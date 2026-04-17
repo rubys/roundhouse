@@ -1,0 +1,33 @@
+//! Roundhouse — Rails is the specification, deployment is a build flag.
+//!
+//! Defines the Roundhouse intermediate representation: a typed, effect-tracked,
+//! serializable core with a Rails dialect layered on top. The IR is the
+//! deliverable; ingesters produce it, emitters consume it.
+
+pub mod analyze;
+pub mod app;
+pub mod dialect;
+pub mod effect;
+pub mod emit;
+pub mod expr;
+pub mod ident;
+pub mod ingest;
+pub mod naming;
+pub mod query;
+pub mod schema;
+pub mod span;
+pub mod ty;
+
+pub use app::App;
+pub use dialect::{
+    Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
+    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, Route, RouteTable, Scope,
+    Validation, ValidationRule, View,
+};
+pub use effect::{Effect, EffectSet};
+pub use expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
+pub use ident::{ClassId, EffectVar, Symbol, TableRef, TyVar, VarId};
+pub use query::{ColumnExpr, JoinKind, OrderKey, Predicate, Query, ValueExpr};
+pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
+pub use span::{FileId, Span};
+pub use ty::{Param, ParamKind, Row, Ty};
