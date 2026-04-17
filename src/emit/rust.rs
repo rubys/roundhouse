@@ -166,8 +166,35 @@ fn emit_expr(e: &Expr) -> String {
         ExprNode::Seq { exprs } => {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = emit_expr(cond);
+            let then_s = emit_block_body(then_branch);
+            let else_s = emit_block_body(else_branch);
+            format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
+}
+
+/// Emit an expression as the body of a `{ ... }` block, indented one level.
+/// For a Seq, each non-tail statement gets a trailing `;`; the tail stays
+/// as the block's value expression. For a single expression, emit it alone.
+fn emit_block_body(e: &Expr) -> String {
+    let raw = match &*e.node {
+        ExprNode::Seq { exprs } => {
+            let mut lines: Vec<String> = Vec::new();
+            for (i, inner) in exprs.iter().enumerate() {
+                if i == exprs.len() - 1 {
+                    lines.push(emit_expr(inner));
+                } else {
+                    lines.push(format!("{};", emit_expr(inner)));
+                }
+            }
+            lines.join("\n")
+        }
+        _ => emit_expr(e),
+    };
+    raw.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
 }
 
 fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {

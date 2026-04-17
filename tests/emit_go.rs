@@ -132,8 +132,11 @@ func (c *PostsController) Show() Post {
 
 func (c *PostsController) Create() {
 \tpost := Post.New(PostParams)
-\tpost.Save()
-\tRedirectTo(post)
+\tif post.Save() {
+\t\tRedirectTo(post)
+\t} else {
+\t\tRender(\"new\")
+\t}
 }
 
 func (c *PostsController) Destroy() {

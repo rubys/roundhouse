@@ -164,6 +164,12 @@ fn emit_expr(e: &Expr) -> String {
         ExprNode::Seq { exprs } => {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = emit_expr(cond);
+            let then_s = emit_block_body(then_branch);
+            let else_s = emit_block_body(else_branch);
+            format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+        }
         ExprNode::Hash { entries, .. } => {
             let parts: Vec<String> = entries
                 .iter()
@@ -196,6 +202,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))
         }
     }
+}
+
+fn emit_block_body(e: &Expr) -> String {
+    let raw = match &*e.node {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .map(emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_expr(e),
+    };
+    raw.lines().map(|l| format!("\t{l}")).collect::<Vec<_>>().join("\n")
 }
 
 fn emit_literal(lit: &Literal) -> String {

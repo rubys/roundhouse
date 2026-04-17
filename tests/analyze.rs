@@ -222,6 +222,36 @@ fn hash_literal_in_where_call_types_as_hash() {
 }
 
 #[test]
+fn if_branches_union_merge() {
+    // create body ends with:
+    //   if @post.save
+    //     redirect_to @post
+    //   else
+    //     render :new
+    //   end
+    // Both branches are `redirect_to` / `render` which return Nil per the
+    // ApplicationController synthetic methods. The If's type should be the
+    // merged union — since both are Nil, the union collapses to Nil.
+    let app = analyzed_app();
+    let create = app.controllers[0]
+        .actions
+        .iter()
+        .find(|a| a.name.as_str() == "create")
+        .expect("create action");
+    let ExprNode::Seq { exprs } = &*create.body.node else {
+        panic!("expected Seq body");
+    };
+    let last = exprs.last().unwrap();
+    let ExprNode::If { .. } = &*last.node else {
+        panic!("expected If as last stmt, got {:?}", last.node);
+    };
+    match last.ty.as_ref().expect("If ty populated") {
+        Ty::Nil => {} // both branches Nil -> union_of collapses
+        other => panic!("expected Nil, got {other:?}"),
+    }
+}
+
+#[test]
 fn ivar_read_resolves_through_seq_tracking() {
     // destroy body:
     //   @post = Post.find(params[:id])

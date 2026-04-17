@@ -834,6 +834,32 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let name = raw.strip_prefix('@').unwrap_or(raw);
             ExprNode::Ivar { name: Symbol::from(name) }
         }
+        n if n.as_if_node().is_some() => {
+            let if_node = n.as_if_node().unwrap();
+            let cond = ingest_expr(&if_node.predicate(), file)?;
+            let then_branch = match if_node.statements() {
+                Some(s) => ingest_expr(&s.as_node(), file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            let else_branch = match if_node.subsequent() {
+                Some(sub) => {
+                    if let Some(else_node) = sub.as_else_node() {
+                        match else_node.statements() {
+                            Some(s) => ingest_expr(&s.as_node(), file)?,
+                            None => Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Seq { exprs: vec![] },
+                            ),
+                        }
+                    } else {
+                        // elsif — recurse as nested if.
+                        ingest_expr(&sub, file)?
+                    }
+                }
+                None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            };
+            ExprNode::If { cond, then_branch, else_branch }
+        }
         n if n.as_hash_node().is_some() => {
             let hn = n.as_hash_node().unwrap();
             ExprNode::Hash {
