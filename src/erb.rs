@@ -41,15 +41,14 @@ pub fn compile_erb(source: &str) -> String {
                     .expect("unterminated ERB tag");
                 let ruby = source[body_start..close].trim();
                 if is_output {
-                    // Deliberately omit wrapping parens for MVP — simpler
-                    // expressions (`@posts.length`) don't need them, and
-                    // our ingester doesn't yet handle ParenthesesNode.
-                    // When a fixture with a low-precedence operator
-                    // (`a || b`) lands, wrap in parens and add the
-                    // ParenthesesNode case to ingest_expr.
-                    out.push_str("_buf = _buf + ");
+                    // Wrap in parens so bareword-arg calls
+                    // (`link_to x, y, class: "..."`) and low-precedence
+                    // operators (`a || b`) bind as a single expression
+                    // under `_buf = _buf + ... .to_s`. Ingest unwraps
+                    // ParenthesesNode transparently.
+                    out.push_str("_buf = _buf + (");
                     out.push_str(ruby);
-                    out.push_str(".to_s\n");
+                    out.push_str(").to_s\n");
                 } else {
                     // `<% code %>` — control flow. Deferred for this pass;
                     // emit raw but callers should only provide text + output
@@ -113,6 +112,6 @@ mod tests {
     fn output_interpolation() {
         let out = compile_erb("Total: <%= count %>\n");
         assert!(out.contains(r#"_buf = _buf + "Total: ""#));
-        assert!(out.contains("_buf = _buf + count.to_s"));
+        assert!(out.contains("_buf = _buf + (count).to_s"));
     }
 }

@@ -978,6 +978,16 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::If { cond, then_branch, else_branch }
         }
+        n if n.as_parentheses_node().is_some() => {
+            // Parens are surface-only: unwrap to the inner expression.
+            // Empty `()` shouldn't appear in well-formed Ruby, but fall back
+            // to `nil` if it does rather than panicking.
+            let p = n.as_parentheses_node().unwrap();
+            return match p.body() {
+                Some(inner) => ingest_expr(&inner, file),
+                None => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+            };
+        }
         n if n.as_array_node().is_some() => {
             let arr = n.as_array_node().unwrap();
             let style = array_style_from(&arr);
