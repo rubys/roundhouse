@@ -143,23 +143,27 @@ pub fn ingest_model(
     let mut validations = Vec::new();
     let mut scopes = Vec::new();
     let mut callbacks = Vec::new();
+    let mut methods = Vec::new();
     if let Some(body) = class.body() {
         for stmt in flatten_statements(body) {
-            let Some(call) = stmt.as_call_node() else { continue };
-            if call.receiver().is_some() {
-                continue;
-            }
-            let method = constant_id_str(&call.name()).to_string();
-            if let Some(assoc) = parse_association(&call, &owner, &method) {
-                associations.push(assoc);
-            } else if method == "validates" {
-                validations.extend(parse_validates(&call));
-            } else if method == "scope" {
-                if let Some(scope) = parse_scope(&call, file)? {
-                    scopes.push(scope);
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_some() {
+                    continue;
                 }
-            } else if let Some(cb) = parse_callback(&call, &method) {
-                callbacks.push(cb);
+                let method = constant_id_str(&call.name()).to_string();
+                if let Some(assoc) = parse_association(&call, &owner, &method) {
+                    associations.push(assoc);
+                } else if method == "validates" {
+                    validations.extend(parse_validates(&call));
+                } else if method == "scope" {
+                    if let Some(scope) = parse_scope(&call, file)? {
+                        scopes.push(scope);
+                    }
+                } else if let Some(cb) = parse_callback(&call, &method) {
+                    callbacks.push(cb);
+                }
+            } else if let Some(def) = stmt.as_def_node() {
+                methods.push(ingest_method(&def, file)?);
             }
         }
     }
@@ -172,8 +176,43 @@ pub fn ingest_model(
         validations,
         scopes,
         callbacks,
-        methods: vec![],
+        methods,
     }))
+}
+
+fn ingest_method(
+    def: &ruby_prism::DefNode<'_>,
+    file: &str,
+) -> IngestResult<crate::dialect::MethodDef> {
+    use crate::dialect::{MethodDef, MethodReceiver};
+
+    let name = Symbol::from(constant_id_str(&def.name()));
+    // `def self.foo` / `def Post.foo` have explicit receivers; plain `def foo`
+    // is an instance method.
+    let receiver = if def.receiver().is_some() {
+        MethodReceiver::Class
+    } else {
+        MethodReceiver::Instance
+    };
+
+    // Parameter-list parsing beyond "no params" lands when a fixture uses
+    // optional/keyword/rest params. Record an empty list for now; Prism's
+    // ParametersNode has the detail we need when we need it.
+    let params: Vec<Symbol> = Vec::new();
+
+    let body = match def.body() {
+        Some(b) => ingest_expr(&b, file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+
+    Ok(MethodDef {
+        name,
+        receiver,
+        params,
+        body,
+        signature: None,
+        effects: EffectSet::pure(),
+    })
 }
 
 fn parse_callback(

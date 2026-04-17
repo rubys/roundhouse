@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{Action, Controller, Model};
+use crate::dialect::{Action, Controller, MethodDef, Model};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::naming::snake_case;
 use crate::ty::Ty;
@@ -46,6 +46,10 @@ fn emit_models(app: &App) -> EmittedFile {
     for model in &app.models {
         writeln!(s).unwrap();
         emit_struct(&mut s, model);
+        for method in &model.methods {
+            writeln!(s).unwrap();
+            emit_model_method(&mut s, model, method);
+        }
     }
     EmittedFile { path: PathBuf::from("app/models.go"), content: s }
 }
@@ -54,6 +58,50 @@ fn emit_struct(out: &mut String, model: &Model) {
     writeln!(out, "type {} struct {{", model.name.0).unwrap();
     for (name, ty) in &model.attributes.fields {
         writeln!(out, "\t{} {}", go_field_name(name.as_str()), go_ty(ty)).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+}
+
+fn emit_model_method(out: &mut String, model: &Model, m: &MethodDef) {
+    let ret_ty = m.body.ty.clone().unwrap_or(Ty::Nil);
+    let method_name = go_method_name(m.name.as_str());
+    let ret_annot = match &ret_ty {
+        Ty::Nil => String::new(),
+        other => format!(" {}", go_ty(other)),
+    };
+    let receiver = match m.receiver {
+        crate::dialect::MethodReceiver::Instance => {
+            // Single-letter receiver name — Go idiom (`p *Post`).
+            let first = model
+                .name
+                .0
+                .as_str()
+                .chars()
+                .next()
+                .unwrap_or('r')
+                .to_ascii_lowercase();
+            format!("({first} *{})", model.name.0)
+        }
+        crate::dialect::MethodReceiver::Class => {
+            // Class method: emit as package-level function (pseudo-Go, since
+            // Go has no class methods).
+            String::new()
+        }
+    };
+    let space_before_name = if receiver.is_empty() { "" } else { " " };
+    writeln!(
+        out,
+        "func {}{}{}(){} {{",
+        receiver, space_before_name, method_name, ret_annot,
+    )
+    .unwrap();
+    let body_s = if matches!(ret_ty, Ty::Nil) {
+        emit_expr(&m.body)
+    } else {
+        format!("return {}", emit_expr(&m.body))
+    };
+    for line in body_s.lines() {
+        writeln!(out, "\t{}", line).unwrap();
     }
     writeln!(out, "}}").unwrap();
 }

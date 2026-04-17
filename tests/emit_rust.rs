@@ -54,7 +54,8 @@ fn comment_struct_is_emitted_with_foreign_key() {
 
 #[test]
 fn emitted_rust_output_is_stable() {
-    let app = ingest_app(fixture_path()).expect("ingest");
+    // Needs the analyzer — model methods have inferred return types.
+    let app = analyzed_app();
     let files = rust::emit(&app);
     let models = files
         .iter()
@@ -72,6 +73,12 @@ pub struct Comment {
 pub struct Post {
     pub id: i64,
     pub title: String,
+}
+
+impl Post {
+    pub fn normalize_title(&self) -> String {
+        title.strip()
+    }
 }
 ";
     assert_eq!(models.content, expected);

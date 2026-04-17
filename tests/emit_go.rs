@@ -46,6 +46,10 @@ type Post struct {
 \tID int64
 \tTitle string
 }
+
+func (p *Post) NormalizeTitle() string {
+\treturn Title.Strip()
+}
 ";
     assert_eq!(models.content, expected);
 }
