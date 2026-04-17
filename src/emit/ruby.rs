@@ -473,9 +473,50 @@ fn emit_buf_stmt(stmt: &Expr) -> String {
         }
         // Epilogue: bare `_buf` read at end.
         ExprNode::Var { name, .. } if name.as_str() == "_buf" => String::new(),
-        // Anything else is control flow.
+        // Control flow: `recv.method(args) do |params| body end` inside a
+        // template body. Emit the opening as `<% recv.method(args) do |p| %>`,
+        // reconstruct the block body template-style, close with `<% end %>`.
+        ExprNode::Send {
+            recv,
+            method,
+            args,
+            block: Some(block),
+            parenthesized,
+        } => emit_template_block_send(
+            recv.as_ref(),
+            method,
+            args,
+            block,
+            *parenthesized,
+        ),
+        // Anything else is a raw control statement.
         _ => format!("<% {} %>", emit_expr(stmt)),
     }
+}
+
+fn emit_template_block_send(
+    recv: Option<&Expr>,
+    method: &Symbol,
+    args: &[Expr],
+    block: &Expr,
+    parenthesized: bool,
+) -> String {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        // Unexpected block shape — fall back to raw code emission.
+        return format!(
+            "<% {} %>",
+            emit_do_block(&emit_send_base(recv, method, args, parenthesized), block)
+        );
+    };
+    let base = emit_send_base(recv, method, args, parenthesized);
+    let params_clause = if params.is_empty() {
+        "do".to_string()
+    } else {
+        let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        format!("do |{}|", ps.join(", "))
+    };
+    let inner = reconstruct_erb(body);
+    format!("<% {} {} %>{}<% end %>", base, params_clause, inner)
 }
 
 /// Emit the argument of `_buf = _buf + ARG` either as a text chunk or
@@ -576,31 +617,11 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-            let base = match (recv, method.as_str()) {
-                // `recv[args]` — bracket-access sugar for the `[]` method.
-                (Some(r), "[]") => format!("{}[{}]", emit_expr(r), args_s.join(", ")),
-                // Implicit-self call: paren style preserved from source.
-                (None, _) => {
-                    if args_s.is_empty() {
-                        method.to_string()
-                    } else if *parenthesized {
-                        format!("{method}({})", args_s.join(", "))
-                    } else {
-                        format!("{method} {}", args_s.join(", "))
-                    }
-                }
-                // Regular `recv.method(args)`.
-                (Some(r), _) => {
-                    let recv_s = emit_expr(r);
-                    if args_s.is_empty() {
-                        format!("{recv_s}.{method}")
-                    } else {
-                        format!("{recv_s}.{method}({})", args_s.join(", "))
-                    }
-                }
-            };
-            if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
+            match block {
+                None => base,
+                Some(b) => emit_do_block(&base, b),
+            }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             format!(
@@ -649,6 +670,61 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
         format!("{{ {} }}", parts.join(", "))
     } else {
         parts.join(", ")
+    }
+}
+
+/// Emit the receiver/method/args portion of a Send without its block.
+/// Used by normal Ruby emission and by ERB template reconstruction.
+fn emit_send_base(
+    recv: Option<&Expr>,
+    method: &Symbol,
+    args: &[Expr],
+    parenthesized: bool,
+) -> String {
+    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    match (recv, method.as_str()) {
+        (Some(r), "[]") => format!("{}[{}]", emit_expr(r), args_s.join(", ")),
+        (None, _) => {
+            if args_s.is_empty() {
+                method.to_string()
+            } else if parenthesized {
+                format!("{method}({})", args_s.join(", "))
+            } else {
+                format!("{method} {}", args_s.join(", "))
+            }
+        }
+        (Some(r), _) => {
+            let recv_s = emit_expr(r);
+            if args_s.is_empty() {
+                format!("{recv_s}.{method}")
+            } else {
+                format!("{recv_s}.{method}({})", args_s.join(", "))
+            }
+        }
+    }
+}
+
+/// Emit a `Send + block` in plain Ruby form (`recv.method(args) do |p| body end`).
+/// Used in normal Ruby emission. Template reconstruction has its own path.
+fn emit_do_block(base: &str, block: &Expr) -> String {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return format!("{base} {{ {} }}", emit_expr(block));
+    };
+    let params_clause = if params.is_empty() {
+        "do".to_string()
+    } else {
+        let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        format!("do |{}|", ps.join(", "))
+    };
+    let body_str = emit_expr(body);
+    if body_str.contains('\n') {
+        format!(
+            "{base} {}\n{}\nend",
+            params_clause,
+            indent_lines(&body_str, 1),
+        )
+    } else {
+        format!("{base} {} {} end", params_clause, body_str)
     }
 }
 

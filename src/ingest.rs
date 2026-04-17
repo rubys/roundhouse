@@ -897,11 +897,15 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 None => None,
             };
             let parenthesized = c.opening_loc().is_some();
+            let block = match c.block() {
+                Some(block_node) => ingest_call_block(&block_node, file)?,
+                None => None,
+            };
             ExprNode::Send {
                 recv,
                 method: Symbol::from(method),
                 args,
-                block: None,
+                block,
                 parenthesized,
             }
         }
@@ -1017,6 +1021,38 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
     };
     Ok(Expr::new(span, expr_node))
+}
+
+/// Ingest a `CallNode`'s block — the `do |...| ... end` or `{ |...| ... }`
+/// attached to a method call. Represented as a `Lambda` expression.
+/// Returns `None` for block-argument nodes (`&block`) which aren't closures.
+fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
+    let Some(b) = node.as_block_node() else {
+        // `&block` — pass-through block argument, not a closure.
+        return Ok(None);
+    };
+    let params = block_param_names(&b);
+    let body = match b.body() {
+        Some(body) => ingest_expr(&body, file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+    Ok(Some(Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda { params, block_param: None, body },
+    )))
+}
+
+fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
+    let Some(params_node) = b.parameters() else { return vec![] };
+    let Some(bpn) = params_node.as_block_parameters_node() else {
+        return vec![];
+    };
+    let Some(pn) = bpn.parameters() else { return vec![] };
+    pn.requireds()
+        .iter()
+        .filter_map(|req| req.as_required_parameter_node())
+        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+        .collect()
 }
 
 fn hash_entries_from(
