@@ -547,6 +547,29 @@ fn emit_buf_append(arg: &Expr) -> String {
     // and accept the loss of the explicit `.to_s` — round-trip is stable
     // on the second pass regardless.
     let inner = unwrap_to_s(arg);
+    // Output-block case: `<%= recv.method(args) do |p| %>body<% end %>`.
+    // The inner expression is a Send with an attached block; the block
+    // body is itself a compiled ERB template we can reconstruct.
+    if let ExprNode::Send {
+        recv,
+        method,
+        args,
+        block: Some(block),
+        parenthesized,
+    } = &*inner.node
+    {
+        if let ExprNode::Lambda { params, body, .. } = &*block.node {
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
+            let params_clause = if params.is_empty() {
+                "do".to_string()
+            } else {
+                let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                format!("do |{}|", ps.join(", "))
+            };
+            let inner_erb = reconstruct_erb(body);
+            return format!("<%= {} {} %>{}<% end %>", base, params_clause, inner_erb);
+        }
+    }
     format!("<%= {} %>", emit_expr(inner))
 }
 
