@@ -18,20 +18,29 @@ A modernized Rails 8 blog with:
 
 ## What's included here
 
-A subset of the full Rails app — just the files that matter for ingest:
+A subset of the full Rails app — the files that matter for ingest, INCLUDING
+tests (per the target implementation workflow: model tests → controller tests
+→ browser tests is the forcing-function sequence for each target):
+
 - `app/models/*.rb`
 - `app/controllers/*.rb`
 - `app/views/articles/*.html.erb`, `app/views/comments/_comment.html.erb`
 - `app/views/layouts/application.html.erb`
 - `config/routes.rb`
 - `db/migrate/*.rb`
+- `test/models/*.rb` — unit tests; first behavioral validation layer
+- `test/controllers/*.rb` — integration tests; second validation layer
+- `test/system/*.rb` — browser/acceptance tests; final validation layer
+- `test/fixtures/*.yml` — data fixtures for tests
+- `test/test_helper.rb`, `test/application_system_test_case.rb`
 - `Gemfile`
 
 Deliberately excluded:
 - `app/helpers/`, `app/jobs/`, `app/mailers/`, `app/javascript/`, `app/assets/`
 - `.json.jbuilder` templates (separate template language)
 - `config/` beyond `routes.rb` (Rails env + initializers; out of current scope)
-- `test/`, `bin/`, `tmp/`, `log/`, `public/`, `storage/`, `vendor/`
+- `bin/`, `tmp/`, `log/`, `public/`, `storage/`, `vendor/`
+- `test/integration/`, `test/mailers/`, `test/helpers/` (empty or out of scope)
 
 ## Why it's here
 
