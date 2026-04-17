@@ -14,11 +14,12 @@
 //!
 //! Each of those comes when a fixture forces it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::App;
+use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{ClassId, Symbol, TyVar};
+use crate::ident::{ClassId, Symbol, TableRef, TyVar};
 use crate::ty::{Row, Ty};
 
 pub struct Analyzer {
@@ -34,6 +35,9 @@ struct Ctx {
 
 #[derive(Default)]
 struct ClassInfo {
+    /// If this class maps to a database table, which one. Used by effect
+    /// inference to attach `DbRead(table)` / `DbWrite(table)` to AR methods.
+    table: Option<TableRef>,
     /// Instance-state shape (columns + attr_accessor).
     attributes: Row,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
@@ -54,6 +58,7 @@ impl Analyzer {
                 Ty::Array { elem: Box::new(self_ty.clone()) };
 
             let mut cls = ClassInfo::default();
+            cls.table = Some(model.table.clone());
             cls.attributes = model.attributes.clone();
 
             // Minimal ActiveRecord class-method signatures. Grow this table
@@ -136,12 +141,10 @@ impl Analyzer {
         Self { classes }
     }
 
-    /// Walk the app, annotating every expression's `ty` field.
+    /// Walk the app, annotating every expression's `ty` field, then
+    /// populating the owning construct's `effects` by visiting the typed tree.
     pub fn analyze(&self, app: &mut App) {
         for controller in &mut app.controllers {
-            // In action bodies, `self` is the controller instance.
-            // Use the parent class (ApplicationController) as the self type —
-            // per-controller method resolution is future work.
             let ctx = Ctx {
                 self_ty: Some(Ty::Class {
                     id: controller
@@ -153,26 +156,124 @@ impl Analyzer {
             };
             for action in &mut controller.actions {
                 self.analyze_expr(&mut action.body, &ctx);
+                action.effects = self.collect_effects(&action.body, &ctx);
             }
         }
         for model in &mut app.models {
-            // In scope bodies, `self` is the model class; bare calls like
-            // `limit(10)` resolve to class methods.
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
             };
             for scope in &mut model.scopes {
                 self.analyze_expr(&mut scope.body, &class_ctx);
             }
-            // Instance methods on the model: `self` is an instance. We reuse
-            // the same Ty::Class { id: Post } because the dispatcher falls
-            // through to instance methods when a class method isn't found.
             for method in &mut model.methods {
                 self.analyze_expr(&mut method.body, &class_ctx);
+                method.effects = self.collect_effects(&method.body, &class_ctx);
             }
         }
         for view in &mut app.views {
             self.analyze_expr(&mut view.body, &Ctx::default());
+        }
+    }
+
+    fn collect_effects(&self, expr: &Expr, ctx: &Ctx) -> EffectSet {
+        let mut set = BTreeSet::new();
+        self.visit_effects(expr, ctx, &mut set);
+        EffectSet { effects: set }
+    }
+
+    fn visit_effects(&self, expr: &Expr, ctx: &Ctx, out: &mut BTreeSet<Effect>) {
+        match &*expr.node {
+            ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Const { .. } => {}
+
+            ExprNode::Let { value, body, .. } => {
+                self.visit_effects(value, ctx, out);
+                self.visit_effects(body, ctx, out);
+            }
+            ExprNode::Lambda { body, .. } => {
+                // Lambda creation is pure; only invocation has effects. A
+                // proper treatment requires first-class Fn types. Skip for now.
+                self.visit_effects(body, ctx, out);
+            }
+            ExprNode::Apply { fun, args, block } => {
+                self.visit_effects(fun, ctx, out);
+                for a in args { self.visit_effects(a, ctx, out); }
+                if let Some(b) = block { self.visit_effects(b, ctx, out); }
+            }
+            ExprNode::Send { recv, method, args, block } => {
+                let recv_ty = match recv {
+                    Some(r) => {
+                        self.visit_effects(r, ctx, out);
+                        r.ty.clone()
+                    }
+                    None => ctx.self_ty.clone(),
+                };
+                if let Some(ty) = recv_ty {
+                    self.contribute_send_effect(&ty, method, out);
+                }
+                for a in args { self.visit_effects(a, ctx, out); }
+                if let Some(b) = block { self.visit_effects(b, ctx, out); }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                self.visit_effects(cond, ctx, out);
+                self.visit_effects(then_branch, ctx, out);
+                self.visit_effects(else_branch, ctx, out);
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                self.visit_effects(scrutinee, ctx, out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard { self.visit_effects(g, ctx, out); }
+                    self.visit_effects(&arm.body, ctx, out);
+                }
+            }
+            ExprNode::Seq { exprs } => {
+                for e in exprs { self.visit_effects(e, ctx, out); }
+            }
+            ExprNode::Assign { target, value } => {
+                self.visit_effects(value, ctx, out);
+                if let LValue::Attr { recv, .. } = target {
+                    self.visit_effects(recv, ctx, out);
+                }
+                if let LValue::Index { recv, index } = target {
+                    self.visit_effects(recv, ctx, out);
+                    self.visit_effects(index, ctx, out);
+                }
+            }
+            ExprNode::Yield { args } => {
+                for a in args { self.visit_effects(a, ctx, out); }
+            }
+            ExprNode::Raise { value } => {
+                self.visit_effects(value, ctx, out);
+                // Could record a Raises effect here once we track exception
+                // class hierarchies. Skip for now.
+            }
+        }
+    }
+
+    fn contribute_send_effect(&self, recv_ty: &Ty, method: &Symbol, out: &mut BTreeSet<Effect>) {
+        let Ty::Class { id, .. } = recv_ty else { return };
+        let Some(cls) = self.classes.get(id) else { return };
+
+        // AR methods on model classes: DbRead / DbWrite against the bound table.
+        if let Some(table) = &cls.table {
+            let m = method.as_str();
+            if is_db_read_method(m) {
+                out.insert(Effect::DbRead { table: table.clone() });
+            } else if is_db_write_method(m) {
+                out.insert(Effect::DbWrite { table: table.clone() });
+            }
+        }
+
+        // Controller-side IO effects.
+        if id.0.as_str() == "ApplicationController" {
+            match method.as_str() {
+                "render" | "redirect_to" | "head" => {
+                    out.insert(Effect::Io);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -355,6 +456,64 @@ fn int_method(method: &Symbol) -> Ty {
 
 fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
+}
+
+fn is_db_read_method(m: &str) -> bool {
+    matches!(
+        m,
+        "all"
+            | "find"
+            | "find_by"
+            | "find_by!"
+            | "first"
+            | "last"
+            | "where"
+            | "limit"
+            | "offset"
+            | "order"
+            | "group"
+            | "having"
+            | "joins"
+            | "includes"
+            | "preload"
+            | "select"
+            | "distinct"
+            | "count"
+            | "exists?"
+            | "pluck"
+            | "pick"
+            | "take"
+            | "sum"
+            | "average"
+            | "maximum"
+            | "minimum"
+    )
+}
+
+fn is_db_write_method(m: &str) -> bool {
+    matches!(
+        m,
+        "save"
+            | "save!"
+            | "create"
+            | "create!"
+            | "update"
+            | "update!"
+            | "update_all"
+            | "destroy"
+            | "destroy!"
+            | "destroy_all"
+            | "delete"
+            | "delete_all"
+            | "increment!"
+            | "decrement!"
+            | "touch"
+            | "touch_all"
+            | "insert"
+            | "insert_all"
+            | "upsert"
+            | "upsert_all"
+    )
 }
 
 fn union_of(a: Ty, b: Ty) -> Ty {

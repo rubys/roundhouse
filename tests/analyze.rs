@@ -7,10 +7,11 @@
 use std::path::Path;
 
 use roundhouse::analyze::Analyzer;
+use roundhouse::effect::Effect;
 use roundhouse::expr::{ExprNode, LValue};
 use roundhouse::ingest::ingest_app;
 use roundhouse::ty::Ty;
-use roundhouse::{ClassId, Symbol};
+use roundhouse::{ClassId, Symbol, TableRef};
 
 fn fixture_path() -> &'static Path {
     Path::new("fixtures/tiny-blog")
@@ -170,6 +171,60 @@ fn scope_body_self_is_model_class() {
         },
         other => panic!("expected Array, got {other:?}"),
     }
+}
+
+#[test]
+fn action_effects_include_db_reads() {
+    // `@posts = Post.all` and `@post = Post.find(...)` both read the posts table.
+    let app = analyzed_app();
+    let ctrl = &app.controllers[0];
+    let posts_tab = Effect::DbRead { table: TableRef(Symbol::from("posts")) };
+
+    for action_name in ["index", "show"] {
+        let action = ctrl.actions.iter().find(|a| a.name.as_str() == action_name).unwrap();
+        assert!(
+            action.effects.effects.contains(&posts_tab),
+            "{action_name} missing DbRead(posts); got {:?}",
+            action.effects.effects
+        );
+    }
+}
+
+#[test]
+fn actions_without_db_calls_stay_pure() {
+    // Not wired in the fixture, but we assert the negative: if a body does
+    // nothing db-like, effects should be empty. Exercise with a hand-built
+    // action via an empty body.
+    use roundhouse::dialect::{Action, RenderTarget};
+    use roundhouse::effect::EffectSet;
+    use roundhouse::expr::Expr;
+    use roundhouse::span::Span;
+    use roundhouse::ty::Row;
+
+    let empty_body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] });
+    let mut action = Action {
+        name: Symbol::from("noop"),
+        params: Row::closed(),
+        body: empty_body,
+        renders: RenderTarget::Inferred,
+        effects: EffectSet::singleton(Effect::Io), // seed a bogus effect
+    };
+    let analyzer = Analyzer::new(&analyzed_app());
+    analyzer.analyze(&mut roundhouse::App::new()); // warm up is a no-op
+    let body_ctx_effects = {
+        // Simulate direct effect collection
+        let mut app = roundhouse::App::new();
+        app.controllers.push(roundhouse::dialect::Controller {
+            name: ClassId(Symbol::from("NoopController")),
+            parent: None,
+            filters: vec![],
+            actions: vec![action.clone()],
+        });
+        analyzer.analyze(&mut app);
+        app.controllers[0].actions[0].effects.clone()
+    };
+    action.effects = body_ctx_effects;
+    assert!(action.effects.effects.is_empty(), "expected empty effects for empty body");
 }
 
 #[test]
