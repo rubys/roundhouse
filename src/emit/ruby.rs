@@ -780,10 +780,18 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
     let parts: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            // Rails-idiomatic shorthand `key: value` when key is a symbol literal;
-            // rocket `k => v` otherwise.
+            // Rails-idiomatic shorthand `key: value` when key is a symbol
+            // literal. Bare shorthand requires a simple identifier; symbols
+            // with special characters (e.g. `"turbo_confirm"`, `"text-sm"`)
+            // use the quoted-key form `"name": value`. Rocket `k => v`
+            // falls through for non-symbol keys.
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                format!("{value}: {}", emit_expr(v))
+                let name = value.as_str();
+                if is_simple_ident(name) {
+                    format!("{name}: {}", emit_expr(v))
+                } else {
+                    format!("{:?}: {}", name, emit_expr(v))
+                }
             } else {
                 format!("{} => {}", emit_expr(k), emit_expr(v))
             }
@@ -794,6 +802,33 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+/// Can `s` appear as a bareword hash key (`s: value`)? The bareword form
+/// requires a `[A-Za-z_][A-Za-z0-9_]*` identifier, optionally ending in
+/// `?`, `!`, or `=`. Anything else (hyphens, spaces, colons, digits-first)
+/// must be quoted: `"s": value`.
+fn is_simple_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    let mut saw_suffix = false;
+    for c in chars {
+        if saw_suffix {
+            return false;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            continue;
+        }
+        if matches!(c, '?' | '!' | '=') {
+            saw_suffix = true;
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// Emit the receiver/method/args portion of a Send without its block.
@@ -820,8 +855,10 @@ fn emit_send_base(
             let recv_s = emit_expr(r);
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
-            } else {
+            } else if parenthesized {
                 format!("{recv_s}.{method}({})", args_s.join(", "))
+            } else {
+                format!("{recv_s}.{method} {}", args_s.join(", "))
             }
         }
     }

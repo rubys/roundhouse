@@ -28,10 +28,18 @@ enum BlockKind {
 
 /// Compile ERB source to Ruby source. The compiled Ruby is a sequence of
 /// statements suitable for parsing as a `ProgramNode`'s body.
+///
+/// Text chunks are accumulated in a buffer and flushed only when a
+/// meaningful tag (output or code) is about to be emitted. `<%# comment %>`
+/// tags are dropped entirely without flushing, so the text surrounding a
+/// comment merges into one chunk — this is what lets IR round-trip
+/// identical across ingest → emit → ingest when comments (which today
+/// drop silently) are present.
 pub fn compile_erb(source: &str) -> String {
     let mut out = String::new();
     out.push_str("_buf = \"\"\n");
     let mut stack: Vec<BlockKind> = Vec::new();
+    let mut pending_text = String::new();
 
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -39,22 +47,24 @@ pub fn compile_erb(source: &str) -> String {
     while cursor < bytes.len() {
         match find_at(bytes, cursor, b"<%") {
             None => {
-                let text = &source[cursor..];
-                if !text.is_empty() {
-                    append_text(&mut out, text);
-                }
+                pending_text.push_str(&source[cursor..]);
                 break;
             }
             Some(open) => {
                 if open > cursor {
-                    append_text(&mut out, &source[cursor..open]);
+                    pending_text.push_str(&source[cursor..open]);
                 }
                 let is_output = bytes.get(open + 2) == Some(&b'=');
+                let is_comment = !is_output && bytes.get(open + 2) == Some(&b'#');
                 let body_start = if is_output { open + 3 } else { open + 2 };
                 let close = find_at(bytes, body_start, b"%>")
                     .expect("unterminated ERB tag");
                 let ruby = source[body_start..close].trim();
-                if is_output {
+                if is_comment {
+                    // Comment tag — intentionally drop without flushing, so
+                    // surrounding text chunks merge into one string literal.
+                } else if is_output {
+                    flush_text(&mut pending_text, &mut out);
                     if is_block_expr(ruby) {
                         // `<%= EXPR do |p| %>` — open an output-block. The
                         // enclosing paren and `.to_s` are emitted on the
@@ -73,6 +83,7 @@ pub fn compile_erb(source: &str) -> String {
                         out.push_str(").to_s\n");
                     }
                 } else if ruby == "end" {
+                    flush_text(&mut pending_text, &mut out);
                     match stack.pop() {
                         Some(BlockKind::Output) => out.push_str("end).to_s\n"),
                         _ => out.push_str("end\n"),
@@ -80,6 +91,7 @@ pub fn compile_erb(source: &str) -> String {
                 } else {
                     // `<% code %>` — passthrough. Track block openers so
                     // their matching `<% end %>` stays a plain `end`.
+                    flush_text(&mut pending_text, &mut out);
                     out.push_str(ruby);
                     out.push('\n');
                     if opens_passthrough_block(ruby) {
@@ -91,8 +103,18 @@ pub fn compile_erb(source: &str) -> String {
         }
     }
 
+    flush_text(&mut pending_text, &mut out);
     out.push_str("_buf\n");
     out
+}
+
+fn flush_text(pending: &mut String, out: &mut String) {
+    if !pending.is_empty() {
+        out.push_str("_buf = _buf + ");
+        out.push_str(&ruby_string_literal(pending));
+        out.push('\n');
+        pending.clear();
+    }
 }
 
 /// Does `code` end in a block opener (`do`, `do |p|`, `{`, `{ |p| `)?
@@ -142,12 +164,6 @@ fn opens_passthrough_block(code: &str) -> bool {
         }
     }
     is_block_expr(t)
-}
-
-fn append_text(out: &mut String, text: &str) {
-    out.push_str("_buf = _buf + ");
-    out.push_str(&ruby_string_literal(text));
-    out.push('\n');
 }
 
 fn ruby_string_literal(s: &str) -> String {

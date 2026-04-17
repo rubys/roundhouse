@@ -50,51 +50,65 @@ against it identifies Rails dialect gaps, which drive priority for
 ingest/emit/analyzer work. Expected failures on any given day; the
 fixture moves from "mostly rejected" to "fully ingested" incrementally.
 
-## Known gaps as of check-in (2026-04-17)
+## Known gaps as of 2026-04-17
 
-Not comprehensive — the first probe hit ArrayNode and stopped.
-Known/expected gaps, in rough priority order:
+Cleared (the fixture now fully ingests):
 
-1. **ArrayNode in expressions** (`[:title, :body]`, `%i[ show edit update ]`)
-   — needed for controller strong-params and `before_action only:` lists.
-2. **`params.expect(...)` pattern** — Rails 8 replacement for
-   `params.require(...).permit(...)`. New idiom; current analyzer
-   doesn't know this method shape.
-3. **`broadcasts_to` / `broadcast_replace_to`** DSL — new class-body
-   recognizer family.
+- **ArrayNode with style preservation** (`[:a]`, `%i[a b]`, `%w[a b]`)
+- **String interpolation** (`"x#{y}z"` → `ExprNode::StringInterp`)
+- **ParenthesesNode** — unwrapped transparently at ingest.
+- **ERB output-block tags** (`<%= form_with do |f| %>...<% end %>`)
+- **ERB comment tags** (`<%# ... %>`) drop + merge surrounding text
+- **Short-circuit operators** (`&&` / `||` / `and` / `or`) →
+  `ExprNode::BoolOp { op, surface }`
+- **`yield :sym`** → `ExprNode::Yield`
+
+Remaining (in rough priority order):
+
+1. **`broadcasts_to`/`broadcast_replace_to`/`after_create_commit`
+   block callbacks** — silently dropped from the model body today;
+   no IR representation yet. Each is a class-body call with either
+   a lambda arg or an attached block.
+2. **`params.expect(...)`** (Rails 8 strong-params) — works
+   syntactically as a generic Send, but needs a recognizer for
+   analyzer effect/shape.
+3. **Routes DSL: `resources :articles do resources :comments ... end`**
+   — the nested-resources form replaces our flat `get/post/...`
+   recognizer. Everything in `config/routes.rb` drops today.
 4. **`respond_to do |format| ... end`** — CallNode with block;
-   the `format.html { ... }` / `format.json { ... }` inside are
-   method calls on `format` with blocks. Existing block-ingest should
-   handle shape-wise; semantics need a recognizer for render targets.
+   inside, `format.html { ... }` / `format.json { ... }` are
+   renders. Needs a recognizer for render targets.
 5. **Migration ingest** — currently we read `db/schema.rb`; here we
-   have `db/migrate/*.rb`. Need to either generate `schema.rb` from
-   migrations or ingest migrations directly. Rails 8 doesn't create
-   `schema.rb` until migrations run.
-6. **`t.references`, `t.timestamps`** column shorthands in schema/
-   migrations — not in current recognizer.
+   have `db/migrate/*.rb`. Need to either generate schema.rb from
+   migrations or ingest migrations directly.
+6. **`t.references`, `t.timestamps`** schema shorthands.
 7. **Symbol table names** (`create_table :articles do |t|`) vs the
    string form we currently handle.
-8. **View helpers**: `link_to`, `form_with`, `form.label`, `pluralize`,
-   `content_for`, `render @articles`, `turbo_stream_from`. Each is a
-   method call; emit works generically; semantic resolution for typed
-   targets needs helper-specific translation rules (future).
-9. **`%i[...]` symbol-array literal** — a separate AST node kind.
-10. **Hash-of-conditional-classes**: `{"class-a": cond1, "class-b": cond2}`
-    — should work via existing hash literal handling; worth verifying.
-11. **Comments** (Ruby `#` and ERB `<%# %>`) — dropped silently today;
-    ruby2js-style association work tracked in auto-memory.
-12. **Private methods** (`private` marker in controller) — not
-    currently recognized; all methods ingest as public.
-13. **`%i`, string interpolation `"#{x}"`, `begin/rescue/ensure`** —
-    core Ruby features we haven't needed yet.
+8. **Extra validation rules** — we only recognize `presence: true`
+   and `absence: true`; `length: { minimum: 10 }` etc. are dropped.
+9. **Private methods** (`private` marker in controller).
+10. **Comments** (Ruby `#` and ERB `<%# %>`) — stripped today.
+    ERB comments now merge surrounding text so IR round-trips, but
+    the comment content is lost.
+11. **View helpers** (`link_to`, `form_with`, `form.label`,
+    `pluralize`, `content_for`, `render @articles`,
+    `turbo_stream_from`) emit via the generic Send path. Target
+    emitters will need per-helper translation rules.
+12. **Multi-line argument formatting** in ERB output tags — works
+    semantically but doesn't round-trip byte-for-byte.
+13. **Unknown class-body calls** (`allow_browser`,
+    `stale_when_importmap_changes`, `primary_abstract_class`) —
+    silently dropped by the controller/model recognizers.
 
 ## Workflow
 
-Don't try to ingest this fixture as part of the regular test suite
-yet — it would fail with one of the above. When working on any item
-on the list above, add a probe test (or a targeted unit test against
-the specific file), fix the gap, verify, and expand.
+`tests/real_blog.rs` pairs three forcing functions against this fixture:
 
-When ingest succeeds cleanly end-to-end, add it as a real fixture
-test paired with `source_equivalence` (byte-for-byte round-trip)
-and `round_trip_identity`, same as tiny-blog.
+- **`ingests_without_errors`** — fails loudly if any recognizer
+  regresses. Ingest is expected to complete today.
+- **`expected_files_round_trip_byte_for_byte`** — compares emitted
+  Ruby against the fixture source for every file on the inclusion
+  list. The list is empty today; as gaps close, promote individual
+  files onto it.
+- **`ir_is_fixed_under_emit_ingest`** — ingest → emit → ingest must
+  yield identical IR. Already passing.
