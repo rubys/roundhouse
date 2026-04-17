@@ -423,7 +423,7 @@ fn emit_view(view: &crate::dialect::View) -> EmittedFile {
 ///   <other ruby statement>         # <% code %> (control flow)
 ///   _buf                           # epilogue
 /// and reconstruct the corresponding ERB source.
-fn reconstruct_erb(body: &Expr) -> String {
+pub fn reconstruct_erb(body: &Expr) -> String {
     let mut out = String::new();
     let stmts: &[Expr] = match &*body.node {
         ExprNode::Seq { exprs } => exprs,
