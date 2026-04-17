@@ -353,22 +353,41 @@ fn emit_method(out: &mut String, m: &MethodDef, indent: usize) {
 // Controllers ------------------------------------------------------------
 
 fn emit_controller(c: &Controller) -> EmittedFile {
+    use crate::dialect::ControllerBodyItem;
+
     let mut s = String::new();
     let parent = c.parent.as_ref().map_or_else(
         || "ApplicationController".to_string(),
         |p| p.to_string(),
     );
     writeln!(s, "class {} < {parent}", c.name).unwrap();
-    for filter in &c.filters {
-        writeln!(s, "  {}", emit_filter(filter)).unwrap();
+
+    // Methods (actions) get a leading blank line unless they're the
+    // first body entry — matches the Rails scaffold's spacing and
+    // makes source-equivalence less fussy.
+    for (idx, item) in c.body.iter().enumerate() {
+        match item {
+            ControllerBodyItem::Filter { filter } => {
+                writeln!(s, "  {}", emit_filter(filter)).unwrap();
+            }
+            ControllerBodyItem::Action { action } => {
+                if idx > 0 {
+                    writeln!(s).unwrap();
+                }
+                emit_action(&mut s, action, 1);
+            }
+            ControllerBodyItem::PrivateMarker => {
+                if idx > 0 {
+                    writeln!(s).unwrap();
+                }
+                writeln!(s, "  private").unwrap();
+            }
+            ControllerBodyItem::Unknown { expr } => {
+                writeln!(s, "  {}", emit_expr(expr)).unwrap();
+            }
+        }
     }
-    if !c.filters.is_empty() && !c.actions.is_empty() {
-        writeln!(s).unwrap();
-    }
-    for (i, action) in c.actions.iter().enumerate() {
-        if i > 0 { writeln!(s).unwrap(); }
-        emit_action(&mut s, action, 1);
-    }
+
     writeln!(s, "end").unwrap();
     EmittedFile {
         path: PathBuf::from(format!(

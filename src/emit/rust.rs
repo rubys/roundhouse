@@ -93,7 +93,7 @@ fn emit_controller(controller: &Controller) -> EmittedFile {
     writeln!(s, "pub struct {};", controller.name.0).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "impl {} {{", controller.name.0).unwrap();
-    for (i, action) in controller.actions.iter().enumerate() {
+    for (i, action) in controller.actions().enumerate() {
         if i > 0 {
             writeln!(s).unwrap();
         }

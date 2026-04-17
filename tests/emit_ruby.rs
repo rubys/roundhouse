@@ -68,15 +68,16 @@ fn tiny_blog() -> App {
     let controller = Controller {
         name: ClassId(Symbol::from("PostsController")),
         parent: Some(ClassId(Symbol::from("ApplicationController"))),
-        filters: vec![],
-        actions: vec![Action {
-            name: Symbol::from("index"),
-            params: Row::closed(),
-            body,
-            renders: RenderTarget::Inferred,
-            effects: EffectSet::singleton(Effect::DbRead {
-                table: TableRef(Symbol::from("posts")),
-            }),
+        body: vec![roundhouse::ControllerBodyItem::Action {
+            action: Action {
+                name: Symbol::from("index"),
+                params: Row::closed(),
+                body,
+                renders: RenderTarget::Inferred,
+                effects: EffectSet::singleton(Effect::DbRead {
+                    table: TableRef(Symbol::from("posts")),
+                }),
+            },
         }],
     };
 

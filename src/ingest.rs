@@ -15,7 +15,8 @@ use indexmap::IndexMap;
 use ruby_prism::{Node, parse};
 
 use crate::dialect::{
-    Action, Controller, HttpMethod, Model, ModelBodyItem, RenderTarget, RouteSpec, RouteTable, View,
+    Action, Controller, ControllerBodyItem, HttpMethod, Model, ModelBodyItem, RenderTarget,
+    RouteSpec, RouteTable, View,
 };
 use crate::erb;
 use crate::effect::EffectSet;
@@ -413,7 +414,53 @@ fn validation_rule_from_kv(
     match key {
         "presence" => bool_value(value).filter(|b| *b).map(|_| ValidationRule::Presence),
         "absence" => bool_value(value).filter(|b| *b).map(|_| ValidationRule::Absence),
+        "length" => parse_length_rule(value),
         _ => None,
+    }
+}
+
+/// `length: { minimum: N, maximum: M }`. Either bound may be absent;
+/// the hash-value shape is the only one we accept today. The shorthand
+/// `length: 5` (exact length) isn't in any fixture yet and drops.
+fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::ValidationRule> {
+    use crate::dialect::ValidationRule;
+    let hash = value.as_hash_node().or_else(|| {
+        // Rails idiomatically uses `{ ... }`, but a bare keyword-args
+        // shape (`length: { … }` parses as HashNode inside the kwargs,
+        // not KeywordHashNode). Keep KeywordHashNode as a fallback for
+        // defensive parsing.
+        None
+    });
+    let elements = if let Some(h) = hash {
+        h.elements()
+    } else if let Some(kh) = value.as_keyword_hash_node() {
+        kh.elements()
+    } else {
+        return None;
+    };
+
+    let mut min: Option<u32> = None;
+    let mut max: Option<u32> = None;
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let Some(key) = symbol_value(&assoc.key()) else { continue };
+        let Some(n) = integer_value(&assoc.value()) else { continue };
+        if n < 0 {
+            continue;
+        }
+        match key.as_str() {
+            "minimum" => min = Some(n as u32),
+            "maximum" => max = Some(n as u32),
+            // `is:` (exact), `in:` (range), `within:` land when a
+            // fixture demands them.
+            _ => {}
+        }
+    }
+
+    if min.is_none() && max.is_none() {
+        None
+    } else {
+        Some(ValidationRule::Length { min, max })
     }
 }
 
@@ -565,30 +612,54 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
-    let mut actions = Vec::new();
-    let mut filters = Vec::new();
-    if let Some(body) = class.body() {
-        for stmt in flatten_statements(body) {
+    let mut body_items: Vec<ControllerBodyItem> = Vec::new();
+    if let Some(class_body) = class.body() {
+        for stmt in flatten_statements(class_body) {
             if let Some(def) = stmt.as_def_node() {
                 let action_name = constant_id_str(&def.name()).to_string();
                 let body_expr = match def.body() {
                     Some(b) => ingest_expr(&b, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
-                actions.push(Action {
-                    name: Symbol::from(action_name),
-                    params: Row::closed(),
-                    body: body_expr,
-                    renders: RenderTarget::Inferred,
-                    effects: EffectSet::pure(),
+                body_items.push(ControllerBodyItem::Action {
+                    action: Action {
+                        name: Symbol::from(action_name),
+                        params: Row::closed(),
+                        body: body_expr,
+                        renders: RenderTarget::Inferred,
+                        effects: EffectSet::pure(),
+                    },
                 });
             } else if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none() {
-                    let method = constant_id_str(&call.name()).to_string();
-                    if let Some(filter) = parse_filter(&call, &method) {
-                        filters.push(filter);
-                    }
+                if call.receiver().is_some() {
+                    body_items.push(ControllerBodyItem::Unknown {
+                        expr: ingest_expr(&stmt, file)?,
+                    });
+                    continue;
                 }
+                let method = constant_id_str(&call.name()).to_string();
+                if let Some(filter) = parse_filter(&call, &method) {
+                    body_items.push(ControllerBodyItem::Filter { filter });
+                } else if method == "private"
+                    && call.arguments().is_none()
+                    && call.block().is_none()
+                {
+                    // Bare `private` marker — methods following it are
+                    // private. Argumentative forms (`private :foo`,
+                    // `private def foo`) aren't in any fixture yet.
+                    body_items.push(ControllerBodyItem::PrivateMarker);
+                } else {
+                    // Unrecognized class-body call (`allow_browser
+                    // versions: :modern`, `stale_when_importmap_changes`,
+                    // …). Preserve as raw Send so Ruby emit reproduces it.
+                    body_items.push(ControllerBodyItem::Unknown {
+                        expr: ingest_expr(&stmt, file)?,
+                    });
+                }
+            } else {
+                body_items.push(ControllerBodyItem::Unknown {
+                    expr: ingest_expr(&stmt, file)?,
+                });
             }
         }
     }
@@ -596,8 +667,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     Ok(Some(Controller {
         name: ClassId(Symbol::from(name_path.join("::"))),
         parent,
-        filters,
-        actions,
+        body: body_items,
     }))
 }
 

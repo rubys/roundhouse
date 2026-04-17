@@ -114,7 +114,7 @@ fn emit_controller(c: &Controller) -> EmittedFile {
     writeln!(s, "package app").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "type {} struct{{}}", c.name.0).unwrap();
-    for action in &c.actions {
+    for action in c.actions() {
         writeln!(s).unwrap();
         emit_action(&mut s, c, action);
     }

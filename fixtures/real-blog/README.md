@@ -72,9 +72,16 @@ Cleared (the fixture now fully ingests):
   field added so `class ApplicationRecord < ActiveRecord::Base`
   round-trips. `app/models/application_record.rb` on the inclusion
   list.
+- **Controller body**: same refactor — source-ordered
+  `Vec<ControllerBodyItem>` with `Filter`, `Action`, `PrivateMarker`,
+  `Unknown`. `private` keyword preserved at its source position;
+  `allow_browser`, `stale_when_importmap_changes` et al. no longer
+  silently drop.
 - **LambdaNode** (`->(x) { ... }`) — ingests as `ExprNode::Lambda`.
 - **RescueModifierNode** (`expr rescue fallback`) — preserved as
   `ExprNode::RescueModifier`.
+- **Length validation rule**: `validates :body, length: { minimum: 10 }`
+  now ingests as `ValidationRule::Length { min, max }` and round-trips.
 
 Remaining (in rough priority order):
 
@@ -85,24 +92,22 @@ Remaining (in rough priority order):
    (required for `article.rb` / `comment.rb` byte-for-byte).
 1. **Block delimiter preservation** — we don't yet track `{ ... }`
    vs `do ... end`; re-emit always uses `do ... end`.
-1. **`length: { minimum: 10 }`** validation rule — currently drops;
-   the Length rule exists in IR but ingest doesn't recognize it.
-2. **`params.expect(...)`** (Rails 8 strong-params) — works
+1. **`params.expect(...)`** (Rails 8 strong-params) — works
    syntactically as a generic Send, but needs a recognizer for
    analyzer effect/shape.
-3. **`respond_to do |format| ... end`** — CallNode with block;
+2. **`respond_to do |format| ... end`** — CallNode with block;
    inside, `format.html { ... }` / `format.json { ... }` are
    renders. Needs a recognizer for render targets.
-5. **Migration ingest** — currently we read `db/schema.rb`; here we
+3. **Migration ingest** — currently we read `db/schema.rb`; here we
    have `db/migrate/*.rb`. Need to either generate schema.rb from
    migrations or ingest migrations directly.
-6. **`t.references`, `t.timestamps`** schema shorthands.
-7. **Symbol table names** (`create_table :articles do |t|`) vs the
+4. **`t.references`, `t.timestamps`** schema shorthands.
+5. **Symbol table names** (`create_table :articles do |t|`) vs the
    string form we currently handle.
-8. **Extra validation rules** — we only recognize `presence: true`
-   and `absence: true`; `length: { minimum: 10 }` etc. are dropped.
-9. **Private methods** (`private` marker in controller).
-10. **Comments** (Ruby `#` and ERB `<%# %>`) — stripped today.
+6. **Extra validation rules beyond Presence/Absence/Length** —
+   `uniqueness:`, `format: { with: … }`, `numericality:`,
+   `inclusion: { in: … }` all still drop at ingest.
+7. **Comments** (Ruby `#` and ERB `<%# %>`) — stripped today.
     ERB comments now merge surrounding text so IR round-trips, but
     the comment content is lost.
 11. **View helpers** (`link_to`, `form_with`, `form.label`,

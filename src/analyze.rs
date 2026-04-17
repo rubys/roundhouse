@@ -159,7 +159,7 @@ impl Analyzer {
                 }),
                 ivar_bindings: HashMap::new(),
             };
-            for action in &mut controller.actions {
+            for action in controller.actions_mut() {
                 self.analyze_expr(&mut action.body, &ctx);
                 action.effects = self.collect_effects(&action.body, &ctx);
             }

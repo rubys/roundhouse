@@ -27,8 +27,7 @@ fn analyzed_app() -> roundhouse::App {
 fn post_all_has_type_array_of_post() {
     let app = analyzed_app();
     let index = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "index")
         .unwrap();
     // body is `@posts = Post.all`. value's ty should be Array<Post>.
@@ -51,8 +50,7 @@ fn post_all_has_type_array_of_post() {
 fn post_find_has_type_post() {
     let app = analyzed_app();
     let show = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "show")
         .unwrap();
     let ExprNode::Assign { value, .. } = &*show.body.node else {
@@ -86,8 +84,7 @@ fn literals_get_primitive_types() {
 fn const_ref_has_class_type() {
     let app = analyzed_app();
     let index = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "index")
         .unwrap();
     // RHS is Send(Some(Const(Post)), all, []). Inner Const should have ty Class(Post).
@@ -104,7 +101,7 @@ fn const_ref_has_class_type() {
 fn assign_target_ivar_is_still_structural() {
     // Sanity check: the analyzer doesn't corrupt non-expression structure.
     let app = analyzed_app();
-    let index = &app.controllers[0].actions[0];
+    let index = app.controllers[0].actions().next().expect("first action");
     let ExprNode::Assign { target, .. } = &*index.body.node else { panic!() };
     match target {
         LValue::Ivar { name } => assert_eq!(name.as_str(), "posts"),
@@ -116,8 +113,7 @@ fn assign_target_ivar_is_still_structural() {
 fn params_resolves_via_implicit_self_in_action_body() {
     let app = analyzed_app();
     let show = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "show")
         .unwrap();
     // Body: `@post = Post.find(params[:id])`.
@@ -233,8 +229,7 @@ fn if_branches_union_merge() {
     // merged union — since both are Nil, the union collapses to Nil.
     let app = analyzed_app();
     let create = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "create")
         .expect("create action");
     let ExprNode::Seq { exprs } = &*create.body.node else {
@@ -262,8 +257,7 @@ fn ivar_read_resolves_through_seq_tracking() {
     let app = analyzed_app();
     let ctrl = &app.controllers[0];
     let destroy = ctrl
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "destroy")
         .expect("destroy action");
     let ExprNode::Seq { exprs } = &*destroy.body.node else {
@@ -296,7 +290,7 @@ fn action_effects_include_db_reads() {
     let posts_read = Effect::DbRead { table: TableRef(Symbol::from("posts")) };
 
     for action_name in ["index", "show", "destroy"] {
-        let action = ctrl.actions.iter().find(|a| a.name.as_str() == action_name).unwrap();
+        let action = ctrl.actions().find(|a| a.name.as_str() == action_name).unwrap();
         assert!(
             action.effects.effects.contains(&posts_read),
             "{action_name} missing DbRead(posts); got {:?}",
@@ -313,8 +307,7 @@ fn destroy_effects_include_db_write_via_ivar_dispatch() {
     // would fall through to Unknown and no write would be recorded.
     let app = analyzed_app();
     let destroy = app.controllers[0]
-        .actions
-        .iter()
+        .actions()
         .find(|a| a.name.as_str() == "destroy")
         .unwrap();
     let posts_write = Effect::DbWrite { table: TableRef(Symbol::from("posts")) };
@@ -352,11 +345,12 @@ fn actions_without_db_calls_stay_pure() {
         app.controllers.push(roundhouse::dialect::Controller {
             name: ClassId(Symbol::from("NoopController")),
             parent: None,
-            filters: vec![],
-            actions: vec![action.clone()],
+            body: vec![roundhouse::ControllerBodyItem::Action {
+                action: action.clone(),
+            }],
         });
         analyzer.analyze(&mut app);
-        app.controllers[0].actions[0].effects.clone()
+        app.controllers[0].actions().next().unwrap().effects.clone()
     };
     action.effects = body_ctx_effects;
     assert!(action.effects.effects.is_empty(), "expected empty effects for empty body");

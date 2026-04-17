@@ -152,12 +152,13 @@ fn ingests_posts_controller_with_actions() {
         ctrl.parent.as_ref().unwrap().0.as_str(),
         "ApplicationController"
     );
-    assert_eq!(ctrl.actions.len(), 4);
-    let names: Vec<_> = ctrl.actions.iter().map(|a| a.name.as_str()).collect();
+    let actions: Vec<&roundhouse::Action> = ctrl.actions().collect();
+    assert_eq!(actions.len(), 4);
+    let names: Vec<_> = actions.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, vec!["index", "show", "create", "destroy"]);
 
     // index body: `@posts = Post.all` — Assign(Ivar(posts), Send(Some(Const(Post)), "all", []))
-    let index = &ctrl.actions[0];
+    let index = actions[0];
     match *index.body.node {
         ExprNode::Assign { ref target, ref value } => {
             match target {
@@ -181,7 +182,7 @@ fn ingests_posts_controller_with_actions() {
 
     // show body: `@post = Post.find(params[:id])`
     // Expect: Assign(Ivar(post), Send(Const(Post), "find", [Send(Send(None, "params", []), "[]", [Sym(id)])]))
-    let show = &ctrl.actions[1];
+    let show = actions[1];
     match *show.body.node {
         ExprNode::Assign { ref target, ref value } => {
             assert!(matches!(target, LValue::Ivar { name } if name.as_str() == "post"));
@@ -293,6 +294,44 @@ fn literal_ingested_expr() {
         ref other => panic!("expected Lit(Int 42), got {other:?}"),
     }
     let _ = Expr::new(expr.span, *expr.node); // just making sure imports are alive
+}
+
+#[test]
+fn length_validation_rule_is_ingested() {
+    use roundhouse::{ModelBodyItem, ValidationRule};
+
+    let source = br#"
+class Widget < ApplicationRecord
+  validates :body, presence: true, length: { minimum: 10 }
+  validates :title, length: { maximum: 80 }
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+        .unwrap()
+        .unwrap();
+
+    let validations: Vec<_> = model.body.iter().filter_map(|item| match item {
+        ModelBodyItem::Validation { validation } => Some(validation),
+        _ => None,
+    }).collect();
+
+    // `validates :body, presence: true, length: { minimum: 10 }` expands
+    // to one Validation for :body with two rules.
+    assert_eq!(validations.len(), 2);
+    let body_v = validations.iter().find(|v| v.attribute.as_str() == "body").unwrap();
+    assert_eq!(body_v.rules.len(), 2);
+    assert!(body_v.rules.iter().any(|r| matches!(r, ValidationRule::Presence)));
+    assert!(body_v.rules.iter().any(
+        |r| matches!(r, ValidationRule::Length { min: Some(10), max: None })
+    ));
+
+    let title_v = validations.iter().find(|v| v.attribute.as_str() == "title").unwrap();
+    assert_eq!(title_v.rules.len(), 1);
+    assert!(matches!(
+        title_v.rules[0],
+        ValidationRule::Length { min: None, max: Some(80) }
+    ));
 }
 
 #[test]

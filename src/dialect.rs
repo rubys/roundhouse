@@ -212,8 +212,49 @@ pub enum MethodReceiver {
 pub struct Controller {
     pub name: ClassId,
     pub parent: Option<ClassId>,
-    pub filters: Vec<Filter>,
-    pub actions: Vec<Action>,
+    /// Source-ordered class body. Same shape as `Model.body` — the
+    /// emitter iterates in order so `private` markers land at the right
+    /// position and unknown class-body calls round-trip verbatim.
+    pub body: Vec<ControllerBodyItem>,
+}
+
+impl Controller {
+    pub fn filters(&self) -> impl Iterator<Item = &Filter> {
+        self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::Filter { filter } => Some(filter),
+            _ => None,
+        })
+    }
+
+    pub fn actions(&self) -> impl Iterator<Item = &Action> {
+        self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::Action { action } => Some(action),
+            _ => None,
+        })
+    }
+
+    pub fn actions_mut(&mut self) -> impl Iterator<Item = &mut Action> {
+        self.body.iter_mut().filter_map(|item| match item {
+            ControllerBodyItem::Action { action } => Some(action),
+            _ => None,
+        })
+    }
+}
+
+/// One statement inside a controller class body, in source order.
+/// Same rationale as `ModelBodyItem`: known forms get typed variants,
+/// everything else falls through to `Unknown` for faithful re-emission.
+/// `PrivateMarker` is a zero-payload marker for the bare `private`
+/// keyword — methods following it in source are private by Ruby's
+/// visibility rules; the marker carries the position, not the
+/// visibility of individual actions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "item", rename_all = "snake_case")]
+pub enum ControllerBodyItem {
+    Filter { filter: Filter },
+    Action { action: Action },
+    PrivateMarker,
+    Unknown { expr: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
