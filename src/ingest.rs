@@ -978,6 +978,16 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::If { cond, then_branch, else_branch }
         }
+        n if n.as_array_node().is_some() => {
+            let arr = n.as_array_node().unwrap();
+            let style = array_style_from(&arr);
+            let elements: Vec<Expr> = arr
+                .elements()
+                .iter()
+                .map(|el| ingest_expr(&el, file))
+                .collect::<IngestResult<_>>()?;
+            ExprNode::Array { elements, style }
+        }
         n if n.as_hash_node().is_some() => {
             let hn = n.as_hash_node().unwrap();
             ExprNode::Hash {
@@ -1053,6 +1063,21 @@ fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
         .filter_map(|req| req.as_required_parameter_node())
         .map(|rp| Symbol::from(constant_id_str(&rp.name())))
         .collect()
+}
+
+/// Detect the surface form of an array literal from its opening token:
+/// `%i[` → PercentI, `%w[` → PercentW, else Brackets.
+fn array_style_from(arr: &ruby_prism::ArrayNode<'_>) -> crate::expr::ArrayStyle {
+    use crate::expr::ArrayStyle;
+    let Some(loc) = arr.opening_loc() else { return ArrayStyle::Brackets };
+    let bytes = loc.as_slice();
+    if bytes.starts_with(b"%i") || bytes.starts_with(b"%I") {
+        ArrayStyle::PercentI
+    } else if bytes.starts_with(b"%w") || bytes.starts_with(b"%W") {
+        ArrayStyle::PercentW
+    } else {
+        ArrayStyle::Brackets
+    }
 }
 
 fn hash_entries_from(

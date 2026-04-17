@@ -270,3 +270,61 @@ fn literal_ingested_expr() {
     }
     let _ = Expr::new(expr.span, *expr.node); // just making sure imports are alive
 }
+
+#[test]
+fn array_literal_styles() {
+    use roundhouse::expr::ArrayStyle;
+
+    fn parse_one(source: &[u8]) -> roundhouse::expr::Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    // Bracket form with symbol elements.
+    let e = parse_one(br"[:a, :b, :c]");
+    match &*e.node {
+        ExprNode::Array { elements, style } => {
+            assert!(matches!(style, ArrayStyle::Brackets));
+            assert_eq!(elements.len(), 3);
+            for el in elements {
+                assert!(matches!(&*el.node, ExprNode::Lit { value: Literal::Sym { .. } }));
+            }
+        }
+        other => panic!("expected Array, got {other:?}"),
+    }
+
+    // %i[ ... ] symbol-list form.
+    let e = parse_one(br"%i[show edit update]");
+    match &*e.node {
+        ExprNode::Array { elements, style } => {
+            assert!(matches!(style, ArrayStyle::PercentI));
+            assert_eq!(elements.len(), 3);
+            match &*elements[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => {
+                    assert_eq!(value.as_str(), "show");
+                }
+                other => panic!("expected Sym, got {other:?}"),
+            }
+        }
+        other => panic!("expected Array, got {other:?}"),
+    }
+
+    // %w[ ... ] word-list form.
+    let e = parse_one(br"%w[alpha beta]");
+    match &*e.node {
+        ExprNode::Array { elements, style } => {
+            assert!(matches!(style, ArrayStyle::PercentW));
+            assert_eq!(elements.len(), 2);
+            match &*elements[0].node {
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    assert_eq!(value.as_str(), "alpha");
+                }
+                other => panic!("expected Str, got {other:?}"),
+            }
+        }
+        other => panic!("expected Array, got {other:?}"),
+    }
+}

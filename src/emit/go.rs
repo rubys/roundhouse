@@ -225,6 +225,10 @@ fn emit_expr(e: &Expr) -> String {
                 .collect();
             format!("map[string]interface{{}}{{{}}}", parts.join(", "))
         }
+        ExprNode::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("[]interface{{}}{{{}}}", parts.join(", "))
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

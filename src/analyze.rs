@@ -202,6 +202,12 @@ impl Analyzer {
                 }
             }
 
+            ExprNode::Array { elements, .. } => {
+                for e in elements {
+                    self.visit_effects(e, ctx, out);
+                }
+            }
+
             ExprNode::Let { value, body, .. } => {
                 self.visit_effects(value, ctx, out);
                 self.visit_effects(body, ctx, out);
@@ -332,6 +338,18 @@ impl Analyzer {
                     key: Box::new(key_ty.unwrap_or_else(unknown)),
                     value: Box::new(value_ty.unwrap_or_else(unknown)),
                 }
+            }
+
+            ExprNode::Array { elements, .. } => {
+                let mut elem_ty: Option<Ty> = None;
+                for e in elements.iter_mut() {
+                    let et = self.analyze_expr(e, ctx);
+                    elem_ty = Some(match elem_ty.take() {
+                        Some(prev) => union_of(prev, et),
+                        None => et,
+                    });
+                }
+                Ty::Array { elem: Box::new(elem_ty.unwrap_or_else(unknown)) }
             }
 
             ExprNode::Let { value, body, .. } => {

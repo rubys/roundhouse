@@ -26,6 +26,21 @@ impl Expr {
 
 fn default_true() -> bool { true }
 
+/// Surface form of an array literal. Source fidelity: `[:a, :b]` (Brackets),
+/// `%i[a b]` (PercentI, symbol list), `%w[a b]` (PercentW, word list) all
+/// produce the same Prism `ArrayNode` but differ byte-for-byte in source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrayStyle {
+    /// `[elem, elem, ...]` — the common form.
+    #[default]
+    Brackets,
+    /// `%i[sym sym ...]` — symbol-list literal. Elements must be bare symbols.
+    PercentI,
+    /// `%w[word word ...]` — word-list literal. Elements must be bare strings.
+    PercentW,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExprNode {
@@ -43,6 +58,13 @@ pub enum ExprNode {
         entries: Vec<(Expr, Expr)>,
         #[serde(default = "default_true")]
         braced: bool,
+    },
+    /// Array literal: `[a, b, c]`, `%i[a b c]`, `%w[a b c]`.
+    /// `style` preserves which surface form the source used.
+    Array {
+        elements: Vec<Expr>,
+        #[serde(default)]
+        style: ArrayStyle,
     },
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {

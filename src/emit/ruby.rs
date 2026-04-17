@@ -615,6 +615,7 @@ fn emit_node(n: &ExprNode) -> String {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }
         ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
+        ExprNode::Array { elements, style } => emit_array(elements, style),
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
@@ -666,6 +667,39 @@ fn emit_node(n: &ExprNode) -> String {
             if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+    }
+}
+
+fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {
+    use crate::expr::ArrayStyle;
+    match style {
+        ArrayStyle::Brackets => {
+            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        ArrayStyle::PercentI => {
+            // Symbol list: elements must be symbol literals. Emit bare names
+            // without the leading `:` and space-separate.
+            let parts: Vec<String> = elements
+                .iter()
+                .map(|e| match &*e.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.to_string(),
+                    _ => emit_expr(e),
+                })
+                .collect();
+            format!("%i[{}]", parts.join(" "))
+        }
+        ArrayStyle::PercentW => {
+            // Word list: elements must be string literals. Emit without quotes.
+            let parts: Vec<String> = elements
+                .iter()
+                .map(|e| match &*e.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => value.to_string(),
+                    _ => emit_expr(e),
+                })
+                .collect();
+            format!("%w[{}]", parts.join(" "))
+        }
     }
 }
 

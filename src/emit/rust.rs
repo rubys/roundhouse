@@ -195,6 +195,10 @@ fn emit_expr(e: &Expr) -> String {
                 .collect();
             format!("HashMap::from([{}])", parts.join(", "))
         }
+        ExprNode::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("vec![{}]", parts.join(", "))
+        }
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {
