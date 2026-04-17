@@ -41,6 +41,27 @@ pub enum ArrayStyle {
     PercentW,
 }
 
+/// Which short-circuit operator is meant.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoolOpKind {
+    And,
+    Or,
+}
+
+/// Surface spelling for `BoolOp`. Ruby's `and`/`or` keywords have lower
+/// precedence than `=` whereas `&&`/`||` bind tighter — not interchangeable
+/// in all positions, so we preserve which one the source wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoolOpSurface {
+    /// `&&` / `||` — the tight-binding operator form.
+    #[default]
+    Symbol,
+    /// `and` / `or` — the keyword form (lower precedence).
+    Word,
+}
+
 /// Piece of an interpolated string. Ingested from Prism's
 /// InterpolatedStringNode so the emitter can re-synthesize `"x#{expr}y"`
 /// byte-for-byte. Lowering to `"x" + expr.to_s + "y"` would lose the
@@ -85,6 +106,17 @@ pub enum ExprNode {
     /// Text-only list would degenerate to `Lit::Str` at ingest; we keep
     /// this variant reserved for cases with at least one Expr part.
     StringInterp { parts: Vec<InterpPart> },
+    /// Short-circuit logical operator: `left && right` or `left || right`.
+    /// Ruby also has keyword forms (`and`/`or`) with different precedence;
+    /// `surface` preserves which spelling the source used so round-trip
+    /// is byte-accurate.
+    BoolOp {
+        op: BoolOpKind,
+        #[serde(default)]
+        surface: BoolOpSurface,
+        left: Expr,
+        right: Expr,
+    },
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {
         params: Vec<Symbol>,

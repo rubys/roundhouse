@@ -640,6 +640,9 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
         ExprNode::Array { elements, style } => emit_array(elements, style),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
+        ExprNode::BoolOp { op, surface, left, right } => {
+            emit_bool_op(*op, *surface, left, right)
+        }
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
@@ -692,6 +695,22 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
     }
+}
+
+fn emit_bool_op(
+    op: crate::expr::BoolOpKind,
+    surface: crate::expr::BoolOpSurface,
+    left: &Expr,
+    right: &Expr,
+) -> String {
+    use crate::expr::{BoolOpKind, BoolOpSurface};
+    let op_s = match (op, surface) {
+        (BoolOpKind::Or, BoolOpSurface::Symbol) => "||",
+        (BoolOpKind::Or, BoolOpSurface::Word) => "or",
+        (BoolOpKind::And, BoolOpSurface::Symbol) => "&&",
+        (BoolOpKind::And, BoolOpSurface::Word) => "and",
+    };
+    format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
 }
 
 fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {

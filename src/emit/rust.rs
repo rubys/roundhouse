@@ -199,6 +199,14 @@ fn emit_expr(e: &Expr) -> String {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();
             format!("vec![{}]", parts.join(", "))
         }
+        ExprNode::BoolOp { op, left, right, .. } => {
+            use crate::expr::BoolOpKind;
+            let op_s = match op {
+                BoolOpKind::Or => "||",
+                BoolOpKind::And => "&&",
+            };
+            format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+        }
         ExprNode::StringInterp { parts } => {
             use crate::expr::InterpPart;
             let mut fmt = String::new();

@@ -19,7 +19,7 @@ use crate::dialect::{
 };
 use crate::erb;
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, Literal};
+use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, Literal};
 use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
@@ -1005,6 +1005,32 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::If { cond, then_branch, else_branch }
         }
+        n if n.as_yield_node().is_some() => {
+            let y = n.as_yield_node().unwrap();
+            let args: Vec<Expr> = if let Some(a) = y.arguments() {
+                a.arguments()
+                    .iter()
+                    .map(|arg| ingest_expr(&arg, file))
+                    .collect::<IngestResult<_>>()?
+            } else {
+                vec![]
+            };
+            ExprNode::Yield { args }
+        }
+        n if n.as_or_node().is_some() => {
+            let o = n.as_or_node().unwrap();
+            let left = ingest_expr(&o.left(), file)?;
+            let right = ingest_expr(&o.right(), file)?;
+            let surface = bool_op_surface(o.operator_loc().as_slice());
+            ExprNode::BoolOp { op: BoolOpKind::Or, surface, left, right }
+        }
+        n if n.as_and_node().is_some() => {
+            let a = n.as_and_node().unwrap();
+            let left = ingest_expr(&a.left(), file)?;
+            let right = ingest_expr(&a.right(), file)?;
+            let surface = bool_op_surface(a.operator_loc().as_slice());
+            ExprNode::BoolOp { op: BoolOpKind::And, surface, left, right }
+        }
         n if n.as_parentheses_node().is_some() => {
             // Parens are surface-only: unwrap to the inner expression.
             // Empty `()` shouldn't appear in well-formed Ruby, but fall back
@@ -1100,6 +1126,16 @@ fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
         .filter_map(|req| req.as_required_parameter_node())
         .map(|rp| Symbol::from(constant_id_str(&rp.name())))
         .collect()
+}
+
+/// Map the operator bytes of an `OrNode` / `AndNode` to the surface form.
+/// Prism's `operator_loc` always points at the actual source bytes, so
+/// `&&`/`||` map to `Symbol` and `and`/`or` to `Word`.
+fn bool_op_surface(op_bytes: &[u8]) -> BoolOpSurface {
+    match op_bytes {
+        b"and" | b"or" => BoolOpSurface::Word,
+        _ => BoolOpSurface::Symbol,
+    }
 }
 
 /// Detect the surface form of an array literal from its opening token:

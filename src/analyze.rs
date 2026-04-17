@@ -216,6 +216,11 @@ impl Analyzer {
                 }
             }
 
+            ExprNode::BoolOp { left, right, .. } => {
+                self.visit_effects(left, ctx, out);
+                self.visit_effects(right, ctx, out);
+            }
+
             ExprNode::Let { value, body, .. } => {
                 self.visit_effects(value, ctx, out);
                 self.visit_effects(body, ctx, out);
@@ -367,6 +372,14 @@ impl Analyzer {
                     }
                 }
                 Ty::Str
+            }
+
+            ExprNode::BoolOp { left, right, .. } => {
+                let lt = self.analyze_expr(left, ctx);
+                let rt = self.analyze_expr(right, ctx);
+                // Short-circuit: the result is either left (if truthy) or
+                // right — a union of the two operand types.
+                union_of(lt, rt)
             }
 
             ExprNode::Let { value, body, .. } => {
