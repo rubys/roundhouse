@@ -15,8 +15,9 @@ use indexmap::IndexMap;
 use ruby_prism::{Node, parse};
 
 use crate::dialect::{
-    Action, Controller, HttpMethod, Model, RenderTarget, Route, RouteTable,
+    Action, Controller, HttpMethod, Model, RenderTarget, Route, RouteTable, View,
 };
+use crate::erb;
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::schema::{Column, ColumnType, Schema, Table};
@@ -94,7 +95,81 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         app.routes = ingest_routes(&source, &routes_path.display().to_string())?;
     }
 
+    let views_dir = dir.join("app/views");
+    if views_dir.is_dir() {
+        let erb_files = read_erb_files(&views_dir)?;
+        for erb_path in erb_files {
+            let source = std::fs::read_to_string(&erb_path)?;
+            let rel = erb_path
+                .strip_prefix(&views_dir)
+                .map_err(|_| IngestError::Unsupported {
+                    file: erb_path.display().to_string(),
+                    message: "view path outside views dir".into(),
+                })?;
+            let view = ingest_view(&source, rel, &erb_path.display().to_string())?;
+            app.views.push(view);
+        }
+    }
+
     Ok(app)
+}
+
+fn read_erb_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    walk_erb(dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn walk_erb(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> IngestResult<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            walk_erb(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("erb") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Ingest a single `.erb` template. The path-extension shape
+/// `posts/index.html.erb` yields name=`posts/index`, format=`html`.
+pub fn ingest_view(source: &str, rel_path: &Path, file: &str) -> IngestResult<View> {
+    let path_str = rel_path.to_string_lossy();
+    let no_erb = path_str.strip_suffix(".erb").unwrap_or(&path_str);
+    let (name, format) = match no_erb.rsplit_once('.') {
+        Some((stem, fmt)) => (stem.to_string(), fmt.to_string()),
+        None => (no_erb.to_string(), "html".to_string()),
+    };
+
+    // Compile ERB to Ruby, then ingest the compiled Ruby through our
+    // existing pipeline. The resulting View body is a `Seq` of `_buf`
+    // operations the emitter pattern-matches back to template form.
+    let compiled = erb::compile_erb(source);
+    let body = ingest_ruby_program(&compiled, file)?;
+
+    Ok(View {
+        name: Symbol::from(name),
+        format: Symbol::from(format),
+        locals: Row::closed(),
+        body,
+    })
+}
+
+/// Parse a Ruby source program (possibly multiple top-level statements)
+/// and return the resulting `Expr`. Used by the ERB ingester; generalized
+/// so future multi-statement sources can share it.
+fn ingest_ruby_program(source: &str, file: &str) -> IngestResult<Expr> {
+    let result = parse(source.as_bytes());
+    let root = result.node();
+    let program = root.as_program_node().ok_or_else(|| IngestError::Parse {
+        file: file.into(),
+        message: "compiled Ruby is not a program".into(),
+    })?;
+    let stmts = program.statements();
+    ingest_expr(&stmts.as_node(), file)
 }
 
 fn read_rb_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {

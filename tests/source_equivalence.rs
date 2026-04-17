@@ -62,7 +62,10 @@ fn walk_rb_files(root: &Path, dir: &Path, f: &mut impl FnMut(&Path)) {
         let path = entry.path();
         if path.is_dir() {
             walk_rb_files(root, &path, f);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rb") {
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("rb") | Some("erb")
+        ) {
             let rel = path.strip_prefix(root).expect("strip_prefix");
             f(rel);
         }

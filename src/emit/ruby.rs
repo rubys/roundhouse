@@ -30,6 +30,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_controller(controller));
     }
     files.push(emit_routes(&app.routes));
+    for view in &app.views {
+        files.push(emit_view(view));
+    }
     files
 }
 
@@ -400,6 +403,103 @@ fn emit_render(r: &RenderTarget) -> Option<String> {
         RenderTarget::Json { value } => Some(format!("render json: {}", emit_expr(value))),
         RenderTarget::Head { status } => Some(format!("head :{status}")),
     }
+}
+
+// Views -----------------------------------------------------------------
+
+fn emit_view(view: &crate::dialect::View) -> EmittedFile {
+    let path = PathBuf::from(format!(
+        "app/views/{}.{}.erb",
+        view.name, view.format
+    ));
+    let content = reconstruct_erb(&view.body);
+    EmittedFile { path, content }
+}
+
+/// Walk a view body whose structure is:
+///   _buf = ""
+///   _buf = _buf + "text"           # text chunk
+///   _buf = _buf + (expr).to_s      # <%= expr %>
+///   <other ruby statement>         # <% code %> (control flow)
+///   _buf                           # epilogue
+/// and reconstruct the corresponding ERB source.
+fn reconstruct_erb(body: &Expr) -> String {
+    let mut out = String::new();
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        // Single-statement body — shouldn't happen for compiled ERB but
+        // fall through gracefully.
+        _ => {
+            out.push_str(&emit_buf_stmt(body));
+            return out;
+        }
+    };
+    for stmt in stmts {
+        out.push_str(&emit_buf_stmt(stmt));
+    }
+    out
+}
+
+fn emit_buf_stmt(stmt: &Expr) -> String {
+    match &*stmt.node {
+        // Prologue: `_buf = ""` — swallow.
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } if name.as_str() == "_buf" => {
+            if let ExprNode::Lit { value: Literal::Str { value: s } } = &*value.node {
+                if s.is_empty() {
+                    return String::new();
+                }
+            }
+            // `_buf = _buf + X` — the working shape.
+            if let ExprNode::Send {
+                recv: Some(recv),
+                method,
+                args,
+                ..
+            } = &*value.node
+            {
+                if method.as_str() == "+" && args.len() == 1 {
+                    if let ExprNode::Var { name: rn, .. } = &*recv.node {
+                        if rn.as_str() == "_buf" {
+                            return emit_buf_append(&args[0]);
+                        }
+                    }
+                }
+            }
+            // Unrecognized `_buf = ...` — fall through as code.
+            format!("<% {} %>", emit_expr(stmt))
+        }
+        // Epilogue: bare `_buf` read at end.
+        ExprNode::Var { name, .. } if name.as_str() == "_buf" => String::new(),
+        // Anything else is control flow.
+        _ => format!("<% {} %>", emit_expr(stmt)),
+    }
+}
+
+/// Emit the argument of `_buf = _buf + ARG` either as a text chunk or
+/// as a `<%= expr %>` output interpolation.
+fn emit_buf_append(arg: &Expr) -> String {
+    // Text chunk: the argument is a string literal.
+    if let ExprNode::Lit { value: Literal::Str { value: s } } = &*arg.node {
+        return s.clone();
+    }
+    // Output interpolation: strip the `(expr).to_s` wrapper the compiler
+    // added. If somebody wrote `<%= x.to_s %>` explicitly, unwrap once
+    // and accept the loss of the explicit `.to_s` — round-trip is stable
+    // on the second pass regardless.
+    let inner = unwrap_to_s(arg);
+    format!("<%= {} %>", emit_expr(inner))
+}
+
+fn unwrap_to_s(expr: &Expr) -> &Expr {
+    if let ExprNode::Send { recv: Some(inner), method, args, .. } = &*expr.node {
+        if method.as_str() == "to_s" && args.is_empty() {
+            return inner;
+        }
+    }
+    expr
 }
 
 // Routes ----------------------------------------------------------------
