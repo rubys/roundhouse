@@ -11,13 +11,90 @@ use crate::ty::{Row, Ty};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub name: ClassId,
+    /// `None` only for anonymous/top-level classes we haven't resolved;
+    /// real Rails models always inherit from `ApplicationRecord` (or
+    /// `ActiveRecord::Base` for `ApplicationRecord` itself). Needed so
+    /// the Ruby emitter reproduces the source's superclass verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ClassId>,
     pub table: TableRef,
     pub attributes: Row,
-    pub associations: Vec<Association>,
-    pub validations: Vec<Validation>,
-    pub scopes: Vec<Scope>,
-    pub callbacks: Vec<Callback>,
-    pub methods: Vec<MethodDef>,
+    /// Source-ordered class body. The Ruby emitter re-emits entries in
+    /// order, so the preserved sequence is what determines byte-for-byte
+    /// round-trip. Filter via the accessors (`associations()`,
+    /// `validations()`, …) when the specialized view is what you want.
+    pub body: Vec<ModelBodyItem>,
+}
+
+impl Model {
+    pub fn associations(&self) -> impl Iterator<Item = &Association> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Association { assoc } => Some(assoc),
+            _ => None,
+        })
+    }
+
+    pub fn validations(&self) -> impl Iterator<Item = &Validation> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Validation { validation } => Some(validation),
+            _ => None,
+        })
+    }
+
+    pub fn scopes(&self) -> impl Iterator<Item = &Scope> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Scope { scope } => Some(scope),
+            _ => None,
+        })
+    }
+
+    pub fn scopes_mut(&mut self) -> impl Iterator<Item = &mut Scope> {
+        self.body.iter_mut().filter_map(|item| match item {
+            ModelBodyItem::Scope { scope } => Some(scope),
+            _ => None,
+        })
+    }
+
+    pub fn callbacks(&self) -> impl Iterator<Item = &Callback> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Callback { callback } => Some(callback),
+            _ => None,
+        })
+    }
+
+    pub fn methods(&self) -> impl Iterator<Item = &MethodDef> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Method { method } => Some(method),
+            _ => None,
+        })
+    }
+
+    pub fn methods_mut(&mut self) -> impl Iterator<Item = &mut MethodDef> {
+        self.body.iter_mut().filter_map(|item| match item {
+            ModelBodyItem::Method { method } => Some(method),
+            _ => None,
+        })
+    }
+}
+
+/// One statement inside a model's class body, in source order. Known DSL
+/// calls (associations, validations, …) become their typed variants;
+/// anything else falls through to `Unknown` so it can be re-emitted
+/// verbatim. The `Unknown` fallback is the *whole reason* this type
+/// exists — without it the Ruby emitter silently drops every
+/// unrecognized line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "item", rename_all = "snake_case")]
+pub enum ModelBodyItem {
+    Association { assoc: Association },
+    Validation { validation: Validation },
+    Scope { scope: Scope },
+    Callback { callback: Callback },
+    Method { method: MethodDef },
+    /// Class-body statement whose semantics aren't yet recognized
+    /// (`broadcasts_to …`, `primary_abstract_class`, bare method calls,
+    /// …). Held as a raw expression for source-faithful re-emission.
+    Unknown { expr: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

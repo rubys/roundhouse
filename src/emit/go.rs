@@ -46,7 +46,7 @@ fn emit_models(app: &App) -> EmittedFile {
     for model in &app.models {
         writeln!(s).unwrap();
         emit_struct(&mut s, model);
-        for method in &model.methods {
+        for method in model.methods() {
             writeln!(s).unwrap();
             emit_model_method(&mut s, model, method);
         }

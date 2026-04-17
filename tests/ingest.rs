@@ -79,8 +79,9 @@ fn ingests_associations_with_convention_defaults() {
         .iter()
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
-    assert_eq!(post.associations.len(), 1);
-    match &post.associations[0] {
+    let post_assocs: Vec<&Association> = post.associations().collect();
+    assert_eq!(post_assocs.len(), 1);
+    match post_assocs[0] {
         Association::HasMany { name, target, foreign_key, through, dependent } => {
             assert_eq!(name.as_str(), "comments");
             assert_eq!(target.0.as_str(), "Comment");
@@ -96,8 +97,9 @@ fn ingests_associations_with_convention_defaults() {
         .iter()
         .find(|m| m.name.0.as_str() == "Comment")
         .unwrap();
-    assert_eq!(comment.associations.len(), 1);
-    match &comment.associations[0] {
+    let comment_assocs: Vec<&Association> = comment.associations().collect();
+    assert_eq!(comment_assocs.len(), 1);
+    match comment_assocs[0] {
         Association::BelongsTo { name, target, foreign_key, optional } => {
             assert_eq!(name.as_str(), "post");
             assert_eq!(target.0.as_str(), "Post");
@@ -116,8 +118,9 @@ fn ingests_validations() {
         .iter()
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
-    assert_eq!(post.validations.len(), 1);
-    let v = &post.validations[0];
+    let validations: Vec<&roundhouse::Validation> = post.validations().collect();
+    assert_eq!(validations.len(), 1);
+    let v = validations[0];
     assert_eq!(v.attribute.as_str(), "title");
     assert_eq!(v.rules.len(), 1);
     assert!(matches!(v.rules[0], ValidationRule::Presence));
@@ -131,8 +134,9 @@ fn ingests_callbacks() {
         .iter()
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
-    assert_eq!(post.callbacks.len(), 1);
-    let cb = &post.callbacks[0];
+    let callbacks: Vec<&roundhouse::Callback> = post.callbacks().collect();
+    assert_eq!(callbacks.len(), 1);
+    let cb = callbacks[0];
     assert!(matches!(cb.hook, CallbackHook::BeforeSave));
     assert_eq!(cb.target.as_str(), "normalize_title");
     assert!(cb.condition.is_none());
@@ -289,6 +293,43 @@ fn literal_ingested_expr() {
         ref other => panic!("expected Lit(Int 42), got {other:?}"),
     }
     let _ = Expr::new(expr.span, *expr.node); // just making sure imports are alive
+}
+
+#[test]
+fn model_body_preserves_source_order_with_unknown_fallback() {
+    use roundhouse::ModelBodyItem;
+
+    // Exercise the ingest: a model with a known association, an unknown
+    // class-body call (`broadcasts_to`), and a validation — in that
+    // order. The body Vec must mirror that exact order, with
+    // broadcasts_to captured as `Unknown` (preserved as an Expr rather
+    // than silently dropped).
+    let source = br#"
+class Widget < ApplicationRecord
+  has_many :gears
+  broadcasts_to :widgets
+  validates :name, presence: true
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(model.body.len(), 3);
+    assert!(matches!(model.body[0], ModelBodyItem::Association { .. }));
+    match &model.body[1] {
+        ModelBodyItem::Unknown { expr } => {
+            // `broadcasts_to :widgets` → Send with no receiver, method
+            // "broadcasts_to", one symbol arg.
+            let ExprNode::Send { method, .. } = &*expr.node else {
+                panic!("expected Send, got {:?}", expr.node);
+            };
+            assert_eq!(method.as_str(), "broadcasts_to");
+        }
+        other => panic!("expected Unknown(broadcasts_to), got {other:?}"),
+    }
+    assert!(matches!(model.body[2], ModelBodyItem::Validation { .. }));
 }
 
 #[test]

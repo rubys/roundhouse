@@ -11,7 +11,7 @@ use crate::App;
 use crate::dialect::{
     Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
     HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, RouteSpec, RouteTable, Scope,
-    ValidationRule,
+    Validation, ValidationRule,
 };
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::{ClassId, Symbol};
@@ -122,37 +122,57 @@ fn emit_column(col: &Column) -> String {
 // Models ----------------------------------------------------------------
 
 fn emit_model(m: &Model) -> EmittedFile {
+    use crate::dialect::ModelBodyItem;
+
     let mut s = String::new();
-    writeln!(s, "class {} < ApplicationRecord", m.name).unwrap();
-    let mut wrote_body = false;
-    for assoc in &m.associations {
-        writeln!(s, "  {}", emit_association(&m.name, assoc)).unwrap();
-        wrote_body = true;
+    let parent = m
+        .parent
+        .as_ref()
+        .map(|c| c.0.to_string())
+        .unwrap_or_else(|| "ApplicationRecord".to_string());
+    writeln!(s, "class {} < {}", m.name, parent).unwrap();
+
+    for (idx, item) in m.body.iter().enumerate() {
+        let line = match item {
+            ModelBodyItem::Association { assoc } => {
+                emit_association(&m.name, assoc)
+            }
+            ModelBodyItem::Validation { validation } => emit_validation_entry(validation),
+            ModelBodyItem::Scope { scope } => emit_scope(scope),
+            ModelBodyItem::Callback { callback } => emit_callback(callback),
+            ModelBodyItem::Method { method } => {
+                // Methods get a leading blank line unless they're the
+                // first item, matching Rails' conventional spacing.
+                if idx > 0 {
+                    writeln!(s).unwrap();
+                }
+                emit_method(&mut s, method, 1);
+                continue;
+            }
+            ModelBodyItem::Unknown { expr } => emit_expr(expr),
+        };
+        writeln!(s, "  {line}").unwrap();
     }
-    for validation in &m.validations {
-        for rule in &validation.rules {
-            writeln!(s, "  {}", emit_validation(&validation.attribute.to_string(), rule)).unwrap();
-            wrote_body = true;
-        }
-    }
-    for scope in &m.scopes {
-        writeln!(s, "  {}", emit_scope(scope)).unwrap();
-        wrote_body = true;
-    }
-    for cb in &m.callbacks {
-        writeln!(s, "  {}", emit_callback(cb)).unwrap();
-        wrote_body = true;
-    }
-    for method in &m.methods {
-        if wrote_body { writeln!(s).unwrap(); }
-        emit_method(&mut s, method, 1);
-        wrote_body = true;
-    }
+
     writeln!(s, "end").unwrap();
     EmittedFile {
         path: PathBuf::from(format!("app/models/{}.rb", snake_case(m.name.0.as_str()))),
         content: s,
     }
+}
+
+/// Emit a single `Validation` (one attribute, possibly multiple rules).
+/// Rails writes `validates :attr, rule1: …, rule2: …` — one line per
+/// validation. If there are multiple rules the attribute appears once
+/// with all rules as keyword args; we keep it simple and emit
+/// one line per rule, which matches the fixture usage today.
+fn emit_validation_entry(v: &Validation) -> String {
+    let attr = v.attribute.to_string();
+    if v.rules.is_empty() {
+        return format!("validates :{attr}");
+    }
+    let parts: Vec<String> = v.rules.iter().map(|r| format_validation_rule(r)).collect();
+    format!("validates :{attr}, {}", parts.join(", "))
 }
 
 fn emit_association(owner: &ClassId, a: &Association) -> String {
@@ -232,41 +252,47 @@ fn emit_dependent(d: &Dependent) -> Option<&'static str> {
     }
 }
 
-fn emit_validation(attr: &str, rule: &ValidationRule) -> String {
+/// Emit the `key: value` fragment for one validation rule — the part
+/// that goes after `validates :attr,`. Multiple rules on the same
+/// attribute get joined by commas by the caller.
+fn format_validation_rule(rule: &ValidationRule) -> String {
     match rule {
-        ValidationRule::Presence => format!("validates :{attr}, presence: true"),
-        ValidationRule::Absence => format!("validates :{attr}, absence: true"),
+        ValidationRule::Presence => "presence: true".to_string(),
+        ValidationRule::Absence => "absence: true".to_string(),
         ValidationRule::Uniqueness { scope, case_sensitive } => {
-            let mut opts = vec!["uniqueness:".to_string()];
             let mut inner = Vec::new();
             if !scope.is_empty() {
                 let s: Vec<String> = scope.iter().map(|s| format!(":{s}")).collect();
                 inner.push(format!("scope: [{}]", s.join(", ")));
             }
-            if !*case_sensitive { inner.push("case_sensitive: false".into()); }
-            if inner.is_empty() { opts.push("true".into()); }
-            else { opts.push(format!("{{ {} }}", inner.join(", "))); }
-            format!("validates :{attr}, {}", opts.join(" "))
+            if !*case_sensitive {
+                inner.push("case_sensitive: false".into());
+            }
+            if inner.is_empty() {
+                "uniqueness: true".into()
+            } else {
+                format!("uniqueness: {{ {} }}", inner.join(", "))
+            }
         }
         ValidationRule::Length { min, max } => {
             let mut parts = Vec::new();
             if let Some(n) = min { parts.push(format!("minimum: {n}")); }
             if let Some(n) = max { parts.push(format!("maximum: {n}")); }
-            format!("validates :{attr}, length: {{ {} }}", parts.join(", "))
+            format!("length: {{ {} }}", parts.join(", "))
         }
         ValidationRule::Format { pattern } => {
-            format!("validates :{attr}, format: {{ with: /{pattern}/ }}")
+            format!("format: {{ with: /{pattern}/ }}")
         }
         ValidationRule::Numericality { only_integer, gt, lt } => {
             let mut parts = Vec::new();
             if *only_integer { parts.push("only_integer: true".into()); }
             if let Some(n) = gt { parts.push(format!("greater_than: {n}")); }
             if let Some(n) = lt { parts.push(format!("less_than: {n}")); }
-            format!("validates :{attr}, numericality: {{ {} }}", parts.join(", "))
+            format!("numericality: {{ {} }}", parts.join(", "))
         }
         ValidationRule::Inclusion { values } => {
             let vs: Vec<String> = values.iter().map(emit_literal).collect();
-            format!("validates :{attr}, inclusion: {{ in: [{}] }}", vs.join(", "))
+            format!("inclusion: {{ in: [{}] }}", vs.join(", "))
         }
         ValidationRule::Custom { method } => format!("validate :{method}"),
     }
@@ -745,6 +771,9 @@ fn emit_node(n: &ExprNode) -> String {
             if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+        ExprNode::RescueModifier { expr, fallback } => {
+            format!("{} rescue {}", emit_expr(expr), emit_expr(fallback))
+        }
     }
 }
 

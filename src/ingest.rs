@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use ruby_prism::{Node, parse};
 
 use crate::dialect::{
-    Action, Controller, HttpMethod, Model, RenderTarget, RouteSpec, RouteTable, View,
+    Action, Controller, HttpMethod, Model, ModelBodyItem, RenderTarget, RouteSpec, RouteTable, View,
 };
 use crate::erb;
 use crate::effect::EffectSet;
@@ -214,44 +214,62 @@ pub fn ingest_model(
         Row::closed()
     };
 
-    let mut associations = Vec::new();
-    let mut validations = Vec::new();
-    let mut scopes = Vec::new();
-    let mut callbacks = Vec::new();
-    let mut methods = Vec::new();
-    if let Some(body) = class.body() {
-        for stmt in flatten_statements(body) {
+    let mut body: Vec<ModelBodyItem> = Vec::new();
+    if let Some(class_body) = class.body() {
+        for stmt in flatten_statements(class_body) {
             if let Some(call) = stmt.as_call_node() {
                 if call.receiver().is_some() {
+                    // Rare in a class body (and currently unused by any
+                    // fixture); preserve verbatim rather than guess.
+                    body.push(ModelBodyItem::Unknown {
+                        expr: ingest_expr(&stmt, file)?,
+                    });
                     continue;
                 }
                 let method = constant_id_str(&call.name()).to_string();
                 if let Some(assoc) = parse_association(&call, &owner, &method) {
-                    associations.push(assoc);
+                    body.push(ModelBodyItem::Association { assoc });
                 } else if method == "validates" {
-                    validations.extend(parse_validates(&call));
+                    for validation in parse_validates(&call) {
+                        body.push(ModelBodyItem::Validation { validation });
+                    }
                 } else if method == "scope" {
                     if let Some(scope) = parse_scope(&call, file)? {
-                        scopes.push(scope);
+                        body.push(ModelBodyItem::Scope { scope });
                     }
-                } else if let Some(cb) = parse_callback(&call, &method) {
-                    callbacks.push(cb);
+                } else if let Some(callback) = parse_callback(&call, &method) {
+                    body.push(ModelBodyItem::Callback { callback });
+                } else {
+                    // Unknown DSL call (`broadcasts_to`, `primary_abstract_class`,
+                    // `after_create_commit { … }`, …). Preserve as a raw Send so
+                    // the Ruby emitter can reproduce it verbatim.
+                    body.push(ModelBodyItem::Unknown {
+                        expr: ingest_expr(&stmt, file)?,
+                    });
                 }
             } else if let Some(def) = stmt.as_def_node() {
-                methods.push(ingest_method(&def, file)?);
+                body.push(ModelBodyItem::Method {
+                    method: ingest_method(&def, file)?,
+                });
+            } else {
+                // Non-call, non-def statement in a class body. Rare; preserve.
+                body.push(ModelBodyItem::Unknown {
+                    expr: ingest_expr(&stmt, file)?,
+                });
             }
         }
     }
 
+    let parent = class.superclass().and_then(|n| {
+        constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
+    });
+
     Ok(Some(Model {
         name: owner,
+        parent,
         table: TableRef(Symbol::from(table_name)),
         attributes,
-        associations,
-        validations,
-        scopes,
-        callbacks,
-        methods,
+        body,
     }))
 }
 
@@ -1123,6 +1141,33 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
             };
             ExprNode::If { cond, then_branch, else_branch }
+        }
+        n if n.as_rescue_modifier_node().is_some() => {
+            let r = n.as_rescue_modifier_node().unwrap();
+            let expr_inner = ingest_expr(&r.expression(), file)?;
+            let fallback = ingest_expr(&r.rescue_expression(), file)?;
+            ExprNode::RescueModifier { expr: expr_inner, fallback }
+        }
+        n if n.as_lambda_node().is_some() => {
+            let l = n.as_lambda_node().unwrap();
+            let params = l
+                .parameters()
+                .and_then(|p| {
+                    p.as_block_parameters_node().and_then(|bpn| bpn.parameters())
+                })
+                .map(|pn| {
+                    pn.requireds()
+                        .iter()
+                        .filter_map(|req| req.as_required_parameter_node())
+                        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let body = match l.body() {
+                Some(b) => ingest_expr(&b, file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            ExprNode::Lambda { params, block_param: None, body }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();

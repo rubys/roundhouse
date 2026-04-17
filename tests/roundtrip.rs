@@ -51,13 +51,10 @@ fn tiny_blog_round_trips() {
 
     let post_model = Model {
         name: ClassId(Symbol::from("Post")),
+        parent: None,
         table: TableRef(Symbol::from("posts")),
         attributes: Row { fields: attrs, rest: None },
-        associations: vec![],
-        validations: vec![],
-        scopes: vec![],
-        callbacks: vec![],
-        methods: vec![],
+        body: vec![],
     };
 
     // Action body: `Post.all` — a Send to a class-level method.

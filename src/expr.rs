@@ -142,6 +142,11 @@ pub enum ExprNode {
     Assign { target: LValue, value: Expr },
     Yield { args: Vec<Expr> },
     Raise { value: Expr },
+    /// Trailing `rescue` modifier: `expr rescue fallback`. Semantically
+    /// `begin; expr; rescue StandardError; fallback; end` but preserved
+    /// as its surface form so the Ruby emitter can round-trip it
+    /// without promoting it to a multi-line `begin` block.
+    RescueModifier { expr: Expr, fallback: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

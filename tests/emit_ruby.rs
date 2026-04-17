@@ -47,13 +47,10 @@ fn tiny_blog() -> App {
 
     let post_model = Model {
         name: ClassId(Symbol::from("Post")),
+        parent: None,
         table: TableRef(Symbol::from("posts")),
         attributes: Row { fields: attrs, rest: None },
-        associations: vec![],
-        validations: vec![],
-        scopes: vec![],
-        callbacks: vec![],
-        methods: vec![],
+        body: vec![],
     };
 
     let recv = Expr::new(sp(), ExprNode::Const { path: vec![Symbol::from("Post")] });

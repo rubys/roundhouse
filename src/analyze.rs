@@ -87,7 +87,7 @@ impl Analyzer {
                 cls.instance_methods.insert(name.clone(), ty.clone());
             }
             // Associations as instance methods (return types derived from cardinality).
-            for assoc in &model.associations {
+            for assoc in model.associations() {
                 use crate::dialect::Association;
                 match assoc {
                     Association::BelongsTo { name, target, .. } => {
@@ -169,10 +169,10 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: HashMap::new(),
             };
-            for scope in &mut model.scopes {
+            for scope in model.scopes_mut() {
                 self.analyze_expr(&mut scope.body, &class_ctx);
             }
-            for method in &mut model.methods {
+            for method in model.methods_mut() {
                 self.analyze_expr(&mut method.body, &class_ctx);
                 method.effects = self.collect_effects(&method.body, &class_ctx);
             }
@@ -219,6 +219,11 @@ impl Analyzer {
             ExprNode::BoolOp { left, right, .. } => {
                 self.visit_effects(left, ctx, out);
                 self.visit_effects(right, ctx, out);
+            }
+
+            ExprNode::RescueModifier { expr, fallback } => {
+                self.visit_effects(expr, ctx, out);
+                self.visit_effects(fallback, ctx, out);
             }
 
             ExprNode::Let { value, body, .. } => {
@@ -380,6 +385,12 @@ impl Analyzer {
                 // Short-circuit: the result is either left (if truthy) or
                 // right — a union of the two operand types.
                 union_of(lt, rt)
+            }
+
+            ExprNode::RescueModifier { expr, fallback } => {
+                let et = self.analyze_expr(expr, ctx);
+                let ft = self.analyze_expr(fallback, ctx);
+                union_of(et, ft)
             }
 
             ExprNode::Let { value, body, .. } => {

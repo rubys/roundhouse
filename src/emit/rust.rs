@@ -37,7 +37,7 @@ fn emit_models(app: &App) -> EmittedFile {
     for model in &app.models {
         writeln!(s).unwrap();
         emit_struct(&mut s, model);
-        if !model.methods.is_empty() {
+        if model.methods().next().is_some() {
             writeln!(s).unwrap();
             emit_model_impl(&mut s, model);
         }
@@ -55,7 +55,7 @@ fn emit_struct(out: &mut String, model: &Model) {
 
 fn emit_model_impl(out: &mut String, model: &Model) {
     writeln!(out, "impl {} {{", model.name.0).unwrap();
-    for (i, method) in model.methods.iter().enumerate() {
+    for (i, method) in model.methods().enumerate() {
         if i > 0 {
             writeln!(out).unwrap();
         }

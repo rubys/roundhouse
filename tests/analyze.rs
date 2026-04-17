@@ -73,7 +73,7 @@ fn literals_get_primitive_types() {
         .iter()
         .find(|m| m.name.0.as_str() == "Post")
         .expect("Post model");
-    let scope = &post_model.scopes[0];
+    let scope = post_model.scopes().next().expect("scope 0");
     // Scope body: `limit(10)` — the 10 is an Int literal.
     let ExprNode::Send { args, .. } = &*scope.body.node else {
         panic!("scope body is {:?}", scope.body.node);
@@ -162,7 +162,7 @@ fn scope_body_self_is_model_class() {
         .iter()
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
-    let scope = &post.scopes[0];
+    let scope = post.scopes().next().expect("first scope");
     // Scope body: `limit(10)` — the top-level Send's ty should be Array<Post>.
     match scope.body.ty.as_ref().expect("scope body ty populated") {
         Ty::Array { elem } => match &**elem {
@@ -184,8 +184,7 @@ fn hash_literal_in_where_call_types_as_hash() {
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
     let published = post
-        .scopes
-        .iter()
+        .scopes()
         .find(|s| s.name.as_str() == "published")
         .expect("published scope");
     // Body: `where(published: true)` — Send(None, where, [Hash{published: true}])

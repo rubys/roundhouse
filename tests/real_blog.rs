@@ -41,6 +41,7 @@ fn fixture_path() -> &'static Path {
 /// - `app/views/**/*.erb` — multi-line argument formatting doesn't
 ///   round-trip yet.
 const EXPECTED_RUBY_FILES: &[&str] = &[
+    "app/models/application_record.rb",
     "config/routes.rb",
 ];
 

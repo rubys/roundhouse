@@ -66,13 +66,27 @@ Cleared (the fixture now fully ingests):
   nested `resources ... do resources ... end` → `RouteSpec` enum.
   `config/routes.rb` now round-trips byte-for-byte and sits on the
   `EXPECTED_RUBY_FILES` inclusion list.
+- **Model body**: source-ordered `Vec<ModelBodyItem>`; unknown class-
+  body calls (`broadcasts_to`, `primary_abstract_class`, …) now
+  preserved as `Unknown` rather than silently dropped. `Model.parent`
+  field added so `class ApplicationRecord < ActiveRecord::Base`
+  round-trips. `app/models/application_record.rb` on the inclusion
+  list.
+- **LambdaNode** (`->(x) { ... }`) — ingests as `ExprNode::Lambda`.
+- **RescueModifierNode** (`expr rescue fallback`) — preserved as
+  `ExprNode::RescueModifier`.
 
 Remaining (in rough priority order):
 
-1. **`broadcasts_to`/`broadcast_replace_to`/`after_create_commit`
-   block callbacks** — silently dropped from the model body today;
-   no IR representation yet. Each is a class-body call with either
-   a lambda arg or an attached block.
+1. **`broadcasts_to`/`broadcast_replace_to`** now preserved as
+   `Unknown` model-body entries (round-trip OK). Remaining gap:
+   `after_create_commit { ... }` callbacks with attached blocks,
+   plus blank-line / comment preservation between body entries
+   (required for `article.rb` / `comment.rb` byte-for-byte).
+1. **Block delimiter preservation** — we don't yet track `{ ... }`
+   vs `do ... end`; re-emit always uses `do ... end`.
+1. **`length: { minimum: 10 }`** validation rule — currently drops;
+   the Length rule exists in IR but ingest doesn't recognize it.
 2. **`params.expect(...)`** (Rails 8 strong-params) — works
    syntactically as a generic Send, but needs a recognizer for
    analyzer effect/shape.
