@@ -41,6 +41,20 @@ pub enum ArrayStyle {
     PercentW,
 }
 
+/// Piece of an interpolated string. Ingested from Prism's
+/// InterpolatedStringNode so the emitter can re-synthesize `"x#{expr}y"`
+/// byte-for-byte. Lowering to `"x" + expr.to_s + "y"` would lose the
+/// distinction between real interpolation and real concatenation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InterpPart {
+    /// Literal chunk between interpolations (already unescaped).
+    Text { value: String },
+    /// Embedded `#{expr}` — the expression's result is converted to a
+    /// string at runtime.
+    Expr { expr: Expr },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExprNode {
@@ -66,6 +80,11 @@ pub enum ExprNode {
         #[serde(default)]
         style: ArrayStyle,
     },
+    /// Interpolated double-quoted string: `"x#{expr}y"`. Parts alternate
+    /// between literal text and embedded expressions. A single-part
+    /// Text-only list would degenerate to `Lit::Str` at ingest; we keep
+    /// this variant reserved for cases with at least one Expr part.
+    StringInterp { parts: Vec<InterpPart> },
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {
         params: Vec<Symbol>,

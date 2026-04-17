@@ -639,6 +639,7 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
         ExprNode::Array { elements, style } => emit_array(elements, style),
+        ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
@@ -691,6 +692,36 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
     }
+}
+
+fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {
+    use crate::expr::InterpPart;
+    let mut out = String::with_capacity(2);
+    out.push('"');
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => {
+                for c in value.chars() {
+                    match c {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        '#' => out.push_str("\\#"),
+                        other => out.push(other),
+                    }
+                }
+            }
+            InterpPart::Expr { expr } => {
+                out.push_str("#{");
+                out.push_str(&emit_expr(expr));
+                out.push('}');
+            }
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {

@@ -229,6 +229,33 @@ fn emit_expr(e: &Expr) -> String {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();
             format!("[]interface{{}}{{{}}}", parts.join(", "))
         }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut fmt = String::new();
+            let mut args: Vec<String> = Vec::new();
+            for p in parts {
+                match p {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            if c == '%' {
+                                fmt.push_str("%%");
+                            } else {
+                                fmt.push(c);
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        fmt.push_str("%v");
+                        args.push(emit_expr(expr));
+                    }
+                }
+            }
+            if args.is_empty() {
+                format!("{fmt:?}")
+            } else {
+                format!("fmt.Sprintf({fmt:?}, {})", args.join(", "))
+            }
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

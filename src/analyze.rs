@@ -208,6 +208,14 @@ impl Analyzer {
                 }
             }
 
+            ExprNode::StringInterp { parts } => {
+                for p in parts {
+                    if let crate::expr::InterpPart::Expr { expr } = p {
+                        self.visit_effects(expr, ctx, out);
+                    }
+                }
+            }
+
             ExprNode::Let { value, body, .. } => {
                 self.visit_effects(value, ctx, out);
                 self.visit_effects(body, ctx, out);
@@ -350,6 +358,15 @@ impl Analyzer {
                     });
                 }
                 Ty::Array { elem: Box::new(elem_ty.unwrap_or_else(unknown)) }
+            }
+
+            ExprNode::StringInterp { parts } => {
+                for p in parts.iter_mut() {
+                    if let crate::expr::InterpPart::Expr { expr } = p {
+                        self.analyze_expr(expr, ctx);
+                    }
+                }
+                Ty::Str
             }
 
             ExprNode::Let { value, body, .. } => {

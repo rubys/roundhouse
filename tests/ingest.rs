@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use roundhouse::dialect::{Association, CallbackHook, Dependent, ValidationRule};
-use roundhouse::expr::{Expr, ExprNode, LValue, Literal};
+use roundhouse::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use roundhouse::ingest::ingest_app;
 use roundhouse::schema::ColumnType;
 use roundhouse::{HttpMethod, RenderTarget};
@@ -269,6 +269,40 @@ fn literal_ingested_expr() {
         ref other => panic!("expected Lit(Int 42), got {other:?}"),
     }
     let _ = Expr::new(expr.span, *expr.node); // just making sure imports are alive
+}
+
+#[test]
+fn string_interpolation() {
+    fn parse_one(source: &[u8]) -> roundhouse::expr::Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap()
+    }
+
+    let e = parse_one(br#""article_#{@article.id}_comments""#);
+    match &*e.node {
+        ExprNode::StringInterp { parts } => {
+            assert_eq!(parts.len(), 3);
+            match &parts[0] {
+                InterpPart::Text { value } => assert_eq!(value.as_str(), "article_"),
+                other => panic!("part 0: expected Text, got {other:?}"),
+            }
+            match &parts[1] {
+                InterpPart::Expr { expr } => {
+                    // `@article.id` → Send(recv=Ivar(article), method=id)
+                    assert!(matches!(&*expr.node, ExprNode::Send { .. }));
+                }
+                other => panic!("part 1: expected Expr, got {other:?}"),
+            }
+            match &parts[2] {
+                InterpPart::Text { value } => assert_eq!(value.as_str(), "_comments"),
+                other => panic!("part 2: expected Text, got {other:?}"),
+            }
+        }
+        other => panic!("expected StringInterp, got {other:?}"),
+    }
 }
 
 #[test]

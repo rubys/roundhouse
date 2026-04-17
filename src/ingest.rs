@@ -19,7 +19,7 @@ use crate::dialect::{
 };
 use crate::erb;
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
@@ -920,6 +920,33 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             ExprNode::Lit {
                 value: Literal::Str { value: String::from_utf8_lossy(bytes).into_owned() },
             }
+        }
+        n if n.as_interpolated_string_node().is_some() => {
+            let is = n.as_interpolated_string_node().unwrap();
+            let mut parts: Vec<InterpPart> = Vec::new();
+            for part in is.parts().iter() {
+                if let Some(sn) = part.as_string_node() {
+                    let bytes = sn.unescaped();
+                    parts.push(InterpPart::Text {
+                        value: String::from_utf8_lossy(bytes).into_owned(),
+                    });
+                } else if let Some(es) = part.as_embedded_statements_node() {
+                    let stmts = es.statements().ok_or_else(|| IngestError::Unsupported {
+                        file: file.into(),
+                        message: "empty `#{}` in interpolated string".into(),
+                    })?;
+                    let inner = ingest_expr(&stmts.as_node(), file)?;
+                    parts.push(InterpPart::Expr { expr: inner });
+                } else {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "unsupported interpolated-string part: {part:?}"
+                        ),
+                    });
+                }
+            }
+            ExprNode::StringInterp { parts }
         }
         n if n.as_symbol_node().is_some() => {
             ExprNode::Lit { value: Literal::Sym { value: symbol_value(n).unwrap_or_default().into() } }

@@ -199,6 +199,34 @@ fn emit_expr(e: &Expr) -> String {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();
             format!("vec![{}]", parts.join(", "))
         }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut fmt = String::new();
+            let mut args: Vec<String> = Vec::new();
+            for p in parts {
+                match p {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            if c == '{' || c == '}' {
+                                fmt.push(c);
+                                fmt.push(c);
+                            } else {
+                                fmt.push(c);
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        fmt.push_str("{}");
+                        args.push(emit_expr(expr));
+                    }
+                }
+            }
+            if args.is_empty() {
+                format!("{fmt:?}.to_string()")
+            } else {
+                format!("format!({fmt:?}, {})", args.join(", "))
+            }
+        }
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {
