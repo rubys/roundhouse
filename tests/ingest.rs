@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use roundhouse::dialect::{Association, Dependent, ValidationRule};
+use roundhouse::dialect::{Association, CallbackHook, Dependent, ValidationRule};
 use roundhouse::expr::{Expr, ExprNode, LValue, Literal};
 use roundhouse::ingest::ingest_app;
 use roundhouse::schema::ColumnType;
@@ -121,6 +121,21 @@ fn ingests_validations() {
     assert_eq!(v.attribute.as_str(), "title");
     assert_eq!(v.rules.len(), 1);
     assert!(matches!(v.rules[0], ValidationRule::Presence));
+}
+
+#[test]
+fn ingests_callbacks() {
+    let app = ingest_app(fixture_path()).expect("ingest");
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    assert_eq!(post.callbacks.len(), 1);
+    let cb = &post.callbacks[0];
+    assert!(matches!(cb.hook, CallbackHook::BeforeSave));
+    assert_eq!(cb.target.as_str(), "normalize_title");
+    assert!(cb.condition.is_none());
 }
 
 #[test]

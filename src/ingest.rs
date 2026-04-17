@@ -142,6 +142,7 @@ pub fn ingest_model(
     let mut associations = Vec::new();
     let mut validations = Vec::new();
     let mut scopes = Vec::new();
+    let mut callbacks = Vec::new();
     if let Some(body) = class.body() {
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
@@ -157,6 +158,8 @@ pub fn ingest_model(
                 if let Some(scope) = parse_scope(&call, file)? {
                     scopes.push(scope);
                 }
+            } else if let Some(cb) = parse_callback(&call, &method) {
+                callbacks.push(cb);
             }
         }
     }
@@ -168,9 +171,43 @@ pub fn ingest_model(
         associations,
         validations,
         scopes,
-        callbacks: vec![],
+        callbacks,
         methods: vec![],
     }))
+}
+
+fn parse_callback(
+    call: &ruby_prism::CallNode<'_>,
+    method: &str,
+) -> Option<crate::dialect::Callback> {
+    use crate::dialect::{Callback, CallbackHook};
+
+    let hook = match method {
+        "before_validation" => CallbackHook::BeforeValidation,
+        "after_validation" => CallbackHook::AfterValidation,
+        "before_save" => CallbackHook::BeforeSave,
+        "after_save" => CallbackHook::AfterSave,
+        "before_create" => CallbackHook::BeforeCreate,
+        "after_create" => CallbackHook::AfterCreate,
+        "before_update" => CallbackHook::BeforeUpdate,
+        "after_update" => CallbackHook::AfterUpdate,
+        "before_destroy" => CallbackHook::BeforeDestroy,
+        "after_destroy" => CallbackHook::AfterDestroy,
+        "after_commit" => CallbackHook::AfterCommit,
+        "after_rollback" => CallbackHook::AfterRollback,
+        _ => return None,
+    };
+
+    let args = call.arguments()?;
+    let all_args = args.arguments();
+    let mut iter = all_args.iter();
+    let first = iter.next()?;
+    let target = Symbol::from(symbol_value(&first)?.as_str());
+
+    // `if:` / `unless:` conditions land when a fixture demands them.
+    let condition = None;
+
+    Some(Callback { hook, target, condition })
 }
 
 fn parse_scope(
