@@ -133,9 +133,9 @@ fn ingests_posts_controller_with_actions() {
         ctrl.parent.as_ref().unwrap().0.as_str(),
         "ApplicationController"
     );
-    assert_eq!(ctrl.actions.len(), 2);
+    assert_eq!(ctrl.actions.len(), 3);
     let names: Vec<_> = ctrl.actions.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["index", "show"]);
+    assert_eq!(names, vec!["index", "show", "destroy"]);
 
     // index body: `@posts = Post.all` — Assign(Ivar(posts), Send(Some(Const(Post)), "all", []))
     let index = &ctrl.actions[0];
@@ -197,7 +197,7 @@ fn ingests_posts_controller_with_actions() {
 #[test]
 fn ingests_routes_file() {
     let app = ingest_app(fixture_path()).expect("ingest");
-    assert_eq!(app.routes.routes.len(), 2);
+    assert_eq!(app.routes.routes.len(), 3);
 
     let index_route = &app.routes.routes[0];
     assert!(matches!(index_route.method, HttpMethod::Get));

@@ -473,17 +473,19 @@ fn emit_node(n: &ExprNode) -> String {
             let base = format!("{}.call({})", emit_expr(fun), args_s.join(", "));
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
-        ExprNode::Send { recv, method, args, block } => {
+        ExprNode::Send { recv, method, args, block, parenthesized } => {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             let base = match (recv, method.as_str()) {
                 // `recv[args]` — bracket-access sugar for the `[]` method.
                 (Some(r), "[]") => format!("{}[{}]", emit_expr(r), args_s.join(", ")),
-                // Implicit self: bare method call.
+                // Implicit-self call: paren style preserved from source.
                 (None, _) => {
                     if args_s.is_empty() {
                         method.to_string()
-                    } else {
+                    } else if *parenthesized {
                         format!("{method}({})", args_s.join(", "))
+                    } else {
+                        format!("{method} {}", args_s.join(", "))
                     }
                 }
                 // Regular `recv.method(args)`.

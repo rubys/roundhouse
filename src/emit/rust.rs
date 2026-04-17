@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{Action, Controller, Model};
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::naming::snake_case;
 use crate::ty::Ty;
 
@@ -105,25 +105,46 @@ fn action_return_type(body: &Expr) -> Ty {
 
 fn emit_body(body: &Expr) -> String {
     // An action body like `@posts = Post.all` drops the ivar assignment and
-    // just returns the RHS. For multi-statement bodies, use `let` bindings
-    // with the last non-let expression as the tail.
+    // just returns the RHS (Rails convention: ivars pass data to the view).
+    // Local-variable assignments become `let` bindings. Multi-statement
+    // bodies join with newlines, tail-expression is the function's return.
     match &*body.node {
-        ExprNode::Assign { value, .. } => emit_expr(value),
+        ExprNode::Assign { target: LValue::Ivar { .. }, value } => emit_expr(value),
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let mut lines: Vec<String> = Vec::new();
             for (i, e) in exprs.iter().enumerate() {
-                if i == exprs.len() - 1 {
-                    match &*e.node {
-                        ExprNode::Assign { value, .. } => lines.push(emit_expr(value)),
-                        _ => lines.push(emit_expr(e)),
-                    }
-                } else {
-                    lines.push(format!("{};", emit_expr(e)));
-                }
+                lines.push(emit_stmt(e, i == exprs.len() - 1));
             }
             lines.join("\n")
         }
         _ => emit_expr(body),
+    }
+}
+
+fn emit_stmt(e: &Expr, is_last: bool) -> String {
+    match &*e.node {
+        // Local `foo = expr` -> `let foo = expr;` (or tail `expr` if last).
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            format!("let {} = {};", name, emit_expr(value))
+        }
+        // Ivar assigns: drop the name (convention). If last, the RHS is
+        // the return value; otherwise, we emit the RHS as a side-effectful
+        // expression statement. A future pass can collect mid-body ivars
+        // into a template-context struct.
+        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+            if is_last {
+                emit_expr(value)
+            } else {
+                format!("{};", emit_expr(value))
+            }
+        }
+        _ => {
+            if is_last {
+                emit_expr(e)
+            } else {
+                format!("{};", emit_expr(e))
+            }
+        }
     }
 }
 

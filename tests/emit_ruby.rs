@@ -64,6 +64,7 @@ fn tiny_blog() -> App {
             method: Symbol::from("all"),
             args: vec![],
             block: None,
+            parenthesized: false,
         },
     );
 

@@ -202,7 +202,7 @@ impl Analyzer {
                 for a in args { self.visit_effects(a, ctx, out); }
                 if let Some(b) = block { self.visit_effects(b, ctx, out); }
             }
-            ExprNode::Send { recv, method, args, block } => {
+            ExprNode::Send { recv, method, args, block, .. } => {
                 let recv_ty = match recv {
                     Some(r) => {
                         self.visit_effects(r, ctx, out);
@@ -312,7 +312,7 @@ impl Analyzer {
                 unknown()
             }
 
-            ExprNode::Send { recv, method, args, block } => {
+            ExprNode::Send { recv, method, args, block, .. } => {
                 let recv_ty = match recv.as_mut() {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),

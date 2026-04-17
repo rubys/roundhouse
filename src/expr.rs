@@ -43,6 +43,11 @@ pub enum ExprNode {
         method: Symbol,
         args: Vec<Expr>,
         block: Option<Expr>,
+        /// Did the source wrap args in parens (`foo(x)` vs `foo x`)? Matters
+        /// only for implicit-self calls with args; explicit-receiver calls
+        /// always use parens in Ruby syntax.
+        #[serde(default)]
+        parenthesized: bool,
     },
     If { cond: Expr, then_branch: Expr, else_branch: Expr },
     Case { scrutinee: Expr, arms: Vec<Arm> },

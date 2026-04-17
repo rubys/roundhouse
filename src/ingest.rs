@@ -745,7 +745,14 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(r) => Some(ingest_expr(&r, file)?),
                 None => None,
             };
-            ExprNode::Send { recv, method: Symbol::from(method), args, block: None }
+            let parenthesized = c.opening_loc().is_some();
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized,
+            }
         }
         n if n.as_integer_node().is_some() => {
             let i = n.as_integer_node().unwrap();

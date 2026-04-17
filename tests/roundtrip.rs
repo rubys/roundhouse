@@ -69,6 +69,7 @@ fn tiny_blog_round_trips() {
             method: Symbol::from("all"),
             args: vec![],
             block: None,
+            parenthesized: false,
         },
     );
 

@@ -151,6 +151,12 @@ impl PostsController {
     pub fn show() -> Post {
         Post::find(params[\"id\"])
     }
+
+    pub fn destroy() -> () {
+        let post = Post::find(params[\"id\"]);
+        post.destroy();
+        redirect_to(posts_path)
+    }
 }
 ";
     assert_eq!(ctrl.content, expected);
