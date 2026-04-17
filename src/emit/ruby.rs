@@ -453,6 +453,7 @@ fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }

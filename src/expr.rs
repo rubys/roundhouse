@@ -29,6 +29,8 @@ impl Expr {
 pub enum ExprNode {
     Lit { value: Literal },
     Var { id: VarId, name: Symbol },
+    /// Instance variable read: `@post`. Writes use `LValue::Ivar`.
+    Ivar { name: Symbol },
     Const { path: Vec<Symbol> },
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {

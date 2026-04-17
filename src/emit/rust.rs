@@ -123,20 +123,14 @@ fn emit_body(body: &Expr) -> String {
 
 fn emit_stmt(e: &Expr, is_last: bool) -> String {
     match &*e.node {
-        // Local `foo = expr` -> `let foo = expr;` (or tail `expr` if last).
+        // Local `foo = expr` -> `let foo = expr;`.
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             format!("let {} = {};", name, emit_expr(value))
         }
-        // Ivar assigns: drop the name (convention). If last, the RHS is
-        // the return value; otherwise, we emit the RHS as a side-effectful
-        // expression statement. A future pass can collect mid-body ivars
-        // into a template-context struct.
-        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
-            if is_last {
-                emit_expr(value)
-            } else {
-                format!("{};", emit_expr(value))
-            }
+        // Ivars in a multi-statement body: treat as locals. Later stmts can
+        // read them via `ExprNode::Ivar` which also emits as the bare name.
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            format!("let {} = {};", name, emit_expr(value))
         }
         _ => {
             if is_last {
@@ -155,6 +149,9 @@ fn emit_expr(e: &Expr) -> String {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }
         ExprNode::Var { name, .. } => name.to_string(),
+        // Rails ivars become plain locals in the action body's Rust scope.
+        // Cross-action ivar handoff (via filters, views) is a separate concern.
+        ExprNode::Ivar { name } => name.to_string(),
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {

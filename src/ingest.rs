@@ -791,6 +791,12 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 name: Symbol::from(constant_id_str(&v.name())),
             }
         }
+        n if n.as_instance_variable_read_node().is_some() => {
+            let v = n.as_instance_variable_read_node().unwrap();
+            let raw = constant_id_str(&v.name());
+            let name = raw.strip_prefix('@').unwrap_or(raw);
+            ExprNode::Ivar { name: Symbol::from(name) }
+        }
         n if n.as_instance_variable_write_node().is_some() => {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());

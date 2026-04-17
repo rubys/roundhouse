@@ -31,6 +31,10 @@ pub struct Analyzer {
 #[derive(Clone, Default)]
 struct Ctx {
     self_ty: Option<Ty>,
+    /// Ivar bindings observed as a `Seq` walks its statements in order.
+    /// `@post = Post.find(...)` in stmt 1 lets `@post.destroy` in stmt 2
+    /// dispatch correctly.
+    ivar_bindings: HashMap<Symbol, Ty>,
 }
 
 #[derive(Default)]
@@ -153,6 +157,7 @@ impl Analyzer {
                         .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
                     args: vec![],
                 }),
+                ivar_bindings: HashMap::new(),
             };
             for action in &mut controller.actions {
                 self.analyze_expr(&mut action.body, &ctx);
@@ -162,6 +167,7 @@ impl Analyzer {
         for model in &mut app.models {
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                ivar_bindings: HashMap::new(),
             };
             for scope in &mut model.scopes {
                 self.analyze_expr(&mut scope.body, &class_ctx);
@@ -186,6 +192,7 @@ impl Analyzer {
         match &*expr.node {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
             | ExprNode::Const { .. } => {}
 
             ExprNode::Let { value, body, .. } => {
@@ -295,6 +302,10 @@ impl Analyzer {
 
             ExprNode::Var { .. } => unknown(), // local scope tracking is future work
 
+            ExprNode::Ivar { name } => {
+                ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
+            }
+
             ExprNode::Let { value, body, .. } => {
                 self.analyze_expr(value, ctx);
                 self.analyze_expr(body, ctx)
@@ -340,9 +351,18 @@ impl Analyzer {
             }
 
             ExprNode::Seq { exprs } => {
+                // Within a Seq, walk statements in order and thread ivar
+                // bindings: `@post = Post.find(...)` in stmt i lets stmt
+                // i+1 resolve `@post` through `ctx.ivar_bindings`.
+                let mut local_ctx = ctx.clone();
                 let mut last = Ty::Nil;
                 for e in exprs.iter_mut() {
-                    last = self.analyze_expr(e, ctx);
+                    last = self.analyze_expr(e, &local_ctx);
+                    if let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*e.node {
+                        if let Some(ty) = e.ty.clone() {
+                            local_ctx.ivar_bindings.insert(name.clone(), ty);
+                        }
+                    }
                 }
                 last
             }

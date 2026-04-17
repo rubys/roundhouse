@@ -174,20 +174,78 @@ fn scope_body_self_is_model_class() {
 }
 
 #[test]
+fn ivar_read_resolves_through_seq_tracking() {
+    // destroy body:
+    //   @post = Post.find(params[:id])
+    //   @post.destroy
+    //   redirect_to posts_path
+    //
+    // The second statement's @post receiver must type as Post via the
+    // ivar binding that the first statement established.
+    let app = analyzed_app();
+    let ctrl = &app.controllers[0];
+    let destroy = ctrl
+        .actions
+        .iter()
+        .find(|a| a.name.as_str() == "destroy")
+        .expect("destroy action");
+    let ExprNode::Seq { exprs } = &*destroy.body.node else {
+        panic!("expected Seq body, got {:?}", destroy.body.node);
+    };
+    assert!(exprs.len() >= 2, "need at least two stmts");
+
+    // stmt[1] is `@post.destroy` — a Send whose receiver is an Ivar.
+    let ExprNode::Send { recv, method, .. } = &*exprs[1].node else {
+        panic!("expected Send at stmt[1]");
+    };
+    assert_eq!(method.as_str(), "destroy");
+    let recv = recv.as_ref().expect("@post.destroy has a receiver");
+    let ExprNode::Ivar { name } = &*recv.node else {
+        panic!("expected Ivar receiver");
+    };
+    assert_eq!(name.as_str(), "post");
+
+    match recv.ty.as_ref().expect("@post ty populated") {
+        Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Post"),
+        other => panic!("expected @post : Post, got {other:?}"),
+    }
+}
+
+#[test]
 fn action_effects_include_db_reads() {
     // `@posts = Post.all` and `@post = Post.find(...)` both read the posts table.
     let app = analyzed_app();
     let ctrl = &app.controllers[0];
-    let posts_tab = Effect::DbRead { table: TableRef(Symbol::from("posts")) };
+    let posts_read = Effect::DbRead { table: TableRef(Symbol::from("posts")) };
 
-    for action_name in ["index", "show"] {
+    for action_name in ["index", "show", "destroy"] {
         let action = ctrl.actions.iter().find(|a| a.name.as_str() == action_name).unwrap();
         assert!(
-            action.effects.effects.contains(&posts_tab),
+            action.effects.effects.contains(&posts_read),
             "{action_name} missing DbRead(posts); got {:?}",
             action.effects.effects
         );
     }
+}
+
+#[test]
+fn destroy_effects_include_db_write_via_ivar_dispatch() {
+    // `@post.destroy` — receiver is an Ivar bound to Post in a prior stmt.
+    // The ivar's tracked type feeds into effect inference, producing a
+    // DbWrite(posts) on the destroy site. Without ivar tracking, this
+    // would fall through to Unknown and no write would be recorded.
+    let app = analyzed_app();
+    let destroy = app.controllers[0]
+        .actions
+        .iter()
+        .find(|a| a.name.as_str() == "destroy")
+        .unwrap();
+    let posts_write = Effect::DbWrite { table: TableRef(Symbol::from("posts")) };
+    assert!(
+        destroy.effects.effects.contains(&posts_write),
+        "destroy missing DbWrite(posts); got {:?}",
+        destroy.effects.effects
+    );
 }
 
 #[test]
