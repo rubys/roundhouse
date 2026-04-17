@@ -152,6 +152,15 @@ fn emit_expr(e: &Expr) -> String {
         // Rails ivars become plain locals in the action body's Rust scope.
         // Cross-action ivar handoff (via filters, views) is a separate concern.
         ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Hash { entries, .. } => {
+            // Rough approximation — real target code would probably want a
+            // strongly-typed struct. HashMap::from is the dumbest-that-works.
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("({}, {})", emit_expr(k), emit_expr(v)))
+                .collect();
+            format!("HashMap::from([{}])", parts.join(", "))
+        }
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {

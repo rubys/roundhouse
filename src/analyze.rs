@@ -195,6 +195,13 @@ impl Analyzer {
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. } => {}
 
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    self.visit_effects(k, ctx, out);
+                    self.visit_effects(v, ctx, out);
+                }
+            }
+
             ExprNode::Let { value, body, .. } => {
                 self.visit_effects(value, ctx, out);
                 self.visit_effects(body, ctx, out);
@@ -304,6 +311,27 @@ impl Analyzer {
 
             ExprNode::Ivar { name } => {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
+            }
+
+            ExprNode::Hash { entries, .. } => {
+                let mut key_ty: Option<Ty> = None;
+                let mut value_ty: Option<Ty> = None;
+                for (k, v) in entries.iter_mut() {
+                    let kt = self.analyze_expr(k, ctx);
+                    let vt = self.analyze_expr(v, ctx);
+                    key_ty = Some(match key_ty.take() {
+                        Some(prev) => union_of(prev, kt),
+                        None => kt,
+                    });
+                    value_ty = Some(match value_ty.take() {
+                        Some(prev) => union_of(prev, vt),
+                        None => vt,
+                    });
+                }
+                Ty::Hash {
+                    key: Box::new(key_ty.unwrap_or_else(unknown)),
+                    value: Box::new(value_ty.unwrap_or_else(unknown)),
+                }
             }
 
             ExprNode::Let { value, body, .. } => {

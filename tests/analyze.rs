@@ -8,7 +8,7 @@ use std::path::Path;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::effect::Effect;
-use roundhouse::expr::{ExprNode, LValue};
+use roundhouse::expr::{ExprNode, LValue, Literal};
 use roundhouse::ingest::ingest_app;
 use roundhouse::ty::Ty;
 use roundhouse::{ClassId, Symbol, TableRef};
@@ -170,6 +170,54 @@ fn scope_body_self_is_model_class() {
             other => panic!("expected Array<Post>, got Array<{other:?}>"),
         },
         other => panic!("expected Array, got {other:?}"),
+    }
+}
+
+#[test]
+fn hash_literal_in_where_call_types_as_hash() {
+    // `scope :published, -> { where(published: true) }`
+    // The `published: true` kwarg is a Hash literal (braced: false in IR).
+    let app = analyzed_app();
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    let published = post
+        .scopes
+        .iter()
+        .find(|s| s.name.as_str() == "published")
+        .expect("published scope");
+    // Body: `where(published: true)` — Send(None, where, [Hash{published: true}])
+    let ExprNode::Send { args, .. } = &*published.body.node else {
+        panic!("expected Send at scope body");
+    };
+    assert_eq!(args.len(), 1, "where takes one hash arg");
+    match &*args[0].node {
+        ExprNode::Hash { entries, braced } => {
+            assert!(!*braced, "trailing kwargs form should be unbraced");
+            assert_eq!(entries.len(), 1);
+            // Key is Sym(published), value is true.
+            match &*entries[0].0.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => {
+                    assert_eq!(value.as_str(), "published");
+                }
+                other => panic!("expected Sym key, got {other:?}"),
+            }
+            match &*entries[0].1.node {
+                ExprNode::Lit { value: Literal::Bool { value: true } } => {}
+                other => panic!("expected Bool(true), got {other:?}"),
+            }
+        }
+        other => panic!("expected Hash, got {other:?}"),
+    }
+    // The Hash expression's ty should be Hash<Sym, Bool>.
+    match args[0].ty.as_ref().expect("hash ty populated") {
+        Ty::Hash { key, value } => {
+            assert!(matches!(**key, Ty::Sym));
+            assert!(matches!(**value, Ty::Bool));
+        }
+        other => panic!("expected Hash<Sym, Bool>, got {other:?}"),
     }
 }
 

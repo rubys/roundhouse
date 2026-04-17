@@ -457,6 +457,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }
+        ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
@@ -528,6 +529,26 @@ fn emit_node(n: &ExprNode) -> String {
             if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+    }
+}
+
+fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
+    let parts: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| {
+            // Rails-idiomatic shorthand `key: value` when key is a symbol literal;
+            // rocket `k => v` otherwise.
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                format!("{value}: {}", emit_expr(v))
+            } else {
+                format!("{} => {}", emit_expr(k), emit_expr(v))
+            }
+        })
+        .collect();
+    if braced {
+        format!("{{ {} }}", parts.join(", "))
+    } else {
+        parts.join(", ")
     }
 }
 

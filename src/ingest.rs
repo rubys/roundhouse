@@ -797,6 +797,22 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let name = raw.strip_prefix('@').unwrap_or(raw);
             ExprNode::Ivar { name: Symbol::from(name) }
         }
+        n if n.as_hash_node().is_some() => {
+            let hn = n.as_hash_node().unwrap();
+            ExprNode::Hash {
+                entries: hash_entries_from(&hn.elements(), file)?,
+                braced: true,
+            }
+        }
+        n if n.as_keyword_hash_node().is_some() => {
+            // Bare keyword args `foo(a: 1)` arrive here when the arg list
+            // is passed through generic expression ingest. No braces in source.
+            let kh = n.as_keyword_hash_node().unwrap();
+            ExprNode::Hash {
+                entries: hash_entries_from(&kh.elements(), file)?,
+                braced: false,
+            }
+        }
         n if n.as_instance_variable_write_node().is_some() => {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());
@@ -824,6 +840,26 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
     };
     Ok(Expr::new(span, expr_node))
+}
+
+fn hash_entries_from(
+    elements: &ruby_prism::NodeList<'_>,
+    file: &str,
+) -> IngestResult<Vec<(Expr, Expr)>> {
+    let mut out = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            // Splats and other non-assoc elements: lift when a fixture demands.
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "non-assoc hash element (splat?) not yet supported".into(),
+            });
+        };
+        let k = ingest_expr(&assoc.key(), file)?;
+        let v = ingest_expr(&assoc.value(), file)?;
+        out.push((k, v));
+    }
+    Ok(out)
 }
 
 // Prism helpers ---------------------------------------------------------

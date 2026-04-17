@@ -24,6 +24,8 @@ impl Expr {
     }
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExprNode {
@@ -32,6 +34,16 @@ pub enum ExprNode {
     /// Instance variable read: `@post`. Writes use `LValue::Ivar`.
     Ivar { name: Symbol },
     Const { path: Vec<Symbol> },
+    /// Hash literal: `{ k1 => v1, k2 => v2 }` or trailing kwargs `k: v`.
+    /// Keys and values are both expressions. `braced` preserves whether the
+    /// source used explicit `{}` (HashNode) or the trailing-kwargs form
+    /// (KeywordHashNode) — the latter only appears as the last argument of
+    /// a method call.
+    Hash {
+        entries: Vec<(Expr, Expr)>,
+        #[serde(default = "default_true")]
+        braced: bool,
+    },
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {
         params: Vec<Symbol>,
