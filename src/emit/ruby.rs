@@ -489,6 +489,22 @@ fn emit_buf_stmt(stmt: &Expr) -> String {
             block,
             *parenthesized,
         ),
+        // Conditional: `<% if cond %> then-template <% else %> else-template <% end %>`.
+        // A missing else clause is represented by `Lit(Nil)`; when we see it,
+        // omit the `<% else %>` segment.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = emit_expr(cond);
+            let then_s = reconstruct_erb(then_branch);
+            if matches!(
+                &*else_branch.node,
+                ExprNode::Lit { value: Literal::Nil }
+            ) {
+                format!("<% if {} %>{}<% end %>", cond_s, then_s)
+            } else {
+                let else_s = reconstruct_erb(else_branch);
+                format!("<% if {} %>{}<% else %>{}<% end %>", cond_s, then_s, else_s)
+            }
+        }
         // Anything else is a raw control statement.
         _ => format!("<% {} %>", emit_expr(stmt)),
     }
