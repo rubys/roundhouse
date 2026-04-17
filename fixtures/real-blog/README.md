@@ -62,6 +62,10 @@ Cleared (the fixture now fully ingests):
 - **Short-circuit operators** (`&&` / `||` / `and` / `or`) →
   `ExprNode::BoolOp { op, surface }`
 - **`yield :sym`** → `ExprNode::Yield`
+- **Routes DSL**: `root "c#a"`, `resources :name [, only:, except:]`,
+  nested `resources ... do resources ... end` → `RouteSpec` enum.
+  `config/routes.rb` now round-trips byte-for-byte and sits on the
+  `EXPECTED_RUBY_FILES` inclusion list.
 
 Remaining (in rough priority order):
 
@@ -72,10 +76,7 @@ Remaining (in rough priority order):
 2. **`params.expect(...)`** (Rails 8 strong-params) — works
    syntactically as a generic Send, but needs a recognizer for
    analyzer effect/shape.
-3. **Routes DSL: `resources :articles do resources :comments ... end`**
-   — the nested-resources form replaces our flat `get/post/...`
-   recognizer. Everything in `config/routes.rb` drops today.
-4. **`respond_to do |format| ... end`** — CallNode with block;
+3. **`respond_to do |format| ... end`** — CallNode with block;
    inside, `format.html { ... }` / `format.json { ... }` are
    renders. Needs a recognizer for render targets.
 5. **Migration ingest** — currently we read `db/schema.rb`; here we

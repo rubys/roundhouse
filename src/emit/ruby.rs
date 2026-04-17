@@ -10,7 +10,7 @@ use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
     Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
-    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, Route, RouteTable, Scope,
+    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, RouteSpec, RouteTable, Scope,
     ValidationRule,
 };
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
@@ -587,15 +587,73 @@ fn unwrap_to_s(expr: &Expr) -> &Expr {
 fn emit_routes(routes: &RouteTable) -> EmittedFile {
     let mut s = String::new();
     writeln!(s, "Rails.application.routes.draw do").unwrap();
-    for route in &routes.routes {
-        writeln!(s, "  {}", emit_route(route)).unwrap();
+    for (i, entry) in routes.entries.iter().enumerate() {
+        if i > 0 && needs_blank_separator(&routes.entries[i - 1], entry) {
+            writeln!(s).unwrap();
+        }
+        write_route_spec(&mut s, entry, 1);
     }
     writeln!(s, "end").unwrap();
     EmittedFile { path: PathBuf::from("config/routes.rb"), content: s }
 }
 
-fn emit_route(r: &Route) -> String {
-    let verb = match r.method {
+/// Blank line between `root "..."` and a following `resources` block —
+/// matches the Rails scaffold's idiomatic spacing and the fixture source.
+fn needs_blank_separator(prev: &RouteSpec, next: &RouteSpec) -> bool {
+    matches!(prev, RouteSpec::Root { .. })
+        && matches!(next, RouteSpec::Resources { .. })
+}
+
+fn write_route_spec(out: &mut String, spec: &RouteSpec, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match spec {
+        RouteSpec::Explicit {
+            method,
+            path,
+            controller,
+            action,
+            as_name,
+            constraints: _,
+        } => {
+            let verb = verb_keyword(method);
+            let mut opts = vec![format!(
+                "to: {:?}",
+                format!("{}#{}", strip_controller_suffix(controller.0.as_str()), action)
+            )];
+            if let Some(name) = as_name {
+                opts.push(format!("as: :{name}"));
+            }
+            if matches!(method, HttpMethod::Any) {
+                opts.push("via: :all".into());
+            }
+            writeln!(out, "{indent}{verb} {:?}, {}", path, opts.join(", ")).unwrap();
+        }
+        RouteSpec::Root { target } => {
+            writeln!(out, "{indent}root {:?}", target).unwrap();
+        }
+        RouteSpec::Resources { name, only, except, nested } => {
+            let mut header = format!("{indent}resources :{name}");
+            if !only.is_empty() {
+                header.push_str(&format!(", only: [{}]", join_symbols(only)));
+            }
+            if !except.is_empty() {
+                header.push_str(&format!(", except: [{}]", join_symbols(except)));
+            }
+            if nested.is_empty() {
+                writeln!(out, "{header}").unwrap();
+            } else {
+                writeln!(out, "{header} do").unwrap();
+                for child in nested {
+                    write_route_spec(out, child, depth + 1);
+                }
+                writeln!(out, "{indent}end").unwrap();
+            }
+        }
+    }
+}
+
+fn verb_keyword(m: &HttpMethod) -> &'static str {
+    match m {
         HttpMethod::Get => "get",
         HttpMethod::Post => "post",
         HttpMethod::Put => "put",
@@ -604,18 +662,11 @@ fn emit_route(r: &Route) -> String {
         HttpMethod::Head => "head",
         HttpMethod::Options => "options",
         HttpMethod::Any => "match",
-    };
-    let mut opts = vec![format!(
-        "to: {:?}",
-        format!("{}#{}", strip_controller_suffix(r.controller.0.as_str()), r.action)
-    )];
-    if let Some(name) = &r.as_name {
-        opts.push(format!("as: :{name}"));
     }
-    if matches!(r.method, HttpMethod::Any) {
-        opts.push("via: :all".into());
-    }
-    format!("{verb} {:?}, {}", r.path, opts.join(", "))
+}
+
+fn join_symbols(syms: &[Symbol]) -> String {
+    syms.iter().map(|s| format!(":{s}")).collect::<Vec<_>>().join(", ")
 }
 
 fn strip_controller_suffix(s: &str) -> String {

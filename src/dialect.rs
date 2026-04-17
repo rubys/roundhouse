@@ -179,9 +179,50 @@ pub enum RenderTarget {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RouteTable {
-    pub routes: Vec<Route>,
+    pub entries: Vec<RouteSpec>,
 }
 
+/// Surface forms of a routes.rb entry. Preserves source structure so
+/// `resources :articles do ... end` round-trips byte-for-byte; a downstream
+/// target emitter that needs concrete routes expands via [`RouteSpec::expand`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteSpec {
+    /// Direct verb call: `get "/path", to: "controller#action"[, as: :name]`.
+    /// The explicit form is the only one that can express arbitrary paths
+    /// and custom constraints.
+    Explicit {
+        method: HttpMethod,
+        path: String,
+        controller: ClassId,
+        action: Symbol,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_name: Option<Symbol>,
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
+    },
+    /// `root "controller#action"` — shorthand for `GET /` routed to the
+    /// given target, with `:root` as the generated name.
+    Root { target: String },
+    /// `resources :name [, only: [...]] [, except: [...]] [do ... end]`.
+    /// `only` and `except` are empty-on-default (an empty `only` means
+    /// "all seven standard actions," matching Rails' behavior). Nested
+    /// blocks hold any entries declared inside the `do ... end`, typically
+    /// further `resources` calls.
+    Resources {
+        name: Symbol,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        only: Vec<Symbol>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        except: Vec<Symbol>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        nested: Vec<RouteSpec>,
+    },
+}
+
+/// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so
+/// call sites that want the flat record (tests, downstream emitters) can
+/// still destructure one without going through the `RouteSpec` variant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Route {
     pub method: HttpMethod,

@@ -84,7 +84,7 @@ fn tiny_blog() -> App {
     };
 
     let routes = RouteTable {
-        routes: vec![Route {
+        entries: vec![roundhouse::RouteSpec::Explicit {
             method: HttpMethod::Get,
             path: "/posts".into(),
             controller: ClassId(Symbol::from("PostsController")),
@@ -154,6 +154,43 @@ fn routes_file_is_idiomatic() {
     let expected = "\
 Rails.application.routes.draw do
   get \"/posts\", to: \"posts#index\", as: :posts
+end
+";
+    assert_eq!(content, expected);
+}
+
+#[test]
+fn emits_root_and_nested_resources() {
+    use roundhouse::{RouteSpec, RouteTable};
+
+    let routes = RouteTable {
+        entries: vec![
+            RouteSpec::Root { target: "articles#index".into() },
+            RouteSpec::Resources {
+                name: Symbol::from("articles"),
+                only: vec![],
+                except: vec![],
+                nested: vec![RouteSpec::Resources {
+                    name: Symbol::from("comments"),
+                    only: vec![Symbol::from("create"), Symbol::from("destroy")],
+                    except: vec![],
+                    nested: vec![],
+                }],
+            },
+        ],
+    };
+    let mut app = tiny_blog();
+    app.routes = routes;
+
+    let files = ruby::emit(&app);
+    let content = find(&files, "config/routes.rb");
+    let expected = "\
+Rails.application.routes.draw do
+  root \"articles#index\"
+
+  resources :articles do
+    resources :comments, only: [:create, :destroy]
+  end
 end
 ";
     assert_eq!(content, expected);

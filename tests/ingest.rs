@@ -211,35 +211,53 @@ fn ingests_posts_controller_with_actions() {
 
 #[test]
 fn ingests_routes_file() {
+    use roundhouse::RouteSpec;
+
     let app = ingest_app(fixture_path()).expect("ingest");
-    assert_eq!(app.routes.routes.len(), 4);
+    assert_eq!(app.routes.entries.len(), 4);
 
-    let index_route = &app.routes.routes[0];
-    assert!(matches!(index_route.method, HttpMethod::Get));
-    assert_eq!(index_route.path, "/posts");
-    assert_eq!(index_route.controller.0.as_str(), "PostsController");
-    assert_eq!(index_route.action.as_str(), "index");
-    assert_eq!(index_route.as_name.as_ref().unwrap().as_str(), "posts");
+    fn as_explicit(spec: &RouteSpec) -> (&HttpMethod, &str, &str, &str, Option<&str>) {
+        let RouteSpec::Explicit { method, path, controller, action, as_name, .. } = spec
+        else {
+            panic!("expected Explicit, got {spec:?}");
+        };
+        (
+            method,
+            path.as_str(),
+            controller.0.as_str(),
+            action.as_str(),
+            as_name.as_ref().map(|s| s.as_str()),
+        )
+    }
 
-    let create_route = &app.routes.routes[1];
-    assert!(matches!(create_route.method, HttpMethod::Post));
-    assert_eq!(create_route.path, "/posts");
-    assert_eq!(create_route.action.as_str(), "create");
+    let (m, path, ctrl, action, name) = as_explicit(&app.routes.entries[0]);
+    assert!(matches!(m, HttpMethod::Get));
+    assert_eq!(path, "/posts");
+    assert_eq!(ctrl, "PostsController");
+    assert_eq!(action, "index");
+    assert_eq!(name, Some("posts"));
 
-    let show_route = &app.routes.routes[2];
-    assert!(matches!(show_route.method, HttpMethod::Get));
-    assert_eq!(show_route.path, "/posts/:id");
-    assert_eq!(show_route.action.as_str(), "show");
-    assert_eq!(show_route.as_name.as_ref().unwrap().as_str(), "post");
+    let (m, path, _, action, _) = as_explicit(&app.routes.entries[1]);
+    assert!(matches!(m, HttpMethod::Post));
+    assert_eq!(path, "/posts");
+    assert_eq!(action, "create");
 
-    let destroy_route = &app.routes.routes[3];
-    assert!(matches!(destroy_route.method, HttpMethod::Delete));
-    assert_eq!(destroy_route.path, "/posts/:id");
-    assert_eq!(destroy_route.action.as_str(), "destroy");
+    let (m, path, _, action, name) = as_explicit(&app.routes.entries[2]);
+    assert!(matches!(m, HttpMethod::Get));
+    assert_eq!(path, "/posts/:id");
+    assert_eq!(action, "show");
+    assert_eq!(name, Some("post"));
+
+    let (m, path, _, action, _) = as_explicit(&app.routes.entries[3]);
+    assert!(matches!(m, HttpMethod::Delete));
+    assert_eq!(path, "/posts/:id");
+    assert_eq!(action, "destroy");
 }
 
 #[test]
 fn ingested_app_is_self_consistent() {
+    use roundhouse::RouteSpec;
+
     let app = ingest_app(fixture_path()).expect("ingest");
     assert_eq!(app.schema_version, roundhouse::App::SCHEMA_VERSION);
     // Serialize / deserialize proves the ingested shape is round-trippable.
@@ -247,12 +265,14 @@ fn ingested_app_is_self_consistent() {
     let _: roundhouse::App = serde_json::from_str(&json).expect("deserialize");
     // Make sure the Rails dependency between route and controller is intact.
     let ctrl_names: Vec<_> = app.controllers.iter().map(|c| c.name.0.as_str()).collect();
-    for r in &app.routes.routes {
-        assert!(
-            ctrl_names.contains(&r.controller.0.as_str()),
-            "route references unknown controller {:?}",
-            r.controller
-        );
+    for entry in &app.routes.entries {
+        if let RouteSpec::Explicit { controller, .. } = entry {
+            assert!(
+                ctrl_names.contains(&controller.0.as_str()),
+                "route references unknown controller {:?}",
+                controller
+            );
+        }
     }
 }
 

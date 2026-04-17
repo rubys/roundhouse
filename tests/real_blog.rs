@@ -30,16 +30,18 @@ fn fixture_path() -> &'static Path {
 /// catch up to the fixture. Anything NOT listed here is still ingested
 /// (so IR-level failures surface), but source-equivalence is skipped.
 ///
-/// Known-excluded (as of 2026-04-17):
-/// - `config/routes.rb` — uses `resources :articles do ... end` nested DSL.
+/// Known-excluded (remaining gaps — see fixtures/real-blog/README.md):
 /// - `db/migrate/*.rb` — migrations (we read `db/schema.rb` today; Rails 8
 ///   doesn't generate `schema.rb` until migrations run).
 /// - `test/**/*.rb` — not yet ingested as part of app/ pipeline.
-/// - `app/views/**/*.erb` — fixtures use view helpers (`link_to`, `form_with`,
-///   `pluralize`, …) whose emit is generic but whose formatting (e.g. multi-
-///   line argument lists) doesn't round-trip byte-for-byte yet.
+/// - `app/models/*.rb` — `broadcasts_to`, `after_*_commit { block }`,
+///   extra validation rules, comments still drop.
+/// - `app/controllers/*.rb` — `private` marker, comments, unknown
+///   class-body calls still drop.
+/// - `app/views/**/*.erb` — multi-line argument formatting doesn't
+///   round-trip yet.
 const EXPECTED_RUBY_FILES: &[&str] = &[
-    // Populate as recognizers catch up and round-trip cleanly end-to-end.
+    "config/routes.rb",
 ];
 
 fn scratch_root(suffix: &str) -> PathBuf {

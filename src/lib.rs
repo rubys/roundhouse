@@ -22,8 +22,8 @@ pub mod ty;
 pub use app::App;
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
-    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, Route, RouteTable, Scope,
-    Validation, ValidationRule, View,
+    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, Route, RouteSpec, RouteTable,
+    Scope, Validation, ValidationRule, View,
 };
 pub use effect::{Effect, EffectSet};
 pub use expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
