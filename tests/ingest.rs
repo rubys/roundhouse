@@ -148,9 +148,9 @@ fn ingests_posts_controller_with_actions() {
         ctrl.parent.as_ref().unwrap().0.as_str(),
         "ApplicationController"
     );
-    assert_eq!(ctrl.actions.len(), 3);
+    assert_eq!(ctrl.actions.len(), 4);
     let names: Vec<_> = ctrl.actions.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["index", "show", "destroy"]);
+    assert_eq!(names, vec!["index", "show", "create", "destroy"]);
 
     // index body: `@posts = Post.all` — Assign(Ivar(posts), Send(Some(Const(Post)), "all", []))
     let index = &ctrl.actions[0];
@@ -212,7 +212,7 @@ fn ingests_posts_controller_with_actions() {
 #[test]
 fn ingests_routes_file() {
     let app = ingest_app(fixture_path()).expect("ingest");
-    assert_eq!(app.routes.routes.len(), 3);
+    assert_eq!(app.routes.routes.len(), 4);
 
     let index_route = &app.routes.routes[0];
     assert!(matches!(index_route.method, HttpMethod::Get));
@@ -221,11 +221,21 @@ fn ingests_routes_file() {
     assert_eq!(index_route.action.as_str(), "index");
     assert_eq!(index_route.as_name.as_ref().unwrap().as_str(), "posts");
 
-    let show_route = &app.routes.routes[1];
+    let create_route = &app.routes.routes[1];
+    assert!(matches!(create_route.method, HttpMethod::Post));
+    assert_eq!(create_route.path, "/posts");
+    assert_eq!(create_route.action.as_str(), "create");
+
+    let show_route = &app.routes.routes[2];
     assert!(matches!(show_route.method, HttpMethod::Get));
     assert_eq!(show_route.path, "/posts/:id");
     assert_eq!(show_route.action.as_str(), "show");
     assert_eq!(show_route.as_name.as_ref().unwrap().as_str(), "post");
+
+    let destroy_route = &app.routes.routes[3];
+    assert!(matches!(destroy_route.method, HttpMethod::Delete));
+    assert_eq!(destroy_route.path, "/posts/:id");
+    assert_eq!(destroy_route.action.as_str(), "destroy");
 }
 
 #[test]

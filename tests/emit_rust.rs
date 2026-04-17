@@ -152,6 +152,12 @@ impl PostsController {
         Post::find(params[\"id\"])
     }
 
+    pub fn create() -> () {
+        let post = Post::new(post_params);
+        post.save();
+        redirect_to(post)
+    }
+
     pub fn destroy() -> () {
         let post = Post::find(params[\"id\"]);
         post.destroy();

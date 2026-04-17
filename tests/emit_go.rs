@@ -130,6 +130,12 @@ func (c *PostsController) Show() Post {
 \treturn Post.Find(Params[\"id\"])
 }
 
+func (c *PostsController) Create() {
+\tpost := Post.New(PostParams)
+\tpost.Save()
+\tRedirectTo(post)
+}
+
 func (c *PostsController) Destroy() {
 \tpost := Post.Find(Params[\"id\"])
 \tpost.Destroy()
