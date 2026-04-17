@@ -112,6 +112,67 @@ fn assign_target_ivar_is_still_structural() {
 }
 
 #[test]
+fn params_resolves_via_implicit_self_in_action_body() {
+    let app = analyzed_app();
+    let show = app.controllers[0]
+        .actions
+        .iter()
+        .find(|a| a.name.as_str() == "show")
+        .unwrap();
+    // Body: `@post = Post.find(params[:id])`.
+    // Drill into the arg of find: it's the `params[:id]` Send.
+    let ExprNode::Assign { value, .. } = &*show.body.node else { panic!() };
+    let ExprNode::Send { args, .. } = &*value.node else { panic!() };
+    assert_eq!(args.len(), 1);
+    let bracket_send = &args[0];
+    // bracket_send is `params[:id]` — Send(Some(params), "[]", [:id])
+    // Its receiver is the bare `params` call.
+    let ExprNode::Send { recv, method, .. } = &*bracket_send.node else { panic!() };
+    assert_eq!(method.as_str(), "[]");
+    let params_recv = recv.as_ref().expect("bracket has a receiver");
+
+    // `params` (implicit self Send) — now resolved via ctx.self_ty to Hash<Sym, Str>.
+    match params_recv.ty.as_ref().expect("params ty populated") {
+        Ty::Hash { key, value } => {
+            assert!(matches!(**key, Ty::Sym));
+            assert!(matches!(**value, Ty::Str));
+        }
+        other => panic!("expected Hash<Sym, Str>, got {other:?}"),
+    }
+
+    // `params[:id]` resolves to Union<Str, Nil>.
+    match bracket_send.ty.as_ref().expect("bracket ty populated") {
+        Ty::Union { variants } => {
+            assert!(variants.iter().any(|v| matches!(v, Ty::Str)));
+            assert!(variants.iter().any(|v| matches!(v, Ty::Nil)));
+        }
+        other => panic!("expected Union<Str, Nil>, got {other:?}"),
+    }
+}
+
+#[test]
+fn scope_body_self_is_model_class() {
+    // `scope :recent, -> { limit(10) }` — `limit` is a bare call; self must
+    // resolve to the model class so that `limit` dispatches to the class
+    // method returning Array<Post>.
+    let app = analyzed_app();
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    let scope = &post.scopes[0];
+    // Scope body: `limit(10)` — the top-level Send's ty should be Array<Post>.
+    match scope.body.ty.as_ref().expect("scope body ty populated") {
+        Ty::Array { elem } => match &**elem {
+            Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Post"),
+            other => panic!("expected Array<Post>, got Array<{other:?}>"),
+        },
+        other => panic!("expected Array, got {other:?}"),
+    }
+}
+
+#[test]
 fn analysis_is_idempotent() {
     // Running the analyzer twice should produce identical results.
     let mut app = ingest_app(fixture_path()).expect("ingest");

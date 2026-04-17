@@ -25,6 +25,13 @@ pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
 }
 
+/// Recursion context — what `self` is here, what locals are in scope, etc.
+/// Grows as more semantic features land.
+#[derive(Clone, Default)]
+struct Ctx {
+    self_ty: Option<Ty>,
+}
+
 #[derive(Default)]
 struct ClassInfo {
     /// Instance-state shape (columns + attr_accessor).
@@ -111,36 +118,71 @@ impl Analyzer {
             classes.insert(model.name.clone(), cls);
         }
 
+        // Hardcoded ApplicationController-ish surface. Real inheritance chains
+        // and per-controller overrides land when a fixture forces them.
+        let mut app_ctrl = ClassInfo::default();
+        let params_ty = Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Str),
+        };
+        app_ctrl.class_methods.insert(Symbol::from("params"), params_ty);
+        app_ctrl.class_methods.insert(Symbol::from("session"),
+            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) });
+        app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
+        app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
+        app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
+
         Self { classes }
     }
 
     /// Walk the app, annotating every expression's `ty` field.
     pub fn analyze(&self, app: &mut App) {
         for controller in &mut app.controllers {
+            // In action bodies, `self` is the controller instance.
+            // Use the parent class (ApplicationController) as the self type —
+            // per-controller method resolution is future work.
+            let ctx = Ctx {
+                self_ty: Some(Ty::Class {
+                    id: controller
+                        .parent
+                        .clone()
+                        .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
+                    args: vec![],
+                }),
+            };
             for action in &mut controller.actions {
-                self.analyze_expr(&mut action.body);
+                self.analyze_expr(&mut action.body, &ctx);
             }
         }
         for model in &mut app.models {
+            // In scope bodies, `self` is the model class; bare calls like
+            // `limit(10)` resolve to class methods.
+            let class_ctx = Ctx {
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+            };
             for scope in &mut model.scopes {
-                self.analyze_expr(&mut scope.body);
+                self.analyze_expr(&mut scope.body, &class_ctx);
             }
+            // Instance methods on the model: `self` is an instance. We reuse
+            // the same Ty::Class { id: Post } because the dispatcher falls
+            // through to instance methods when a class method isn't found.
             for method in &mut model.methods {
-                self.analyze_expr(&mut method.body);
+                self.analyze_expr(&mut method.body, &class_ctx);
             }
         }
         for view in &mut app.views {
-            self.analyze_expr(&mut view.body);
+            self.analyze_expr(&mut view.body, &Ctx::default());
         }
     }
 
-    fn analyze_expr(&self, expr: &mut Expr) -> Ty {
-        let ty = self.compute(expr);
+    fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
         ty
     }
 
-    fn compute(&self, expr: &mut Expr) -> Ty {
+    fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         match &mut *expr.node {
             ExprNode::Lit { value } => lit_ty(value),
 
@@ -153,42 +195,45 @@ impl Analyzer {
             ExprNode::Var { .. } => unknown(), // local scope tracking is future work
 
             ExprNode::Let { value, body, .. } => {
-                self.analyze_expr(value);
-                self.analyze_expr(body)
+                self.analyze_expr(value, ctx);
+                self.analyze_expr(body, ctx)
             }
 
             ExprNode::Lambda { body, .. } => {
-                self.analyze_expr(body);
+                self.analyze_expr(body, ctx);
                 unknown() // Fn type synthesis is future work
             }
 
             ExprNode::Apply { fun, args, block } => {
-                self.analyze_expr(fun);
-                for a in args.iter_mut() { self.analyze_expr(a); }
-                if let Some(b) = block { self.analyze_expr(b); }
+                self.analyze_expr(fun, ctx);
+                for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                if let Some(b) = block { self.analyze_expr(b, ctx); }
                 unknown()
             }
 
             ExprNode::Send { recv, method, args, block } => {
-                let recv_ty = recv.as_mut().map(|r| self.analyze_expr(r));
-                for a in args.iter_mut() { self.analyze_expr(a); }
-                if let Some(b) = block { self.analyze_expr(b); }
+                let recv_ty = match recv.as_mut() {
+                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    None => ctx.self_ty.clone(),
+                };
+                for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                if let Some(b) = block { self.analyze_expr(b, ctx); }
                 self.dispatch(recv_ty.as_ref(), method)
             }
 
             ExprNode::If { cond, then_branch, else_branch } => {
-                self.analyze_expr(cond);
-                let t = self.analyze_expr(then_branch);
-                let e = self.analyze_expr(else_branch);
+                self.analyze_expr(cond, ctx);
+                let t = self.analyze_expr(then_branch, ctx);
+                let e = self.analyze_expr(else_branch, ctx);
                 union_of(t, e)
             }
 
             ExprNode::Case { scrutinee, arms } => {
-                self.analyze_expr(scrutinee);
+                self.analyze_expr(scrutinee, ctx);
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body));
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
                 }
                 union_many(branch_tys)
             }
@@ -196,32 +241,30 @@ impl Analyzer {
             ExprNode::Seq { exprs } => {
                 let mut last = Ty::Nil;
                 for e in exprs.iter_mut() {
-                    last = self.analyze_expr(e);
+                    last = self.analyze_expr(e, ctx);
                 }
                 last
             }
 
             ExprNode::Assign { target, value } => {
-                let value_ty = self.analyze_expr(value);
-                // Annotate lvalue-side subexpressions that carry their own.
+                let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
-                    self.analyze_expr(recv);
+                    self.analyze_expr(recv, ctx);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.analyze_expr(recv);
-                    self.analyze_expr(index);
+                    self.analyze_expr(recv, ctx);
+                    self.analyze_expr(index, ctx);
                 }
                 value_ty
             }
 
             ExprNode::Yield { args } => {
-                for a in args.iter_mut() { self.analyze_expr(a); }
+                for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                 unknown()
             }
 
             ExprNode::Raise { value } => {
-                self.analyze_expr(value);
-                // `raise` produces no value; use Nil.
+                self.analyze_expr(value, ctx);
                 Ty::Nil
             }
         }
@@ -229,7 +272,7 @@ impl Analyzer {
 
     fn dispatch(&self, recv_ty: Option<&Ty>, method: &Symbol) -> Ty {
         match recv_ty {
-            None => unknown(), // implicit self; binding context tracking is future work
+            None => unknown(),
             Some(Ty::Class { id, .. }) => {
                 if let Some(cls) = self.classes.get(id) {
                     if let Some(ty) = cls.class_methods.get(method) {
@@ -242,6 +285,7 @@ impl Analyzer {
                 unknown()
             }
             Some(Ty::Array { elem }) => array_method(method, elem),
+            Some(Ty::Hash { value, .. }) => hash_method(method, value),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Int) => int_method(method),
             _ => unknown(),
@@ -274,6 +318,16 @@ fn array_method(method: &Symbol, elem: &Ty) -> Ty {
         "each" | "map" | "select" | "reject" | "sort" | "reverse" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
+        _ => unknown(),
+    }
+}
+
+fn hash_method(method: &Symbol, value: &Ty) -> Ty {
+    match method.as_str() {
+        "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        "length" | "size" | "count" => Ty::Int,
+        "values" => Ty::Array { elem: Box::new(value.clone()) },
+        "empty?" => Ty::Bool,
         _ => unknown(),
     }
 }
