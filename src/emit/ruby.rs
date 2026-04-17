@@ -132,24 +132,23 @@ fn emit_model(m: &Model) -> EmittedFile {
         .unwrap_or_else(|| "ApplicationRecord".to_string());
     writeln!(s, "class {} < {}", m.name, parent).unwrap();
 
-    for (idx, item) in m.body.iter().enumerate() {
+    for item in m.body.iter() {
+        if item.leading_blank_line() {
+            writeln!(s).unwrap();
+        }
+        emit_leading_comments(&mut s, item.leading_comments(), 1);
         let line = match item {
-            ModelBodyItem::Association { assoc } => {
+            ModelBodyItem::Association { assoc, .. } => {
                 emit_association(&m.name, assoc)
             }
-            ModelBodyItem::Validation { validation } => emit_validation_entry(validation),
-            ModelBodyItem::Scope { scope } => emit_scope(scope),
-            ModelBodyItem::Callback { callback } => emit_callback(callback),
-            ModelBodyItem::Method { method } => {
-                // Methods get a leading blank line unless they're the
-                // first item, matching Rails' conventional spacing.
-                if idx > 0 {
-                    writeln!(s).unwrap();
-                }
+            ModelBodyItem::Validation { validation, .. } => emit_validation_entry(validation),
+            ModelBodyItem::Scope { scope, .. } => emit_scope(scope),
+            ModelBodyItem::Callback { callback, .. } => emit_callback(callback),
+            ModelBodyItem::Method { method, .. } => {
                 emit_method(&mut s, method, 1);
                 continue;
             }
-            ModelBodyItem::Unknown { expr } => emit_expr(expr),
+            ModelBodyItem::Unknown { expr, .. } => emit_expr(expr),
         };
         writeln!(s, "  {line}").unwrap();
     }
@@ -158,6 +157,16 @@ fn emit_model(m: &Model) -> EmittedFile {
     EmittedFile {
         path: PathBuf::from(format!("app/models/{}.rb", snake_case(m.name.0.as_str()))),
         content: s,
+    }
+}
+
+/// Emit each preserved comment on its own line at the given indent
+/// depth (`depth * 2` spaces). Comment text already starts with `#`,
+/// so we just prefix indent + content + newline.
+fn emit_leading_comments(out: &mut String, comments: &[crate::dialect::Comment], depth: usize) {
+    let pad = "  ".repeat(depth);
+    for c in comments {
+        writeln!(out, "{pad}{}", c.text).unwrap();
     }
 }
 
@@ -362,27 +371,22 @@ fn emit_controller(c: &Controller) -> EmittedFile {
     );
     writeln!(s, "class {} < {parent}", c.name).unwrap();
 
-    // Methods (actions) get a leading blank line unless they're the
-    // first body entry — matches the Rails scaffold's spacing and
-    // makes source-equivalence less fussy.
-    for (idx, item) in c.body.iter().enumerate() {
+    for item in c.body.iter() {
+        if item.leading_blank_line() {
+            writeln!(s).unwrap();
+        }
+        emit_leading_comments(&mut s, item.leading_comments(), 1);
         match item {
-            ControllerBodyItem::Filter { filter } => {
+            ControllerBodyItem::Filter { filter, .. } => {
                 writeln!(s, "  {}", emit_filter(filter)).unwrap();
             }
-            ControllerBodyItem::Action { action } => {
-                if idx > 0 {
-                    writeln!(s).unwrap();
-                }
+            ControllerBodyItem::Action { action, .. } => {
                 emit_action(&mut s, action, 1);
             }
-            ControllerBodyItem::PrivateMarker => {
-                if idx > 0 {
-                    writeln!(s).unwrap();
-                }
+            ControllerBodyItem::PrivateMarker { .. } => {
                 writeln!(s, "  private").unwrap();
             }
-            ControllerBodyItem::Unknown { expr } => {
+            ControllerBodyItem::Unknown { expr, .. } => {
                 writeln!(s, "  {}", emit_expr(expr)).unwrap();
             }
         }

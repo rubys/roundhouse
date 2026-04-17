@@ -78,6 +78,8 @@ fn tiny_blog() -> App {
                     table: TableRef(Symbol::from("posts")),
                 }),
             },
+            leading_comments: vec![],
+            leading_blank_line: false,
         }],
     };
 

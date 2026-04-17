@@ -297,6 +297,49 @@ fn literal_ingested_expr() {
 }
 
 #[test]
+fn leading_comments_attach_to_class_body_items() {
+    use roundhouse::ModelBodyItem;
+
+    let source = br#"
+class Widget < ApplicationRecord
+  # This comment should attach to has_many below.
+  has_many :gears
+
+  # Two comment lines
+  # both attach to validates
+  validates :name, presence: true
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(model.body.len(), 2);
+
+    let ModelBodyItem::Association { leading_comments: has_many_comments, .. } = &model.body[0]
+    else {
+        panic!("expected Association first");
+    };
+    assert_eq!(has_many_comments.len(), 1);
+    assert_eq!(
+        has_many_comments[0].text.as_str(),
+        "# This comment should attach to has_many below."
+    );
+
+    let ModelBodyItem::Validation { leading_comments: validates_comments, .. } = &model.body[1]
+    else {
+        panic!("expected Validation second");
+    };
+    assert_eq!(validates_comments.len(), 2);
+    assert_eq!(validates_comments[0].text.as_str(), "# Two comment lines");
+    assert_eq!(
+        validates_comments[1].text.as_str(),
+        "# both attach to validates"
+    );
+}
+
+#[test]
 fn length_validation_rule_is_ingested() {
     use roundhouse::{ModelBodyItem, ValidationRule};
 
@@ -312,7 +355,7 @@ end
         .unwrap();
 
     let validations: Vec<_> = model.body.iter().filter_map(|item| match item {
-        ModelBodyItem::Validation { validation } => Some(validation),
+        ModelBodyItem::Validation { validation, .. } => Some(validation),
         _ => None,
     }).collect();
 
@@ -358,7 +401,7 @@ end
     assert_eq!(model.body.len(), 3);
     assert!(matches!(model.body[0], ModelBodyItem::Association { .. }));
     match &model.body[1] {
-        ModelBodyItem::Unknown { expr } => {
+        ModelBodyItem::Unknown { expr, .. } => {
             // `broadcasts_to :widgets` → Send with no receiver, method
             // "broadcasts_to", one symbol arg.
             let ExprNode::Send { method, .. } = &*expr.node else {

@@ -82,6 +82,16 @@ Cleared (the fixture now fully ingests):
   `ExprNode::RescueModifier`.
 - **Length validation rule**: `validates :body, length: { minimum: 10 }`
   now ingests as `ValidationRule::Length { min, max }` and round-trips.
+- **Ruby comments on class-body items**: ported ruby2js's
+  `associate_comments` — each `ModelBodyItem` / `ControllerBodyItem`
+  carries its leading `# …` lines. Emit reproduces them at the right
+  indent before the item.
+- **Blank lines between body items**: detected from source offsets
+  (two consecutive newlines between prev stmt's end and this item's
+  leading area). Emitted as a bare blank line before leading comments.
+  Together with the comment work, this promoted
+  `app/controllers/application_controller.rb` and
+  `app/models/article.rb` onto the inclusion list.
 
 Remaining (in rough priority order):
 
@@ -107,7 +117,9 @@ Remaining (in rough priority order):
 6. **Extra validation rules beyond Presence/Absence/Length** —
    `uniqueness:`, `format: { with: … }`, `numericality:`,
    `inclusion: { in: … }` all still drop at ingest.
-7. **Comments** (Ruby `#` and ERB `<%# %>`) — stripped today.
+7. **ERB comments** (`<%# %>`) are dropped and surrounding text
+   merged; the Ruby `#` form on class-body items is now preserved.
+   Per-expression (inside method bodies) comments still drop.
     ERB comments now merge surrounding text so IR round-trips, but
     the comment content is lost.
 11. **View helpers** (`link_to`, `form_with`, `form.label`,

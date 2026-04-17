@@ -4,7 +4,23 @@ use serde::{Deserialize, Serialize};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, Literal};
 use crate::ident::{ClassId, Symbol, TableRef};
+use crate::span::Span;
 use crate::ty::{Row, Ty};
+
+/// A source comment preserved through the pipeline. We inline comments
+/// on the owning IR node (`leading_comments` / `trailing_comment` fields)
+/// rather than keep a side-table keyed by node identity the way ruby2js
+/// does — our IR isn't identity-stable across transforms.
+///
+/// `text` is the full original including the leading `#` (line form) or
+/// `=begin` / `=end` markers (block form). Emitters translate to the
+/// target's native comment syntax when needed; the IR stays source-native.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Comment {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub span: Span,
+}
 
 // Models ----------------------------------------------------------------
 
@@ -29,49 +45,49 @@ pub struct Model {
 impl Model {
     pub fn associations(&self) -> impl Iterator<Item = &Association> {
         self.body.iter().filter_map(|item| match item {
-            ModelBodyItem::Association { assoc } => Some(assoc),
+            ModelBodyItem::Association { assoc, .. } => Some(assoc),
             _ => None,
         })
     }
 
     pub fn validations(&self) -> impl Iterator<Item = &Validation> {
         self.body.iter().filter_map(|item| match item {
-            ModelBodyItem::Validation { validation } => Some(validation),
+            ModelBodyItem::Validation { validation, .. } => Some(validation),
             _ => None,
         })
     }
 
     pub fn scopes(&self) -> impl Iterator<Item = &Scope> {
         self.body.iter().filter_map(|item| match item {
-            ModelBodyItem::Scope { scope } => Some(scope),
+            ModelBodyItem::Scope { scope, .. } => Some(scope),
             _ => None,
         })
     }
 
     pub fn scopes_mut(&mut self) -> impl Iterator<Item = &mut Scope> {
         self.body.iter_mut().filter_map(|item| match item {
-            ModelBodyItem::Scope { scope } => Some(scope),
+            ModelBodyItem::Scope { scope, .. } => Some(scope),
             _ => None,
         })
     }
 
     pub fn callbacks(&self) -> impl Iterator<Item = &Callback> {
         self.body.iter().filter_map(|item| match item {
-            ModelBodyItem::Callback { callback } => Some(callback),
+            ModelBodyItem::Callback { callback, .. } => Some(callback),
             _ => None,
         })
     }
 
     pub fn methods(&self) -> impl Iterator<Item = &MethodDef> {
         self.body.iter().filter_map(|item| match item {
-            ModelBodyItem::Method { method } => Some(method),
+            ModelBodyItem::Method { method, .. } => Some(method),
             _ => None,
         })
     }
 
     pub fn methods_mut(&mut self) -> impl Iterator<Item = &mut MethodDef> {
         self.body.iter_mut().filter_map(|item| match item {
-            ModelBodyItem::Method { method } => Some(method),
+            ModelBodyItem::Method { method, .. } => Some(method),
             _ => None,
         })
     }
@@ -86,15 +102,99 @@ impl Model {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "item", rename_all = "snake_case")]
 pub enum ModelBodyItem {
-    Association { assoc: Association },
-    Validation { validation: Validation },
-    Scope { scope: Scope },
-    Callback { callback: Callback },
-    Method { method: MethodDef },
+    Association {
+        assoc: Association,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Validation {
+        validation: Validation,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Scope {
+        scope: Scope,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Callback {
+        callback: Callback,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Method {
+        method: MethodDef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
     /// Class-body statement whose semantics aren't yet recognized
     /// (`broadcasts_to …`, `primary_abstract_class`, bare method calls,
     /// …). Held as a raw expression for source-faithful re-emission.
-    Unknown { expr: Expr },
+    Unknown {
+        expr: Expr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+}
+
+impl ModelBodyItem {
+    /// Return the leading comments attached to this item, regardless of
+    /// variant — so emit code can fetch them without re-matching.
+    pub fn leading_comments(&self) -> &[Comment] {
+        match self {
+            Self::Association { leading_comments, .. }
+            | Self::Validation { leading_comments, .. }
+            | Self::Scope { leading_comments, .. }
+            | Self::Callback { leading_comments, .. }
+            | Self::Method { leading_comments, .. }
+            | Self::Unknown { leading_comments, .. } => leading_comments,
+        }
+    }
+
+    pub fn leading_comments_mut(&mut self) -> &mut Vec<Comment> {
+        match self {
+            Self::Association { leading_comments, .. }
+            | Self::Validation { leading_comments, .. }
+            | Self::Scope { leading_comments, .. }
+            | Self::Callback { leading_comments, .. }
+            | Self::Method { leading_comments, .. }
+            | Self::Unknown { leading_comments, .. } => leading_comments,
+        }
+    }
+
+    pub fn leading_blank_line(&self) -> bool {
+        match self {
+            Self::Association { leading_blank_line, .. }
+            | Self::Validation { leading_blank_line, .. }
+            | Self::Scope { leading_blank_line, .. }
+            | Self::Callback { leading_blank_line, .. }
+            | Self::Method { leading_blank_line, .. }
+            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
+        }
+    }
+
+    pub fn set_leading_blank_line(&mut self, v: bool) {
+        match self {
+            Self::Association { leading_blank_line, .. }
+            | Self::Validation { leading_blank_line, .. }
+            | Self::Scope { leading_blank_line, .. }
+            | Self::Callback { leading_blank_line, .. }
+            | Self::Method { leading_blank_line, .. }
+            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -221,21 +321,21 @@ pub struct Controller {
 impl Controller {
     pub fn filters(&self) -> impl Iterator<Item = &Filter> {
         self.body.iter().filter_map(|item| match item {
-            ControllerBodyItem::Filter { filter } => Some(filter),
+            ControllerBodyItem::Filter { filter, .. } => Some(filter),
             _ => None,
         })
     }
 
     pub fn actions(&self) -> impl Iterator<Item = &Action> {
         self.body.iter().filter_map(|item| match item {
-            ControllerBodyItem::Action { action } => Some(action),
+            ControllerBodyItem::Action { action, .. } => Some(action),
             _ => None,
         })
     }
 
     pub fn actions_mut(&mut self) -> impl Iterator<Item = &mut Action> {
         self.body.iter_mut().filter_map(|item| match item {
-            ControllerBodyItem::Action { action } => Some(action),
+            ControllerBodyItem::Action { action, .. } => Some(action),
             _ => None,
         })
     }
@@ -251,10 +351,71 @@ impl Controller {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "item", rename_all = "snake_case")]
 pub enum ControllerBodyItem {
-    Filter { filter: Filter },
-    Action { action: Action },
-    PrivateMarker,
-    Unknown { expr: Expr },
+    Filter {
+        filter: Filter,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Action {
+        action: Action,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    PrivateMarker {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+    Unknown {
+        expr: Expr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+    },
+}
+
+impl ControllerBodyItem {
+    pub fn leading_comments(&self) -> &[Comment] {
+        match self {
+            Self::Filter { leading_comments, .. }
+            | Self::Action { leading_comments, .. }
+            | Self::PrivateMarker { leading_comments, .. }
+            | Self::Unknown { leading_comments, .. } => leading_comments,
+        }
+    }
+
+    pub fn leading_comments_mut(&mut self) -> &mut Vec<Comment> {
+        match self {
+            Self::Filter { leading_comments, .. }
+            | Self::Action { leading_comments, .. }
+            | Self::PrivateMarker { leading_comments, .. }
+            | Self::Unknown { leading_comments, .. } => leading_comments,
+        }
+    }
+
+    pub fn leading_blank_line(&self) -> bool {
+        match self {
+            Self::Filter { leading_blank_line, .. }
+            | Self::Action { leading_blank_line, .. }
+            | Self::PrivateMarker { leading_blank_line, .. }
+            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
+        }
+    }
+
+    pub fn set_leading_blank_line(&mut self, v: bool) {
+        match self {
+            Self::Filter { leading_blank_line, .. }
+            | Self::Action { leading_blank_line, .. }
+            | Self::PrivateMarker { leading_blank_line, .. }
+            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

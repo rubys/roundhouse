@@ -347,6 +347,8 @@ fn actions_without_db_calls_stay_pure() {
             parent: None,
             body: vec![roundhouse::ControllerBodyItem::Action {
                 action: action.clone(),
+                leading_comments: vec![],
+                leading_blank_line: false,
             }],
         });
         analyzer.analyze(&mut app);

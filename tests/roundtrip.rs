@@ -83,7 +83,11 @@ fn tiny_blog_round_trips() {
     let posts_controller = Controller {
         name: ClassId(Symbol::from("PostsController")),
         parent: Some(ClassId(Symbol::from("ApplicationController"))),
-        body: vec![roundhouse::ControllerBodyItem::Action { action: index_action }],
+        body: vec![roundhouse::ControllerBodyItem::Action {
+            action: index_action,
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
     };
 
     let routes = RouteTable {

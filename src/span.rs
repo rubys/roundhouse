@@ -15,7 +15,17 @@ impl Span {
         Span { file: FileId(0), start: 0, end: 0 }
     }
 
+    pub fn is_synthetic(&self) -> bool {
+        self.file.0 == 0 && self.start == 0 && self.end == 0
+    }
+
     pub fn len(&self) -> u32 {
         self.end - self.start
+    }
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self::synthetic()
     }
 }
