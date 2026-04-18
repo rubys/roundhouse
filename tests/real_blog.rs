@@ -42,9 +42,15 @@ fn fixture_path() -> &'static Path {
 ///   round-trip yet.
 const EXPECTED_RUBY_FILES: &[&str] = &[
     "app/controllers/application_controller.rb",
+    "app/controllers/articles_controller.rb",
+    "app/controllers/comments_controller.rb",
     "app/models/application_record.rb",
     "app/models/article.rb",
     "app/models/comment.rb",
+    "app/views/articles/_article.html.erb",
+    "app/views/articles/edit.html.erb",
+    "app/views/articles/index.html.erb",
+    "app/views/articles/new.html.erb",
     "config/routes.rb",
 ];
 

@@ -96,6 +96,22 @@ Cleared (the fixture now fully ingests):
   `ExprNode::Lambda` via a `BlockStyle` enum, detected from Prism's
   `BlockNode.opening_loc` bytes. Promoted `app/models/comment.rb`
   onto the inclusion list.
+- **Filter `only:` / `except:` array style** (`%i[ … ]` vs `[:…]`):
+  added `only_style` / `except_style` fields on `Filter`.
+- **Blank lines between `Seq` statements** (inside method bodies):
+  `leading_blank_line: bool` added to `Expr`; populated during ingest
+  from Prism source offsets (the `StatementsNode`'s `as_slice()` lets
+  us detect blank-line gaps without threading source bytes through
+  every ingest call).
+- **Private-method indent** (4 spaces after `private` marker in
+  scaffold convention): controller emit tracks a `past_private` flag
+  and bumps the indent depth.
+- **`[ … ]` bracket padding**: new `ArrayStyle::BracketsSpaced`
+  variant, detected from the gap between Prism's opener end and the
+  first element's start.
+
+All seven real-blog Ruby files and four of eight `.erb` files now
+round-trip byte-for-byte.
 
 Remaining (in rough priority order):
 

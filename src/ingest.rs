@@ -388,7 +388,18 @@ fn source_has_blank_line(source: &[u8], from: usize, to: usize) -> bool {
     if from >= to || to > source.len() {
         return false;
     }
-    let slice = &source[from..to];
+    slice_has_blank_line(source, from, to)
+}
+
+/// Same check, scoped to an already-sliced byte range (e.g., a Prism
+/// `Location::as_slice()`). Kept separate from `source_has_blank_line`
+/// because callers that work from a sub-slice don't need the outer
+/// bounds check.
+fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool {
+    if from >= to || to > bytes.len() {
+        return false;
+    }
+    let slice = &bytes[from..to];
     let mut saw_newline = false;
     for &b in slice {
         match b {
@@ -398,9 +409,7 @@ fn source_has_blank_line(source: &[u8], from: usize, to: usize) -> bool {
                 }
                 saw_newline = true;
             }
-            b' ' | b'\t' | b'\r' => {
-                // whitespace between newlines keeps the state
-            }
+            b' ' | b'\t' | b'\r' => {}
             _ => saw_newline = false,
         }
     }
@@ -854,6 +863,8 @@ fn parse_filter(
 
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
+    let mut only_style = crate::expr::ArrayStyle::default();
+    let mut except_style = crate::expr::ArrayStyle::default();
 
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -862,14 +873,20 @@ fn parse_filter(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = assoc.value();
             match key.as_str() {
-                "only" => only = symbol_list_value(&value),
-                "except" => except = symbol_list_value(&value),
+                "only" => {
+                    only = symbol_list_value(&value);
+                    only_style = symbol_list_style(&value);
+                }
+                "except" => {
+                    except = symbol_list_value(&value);
+                    except_style = symbol_list_style(&value);
+                }
                 _ => {}
             }
         }
     }
 
-    Some(Filter { kind, target, only, except })
+    Some(Filter { kind, target, only, except, only_style, except_style })
 }
 
 fn symbol_list_value(node: &ruby_prism::Node<'_>) -> Vec<Symbol> {
@@ -885,6 +902,16 @@ fn symbol_list_value(node: &ruby_prism::Node<'_>) -> Vec<Symbol> {
         return vec![Symbol::from(s.as_str())];
     }
     vec![]
+}
+
+/// Surface form of a symbol list (`[:a, :b]` or `%i[a b]`). For a bare
+/// symbol arg (`before_action :foo, only: :show`) we default to Brackets
+/// since no array syntax was used — emit falls back on the flat form.
+fn symbol_list_style(node: &ruby_prism::Node<'_>) -> crate::expr::ArrayStyle {
+    if let Some(arr) = node.as_array_node() {
+        return array_style_from(&arr);
+    }
+    crate::expr::ArrayStyle::default()
 }
 
 // Routes ----------------------------------------------------------------
@@ -1324,11 +1351,30 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_nil_node().is_some() => ExprNode::Lit { value: Literal::Nil },
         n if n.as_statements_node().is_some() => {
             let stmts = n.as_statements_node().unwrap();
-            let exprs: Vec<Expr> = stmts
-                .body()
-                .iter()
-                .map(|s| ingest_expr(&s, file))
-                .collect::<IngestResult<_>>()?;
+            // The StatementsNode's own location slice is the source for
+            // all its children — its bytes let us detect blank-line
+            // separators between consecutive stmts without threading the
+            // whole source string through every ingest call.
+            let block_loc = stmts.location();
+            let block_start = block_loc.start_offset();
+            let block_bytes = block_loc.as_slice();
+
+            let body_nodes: Vec<Node<'_>> = stmts.body().iter().collect();
+            let mut exprs: Vec<Expr> = Vec::with_capacity(body_nodes.len());
+            let mut prev_end: Option<usize> = None;
+            for child in &body_nodes {
+                let child_start = child.location().start_offset();
+                let mut expr = ingest_expr(child, file)?;
+                if let Some(pe) = prev_end {
+                    let from = pe - block_start;
+                    let to = child_start - block_start;
+                    if slice_has_blank_line(block_bytes, from, to) {
+                        expr.leading_blank_line = true;
+                    }
+                }
+                exprs.push(expr);
+                prev_end = Some(child.location().end_offset());
+            }
             if exprs.len() == 1 {
                 return Ok(exprs.into_iter().next().unwrap());
             }
@@ -1550,18 +1596,30 @@ fn bool_op_surface(op_bytes: &[u8]) -> BoolOpSurface {
 }
 
 /// Detect the surface form of an array literal from its opening token:
-/// `%i[` → PercentI, `%w[` → PercentW, else Brackets.
+/// `%i[` → PercentI, `%w[` → PercentW, else Brackets (with padding
+/// detected from the gap between opener and first element).
 fn array_style_from(arr: &ruby_prism::ArrayNode<'_>) -> crate::expr::ArrayStyle {
     use crate::expr::ArrayStyle;
     let Some(loc) = arr.opening_loc() else { return ArrayStyle::Brackets };
     let bytes = loc.as_slice();
     if bytes.starts_with(b"%i") || bytes.starts_with(b"%I") {
-        ArrayStyle::PercentI
-    } else if bytes.starts_with(b"%w") || bytes.starts_with(b"%W") {
-        ArrayStyle::PercentW
-    } else {
-        ArrayStyle::Brackets
+        return ArrayStyle::PercentI;
     }
+    if bytes.starts_with(b"%w") || bytes.starts_with(b"%W") {
+        return ArrayStyle::PercentW;
+    }
+    // Bare brackets — padded `[ x, y ]` vs tight `[x, y]`. Detected by
+    // comparing the opening's end-offset to the first element's start.
+    // An empty array (`[]`) has no first element; default to tight
+    // brackets since padding is only visually meaningful with content.
+    if let Some(first) = arr.elements().iter().next() {
+        let opener_end = loc.end_offset();
+        let first_start = first.location().start_offset();
+        if first_start > opener_end {
+            return ArrayStyle::BracketsSpaced;
+        }
+    }
+    ArrayStyle::Brackets
 }
 
 fn hash_entries_from(

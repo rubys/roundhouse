@@ -16,11 +16,17 @@ pub struct Expr {
     pub node: Box<ExprNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ty: Option<Ty>,
+    /// Set when this Expr is a `Seq` member whose source was preceded
+    /// by a blank line. Meaningless outside that context; emit honors
+    /// it when walking a `Seq` body. Populated from source offsets
+    /// at ingest time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub leading_blank_line: bool,
 }
 
 impl Expr {
     pub fn new(span: Span, node: ExprNode) -> Self {
-        Self { span, node: Box::new(node), ty: None }
+        Self { span, node: Box::new(node), ty: None, leading_blank_line: false }
     }
 }
 
@@ -29,12 +35,18 @@ fn default_true() -> bool { true }
 /// Surface form of an array literal. Source fidelity: `[:a, :b]` (Brackets),
 /// `%i[a b]` (PercentI, symbol list), `%w[a b]` (PercentW, word list) all
 /// produce the same Prism `ArrayNode` but differ byte-for-byte in source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ArrayStyle {
     /// `[elem, elem, ...]` — the common form.
     #[default]
     Brackets,
+    /// `[ elem, elem, ... ]` — brackets with a space between each
+    /// bracket and the first / last element. Rails scaffolds emit
+    /// literals this way in a few places (e.g. `params.expect(article:
+    /// [ :title, :body ])`). Round-trip only; semantically identical
+    /// to `Brackets`.
+    BracketsSpaced,
     /// `%i[sym sym ...]` — symbol-list literal. Elements must be bare symbols.
     PercentI,
     /// `%w[word word ...]` — word-list literal. Elements must be bare strings.

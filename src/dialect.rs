@@ -424,6 +424,14 @@ pub struct Filter {
     pub target: Symbol,
     pub only: Vec<Symbol>,
     pub except: Vec<Symbol>,
+    /// Surface style of `only: [...]` — brackets (`[:a, :b]`) vs
+    /// `%i[a b]`. Only meaningful when `only` is non-empty.
+    #[serde(default)]
+    pub only_style: crate::expr::ArrayStyle,
+    /// Surface style of `except: [...]`. Only meaningful when
+    /// `except` is non-empty.
+    #[serde(default)]
+    pub except_style: crate::expr::ArrayStyle,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

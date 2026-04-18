@@ -353,10 +353,22 @@ fn emit_method(out: &mut String, m: &MethodDef, indent: usize) {
         format!("({})", ps.join(", "))
     };
     writeln!(out, "{pad}def {prefix}{}{}", m.name, params).unwrap();
-    for line in emit_expr(&m.body).lines() {
-        writeln!(out, "{pad}  {line}").unwrap();
-    }
+    emit_indented_body(out, &emit_expr(&m.body), indent + 1);
     writeln!(out, "{pad}end").unwrap();
+}
+
+/// Write `body_text` line-by-line at `indent_depth * 2` spaces of indent.
+/// Empty lines emit as bare `"\n"` (no trailing whitespace) — matches
+/// scaffold conventions and keeps source-equivalence happy.
+fn emit_indented_body(out: &mut String, body_text: &str, indent_depth: usize) {
+    let pad = "  ".repeat(indent_depth);
+    for line in body_text.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "{pad}{line}").unwrap();
+        }
+    }
 }
 
 // Controllers ------------------------------------------------------------
@@ -371,23 +383,31 @@ fn emit_controller(c: &Controller) -> EmittedFile {
     );
     writeln!(s, "class {} < {parent}", c.name).unwrap();
 
+    // Rails scaffolds indent methods that appear *after* the `private`
+    // marker by an extra level (4 spaces instead of 2). The extra
+    // indent is cosmetic — Ruby's visibility semantics don't care —
+    // but reproducing it is required for byte-for-byte round-trip.
+    let mut past_private = false;
     for item in c.body.iter() {
+        let indent_depth = if past_private { 2 } else { 1 };
+        let indent = "  ".repeat(indent_depth);
         if item.leading_blank_line() {
             writeln!(s).unwrap();
         }
-        emit_leading_comments(&mut s, item.leading_comments(), 1);
+        emit_leading_comments(&mut s, item.leading_comments(), indent_depth);
         match item {
             ControllerBodyItem::Filter { filter, .. } => {
-                writeln!(s, "  {}", emit_filter(filter)).unwrap();
+                writeln!(s, "{indent}{}", emit_filter(filter)).unwrap();
             }
             ControllerBodyItem::Action { action, .. } => {
-                emit_action(&mut s, action, 1);
+                emit_action(&mut s, action, indent_depth);
             }
             ControllerBodyItem::PrivateMarker { .. } => {
                 writeln!(s, "  private").unwrap();
+                past_private = true;
             }
             ControllerBodyItem::Unknown { expr, .. } => {
-                writeln!(s, "  {}", emit_expr(expr)).unwrap();
+                writeln!(s, "{indent}{}", emit_expr(expr)).unwrap();
             }
         }
     }
@@ -411,12 +431,13 @@ fn emit_filter(f: &Filter) -> String {
     };
     let mut opts = Vec::new();
     if !f.only.is_empty() {
-        let os: Vec<String> = f.only.iter().map(|s| format!(":{s}")).collect();
-        opts.push(format!("only: [{}]", os.join(", ")));
+        opts.push(format!("only: {}", emit_symbol_list(&f.only, f.only_style)));
     }
     if !f.except.is_empty() {
-        let os: Vec<String> = f.except.iter().map(|s| format!(":{s}")).collect();
-        opts.push(format!("except: [{}]", os.join(", ")));
+        opts.push(format!(
+            "except: {}",
+            emit_symbol_list(&f.except, f.except_style)
+        ));
     }
     if opts.is_empty() {
         format!("{name} :{}", f.target)
@@ -425,12 +446,37 @@ fn emit_filter(f: &Filter) -> String {
     }
 }
 
+/// Emit a list of symbols in its source form. `%i[a b]` uses space
+/// separation and bare names; `[:a, :b]` uses comma separation with
+/// `:` prefixes. `%i` lists in Rails scaffolds conventionally pad
+/// with a single space after the opener (`%i[ show edit ]`).
+fn emit_symbol_list(syms: &[Symbol], style: crate::expr::ArrayStyle) -> String {
+    use crate::expr::ArrayStyle;
+    match style {
+        ArrayStyle::Brackets => {
+            let parts: Vec<String> = syms.iter().map(|s| format!(":{s}")).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        ArrayStyle::BracketsSpaced => {
+            let parts: Vec<String> = syms.iter().map(|s| format!(":{s}")).collect();
+            format!("[ {} ]", parts.join(", "))
+        }
+        ArrayStyle::PercentI => {
+            let parts: Vec<String> = syms.iter().map(|s| s.to_string()).collect();
+            format!("%i[ {} ]", parts.join(" "))
+        }
+        ArrayStyle::PercentW => {
+            // `%w` on a symbol list doesn't make Ruby sense; fall back to brackets.
+            let parts: Vec<String> = syms.iter().map(|s| format!(":{s}")).collect();
+            format!("[{}]", parts.join(", "))
+        }
+    }
+}
+
 fn emit_action(out: &mut String, a: &Action, indent: usize) {
     let pad = "  ".repeat(indent);
     writeln!(out, "{pad}def {}", a.name).unwrap();
-    for line in emit_expr(&a.body).lines() {
-        writeln!(out, "{pad}  {line}").unwrap();
-    }
+    emit_indented_body(out, &emit_expr(&a.body), indent + 1);
     if let Some(line) = emit_render(&a.renders) {
         writeln!(out, "{pad}  {line}").unwrap();
     }
@@ -784,7 +830,17 @@ fn emit_node(n: &ExprNode) -> String {
             s
         }
         ExprNode::Seq { exprs } => {
-            exprs.iter().map(emit_expr).collect::<Vec<_>>().join("\n")
+            let mut out = String::new();
+            for (i, e) in exprs.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                    if e.leading_blank_line {
+                        out.push('\n');
+                    }
+                }
+                out.push_str(&emit_expr(e));
+            }
+            out
         }
         ExprNode::Assign { target, value } => {
             format!("{} = {}", emit_lvalue(target), emit_expr(value))
@@ -852,6 +908,14 @@ fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {
         ArrayStyle::Brackets => {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();
             format!("[{}]", parts.join(", "))
+        }
+        ArrayStyle::BracketsSpaced => {
+            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            if parts.is_empty() {
+                "[]".to_string()
+            } else {
+                format!("[ {} ]", parts.join(", "))
+            }
         }
         ArrayStyle::PercentI => {
             // Symbol list: elements must be symbol literals. Emit bare names
