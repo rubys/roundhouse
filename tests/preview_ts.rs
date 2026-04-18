@@ -38,9 +38,7 @@ fn dump_tiny_blog_elixir() {
 #[ignore]
 fn dump_real_blog_ts() {
     for f in typescript::emit(&analyzed("fixtures/real-blog")) {
-        if f.path.starts_with("app/models/") {
-            println!("// ======= {} =======", f.path.display());
-            println!("{}", f.content);
-        }
+        println!("// ======= {} =======", f.path.display());
+        println!("{}", f.content);
     }
 }

@@ -351,15 +351,59 @@ fn controller_new_action_is_reserved_word_escaped() {
 }
 
 #[test]
-fn routes_dispatch_table_has_every_route() {
-    let app = analyzed_app();
+fn routes_emit_router_method_calls() {
+    // Use the real-blog fixture so we exercise `root` +
+    // `resources` + nested resources — tiny-blog is all explicit verbs.
+    let mut app = roundhouse::ingest::ingest_app(
+        std::path::Path::new("fixtures/real-blog"),
+    )
+    .expect("ingest real-blog");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let files = typescript::emit(&app);
     let content = find(&files, "src/routes.ts");
-    assert!(content.contains("export interface Route {"), "got:\n{content}");
-    assert!(content.contains("export const routes: Route[] = ["), "got:\n{content}");
-    // tiny-blog declares four explicit verb routes; each shows up as a row.
-    assert!(content.contains("method: \"GET\""), "got:\n{content}");
-    assert!(content.contains("path: \"/posts\""), "got:\n{content}");
-    assert!(content.contains("controller: \"PostsController\""), "got:\n{content}");
-    assert!(content.contains("action: \"index\""), "got:\n{content}");
+
+    // Router + controller imports at the top.
+    assert!(
+        content.contains("import { Router } from \"juntos\";"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains(
+            "import { ArticlesController } from \"../app/controllers/articles_controller.js\";"
+        ),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains(
+            "import { CommentsController } from \"../app/controllers/comments_controller.js\";"
+        ),
+        "got:\n{content}"
+    );
+
+    // `root "articles#index"` → Router.root("/", ArticlesController, "index").
+    assert!(
+        content.contains("Router.root(\"/\", ArticlesController, \"index\");"),
+        "got:\n{content}"
+    );
+
+    // Top-level resources + nested resources.
+    assert!(
+        content.contains(
+            "Router.resources(\"articles\", ArticlesController, {nested: [{name: \"comments\", controller: CommentsController, only: [\"create\", \"destroy\"]}]});"
+        ),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn controllers_export_namespace_object() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // Router dispatches via `PostsController.<action>`; controller file
+    // exports this namespace object alongside the individual functions.
+    assert!(
+        content.contains("export const PostsController = { index, show, create, destroy };"),
+        "got:\n{content}"
+    );
 }
