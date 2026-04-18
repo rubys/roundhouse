@@ -71,3 +71,32 @@ fn tiny_blog_cargo_check_passes() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+#[test]
+#[ignore]
+fn real_blog_cargo_test_passes() {
+    // Phase 2b forcing function: emit real-blog, run cargo test
+    // against the generated project, assert the non-ignored model
+    // tests pass. Two tests are marked #[ignore] because they need
+    // persistence runtime (Phase 3); the rest should pass cleanly.
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog");
+    generate_project(fixture, &scratch);
+
+    let output = Command::new("cargo")
+        .arg("test")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo test");
+
+    assert!(
+        output.status.success(),
+        "cargo test failed on emitted real-blog project at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}

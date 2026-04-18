@@ -119,12 +119,14 @@ fn emitted_rust_output_is_stable() {
 
 use crate::runtime;
 
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Comment {
     pub id: i64,
     pub body: String,
     pub post_id: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Post {
     pub id: i64,
     pub title: String,
@@ -141,6 +143,10 @@ impl Post {
             errors.push(runtime::ValidationError::new(\"title\", \"can't be blank\"));
         }
         errors
+    }
+
+    pub fn save(&self) -> bool {
+        self.validate().is_empty()
     }
 }
 ";

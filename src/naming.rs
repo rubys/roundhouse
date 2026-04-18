@@ -47,15 +47,29 @@ pub fn pluralize_snake(class_name: &str) -> String {
 }
 
 pub fn singularize(plural: &str) -> String {
-    if let Some(s) = plural.strip_suffix("ies") {
-        format!("{s}y")
-    } else if let Some(s) = plural.strip_suffix("es") {
-        s.to_string()
-    } else if let Some(s) = plural.strip_suffix('s') {
-        s.to_string()
-    } else {
-        plural.to_string()
+    if let Some(stem) = plural.strip_suffix("ies") {
+        return format!("{stem}y");
     }
+    // "es" strips only when the stem ends in a sibilant (s, x, z) or a
+    // sibilant digraph (sh, ch). Otherwise fall through to plain "s"
+    // strip: "articles" → "article" (stem "articl" not sibilant),
+    // "boxes" → "box" (stem "box" sibilant), "buses" → "bus" (stem "bus"
+    // sibilant).
+    if let Some(stem) = plural.strip_suffix("es") {
+        let sibilant = stem.ends_with('s')
+            || stem.ends_with('x')
+            || stem.ends_with('z')
+            || stem.ends_with("sh")
+            || stem.ends_with("ch");
+        if sibilant {
+            return stem.to_string();
+        }
+        // Otherwise fall through — "es" was coincidental; just strip "s".
+    }
+    if let Some(s) = plural.strip_suffix('s') {
+        return s.to_string();
+    }
+    plural.to_string()
 }
 
 pub fn singularize_camelize(plural_symbol: &str) -> String {
