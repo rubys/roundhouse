@@ -20,10 +20,26 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::naming::snake_case;
 use crate::ty::Ty;
 
+/// Source of the hand-written Roundhouse Rust runtime. Pulled in at
+/// compile time from `runtime/rust/runtime.rs` so the file stays
+/// editable as normal Rust (with its own tests, rust-analyzer support,
+/// etc.) rather than living as a string constant here. When the
+/// emitter runs, this string is copied verbatim into the generated
+/// project's `src/runtime.rs`.
+const RUNTIME_SOURCE: &str = include_str!("../../runtime/rust/runtime.rs");
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.models.is_empty() {
         files.push(emit_models(app));
+        // The runtime tags along whenever any model is emitted —
+        // every non-trivial app references at least
+        // `crate::runtime::ValidationError` through the lowered
+        // validation evaluator.
+        files.push(EmittedFile {
+            path: PathBuf::from("src/runtime.rs"),
+            content: RUNTIME_SOURCE.to_string(),
+        });
     }
     for controller in &app.controllers {
         files.push(emit_controller(controller));

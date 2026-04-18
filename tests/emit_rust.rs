@@ -27,6 +27,59 @@ fn emits_a_models_file() {
 }
 
 #[test]
+fn runtime_is_emitted_alongside_models() {
+    // The generated `src/models.rs` references `crate::runtime::
+    // ValidationError`; the runtime file has to ship with it so the
+    // project compiles. It's copied verbatim from the hand-written
+    // source under `runtime/rust/`.
+    let app = ingest_app(fixture_path()).expect("ingest");
+    let files = rust::emit(&app);
+    let runtime = files
+        .iter()
+        .find(|f| f.path == PathBuf::from("src/runtime.rs"))
+        .expect("runtime file should be emitted when any model is emitted");
+    assert!(
+        runtime.content.contains("pub struct ValidationError"),
+        "got:\n{}",
+        runtime.content
+    );
+    assert!(
+        runtime
+            .content
+            .contains("pub fn new(field: &str, message: &str) -> Self"),
+        "got:\n{}",
+        runtime.content
+    );
+    assert!(
+        runtime.content.contains("pub fn full_message(&self) -> String"),
+        "got:\n{}",
+        runtime.content
+    );
+}
+
+#[test]
+fn runtime_compiles_as_rust() {
+    // The runtime source is `include_str!`d at compile time from
+    // `runtime/rust/runtime.rs`. If that file ever stops being valid
+    // Rust, the build of *this crate* fails, which is a strong enough
+    // check for most changes. The inline `#[cfg(test)]` tests inside
+    // runtime.rs itself aren't run by our test harness (they're not
+    // compiled into *our* crate — they're part of the string), so
+    // this stub just pins the file's presence and non-emptiness.
+    let app = ingest_app(fixture_path()).expect("ingest");
+    let files = rust::emit(&app);
+    let runtime = files
+        .iter()
+        .find(|f| f.path == PathBuf::from("src/runtime.rs"))
+        .unwrap();
+    assert!(!runtime.content.is_empty());
+    // The include_str! preserves the file verbatim including the
+    // `#[cfg(test)] mod tests` block, which means a generated project
+    // running `cargo test` also exercises the runtime's own tests.
+    assert!(runtime.content.contains("#[cfg(test)]"));
+}
+
+#[test]
 fn post_struct_is_emitted() {
     let app = ingest_app(fixture_path()).expect("ingest");
     let files = rust::emit(&app);
