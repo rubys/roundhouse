@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::dialect::{Controller, Model, RouteTable, TestModule, View};
+use crate::dialect::{Controller, Fixture, Model, RouteTable, TestModule, View};
 use crate::schema::Schema;
 
 /// The top-level IR: a Rails application as data. This is the serializable
@@ -15,6 +15,8 @@ pub struct App {
     pub views: Vec<View>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_modules: Vec<TestModule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<Fixture>,
 }
 
 impl App {
@@ -29,6 +31,7 @@ impl App {
             routes: RouteTable::default(),
             views: Vec::new(),
             test_modules: Vec::new(),
+            fixtures: Vec::new(),
         }
     }
 }

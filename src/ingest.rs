@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use ruby_prism::{Node, parse};
 
 use crate::dialect::{
-    Action, Comment, Controller, ControllerBodyItem, HttpMethod, Model, ModelBodyItem,
+    Action, Comment, Controller, ControllerBodyItem, Fixture, HttpMethod, Model, ModelBodyItem,
     RenderTarget, RouteSpec, RouteTable, Test, TestModule, View,
 };
 use crate::erb;
@@ -127,7 +127,34 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         }
     }
 
+    // YAML fixtures — `test/fixtures/*.yml`. The file stem is conventionally
+    // the table name (articles.yml → articles). Values are kept as strings;
+    // emitters interpret per column type and resolve Rails fixture-reference
+    // shorthand (`article: one` → id of the `one` fixture in articles).
+    let fixtures_dir = dir.join("test/fixtures");
+    if fixtures_dir.is_dir() {
+        for entry in read_yml_files(&fixtures_dir)? {
+            let source = std::fs::read(&entry)?;
+            let fixture = ingest_fixture_file(&source, &entry)?;
+            app.fixtures.push(fixture);
+        }
+    }
+
     Ok(app)
+}
+
+fn read_yml_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("yml") | Some("yaml") => out.push(path),
+            _ => {}
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn read_erb_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
@@ -265,6 +292,65 @@ fn ingest_test_declaration(
     };
 
     Ok(Some(Test { name, body }))
+}
+
+/// Ingest a `test/fixtures/<name>.yml` file. The top-level YAML is a
+/// mapping of label → field map (e.g. `one: { title: "...", body: "..." }`).
+/// Field values are parsed as strings regardless of YAML scalar type —
+/// emitters handle per-column-type coercion and fixture-reference
+/// resolution (Rails's `article: one` shorthand).
+pub fn ingest_fixture_file(
+    source: &[u8],
+    path: &Path,
+) -> IngestResult<Fixture> {
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| IngestError::Unsupported {
+            file: path.display().to_string(),
+            message: "fixture file has no stem".into(),
+        })?;
+
+    // Parse as a nested mapping of String → String → YAML scalar. We
+    // stringify scalars at load time so the IR representation stays
+    // format-simple; round-trip tests catch any precision loss by
+    // comparing re-ingested YAML.
+    let raw: IndexMap<String, IndexMap<String, serde_yaml_ng::Value>> =
+        serde_yaml_ng::from_slice(source).map_err(|e| IngestError::Parse {
+            file: path.display().to_string(),
+            message: format!("yaml: {e}"),
+        })?;
+
+    let mut records: IndexMap<Symbol, IndexMap<Symbol, String>> = IndexMap::new();
+    for (label, fields) in raw {
+        let mut field_map: IndexMap<Symbol, String> = IndexMap::new();
+        for (k, v) in fields {
+            let s = yaml_scalar_as_string(&v).ok_or_else(|| IngestError::Unsupported {
+                file: path.display().to_string(),
+                message: format!("fixture field {label}.{k} is not a scalar"),
+            })?;
+            field_map.insert(Symbol::from(k), s);
+        }
+        records.insert(Symbol::from(label), field_map);
+    }
+
+    Ok(Fixture {
+        name: Symbol::from(name),
+        records,
+    })
+}
+
+fn yaml_scalar_as_string(v: &serde_yaml_ng::Value) -> Option<String> {
+    match v {
+        serde_yaml_ng::Value::String(s) => Some(s.clone()),
+        serde_yaml_ng::Value::Number(n) => Some(n.to_string()),
+        serde_yaml_ng::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml_ng::Value::Null => Some(String::new()),
+        // Nested maps/sequences aren't used in the fixtures we handle;
+        // return None so the caller can error cleanly.
+        serde_yaml_ng::Value::Mapping(_) | serde_yaml_ng::Value::Sequence(_) => None,
+        serde_yaml_ng::Value::Tagged(t) => yaml_scalar_as_string(&t.value),
+    }
 }
 
 /// Parse a Ruby source program (possibly multiple top-level statements)

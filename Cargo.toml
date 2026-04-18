@@ -11,5 +11,6 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 indexmap = { version = "2", features = ["serde"] }
 ruby-prism = "1.9.0"

@@ -109,6 +109,7 @@ fn tiny_blog_round_trips() {
         routes,
         views: vec![],
         test_modules: vec![],
+        fixtures: vec![],
     };
 
     let json = serde_json::to_string_pretty(&app).expect("serialize");

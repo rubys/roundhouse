@@ -599,7 +599,14 @@ pub fn rust_ty(ty: &Ty) -> String {
             // Real answer: emit an enum. Landing when a fixture demands it.
             "Box<dyn std::any::Any>".to_string()
         }),
-        Ty::Class { id, .. } => id.0.to_string(),
+        Ty::Class { id, .. } => match id.0.as_str() {
+            // Schema Date/DateTime/Time columns carry Ty::Class(Time); map
+            // to String for now so models emit compilable Rust. A future
+            // step with a chrono/time dep can upgrade this to a real
+            // DateTime type.
+            "Time" => "String".to_string(),
+            other => other.to_string(),
+        },
         Ty::Fn { .. } => "Box<dyn Fn()>".to_string(),
         Ty::Var { .. } => "()".to_string(),
     }

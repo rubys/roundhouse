@@ -572,3 +572,17 @@ pub struct Test {
     pub name: String,
     pub body: Expr,
 }
+
+/// A `test/fixtures/<name>.yml` file. `name` is the file stem
+/// (`articles`, `comments`) — conventionally matches the table name.
+/// `records` preserves the label→fields mapping order from the source;
+/// values stay as strings since Rails YAML fixtures rarely type-tag
+/// them and emitters can interpret per column type. Fixture-to-fixture
+/// references (Rails's `article: one` shorthand for "id of the `one`
+/// fixture in articles") are preserved verbatim as strings — the
+/// resolver is an emit-time concern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fixture {
+    pub name: Symbol,
+    pub records: IndexMap<Symbol, IndexMap<Symbol, String>>,
+}

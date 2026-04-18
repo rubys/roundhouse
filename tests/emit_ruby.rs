@@ -102,6 +102,7 @@ fn tiny_blog() -> App {
         routes,
         views: vec![],
         test_modules: vec![],
+        fixtures: vec![],
     }
 }
 

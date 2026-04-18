@@ -179,6 +179,50 @@ fn model_tests_ingest_into_test_modules() {
 }
 
 #[test]
+fn fixtures_ingest_into_app() {
+    // real-blog has two YAML fixture files under test/fixtures/.
+    // Each should land in app.fixtures with records preserving label
+    // order and field values as strings.
+    let app = ingest_app(fixture_path()).expect("ingest");
+
+    let names: Vec<&str> = app.fixtures.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"articles") && names.contains(&"comments"),
+        "expected articles and comments fixtures; got {:?}",
+        names
+    );
+
+    let articles = app
+        .fixtures
+        .iter()
+        .find(|f| f.name.as_str() == "articles")
+        .expect("articles fixture");
+    let one = articles
+        .records
+        .get(&roundhouse::Symbol::from("one"))
+        .expect("articles: one");
+    assert_eq!(
+        one.get(&roundhouse::Symbol::from("title")).map(|s| s.as_str()),
+        Some("Getting Started with Rails"),
+    );
+    // Fixture-reference shorthand stays as a string in the IR —
+    // resolution is an emit-time concern.
+    let comments = app
+        .fixtures
+        .iter()
+        .find(|f| f.name.as_str() == "comments")
+        .expect("comments fixture");
+    let one_c = comments
+        .records
+        .get(&roundhouse::Symbol::from("one"))
+        .expect("comments: one");
+    assert_eq!(
+        one_c.get(&roundhouse::Symbol::from("article")).map(|s| s.as_str()),
+        Some("one"),
+    );
+}
+
+#[test]
 fn ir_is_fixed_under_emit_ingest() {
     let original = ingest_app(fixture_path()).expect("ingest original");
 

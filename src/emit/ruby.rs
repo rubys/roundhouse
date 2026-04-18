@@ -10,8 +10,8 @@ use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
     Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
-    HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, RouteSpec, RouteTable, Scope,
-    TestModule, Validation, ValidationRule,
+    Fixture, HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, RouteSpec, RouteTable,
+    Scope, TestModule, Validation, ValidationRule,
 };
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::{ClassId, Symbol};
@@ -35,6 +35,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
     for tm in &app.test_modules {
         files.push(emit_test_module(tm));
+    }
+    for fixture in &app.fixtures {
+        files.push(emit_fixture(fixture));
     }
     files
 }
@@ -512,6 +515,32 @@ fn emit_view(view: &crate::dialect::View) -> EmittedFile {
     ));
     let content = reconstruct_erb(&view.body);
     EmittedFile { path, content }
+}
+
+fn emit_fixture(fixture: &Fixture) -> EmittedFile {
+    // Rebuild the YAML via serde_yaml_ng so the round-trip stays clean.
+    // Our IR stores all values as strings; serde_yaml_ng emits them
+    // unquoted where possible, matching Rails's stylistic default.
+    let mut outer = serde_yaml_ng::Mapping::new();
+    for (label, fields) in &fixture.records {
+        let mut inner = serde_yaml_ng::Mapping::new();
+        for (k, v) in fields {
+            inner.insert(
+                serde_yaml_ng::Value::String(k.as_str().to_string()),
+                serde_yaml_ng::Value::String(v.clone()),
+            );
+        }
+        outer.insert(
+            serde_yaml_ng::Value::String(label.as_str().to_string()),
+            serde_yaml_ng::Value::Mapping(inner),
+        );
+    }
+    let content = serde_yaml_ng::to_string(&serde_yaml_ng::Value::Mapping(outer))
+        .unwrap_or_default();
+    EmittedFile {
+        path: PathBuf::from(format!("test/fixtures/{}.yml", fixture.name)),
+        content,
+    }
 }
 
 fn emit_test_module(tm: &TestModule) -> EmittedFile {
