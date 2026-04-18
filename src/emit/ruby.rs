@@ -746,7 +746,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
-        ExprNode::Lambda { params, block_param, body } => {
+        ExprNode::Lambda { params, block_param, body, .. } => {
             let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
             if let Some(b) = block_param { ps.push(format!("&{b}")); }
             if ps.is_empty() {
@@ -967,19 +967,37 @@ fn emit_send_base(
     }
 }
 
-/// Emit a `Send + block` in plain Ruby form (`recv.method(args) do |p| body end`).
-/// Used in normal Ruby emission. Template reconstruction has its own path.
+/// Emit a `Send + block` in plain Ruby form. Honors the Lambda's
+/// `block_style` to pick `{ … }` vs `do … end`. `{ }` emits a single-line
+/// body; `do … end` spans multiple lines when the body has newlines.
 fn emit_do_block(base: &str, block: &Expr) -> String {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    use crate::expr::BlockStyle;
+    let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
         return format!("{base} {{ {} }}", emit_expr(block));
     };
-    let params_clause = if params.is_empty() {
-        "do".to_string()
+    let body_str = emit_expr(body);
+    let params_str = if params.is_empty() {
+        String::new()
     } else {
         let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-        format!("do |{}|", ps.join(", "))
+        format!(" |{}|", ps.join(", "))
     };
-    let body_str = emit_expr(body);
+    match block_style {
+        BlockStyle::Brace => {
+            // Single-line brace form — the common use for one-liner
+            // callbacks and small block args.
+            format!("{base} {{{params_str} {body_str} }}")
+        }
+        BlockStyle::Do => emit_do_form(base, &params_str, &body_str),
+    }
+}
+
+fn emit_do_form(base: &str, params_str: &str, body_str: &str) -> String {
+    let params_clause = if params_str.is_empty() {
+        "do".to_string()
+    } else {
+        format!("do{params_str}")
+    };
     if body_str.contains('\n') {
         format!(
             "{base} {}\n{}\nend",

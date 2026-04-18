@@ -44,6 +44,7 @@ const EXPECTED_RUBY_FILES: &[&str] = &[
     "app/controllers/application_controller.rb",
     "app/models/application_record.rb",
     "app/models/article.rb",
+    "app/models/comment.rb",
     "config/routes.rb",
 ];
 

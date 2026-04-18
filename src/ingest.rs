@@ -1398,7 +1398,11 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(b) => ingest_expr(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
-            ExprNode::Lambda { params, block_param: None, body }
+            // `->(x) { body }` literals always use brace form (Prism's
+            // opening_loc is `{`); `->(x) do body end` exists but isn't
+            // idiomatic and doesn't appear in any fixture yet.
+            let block_style = block_style_from_opening(l.opening_loc().as_slice());
+            ExprNode::Lambda { params, block_param: None, body, block_style }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();
@@ -1504,10 +1508,22 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Some(Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { params, block_param: None, body },
+        ExprNode::Lambda { params, block_param: None, body, block_style },
     )))
+}
+
+/// Classify a block's `opening_loc` bytes as `{` (brace form) or `do`.
+/// Prism always populates this location with the source-literal opener.
+fn block_style_from_opening(bytes: &[u8]) -> crate::expr::BlockStyle {
+    use crate::expr::BlockStyle;
+    if bytes.starts_with(b"{") {
+        BlockStyle::Brace
+    } else {
+        BlockStyle::Do
+    }
 }
 
 fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {

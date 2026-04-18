@@ -92,6 +92,10 @@ Cleared (the fixture now fully ingests):
   Together with the comment work, this promoted
   `app/controllers/application_controller.rb` and
   `app/models/article.rb` onto the inclusion list.
+- **Block delimiter style** (`{ … }` vs `do … end`): preserved on
+  `ExprNode::Lambda` via a `BlockStyle` enum, detected from Prism's
+  `BlockNode.opening_loc` bytes. Promoted `app/models/comment.rb`
+  onto the inclusion list.
 
 Remaining (in rough priority order):
 
@@ -100,8 +104,6 @@ Remaining (in rough priority order):
    `after_create_commit { ... }` callbacks with attached blocks,
    plus blank-line / comment preservation between body entries
    (required for `article.rb` / `comment.rb` byte-for-byte).
-1. **Block delimiter preservation** — we don't yet track `{ ... }`
-   vs `do ... end`; re-emit always uses `do ... end`.
 1. **`params.expect(...)`** (Rails 8 strong-params) — works
    syntactically as a generic Send, but needs a recognizer for
    analyzer effect/shape.

@@ -41,6 +41,25 @@ pub enum ArrayStyle {
     PercentW,
 }
 
+/// Delimiter style for a block body.
+///
+/// Ruby's two block forms (`{ … }` and `do … end`) bind differently to
+/// chained method calls — `{ … }` binds tight, `do … end` binds to the
+/// leftmost call. That difference is surface-observable and sometimes
+/// semantically relevant, so we preserve whichever one the source used.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockStyle {
+    /// `do … end` (or no explicit delimiter context, e.g. lambda bodies
+    /// that emit as `->(x) { … }` where the brace is implicit in the
+    /// lambda form). The conservative default when style can't be
+    /// determined.
+    #[default]
+    Do,
+    /// `{ … }` — the tight-binding form; preferred for one-liners.
+    Brace,
+}
+
 /// Which short-circuit operator is meant.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +141,13 @@ pub enum ExprNode {
         params: Vec<Symbol>,
         block_param: Option<Symbol>,
         body: Expr,
+        /// Surface form when this Lambda represents a block attached to
+        /// a method call (`foo { ... }` vs `foo do ... end`) — or the
+        /// body delimiter of a `->` lambda (which is always braces in
+        /// Prism, so we default to `Brace` for lambda literals).
+        /// For round-trip fidelity; analyzer and typed targets ignore it.
+        #[serde(default)]
+        block_style: BlockStyle,
     },
     Apply { fun: Expr, args: Vec<Expr>, block: Option<Expr> },
     Send {

@@ -26,7 +26,7 @@ pub use dialect::{
     RenderTarget, Route, RouteSpec, RouteTable, Scope, Validation, ValidationRule, View,
 };
 pub use effect::{Effect, EffectSet};
-pub use expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
+pub use expr::{Arm, BlockStyle, Expr, ExprNode, LValue, Literal, Pattern};
 pub use ident::{ClassId, EffectVar, Symbol, TableRef, TyVar, VarId};
 pub use query::{ColumnExpr, JoinKind, OrderKey, Predicate, Query, ValueExpr};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};

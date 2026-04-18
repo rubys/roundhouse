@@ -297,6 +297,44 @@ fn literal_ingested_expr() {
 }
 
 #[test]
+fn block_delimiter_style_is_preserved() {
+    use roundhouse::{BlockStyle, ExprNode, ModelBodyItem};
+
+    // Two consecutive class-body calls with different block delimiters —
+    // the Ruby emitter uses the preserved style to pick `{ }` vs do…end.
+    let source = br#"
+class Widget < ApplicationRecord
+  after_create_commit { ping }
+  after_destroy_commit do
+    pong
+  end
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(model.body.len(), 2);
+
+    fn block_style_of(item: &ModelBodyItem) -> BlockStyle {
+        let ModelBodyItem::Unknown { expr, .. } = item else {
+            panic!("expected Unknown body item, got {item:?}");
+        };
+        let ExprNode::Send { block: Some(block), .. } = &*expr.node else {
+            panic!("expected Send-with-block");
+        };
+        let ExprNode::Lambda { block_style, .. } = &*block.node else {
+            panic!("expected Lambda block");
+        };
+        *block_style
+    }
+
+    assert!(matches!(block_style_of(&model.body[0]), BlockStyle::Brace));
+    assert!(matches!(block_style_of(&model.body[1]), BlockStyle::Do));
+}
+
+#[test]
 fn leading_comments_attach_to_class_body_items() {
     use roundhouse::ModelBodyItem;
 
