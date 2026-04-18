@@ -82,3 +82,32 @@ fn real_blog_crystal_build_passes() {
     generate_project(fixture, &scratch);
     assert_crystal_passes("real-blog", &scratch);
 }
+
+#[test]
+#[ignore]
+fn real_blog_crystal_spec_passes() {
+    // Phase 2 forcing function: emit real-blog, run `crystal spec`
+    // against the generated project, assert zero failures. A subset
+    // of tests are marked `pending` because they need persistence
+    // runtime (Phase 3); the rest should pass.
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog");
+    generate_project(fixture, &scratch);
+
+    let output = Command::new("crystal")
+        .arg("spec")
+        .arg("--no-color")
+        .current_dir(&scratch)
+        .output()
+        .expect("run crystal spec");
+
+    assert!(
+        output.status.success(),
+        "crystal spec failed on emitted real-blog at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
