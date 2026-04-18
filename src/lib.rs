@@ -13,6 +13,7 @@ pub mod erb;
 pub mod expr;
 pub mod ident;
 pub mod ingest;
+pub mod lower;
 pub mod naming;
 pub mod query;
 pub mod schema;
