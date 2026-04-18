@@ -132,7 +132,7 @@ pub struct Post {
 
 impl Post {
     pub fn normalize_title(&self) -> String {
-        title.strip()
+        self.title.trim().to_string()
     }
 
     pub fn validate(&self) -> Vec<runtime::ValidationError> {
