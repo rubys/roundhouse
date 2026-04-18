@@ -37,8 +37,12 @@ fn emits_expected_files() {
     // One file per model under app/models/, Rails-layout style.
     assert!(paths.contains(&"app/models/post.ts".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/models/comment.ts".to_string()), "got {paths:?}");
-    // Controllers + routes still flat for now — upgraded in later Phase 3 commits.
-    assert!(paths.contains(&"src/controllers.ts".to_string()), "got {paths:?}");
+    // One file per controller under app/controllers/, same convention.
+    assert!(
+        paths.contains(&"app/controllers/posts_controller.ts".to_string()),
+        "got {paths:?}"
+    );
+    // Routes still flat for now — upgraded in the next Phase 3 commit.
     assert!(paths.contains(&"src/routes.ts".to_string()), "got {paths:?}");
 }
 
@@ -266,19 +270,84 @@ fn model_methods_emit_with_return_types() {
 }
 
 #[test]
-fn controller_actions_are_async() {
+fn controllers_emit_as_module_of_exported_async_functions() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
-    let content = find(&files, "src/controllers.ts");
-    assert!(content.contains("export class PostsController {"), "got:\n{content}");
-    // Every action is emitted as `async <name>()`. Tiny-blog's
-    // PostsController has index / show / create / destroy.
-    for action in &["async index()", "async show()", "async create()", "async destroy()"] {
-        assert!(content.contains(action), "missing {action} in:\n{content}");
-    }
-    // Async methods wrap their return type in Promise<…>.
-    assert!(content.contains("Promise<void>"), "missing Promise<void> in:\n{content}");
-    assert!(content.contains("Promise<Post"), "missing Promise<Post…> in:\n{content}");
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // No class wrapper — each action is a top-level exported function.
+    assert!(!content.contains("export class"), "controllers shouldn't emit as classes:\n{content}");
+    // Read actions take just `context`; write actions take `context, params`.
+    assert!(
+        content.contains("export async function index(context)"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("export async function show(context)"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("export async function create(context, params)"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("export async function destroy(context)"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn controller_ivar_writes_become_let_rebinds() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // `@posts = Post.all` → `let posts = Post.all;`. The `@` dies.
+    assert!(content.contains("let posts = Post.all;"), "got:\n{content}");
+    assert!(!content.contains("@posts"), "should drop @:\n{content}");
+}
+
+#[test]
+fn controller_params_bracket_access_rewrites_to_context() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // `params[:id]` → `context.params.id`.
+    assert!(
+        content.contains("Post.find(context.params.id)"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn controller_new_action_is_reserved_word_escaped() {
+    // Build a minimal controller with a `new` action since tiny-blog
+    // doesn't have one. `new` is reserved in JS; ruby2js renames to `$new`.
+    use roundhouse::{
+        Action, ClassId, Controller, ControllerBodyItem, EffectSet, Expr, ExprNode, RenderTarget,
+        Row, Symbol,
+    };
+    use roundhouse::span::Span;
+    let mut app = roundhouse::App::new();
+    app.controllers.push(Controller {
+        name: ClassId(Symbol::from("WidgetsController")),
+        parent: None,
+        body: vec![ControllerBodyItem::Action {
+            action: Action {
+                name: Symbol::from("new"),
+                params: Row::closed(),
+                body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+                renders: RenderTarget::Inferred,
+                effects: EffectSet::pure(),
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/widgets_controller.ts");
+    assert!(
+        content.contains("export async function $new(context)"),
+        "got:\n{content}"
+    );
 }
 
 #[test]
