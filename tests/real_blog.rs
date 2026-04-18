@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app;
 
@@ -131,5 +132,65 @@ fn ir_is_fixed_under_emit_ingest() {
     assert_eq!(
         original, roundtripped,
         "IR diverged across Ruby emit + re-ingest"
+    );
+}
+
+// Type-analysis coverage forcing function ---------------------------------
+//
+// Runs the analyzer + diagnose() over every controller/model/view in
+// real-blog and asserts zero diagnostics. real-blog is the baseline
+// "basic MVC Rails app" — full analysis without annotations is the
+// promise, and this test enforces it.
+
+fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String) {
+    match &d.kind {
+        DiagnosticKind::IvarUnresolved { name } => {
+            ("IvarUnresolved".into(), format!("@{}", name.as_str()))
+        }
+        DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
+            let recv_descriptor = match recv_ty {
+                roundhouse::ty::Ty::Class { id, .. } => format!("Class({})", id.0.as_str()),
+                roundhouse::ty::Ty::Array { elem } => match &**elem {
+                    roundhouse::ty::Ty::Class { id, .. } => {
+                        format!("Array<Class({})>", id.0.as_str())
+                    }
+                    other => format!("Array<{other:?}>"),
+                },
+                roundhouse::ty::Ty::Hash { key, value } => {
+                    format!("Hash<{:?}, {:?}>", key, value)
+                }
+                other => format!("{other:?}"),
+            };
+            ("SendDispatchFailed".into(), format!("{}:{}", method.as_str(), recv_descriptor))
+        }
+    }
+}
+
+#[test]
+fn type_analysis_coverage() {
+    // real-blog is fully type-analyzable with no annotations. Every
+    // expression's ty is concrete, so diagnose() yields an empty list.
+    //
+    // When this starts failing, the delta is the work queue: either a
+    // new dialect gap surfaced (extend the registry in src/analyze.rs)
+    // or an existing registry entry stopped firing (the fixture changed
+    // shape). Keep this tight — the promise of "full analysis without
+    // annotations on a basic MVC blog" is only a promise if we enforce
+    // it on every commit.
+    let mut app = ingest_app(fixture_path()).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let diags = diagnose(&app);
+    assert!(
+        diags.is_empty(),
+        "real-blog has {} diagnostics (expected zero):\n{}",
+        diags.len(),
+        diags
+            .iter()
+            .map(|d| {
+                let (kind, detail) = diagnostic_signature(d);
+                format!("  {kind}: {detail}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
