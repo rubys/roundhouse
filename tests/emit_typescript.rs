@@ -34,32 +34,59 @@ fn emits_expected_files() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
-    assert!(paths.contains(&"src/models.ts".to_string()), "got {paths:?}");
+    // One file per model under app/models/, Rails-layout style.
+    assert!(paths.contains(&"app/models/post.ts".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/models/comment.ts".to_string()), "got {paths:?}");
+    // Controllers + routes still flat for now — upgraded in later Phase 3 commits.
     assert!(paths.contains(&"src/controllers.ts".to_string()), "got {paths:?}");
     assert!(paths.contains(&"src/routes.ts".to_string()), "got {paths:?}");
 }
 
 #[test]
-fn model_classes_are_typed() {
+fn models_extend_application_record() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
-    let content = find(&files, "src/models.ts");
-    // Each model becomes a class.
-    assert!(content.contains("export class Post {"), "got:\n{content}");
-    assert!(content.contains("export class Comment {"), "got:\n{content}");
-    // Schema-derived fields get camelCased TS names with type annotations.
-    assert!(content.contains("id: number;"), "got:\n{content}");
-    assert!(content.contains("title: string;"), "got:\n{content}");
-    assert!(content.contains("postId: number;"), "got:\n{content}");
+    let content = find(&files, "app/models/post.ts");
+    // Juntos ApplicationRecord import + extend.
+    assert!(
+        content.contains("import { ApplicationRecord } from \"juntos\";"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("export class Post extends ApplicationRecord {"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn models_declare_static_table_name_and_columns() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/post.ts");
+    assert!(content.contains("static table_name = \"posts\""), "got:\n{content}");
+    // `id` is excluded — Juntos handles the primary key universally.
+    assert!(content.contains("static columns = [\"title\"];"), "got:\n{content}");
+    assert!(!content.contains("\"id\""), "columns must omit id, got:\n{content}");
+}
+
+#[test]
+fn models_omit_instance_field_declarations() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/post.ts");
+    // Juntos materializes column accessors at runtime; declaring
+    // `title: string;` on the class would shadow them. The scaffold
+    // version did emit these — Phase 3 drops them.
+    assert!(!content.contains("title: string;"), "should not declare fields, got:\n{content}");
+    assert!(!content.contains("id: number;"), "should not declare id, got:\n{content}");
 }
 
 #[test]
 fn model_methods_emit_with_return_types() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
-    let content = find(&files, "src/models.ts");
-    // `normalize_title` in tiny-blog Post; it has a string body
-    // (title.strip), so the analyzer types it as string.
+    let content = find(&files, "app/models/post.ts");
+    // `normalize_title` in tiny-blog Post; analyzer types it as string.
     assert!(
         content.contains("normalizeTitle(): string"),
         "got:\n{content}"
