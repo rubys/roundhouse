@@ -47,11 +47,13 @@ fn models_extend_application_record() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/models/post.ts");
-    // Juntos ApplicationRecord import + extend.
+    // The import list starts with ApplicationRecord; associations add
+    // more symbols (checked separately). Test with a prefix match.
     assert!(
-        content.contains("import { ApplicationRecord } from \"juntos\";"),
+        content.contains("import { ApplicationRecord"),
         "got:\n{content}"
     );
+    assert!(content.contains("} from \"juntos\";"), "got:\n{content}");
     assert!(
         content.contains("export class Post extends ApplicationRecord {"),
         "got:\n{content}"
@@ -90,6 +92,74 @@ fn model_validations_emit_as_validate_method() {
     assert!(content.contains("validate() {"), "got:\n{content}");
     assert!(
         content.contains("this.validates_presence_of(\"title\")"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn has_many_association_emits_collection_proxy_getter() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    // tiny-blog's Post has `has_many :comments`.
+    let content = find(&files, "app/models/post.ts");
+    // Import expands when associations are present.
+    assert!(
+        content.contains("import { ApplicationRecord, CollectionProxy, modelRegistry } from \"juntos\";"),
+        "got:\n{content}"
+    );
+    // Getter body uses CollectionProxy and looks up target through the registry.
+    assert!(content.contains("get comments() {"), "got:\n{content}");
+    assert!(content.contains("type: \"has_many\""), "got:\n{content}");
+    assert!(content.contains("foreignKey: \"post_id\""), "got:\n{content}");
+    assert!(content.contains("modelRegistry.Comment"), "got:\n{content}");
+}
+
+#[test]
+fn belongs_to_association_emits_reference_getter() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    // tiny-blog's Comment has `belongs_to :post`.
+    let content = find(&files, "app/models/comment.ts");
+    assert!(
+        content.contains("import { ApplicationRecord, Reference, modelRegistry }"),
+        "got:\n{content}"
+    );
+    assert!(content.contains("get post() {"), "got:\n{content}");
+    assert!(
+        content.contains("new Reference(modelRegistry.Post, this.attributes.post_id)"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn optional_belongs_to_emits_ternary_guard() {
+    use roundhouse::{
+        Association, ClassId, Model, ModelBodyItem, Row, Symbol, TableRef,
+    };
+    let mut app = roundhouse::App::new();
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![ModelBodyItem::Association {
+            assoc: Association::BelongsTo {
+                name: Symbol::from("author"),
+                target: ClassId(Symbol::from("User")),
+                foreign_key: Symbol::from("author_id"),
+                optional: true,
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/article.ts");
+    // Optional belongs_to wraps the FK lookup in a ternary.
+    assert!(
+        content.contains(
+            "this.attributes.author_id ? new Reference(modelRegistry.User, this.attributes.author_id) : null"
+        ),
         "got:\n{content}"
     );
 }
