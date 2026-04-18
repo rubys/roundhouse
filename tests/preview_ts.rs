@@ -1,7 +1,8 @@
-//! Scratch: print emitted target output for tiny-blog.
+//! Scratch: print emitted target output for our fixtures.
 //! Run one of:
 //!   cargo test --test preview_ts dump_tiny_blog_ts     -- --ignored --nocapture
 //!   cargo test --test preview_ts dump_tiny_blog_elixir -- --ignored --nocapture
+//!   cargo test --test preview_ts dump_real_blog_ts     -- --ignored --nocapture
 
 use std::path::Path;
 
@@ -9,8 +10,8 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::emit::{elixir, typescript};
 use roundhouse::ingest::ingest_app;
 
-fn analyzed() -> roundhouse::App {
-    let mut app = ingest_app(Path::new("fixtures/tiny-blog")).expect("ingest");
+fn analyzed(fixture: &str) -> roundhouse::App {
+    let mut app = ingest_app(Path::new(fixture)).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     app
 }
@@ -18,7 +19,7 @@ fn analyzed() -> roundhouse::App {
 #[test]
 #[ignore]
 fn dump_tiny_blog_ts() {
-    for f in typescript::emit(&analyzed()) {
+    for f in typescript::emit(&analyzed("fixtures/tiny-blog")) {
         println!("// ======= {} =======", f.path.display());
         println!("{}", f.content);
     }
@@ -27,8 +28,19 @@ fn dump_tiny_blog_ts() {
 #[test]
 #[ignore]
 fn dump_tiny_blog_elixir() {
-    for f in elixir::emit(&analyzed()) {
+    for f in elixir::emit(&analyzed("fixtures/tiny-blog")) {
         println!("# ======= {} =======", f.path.display());
         println!("{}", f.content);
+    }
+}
+
+#[test]
+#[ignore]
+fn dump_real_blog_ts() {
+    for f in typescript::emit(&analyzed("fixtures/real-blog")) {
+        if f.path.starts_with("app/models/") {
+            println!("// ======= {} =======", f.path.display());
+            println!("{}", f.content);
+        }
     }
 }

@@ -165,6 +165,64 @@ fn optional_belongs_to_emits_ternary_guard() {
 }
 
 #[test]
+fn broadcasts_to_emits_turbo_callback_registrations() {
+    // real-blog's Article has
+    //   broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend
+    // We ingest the real-blog fixture directly so the IR shape
+    // matches the actual Rails source rather than a hand-built model.
+    let mut app = roundhouse::ingest::ingest_app(
+        std::path::Path::new("fixtures/real-blog"),
+    )
+    .expect("ingest real-blog");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let files = typescript::emit(&app);
+
+    // The Article model is emitted to app/models/article.ts.
+    let content = find(&files, "app/models/article.ts");
+
+    // inserts_by: :prepend → broadcastPrependTo on save.
+    assert!(
+        content.contains(
+            "Article.afterSave((record) => record.broadcastPrependTo(\"articles\"));"
+        ),
+        "got:\n{content}"
+    );
+    // Destroy always removes.
+    assert!(
+        content.contains(
+            "Article.afterDestroy((record) => record.broadcastRemoveTo(\"articles\"));"
+        ),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn broadcasts_to_rewrites_lambda_param_to_record() {
+    // real-blog's Comment has
+    //   broadcasts_to ->(comment) { "article_#{comment.article_id}_comments" }
+    // The lambda param (`comment`) is what's visible to the stream
+    // template; in the Juntos callback it's named `record`. Emit must
+    // rewrite the reference.
+    let mut app = roundhouse::ingest::ingest_app(
+        std::path::Path::new("fixtures/real-blog"),
+    )
+    .expect("ingest real-blog");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/comment.ts");
+    assert!(
+        content.contains("record.article_id"),
+        "expected `record.article_id` rewrite in:\n{content}"
+    );
+    // Comment uses `target: "comments"` — passed as the opts object
+    // second arg to broadcastAppendTo.
+    assert!(
+        content.contains("{ target: \"comments\" }"),
+        "expected target-opts hash in:\n{content}"
+    );
+}
+
+#[test]
 fn length_validation_emits_with_options_object() {
     // Construct an ad-hoc model with `validates :body, length: { minimum: 10 }`
     // to exercise the length-rule path (tiny-blog only has presence).
@@ -199,9 +257,10 @@ fn model_methods_emit_with_return_types() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/models/post.ts");
-    // `normalize_title` in tiny-blog Post; analyzer types it as string.
+    // Snake_case preserved for Rails-facing compat with Juntos;
+    // `normalize_title` stays `normalize_title`, not `normalizeTitle`.
     assert!(
-        content.contains("normalizeTitle(): string"),
+        content.contains("normalize_title(): string"),
         "got:\n{content}"
     );
 }
