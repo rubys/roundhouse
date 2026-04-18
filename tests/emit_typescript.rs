@@ -82,6 +82,49 @@ fn models_omit_instance_field_declarations() {
 }
 
 #[test]
+fn model_validations_emit_as_validate_method() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    // tiny-blog's Post has `validates :title, presence: true`.
+    let content = find(&files, "app/models/post.ts");
+    assert!(content.contains("validate() {"), "got:\n{content}");
+    assert!(
+        content.contains("this.validates_presence_of(\"title\")"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
+fn length_validation_emits_with_options_object() {
+    // Construct an ad-hoc model with `validates :body, length: { minimum: 10 }`
+    // to exercise the length-rule path (tiny-blog only has presence).
+    use roundhouse::{
+        ClassId, Model, ModelBodyItem, Row, Symbol, TableRef, Validation, ValidationRule,
+    };
+    let mut app = roundhouse::App::new();
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![ModelBodyItem::Validation {
+            validation: Validation {
+                attribute: Symbol::from("body"),
+                rules: vec![ValidationRule::Length { min: Some(10), max: None }],
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/article.ts");
+    assert!(
+        content.contains("this.validates_length_of(\"body\", {minimum: 10})"),
+        "got:\n{content}"
+    );
+}
+
+#[test]
 fn model_methods_emit_with_return_types() {
     let app = analyzed_app();
     let files = typescript::emit(&app);

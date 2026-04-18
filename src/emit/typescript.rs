@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{Action, Controller, MethodDef, Model, RouteSpec};
+use crate::dialect::{Action, Controller, MethodDef, Model, RouteSpec, Validation, ValidationRule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
 
@@ -94,6 +94,24 @@ fn emit_model_file(model: &Model) -> EmittedFile {
         writeln!(s, "  static columns = [{}];", columns.join(", ")).unwrap();
     }
 
+    // Validations collapse into a single `validate()` method — one line
+    // per (attribute, rule) pair. Juntos calls this method during
+    // `isValid()` / `save()`; each `validates_<kind>_of` sets errors
+    // on `this.errors`.
+    let validations: Vec<&Validation> = model.validations().collect();
+    if !validations.is_empty() {
+        writeln!(s).unwrap();
+        writeln!(s, "  validate() {{").unwrap();
+        for v in &validations {
+            for rule in &v.rules {
+                if let Some(call) = emit_validate_call(v.attribute.as_str(), rule) {
+                    writeln!(s, "    {call};").unwrap();
+                }
+            }
+        }
+        writeln!(s, "  }}").unwrap();
+    }
+
     for method in model.methods() {
         writeln!(s).unwrap();
         emit_model_method(&mut s, method);
@@ -103,6 +121,80 @@ fn emit_model_file(model: &Model) -> EmittedFile {
     EmittedFile {
         path: PathBuf::from(format!("app/models/{file_stem}.ts")),
         content: s,
+    }
+}
+
+/// Build the single-line `this.validates_<kind>_of(...)` call for one
+/// attribute + one rule. Returns `None` for rules we can't yet emit
+/// (so emit silently skips rather than producing broken JS); that's
+/// temporary — a fixture forcing the gap will drive the follow-up.
+fn emit_validate_call(attr: &str, rule: &ValidationRule) -> Option<String> {
+    let attr_lit = format!("{attr:?}");
+    match rule {
+        ValidationRule::Presence => {
+            Some(format!("this.validates_presence_of({attr_lit})"))
+        }
+        ValidationRule::Absence => {
+            Some(format!("this.validates_absence_of({attr_lit})"))
+        }
+        ValidationRule::Length { min, max } => {
+            let mut opts = Vec::new();
+            if let Some(n) = min { opts.push(format!("minimum: {n}")); }
+            if let Some(n) = max { opts.push(format!("maximum: {n}")); }
+            Some(format!(
+                "this.validates_length_of({attr_lit}, {{{}}})",
+                opts.join(", ")
+            ))
+        }
+        ValidationRule::Uniqueness { scope, case_sensitive } => {
+            let mut opts = Vec::new();
+            if !scope.is_empty() {
+                let parts: Vec<String> =
+                    scope.iter().map(|s| format!("{:?}", s.as_str())).collect();
+                opts.push(format!("scope: [{}]", parts.join(", ")));
+            }
+            if !*case_sensitive {
+                opts.push("case_sensitive: false".to_string());
+            }
+            Some(if opts.is_empty() {
+                format!("this.validates_uniqueness_of({attr_lit})")
+            } else {
+                format!(
+                    "this.validates_uniqueness_of({attr_lit}, {{{}}})",
+                    opts.join(", ")
+                )
+            })
+        }
+        ValidationRule::Format { pattern } => Some(format!(
+            "this.validates_format_of({attr_lit}, {{with: /{pattern}/}})"
+        )),
+        ValidationRule::Numericality { only_integer, gt, lt } => {
+            let mut opts = Vec::new();
+            if *only_integer { opts.push("only_integer: true".to_string()); }
+            if let Some(n) = gt { opts.push(format!("greater_than: {n}")); }
+            if let Some(n) = lt { opts.push(format!("less_than: {n}")); }
+            Some(if opts.is_empty() {
+                format!("this.validates_numericality_of({attr_lit})")
+            } else {
+                format!(
+                    "this.validates_numericality_of({attr_lit}, {{{}}})",
+                    opts.join(", ")
+                )
+            })
+        }
+        ValidationRule::Inclusion { values } => {
+            let parts: Vec<String> = values.iter().map(emit_literal).collect();
+            Some(format!(
+                "this.validates_inclusion_of({attr_lit}, {{in: [{}]}})",
+                parts.join(", ")
+            ))
+        }
+        ValidationRule::Custom { method } => {
+            // `validate :method_name` (no `s` — different DSL). Juntos
+            // convention is still a method reference; emit as a direct
+            // call so the method runs during `validate()`.
+            Some(format!("this.{method}()"))
+        }
     }
 }
 
