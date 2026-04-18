@@ -86,3 +86,36 @@ fn real_blog_tsc_passes() {
     generate_project(fixture, &scratch);
     assert_tsc_passes("real-blog", &scratch);
 }
+
+#[test]
+#[ignore]
+fn real_blog_node_test_passes() {
+    // Phase 2 forcing function: emit real-blog, run `node:test` via
+    // tsx (for TS transpile) against the emitted spec files, assert
+    // zero failures. Mirrors the Rust/Crystal Phase 2 bar —
+    // Phase-3-dependent tests are marked `test.skip(...)`.
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog");
+    generate_project(fixture, &scratch);
+
+    // Shell invocation so glob expansion picks up every test file —
+    // passing `spec/models` as a directory confuses tsx/node:test when
+    // there's no index entry. tsx registers a module loader so `.ts`
+    // imports resolve at run time.
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("npx --yes --package=tsx@4.19.2 -- tsx --test spec/models/*.test.ts")
+        .current_dir(&scratch)
+        .output()
+        .expect("run node --test via tsx");
+
+    assert!(
+        output.status.success(),
+        "node --test failed on emitted real-blog at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}

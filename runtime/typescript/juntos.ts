@@ -42,6 +42,7 @@ export class ApplicationRecord {
   static afterCommit(_fn: (record: any) => any): void {}
 
   get save(): boolean {
+    this.errors = new ErrorCollection();
     this.validate();
     return this.errors.none;
   }
@@ -52,9 +53,32 @@ export class ApplicationRecord {
 
   validate(): void {}
 
-  validates_presence_of(_field: string): void {}
+  validates_presence_of(field: string): void {
+    const value = (this as any)[field];
+    if (value === null || value === undefined || value === "") {
+      this.errors.add(field, "can't be blank");
+    }
+  }
 
-  validates_length_of(_field: string, _opts?: any): void {}
+  validates_length_of(
+    field: string,
+    opts: { minimum?: number; maximum?: number } = {},
+  ): void {
+    const value = (this as any)[field];
+    const len = value == null ? 0 : (value as { length: number }).length ?? 0;
+    if (opts.minimum !== undefined && len < opts.minimum) {
+      this.errors.add(
+        field,
+        `is too short (minimum is ${opts.minimum} characters)`,
+      );
+    }
+    if (opts.maximum !== undefined && len > opts.maximum) {
+      this.errors.add(
+        field,
+        `is too long (maximum is ${opts.maximum} characters)`,
+      );
+    }
+  }
 
   // Turbo-stream broadcasts on the record. Real implementations push
   // HTML to subscribed WebSocket channels; the stub is a no-op.
