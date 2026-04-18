@@ -36,8 +36,20 @@ use crate::dialect::{
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
 
+/// Hand-written Juntos-shape stub, copied into every generated project
+/// as `src/juntos.ts`. tsconfig's `paths` alias rewrites `"juntos"`
+/// imports to this file for type-checking without requiring npm
+/// install. Real deployments swap in the actual Juntos package.
+const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
+    files.push(emit_package_json());
+    files.push(emit_tsconfig_json());
+    files.push(EmittedFile {
+        path: PathBuf::from("src/juntos.ts"),
+        content: JUNTOS_STUB_SOURCE.to_string(),
+    });
     files.extend(emit_models(app));
     files.extend(emit_controllers(app));
     files.extend(emit_views(app));
@@ -45,6 +57,55 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_routes(app));
     }
     files
+}
+
+/// Minimal package.json. `"type": "module"` matches the ESM import/
+/// export style the emitter produces. No dependencies listed — the
+/// tsconfig `paths` alias resolves `"juntos"` to our local stub so
+/// tsc type-checks without needing `npm install`.
+fn emit_package_json() -> EmittedFile {
+    let content = "\
+{
+  \"name\": \"app\",
+  \"version\": \"0.1.0\",
+  \"private\": true,
+  \"type\": \"module\"
+}
+";
+    EmittedFile {
+        path: PathBuf::from("package.json"),
+        content: content.to_string(),
+    }
+}
+
+/// tsconfig.json — strict TS with the two bits that matter for the
+/// generated shape: `paths` maps `"juntos"` to the local stub, and
+/// `allowJs`/`esModuleInterop` let imports in both styles resolve.
+/// Phase 1 only type-checks models + the stub; controllers/views/
+/// routes land in the include list when Phase 3 wires their runtime.
+fn emit_tsconfig_json() -> EmittedFile {
+    let content = "\
+{
+  \"compilerOptions\": {
+    \"target\": \"ES2022\",
+    \"module\": \"ESNext\",
+    \"moduleResolution\": \"bundler\",
+    \"strict\": false,
+    \"esModuleInterop\": true,
+    \"skipLibCheck\": true,
+    \"noEmit\": true,
+    \"baseUrl\": \".\",
+    \"paths\": {
+      \"juntos\": [\"./src/juntos.ts\"]
+    }
+  },
+  \"include\": [\"app/models/**/*.ts\", \"src/juntos.ts\"]
+}
+";
+    EmittedFile {
+        path: PathBuf::from("tsconfig.json"),
+        content: content.to_string(),
+    }
 }
 
 // Models ---------------------------------------------------------------
@@ -166,7 +227,7 @@ fn emit_model_file(model: &Model) -> EmittedFile {
 
     for method in model.methods() {
         writeln!(s).unwrap();
-        emit_model_method(&mut s, method);
+        emit_model_method(&mut s, method, model);
     }
     writeln!(s, "}}").unwrap();
 
@@ -497,7 +558,7 @@ fn inclusion_value_to_js(v: &crate::lower::InclusionValue) -> String {
     }
 }
 
-fn emit_model_method(out: &mut String, m: &MethodDef) {
+fn emit_model_method(out: &mut String, m: &MethodDef, model: &Model) {
     let name = ts_method_name(m.name.as_str());
     let ret = m.body.ty.clone().unwrap_or(Ty::Nil);
     let ret_annot = if matches!(ret, Ty::Nil) {
@@ -508,11 +569,144 @@ fn emit_model_method(out: &mut String, m: &MethodDef) {
     let is_static = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
     let static_prefix = if is_static { "static " } else { "" };
     writeln!(out, "  {static_prefix}{name}(){ret_annot} {{").unwrap();
-    let body_text = emit_body(&m.body, &ret);
+    // Ruby's implicit-self `title` becomes TS's `this.title`. Pre-emit
+    // rewrite: turn bare-name Sends (no recv, no args) matching an
+    // attribute of the enclosing model into Ivar reads — the existing
+    // Ivar emission renders them as `this.<field>`.
+    let attrs: Vec<crate::ident::Symbol> =
+        model.attributes.fields.keys().cloned().collect();
+    let rewritten = rewrite_bare_attrs_to_ivars(&m.body, &attrs);
+    let body_text = emit_body(&rewritten, &ret);
     for line in body_text.lines() {
         writeln!(out, "    {line}").unwrap();
     }
     writeln!(out, "  }}").unwrap();
+}
+
+/// Deep-clone an Expr, rewriting every bare-name Send whose method
+/// matches one of `attrs` into an Ivar read with the same name.
+/// Callers use this on model method bodies so Ruby's implicit-self
+/// `title` renders as TS's `this.title`.
+fn rewrite_bare_attrs_to_ivars(
+    e: &Expr,
+    attrs: &[crate::ident::Symbol],
+) -> Expr {
+    use crate::expr::{Arm, InterpPart, Pattern};
+    let rewrite = |child: &Expr| rewrite_bare_attrs_to_ivars(child, attrs);
+    let new_node = match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && attrs.iter().any(|s| s == method) =>
+        {
+            ExprNode::Ivar { name: method.clone() }
+        }
+        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
+            recv: recv.as_ref().map(&rewrite),
+            method: method.clone(),
+            args: args.iter().map(&rewrite).collect(),
+            block: block.as_ref().map(&rewrite),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(&rewrite).collect(),
+        },
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements.iter().map(&rewrite).collect(),
+            style: *style,
+        },
+        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rewrite(k), rewrite(v)))
+                .collect(),
+            braced: *braced,
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite(cond),
+            then_branch: rewrite(then_branch),
+            else_branch: rewrite(else_branch),
+        },
+        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
+            scrutinee: rewrite(scrutinee),
+            arms: arms
+                .iter()
+                .map(|arm| Arm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(&rewrite),
+                    body: rewrite(&arm.body),
+                })
+                .collect(),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: rewrite(left),
+            right: rewrite(right),
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
+                    InterpPart::Expr { expr } => InterpPart::Expr { expr: rewrite(expr) },
+                })
+                .collect(),
+        },
+        ExprNode::Let { id, name, value, body } => ExprNode::Let {
+            id: *id,
+            name: name.clone(),
+            value: rewrite(value),
+            body: rewrite(body),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite(body),
+            block_style: *block_style,
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: rewrite(fun),
+            args: args.iter().map(&rewrite).collect(),
+            block: block.as_ref().map(&rewrite),
+        },
+        ExprNode::Assign { target, value } => {
+            let new_target = match target {
+                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: rewrite(recv),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: rewrite(recv),
+                    index: rewrite(index),
+                },
+            };
+            ExprNode::Assign {
+                target: new_target,
+                value: rewrite(value),
+            }
+        }
+        ExprNode::Yield { args } => ExprNode::Yield {
+            args: args.iter().map(&rewrite).collect(),
+        },
+        ExprNode::Raise { value } => ExprNode::Raise { value: rewrite(value) },
+        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
+            expr: rewrite(expr),
+            fallback: rewrite(fallback),
+        },
+        // Leaves (no subexpressions): clone unchanged.
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. } => (*e.node).clone(),
+    };
+    let _ = Pattern::Wildcard; // keep Pattern import live in case future case-arm edits need it
+    Expr {
+        span: e.span,
+        node: Box::new(new_node),
+        ty: e.ty.clone(),
+        leading_blank_line: e.leading_blank_line,
+    }
 }
 
 // Controllers ----------------------------------------------------------
