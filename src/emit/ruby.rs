@@ -11,7 +11,7 @@ use crate::App;
 use crate::dialect::{
     Action, Association, Callback, CallbackHook, Controller, Dependent, Filter, FilterKind,
     HttpMethod, MethodDef, MethodReceiver, Model, RenderTarget, RouteSpec, RouteTable, Scope,
-    Validation, ValidationRule,
+    TestModule, Validation, ValidationRule,
 };
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::{ClassId, Symbol};
@@ -32,6 +32,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(emit_routes(&app.routes));
     for view in &app.views {
         files.push(emit_view(view));
+    }
+    for tm in &app.test_modules {
+        files.push(emit_test_module(tm));
     }
     files
 }
@@ -509,6 +512,34 @@ fn emit_view(view: &crate::dialect::View) -> EmittedFile {
     ));
     let content = reconstruct_erb(&view.body);
     EmittedFile { path, content }
+}
+
+fn emit_test_module(tm: &TestModule) -> EmittedFile {
+    let mut s = String::new();
+    writeln!(s, "require \"test_helper\"").unwrap();
+    writeln!(s).unwrap();
+    let superclass = tm
+        .parent
+        .as_ref()
+        .map(|c| format!(" < {}", c.0))
+        .unwrap_or_default();
+    writeln!(s, "class {}{}", tm.name.0, superclass).unwrap();
+    for (i, test) in tm.tests.iter().enumerate() {
+        if i > 0 {
+            writeln!(s).unwrap();
+        }
+        writeln!(s, "  test {:?} do", test.name).unwrap();
+        emit_indented_body(&mut s, &emit_expr(&test.body), 2);
+        writeln!(s, "  end").unwrap();
+    }
+    writeln!(s, "end").unwrap();
+    // File path: `test/models/<snake_class_name>.rb`. ArticleTest →
+    // article_test.rb. Matches Rails' test/models/*_test.rb convention.
+    let filename = snake_case(tm.name.0.as_str());
+    EmittedFile {
+        path: PathBuf::from(format!("test/models/{filename}.rb")),
+        content: s,
+    }
 }
 
 /// Walk a view body whose structure is:

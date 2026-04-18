@@ -542,3 +542,33 @@ pub struct View {
     pub locals: Row,
     pub body: Expr,
 }
+
+// Tests -----------------------------------------------------------------
+
+/// A Ruby test file (typically `test/models/*_test.rb`). One class per
+/// file, containing a sequence of `test "description" do ... end`
+/// declarations. `target` is the class under test, inferred from the
+/// test class's name by stripping a `Test` suffix — e.g.
+/// `ArticleTest` → `Article`. `None` when the stripped name doesn't
+/// match any model in the app, in which case the tests are still
+/// ingested but typed emission will need the user to point at the
+/// right target.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TestModule {
+    pub name: ClassId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ClassId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ClassId>,
+    pub tests: Vec<Test>,
+}
+
+/// A single `test "name" do ... end` block. `name` is the literal
+/// string passed to the `test` macro; `body` is the block body.
+/// Emission snake-cases `name` for the target's function-name form
+/// (`creates an article` → `creates_an_article`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Test {
+    pub name: String,
+    pub body: Expr,
+}

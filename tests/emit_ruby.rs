@@ -101,6 +101,7 @@ fn tiny_blog() -> App {
         controllers: vec![controller],
         routes,
         views: vec![],
+        test_modules: vec![],
     }
 }
 

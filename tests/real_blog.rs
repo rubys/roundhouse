@@ -121,6 +121,64 @@ fn expected_files_round_trip_byte_for_byte() {
 }
 
 #[test]
+fn model_tests_ingest_into_test_modules() {
+    // Phase 2a forcing function: real-blog has two model test files
+    // (article_test.rb, comment_test.rb). Ingest should produce one
+    // TestModule per file, each carrying its `test "..." do ... end`
+    // declarations as named Test entries with populated bodies.
+    let app = ingest_app(fixture_path()).expect("ingest");
+
+    let names: Vec<&str> = app
+        .test_modules
+        .iter()
+        .map(|tm| tm.name.0.as_str())
+        .collect();
+    assert!(
+        names.contains(&"ArticleTest") && names.contains(&"CommentTest"),
+        "expected ArticleTest and CommentTest; got {:?}",
+        names
+    );
+
+    let article_tests = app
+        .test_modules
+        .iter()
+        .find(|tm| tm.name.0.as_str() == "ArticleTest")
+        .expect("ArticleTest module");
+
+    // Target class inferred by stripping "Test" suffix.
+    assert_eq!(
+        article_tests.target.as_ref().map(|c| c.0.as_str()),
+        Some("Article"),
+    );
+
+    // All 4 article tests should be captured by name.
+    let test_names: Vec<&str> =
+        article_tests.tests.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        test_names,
+        vec![
+            "creates an article with valid attributes",
+            "validates title presence",
+            "validates body minimum length",
+            "destroys comments when article is destroyed",
+        ],
+        "article test names"
+    );
+
+    // Each test's body should be non-empty (ingested as an Expr, not a
+    // placeholder). The first test's body should contain at least one
+    // Send — the `articles(:one)` call.
+    let first = &article_tests.tests[0];
+    use roundhouse::expr::ExprNode;
+    match &*first.body.node {
+        ExprNode::Seq { exprs } => {
+            assert!(!exprs.is_empty(), "first test body should have statements");
+        }
+        _ => panic!("first test body should be a Seq, got {:?}", first.body.node),
+    }
+}
+
+#[test]
 fn ir_is_fixed_under_emit_ingest() {
     let original = ingest_app(fixture_path()).expect("ingest original");
 

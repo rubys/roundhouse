@@ -108,6 +108,7 @@ fn tiny_blog_round_trips() {
         controllers: vec![posts_controller],
         routes,
         views: vec![],
+        test_modules: vec![],
     };
 
     let json = serde_json::to_string_pretty(&app).expect("serialize");
