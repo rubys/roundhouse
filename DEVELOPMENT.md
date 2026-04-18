@@ -123,7 +123,8 @@ Key files:
   (`compute` for types, `visit_effects` for effects).
 - **`src/emit/`** — one file per target. Ruby emit pairs with ingest as
   the round-trip identity forcing function. Targets today:
-  `ruby` (full), `rust` / `go` / `typescript` / `elixir` (scaffolds — Phase 2).
+  `ruby` (full), `rust` / `go` / `typescript` / `elixir` / `python` / `crystal`
+  (scaffolds — Phase 2 complete).
 
 ## Fixtures
 
