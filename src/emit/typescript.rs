@@ -31,8 +31,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
-    Action, Association, Controller, MethodDef, Model, ModelBodyItem, RouteSpec, Validation,
-    ValidationRule,
+    Action, Association, Controller, MethodDef, Model, ModelBodyItem, RouteSpec,
 };
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
@@ -144,17 +143,20 @@ fn emit_model_file(model: &Model) -> EmittedFile {
         emit_association(&mut s, assoc);
     }
 
-    // Validations collapse into a single `validate()` method — one line
-    // per (attribute, rule) pair. Juntos calls this method during
-    // `isValid()` / `save()`; each `validates_<kind>_of` sets errors
-    // on `this.errors`.
-    let validations: Vec<&Validation> = model.validations().collect();
-    if !validations.is_empty() {
+    // Validations: consume the Phase 4 lowered form. One
+    // `this.validates_<kind>_of(...)` line per atomic `Check` — Juntos
+    // has a primitive for every variant, so the TS render is a direct
+    // mapping from `Check` to Juntos's runtime method. Compound source
+    // rules (`Length { min, max }`) were already fanned out into
+    // separate checks by the lowering, so we never see them as a unit
+    // here.
+    let lowered = crate::lower::lower_validations(model);
+    if !lowered.is_empty() {
         writeln!(s).unwrap();
         writeln!(s, "  validate() {{").unwrap();
-        for v in &validations {
-            for rule in &v.rules {
-                if let Some(call) = emit_validate_call(v.attribute.as_str(), rule) {
+        for lv in &lowered {
+            for check in &lv.checks {
+                if let Some(call) = emit_juntos_validate_call(lv.attribute.as_str(), check) {
                     writeln!(s, "    {call};").unwrap();
                 }
             }
@@ -413,29 +415,45 @@ fn emit_association(out: &mut String, assoc: &Association) {
     }
 }
 
-/// Build the single-line `this.validates_<kind>_of(...)` call for one
-/// attribute + one rule. Returns `None` for rules we can't yet emit
-/// (so emit silently skips rather than producing broken JS); that's
-/// temporary — a fixture forcing the gap will drive the follow-up.
-fn emit_validate_call(attr: &str, rule: &ValidationRule) -> Option<String> {
+/// Render one lowered `Check` as its Juntos-primitive call. Compound
+/// source rules already fanned out during lowering — `MinLength` /
+/// `MaxLength` are their own checks here, not a combined `Length`. TS
+/// still calls Juntos's original `validates_length_of` primitive
+/// (which takes `{minimum, maximum}`) so the two checks on the same
+/// attribute emit as two calls with one bound each, which Juntos
+/// accumulates into a single validation result.
+fn emit_juntos_validate_call(attr: &str, check: &crate::lower::Check) -> Option<String> {
+    use crate::lower::Check;
     let attr_lit = format!("{attr:?}");
-    match rule {
-        ValidationRule::Presence => {
-            Some(format!("this.validates_presence_of({attr_lit})"))
+    Some(match check {
+        Check::Presence => format!("this.validates_presence_of({attr_lit})"),
+        Check::Absence => format!("this.validates_absence_of({attr_lit})"),
+        Check::MinLength { n } => {
+            format!("this.validates_length_of({attr_lit}, {{minimum: {n}}})")
         }
-        ValidationRule::Absence => {
-            Some(format!("this.validates_absence_of({attr_lit})"))
+        Check::MaxLength { n } => {
+            format!("this.validates_length_of({attr_lit}, {{maximum: {n}}})")
         }
-        ValidationRule::Length { min, max } => {
-            let mut opts = Vec::new();
-            if let Some(n) = min { opts.push(format!("minimum: {n}")); }
-            if let Some(n) = max { opts.push(format!("maximum: {n}")); }
-            Some(format!(
-                "this.validates_length_of({attr_lit}, {{{}}})",
-                opts.join(", ")
-            ))
+        Check::GreaterThan { threshold } => format!(
+            "this.validates_numericality_of({attr_lit}, {{greater_than: {threshold}}})"
+        ),
+        Check::LessThan { threshold } => format!(
+            "this.validates_numericality_of({attr_lit}, {{less_than: {threshold}}})"
+        ),
+        Check::OnlyInteger => format!(
+            "this.validates_numericality_of({attr_lit}, {{only_integer: true}})"
+        ),
+        Check::Inclusion { values } => {
+            let parts: Vec<String> = values.iter().map(inclusion_value_to_js).collect();
+            format!(
+                "this.validates_inclusion_of({attr_lit}, {{in: [{}]}})",
+                parts.join(", ")
+            )
         }
-        ValidationRule::Uniqueness { scope, case_sensitive } => {
+        Check::Format { pattern } => format!(
+            "this.validates_format_of({attr_lit}, {{with: /{pattern}/}})"
+        ),
+        Check::Uniqueness { scope, case_sensitive } => {
             let mut opts = Vec::new();
             if !scope.is_empty() {
                 let parts: Vec<String> =
@@ -445,45 +463,37 @@ fn emit_validate_call(attr: &str, rule: &ValidationRule) -> Option<String> {
             if !*case_sensitive {
                 opts.push("case_sensitive: false".to_string());
             }
-            Some(if opts.is_empty() {
+            if opts.is_empty() {
                 format!("this.validates_uniqueness_of({attr_lit})")
             } else {
                 format!(
                     "this.validates_uniqueness_of({attr_lit}, {{{}}})",
                     opts.join(", ")
                 )
-            })
+            }
         }
-        ValidationRule::Format { pattern } => Some(format!(
-            "this.validates_format_of({attr_lit}, {{with: /{pattern}/}})"
-        )),
-        ValidationRule::Numericality { only_integer, gt, lt } => {
-            let mut opts = Vec::new();
-            if *only_integer { opts.push("only_integer: true".to_string()); }
-            if let Some(n) = gt { opts.push(format!("greater_than: {n}")); }
-            if let Some(n) = lt { opts.push(format!("less_than: {n}")); }
-            Some(if opts.is_empty() {
-                format!("this.validates_numericality_of({attr_lit})")
-            } else {
-                format!(
-                    "this.validates_numericality_of({attr_lit}, {{{}}})",
-                    opts.join(", ")
-                )
-            })
+        Check::Custom { method } => {
+            // `validate :method_name` — direct method call, not one of
+            // Juntos's `validates_<kind>_of` primitives. The method
+            // is expected to populate `this.errors` itself.
+            format!("this.{method}()")
         }
-        ValidationRule::Inclusion { values } => {
-            let parts: Vec<String> = values.iter().map(emit_literal).collect();
-            Some(format!(
-                "this.validates_inclusion_of({attr_lit}, {{in: [{}]}})",
-                parts.join(", ")
-            ))
+    })
+}
+
+/// Render an `InclusionValue` as a JS literal. Strings use TS double-
+/// quote escaping via `Debug`; numbers emit as-is; bools as `true`/
+/// `false`.
+fn inclusion_value_to_js(v: &crate::lower::InclusionValue) -> String {
+    use crate::lower::InclusionValue;
+    match v {
+        InclusionValue::Str { value } => format!("{value:?}"),
+        InclusionValue::Int { value } => value.to_string(),
+        InclusionValue::Float { value } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
         }
-        ValidationRule::Custom { method } => {
-            // `validate :method_name` (no `s` — different DSL). Juntos
-            // convention is still a method reference; emit as a direct
-            // call so the method runs during `validate()`.
-            Some(format!("this.{method}()"))
-        }
+        InclusionValue::Bool { value } => value.to_string(),
     }
 }
 

@@ -19,4 +19,4 @@
 
 pub mod validations;
 
-pub use validations::{lower_validations, Check, LoweredValidation};
+pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};
