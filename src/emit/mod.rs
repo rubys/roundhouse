@@ -6,6 +6,7 @@
 pub mod go;
 pub mod ruby;
 pub mod rust;
+pub mod typescript;
 
 use std::path::PathBuf;
 

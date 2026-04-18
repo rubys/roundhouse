@@ -122,7 +122,8 @@ Key files:
 - **`src/analyze.rs`** — type inference + effect inference. Two walks
   (`compute` for types, `visit_effects` for effects).
 - **`src/emit/`** — one file per target. Ruby emit pairs with ingest as
-  the round-trip identity forcing function.
+  the round-trip identity forcing function. Typed targets today:
+  `ruby` (full), `rust` / `go` / `typescript` (scaffolds — Phase 2).
 
 ## Fixtures
 
