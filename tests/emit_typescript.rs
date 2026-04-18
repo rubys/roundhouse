@@ -30,6 +30,40 @@ fn find<'a>(files: &'a [roundhouse::emit::EmittedFile], p: &str) -> &'a str {
 }
 
 #[test]
+fn views_emit_as_string_returning_functions() {
+    let app = analyzed_app();
+    let files = typescript::emit(&app);
+    // tiny-blog has one view: app/views/posts/index.html.erb.
+    let content = find(&files, "app/views/posts/index.html.ts");
+    // Function signature: takes a locals record, returns string.
+    assert!(
+        content.contains(
+            "export function renderPostsIndex(locals: Record<string, unknown> = {}): string {"
+        ),
+        "got:\n{content}"
+    );
+    // Ivars destructure out of locals at the top.
+    assert!(
+        content.contains("const { posts } = locals as Record<string, any>;"),
+        "got:\n{content}"
+    );
+    // Text chunks append as string literals.
+    assert!(
+        content.contains("_buf += \"<h1>Posts</h1>\\n\";"),
+        "got:\n{content}"
+    );
+    // <%= expr %> wraps in String(...) so any value stringifies.
+    assert!(
+        content.contains("_buf += String(post.title);"),
+        "got:\n{content}"
+    );
+    // `<% @posts.each do |post| %>` → JS `for…of`.
+    assert!(content.contains("for (const post of posts) {"), "got:\n{content}");
+    // Tail is a `return _buf;`.
+    assert!(content.contains("return _buf;"), "got:\n{content}");
+}
+
+#[test]
 fn emits_expected_files() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -37,12 +71,17 @@ fn emits_expected_files() {
     // One file per model under app/models/, Rails-layout style.
     assert!(paths.contains(&"app/models/post.ts".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/models/comment.ts".to_string()), "got {paths:?}");
-    // One file per controller under app/controllers/, same convention.
+    // One file per controller under app/controllers/.
     assert!(
         paths.contains(&"app/controllers/posts_controller.ts".to_string()),
         "got {paths:?}"
     );
-    // Routes still flat for now — upgraded in the next Phase 3 commit.
+    // One file per view under app/views/, keeping the Rails
+    // controller/action.format path shape.
+    assert!(
+        paths.contains(&"app/views/posts/index.html.ts".to_string()),
+        "got {paths:?}"
+    );
     assert!(paths.contains(&"src/routes.ts".to_string()), "got {paths:?}");
 }
 
