@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Roundhouse logo (monochrome)">
+  <title>Roundhouse</title>
+  <desc>Monochrome variant of the roundhouse logo — same silhouette as the full-color mark, without per-language bay accents. Intended for small sizes (favicon, CLI spinner, print).</desc>
+
+  <!-- Outer wall with input gap on the left. -->
+  <path d="M 28.2 86.7 A 108 108 0 1 1 28.2 169.3"
+        fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Eight bay spokes from turntable edge (r=28) to outer wall (r=108). -->
+  <g stroke="currentColor" stroke-width="4" stroke-linecap="round">
+    <line x1="153.9" y1="138.7" x2="227.8" y2="169.3"/>
+    <line x1="138.7" y1="153.9" x2="169.3" y2="227.8"/>
+    <line x1="117.3" y1="153.9" x2="86.7"  y2="227.8"/>
+    <line x1="102.1" y1="138.7" x2="28.2"  y2="169.3"/>
+    <line x1="102.1" y1="117.3" x2="28.2"  y2="86.7"/>
+    <line x1="117.3" y1="102.1" x2="86.7"  y2="28.2"/>
+    <line x1="138.7" y1="102.1" x2="169.3" y2="28.2"/>
+    <line x1="153.9" y1="117.3" x2="227.8" y2="86.7"/>
+  </g>
+
+  <!-- Single input track stub (no ties — they disappear at small sizes). -->
+  <line x1="0" y1="128" x2="100" y2="128"
+        stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Turntable — solid fill so the center reads clearly. -->
+  <circle cx="128" cy="128" r="28" fill="currentColor"/>
+</svg>
