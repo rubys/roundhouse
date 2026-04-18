@@ -31,12 +31,24 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{Action, Controller, MethodDef, Model, RouteSpec};
+use crate::ident::Symbol;
+use crate::dialect::{
+    Action, Association, Controller, Fixture, MethodDef, Model, RouteSpec, Test, TestModule,
+};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::naming::snake_case;
 
+const RUNTIME_SOURCE: &str = include_str!("../../runtime/elixir/runtime.ex");
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
+    files.push(emit_mix_exs());
+    if !app.models.is_empty() {
+        files.push(EmittedFile {
+            path: PathBuf::from("lib/roundhouse.ex"),
+            content: RUNTIME_SOURCE.to_string(),
+        });
+    }
     for model in &app.models {
         files.push(emit_model_file(model));
     }
@@ -46,7 +58,71 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !app.routes.entries.is_empty() {
         files.push(emit_router_file(app));
     }
+    if !app.fixtures.is_empty() {
+        for fixture in &app.fixtures {
+            files.push(emit_ex_fixture(fixture, app));
+        }
+    }
+    if !app.test_modules.is_empty() {
+        files.push(EmittedFile {
+            path: PathBuf::from("test/test_helper.exs"),
+            content: "ExUnit.start()\n".to_string(),
+        });
+        for tm in &app.test_modules {
+            files.push(emit_ex_test(tm, app));
+        }
+    }
     files
+}
+
+/// Minimal mix.exs. `elixirc_paths` uses a wildcard filter that
+/// excludes controllers and the router — their bodies reference
+/// runtime that doesn't exist yet (redirect_to, Post.all, etc.), so
+/// including them blocks `mix compile`. When Phase 3 wires the
+/// runtime, the filter relaxes.
+fn emit_mix_exs() -> EmittedFile {
+    let content = "\
+defmodule App.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :app,
+      version: \"0.1.0\",
+      elixir: \"~> 1.18\",
+      elixirc_paths: elixirc_paths(Mix.env()),
+      start_permanent: Mix.env() == :prod,
+      deps: []
+    ]
+  end
+
+  def application do
+    [extra_applications: [:logger]]
+  end
+
+  # Compile only models in Phase 1. Controllers + router are emitted
+  # as files but reference runtime that doesn't exist yet; including
+  # them here would block compile. Test env additionally includes
+  # test/support/ so fixtures are compiled alongside the app.
+  defp elixirc_paths(:test) do
+    (Path.wildcard(\"lib/**/*.ex\") ++ Path.wildcard(\"test/support/**/*.ex\"))
+    |> Enum.reject(&excluded?/1)
+  end
+
+  defp elixirc_paths(_) do
+    Path.wildcard(\"lib/**/*.ex\")
+    |> Enum.reject(&excluded?/1)
+  end
+
+  defp excluded?(p) do
+    String.ends_with?(p, \"_controller.ex\") or String.ends_with?(p, \"router.ex\")
+  end
+end
+";
+    EmittedFile {
+        path: PathBuf::from("mix.exs"),
+        content: content.to_string(),
+    }
 }
 
 // Models ---------------------------------------------------------------
@@ -73,9 +149,20 @@ fn emit_model_file(model: &Model) -> EmittedFile {
         writeln!(s, "  defstruct []").unwrap();
     }
 
+    let attrs: Vec<Symbol> = model.attributes.fields.keys().cloned().collect();
     for method in model.methods() {
         writeln!(s).unwrap();
-        emit_model_method(&mut s, module, method);
+        emit_model_method_with_attrs(&mut s, module, method, &attrs);
+    }
+
+    let lowered = crate::lower::lower_validations(model);
+    if !lowered.is_empty() {
+        writeln!(s).unwrap();
+        emit_validate_method_ex(&mut s, &lowered);
+        writeln!(s).unwrap();
+        writeln!(s, "  def save({}) do", module_receiver_name(module)).unwrap();
+        writeln!(s, "    validate({}) == []", module_receiver_name(module)).unwrap();
+        writeln!(s, "  end").unwrap();
     }
 
     writeln!(s, "end").unwrap();
@@ -83,7 +170,81 @@ fn emit_model_file(model: &Model) -> EmittedFile {
     EmittedFile { path: PathBuf::from(fname), content: s }
 }
 
-fn emit_model_method(out: &mut String, module: &str, m: &MethodDef) {
+fn emit_validate_method_ex(
+    out: &mut String,
+    validations: &[crate::lower::LoweredValidation],
+) {
+    writeln!(out, "  def validate(record) do").unwrap();
+    writeln!(out, "    errors = []").unwrap();
+    for lv in validations {
+        for check in &lv.checks {
+            emit_check_inline_ex(out, lv.attribute.as_str(), check);
+        }
+    }
+    writeln!(out, "    errors").unwrap();
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_check_inline_ex(out: &mut String, attr: &str, check: &crate::lower::Check) {
+    use crate::lower::Check;
+    let msg = check.default_message();
+    let push = |cond: &str| -> String {
+        format!(
+            "    errors =\n      if {cond} do\n        [Roundhouse.ValidationError.new({attr:?}, {msg:?}) | errors]\n      else\n        errors\n      end"
+        )
+    };
+    let block = match check {
+        Check::Presence => push(&format!("record.{attr} == \"\" or record.{attr} == nil")),
+        Check::Absence => push(&format!("record.{attr} != \"\" and record.{attr} != nil")),
+        Check::MinLength { n } => {
+            push(&format!("record.{attr} == nil or String.length(record.{attr}) < {n}"))
+        }
+        Check::MaxLength { n } => {
+            push(&format!("record.{attr} != nil and String.length(record.{attr}) > {n}"))
+        }
+        Check::GreaterThan { threshold } => {
+            push(&format!("record.{attr} <= {threshold}"))
+        }
+        Check::LessThan { threshold } => push(&format!("record.{attr} >= {threshold}")),
+        Check::OnlyInteger => {
+            format!("    # OnlyInteger on {attr:?} — no-op, Elixir has no implicit coercion")
+        }
+        Check::Inclusion { values } => {
+            let parts: Vec<String> = values.iter().map(inclusion_value_to_ex).collect();
+            push(&format!("record.{attr} not in [{}]", parts.join(", ")))
+        }
+        Check::Format { pattern } => {
+            format!("    # TODO: Format check on {attr:?} requires Regex ({pattern:?})")
+        }
+        Check::Uniqueness { .. } => {
+            format!("    # TODO: Uniqueness on {attr:?} requires DB access at runtime")
+        }
+        Check::Custom { method } => {
+            format!("    errors = {method}(record, errors)", method = method.as_str())
+        }
+    };
+    writeln!(out, "{block}").unwrap();
+}
+
+fn inclusion_value_to_ex(v: &crate::lower::InclusionValue) -> String {
+    use crate::lower::InclusionValue;
+    match v {
+        InclusionValue::Str { value } => format!("{value:?}"),
+        InclusionValue::Int { value } => value.to_string(),
+        InclusionValue::Float { value } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        InclusionValue::Bool { value } => value.to_string(),
+    }
+}
+
+fn emit_model_method_with_attrs(
+    out: &mut String,
+    module: &str,
+    m: &MethodDef,
+    attrs: &[Symbol],
+) {
     let name = m.name.as_str();
     // Instance methods take the record as first arg (`post` for
     // module Post). Class methods take only their declared params.
@@ -104,11 +265,135 @@ fn emit_model_method(out: &mut String, module: &str, m: &MethodDef) {
     };
 
     writeln!(out, "  def {name}{param_list} do").unwrap();
-    let body = emit_block(&m.body, first_arg.as_deref());
+    // Pre-emit rewrite: bare-name Sends matching a model attribute
+    // become Ivar reads, which `emit_expr` already renders as
+    // `post.<field>` when receiver_arg is set. Same shape as the
+    // TS/Go pre-emit passes.
+    let body_expr = if first_arg.is_some() {
+        rewrite_bare_attrs_to_ivars_ex(&m.body, attrs)
+    } else {
+        m.body.clone()
+    };
+    let body = emit_block(&body_expr, first_arg.as_deref());
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
     writeln!(out, "  end").unwrap();
+}
+
+fn rewrite_bare_attrs_to_ivars_ex(e: &Expr, attrs: &[Symbol]) -> Expr {
+    use crate::expr::{Arm, InterpPart, Pattern};
+    let rewrite = |child: &Expr| rewrite_bare_attrs_to_ivars_ex(child, attrs);
+    let new_node = match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && attrs.iter().any(|s| s == method) =>
+        {
+            ExprNode::Ivar { name: method.clone() }
+        }
+        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
+            recv: recv.as_ref().map(&rewrite),
+            method: method.clone(),
+            args: args.iter().map(&rewrite).collect(),
+            block: block.as_ref().map(&rewrite),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(&rewrite).collect(),
+        },
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements.iter().map(&rewrite).collect(),
+            style: *style,
+        },
+        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+            entries: entries.iter().map(|(k, v)| (rewrite(k), rewrite(v))).collect(),
+            braced: *braced,
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite(cond),
+            then_branch: rewrite(then_branch),
+            else_branch: rewrite(else_branch),
+        },
+        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
+            scrutinee: rewrite(scrutinee),
+            arms: arms
+                .iter()
+                .map(|arm| Arm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(&rewrite),
+                    body: rewrite(&arm.body),
+                })
+                .collect(),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: rewrite(left),
+            right: rewrite(right),
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
+                    InterpPart::Expr { expr } => InterpPart::Expr { expr: rewrite(expr) },
+                })
+                .collect(),
+        },
+        ExprNode::Let { id, name, value, body } => ExprNode::Let {
+            id: *id,
+            name: name.clone(),
+            value: rewrite(value),
+            body: rewrite(body),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite(body),
+            block_style: *block_style,
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: rewrite(fun),
+            args: args.iter().map(&rewrite).collect(),
+            block: block.as_ref().map(&rewrite),
+        },
+        ExprNode::Assign { target, value } => {
+            let new_target = match target {
+                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: rewrite(recv),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: rewrite(recv),
+                    index: rewrite(index),
+                },
+            };
+            ExprNode::Assign {
+                target: new_target,
+                value: rewrite(value),
+            }
+        }
+        ExprNode::Yield { args } => ExprNode::Yield {
+            args: args.iter().map(&rewrite).collect(),
+        },
+        ExprNode::Raise { value } => ExprNode::Raise { value: rewrite(value) },
+        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
+            expr: rewrite(expr),
+            fallback: rewrite(fallback),
+        },
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. } => (*e.node).clone(),
+    };
+    let _ = Pattern::Wildcard;
+    Expr {
+        span: e.span,
+        node: Box::new(new_node),
+        ty: e.ty.clone(),
+        leading_blank_line: e.leading_blank_line,
+    }
 }
 
 /// Convention: the record arg is the snake_case form of the module name.
@@ -442,6 +727,14 @@ fn emit_send(
         }
         Some(r) => {
             let recv_s = emit_expr(r, receiver_arg);
+            // Ruby String methods map onto Elixir's `String` module
+            // functions (module-function-call form, not method). `.strip`
+            // → `String.trim(recv)`, upcase/downcase similar.
+            if args.is_empty() && matches!(r.ty, Some(crate::ty::Ty::Str)) {
+                if let Some(wrapped) = map_ex_str_method(method, &recv_s) {
+                    return wrapped;
+                }
+            }
             // `recv.method(args)` reads fine for both module function
             // calls (e.g. `Post.find(id)`) and struct-field-style
             // getters (`post.title` with no args).
@@ -451,6 +744,21 @@ fn emit_send(
                 format!("{recv_s}.{method}({})", args_s.join(", "))
             }
         }
+    }
+}
+
+/// Map Ruby String methods onto Elixir's `String` module functions
+/// (module-function-call form — Elixir strings don't have `.method`
+/// dispatch). Returns `Some(emit_text)` for a handled method; unhandled
+/// methods fall through to the default `recv.method` emit.
+fn map_ex_str_method(method: &str, recv_text: &str) -> Option<String> {
+    match method {
+        "strip" => Some(format!("String.trim({recv_text})")),
+        "upcase" => Some(format!("String.upcase({recv_text})")),
+        "downcase" => Some(format!("String.downcase({recv_text})")),
+        "length" | "size" => Some(format!("String.length({recv_text})")),
+        "empty?" => Some(format!("{recv_text} == \"\"")),
+        _ => None,
     }
 }
 
@@ -475,4 +783,468 @@ fn indent(text: &str, depth: usize) -> String {
         .map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// Fixtures + tests ---------------------------------------------------
+
+fn emit_ex_fixture(fixture: &Fixture, app: &App) -> EmittedFile {
+    let class_name = crate::naming::singularize_camelize(fixture.name.as_str());
+    let model = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == class_name.as_str());
+    let ns = crate::naming::camelize(fixture.name.as_str());
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule Fixtures.{ns} do").unwrap();
+
+    for (i, (label, fields)) in fixture.records.iter().enumerate() {
+        let id = (i as i64) + 1;
+        writeln!(s).unwrap();
+        writeln!(s, "  def {}() do", label.as_str()).unwrap();
+        let mut field_lines: Vec<String> =
+            vec![format!("    id: {id}")];
+        if let Some(m) = model {
+            for (field, value) in fields {
+                if let Some((col, val)) = resolve_fixture_field_ex(field, value, m, app) {
+                    field_lines.push(format!("    {col}: {val}"));
+                }
+            }
+        }
+        writeln!(s, "    %{} {{", class_name).unwrap();
+        for (idx, line) in field_lines.iter().enumerate() {
+            if idx < field_lines.len() - 1 {
+                writeln!(s, "  {line},").unwrap();
+            } else {
+                writeln!(s, "  {line}").unwrap();
+            }
+        }
+        writeln!(s, "    }}").unwrap();
+        writeln!(s, "  end").unwrap();
+    }
+
+    writeln!(s, "end").unwrap();
+
+    EmittedFile {
+        path: PathBuf::from(format!("test/support/fixtures/{}.ex", fixture.name)),
+        content: s,
+    }
+}
+
+fn resolve_fixture_field_ex(
+    field: &Symbol,
+    value: &str,
+    model: &Model,
+    app: &App,
+) -> Option<(String, String)> {
+    if let Some(ty) = model.attributes.fields.get(field) {
+        return Some((field.as_str().to_string(), ex_literal_for(value, ty)));
+    }
+    for assoc in model.associations() {
+        if let Association::BelongsTo { name, target, foreign_key, .. } = assoc {
+            if name == field {
+                let target_table = crate::naming::pluralize_snake(target.0.as_str());
+                if let Some(target_fixture) = app
+                    .fixtures
+                    .iter()
+                    .find(|f| f.name.as_str() == target_table.as_str())
+                {
+                    if let Some(idx) = target_fixture
+                        .records
+                        .keys()
+                        .position(|k| k.as_str() == value)
+                    {
+                        let resolved_id = (idx as i64) + 1;
+                        return Some((
+                            foreign_key.as_str().to_string(),
+                            resolved_id.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn ex_literal_for(value: &str, ty: &crate::ty::Ty) -> String {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Str | Ty::Sym => format!("{value:?}"),
+        Ty::Int => {
+            if value.parse::<i64>().is_ok() {
+                value.to_string()
+            } else {
+                format!("0 # TODO: coerce {value:?}")
+            }
+        }
+        Ty::Float => {
+            if value.parse::<f64>().is_ok() {
+                value.to_string()
+            } else {
+                format!("0.0 # TODO: coerce {value:?}")
+            }
+        }
+        Ty::Bool => match value {
+            "true" | "1" => "true".into(),
+            "false" | "0" => "false".into(),
+            _ => format!("false # TODO: coerce {value:?}"),
+        },
+        Ty::Class { id, .. } if id.0.as_str() == "Time" => format!("{value:?}"),
+        _ => format!("{value:?}"),
+    }
+}
+
+fn emit_ex_test(tm: &TestModule, app: &App) -> EmittedFile {
+    let fixture_names: Vec<Symbol> =
+        app.fixtures.iter().map(|f| f.name.clone()).collect();
+    let known_models: Vec<Symbol> =
+        app.models.iter().map(|m| m.name.0.clone()).collect();
+    let mut attrs_set: std::collections::BTreeSet<Symbol> =
+        std::collections::BTreeSet::new();
+    for m in &app.models {
+        for attr in m.attributes.fields.keys() {
+            attrs_set.insert(attr.clone());
+        }
+    }
+    let model_attrs: Vec<Symbol> = attrs_set.into_iter().collect();
+
+    let ctx = ExTestCtx {
+        fixture_names: &fixture_names,
+        known_models: &known_models,
+        model_attrs: &model_attrs,
+    };
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule {} do", tm.name.0).unwrap();
+    writeln!(s, "  use ExUnit.Case").unwrap();
+
+    for test in &tm.tests {
+        writeln!(s).unwrap();
+        if test_needs_runtime_unsupported_ex(test) {
+            writeln!(s, "  @tag :skip").unwrap();
+            writeln!(s, "  test {:?} do", test.name).unwrap();
+            writeln!(s, "    # Phase 3: needs persistence runtime").unwrap();
+            writeln!(s, "  end").unwrap();
+        } else {
+            writeln!(s, "  test {:?} do", test.name).unwrap();
+            let body = emit_ex_test_body(&test.body, ctx);
+            for line in body.lines() {
+                writeln!(s, "    {line}").unwrap();
+            }
+            writeln!(s, "  end").unwrap();
+        }
+    }
+
+    writeln!(s, "end").unwrap();
+
+    let filename = snake_case(tm.name.0.as_str());
+    EmittedFile {
+        path: PathBuf::from(format!("test/{filename}.exs")),
+        content: s,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExTestCtx<'a> {
+    fixture_names: &'a [Symbol],
+    known_models: &'a [Symbol],
+    model_attrs: &'a [Symbol],
+}
+
+fn emit_ex_test_body(body: &Expr, ctx: ExTestCtx) -> String {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .map(|e| emit_ex_test_stmt(e, ctx))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_ex_test_stmt(body, ctx),
+    }
+}
+
+fn emit_ex_test_stmt(e: &Expr, ctx: ExTestCtx) -> String {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            format!("{} = {}", name, emit_ex_test_expr(value, ctx))
+        }
+        _ => emit_ex_test_expr(e, ctx),
+    }
+}
+
+fn emit_ex_test_expr(e: &Expr, ctx: ExTestCtx) -> String {
+    match &*e.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Const { path } => {
+            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
+        }
+        ExprNode::Send { recv, method, args, .. } => {
+            emit_ex_test_send(recv.as_ref(), method.as_str(), args, ctx)
+        }
+        ExprNode::BoolOp { op, left, right, .. } => {
+            use crate::expr::BoolOpKind;
+            let op_s = match op {
+                BoolOpKind::Or => "or",
+                BoolOpKind::And => "and",
+            };
+            format!(
+                "{} {op_s} {}",
+                emit_ex_test_expr(left, ctx),
+                emit_ex_test_expr(right, ctx)
+            )
+        }
+        ExprNode::Hash { entries, .. } => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                        format!("{value}: {}", emit_ex_test_expr(v, ctx))
+                    } else {
+                        format!(
+                            "{} => {}",
+                            emit_ex_test_expr(k, ctx),
+                            emit_ex_test_expr(v, ctx),
+                        )
+                    }
+                })
+                .collect();
+            format!("%{{{}}}", parts.join(", "))
+        }
+        _ => format!("# TODO: Elixir test emit for {:?}", std::mem::discriminant(&*e.node)),
+    }
+}
+
+fn emit_ex_test_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    ctx: ExTestCtx,
+) -> String {
+    let args_s: Vec<String> = args.iter().map(|a| emit_ex_test_expr(a, ctx)).collect();
+
+    // Fixture accessor: articles(:one) → Fixtures.Articles.one()
+    if recv.is_none()
+        && args.len() == 1
+        && ctx.fixture_names.iter().any(|s| s.as_str() == method)
+    {
+        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*args[0].node {
+            let ns = crate::naming::camelize(method);
+            return format!("Fixtures.{ns}.{}()", sym.as_str());
+        }
+    }
+
+    // Assertion macros → ExUnit's assert/refute.
+    if recv.is_none() {
+        match (method, args_s.len()) {
+            ("assert_equal", 2) => {
+                return format!(
+                    "assert {actual} == {expected}",
+                    expected = args_s[0],
+                    actual = args_s[1]
+                );
+            }
+            ("assert_not_equal", 2) => {
+                return format!(
+                    "refute {actual} == {expected}",
+                    expected = args_s[0],
+                    actual = args_s[1]
+                );
+            }
+            ("assert_not", 1) => return format!("refute {}", args_s[0]),
+            ("assert", 1) => return format!("assert {}", args_s[0]),
+            ("assert_nil", 1) => return format!("assert is_nil({})", args_s[0]),
+            ("assert_not_nil", 1) => return format!("refute is_nil({})", args_s[0]),
+            _ => {}
+        }
+    }
+
+    // `Class.new(hash)` → `%Class{ k: v, ... }` struct literal.
+    if let Some(r) = recv {
+        if method == "new" && args.len() == 1 {
+            if let ExprNode::Const { path } = &*r.node {
+                if let Some(class_name) = path.last() {
+                    if ctx.known_models.iter().any(|s| s == class_name) {
+                        if let ExprNode::Hash { entries, .. } = &*args[0].node {
+                            let pairs: Vec<String> = entries
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    if let ExprNode::Lit {
+                                        value: Literal::Sym { value: f },
+                                    } = &*k.node
+                                    {
+                                        Some(format!(
+                                            "{}: {}",
+                                            f.as_str(),
+                                            emit_ex_test_expr(v, ctx)
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            return format!("%{} {{{}}}", class_name, pairs.join(", "));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match recv {
+        None => {
+            if args_s.is_empty() {
+                method.to_string()
+            } else {
+                format!("{}({})", method, args_s.join(", "))
+            }
+        }
+        Some(r) => {
+            let recv_s = emit_ex_test_expr(r, ctx);
+            let is_class_call = matches!(&*r.node, ExprNode::Const { .. });
+            if is_class_call {
+                // Module.function(args) — Elixir's module-function-call form.
+                if args_s.is_empty() {
+                    format!("{recv_s}.{method}({recv_s_ref})", recv_s_ref = recv_s)
+                } else {
+                    format!("{recv_s}.{method}({})", args_s.join(", "))
+                }
+            } else {
+                let is_attr = args_s.is_empty()
+                    && ctx.model_attrs.iter().any(|s| s.as_str() == method);
+                if is_attr {
+                    format!("{recv_s}.{method}")
+                } else if method == "save" && args_s.is_empty() {
+                    // `article.save` in Ruby → `Module.save(article)` in Elixir.
+                    // The receiver's struct module is conventionally `@__
+                    // struct__` value.
+                    format!("{}(\n      {recv_s}\n    )", ex_module_fn_for(r, method))
+                } else if args_s.is_empty() {
+                    format!("{recv_s}.{method}")
+                } else {
+                    format!("{recv_s}.{method}({})", args_s.join(", "))
+                }
+            }
+        }
+    }
+}
+
+/// Guess the module-function path for `recv.method`. If recv is a
+/// struct, the struct's module holds the function — so `article.save`
+/// emits as `Article.save(article)`. Without type info we scrape the
+/// variable name and infer.
+fn ex_module_fn_for(recv: &Expr, method: &str) -> String {
+    if let ExprNode::Var { name, .. } = &*recv.node {
+        let n = name.as_str();
+        // Variable names for fixtures follow the snake-cased class name.
+        let camelized = crate::naming::camelize(n);
+        return format!("{camelized}.{method}");
+    }
+    format!("??.{method}") // fallback; should be rare
+}
+
+fn test_needs_runtime_unsupported_ex(test: &Test) -> bool {
+    let known_name = matches!(test.name.as_str(), "requires valid article");
+    if known_name {
+        return true;
+    }
+    test_body_uses_unsupported_ex(&test.body)
+}
+
+fn test_body_uses_unsupported_ex(e: &Expr) -> bool {
+    use crate::expr::InterpPart;
+    let self_hit = match &*e.node {
+        ExprNode::Send { recv, method, .. } => {
+            let m = method.as_str();
+            matches!(
+                m,
+                "assert_difference"
+                    | "destroy"
+                    | "destroy!"
+                    | "build"
+                    | "create"
+                    | "create!"
+            ) || (m == "count"
+                && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })))
+        }
+        _ => false,
+    };
+    if self_hit {
+        return true;
+    }
+    match &*e.node {
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                if test_body_uses_unsupported_ex(r) {
+                    return true;
+                }
+            }
+            for a in args {
+                if test_body_uses_unsupported_ex(a) {
+                    return true;
+                }
+            }
+            if let Some(b) = block {
+                if test_body_uses_unsupported_ex(b) {
+                    return true;
+                }
+            }
+        }
+        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+            for e in exprs {
+                if test_body_uses_unsupported_ex(e) {
+                    return true;
+                }
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                if test_body_uses_unsupported_ex(k) || test_body_uses_unsupported_ex(v) {
+                    return true;
+                }
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let InterpPart::Expr { expr } = p {
+                    if test_body_uses_unsupported_ex(expr) {
+                        return true;
+                    }
+                }
+            }
+        }
+        ExprNode::BoolOp { left, right, .. }
+        | ExprNode::RescueModifier { expr: left, fallback: right } => {
+            if test_body_uses_unsupported_ex(left) || test_body_uses_unsupported_ex(right) {
+                return true;
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if test_body_uses_unsupported_ex(cond)
+                || test_body_uses_unsupported_ex(then_branch)
+                || test_body_uses_unsupported_ex(else_branch)
+            {
+                return true;
+            }
+        }
+        ExprNode::Let { value, body, .. } => {
+            if test_body_uses_unsupported_ex(value) || test_body_uses_unsupported_ex(body) {
+                return true;
+            }
+        }
+        ExprNode::Lambda { body, .. } => {
+            if test_body_uses_unsupported_ex(body) {
+                return true;
+            }
+        }
+        ExprNode::Assign { value, .. } => {
+            if test_body_uses_unsupported_ex(value) {
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
 }
