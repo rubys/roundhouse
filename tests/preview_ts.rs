@@ -42,3 +42,12 @@ fn dump_real_blog_ts() {
         println!("{}", f.content);
     }
 }
+
+#[test]
+#[ignore]
+fn dump_real_blog_rust() {
+    for f in roundhouse::emit::rust::emit(&analyzed("fixtures/real-blog")) {
+        println!("// ======= {} =======", f.path.display());
+        println!("{}", f.content);
+    }
+}
