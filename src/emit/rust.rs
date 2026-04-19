@@ -3758,10 +3758,7 @@ fn emit_rust_controller_test(out: &mut String, test: &Test, app: &App) {
 /// Flatten a test body into a statement sequence. If the body is a
 /// single Seq, unwrap it; otherwise return a singleton.
 fn ctrl_test_body_stmts(body: &Expr) -> Vec<&Expr> {
-    match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
-    }
+    crate::lower::test_body_stmts(body)
 }
 
 /// Emit a single controller-test statement.
@@ -3801,46 +3798,56 @@ fn emit_ctrl_test_stmt(stmt: &Expr, app: &App) -> String {
 }
 
 /// Top-level Send dispatcher for test body statements. Recognizes
-/// Minitest + Rails test primitives + falls back to a best-effort
-/// expression render for unknown shapes.
+/// Minitest + Rails test primitives via the shared classifier and
+/// renders each variant per Rust's axum_test conventions. Unknown
+/// shapes fall back to a best-effort `method(args)` render.
 fn emit_ctrl_test_send(
     method: &str,
     args: &[Expr],
     block: Option<&Expr>,
     app: &App,
 ) -> String {
-    match method {
-        "get" => emit_http_get(args, app),
-        "post" | "patch" => emit_http_write(method, args, app),
-        "delete" => {
-            let url = args.first().map(|a| emit_url_expr(a, app)).unwrap_or_default();
-            format!("let resp = server.delete(&{url}).await;")
+    use crate::lower::{ControllerTestSend, AssertSelectKind};
+    match crate::lower::classify_controller_test_send(method, args, block) {
+        Some(ControllerTestSend::HttpGet { url }) => {
+            let u = emit_url_expr(url, app);
+            format!("let resp = server.get(&{u}).await;")
         }
-        "assert_response" => {
-            let sym = args.first().and_then(as_sym).unwrap_or_default();
-            match sym.as_str() {
-                "success" => "resp.assert_ok();".to_string(),
-                "unprocessable_entity" => "resp.assert_unprocessable();".to_string(),
-                other => format!("resp.assert_status(/* {other:?} */ 200);"),
-            }
+        Some(ControllerTestSend::HttpWrite { method, url, params }) => {
+            let u = emit_url_expr(url, app);
+            let form_body = params
+                .map(|h| flatten_params_to_form(h, None, app))
+                .unwrap_or_else(|| "std::collections::HashMap::<String, String>::new()".to_string());
+            format!("let resp = server.{method}(&{u}).form(&{form_body}).await;")
         }
-        "assert_redirected_to" => {
-            let url = args.first().map(|a| emit_url_expr(a, app)).unwrap_or_default();
-            format!("resp.assert_redirected_to(&{url});")
+        Some(ControllerTestSend::HttpDelete { url }) => {
+            let u = emit_url_expr(url, app);
+            format!("let resp = server.delete(&{u}).await;")
         }
-        "assert_select" => emit_assert_select(args, block, app),
-        "assert_difference" | "assert_no_difference" => {
-            emit_assert_difference(method, args, block, app)
+        Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
+            "success" => "resp.assert_ok();".to_string(),
+            "unprocessable_entity" => "resp.assert_unprocessable();".to_string(),
+            other => format!("resp.assert_status(/* {other:?} */ 200);"),
+        },
+        Some(ControllerTestSend::AssertRedirectedTo { url }) => {
+            let u = emit_url_expr(url, app);
+            format!("resp.assert_redirected_to(&{u});")
         }
-        "assert_equal" => {
-            let a = args.first().map(|e| emit_ctrl_test_expr(e, app)).unwrap_or_default();
-            let b = args.get(1).map(|e| emit_ctrl_test_expr(e, app)).unwrap_or_default();
+        Some(ControllerTestSend::AssertSelect { selector, kind }) => {
+            emit_assert_select_classified(selector, kind, app)
+        }
+        Some(ControllerTestSend::AssertDifference { method, count_expr, delta, block }) => {
+            let _ = method;
+            emit_assert_difference_classified(count_expr, delta, block, app)
+        }
+        Some(ControllerTestSend::AssertEqual { expected, actual }) => {
+            let e = emit_ctrl_test_expr(expected, app);
+            let a = emit_ctrl_test_expr(actual, app);
             // Rails calls assert_equal(expected, actual); match
             // Rust's assert_eq! argument order.
-            format!("assert_eq!({a}, {b});")
+            format!("assert_eq!({e}, {a});")
         }
-        _ => {
-            // Unrecognized Send — fall back to a string representation.
+        None => {
             let args_s: Vec<String> =
                 args.iter().map(|a| emit_ctrl_test_expr(a, app)).collect();
             if args_s.is_empty() {
@@ -3852,161 +3859,55 @@ fn emit_ctrl_test_send(
     }
 }
 
-/// `get <url_expr>` → `let resp = server.get(&<url>).await;`.
-fn emit_http_get(args: &[Expr], app: &App) -> String {
-    let url = args.first().map(|a| emit_url_expr(a, app)).unwrap_or_default();
-    format!("let resp = server.get(&{url}).await;")
-}
-
-/// `post/patch <url>, params: {...}` →
-/// `let resp = server.<verb>(&<url>).form(&<params_flat>).await;`.
-fn emit_http_write(method: &str, args: &[Expr], app: &App) -> String {
-    let url = args.first().map(|a| emit_url_expr(a, app)).unwrap_or_default();
-    // The `params:` keyword arg lands as a trailing Hash arg. Find
-    // it and flatten to `HashMap<String, String>` with Rails'
-    // bracketed key shape (`article[title]` etc).
-    let params_hash = args
-        .iter()
-        .skip(1)
-        .find_map(|a| match &*a.node {
-            ExprNode::Hash { entries, .. } => {
-                // Find the `params:` entry.
-                for (k, v) in entries {
-                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                        if value.as_str() == "params" {
-                            return Some(v.clone());
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        });
-    let form_body = params_hash
-        .as_ref()
-        .map(|h| flatten_params_to_form(h, None, app))
-        .unwrap_or_else(|| "std::collections::HashMap::<String, String>::new()".to_string());
-    format!("let resp = server.{method}(&{url}).form(&{form_body}).await;")
-}
-
 /// Flatten a Ruby-shape params Hash into a Rust `HashMap<String,
-/// String>` literal matching Rails' bracketed-key form. E.g.
-/// `{ article: { title: "X", body: "Y" } }` →
-/// `HashMap::from([("article[title]".into(), "X".into()),
-///                 ("article[body]".into(), "Y".into())])`.
+/// String>` literal matching Rails' bracketed-key form. Delegates
+/// key-flattening to `crate::lower::flatten_params_pairs`; this
+/// function is just the Rust-side value render.
 fn flatten_params_to_form(expr: &Expr, scope: Option<&str>, app: &App) -> String {
-    let mut pairs: Vec<String> = Vec::new();
-    if let ExprNode::Hash { entries, .. } = &*expr.node {
-        for (k, v) in entries {
-            let key_name = match &*k.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-                _ => continue,
-            };
-            let full_key = match scope {
-                Some(s) => format!("{s}[{key_name}]"),
-                None => key_name.clone(),
-            };
-            if let ExprNode::Hash { .. } = &*v.node {
-                // Nested — recurse and append its pairs.
-                let nested = flatten_params_to_form_pairs(v, Some(&full_key), app);
-                pairs.extend(nested);
-            } else {
-                let val = emit_ctrl_test_expr(v, app);
-                pairs.push(format!("({full_key:?}.to_string(), {val}.to_string())"));
-            }
-        }
-    }
+    let pairs: Vec<String> = crate::lower::flatten_params_pairs(expr, scope)
+        .into_iter()
+        .map(|(key, value)| {
+            let val = emit_ctrl_test_expr(value, app);
+            format!("({key:?}.to_string(), {val}.to_string())")
+        })
+        .collect();
     format!(
         "std::collections::HashMap::<String, String>::from([{}])",
         pairs.join(", "),
     )
 }
 
-/// Helper for flatten_params_to_form's recursion: returns the raw
-/// key/value pairs so the caller can splice them into its list.
-fn flatten_params_to_form_pairs(expr: &Expr, scope: Option<&str>, app: &App) -> Vec<String> {
-    let mut pairs: Vec<String> = Vec::new();
-    if let ExprNode::Hash { entries, .. } = &*expr.node {
-        for (k, v) in entries {
-            let key_name = match &*k.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-                _ => continue,
-            };
-            let full_key = match scope {
-                Some(s) => format!("{s}[{key_name}]"),
-                None => key_name.clone(),
-            };
-            if let ExprNode::Hash { .. } = &*v.node {
-                pairs.extend(flatten_params_to_form_pairs(v, Some(&full_key), app));
-            } else {
-                let val = emit_ctrl_test_expr(v, app);
-                pairs.push(format!("({full_key:?}.to_string(), {val}.to_string())"));
-            }
-        }
-    }
-    pairs
-}
-
 /// Render a URL-helper call (`articles_url`, `article_url(@article)`)
-/// into a `route_helpers::*_path(...)` call returning `String`. URL
-/// helpers ending in `_url` rewrite to `_path` — the test client uses
-/// relative paths.
+/// into a `route_helpers::*_path(...)` call returning `String`. Uses
+/// the shared URL-helper classifier — Rust-specific pieces are the
+/// `_path` suffix and the `Model::last().unwrap().id` unwrap syntax.
 fn emit_url_expr(expr: &Expr, app: &App) -> String {
-    match &*expr.node {
-        ExprNode::Send { recv: None, method, args, .. } => {
-            let base = method
-                .as_str()
-                .strip_suffix("_url")
-                .unwrap_or(method.as_str());
-            let helper = format!("{base}_path");
-            let args_s: Vec<String> = args
-                .iter()
-                .map(|a| {
-                    // Route helpers take i64s. If the arg is an
-                    // ivar/var bound to a model, pass its `.id`.
-                    match &*a.node {
-                        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
-                            format!("{}.id", name.as_str())
-                        }
-                        ExprNode::Send { recv: Some(r), method: m, args: inner_args, .. }
-                            if m.as_str() == "last" && inner_args.is_empty() =>
-                        {
-                            // `Article.last` — unwrap the Option and
-                            // take its id.
-                            let class = match &*r.node {
-                                ExprNode::Const { path } => {
-                                    path.last().map(|s| s.as_str().to_string()).unwrap_or_default()
-                                }
-                                _ => emit_ctrl_test_expr(r, app),
-                            };
-                            format!("{class}::last().unwrap().id")
-                        }
-                        _ => emit_ctrl_test_expr(a, app),
-                    }
-                })
-                .collect();
-            format!("route_helpers::{helper}({})", args_s.join(", "))
-        }
-        _ => emit_ctrl_test_expr(expr, app),
-    }
-}
-
-fn as_sym(e: &Expr) -> Option<String> {
-    if let ExprNode::Lit { value: Literal::Sym { value } } = &*e.node {
-        return Some(value.as_str().to_string());
-    }
-    None
-}
-
-/// `assert_select <sel>` / `assert_select <sel>, <text>` /
-/// `assert_select <sel>, minimum: N` / `assert_select <sel> do
-/// <body> end`.
-fn emit_assert_select(args: &[Expr], block: Option<&Expr>, app: &App) -> String {
-    let Some(selector_expr) = args.first() else {
-        return "/* malformed assert_select */".to_string();
+    use crate::lower::UrlArg;
+    let Some(helper) = crate::lower::classify_url_expr(expr) else {
+        return emit_ctrl_test_expr(expr, app);
     };
+    let helper_name = format!("{}_path", helper.helper_base);
+    let args_s: Vec<String> = helper
+        .args
+        .iter()
+        .map(|a| match a {
+            UrlArg::IvarOrVarId(name) => format!("{name}.id"),
+            UrlArg::ModelLast(class) => format!("{}::last().unwrap().id", class.as_str()),
+            UrlArg::Raw(e) => emit_ctrl_test_expr(e, app),
+        })
+        .collect();
+    format!("route_helpers::{helper_name}({})", args_s.join(", "))
+}
+
+/// `assert_select` render over the shared classifier. Rust-specific
+/// pieces: `&` borrow on string args, `as usize` cast on the
+/// minimum-count arg.
+fn emit_assert_select_classified(
+    selector_expr: &Expr,
+    kind: crate::lower::AssertSelectKind<'_>,
+    app: &App,
+) -> String {
+    use crate::lower::AssertSelectKind;
     let ExprNode::Lit { value: Literal::Str { value: selector } } = &*selector_expr.node
     else {
         return format!(
@@ -4014,89 +3915,46 @@ fn emit_assert_select(args: &[Expr], block: Option<&Expr>, app: &App) -> String 
             emit_ctrl_test_expr(selector_expr, app),
         );
     };
-
-    // Second arg might be a plain text string or a keyword-style
-    // options hash like `{ minimum: 1 }`.
-    if let Some(second) = args.get(1) {
-        match &*second.node {
-            ExprNode::Lit { value: Literal::Str { .. } } => {
-                let text = emit_ctrl_test_expr(second, app);
-                return format!("resp.assert_select_text({selector:?}, &{text});");
+    match kind {
+        AssertSelectKind::Text(expr) => {
+            let text = emit_ctrl_test_expr(expr, app);
+            format!("resp.assert_select_text({selector:?}, &{text});")
+        }
+        AssertSelectKind::Minimum(expr) => {
+            let n = emit_ctrl_test_expr(expr, app);
+            format!("resp.assert_select_min({selector:?}, {n} as usize);")
+        }
+        // Block form: `assert_select "#articles" do assert_select "h2",
+        // minimum: 1 end`. Outer selector check + recurse through the
+        // block body as parallel assertions (no nested scoping).
+        AssertSelectKind::SelectorBlock(b) => {
+            let mut out = String::new();
+            out.push_str(&format!("resp.assert_select({selector:?});\n"));
+            let inner_body = match &*b.node {
+                ExprNode::Lambda { body, .. } => body,
+                _ => b,
+            };
+            for stmt in ctrl_test_body_stmts(inner_body) {
+                out.push_str(&emit_ctrl_test_stmt(stmt, app));
+                out.push('\n');
             }
-            ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "title" => {
-                // `@article.title` → `&article.title`
-                let recv_s = match &*r.node {
-                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
-                    _ => emit_ctrl_test_expr(r, app),
-                };
-                return format!("resp.assert_select_text({selector:?}, &{recv_s}.{method});");
-            }
-            ExprNode::Hash { entries, .. } => {
-                // `minimum: N` shape.
-                for (k, v) in entries {
-                    if let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node {
-                        if key.as_str() == "minimum" {
-                            let n = emit_ctrl_test_expr(v, app);
-                            return format!("resp.assert_select_min({selector:?}, {n} as usize);");
-                        }
-                    }
-                }
-            }
-            _ => {
-                let text = emit_ctrl_test_expr(second, app);
-                return format!("resp.assert_select_text({selector:?}, &{text});");
-            }
+            out.trim_end().to_string()
+        }
+        AssertSelectKind::SelectorOnly => {
+            format!("resp.assert_select({selector:?});")
         }
     }
-
-    // Block form: `assert_select "#articles" do assert_select "h2",
-    // minimum: 1 end`. Emit the outer selector check + recurse into
-    // the block body (treating each inner statement as another
-    // assert_select on `resp`). Phase 4d's substring assertions
-    // don't scope to the outer match, but the scaffold HTML is
-    // narrow enough that parallel checks are a reliable signal.
-    if let Some(b) = block {
-        let mut out = String::new();
-        out.push_str(&format!("resp.assert_select({selector:?});\n"));
-        let inner_body = match &*b.node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => b,
-        };
-        for stmt in ctrl_test_body_stmts(inner_body) {
-            out.push_str(&emit_ctrl_test_stmt(stmt, app));
-            out.push('\n');
-        }
-        return out.trim_end().to_string();
-    }
-
-    format!("resp.assert_select({selector:?});")
 }
 
-/// `assert_difference(<expr>[, <delta>]) { body }` — measure a
-/// counted expression before and after the block and assert the
-/// delta. `assert_no_difference` is `assert_difference(..., 0)` in
-/// spirit.
-fn emit_assert_difference(
-    method: &str,
-    args: &[Expr],
+/// `assert_difference(<expr>[, <delta>]) { body }` — render with
+/// Rust-specific `Model::count()` syntax. Delta + block come
+/// pre-classified.
+fn emit_assert_difference_classified(
+    count_expr_str: String,
+    expected_delta: i64,
     block: Option<&Expr>,
     app: &App,
 ) -> String {
-    let expected_delta: i64 = if method == "assert_no_difference" {
-        0
-    } else {
-        args.get(1).and_then(|e| match &*e.node {
-            ExprNode::Lit { value: Literal::Int { value } } => Some(*value),
-            _ => None,
-        }).unwrap_or(1)
-    };
-    let count_expr_str = args
-        .first()
-        .and_then(|e| match &*e.node {
-            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "Unknown.count".to_string());
     // Rewrite "Article.count" → "Article::count()".
     let count_expr = count_expr_str
         .split_once('.')

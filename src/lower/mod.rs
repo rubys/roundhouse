@@ -19,6 +19,7 @@
 
 pub mod associations;
 pub mod controller;
+pub mod controller_test;
 pub mod fixtures;
 pub mod persistence;
 pub mod schema_sql;
@@ -29,6 +30,11 @@ pub use controller::{
     chain_target_class, classify_controller_send, is_format_binding, is_params_expr,
     is_query_builder_method, singularize_to_model, split_public_private,
     walk_controller_ivars, SendKind, WalkedIvars,
+};
+pub use controller_test::{
+    classify_assert_select, classify_controller_test_send, classify_url_expr,
+    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    UrlHelperCall,
 };
 pub use fixtures::{
     lower_fixtures, LoweredFixture, LoweredFixtureField, LoweredFixtureRecord, LoweredFixtureSet,
