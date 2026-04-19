@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{Action, Association, Controller, MethodDef, Model, Test, TestModule};
+use crate::dialect::{Action, Controller, MethodDef, Model, Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming::snake_case;
@@ -1018,17 +1018,13 @@ fn try_emit_assoc_create(
     ctx: EmitCtx,
 ) -> Option<String> {
     let app = ctx.app?;
-    // Find any HasMany across all models that matches the association
-    // name. Real-blog has unique names; a future fixture with two
-    // classes both named `comments` would need owner-type dispatch.
-    let (target_class, foreign_key) = app.models.iter().find_map(|m| {
-        m.associations().find_map(|a| match a {
-            Association::HasMany { name, target, foreign_key, .. } if name.as_str() == assoc_name => {
-                Some((target.0.as_str().to_string(), foreign_key.as_str().to_string()))
-            }
-            _ => None,
-        })
-    })?;
+    let resolved = crate::lower::resolve_has_many(
+        &Symbol::from(assoc_name),
+        owner.ty.as_ref(),
+        app,
+    )?;
+    let target_class = resolved.target_class.0.as_str();
+    let foreign_key = resolved.foreign_key.as_str();
 
     let owner_s = emit_expr(owner, ctx);
     let hash_entries = match &args.first()?.node.as_ref() {
@@ -1049,8 +1045,7 @@ fn try_emit_assoc_create(
     }
 
     let struct_lit = format!(
-        "{} {{\n{}\n                ..Default::default()\n            }}",
-        target_class,
+        "{target_class} {{\n{}\n                ..Default::default()\n            }}",
         field_lines.join("\n"),
     );
     // `.build` returns the unsaved record; `.create` saves it first.

@@ -17,11 +17,13 @@
 //! exercises the pattern. If it works, follow-ups cover query algebra,
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
+pub mod associations;
 pub mod fixtures;
 pub mod persistence;
 pub mod schema_sql;
 pub mod validations;
 
+pub use associations::{resolve_has_many, HasManyRef};
 pub use fixtures::{
     lower_fixtures, LoweredFixture, LoweredFixtureField, LoweredFixtureRecord, LoweredFixtureSet,
     LoweredFixtureValue,
