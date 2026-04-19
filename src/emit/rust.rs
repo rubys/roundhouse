@@ -287,16 +287,132 @@ fn emit_model_impl(
             writeln!(out).unwrap();
         }
         emit_validate_method(out, validations);
-        // `save() -> bool` — Rails semantics: true when valid. The
-        // no-DB version just runs validation; when a persistence
-        // runtime lands, `save` becomes "insert/update + validate"
-        // and this stub gets replaced.
-        writeln!(out).unwrap();
-        writeln!(out, "    pub fn save(&self) -> bool {{").unwrap();
-        writeln!(out, "        self.validate().is_empty()").unwrap();
-        writeln!(out, "    }}").unwrap();
     }
+    // Persistence methods — generated for every model regardless of
+    // whether it has validations, because tests may call `destroy` /
+    // `count` / `find` on the class independently of validation rules.
+    // Each method runs against the per-test `:memory:` SQLite
+    // connection installed by `crate::db::setup_test_db`.
+    if !first || !validations.is_empty() {
+        writeln!(out).unwrap();
+    }
+    emit_persistence_methods(out, model, !validations.is_empty());
     writeln!(out, "}}").unwrap();
+}
+
+/// Render save/destroy/count/find for a model against the thread-local
+/// SQLite connection. The column order tracks `model.attributes.fields`
+/// (insertion-ordered via IndexMap), so the emitted SQL string stays in
+/// sync with the struct field order. `id` is excluded from INSERT
+/// columns — SQLite's AUTOINCREMENT assigns it — and becomes the WHERE
+/// key for UPDATE / DELETE / find.
+fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool) {
+    let table = model.table.0.as_str();
+    let class = model.name.0.as_str();
+
+    // Partition attributes into `id` and everything else. The SQL
+    // column list is the "everything else"; the id column anchors
+    // primary-key lookups.
+    let non_id_fields: Vec<&Symbol> = model
+        .attributes
+        .fields
+        .keys()
+        .filter(|k| k.as_str() != "id")
+        .collect();
+
+    // ----- save -----
+    let insert_cols: Vec<String> =
+        non_id_fields.iter().map(|s| s.as_str().to_string()).collect();
+    let insert_placeholders: Vec<String> = (1..=non_id_fields.len())
+        .map(|i| format!("?{i}"))
+        .collect();
+    let insert_params: Vec<String> = non_id_fields
+        .iter()
+        .map(|s| format!("self.{}", s.as_str()))
+        .collect();
+    let update_assigns: Vec<String> = non_id_fields
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{} = ?{}", s.as_str(), i + 1))
+        .collect();
+    let update_id_placeholder = non_id_fields.len() + 1;
+
+    writeln!(out, "    pub fn save(&mut self) -> bool {{").unwrap();
+    if has_validate {
+        writeln!(out, "        let errors = self.validate();").unwrap();
+        writeln!(out, "        if !errors.is_empty() {{ return false; }}").unwrap();
+    }
+    writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
+    writeln!(out, "            if self.id == 0 {{").unwrap();
+    writeln!(
+        out,
+        "                conn.execute(\n                    \"INSERT INTO {table} ({}) VALUES ({})\",\n                    rusqlite::params![{}],\n                ).expect(\"INSERT {table}\");",
+        insert_cols.join(", "),
+        insert_placeholders.join(", "),
+        insert_params.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "                self.id = conn.last_insert_rowid();").unwrap();
+    writeln!(out, "            }} else {{").unwrap();
+    writeln!(
+        out,
+        "                conn.execute(\n                    \"UPDATE {table} SET {} WHERE id = ?{update_id_placeholder}\",\n                    rusqlite::params![{}, self.id],\n                ).expect(\"UPDATE {table}\");",
+        update_assigns.join(", "),
+        insert_params.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        }});").unwrap();
+    writeln!(out, "        true").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    // ----- destroy -----
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn destroy(&self) {{").unwrap();
+    writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
+    writeln!(
+        out,
+        "            conn.execute(\"DELETE FROM {table} WHERE id = ?1\", rusqlite::params![self.id])\n                .expect(\"DELETE {table}\");",
+    )
+    .unwrap();
+    writeln!(out, "        }});").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    // ----- count (associated function) -----
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn count() -> i64 {{").unwrap();
+    writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
+    writeln!(
+        out,
+        "            conn.query_row(\"SELECT COUNT(*) FROM {table}\", [], |r| r.get(0))\n                .expect(\"count {table}\")",
+    )
+    .unwrap();
+    writeln!(out, "        }})").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    // ----- find (associated function) -----
+    let select_cols: Vec<String> = model
+        .attributes
+        .fields
+        .keys()
+        .map(|s| s.as_str().to_string())
+        .collect();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn find(id: i64) -> Option<{class}> {{").unwrap();
+    writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
+    writeln!(
+        out,
+        "            conn.query_row(\n                \"SELECT {} FROM {table} WHERE id = ?1\",\n                rusqlite::params![id],",
+        select_cols.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "                |r| Ok({class} {{").unwrap();
+    for (i, field) in model.attributes.fields.keys().enumerate() {
+        writeln!(out, "                    {}: r.get({i})?,", field.as_str()).unwrap();
+    }
+    writeln!(out, "                }}),\n            ).ok()").unwrap();
+    writeln!(out, "        }})").unwrap();
+    writeln!(out, "    }}").unwrap();
 }
 
 /// Render `fn validate(&self) -> Vec<runtime::ValidationError>` with
@@ -533,12 +649,28 @@ fn emit_stmt(e: &Expr, is_last: bool, ctx: EmitCtx) -> String {
     match &*e.node {
         // Local `foo = expr` -> `let foo = expr;`.
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            format!("let {} = {};", name, emit_expr(value, ctx))
+            if ctx.in_test {
+                // Save/destroy take `&mut self`; mark every local as
+                // mut so test bindings work uniformly. The allow-attr
+                // on each test fn swallows the resulting unused-mut
+                // warnings.
+                format!("let mut {} = {};", name, emit_expr(value, ctx))
+            } else {
+                format!("let {} = {};", name, emit_expr(value, ctx))
+            }
         }
         // Ivars in a multi-statement body: treat as locals. Later stmts can
         // read them via `ExprNode::Ivar` which also emits as the bare name.
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            format!("let {} = {};", name, emit_expr(value, ctx))
+            if ctx.in_test {
+                // Save/destroy take `&mut self`; mark every local as
+                // mut so test bindings work uniformly. The allow-attr
+                // on each test fn swallows the resulting unused-mut
+                // warnings.
+                format!("let mut {} = {};", name, emit_expr(value, ctx))
+            } else {
+                format!("let {} = {};", name, emit_expr(value, ctx))
+            }
         }
         _ => {
             if is_last {
@@ -1047,6 +1179,11 @@ fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
             writeln!(s, "}}").unwrap();
         } else {
             writeln!(s, "#[test]").unwrap();
+            // Test bodies emit `let mut` uniformly so save/destroy
+            // calls on model bindings type-check; this allow-attr
+            // silences the resulting unused-mut warnings on bindings
+            // that never actually mutate.
+            writeln!(s, "#[allow(unused_mut)]").unwrap();
             writeln!(s, "fn {}() {{", test_fn_name(&test.name)).unwrap();
             for line in emit_body(&test.body, ctx).lines() {
                 writeln!(s, "    {line}").unwrap();
