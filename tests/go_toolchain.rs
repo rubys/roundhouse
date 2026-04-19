@@ -43,7 +43,26 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn go_mod_tidy(scratch: &Path) {
+    let tidy = Command::new("go")
+        .arg("mod")
+        .arg("tidy")
+        .current_dir(scratch)
+        .output()
+        .expect("run go mod tidy");
+    assert!(
+        tidy.status.success(),
+        "go mod tidy failed at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&tidy.stdout),
+        String::from_utf8_lossy(&tidy.stderr),
+    );
+}
+
 fn assert_go_passes(fixture: &str, scratch: &Path) {
+    go_mod_tidy(scratch);
     let output = Command::new("go")
         .arg("vet")
         .arg("./app")
@@ -66,7 +85,7 @@ fn assert_go_passes(fixture: &str, scratch: &Path) {
 #[ignore]
 fn real_blog_go_vet_passes() {
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-vet");
     generate_project(fixture, &scratch);
     assert_go_passes("real-blog", &scratch);
 }
@@ -87,8 +106,9 @@ fn real_blog_go_test_passes() {
     // against the generated package, assert zero failures.
     // Phase-3-dependent tests are `t.Skip`-ped.
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
+    go_mod_tidy(&scratch);
 
     let output = Command::new("go")
         .arg("test")
