@@ -1118,6 +1118,7 @@ fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
     let model_attrs: Vec<crate::ident::Symbol> = attrs_set.into_iter().collect();
 
     let ctx = GoTestCtx {
+        app,
         fixture_names: &fixture_names,
         known_models: &known_models,
         model_attrs: &model_attrs,
@@ -1174,6 +1175,7 @@ fn test_name_snake(desc: &str) -> String {
 
 #[derive(Clone, Copy)]
 struct GoTestCtx<'a> {
+    app: &'a App,
     fixture_names: &'a [crate::ident::Symbol],
     known_models: &'a [crate::ident::Symbol],
     model_attrs: &'a [crate::ident::Symbol],
@@ -1208,8 +1210,8 @@ fn emit_test_expr_go(e: &Expr, ctx: GoTestCtx) -> String {
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .join("."),
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_test_send_go(recv.as_ref(), method.as_str(), args, ctx)
+        ExprNode::Send { recv, method, args, block, .. } => {
+            emit_test_send_go(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx)
         }
         ExprNode::Hash { entries, .. } => {
             // Rough: only used inside Class.new(hash) — handled above.
@@ -1240,6 +1242,7 @@ fn emit_test_send_go(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
     ctx: GoTestCtx,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_test_expr_go(a, ctx)).collect();
@@ -1255,6 +1258,56 @@ fn emit_test_send_go(
                 go_field_name(method),
                 go_field_name(sym.as_str())
             );
+        }
+    }
+
+    // assert_difference("Class.count", delta) do ... end →
+    // before/after capture + inline Go comparison. Parses the Ruby
+    // string into a Go expression (`Comment.count` → `CommentCount()`).
+    if recv.is_none() && method == "assert_difference" {
+        if let Some(body) = block {
+            if let Some(count_expr) = args
+                .first()
+                .and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        rewrite_ruby_dot_call_go(value)
+                    }
+                    _ => None,
+                })
+            {
+                let delta = args_s.get(1).cloned().unwrap_or_else(|| "1".into());
+                let body_s = emit_block_body_go(body, ctx);
+                return format!(
+                    "_before := {count_expr}\n{body_s}\n_after := {count_expr}\nif _after - _before != int64({delta}) {{ t.Errorf(\"expected delta {delta}, got %d\", _after - _before) }}",
+                );
+            }
+        }
+    }
+
+    // owner.<assoc>.create(hash) / .build(hash) — HasMany rewrite.
+    // Renders as a Go IIFE so the surrounding assignment/expression
+    // context still gets a value.
+    if (method == "create" || method == "build") && args.len() == 1 {
+        if let Some(outer_recv) = recv {
+            if let ExprNode::Send {
+                recv: Some(assoc_recv),
+                method: assoc_method,
+                args: inner_args,
+                ..
+            } = &*outer_recv.node
+            {
+                if inner_args.is_empty() {
+                    if let Some(s) = try_emit_assoc_create_go(
+                        assoc_recv,
+                        assoc_method.as_str(),
+                        args,
+                        method,
+                        ctx,
+                    ) {
+                        return s;
+                    }
+                }
+            }
         }
     }
 
@@ -1353,8 +1406,22 @@ fn emit_test_send_go(
         Some(r) => {
             let recv_s = emit_test_expr_go(r, ctx);
             let is_class_call = matches!(&*r.node, ExprNode::Const { .. });
-            let is_attr = !is_class_call
-                && args_s.is_empty()
+            // Class-level calls flatten to `ClassMethod(args)` — Go
+            // has no class methods, and our persistence emitter laid
+            // down package-level `ArticleFind` / `CommentCount` /
+            // etc. to stand in.
+            if is_class_call {
+                if args_s.is_empty() {
+                    return format!("{recv_s}{}()", go_field_name(method));
+                } else {
+                    return format!(
+                        "{recv_s}{}({})",
+                        go_field_name(method),
+                        args_s.join(", ")
+                    );
+                }
+            }
+            let is_attr = args_s.is_empty()
                 && ctx.model_attrs.iter().any(|s| s.as_str() == method);
             if is_attr {
                 format!("{recv_s}.{}", go_field_name(method))
@@ -1371,13 +1438,99 @@ fn emit_test_send_go(
     }
 }
 
-fn test_needs_runtime_unsupported_go(test: &Test) -> bool {
-    let known_name = matches!(test.name.as_str(), "requires valid article");
-    if known_name {
-        return true;
+/// Parse a Ruby-style `"Class.method"` expression into Go syntax.
+/// Capitalized LHS → package-level function (`Comment.count` →
+/// `CommentCount()`); lowercase LHS → instance field read.
+fn rewrite_ruby_dot_call_go(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    let (lhs, rhs) = trimmed.split_once('.')?;
+    let is_ident = |s: &str| {
+        !s.is_empty()
+            && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if !is_ident(lhs) || !is_ident(rhs) {
+        return None;
     }
-    test_body_uses_unsupported_go(&test.body)
+    let is_class = lhs.chars().next().is_some_and(|c| c.is_uppercase());
+    if is_class {
+        Some(format!("{lhs}{}()", go_field_name(rhs)))
+    } else {
+        Some(format!("{lhs}.{}", go_field_name(rhs)))
+    }
 }
+
+/// Render a Ruby block body as Go statements, peeling one Lambda
+/// layer (Ruby `do ... end` lowers to `ExprNode::Lambda` in the IR).
+fn emit_block_body_go(e: &Expr, ctx: GoTestCtx) -> String {
+    let inner = match &*e.node {
+        ExprNode::Lambda { body, .. } => body,
+        _ => e,
+    };
+    match &*inner.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .map(|s| emit_test_stmt_go(s, ctx))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_test_stmt_go(inner, ctx),
+    }
+}
+
+fn try_emit_assoc_create_go(
+    owner: &Expr,
+    assoc_name: &str,
+    args: &[Expr],
+    outer_method: &str,
+    ctx: GoTestCtx,
+) -> Option<String> {
+    let resolved = crate::lower::resolve_has_many(
+        &crate::ident::Symbol::from(assoc_name),
+        owner.ty.as_ref(),
+        ctx.app,
+    )?;
+    let target_class = resolved.target_class.0.as_str();
+    let foreign_key = go_field_name(resolved.foreign_key.as_str());
+
+    let owner_s = emit_test_expr_go(owner, ctx);
+    let hash_entries = match &args.first()?.node.as_ref() {
+        ExprNode::Hash { entries, .. } => entries.clone(),
+        _ => return None,
+    };
+
+    let mut pairs: Vec<String> =
+        vec![format!("{foreign_key}: {owner_s}.ID")];
+    for (k, v) in &hash_entries {
+        if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
+            pairs.push(format!(
+                "{}: {}",
+                go_field_name(field_name.as_str()),
+                emit_test_expr_go(v, ctx),
+            ));
+        }
+    }
+    let struct_lit = format!("&{target_class}{{{}}}", pairs.join(", "));
+    // Go IIFE — wraps the multi-statement build+save+return so the
+    // caller can use it in an expression position (e.g. RHS of :=).
+    if outer_method == "create" {
+        Some(format!(
+            "func() *{target_class} {{ r := {struct_lit}; r.Save(); return r }}()"
+        ))
+    } else {
+        Some(format!(
+            "func() *{target_class} {{ r := {struct_lit}; return r }}()"
+        ))
+    }
+}
+
+fn test_needs_runtime_unsupported_go(_test: &Test) -> bool {
+    // Phase 3 rounded out the Go emitter's coverage. Keep the
+    // predicate as a future-guard; no real-blog shape forces a
+    // skip today.
+    false
+}
+
+#[allow(dead_code)]
 
 fn test_body_uses_unsupported_go(e: &Expr) -> bool {
     use crate::expr::InterpPart;
