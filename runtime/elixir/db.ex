@@ -58,10 +58,22 @@ defmodule Roundhouse.Db do
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     :ok = Exqlite.Sqlite3.bind(stmt, params)
     :done = Exqlite.Sqlite3.step(conn, stmt)
-    id = Exqlite.Sqlite3.last_insert_rowid(conn)
+    id = unwrap_rowid(Exqlite.Sqlite3.last_insert_rowid(conn))
     :ok = Exqlite.Sqlite3.release(conn, stmt)
     id
   end
+
+  @doc false
+  @spec last_insert_rowid() :: integer()
+  def last_insert_rowid do
+    unwrap_rowid(Exqlite.Sqlite3.last_insert_rowid(conn()))
+  end
+
+  # Older exqlite returned the bare integer; 0.36+ returns
+  # `{:ok, rowid}`. Accept both shapes so the runtime doesn't pin a
+  # version.
+  defp unwrap_rowid({:ok, n}) when is_integer(n), do: n
+  defp unwrap_rowid(n) when is_integer(n), do: n
 
   @doc "Run a single-row SELECT; returns the row list or nil."
   @spec query_one(String.t(), list()) :: list() | nil
@@ -105,13 +117,4 @@ defmodule Roundhouse.Db do
     val
   end
 
-  @doc """
-  Last rowid assigned by the most recent INSERT on the current
-  connection. Called from fixture loaders and `.create` rewrites so
-  tests can reach the autoincrement id their save just produced.
-  """
-  @spec last_insert_rowid() :: integer()
-  def last_insert_rowid do
-    Exqlite.Sqlite3.last_insert_rowid(conn())
-  end
 end
