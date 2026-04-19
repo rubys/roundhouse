@@ -145,8 +145,51 @@ impl Post {
         errors
     }
 
-    pub fn save(&self) -> bool {
-        self.validate().is_empty()
+    pub fn save(&mut self) -> bool {
+        let errors = self.validate();
+        if !errors.is_empty() { return false; }
+        crate::db::with_conn(|conn| {
+            if self.id == 0 {
+                conn.execute(
+                    \"INSERT INTO posts (title) VALUES (?1)\",
+                    rusqlite::params![self.title],
+                ).expect(\"INSERT posts\");
+                self.id = conn.last_insert_rowid();
+            } else {
+                conn.execute(
+                    \"UPDATE posts SET title = ?1 WHERE id = ?2\",
+                    rusqlite::params![self.title, self.id],
+                ).expect(\"UPDATE posts\");
+            }
+        });
+        true
+    }
+
+    pub fn destroy(&self) {
+        crate::db::with_conn(|conn| {
+            conn.execute(\"DELETE FROM posts WHERE id = ?1\", rusqlite::params![self.id])
+                .expect(\"DELETE posts\");
+        });
+    }
+
+    pub fn count() -> i64 {
+        crate::db::with_conn(|conn| {
+            conn.query_row(\"SELECT COUNT(*) FROM posts\", [], |r| r.get(0))
+                .expect(\"count posts\")
+        })
+    }
+
+    pub fn find(id: i64) -> Option<Post> {
+        crate::db::with_conn(|conn| {
+            conn.query_row(
+                \"SELECT id, title FROM posts WHERE id = ?1\",
+                rusqlite::params![id],
+                |r| Ok(Post {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                }),
+            ).ok()
+        })
     }
 }
 ";
