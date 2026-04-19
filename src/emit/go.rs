@@ -21,9 +21,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{
-    Action, Association, Controller, MethodDef, Model, Test, TestModule,
-};
+use crate::dialect::{Action, Controller, MethodDef, Model, Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming::snake_case;

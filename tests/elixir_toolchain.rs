@@ -39,11 +39,34 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn mix_deps_get(scratch: &Path) {
+    let output = Command::new("mix")
+        .arg("deps.get")
+        .current_dir(scratch)
+        .env("MIX_ENV", "test")
+        // Hex package fetches need a cache; isolate per-test to
+        // avoid parallel `mix local.hex` races on fresh runners.
+        .env("MIX_HOME", scratch.join(".mix"))
+        .output()
+        .expect("run mix deps.get");
+    assert!(
+        output.status.success(),
+        "mix deps.get failed at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn assert_mix_compile_passes(fixture: &str, scratch: &Path) {
+    mix_deps_get(scratch);
     let output = Command::new("mix")
         .arg("compile")
         .arg("--warnings-as-errors")
         .current_dir(scratch)
+        .env("MIX_HOME", scratch.join(".mix"))
         .output()
         .expect("run mix compile");
 
@@ -71,7 +94,7 @@ fn tiny_blog_mix_compile_passes() {
 #[ignore]
 fn real_blog_mix_compile_passes() {
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-compile");
     generate_project(fixture, &scratch);
     assert_mix_compile_passes("real-blog", &scratch);
 }
@@ -82,12 +105,14 @@ fn real_blog_mix_test_passes() {
     // Phase 2 forcing function: emit real-blog, run `mix test`,
     // assert zero failures. Phase-3 tests are tagged `:skip`.
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
+    mix_deps_get(&scratch);
 
     let output = Command::new("mix")
         .arg("test")
         .current_dir(&scratch)
+        .env("MIX_HOME", scratch.join(".mix"))
         .output()
         .expect("run mix test");
 
