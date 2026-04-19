@@ -41,13 +41,14 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 }
 
 fn assert_python_compiles(fixture: &str, scratch: &Path) {
-    // Only compile-check the models package; controllers/routes
-    // reference a runtime we haven't wired yet.
+    // Compile-check the whole `app/` package. Phase 4c brought
+    // controllers + the http stub under compileall; earlier phases
+    // scoped this to `app/models.py`.
     let output = Command::new("python3")
         .arg("-m")
         .arg("compileall")
         .arg("-q")
-        .arg("app/models.py")
+        .arg("app/")
         .current_dir(scratch)
         .output()
         .expect("run python compileall");
