@@ -48,8 +48,13 @@ fn models_define_struct_and_module_functions() {
     let files = elixir::emit(&app);
     let content = find(&files, "lib/post.ex");
     assert!(content.contains("defmodule Post do"), "got:\n{content}");
-    // defstruct with the schema fields as atom keys.
-    assert!(content.contains("defstruct [:id, :title]"), "got:\n{content}");
+    // Phase 3: defstruct declares typed defaults so NOT NULL schema
+    // columns get concrete values before save runs (SQLite rejects
+    // nil → NOT NULL).
+    assert!(
+        content.contains("defstruct [id: nil, title: \"\"]"),
+        "got:\n{content}"
+    );
     // Instance methods become module functions taking the record as
     // first arg. `normalize_title` from tiny-blog's Post.
     assert!(
