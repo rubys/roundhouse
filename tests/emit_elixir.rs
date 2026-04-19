@@ -81,9 +81,20 @@ fn controllers_emit_as_bare_modules() {
     let files = elixir::emit(&app);
     let content = find(&files, "lib/posts_controller.ex");
     assert!(content.contains("defmodule PostsController do"), "got:\n{content}");
-    // Every action: `def <name>(params) do … end`. No class, no
-    // receiver — matches Plug-ish convention.
-    for action in &["def index(params) do", "def show(params) do", "def create(params) do", "def destroy(params) do"] {
+    // Phase 4c: each controller imports the stub HTTP surface (so
+    // bodies can call `render`, `redirect_to`, etc. bare) and every
+    // action is `def <name>(...)` — arg name is `params` or `_params`
+    // depending on whether the emitted body references it.
+    assert!(
+        content.contains("import Roundhouse.Http"),
+        "expected Roundhouse.Http import; got:\n{content}"
+    );
+    for action in &[
+        "def index(",
+        "def show(",
+        "def create(",
+        "def destroy(",
+    ] {
         assert!(content.contains(action), "missing {action} in:\n{content}");
     }
 }
