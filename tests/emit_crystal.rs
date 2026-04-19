@@ -56,42 +56,59 @@ fn methods_have_return_type_annotations() {
 }
 
 #[test]
-fn controllers_emit_as_classes() {
+fn controllers_emit_as_modules_of_self_actions() {
     let app = analyzed_app();
     let files = crystal::emit(&app);
     let content = find(&files, "src/controllers.cr");
-    assert!(content.contains("class PostsController"), "got:\n{content}");
-    // Phase 4c: every action returns the stub `Response` value.
+    // Pass-2: each controller emits as a module `<Name>Actions`
+    // holding `def self.<action>(context) : ActionResponse` methods.
     assert!(
-        content.contains("def create : Roundhouse::Http::Response"),
+        content.contains("module PostsControllerActions"),
         "got:\n{content}"
     );
     assert!(
-        content.contains("def destroy : Roundhouse::Http::Response"),
+        content.contains(
+            "def self.create(context : Roundhouse::Http::ActionContext) : Roundhouse::Http::ActionResponse"
+        ),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains(
+            "def self.destroy(context : Roundhouse::Http::ActionContext) : Roundhouse::Http::ActionResponse"
+        ),
         "got:\n{content}"
     );
 }
 
 #[test]
-fn routes_table_uses_namedtuple_syntax() {
+fn routes_register_handlers_on_router() {
     let app = analyzed_app();
     let files = crystal::emit(&app);
     let content = find(&files, "src/routes.cr");
-    assert!(content.contains("ROUTES = ["), "got:\n{content}");
-    // NamedTuple-style `{key: value}` entries.
+    // Pass-2: routes file pushes procs into `Roundhouse::Http::Router`
+    // at require time. The old ROUTES NamedTuple constant is gone —
+    // TestClient dispatches via `Router.match`.
     assert!(
-        content.contains("method: :get, path: \"/posts\""),
+        content.contains("Roundhouse::Http::Router.add"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("PostsControllerActions.index(ctx)"),
         "got:\n{content}"
     );
 }
 
 #[test]
-fn symbols_emit_as_crystal_symbols() {
+fn controller_params_coerce_to_int64() {
     let app = analyzed_app();
     let files = crystal::emit(&app);
     let content = find(&files, "src/controllers.cr");
-    // Phase 4c: `params[:id]` in the show action lowers through the
-    // stub `Params#[]` — both the receiver and the symbol index
-    // preserve their native Crystal shapes.
-    assert!(content.contains("params[:id]"), "got:\n{content}");
+    // Pass-2: path ids come through `context.params["id"]` as a
+    // String and coerce to Int64 at the top of show/edit/update/
+    // destroy. Downstream model calls (`Post.find(id)`) use the
+    // typed local.
+    assert!(
+        content.contains("id = context.params[\"id\"].to_i64"),
+        "got:\n{content}"
+    );
 }

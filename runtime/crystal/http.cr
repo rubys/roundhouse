@@ -1,76 +1,131 @@
-# Roundhouse Crystal HTTP runtime — Phase 4c compile-only stubs.
+# Roundhouse Crystal HTTP runtime.
 #
 # Hand-written, shipped alongside generated code (copied in by the
-# Crystal emitter as `src/http.cr`). Provides just enough surface that
-# emitted controller actions type-check: `Response`, a `Params`
-# placeholder, and the free methods generated code expects
-# (`render`, `redirect_to`, `head`, `respond_to`).
+# Crystal emitter as `src/http.cr`). Provides the Roundhouse::Http
+# surface that emitted controller actions call into: ActionResponse
+# (typed return value), ActionContext (params + request shape),
+# Router (in-memory route-match table), plus legacy stubs for the
+# Phase 4c controller shape (render/redirect_to/head/respond_to)
+# that the preview emitters still reference.
 #
-# Mirrors `runtime/rust/http.rs` one-for-one — same stubs, same
-# behavior (every call returns `Response.new`). Real behavior lands in
-# Phase 4e+. Controller tests stay `pending` until then, so nothing in
-# this module actually executes during `crystal spec`; the purpose is
-# to make `crystal build` succeed.
+# Mirrors `runtime/rust/http.rs` / `runtime/typescript/juntos.ts` in
+# shape and posture: pure in-process dispatch via `Router.match`
+# means tests call controller actions directly — no HTTP server,
+# no sockets, no event-loop glue. A real HTTP transport slots in
+# later by adding a `HTTP::Handler` on top of the same match table.
 
 module Roundhouse
   module Http
-    # Opaque response value. The real runtime will carry status + body
-    # + headers; Phase 4c only needs a value every action can return.
+    # What every controller action returns. Fields are optional so
+    # actions pick the shape they need:
+    #   - `body`: the HTML string the view rendered (for GET actions)
+    #   - `status`: HTTP status code (default 200; 422 for
+    #     unprocessable, 303 for redirects)
+    #   - `location`: redirect target URL; test assertions on
+    #     `assert_redirected_to` check this field.
+    class ActionResponse
+      property body : String
+      property status : Int32
+      property location : String
+
+      def initialize(@body : String = "", @status : Int32 = 200, @location : String = "")
+      end
+    end
+
+    # Context passed to every action. `params` merges path params +
+    # form body. Values are always strings — controllers coerce to
+    # integers via `.to_i64` at the boundary.
+    class ActionContext
+      getter params : Hash(String, String)
+
+      def initialize(@params : Hash(String, String) = {} of String => String)
+      end
+    end
+
+    # One entry in the router's match table. The handler is a proc
+    # taking ActionContext and returning ActionResponse.
+    alias Handler = ActionContext -> ActionResponse
+
+    record Route, method : String, path : String, handler : Handler
+
+    # In-memory router + dispatch. Controllers register routes at
+    # require time (the emitted `src/routes.cr` runs Router.root /
+    # Router.resources at top level); tests dispatch through
+    # `Router.match` without a live HTTP server.
+    class Router
+      @@routes : Array(Route) = [] of Route
+
+      def self.reset : Nil
+        @@routes.clear
+      end
+
+      def self.add(method : String, path : String, handler : Handler) : Nil
+        @@routes << Route.new(method, path, handler)
+      end
+
+      # Match a request path against the registered routes; return
+      # the handler + extracted path params, or nil. Path params
+      # come from `:id`-style segments in the route pattern.
+      def self.match(method : String, path : String) : {Handler, Hash(String, String)}?
+        @@routes.each do |route|
+          next unless route.method == method
+          if extracted = try_match(route.path, path)
+            return {route.handler, extracted}
+          end
+        end
+        nil
+      end
+
+      private def self.try_match(pattern : String, path : String) : Hash(String, String)?
+        pat_parts = pattern.split('/').reject(&.empty?)
+        path_parts = path.split('/').reject(&.empty?)
+        return nil unless pat_parts.size == path_parts.size
+        params = {} of String => String
+        pat_parts.zip(path_parts).each do |pat, seg|
+          if pat.starts_with?(':')
+            params[pat[1..]] = seg
+          elsif pat != seg
+            return nil
+          end
+        end
+        params
+      end
+    end
+
+    # Legacy Phase-4c stubs kept for the compile-only pass of
+    # controllers still using respond_to/render; pass-2 template
+    # actions don't call these.
     class Response
       def initialize
       end
     end
 
-    # Controller-side view of request parameters. Bare `params` in a
-    # Ruby controller lowers to `Roundhouse::Http.params` — both reads
-    # and the `params.expect(...)` surface live on this stub.
     class Params
-      # `params.expect(:key)` / `params.expect(article: [:title, :body])`.
-      # Accepts any positional or keyword shape; returns `self` so
-      # chained helpers (`Article.new(params.expect(...))`) compile.
-      # The real runtime will type-check and coerce from the request.
       def expect(*args, **kwargs) : Params
         self
       end
 
-      # `params[:id]` / `params["id"]`. Returns a zero Int64 — Phase
-      # 4c's most common call site is `Model.find(params[:id])`, whose
-      # argument type is `Int64`. String-indexed accesses will need a
-      # different overload when we add one.
       def [](key) : Int64
         0_i64
       end
     end
 
-    # Accessor emitted for a bare `params` reference in a controller
-    # body.
     def self.params : Params
       Params.new
     end
 
-    # Stub `render`. Accepts any positional + keyword arg shape the
-    # emitter produces (template symbol, string, or an options hash).
     def self.render(*args, **kwargs) : Response
       Response.new
     end
 
-    # Stub `redirect_to`. First positional arg is the target (a model,
-    # a string URL, a path helper result); kwargs carry the Rails
-    # options (`notice:`, `status:`, etc.).
     def self.redirect_to(*args, **kwargs) : Response
       Response.new
     end
 
-    # Stub `head :status`. Emitted when an action returns only a status.
     def self.head(*args, **kwargs) : Response
       Response.new
     end
 
-    # `respond_to do |format| ... end` lowers to this: the block gets a
-    # `FormatRouter` and the caller threads the format-specific
-    # `Response` back out. Phase 4c wires only the HTML branch; the
-    # JSON branch is replaced at the call site with a `# TODO: JSON
-    # branch` comment.
     def self.respond_to(&) : Response
       fr = FormatRouter.new
       yield fr
@@ -78,16 +133,11 @@ module Roundhouse
     end
 
     class FormatRouter
-      # HTML branch. Runs the block for its side effects and surfaces
-      # the Response.
       def html(&) : Response
         yield
         Response.new
       end
 
-      # JSON branch stub — Phase 4c replaces callers with a
-      # `# TODO: JSON branch` comment; kept callable so hand-written
-      # code outside the emitter still typechecks.
       def json(&) : Response
         yield
         Response.new
