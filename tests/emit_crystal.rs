@@ -61,9 +61,15 @@ fn controllers_emit_as_classes() {
     let files = crystal::emit(&app);
     let content = find(&files, "src/controllers.cr");
     assert!(content.contains("class PostsController"), "got:\n{content}");
-    // Void actions annotate as `: Nil` (Crystal's Void type).
-    assert!(content.contains("def create : Nil"), "got:\n{content}");
-    assert!(content.contains("def destroy : Nil"), "got:\n{content}");
+    // Phase 4c: every action returns the stub `Response` value.
+    assert!(
+        content.contains("def create : Roundhouse::Http::Response"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("def destroy : Roundhouse::Http::Response"),
+        "got:\n{content}"
+    );
 }
 
 #[test]
@@ -84,6 +90,8 @@ fn symbols_emit_as_crystal_symbols() {
     let app = analyzed_app();
     let files = crystal::emit(&app);
     let content = find(&files, "src/controllers.cr");
-    // Crystal has first-class :symbol — stays as `:id` not `"id"`.
+    // Phase 4c: `params[:id]` in the show action lowers through the
+    // stub `Params#[]` — both the receiver and the symbol index
+    // preserve their native Crystal shapes.
     assert!(content.contains("params[:id]"), "got:\n{content}");
 }
