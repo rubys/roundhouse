@@ -337,7 +337,7 @@ pub async fn show(
     Path(id): Path<i64>,
 ) -> Response {
     let record = Post::find(id).unwrap_or_default();
-    http::html(views::post_show(&record)).into_response()
+    http::html(views::posts_show(&record)).into_response()
 }
 
 pub async fn create(
@@ -352,7 +352,7 @@ pub async fn create(
     if record.save() {
         http::redirect(&route_helpers::post_path(record.id)).into_response()
     } else {
-        http::unprocessable(views::post_new(&record)).into_response()
+        http::unprocessable(views::posts_new(&record)).into_response()
     }
 }
 
