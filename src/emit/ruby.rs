@@ -562,11 +562,19 @@ fn emit_test_module(tm: &TestModule) -> EmittedFile {
         writeln!(s, "  end").unwrap();
     }
     writeln!(s, "end").unwrap();
-    // File path: `test/models/<snake_class_name>.rb`. ArticleTest →
-    // article_test.rb. Matches Rails' test/models/*_test.rb convention.
+    // File path: `test/<subdir>/<snake_class_name>.rb`. Subdir is
+    // `controllers/` when the class name follows the Rails
+    // convention `FooControllerTest`, otherwise `models/`. Matches
+    // both directories the ingester walks, so Ruby round-trip lands
+    // in the same spot the source did.
     let filename = snake_case(tm.name.0.as_str());
+    let subdir = if tm.name.0.as_str().ends_with("ControllerTest") {
+        "controllers"
+    } else {
+        "models"
+    };
     EmittedFile {
-        path: PathBuf::from(format!("test/models/{filename}.rb")),
+        path: PathBuf::from(format!("test/{subdir}/{filename}.rb")),
         content: s,
     }
 }

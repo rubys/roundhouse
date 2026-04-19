@@ -1122,10 +1122,17 @@ fn emit_py_test(tm: &TestModule, app: &App) -> EmittedFile {
         writeln!(s, "        fixtures.setup()").unwrap();
     }
 
+    // Controller tests @unittest.skip wholesale — Phase 4 HTTP
+    // runtime isn't wired.
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         let fn_name = format!("test_{}", test_name_snake_py(&test.name));
         writeln!(s).unwrap();
-        if test_needs_runtime_unsupported_py(test) {
+        if is_controller_test {
+            writeln!(s, "    @unittest.skip(\"Phase 4: needs HTTP runtime\")").unwrap();
+            writeln!(s, "    def {fn_name}(self):").unwrap();
+            writeln!(s, "        pass").unwrap();
+        } else if test_needs_runtime_unsupported_py(test) {
             writeln!(
                 s,
                 "    @unittest.skip(\"Phase 3: needs persistence runtime\")"

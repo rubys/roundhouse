@@ -1224,9 +1224,17 @@ fn emit_ex_test(tm: &TestModule, app: &App) -> EmittedFile {
         writeln!(s, "  end").unwrap();
     }
 
+    // Controller tests stay tagged :skip wholesale — Phase 4 HTTP
+    // runtime (routes, render, redirect_to, etc.) isn't wired yet.
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         writeln!(s).unwrap();
-        if test_needs_runtime_unsupported_ex(test) {
+        if is_controller_test {
+            writeln!(s, "  @tag :skip").unwrap();
+            writeln!(s, "  test {:?} do", test.name).unwrap();
+            writeln!(s, "    # Phase 4: needs HTTP runtime").unwrap();
+            writeln!(s, "  end").unwrap();
+        } else if test_needs_runtime_unsupported_ex(test) {
             writeln!(s, "  @tag :skip").unwrap();
             writeln!(s, "  test {:?} do", test.name).unwrap();
             writeln!(s, "    # Phase 3: needs persistence runtime").unwrap();

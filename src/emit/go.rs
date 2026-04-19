@@ -1128,11 +1128,16 @@ fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
     writeln!(s).unwrap();
     writeln!(s, "import \"testing\"").unwrap();
 
+    // Controller tests t.Skip wholesale — Phase 4 HTTP runtime
+    // (get/post, render, redirect_to, etc.) isn't wired.
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         let fn_name = format!("Test{}", go_field_name(&test_name_snake(&test.name)));
         writeln!(s).unwrap();
         writeln!(s, "func {fn_name}(t *testing.T) {{").unwrap();
-        if test_needs_runtime_unsupported_go(test) {
+        if is_controller_test {
+            writeln!(s, "\tt.Skip(\"Phase 4: needs HTTP runtime\")").unwrap();
+        } else if test_needs_runtime_unsupported_go(test) {
             writeln!(
                 s,
                 "\tt.Skip(\"Phase 3: needs persistence runtime\")"

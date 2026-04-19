@@ -1030,12 +1030,20 @@ fn emit_spec_helper(app: &App) -> EmittedFile {
 
 fn emit_crystal_spec(tm: &TestModule, app: &App) -> EmittedFile {
     // Target class: Article for ArticleTest. Used as the `describe`
-    // subject so the spec output reads naturally.
-    let subject = tm
-        .target
-        .as_ref()
-        .map(|c| c.0.as_str().to_string())
-        .unwrap_or_else(|| tm.name.0.as_str().to_string());
+    // subject so the spec output reads naturally. For controller
+    // tests we use the test-module name as a string instead —
+    // Crystal resolves bare-identifier describe subjects at parse
+    // time and the controller class isn't required into the spec
+    // build yet (Phase 4 skips).
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
+    let subject = if is_controller_test {
+        format!("{:?}", tm.name.0.as_str())
+    } else {
+        tm.target
+            .as_ref()
+            .map(|c| c.0.as_str().to_string())
+            .unwrap_or_else(|| tm.name.0.as_str().to_string())
+    };
 
     let fixture_names: Vec<Symbol> =
         app.fixtures.iter().map(|f| f.name.clone()).collect();
@@ -1063,8 +1071,16 @@ fn emit_crystal_spec(tm: &TestModule, app: &App) -> EmittedFile {
     writeln!(s).unwrap();
     writeln!(s, "describe {subject} do").unwrap();
 
+    // Controller tests stay pending wholesale — Phase 4 HTTP runtime
+    // (routes, render, redirect_to, assert_select, assert_response)
+    // isn't wired yet.
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
-        if test_needs_runtime_unsupported_cr(test) {
+        if is_controller_test {
+            writeln!(s, "  pending {:?} do", test.name).unwrap();
+            writeln!(s, "    # Phase 4: needs HTTP runtime").unwrap();
+            writeln!(s, "  end").unwrap();
+        } else if test_needs_runtime_unsupported_cr(test) {
             writeln!(
                 s,
                 "  pending {:?} do",

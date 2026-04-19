@@ -112,17 +112,22 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         }
     }
 
-    // Model test files — `test/models/*_test.rb`. Other test
-    // directories (controllers, system) need more than the minitest-macro
-    // shape we handle today; they come when Phase 3 controller work does.
-    let model_tests_dir = dir.join("test/models");
-    if model_tests_dir.is_dir() {
-        for entry in read_rb_files(&model_tests_dir)? {
-            let source = std::fs::read(&entry)?;
-            if let Some(tm) =
-                ingest_test_file(&source, &entry.display().to_string())?
-            {
-                app.test_modules.push(tm);
+    // Test files — `test/models/*_test.rb` and
+    // `test/controllers/*_test.rb`. System tests under `test/system/`
+    // still need a browser-driver runtime and stay out of scope.
+    // Ingesting controller tests early (Phase 4-compile stage) lets
+    // the emitter surface the HTTP primitives the tests reference,
+    // even if those tests all skip pending the HTTP runtime.
+    for subdir in ["test/models", "test/controllers"] {
+        let tests_dir = dir.join(subdir);
+        if tests_dir.is_dir() {
+            for entry in read_rb_files(&tests_dir)? {
+                let source = std::fs::read(&entry)?;
+                if let Some(tm) =
+                    ingest_test_file(&source, &entry.display().to_string())?
+                {
+                    app.test_modules.push(tm);
+                }
             }
         }
     }

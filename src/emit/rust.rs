@@ -1349,9 +1349,23 @@ fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
         app: Some(app),
     };
 
+    // Controller tests (class name ends in `ControllerTest`) reference
+    // HTTP primitives — `get`, `post`, `assert_response`, route
+    // helpers — that the Phase 4 runtime hasn't wired yet. Skip the
+    // whole module wholesale rather than try to render bodies that
+    // can't compile; the test count stays visible so the gap is
+    // honest in `cargo test` output.
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         writeln!(s).unwrap();
-        if test_needs_runtime_unsupported(test) {
+        if is_controller_test {
+            writeln!(s, "#[test]").unwrap();
+            writeln!(s, "#[ignore] // Phase 4: needs HTTP runtime").unwrap();
+            writeln!(s, "fn {}() {{", test_fn_name(&test.name)).unwrap();
+            writeln!(s, "    // {:?}", test.name).unwrap();
+            writeln!(s, "    // TODO: HTTP runtime — get/post, render, redirect_to, route helpers").unwrap();
+            writeln!(s, "}}").unwrap();
+        } else if test_needs_runtime_unsupported(test) {
             // Body would either fail to compile (destroy/count/
             // assert_difference) or fail at run time (save returning
             // true where a DB check would have made it false).
