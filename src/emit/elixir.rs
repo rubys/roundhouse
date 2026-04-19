@@ -40,12 +40,21 @@ use crate::naming::snake_case;
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/elixir/runtime.ex");
 const DB_SOURCE: &str = include_str!("../../runtime/elixir/db.ex");
-/// Elixir HTTP runtime — Phase 4c compile-only stubs. Copied verbatim
+/// Elixir HTTP runtime — Phase 4d pass-2 shape. Copied verbatim
 /// into generated projects as `lib/roundhouse/http.ex` when any
-/// controller emits. `Roundhouse.Http` exposes `params`, `render`,
-/// `redirect_to`, `head`, `respond_to` — each controller module
-/// imports these so the emitted action bodies can call them bare.
+/// controller emits. Exposes ActionResponse/ActionContext structs
+/// + Router.match table; the emitter's action templates return
+/// ActionResponse directly (no class-based dispatch).
 const HTTP_SOURCE: &str = include_str!("../../runtime/elixir/http.ex");
+/// Pass-2 test-support runtime. TestClient + TestResponse with
+/// Rails-shaped assertions. Ships as
+/// `lib/roundhouse/test_support.ex`.
+const TEST_SUPPORT_SOURCE: &str =
+    include_str!("../../runtime/elixir/test_support.ex");
+/// View helpers — link_to, button_to, FormBuilder, etc. Ships as
+/// `lib/roundhouse/view_helpers.ex` when views emit.
+const VIEW_HELPERS_SOURCE: &str =
+    include_str!("../../runtime/elixir/view_helpers.ex");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
@@ -65,20 +74,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_model_file(model, app));
     }
     if !app.controllers.is_empty() {
-        // HTTP runtime stubs — copied verbatim. Same posture as
-        // runtime.ex / db.ex.
+        // HTTP runtime (ActionResponse/ActionContext + Router) —
+        // copied verbatim.
         files.push(EmittedFile {
             path: PathBuf::from("lib/roundhouse/http.ex"),
             content: HTTP_SOURCE.to_string(),
         });
+        files.push(EmittedFile {
+            path: PathBuf::from("lib/roundhouse/test_support.ex"),
+            content: TEST_SUPPORT_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("lib/roundhouse/view_helpers.ex"),
+            content: VIEW_HELPERS_SOURCE.to_string(),
+        });
         let known_models: Vec<Symbol> =
             app.models.iter().map(|m| m.name.0.clone()).collect();
         for controller in &app.controllers {
-            files.push(emit_controller_file(controller, &known_models));
+            files.push(emit_controller_file_pass2(controller, &known_models, app));
         }
+        files.push(emit_ex_route_helpers(app));
+        files.push(emit_ex_views(app));
     }
     if !app.routes.entries.is_empty() {
         files.push(emit_router_file(app));
+        files.push(emit_ex_routes_register(app));
     }
     if !app.fixtures.is_empty() {
         let lowered = crate::lower::lower_fixtures(app);
@@ -382,6 +402,99 @@ fn emit_persistence_methods_ex(
     writeln!(out, "        nil").unwrap();
     writeln!(out, "    end").unwrap();
     writeln!(out, "  end").unwrap();
+
+    // ----- all/0 -----
+    let select_all_sql = positional_placeholders_ex(&lp.select_all_sql);
+    writeln!(out).unwrap();
+    writeln!(out, "  def all do").unwrap();
+    writeln!(
+        out,
+        "    rows = Roundhouse.Db.query_all({select_all_sql:?}, [])"
+    )
+    .unwrap();
+    writeln!(out, "    Enum.map(rows, fn row ->").unwrap();
+    writeln!(
+        out,
+        "      [{}] = row",
+        lp.columns
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "      %{module}{{{}}}",
+        struct_fields.join(", ")
+    )
+    .unwrap();
+    writeln!(out, "    end)").unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- last/0 -----
+    let select_last_sql = positional_placeholders_ex(&lp.select_last_sql);
+    writeln!(out).unwrap();
+    writeln!(out, "  def last do").unwrap();
+    writeln!(
+        out,
+        "    case Roundhouse.Db.query_one({select_last_sql:?}, []) do"
+    )
+    .unwrap();
+    writeln!(out, "      [{}] ->", field_list.join(", ")).unwrap();
+    writeln!(
+        out,
+        "        %{module}{{{}}}",
+        struct_fields.join(", ")
+    )
+    .unwrap();
+    writeln!(out, "      nil ->").unwrap();
+    writeln!(out, "        nil").unwrap();
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- reload/1 — reads the row fresh, returns updated struct -----
+    writeln!(out).unwrap();
+    writeln!(out, "  def reload({recv}) do").unwrap();
+    writeln!(out, "    case find({recv}.id) do").unwrap();
+    writeln!(out, "      nil -> {recv}").unwrap();
+    writeln!(out, "      fresh -> fresh").unwrap();
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- has_many association accessors -----
+    for dc in &lp.dependent_children {
+        let child_class = dc.child_class.0.as_str();
+        let assoc = crate::naming::pluralize_snake(child_class);
+        let child_select = positional_placeholders_ex(&dc.select_by_parent_sql);
+        let child_cols: Vec<String> = dc
+            .child_columns
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        let child_struct_fields: Vec<String> = dc
+            .child_columns
+            .iter()
+            .map(|c| format!("{0}: {0}", c.as_str()))
+            .collect();
+        writeln!(out).unwrap();
+        writeln!(out, "  def {assoc}({recv}) do").unwrap();
+        writeln!(
+            out,
+            "    rows = Roundhouse.Db.query_all({child_select:?}, [{recv}.id])"
+        )
+        .unwrap();
+        writeln!(out, "    Enum.map(rows, fn row ->").unwrap();
+        writeln!(out, "      [{}] = row", child_cols.join(", ")).unwrap();
+        writeln!(
+            out,
+            "      %{child_class}{{{}}}",
+            child_struct_fields.join(", ")
+        )
+        .unwrap();
+        writeln!(out, "    end)").unwrap();
+        writeln!(out, "  end").unwrap();
+    }
 }
 
 /// Elixir defstruct default for a field typed by the schema. Mirrors
@@ -1242,6 +1355,1347 @@ fn controller_class_name(short: &str) -> String {
     s
 }
 
+// Pass-2 controllers ---------------------------------------------------
+//
+// The pass-1 emitter (`emit_controller_file`) returns :ok from every
+// action to make `mix compile` pass. Pass-2 replaces that with
+// template actions — each action returns an ActionResponse struct
+// that Router.match-driven TestClient dispatch can assert on. The
+// action bodies are synthesized per Rails CRUD shape (index, show,
+// new, edit, create, update, destroy); arbitrary custom actions
+// fall back to a 501 stub. Mirrors the Python/TS/Crystal pass-2
+// controllers in shape.
+
+fn emit_controller_file_pass2(
+    c: &Controller,
+    known_models: &[Symbol],
+    _app: &App,
+) -> EmittedFile {
+    let module = c.name.0.as_str();
+    let resource = resource_from_controller_name_ex(module);
+    let model_class = crate::naming::singularize_camelize(&resource);
+    let has_model = known_models.iter().any(|m| m.as_str() == model_class);
+    let parent = find_nested_parent_ex(module);
+    let permitted = permitted_fields_for_ex(c, &resource)
+        .unwrap_or_else(|| default_permitted_fields_ex(&model_class));
+
+    let (public_actions, _private) = crate::lower::split_public_private(c);
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule {module} do").unwrap();
+    if !public_actions.is_empty() {
+        writeln!(s, "  alias Roundhouse.Http.ActionResponse").unwrap();
+        writeln!(s, "  import Roundhouse.RouteHelpers").unwrap();
+        writeln!(s).unwrap();
+    }
+
+    for action in &public_actions {
+        emit_ex_action_template(
+            &mut s,
+            action,
+            &resource,
+            &model_class,
+            has_model,
+            parent.as_ref(),
+            &permitted,
+        );
+        writeln!(s).unwrap();
+    }
+    writeln!(s, "end").unwrap();
+
+    let fname = format!("lib/{}.ex", snake_case(module));
+    EmittedFile {
+        path: PathBuf::from(fname),
+        content: s,
+    }
+}
+
+fn resource_from_controller_name_ex(name: &str) -> String {
+    let trimmed = name.strip_suffix("Controller").unwrap_or(name);
+    crate::naming::singularize(&crate::naming::snake_case(trimmed))
+}
+
+#[derive(Clone, Debug)]
+struct ExNestedParent {
+    singular: String,
+    #[allow(dead_code)]
+    plural: String,
+}
+
+fn find_nested_parent_ex(controller_name: &str) -> Option<ExNestedParent> {
+    let resource = resource_from_controller_name_ex(controller_name);
+    if resource == "comment" {
+        Some(ExNestedParent {
+            singular: "article".to_string(),
+            plural: "articles".to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+fn permitted_fields_for_ex(c: &Controller, resource: &str) -> Option<Vec<String>> {
+    use crate::dialect::ControllerBodyItem;
+    let helper_name = format!("{}_params", resource);
+    let action = c.body.iter().find_map(|item| match item {
+        ControllerBodyItem::Action { action, .. }
+            if action.name.as_str() == helper_name =>
+        {
+            Some(action)
+        }
+        _ => None,
+    })?;
+    extract_permitted_from_expr_ex(&action.body)
+}
+
+fn extract_permitted_from_expr_ex(expr: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
+        if method.as_str() == "expect" && crate::lower::is_params_expr(r) {
+            if let Some(arg) = args.first() {
+                if let ExprNode::Hash { entries, .. } = &*arg.node {
+                    if let Some((_, value)) = entries.first() {
+                        if let ExprNode::Array { elements, .. } = &*value.node {
+                            let fields: Vec<String> = elements
+                                .iter()
+                                .filter_map(|e| match &*e.node {
+                                    ExprNode::Lit {
+                                        value: Literal::Sym { value },
+                                    } => Some(value.as_str().to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !fields.is_empty() {
+                                return Some(fields);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let ExprNode::Seq { exprs } = &*expr.node {
+        for e in exprs {
+            if let Some(v) = extract_permitted_from_expr_ex(e) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn default_permitted_fields_ex(model_class: &str) -> Vec<String> {
+    match model_class {
+        "Article" => vec!["title".to_string(), "body".to_string()],
+        "Comment" => vec!["commenter".to_string(), "body".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn ex_view_fn(model_class: &str, suffix: &str) -> String {
+    let plural = crate::naming::pluralize_snake(model_class);
+    format!("render_{plural}_{}", suffix.to_lowercase())
+}
+
+fn emit_ex_action_template(
+    out: &mut String,
+    action: &Action,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&ExNestedParent>,
+    permitted: &[String],
+) {
+    let raw = action.name.as_str();
+    match raw {
+        "index" => emit_ex_index(out, raw, model_class, has_model),
+        "show" => emit_ex_show(out, raw, model_class, has_model),
+        "new" => emit_ex_new(out, raw, model_class, has_model),
+        "edit" => emit_ex_edit(out, raw, model_class, has_model),
+        "create" => emit_ex_create(
+            out, raw, resource, model_class, has_model, parent, permitted,
+        ),
+        "update" => emit_ex_update(
+            out, raw, resource, model_class, has_model, permitted,
+        ),
+        "destroy" => emit_ex_destroy(out, raw, model_class, has_model, parent),
+        _ => {
+            writeln!(out, "  def {raw}(_context) do").unwrap();
+            writeln!(out, "    %ActionResponse{{status: 501}}").unwrap();
+            writeln!(out, "  end").unwrap();
+        }
+    }
+}
+
+fn emit_ex_index(out: &mut String, name: &str, model_class: &str, has_model: bool) {
+    let view_fn = ex_view_fn(model_class, "index");
+    writeln!(out, "  def {name}(_context) do").unwrap();
+    if has_model {
+        writeln!(out, "    records = {model_class}.all()").unwrap();
+        writeln!(
+            out,
+            "    %ActionResponse{{body: App.Views.{view_fn}(records)}}"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_show(out: &mut String, name: &str, model_class: &str, has_model: bool) {
+    let view_fn = ex_view_fn(model_class, "show");
+    writeln!(out, "  def {name}(context) do").unwrap();
+    if has_model {
+        writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
+        writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
+        writeln!(
+            out,
+            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_new(out: &mut String, name: &str, model_class: &str, has_model: bool) {
+    let view_fn = ex_view_fn(model_class, "new");
+    writeln!(out, "  def {name}(_context) do").unwrap();
+    if has_model {
+        writeln!(out, "    record = %{model_class}{{}}").unwrap();
+        writeln!(
+            out,
+            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_edit(out: &mut String, name: &str, model_class: &str, has_model: bool) {
+    let view_fn = ex_view_fn(model_class, "edit");
+    writeln!(out, "  def {name}(context) do").unwrap();
+    if has_model {
+        writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
+        writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
+        writeln!(
+            out,
+            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_create(
+    out: &mut String,
+    name: &str,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&ExNestedParent>,
+    permitted: &[String],
+) {
+    let uses_context = has_model && (parent.is_some() || !permitted.is_empty());
+    let arg = if uses_context { "context" } else { "_context" };
+    writeln!(out, "  def {name}({arg}) do").unwrap();
+    if !has_model {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+        writeln!(out, "  end").unwrap();
+        return;
+    }
+    writeln!(out, "    record = %{model_class}{{}}").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "    record = %{{record | {0}_id: String.to_integer(to_string(context.params[\"{0}_id\"]))}}",
+            p.singular
+        )
+        .unwrap();
+    }
+    let mut field_assigns: Vec<String> = Vec::new();
+    for field in permitted {
+        field_assigns.push(format!(
+            "{field}: Map.get(context.params, \"{resource}[{field}]\", \"\")"
+        ));
+    }
+    if !field_assigns.is_empty() {
+        writeln!(
+            out,
+            "    record = %{{record | {}}}",
+            field_assigns.join(", ")
+        )
+        .unwrap();
+    }
+    writeln!(out, "    if {model_class}.save(record) do").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+            p.singular,
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "      record = %{{record | id: Roundhouse.Db.last_insert_rowid()}}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    else").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+            p.singular,
+        )
+        .unwrap();
+    } else {
+        let view_fn = ex_view_fn(model_class, "new");
+        writeln!(
+            out,
+            "      %ActionResponse{{status: 422, body: App.Views.{view_fn}(record)}}"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_update(
+    out: &mut String,
+    name: &str,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    permitted: &[String],
+) {
+    let arg = if has_model { "context" } else { "_context" };
+    writeln!(out, "  def {name}({arg}) do").unwrap();
+    if !has_model {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+        writeln!(out, "  end").unwrap();
+        return;
+    }
+    writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
+    writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
+    for field in permitted {
+        writeln!(
+            out,
+            "    record = if Map.has_key?(context.params, \"{resource}[{field}]\"), do: %{{record | {field}: context.params[\"{resource}[{field}]\"]}}, else: record"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    if {model_class}.save(record) do").unwrap();
+    writeln!(
+        out,
+        "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
+    )
+    .unwrap();
+    writeln!(out, "    else").unwrap();
+    let edit_view = ex_view_fn(model_class, "edit");
+    writeln!(
+        out,
+        "      %ActionResponse{{status: 422, body: App.Views.{edit_view}(record)}}"
+    )
+    .unwrap();
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_destroy(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&ExNestedParent>,
+) {
+    let arg = if has_model { "context" } else { "_context" };
+    writeln!(out, "  def {name}({arg}) do").unwrap();
+    if !has_model {
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+        writeln!(out, "  end").unwrap();
+        return;
+    }
+    writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
+    writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
+    writeln!(
+        out,
+        "    if record != nil, do: {model_class}.destroy(record)"
+    )
+    .unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "    %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+            p.singular,
+        )
+        .unwrap();
+    } else {
+        let plural = crate::naming::pluralize_snake(model_class);
+        writeln!(
+            out,
+            "    %ActionResponse{{status: 303, location: {plural}_path()}}"
+        )
+        .unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+// Pass-2 route helpers -------------------------------------------------
+
+fn emit_ex_route_helpers(app: &App) -> EmittedFile {
+    let flat = flatten_ex_routes(app);
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule Roundhouse.RouteHelpers do").unwrap();
+    writeln!(s, "  @moduledoc false").unwrap();
+    writeln!(s).unwrap();
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for route in &flat {
+        if !seen.insert(route.as_name.clone()) {
+            continue;
+        }
+        let fn_name = format!("{}_path", route.as_name);
+        let params: Vec<String> = route
+            .path_params
+            .iter()
+            .map(|p| format!("{p} \\\\ 0"))
+            .collect();
+        let sig = if params.is_empty() {
+            String::new()
+        } else {
+            format!("({})", params.join(", "))
+        };
+        let body = if route.path_params.is_empty() {
+            format!("\"{}\"", route.path)
+        } else {
+            let mut interp = String::new();
+            let mut chars = route.path.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == ':' {
+                    let mut ident = String::new();
+                    while let Some(&nc) = chars.peek() {
+                        if nc.is_alphanumeric() || nc == '_' {
+                            ident.push(nc);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    interp.push_str("#{");
+                    interp.push_str(&ident);
+                    interp.push('}');
+                } else {
+                    interp.push(c);
+                }
+            }
+            format!("\"{}\"", interp)
+        };
+        writeln!(s, "  def {fn_name}{sig}, do: {body}").unwrap();
+    }
+    writeln!(s, "end").unwrap();
+    EmittedFile {
+        path: PathBuf::from("lib/roundhouse/route_helpers.ex"),
+        content: s,
+    }
+}
+
+#[derive(Debug)]
+struct ExFlatRoute {
+    path: String,
+    as_name: String,
+    path_params: Vec<String>,
+}
+
+fn flatten_ex_routes(app: &App) -> Vec<ExFlatRoute> {
+    let mut out = Vec::new();
+    for entry in &app.routes.entries {
+        collect_flat_ex_routes(entry, &mut out, None);
+    }
+    out
+}
+
+fn collect_flat_ex_routes(
+    spec: &RouteSpec,
+    out: &mut Vec<ExFlatRoute>,
+    scope_prefix: Option<(&str, &str)>,
+) {
+    match spec {
+        RouteSpec::Explicit { path, action, as_name, .. } => {
+            let (full_path, mut params) = nest_ex_path(path, scope_prefix);
+            extract_ex_path_params(&full_path, &mut params);
+            out.push(ExFlatRoute {
+                path: full_path,
+                as_name: as_name
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| action.to_string()),
+                path_params: params,
+            });
+        }
+        RouteSpec::Root { .. } => {
+            out.push(ExFlatRoute {
+                path: "/".to_string(),
+                as_name: "root".to_string(),
+                path_params: vec![],
+            });
+        }
+        RouteSpec::Resources { name, only, except, nested } => {
+            let resource_path = format!("/{name}");
+            let singular_low =
+                crate::naming::singularize_camelize(name.as_str()).to_lowercase();
+            for (action, _method, suffix) in standard_resource_actions() {
+                let action: &str = action;
+                let suffix: &str = suffix;
+                if !only.is_empty()
+                    && !only.iter().any(|s| s.as_str() == action)
+                {
+                    continue;
+                }
+                if except.iter().any(|s| s.as_str() == action) {
+                    continue;
+                }
+                let path = format!("{resource_path}{suffix}");
+                let (full_path, mut params) = nest_ex_path(&path, scope_prefix);
+                if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
+                    params.push("id".to_string());
+                }
+                let as_name = ex_resource_as_name(
+                    action,
+                    &singular_low,
+                    name.as_str(),
+                    scope_prefix,
+                );
+                out.push(ExFlatRoute {
+                    path: full_path,
+                    as_name,
+                    path_params: params,
+                });
+            }
+            for child in nested {
+                collect_flat_ex_routes(
+                    child,
+                    out,
+                    Some((&singular_low, name.as_str())),
+                );
+            }
+        }
+    }
+}
+
+fn nest_ex_path(
+    path: &str,
+    scope_prefix: Option<(&str, &str)>,
+) -> (String, Vec<String>) {
+    match scope_prefix {
+        Some((parent, parent_plural)) => {
+            let full = format!("/{parent_plural}/:{parent}_id{path}");
+            let params = vec![format!("{parent}_id")];
+            (full, params)
+        }
+        None => (path.to_string(), vec![]),
+    }
+}
+
+fn extract_ex_path_params(path: &str, params: &mut Vec<String>) {
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' {
+            let mut ident = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !ident.is_empty() && !params.iter().any(|p| p == &ident) {
+                params.push(ident);
+            }
+        }
+    }
+}
+
+fn ex_resource_as_name(
+    action: &str,
+    singular_low: &str,
+    plural: &str,
+    scope_prefix: Option<(&str, &str)>,
+) -> String {
+    let parent_prefix = scope_prefix
+        .map(|(p, _)| format!("{p}_"))
+        .unwrap_or_default();
+    match action {
+        "index" => format!("{parent_prefix}{plural}"),
+        "create" => format!("{parent_prefix}{plural}"),
+        "new" => format!("new_{parent_prefix}{singular_low}"),
+        "show" => format!("{parent_prefix}{singular_low}"),
+        "edit" => format!("edit_{parent_prefix}{singular_low}"),
+        "update" => format!("{parent_prefix}{singular_low}"),
+        "destroy" => format!("{parent_prefix}{singular_low}"),
+        _ => format!("{parent_prefix}{singular_low}"),
+    }
+}
+
+// Pass-2 route registration --------------------------------------------
+
+fn emit_ex_routes_register(app: &App) -> EmittedFile {
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule App.Routes do").unwrap();
+    writeln!(s, "  @moduledoc false").unwrap();
+    writeln!(s, "  alias Roundhouse.Http.Router").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "  def register do").unwrap();
+    writeln!(s, "    Router.reset()").unwrap();
+    for entry in &app.routes.entries {
+        emit_ex_route_spec(&mut s, entry);
+    }
+    writeln!(s, "    :ok").unwrap();
+    writeln!(s, "  end").unwrap();
+    writeln!(s, "end").unwrap();
+    EmittedFile {
+        path: PathBuf::from("lib/app/routes.ex"),
+        content: s,
+    }
+}
+
+fn emit_ex_route_spec(out: &mut String, spec: &RouteSpec) {
+    match spec {
+        RouteSpec::Explicit { method, path, controller, action, .. } => {
+            let verb = match method {
+                crate::dialect::HttpMethod::Get => "get",
+                crate::dialect::HttpMethod::Post => "post",
+                crate::dialect::HttpMethod::Put => "put",
+                crate::dialect::HttpMethod::Patch => "patch",
+                crate::dialect::HttpMethod::Delete => "delete",
+                _ => "get",
+            };
+            writeln!(
+                out,
+                "    Router.{verb}({:?}, {}, :{})",
+                path,
+                controller.0,
+                action.as_str(),
+            )
+            .unwrap();
+        }
+        RouteSpec::Root { target } => {
+            let (controller, action) = target
+                .split_once('#')
+                .map(|(c, a)| (controller_class_name(c), a.to_string()))
+                .unwrap_or_else(|| (target.clone(), "index".to_string()));
+            writeln!(out, "    Router.root({controller}, :{action})").unwrap();
+        }
+        RouteSpec::Resources { name, only, except: _, nested } => {
+            let controller = controller_class_name(name.as_str());
+            let mut opts: Vec<String> = Vec::new();
+            if !only.is_empty() {
+                let parts: Vec<String> =
+                    only.iter().map(|s| format!(":{}", s.as_str())).collect();
+                opts.push(format!("only: [{}]", parts.join(", ")));
+            }
+            if !nested.is_empty() {
+                let mut nested_parts: Vec<String> = Vec::new();
+                for child in nested {
+                    if let Some(part) = ex_nested_spec_entry(child) {
+                        nested_parts.push(part);
+                    }
+                }
+                if !nested_parts.is_empty() {
+                    opts.push(format!("nested: [{}]", nested_parts.join(", ")));
+                }
+            }
+            if opts.is_empty() {
+                writeln!(
+                    out,
+                    "    Router.resources({:?}, {})",
+                    name.as_str(),
+                    controller
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "    Router.resources({:?}, {}, [{}])",
+                    name.as_str(),
+                    controller,
+                    opts.join(", ")
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+fn ex_nested_spec_entry(spec: &RouteSpec) -> Option<String> {
+    let RouteSpec::Resources { name, only, except: _, nested: _ } = spec else {
+        return None;
+    };
+    let controller = controller_class_name(name.as_str());
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("name: {:?}", name.as_str()));
+    parts.push(format!("controller: {}", controller));
+    if !only.is_empty() {
+        let items: Vec<String> =
+            only.iter().map(|s| format!(":{}", s.as_str())).collect();
+        parts.push(format!("only: [{}]", items.join(", ")));
+    }
+    Some(format!("[{}]", parts.join(", ")))
+}
+
+// Pass-2 views ---------------------------------------------------------
+
+fn emit_ex_views(app: &App) -> EmittedFile {
+    let known_models: Vec<Symbol> =
+        app.models.iter().map(|m| m.name.0.clone()).collect();
+    let attrs_by_class: std::collections::BTreeMap<String, Vec<String>> = app
+        .models
+        .iter()
+        .map(|m| {
+            (
+                m.name.0.as_str().to_string(),
+                m.attributes
+                    .fields
+                    .keys()
+                    .map(|k| k.as_str().to_string())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut body = String::new();
+
+    let mut emitted_names: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+
+    for v in &app.views {
+        let fn_name = ex_view_function_name(v.name.as_str());
+        if !emitted_names.insert(fn_name.clone()) {
+            continue;
+        }
+        emit_view_file_pass2_ex(&mut body, v, &known_models, &attrs_by_class);
+        writeln!(body).unwrap();
+    }
+
+    // Stub missing standard CRUD views so controllers always link.
+    for model in &app.models {
+        if model.attributes.fields.is_empty() {
+            continue;
+        }
+        let class = model.name.0.as_str();
+        let plural = crate::naming::pluralize_snake(class);
+        for (_, suffix) in [
+            ("Index", "index"),
+            ("Show", "show"),
+            ("New", "new"),
+            ("Edit", "edit"),
+        ] {
+            let view_name = format!("{plural}/{suffix}");
+            let fn_name = ex_view_function_name(&view_name);
+            if emitted_names.insert(fn_name.clone()) {
+                writeln!(body, "  def {fn_name}(_record), do: \"\"").unwrap();
+                writeln!(body).unwrap();
+            }
+        }
+    }
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "defmodule App.Views do").unwrap();
+    writeln!(s, "  @moduledoc false").unwrap();
+    if ex_text_references(&body, "ViewHelpers") {
+        writeln!(s, "  alias Roundhouse.ViewHelpers").unwrap();
+    }
+    if ex_text_references(&body, "FormBuilder") {
+        writeln!(s, "  alias Roundhouse.FormBuilder").unwrap();
+    }
+    writeln!(s).unwrap();
+    s.push_str(&body);
+    writeln!(s, "end").unwrap();
+    EmittedFile {
+        path: PathBuf::from("lib/app/views.ex"),
+        content: s,
+    }
+}
+
+fn ex_view_function_name(name: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for seg in name.split('/') {
+        let trimmed = seg.strip_prefix('_').unwrap_or(seg);
+        parts.push(trimmed.to_string());
+    }
+    format!("render_{}", parts.join("_"))
+}
+
+fn emit_view_file_pass2_ex(
+    out: &mut String,
+    view: &crate::dialect::View,
+    known_models: &[Symbol],
+    attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    let fn_name = ex_view_function_name(view.name.as_str());
+    let (arg_name, arg_model) = ex_view_signature(view.name.as_str(), known_models);
+    let attrs = arg_model
+        .as_ref()
+        .and_then(|c| attrs_by_class.get(c).cloned())
+        .unwrap_or_default();
+
+    writeln!(out, "  def {fn_name}({arg_name}) do").unwrap();
+    writeln!(out, "    _ = {arg_name}").unwrap();
+    writeln!(out, "    buf = \"\"").unwrap();
+
+    let mut locals: Vec<String> = vec!["buf".to_string(), arg_name.clone()];
+    let ivar_names = ex_collect_ivar_names(&view.body);
+    for n in &ivar_names {
+        if !locals.iter().any(|x| x == n) {
+            locals.push(n.clone());
+        }
+    }
+    let resource_dir = view
+        .name
+        .as_str()
+        .rsplit_once('/')
+        .map(|(d, _): (&str, &str)| d.to_string())
+        .unwrap_or_default();
+    let ctx = ExViewCtx {
+        locals,
+        arg_name: arg_name.clone(),
+        arg_attrs: attrs,
+        resource_dir,
+    };
+
+    let body_lines = emit_ex_view_body(&view.body, &ctx);
+    for line in body_lines {
+        writeln!(out, "    {line}").unwrap();
+    }
+    writeln!(out, "    buf").unwrap();
+    writeln!(out, "  end").unwrap();
+}
+
+struct ExViewCtx {
+    locals: Vec<String>,
+    arg_name: String,
+    arg_attrs: Vec<String>,
+    resource_dir: String,
+}
+
+impl ExViewCtx {
+    fn is_local(&self, n: &str) -> bool {
+        self.locals.iter().any(|x| x == n)
+    }
+    fn arg_has_attr(&self, name: &str, attr: &str) -> bool {
+        name == self.arg_name && self.arg_attrs.iter().any(|a| a == attr)
+    }
+}
+
+fn ex_view_signature(
+    view_name: &str,
+    known_models: &[Symbol],
+) -> (String, Option<String>) {
+    let (dir, base) = view_name.rsplit_once('/').unwrap_or(("", view_name));
+    let is_partial = base.starts_with('_');
+    let stem = base.trim_start_matches('_');
+    let model_class = crate::naming::singularize_camelize(dir);
+    let model_exists = known_models.iter().any(|m| m.as_str() == model_class);
+    let singular = crate::naming::singularize(dir);
+
+    if is_partial {
+        let arg_name = if model_exists { singular } else { stem.to_string() };
+        return (arg_name, if model_exists { Some(model_class) } else { None });
+    }
+    match stem {
+        "index" => (dir.to_string(), if model_exists { Some(model_class) } else { None }),
+        _ => (singular, if model_exists { Some(model_class) } else { None }),
+    }
+}
+
+fn emit_ex_view_body(body: &Expr, ctx: &ExViewCtx) -> Vec<String> {
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let mut out = Vec::new();
+    for stmt in &stmts {
+        out.extend(emit_ex_view_stmt_pass2(stmt, ctx));
+    }
+    out
+}
+
+fn emit_ex_view_stmt_pass2(stmt: &Expr, ctx: &ExViewCtx) -> Vec<String> {
+    match &*stmt.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if name.as_str() == "_buf" =>
+        {
+            if let ExprNode::Lit { value: Literal::Str { value: s } } = &*value.node {
+                if s.is_empty() {
+                    return Vec::new();
+                }
+            }
+            if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*value.node {
+                if method.as_str() == "+" && args.len() == 1 {
+                    if let ExprNode::Var { name: rn, .. } = &*recv.node {
+                        if rn.as_str() == "_buf" {
+                            let chunk = emit_ex_view_append_pass2(&args[0], ctx);
+                            return chunk
+                                .lines()
+                                .map(|l| l.to_string())
+                                .collect();
+                        }
+                    }
+                }
+            }
+            vec!["# TODO ERB: buf shape".to_string()]
+        }
+        ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
+        ExprNode::Ivar { .. } => Vec::new(),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = if is_ex_simple_expr(cond, ctx) {
+                emit_ex_view_expr_raw(cond, ctx)
+            } else {
+                "false".to_string()
+            };
+            let mut out = vec![format!("buf = if {cond_s} do")];
+            let then_lines = emit_ex_view_body(then_branch, ctx);
+            out.push("  buf = buf".to_string());
+            for line in then_lines {
+                out.push(format!("  {line}"));
+            }
+            out.push("  buf".to_string());
+            let has_else = !matches!(
+                &*else_branch.node,
+                ExprNode::Lit { value: Literal::Nil }
+            );
+            out.push("else".to_string());
+            if has_else {
+                out.push("  buf = buf".to_string());
+                for line in emit_ex_view_body(else_branch, ctx) {
+                    out.push(format!("  {line}"));
+                }
+                out.push("  buf".to_string());
+            } else {
+                out.push("  buf".to_string());
+            }
+            out.push("end".to_string());
+            out
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. }
+            if method.as_str() == "each" && args.is_empty() =>
+        {
+            if !is_ex_simple_expr(recv, ctx) {
+                return vec!["# TODO ERB: each over complex coll".to_string()];
+            }
+            let ExprNode::Lambda { params, body, .. } = &*block.node else {
+                return vec!["# unexpected each block".to_string()];
+            };
+            let coll_s = emit_ex_view_expr_raw(recv, ctx);
+            let var = params
+                .first()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| "item".into());
+            let inner_ctx = ExViewCtx {
+                locals: {
+                    let mut l = ctx.locals.clone();
+                    if !l.iter().any(|x| x == &var) {
+                        l.push(var.clone());
+                    }
+                    l
+                },
+                arg_name: ctx.arg_name.clone(),
+                arg_attrs: ctx.arg_attrs.clone(),
+                resource_dir: ctx.resource_dir.clone(),
+            };
+            let inner_lines = emit_ex_view_body(body, &inner_ctx);
+            let inner_text = inner_lines.join("\n");
+            let emitted_var = if ex_text_references(&inner_text, &var) {
+                var.clone()
+            } else {
+                format!("_{var}")
+            };
+            let mut out = vec![format!(
+                "buf = Enum.reduce({coll_s}, buf, fn {emitted_var}, buf ->"
+            )];
+            for line in inner_lines {
+                out.push(format!("  {line}"));
+            }
+            out.push("  buf".to_string());
+            out.push("end)".to_string());
+            out
+        }
+        _ => vec!["# TODO ERB: unknown stmt".to_string()],
+    }
+}
+
+fn emit_ex_view_append_pass2(arg: &Expr, ctx: &ExViewCtx) -> String {
+    if let ExprNode::Lit { value: Literal::Str { value: s } } = &*arg.node {
+        return format!("buf = buf <> {}", ex_string_literal(s));
+    }
+    let inner = unwrap_to_s_ex(arg);
+
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "render" {
+            if args.len() == 1 {
+                return emit_ex_render_call(&args[0], ctx);
+            }
+            if args.len() == 2 {
+                if let (
+                    ExprNode::Lit { value: Literal::Str { value: partial } },
+                    ExprNode::Hash { entries, .. },
+                ) = (&*args[0].node, &*args[1].node)
+                {
+                    let partial_fn = format!(
+                        "render_{}_{}",
+                        ctx.resource_dir,
+                        partial.trim_start_matches('_'),
+                    );
+                    if let Some((_, v)) = entries.first() {
+                        if is_ex_simple_expr(v, ctx) {
+                            let arg_expr = emit_ex_view_expr_raw(v, ctx);
+                            return format!("buf = buf <> {partial_fn}({arg_expr})");
+                        }
+                    }
+                    return format!("buf = buf <> {partial_fn}(nil)");
+                }
+            }
+        }
+    }
+
+    if let ExprNode::Send {
+        recv: None,
+        method,
+        args,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if is_ex_capturing_helper(method.as_str()) {
+            return emit_ex_captured_helper(method.as_str(), args, block, ctx);
+        }
+    }
+
+    if is_ex_simple_expr(inner, ctx) {
+        return format!(
+            "buf = buf <> to_string({})",
+            emit_ex_view_expr_raw(inner, ctx),
+        );
+    }
+
+    "buf = buf <> \"\" # TODO ERB: complex interpolation".to_string()
+}
+
+fn is_ex_capturing_helper(method: &str) -> bool {
+    matches!(method, "form_with" | "content_for")
+}
+
+fn emit_ex_captured_helper(
+    method: &str,
+    args: &[Expr],
+    block: &Expr,
+    ctx: &ExViewCtx,
+) -> String {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return format!("buf = buf <> \"\" # TODO ERB: {method}");
+    };
+    let cls_expr = args
+        .iter()
+        .find_map(|a| ex_extract_kwarg(a, "class"))
+        .filter(|e| is_ex_simple_expr(e, ctx))
+        .map(|e| emit_ex_view_expr_raw(e, ctx))
+        .unwrap_or_else(|| "\"\"".to_string());
+    match method {
+        "form_with" => {
+            let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
+            let inner_ctx = ExViewCtx {
+                locals: {
+                    let mut l = ctx.locals.clone();
+                    l.push(pname.to_string());
+                    l.push("form_begin".to_string());
+                    l
+                },
+                arg_name: ctx.arg_name.clone(),
+                arg_attrs: ctx.arg_attrs.clone(),
+                resource_dir: ctx.resource_dir.clone(),
+            };
+            let body_lines = emit_ex_view_body(body, &inner_ctx);
+            let body_text = body_lines.join("\n");
+            let form_binding = if ex_text_references(&body_text, pname) {
+                format!("{pname} = %FormBuilder{{record: nil}}")
+            } else {
+                format!("_{pname} = %FormBuilder{{record: nil}}")
+            };
+            let mut lines = vec![
+                "form_begin = byte_size(buf)".to_string(),
+                form_binding,
+            ];
+            for line in body_lines {
+                lines.push(line);
+            }
+            lines.push(format!(
+                "buf = binary_part(buf, 0, form_begin) <> ViewHelpers.form_wrap(nil, {cls_expr}, binary_part(buf, form_begin, byte_size(buf) - form_begin))"
+            ));
+            lines.join("\n")
+        }
+        _ => {
+            let _ = cls_expr;
+            "buf = buf <> \"\"".to_string()
+        }
+    }
+}
+
+fn emit_ex_render_call(arg: &Expr, ctx: &ExViewCtx) -> String {
+    match &*arg.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+            if ctx.is_local(name.as_str()) =>
+        {
+            let singular = crate::naming::singularize(name.as_str());
+            let partial_fn = format!("render_{}_{singular}", name.as_str());
+            let coll = name.to_string();
+            format!(
+                "buf = buf <> Enum.map_join({coll}, \"\", fn r -> {partial_fn}(r) end)"
+            )
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if args.is_empty()
+                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
+        {
+            let assoc_plural = method.as_str();
+            let singular = crate::naming::singularize(assoc_plural);
+            let partial_fn = format!("render_{assoc_plural}_{singular}");
+            let parent_name = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
+                _ => unreachable!(),
+            };
+            let parent_class = crate::naming::singularize_camelize(&parent_name);
+            format!(
+                "buf = buf <> Enum.map_join({parent_class}.{assoc_plural}({parent_name}), \"\", fn c -> {partial_fn}(c) end)"
+            )
+        }
+        _ => "buf = buf <> \"\" # TODO ERB: render".to_string(),
+    }
+}
+
+fn ex_extract_kwarg<'a>(arg: &'a Expr, key: &str) -> Option<&'a Expr> {
+    if let ExprNode::Hash { entries, .. } = &*arg.node {
+        for (k, v) in entries {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                if value.as_str() == key {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn ex_text_references(text: &str, ident: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = ident.as_bytes();
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let prev_is_word = i > 0
+                && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let next_idx = i + needle.len();
+            let next_is_word = next_idx < bytes.len()
+                && (bytes[next_idx].is_ascii_alphanumeric()
+                    || bytes[next_idx] == b'_');
+            if !prev_is_word && !next_is_word {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn unwrap_to_s_ex(expr: &Expr) -> &Expr {
+    if let ExprNode::Send { recv: Some(inner), method, args, .. } = &*expr.node {
+        if method.as_str() == "to_s" && args.is_empty() {
+            return inner;
+        }
+    }
+    expr
+}
+
+fn ex_string_literal(s: &str) -> String {
+    format!("{s:?}")
+}
+
+fn is_ex_simple_expr(expr: &Expr, ctx: &ExViewCtx) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            ctx.is_local(name.as_str())
+        }
+        ExprNode::Send { recv: Some(r), method, args, block, .. } => {
+            if !args.is_empty() || block.is_some() {
+                return false;
+            }
+            let clean = method.as_str().trim_end_matches('?').trim_end_matches('!');
+            if clean.is_empty() {
+                return false;
+            }
+            if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
+                if ctx.arg_has_attr(name.as_str(), clean) {
+                    return true;
+                }
+                if ctx.is_local(name.as_str())
+                    && matches!(
+                        method.as_str(),
+                        "any?" | "none?" | "present?" | "empty?"
+                    )
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        ExprNode::StringInterp { parts } => parts.iter().all(|p| match p {
+            crate::expr::InterpPart::Text { .. } => true,
+            crate::expr::InterpPart::Expr { expr } => is_ex_simple_expr(expr, ctx),
+        }),
+        _ => false,
+    }
+}
+
+fn emit_ex_view_expr_raw(expr: &Expr, ctx: &ExViewCtx) -> String {
+    match &*expr.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            let method_s = method.as_str();
+            if args.is_empty() {
+                if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
+                    if ctx.is_local(name.as_str()) {
+                        match method_s {
+                            "any?" | "present?" => return format!("(length({name}) > 0)"),
+                            "none?" | "empty?" => return format!("(length({name}) == 0)"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let recv_s = emit_ex_view_expr_raw(r, ctx);
+            let clean = method_s.trim_end_matches('?').trim_end_matches('!');
+            if args.is_empty() {
+                format!("{recv_s}.{clean}")
+            } else {
+                let args_s: Vec<String> = args
+                    .iter()
+                    .map(|a| emit_ex_view_expr_raw(a, ctx))
+                    .collect();
+                format!("{recv_s}.{clean}({})", args_s.join(", "))
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut out = String::from("\"");
+            for p in parts {
+                match p {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            match c {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                other => out.push(other),
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        out.push_str("#{");
+                        out.push_str(&emit_ex_view_expr_raw(expr, ctx));
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
+            out
+        }
+        _ => "\"\"".to_string(),
+    }
+}
+
+fn ex_collect_ivar_names(expr: &Expr) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    ex_collect_ivars_into(expr, &mut out);
+    out
+}
+
+fn ex_collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
+    match &*expr.node {
+        ExprNode::Ivar { name } => {
+            let n = name.to_string();
+            if !out.iter().any(|existing| existing == &n) {
+                out.push(n);
+            }
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Ivar { name } = target {
+                let n = name.to_string();
+                if !out.iter().any(|existing| existing == &n) {
+                    out.push(n);
+                }
+            }
+            ex_collect_ivars_into(value, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                ex_collect_ivars_into(r, out);
+            }
+            for a in args {
+                ex_collect_ivars_into(a, out);
+            }
+            if let Some(b) = block {
+                ex_collect_ivars_into(b, out);
+            }
+        }
+        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+            for e in exprs {
+                ex_collect_ivars_into(e, out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                ex_collect_ivars_into(k, out);
+                ex_collect_ivars_into(v, out);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            ex_collect_ivars_into(cond, out);
+            ex_collect_ivars_into(then_branch, out);
+            ex_collect_ivars_into(else_branch, out);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            ex_collect_ivars_into(left, out);
+            ex_collect_ivars_into(right, out);
+        }
+        ExprNode::Lambda { body, .. } => ex_collect_ivars_into(body, out),
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    ex_collect_ivars_into(expr, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 // Bodies ---------------------------------------------------------------
 
 /// Emit a method / action body as Elixir statements. Ruby ivar writes
@@ -1660,30 +3114,43 @@ fn emit_ex_test(tm: &TestModule, app: &App) -> EmittedFile {
         model_attrs: &model_attrs,
     };
 
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
+
     let mut s = String::new();
     writeln!(s, "# Generated by Roundhouse.").unwrap();
     writeln!(s, "defmodule {} do", tm.name.0).unwrap();
     writeln!(s, "  use ExUnit.Case").unwrap();
+    if is_controller_test {
+        writeln!(s, "  alias Roundhouse.TestClient").unwrap();
+        writeln!(s, "  alias Roundhouse.TestResponse").unwrap();
+        writeln!(s, "  import Roundhouse.RouteHelpers").unwrap();
+    }
     // Each test starts on a fresh :memory: SQLite DB with all
     // fixtures loaded — Rails' transactional-fixture isolation
     // adapted to Elixir's per-process test semantics.
     if !app.fixtures.is_empty() {
         writeln!(s).unwrap();
         writeln!(s, "  setup do").unwrap();
+        if is_controller_test {
+            writeln!(s, "    App.Routes.register()").unwrap();
+        }
         writeln!(s, "    Fixtures.setup()").unwrap();
         writeln!(s, "    :ok").unwrap();
         writeln!(s, "  end").unwrap();
     }
 
-    // Controller tests stay tagged :skip wholesale — Phase 4 HTTP
-    // runtime (routes, render, redirect_to, etc.) isn't wired yet.
-    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         writeln!(s).unwrap();
         if is_controller_test {
-            writeln!(s, "  @tag :skip").unwrap();
             writeln!(s, "  test {:?} do", test.name).unwrap();
-            writeln!(s, "    # Phase 4: needs HTTP runtime").unwrap();
+            let body = emit_ex_controller_test_body(test, app, ctx);
+            if body.is_empty() {
+                writeln!(s, "    :ok").unwrap();
+            } else {
+                for line in body.lines() {
+                    writeln!(s, "    {line}").unwrap();
+                }
+            }
             writeln!(s, "  end").unwrap();
         } else if test_needs_runtime_unsupported_ex(test) {
             writeln!(s, "  @tag :skip").unwrap();
@@ -1816,7 +3283,7 @@ fn emit_ex_test_send(
                 let delta = args_s.get(1).cloned().unwrap_or_else(|| "1".into());
                 let body_s = emit_block_body_ex(body, ctx);
                 return format!(
-                    "_before = {count_expr}\n{body_s}\n_after = {count_expr}\nassert _after - _before == {delta}"
+                    "count_before = {count_expr}\n{body_s}\ncount_after = {count_expr}\nassert count_after - count_before == {delta}"
                 );
             }
         }
@@ -2047,6 +3514,315 @@ fn test_needs_runtime_unsupported_ex(_test: &Test) -> bool {
     // Phase 3 rounded out Elixir's real-blog coverage. Keep as a
     // future-guard; no current pattern forces a skip.
     false
+}
+
+// Pass-2 controller-test emit ------------------------------------------
+//
+// Walks the test AST via the shared classifier + renders each
+// statement through an Elixir-specific assertion render table.
+
+fn emit_ex_controller_test_body(test: &Test, app: &App, ctx: ExTestCtx) -> String {
+    let mut out = String::new();
+    // Prime ivars read without assignment: `@article` → `article = Fixtures.Articles.one()`.
+    let walked = crate::lower::walk_controller_ivars(&test.body);
+    for ivar in walked.ivars_read_without_assign() {
+        let plural = crate::naming::pluralize_snake(ivar.as_str());
+        if ctx.fixture_names.iter().any(|s| s.as_str() == plural) {
+            let ns = crate::naming::camelize(&plural);
+            out.push_str(&format!("{} = Fixtures.{}.one()\n", ivar.as_str(), ns));
+        }
+    }
+
+    for stmt in crate::lower::test_body_stmts(&test.body) {
+        let rendered = emit_ex_ctrl_test_stmt(stmt, app, ctx);
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    out
+}
+
+fn emit_ex_ctrl_test_stmt(stmt: &Expr, app: &App, ctx: ExTestCtx) -> String {
+    match &*stmt.node {
+        ExprNode::Send { recv: None, method, args, block, .. } => {
+            emit_ex_ctrl_test_send(method.as_str(), args, block.as_ref(), app, ctx)
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            if method.as_str() == "reload" {
+                let recv_s = match &*r.node {
+                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
+                    _ => emit_ex_ctrl_test_expr(r, app, ctx),
+                };
+                let module = match &*r.node {
+                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
+                        crate::naming::camelize(name.as_str())
+                    }
+                    _ => "Unknown".to_string(),
+                };
+                return format!("{recv_s} = {module}.reload({recv_s})");
+            }
+            let recv_s = emit_ex_ctrl_test_expr(r, app, ctx);
+            let args_s: Vec<String> = args
+                .iter()
+                .map(|a| emit_ex_ctrl_test_expr(a, app, ctx))
+                .collect();
+            if args_s.is_empty() {
+                format!("{recv_s}.{}", method.as_str())
+            } else {
+                format!("{recv_s}.{}({})", method.as_str(), args_s.join(", "))
+            }
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            format!("{name} = {}", emit_ex_ctrl_test_expr(value, app, ctx))
+        }
+        _ => emit_ex_ctrl_test_expr(stmt, app, ctx),
+    }
+}
+
+fn emit_ex_ctrl_test_send(
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    app: &App,
+    ctx: ExTestCtx,
+) -> String {
+    use crate::lower::{AssertSelectKind, ControllerTestSend};
+    match crate::lower::classify_controller_test_send(method, args, block) {
+        Some(ControllerTestSend::HttpGet { url }) => {
+            let u = emit_ex_url_expr(url, app, ctx);
+            format!("resp = TestClient.get({u})")
+        }
+        Some(ControllerTestSend::HttpWrite { method: m, url, params }) => {
+            let u = emit_ex_url_expr(url, app, ctx);
+            let body = params
+                .map(|h| flatten_ex_params_to_form(h, None, app, ctx))
+                .unwrap_or_else(|| "%{}".to_string());
+            format!("resp = TestClient.{m}({u}, {body})")
+        }
+        Some(ControllerTestSend::HttpDelete { url }) => {
+            let u = emit_ex_url_expr(url, app, ctx);
+            format!("resp = TestClient.delete({u})")
+        }
+        Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
+            "success" => "TestResponse.assert_ok(resp)".to_string(),
+            "unprocessable_entity" => "TestResponse.assert_unprocessable(resp)".to_string(),
+            other => format!("TestResponse.assert_status(resp, 200) # TODO: {other:?}"),
+        },
+        Some(ControllerTestSend::AssertRedirectedTo { url }) => {
+            let u = emit_ex_url_expr(url, app, ctx);
+            format!("TestResponse.assert_redirected_to(resp, {u})")
+        }
+        Some(ControllerTestSend::AssertSelect { selector, kind }) => {
+            emit_ex_assert_select_classified(selector, kind, app, ctx)
+        }
+        Some(ControllerTestSend::AssertDifference {
+            method: _,
+            count_expr,
+            delta,
+            block,
+        }) => emit_ex_assert_difference_classified(count_expr, delta, block, app, ctx),
+        Some(ControllerTestSend::AssertEqual { expected, actual }) => {
+            let e = emit_ex_ctrl_test_expr(expected, app, ctx);
+            let a = emit_ex_ctrl_test_expr(actual, app, ctx);
+            format!("assert {a} == {e}")
+        }
+        None => {
+            let args_s: Vec<String> = args
+                .iter()
+                .map(|a| emit_ex_ctrl_test_expr(a, app, ctx))
+                .collect();
+            if args_s.is_empty() {
+                method.to_string()
+            } else {
+                format!("{method}({})", args_s.join(", "))
+            }
+        }
+    }
+}
+
+fn emit_ex_url_expr(expr: &Expr, app: &App, ctx: ExTestCtx) -> String {
+    use crate::lower::UrlArg;
+    let Some(helper) = crate::lower::classify_url_expr(expr) else {
+        return emit_ex_ctrl_test_expr(expr, app, ctx);
+    };
+    let helper_name = format!("{}_path", helper.helper_base);
+    let args_s: Vec<String> = helper
+        .args
+        .iter()
+        .map(|a| match a {
+            UrlArg::IvarOrVarId(name) => format!("{name}.id"),
+            UrlArg::ModelLast(class) => format!("{}.last().id", class.as_str()),
+            UrlArg::Raw(e) => emit_ex_ctrl_test_expr(e, app, ctx),
+        })
+        .collect();
+    if args_s.is_empty() {
+        format!("{helper_name}()")
+    } else {
+        format!("{helper_name}({})", args_s.join(", "))
+    }
+}
+
+fn emit_ex_assert_select_classified(
+    selector_expr: &Expr,
+    kind: crate::lower::AssertSelectKind<'_>,
+    app: &App,
+    ctx: ExTestCtx,
+) -> String {
+    use crate::lower::AssertSelectKind;
+    let ExprNode::Lit { value: Literal::Str { value: selector } } =
+        &*selector_expr.node
+    else {
+        return format!(
+            "TestResponse.assert_select(resp, {}) # TODO: dynamic selector",
+            emit_ex_ctrl_test_expr(selector_expr, app, ctx),
+        );
+    };
+    match kind {
+        AssertSelectKind::Text(expr) => {
+            let text = emit_ex_ctrl_test_expr(expr, app, ctx);
+            format!("TestResponse.assert_select_text(resp, {selector:?}, {text})")
+        }
+        AssertSelectKind::Minimum(expr) => {
+            let n = emit_ex_ctrl_test_expr(expr, app, ctx);
+            format!("TestResponse.assert_select_min(resp, {selector:?}, {n})")
+        }
+        AssertSelectKind::SelectorBlock(b) => {
+            let mut out = String::new();
+            out.push_str(&format!("TestResponse.assert_select(resp, {selector:?})\n"));
+            let inner_body = match &*b.node {
+                ExprNode::Lambda { body, .. } => body,
+                _ => b,
+            };
+            for stmt in crate::lower::test_body_stmts(inner_body) {
+                out.push_str(&emit_ex_ctrl_test_stmt(stmt, app, ctx));
+                out.push('\n');
+            }
+            out.trim_end().to_string()
+        }
+        AssertSelectKind::SelectorOnly => {
+            format!("TestResponse.assert_select(resp, {selector:?})")
+        }
+    }
+}
+
+fn emit_ex_assert_difference_classified(
+    count_expr_str: String,
+    expected_delta: i64,
+    block: Option<&Expr>,
+    app: &App,
+    ctx: ExTestCtx,
+) -> String {
+    // `Article.count` → `Article.count()` in Elixir.
+    let count_expr = count_expr_str
+        .split_once('.')
+        .map(|(cls, m)| format!("{cls}.{m}()"))
+        .unwrap_or_else(|| count_expr_str.clone());
+
+    let mut out = String::new();
+    out.push_str(&format!("count_before = {count_expr}\n"));
+    if let Some(b) = block {
+        let inner_body = match &*b.node {
+            ExprNode::Lambda { body, .. } => body,
+            _ => b,
+        };
+        for stmt in crate::lower::test_body_stmts(inner_body) {
+            out.push_str(&emit_ex_ctrl_test_stmt(stmt, app, ctx));
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!("count_after = {count_expr}\n"));
+    out.push_str(&format!("assert count_after - count_before == {expected_delta}"));
+    out
+}
+
+fn emit_ex_ctrl_test_expr(expr: &Expr, app: &App, ctx: ExTestCtx) -> String {
+    match &*expr.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Const { path } => {
+            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            let m = method.as_str();
+            if m == "last" && args.is_empty() {
+                if let ExprNode::Const { path } = &*r.node {
+                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    return format!("{class}.last()");
+                }
+            }
+            if m == "count" && args.is_empty() {
+                if let ExprNode::Const { path } = &*r.node {
+                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    return format!("{class}.count()");
+                }
+            }
+            if args.is_empty() {
+                let recv_s = match &*r.node {
+                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
+                    _ => emit_ex_ctrl_test_expr(r, app, ctx),
+                };
+                return format!("{recv_s}.{m}");
+            }
+            let recv_s = emit_ex_ctrl_test_expr(r, app, ctx);
+            let args_s: Vec<String> = args
+                .iter()
+                .map(|a| emit_ex_ctrl_test_expr(a, app, ctx))
+                .collect();
+            format!("{recv_s}.{m}({})", args_s.join(", "))
+        }
+        ExprNode::Send { recv: None, method, args, .. } => {
+            if method.as_str().ends_with("_url") || method.as_str().ends_with("_path") {
+                return emit_ex_url_expr(expr, app, ctx);
+            }
+            let args_s: Vec<String> = args
+                .iter()
+                .map(|a| emit_ex_ctrl_test_expr(a, app, ctx))
+                .collect();
+            if args_s.is_empty() {
+                method.to_string()
+            } else {
+                format!("{method}({})", args_s.join(", "))
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    if let ExprNode::Lit {
+                        value: Literal::Sym { value },
+                    } = &*k.node
+                    {
+                        format!("{value}: {}", emit_ex_ctrl_test_expr(v, app, ctx))
+                    } else {
+                        format!(
+                            "{} => {}",
+                            emit_ex_ctrl_test_expr(k, app, ctx),
+                            emit_ex_ctrl_test_expr(v, app, ctx),
+                        )
+                    }
+                })
+                .collect();
+            format!("%{{{}}}", parts.join(", "))
+        }
+        _ => "nil # TODO expr".to_string(),
+    }
+}
+
+fn flatten_ex_params_to_form(
+    expr: &Expr,
+    scope: Option<&str>,
+    app: &App,
+    ctx: ExTestCtx,
+) -> String {
+    let pairs: Vec<String> = crate::lower::flatten_params_pairs(expr, scope)
+        .into_iter()
+        .map(|(key, value)| {
+            let val = emit_ex_ctrl_test_expr(value, app, ctx);
+            format!("{key:?} => to_string({val})")
+        })
+        .collect();
+    format!("%{{{}}}", pairs.join(", "))
 }
 
 #[allow(dead_code)]

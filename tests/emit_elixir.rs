@@ -81,13 +81,16 @@ fn controllers_emit_as_bare_modules() {
     let files = elixir::emit(&app);
     let content = find(&files, "lib/posts_controller.ex");
     assert!(content.contains("defmodule PostsController do"), "got:\n{content}");
-    // Phase 4c: each controller imports the stub HTTP surface (so
-    // bodies can call `render`, `redirect_to`, etc. bare) and every
-    // action is `def <name>(...)` — arg name is `params` or `_params`
-    // depending on whether the emitted body references it.
+    // Phase 4d pass-2: each controller aliases ActionResponse and
+    // imports route helpers, and every action is `def <name>(...)`
+    // returning an `ActionResponse` struct.
     assert!(
-        content.contains("import Roundhouse.Http"),
-        "expected Roundhouse.Http import; got:\n{content}"
+        content.contains("alias Roundhouse.Http.ActionResponse"),
+        "expected ActionResponse alias; got:\n{content}"
+    );
+    assert!(
+        content.contains("import Roundhouse.RouteHelpers"),
+        "expected RouteHelpers import; got:\n{content}"
     );
     for action in &[
         "def index(",
@@ -97,17 +100,21 @@ fn controllers_emit_as_bare_modules() {
     ] {
         assert!(content.contains(action), "missing {action} in:\n{content}");
     }
+    assert!(
+        content.contains("%ActionResponse{"),
+        "expected ActionResponse struct literal; got:\n{content}"
+    );
 }
 
 #[test]
-fn ivar_writes_become_local_rebinds_in_controller_actions() {
+fn show_action_finds_record_by_id_param() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
     let content = find(&files, "lib/posts_controller.ex");
-    // Ruby `@post = Post.find(params[:id])` in `show` becomes a
-    // straightforward Elixir rebind — the `@` dies.
+    // Phase 4d pass-2: show action reads `id` from context.params,
+    // calls `Model.find/1`, falls back to an empty struct.
     assert!(
-        content.contains("post = Post.find(params[:id])"),
+        content.contains("Post.find(record_id) || %Post{}"),
         "got:\n{content}"
     );
 }
@@ -135,8 +142,11 @@ fn router_is_a_module_with_routes_list() {
 fn symbols_emit_as_atoms() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
-    let content = find(&files, "lib/posts_controller.ex");
-    // `params[:id]` — `:id` is a Ruby symbol, which maps 1:1 to an
-    // Elixir atom. Bracket-access syntax carries through.
-    assert!(content.contains("params[:id]"), "got:\n{content}");
+    let routes = find(&files, "lib/app/routes.ex");
+    // `:action` names emit as bare atoms in the Router registration
+    // calls — Ruby symbols map 1:1 to Elixir atoms.
+    assert!(
+        routes.contains(":index") || routes.contains(":show"),
+        "expected atom :index / :show in routes; got:\n{routes}"
+    );
 }
