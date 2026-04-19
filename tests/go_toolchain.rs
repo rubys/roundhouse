@@ -5,9 +5,8 @@
 //! the package without linking — closest equivalent to `cargo check` /
 //! `crystal build --no-codegen` / `tsc --noEmit`.
 //!
-//! Scoped to the `./app` package explicitly (not `./...`) so the
-//! controllers under `./app/controllers` — which are emitted but
-//! reference a runtime we haven't wired yet — don't get pulled in.
+//! Scoped to the `./app` package, which as of Phase 4c contains
+//! controllers, http runtime, and models all flat in one package.
 //!
 //! Marked `#[ignore]`; run with:
 //!
