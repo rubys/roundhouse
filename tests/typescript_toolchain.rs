@@ -63,20 +63,16 @@ fn assert_tsc_passes(fixture: &str, scratch: &Path) {
         String::from_utf8_lossy(&install.stderr),
     );
 
-    // `npx tsc` resolves to a typosquatting-prevention stub; use
-    // `--package=typescript` to pull the real compiler. `--yes`
-    // auto-installs on first run and caches for subsequent ones.
-    let output = Command::new("npx")
-        .arg("--yes")
-        .arg("--package=typescript@5.7.3")
-        .arg("--")
-        .arg("tsc")
+    // Invoke the locally-installed tsc directly — `npx tsc` resolves
+    // to a typosquatting-prevention stub, and `npx --package=` can
+    // get confused by the node_modules we just populated.
+    let output = Command::new("./node_modules/.bin/tsc")
         .arg("-p")
         .arg(".")
         .arg("--noEmit")
         .current_dir(scratch)
         .output()
-        .expect("run tsc via npx");
+        .expect("run tsc");
 
     assert!(
         output.status.success(),
@@ -122,9 +118,32 @@ fn real_blog_node_test_passes() {
     // passing `spec/models` as a directory confuses tsx/node:test when
     // there's no index entry. tsx registers a module loader so `.ts`
     // imports resolve at run time.
+    // Install devDependencies first so the locally-installed tsx is
+    // on disk, then run it via a shell for glob expansion — passing
+    // `spec/models` as a directory confuses tsx/node:test when
+    // there's no index entry. tsx registers a module loader so
+    // `.ts` imports resolve at run time.
+    let install = Command::new("npm")
+        .arg("install")
+        .arg("--silent")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .current_dir(&scratch)
+        .output()
+        .expect("run npm install");
+    assert!(
+        install.status.success(),
+        "npm install failed for real-blog node test at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr),
+    );
+
     let output = Command::new("sh")
         .arg("-c")
-        .arg("npx --yes --package=tsx@4.19.2 -- tsx --test spec/models/*.test.ts")
+        .arg("./node_modules/.bin/tsx --test spec/models/*.test.ts")
         .current_dir(&scratch)
         .output()
         .expect("run node --test via tsx");

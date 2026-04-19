@@ -84,7 +84,9 @@ fn emit_package_json() -> EmittedFile {
   \"private\": true,
   \"type\": \"module\",
   \"devDependencies\": {
-    \"@types/node\": \"^20\"
+    \"@types/node\": \"^20\",
+    \"typescript\": \"5.7.3\",
+    \"tsx\": \"4.19.2\"
   }
 }
 ";
