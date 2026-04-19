@@ -37,6 +37,11 @@ pub struct LoweredPersistence {
     pub delete_sql: String,
     pub count_sql: String,
     pub select_by_id_sql: String,
+    /// `SELECT <cols> FROM <table>` — used by `Model.all()` emit.
+    pub select_all_sql: String,
+    /// `SELECT <cols> FROM <table> ORDER BY id DESC LIMIT 1` — used
+    /// by `Model.last()` emit.
+    pub select_last_sql: String,
     /// `belongs_to` references that the AR layer expects to exist
     /// before save returns true. Rails 5+ default; rendered as a
     /// `Target::find(self.foreign_key).is_none()` short-circuit in
@@ -113,6 +118,10 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
     let select_by_id_sql = format!(
         "SELECT {all_cols_projection} FROM {table_name} WHERE id = ?1"
     );
+    let select_all_sql = format!("SELECT {all_cols_projection} FROM {table_name}");
+    let select_last_sql = format!(
+        "SELECT {all_cols_projection} FROM {table_name} ORDER BY id DESC LIMIT 1"
+    );
 
     let belongs_to_checks: Vec<BelongsToCheck> = model
         .associations()
@@ -185,6 +194,8 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
         delete_sql,
         count_sql,
         select_by_id_sql,
+        select_all_sql,
+        select_last_sql,
         belongs_to_checks,
         dependent_children,
     }
