@@ -42,12 +42,37 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn shards_install(scratch: &Path) {
+    // Per-test shards cache — the global ~/.cache/shards/ races on
+    // git index.lock files when multiple installs run in parallel.
+    let install = Command::new("shards")
+        .arg("install")
+        .current_dir(scratch)
+        .env("SHARDS_CACHE_PATH", scratch.join(".shards-cache"))
+        .output()
+        .expect("run shards install");
+    assert!(
+        install.status.success(),
+        "shards install failed at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr),
+    );
+}
+
 fn run_crystal_build(scratch: &Path) -> std::process::Output {
+    shards_install(scratch);
     Command::new("crystal")
         .arg("build")
         .arg("--no-codegen")
         .arg("src/app.cr")
         .current_dir(scratch)
+        // Per-test build cache dir — Crystal's global ~/.cache/crystal
+        // races when multiple parallel compiles touch overlapping
+        // cache keys.
+        .env("CRYSTAL_CACHE_DIR", scratch.join(".crystal-cache"))
         .output()
         .expect("run crystal build")
 }
@@ -78,7 +103,7 @@ fn tiny_blog_crystal_build_passes() {
 #[ignore]
 fn real_blog_crystal_build_passes() {
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-build");
     generate_project(fixture, &scratch);
     assert_crystal_passes("real-blog", &scratch);
 }
@@ -91,13 +116,15 @@ fn real_blog_crystal_spec_passes() {
     // of tests are marked `pending` because they need persistence
     // runtime (Phase 3); the rest should pass.
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-spec");
     generate_project(fixture, &scratch);
+    shards_install(&scratch);
 
     let output = Command::new("crystal")
         .arg("spec")
         .arg("--no-color")
         .current_dir(&scratch)
+        .env("CRYSTAL_CACHE_DIR", scratch.join(".crystal-cache"))
         .output()
         .expect("run crystal spec");
 
