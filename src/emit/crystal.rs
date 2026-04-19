@@ -148,12 +148,12 @@ fn emit_models(app: &App) -> EmittedFile {
         if i > 0 {
             writeln!(s).unwrap();
         }
-        emit_model(&mut s, model);
+        emit_model(&mut s, model, app);
     }
     EmittedFile { path: PathBuf::from("src/models.cr"), content: s }
 }
 
-fn emit_model(out: &mut String, model: &Model) {
+fn emit_model(out: &mut String, model: &Model, app: &App) {
     let name = model.name.0.as_str();
     writeln!(out, "class {name}").unwrap();
     for (field, ty) in &model.attributes.fields {
@@ -174,14 +174,190 @@ fn emit_model(out: &mut String, model: &Model) {
     if !lowered.is_empty() {
         writeln!(out).unwrap();
         emit_validate_method(out, &lowered);
+    }
+    // Skip persistence for abstract base classes (no columns beyond
+    // maybe an `id`) — ApplicationRecord et al. have nothing to save.
+    let has_table = model
+        .attributes
+        .fields
+        .keys()
+        .any(|k| k.as_str() != "id");
+    if has_table {
         writeln!(out).unwrap();
-        // save() runs validation — matches Rails' non-persisting semantics
-        // for now. Real save lands when a persistence adapter does.
-        writeln!(out, "  def save : Bool").unwrap();
-        writeln!(out, "    validate.empty?").unwrap();
-        writeln!(out, "  end").unwrap();
+        emit_persistence_methods_cr(out, model, !lowered.is_empty(), app);
     }
     writeln!(out, "end").unwrap();
+}
+
+/// Render save/destroy/count/find for a model against the test
+/// connection. SQL strings come from `LoweredPersistence`; per-target
+/// concerns are placeholder dialect (`?N` → `?`) and the crystal-db
+/// API shape (exec/scalar/query_one? with block hydration).
+fn emit_persistence_methods_cr(out: &mut String, model: &Model, has_validate: bool, app: &App) {
+    let lp = crate::lower::lower_persistence(model, app);
+    let class = lp.class.0.as_str();
+
+    let insert_sql = positional_placeholders(&lp.insert_sql);
+    let update_sql = positional_placeholders(&lp.update_sql);
+    let delete_sql = positional_placeholders(&lp.delete_sql);
+    let select_by_id_sql = positional_placeholders(&lp.select_by_id_sql);
+    let count_sql = lp.count_sql.clone(); // no placeholders
+
+    let non_id_args: Vec<String> = lp
+        .non_id_columns
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+
+    // ----- save -----
+    writeln!(out, "  def save : Bool").unwrap();
+    if has_validate {
+        writeln!(out, "    errors = validate").unwrap();
+        writeln!(out, "    return false unless errors.empty?").unwrap();
+    }
+    for check in &lp.belongs_to_checks {
+        let fk = check.foreign_key.as_str();
+        let target = check.target_class.0.as_str();
+        writeln!(
+            out,
+            "    return false if {fk} == 0_i64 || {target}.find({fk}).nil?",
+        )
+        .unwrap();
+    }
+    writeln!(out, "    db = Roundhouse::Db.conn").unwrap();
+    writeln!(out, "    if id == 0_i64").unwrap();
+    writeln!(
+        out,
+        "      result = db.exec({insert_sql:?}, {})",
+        non_id_args.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "      @id = result.last_insert_id").unwrap();
+    writeln!(out, "    else").unwrap();
+    writeln!(
+        out,
+        "      db.exec({update_sql:?}, {}, id)",
+        non_id_args.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "    true").unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- destroy -----
+    writeln!(out).unwrap();
+    writeln!(out, "  def destroy").unwrap();
+    for dc in &lp.dependent_children {
+        let child_class = dc.child_class.0.as_str();
+        let child_select = positional_placeholders(&dc.select_by_parent_sql);
+        writeln!(out, "    dependents = [] of {child_class}").unwrap();
+        writeln!(
+            out,
+            "    Roundhouse::Db.conn.query_all({child_select:?}, id) do |rs|"
+        )
+        .unwrap();
+        writeln!(out, "      record = {child_class}.new").unwrap();
+        for col in &dc.child_columns {
+            let col_name = col.as_str();
+            let ty = cr_rs_reader_type(col_name);
+            writeln!(out, "      record.{col_name} = rs.read({ty})").unwrap();
+        }
+        writeln!(out, "      dependents << record").unwrap();
+        writeln!(out, "    end").unwrap();
+        writeln!(out, "    dependents.each(&.destroy)").unwrap();
+    }
+    writeln!(
+        out,
+        "    Roundhouse::Db.conn.exec({delete_sql:?}, id)",
+    )
+    .unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- count -----
+    writeln!(out).unwrap();
+    writeln!(out, "  def self.count : Int64").unwrap();
+    writeln!(
+        out,
+        "    Roundhouse::Db.conn.scalar({count_sql:?}).as(Int64)",
+    )
+    .unwrap();
+    writeln!(out, "  end").unwrap();
+
+    // ----- find -----
+    writeln!(out).unwrap();
+    writeln!(out, "  def self.find(id : Int64) : {class}?").unwrap();
+    writeln!(
+        out,
+        "    Roundhouse::Db.conn.query_one?({select_by_id_sql:?}, id) do |rs|",
+    )
+    .unwrap();
+    writeln!(out, "      record = {class}.new").unwrap();
+    for col in &lp.columns {
+        let col_name = col.as_str();
+        let ty = cr_rs_reader_type_for(model, col_name);
+        writeln!(out, "      record.{col_name} = rs.read({ty})").unwrap();
+    }
+    writeln!(out, "      record").unwrap();
+    writeln!(out, "    end").unwrap();
+    writeln!(out, "  end").unwrap();
+}
+
+/// SQLite numbered placeholders (`?1`, `?2`) → crystal-db positional
+/// (`?`). Same table, same semantics, different wire syntax — a
+/// driver-level quirk we absorb at emit time. Keyed on `?` + digit
+/// run; non-placeholder `?`s pass through.
+fn positional_placeholders(sql: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '?' {
+            out.push('?');
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Crystal reader type for a struct field during cascade hydration.
+/// Uses the model's declared type when available; defaults to
+/// Int64/String by column-name heuristic otherwise (only happens when
+/// a LoweredPersistence DependentChild carries columns whose owning
+/// model isn't on hand in this callsite).
+fn cr_rs_reader_type(col_name: &str) -> &'static str {
+    match col_name {
+        "id" => "Int64",
+        _ if col_name.ends_with("_id") => "Int64",
+        "created_at" | "updated_at" => "Time",
+        _ => "String",
+    }
+}
+
+fn cr_rs_reader_type_for(model: &Model, col_name: &str) -> String {
+    if let Some(ty) = model
+        .attributes
+        .fields
+        .iter()
+        .find(|(k, _)| k.as_str() == col_name)
+        .map(|(_, v)| v)
+    {
+        match ty {
+            Ty::Int => "Int64".to_string(),
+            Ty::Float => "Float64".to_string(),
+            Ty::Bool => "Bool".to_string(),
+            Ty::Str | Ty::Sym => "String".to_string(),
+            Ty::Class { id, .. } if id.0.as_str() == "Time" => "Time".to_string(),
+            _ => "String".to_string(),
+        }
+    } else {
+        cr_rs_reader_type(col_name).to_string()
+    }
 }
 
 fn emit_validate_method(
