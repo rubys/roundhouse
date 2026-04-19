@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
-    Action, Association, Controller, Fixture, MethodDef, Model, RouteSpec, Test, TestModule,
+    Action, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
 };
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
@@ -1051,6 +1051,7 @@ fn emit_crystal_spec(tm: &TestModule, app: &App) -> EmittedFile {
     let model_attrs: Vec<Symbol> = attrs_set.into_iter().collect();
 
     let ctx = SpecCtx {
+        app,
         fixture_names: &fixture_names,
         known_models: &known_models,
         model_attrs: &model_attrs,
@@ -1095,6 +1096,7 @@ fn emit_crystal_spec(tm: &TestModule, app: &App) -> EmittedFile {
 /// Context threaded through spec body emission.
 #[derive(Clone, Copy)]
 struct SpecCtx<'a> {
+    app: &'a App,
     fixture_names: &'a [Symbol],
     known_models: &'a [Symbol],
     model_attrs: &'a [Symbol],
@@ -1158,8 +1160,8 @@ fn emit_spec_expr(e: &Expr, ctx: SpecCtx) -> String {
             out.push('"');
             out
         }
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_spec_send(recv.as_ref(), method.as_str(), args, ctx)
+        ExprNode::Send { recv, method, args, block, .. } => {
+            emit_spec_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx)
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
@@ -1192,6 +1194,7 @@ fn emit_spec_send(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
     ctx: SpecCtx,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_spec_expr(a, ctx)).collect();
@@ -1204,6 +1207,52 @@ fn emit_spec_send(
         if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*args[0].node {
             let module_name = crate::naming::camelize(method);
             return format!("Fixtures::{module_name}.{}", sym.as_str());
+        }
+    }
+
+    // assert_difference("Class.count", delta) do ... end
+    if recv.is_none() && method == "assert_difference" {
+        if let Some(body) = block {
+            if let Some(count_expr) = args
+                .first()
+                .and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        rewrite_ruby_dot_call_cr(value)
+                    }
+                    _ => None,
+                })
+            {
+                let delta = args_s.get(1).cloned().unwrap_or_else(|| "1_i64".into());
+                let body_s = emit_block_body_cr(body, ctx);
+                return format!(
+                    "_before = {count_expr}\n    {body_s}\n    ({count_expr} - _before).should eq({delta})"
+                );
+            }
+        }
+    }
+
+    // owner.<assoc>.create(hash) / .build(hash) — HasMany rewrite.
+    if (method == "create" || method == "build") && args.len() == 1 {
+        if let Some(outer_recv) = recv {
+            if let ExprNode::Send {
+                recv: Some(assoc_recv),
+                method: assoc_method,
+                args: inner_args,
+                ..
+            } = &*outer_recv.node
+            {
+                if inner_args.is_empty() {
+                    if let Some(s) = try_emit_assoc_create_cr(
+                        assoc_recv,
+                        assoc_method.as_str(),
+                        args,
+                        method,
+                        ctx,
+                    ) {
+                        return s;
+                    }
+                }
+            }
         }
     }
 
@@ -1297,34 +1346,96 @@ fn emit_spec_send(
     }
 }
 
-/// Heuristic: does the test body reference runtime support we haven't
-/// built yet? Mirrors the Rust equivalent.
-fn test_needs_runtime_unsupported_cr(test: &Test) -> bool {
-    let known_name_ignored = matches!(test.name.as_str(), "requires valid article");
-    if known_name_ignored {
-        return true;
-    }
-    test_body_uses_unsupported_cr(&test.body)
+/// Phase 3 rounded out the Crystal emitter's handling of
+/// assert_difference, destroy, Class.count, build/create, and
+/// belongs_to existence. Keep the predicate as a future-guard; no
+/// real-blog shape currently forces a skip.
+fn test_needs_runtime_unsupported_cr(_test: &Test) -> bool {
+    false
 }
 
+/// Parse a Ruby-style `"Class.method"` expression string into Crystal
+/// `Class.method` syntax (Crystal uses `.` for both class and instance
+/// method calls). Only alphanumeric identifiers on both sides.
+fn rewrite_ruby_dot_call_cr(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    let (lhs, rhs) = trimmed.split_once('.')?;
+    let is_ident = |s: &str| {
+        !s.is_empty()
+            && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if !is_ident(lhs) || !is_ident(rhs) {
+        return None;
+    }
+    Some(format!("{lhs}.{rhs}"))
+}
+
+/// Render a Ruby block body (a single expression or a Seq) as Crystal
+/// spec statements at spec-body indent. Peels one Lambda layer — Ruby
+/// `do ... end` lowers to `ExprNode::Lambda` in the IR but translates
+/// to plain statements in Crystal.
+fn emit_block_body_cr(e: &Expr, ctx: SpecCtx) -> String {
+    let inner = match &*e.node {
+        ExprNode::Lambda { body, .. } => body,
+        _ => e,
+    };
+    match &*inner.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .map(|s| emit_spec_stmt(s, ctx))
+            .collect::<Vec<_>>()
+            .join("\n    "),
+        _ => emit_spec_stmt(inner, ctx),
+    }
+}
+
+fn try_emit_assoc_create_cr(
+    owner: &Expr,
+    assoc_name: &str,
+    args: &[Expr],
+    outer_method: &str,
+    ctx: SpecCtx,
+) -> Option<String> {
+    let resolved = crate::lower::resolve_has_many(
+        &Symbol::from(assoc_name),
+        owner.ty.as_ref(),
+        ctx.app,
+    )?;
+    let target_class = resolved.target_class.0.as_str();
+    let foreign_key = resolved.foreign_key.as_str();
+
+    let owner_s = emit_spec_expr(owner, ctx);
+    let hash_entries = match &args.first()?.node.as_ref() {
+        ExprNode::Hash { entries, .. } => entries.clone(),
+        _ => return None,
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("{target_class}.new.tap do |record|"));
+    lines.push(format!("      record.{foreign_key} = {owner_s}.id"));
+    for (k, v) in &hash_entries {
+        if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
+            lines.push(format!(
+                "      record.{} = {}",
+                field_name.as_str(),
+                emit_spec_expr(v, ctx),
+            ));
+        }
+    }
+    // `.build` returns the unsaved record; `.create` saves it first.
+    // Both yield the record so tests can read `.article_id` etc.
+    if outer_method == "create" {
+        lines.push("      record.save".to_string());
+    }
+    lines.push("    end".to_string());
+    Some(lines.join("\n"))
+}
+
+#[allow(dead_code)]
 fn test_body_uses_unsupported_cr(e: &Expr) -> bool {
     use crate::expr::InterpPart;
-    let self_hit = match &*e.node {
-        ExprNode::Send { recv, method, .. } => {
-            let m = method.as_str();
-            matches!(
-                m,
-                "assert_difference"
-                    | "destroy"
-                    | "destroy!"
-                    | "build"
-                    | "create"
-                    | "create!"
-            ) || (m == "count"
-                && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })))
-        }
-        _ => false,
-    };
+    let self_hit = false;
     if self_hit {
         return true;
     }
