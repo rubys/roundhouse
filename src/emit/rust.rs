@@ -17,7 +17,7 @@ use super::EmittedFile;
 use crate::App;
 use crate::dialect::{Action, Association, Controller, Fixture, MethodDef, Model, Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::Symbol;
 use crate::naming::snake_case;
 use crate::ty::Ty;
 
@@ -256,73 +256,21 @@ fn emit_model_impl(
 }
 
 /// Render save/destroy/count/find for a model against the thread-local
-/// SQLite connection. The column order tracks `model.attributes.fields`
-/// (insertion-ordered via IndexMap), so the emitted SQL string stays in
-/// sync with the struct field order. `id` is excluded from INSERT
-/// columns — SQLite's AUTOINCREMENT assigns it — and becomes the WHERE
-/// key for UPDATE / DELETE / find.
+/// SQLite connection. The SQL strings, column projections, belongs_to
+/// checks, and dependent-destroy cascade targets come from the shared
+/// `LoweredPersistence` — this function only wraps them in rusqlite
+/// syntax.
 fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool, app: &App) {
-    let table = model.table.0.as_str();
-    let class = model.name.0.as_str();
+    let lp = crate::lower::lower_persistence(model, app);
+    let class = lp.class.0.as_str();
 
-    // belongs_to existence checks run inside `save` after structural
-    // validation. Rails' default (since 5.0) treats a dangling FK as
-    // an invalid record, so `Comment.new(article_id: 999).save` must
-    // return false without touching the DB.
-    let belongs_to_checks: Vec<(&Symbol, &ClassId)> = model
-        .associations()
-        .filter_map(|a| match a {
-            Association::BelongsTo { foreign_key, target, optional: false, .. } => {
-                Some((foreign_key, target))
-            }
-            _ => None,
-        })
-        .collect();
-
-    // has_many with `dependent: :destroy` — `destroy` on this model
-    // must first delete each dependent child (so each child's own
-    // destroy callbacks fire, matching Rails semantics) before the
-    // parent row goes.
-    let dependent_children: Vec<(ClassId, &Symbol)> = model
-        .associations()
-        .filter_map(|a| match a {
-            Association::HasMany {
-                target,
-                foreign_key,
-                dependent: crate::dialect::Dependent::Destroy,
-                ..
-            } => Some((target.clone(), foreign_key)),
-            _ => None,
-        })
-        .collect();
-
-    // Partition attributes into `id` and everything else. The SQL
-    // column list is the "everything else"; the id column anchors
-    // primary-key lookups.
-    let non_id_fields: Vec<&Symbol> = model
-        .attributes
-        .fields
-        .keys()
-        .filter(|k| k.as_str() != "id")
-        .collect();
-
-    // ----- save -----
-    let insert_cols: Vec<String> =
-        non_id_fields.iter().map(|s| s.as_str().to_string()).collect();
-    let insert_placeholders: Vec<String> = (1..=non_id_fields.len())
-        .map(|i| format!("?{i}"))
-        .collect();
-    let insert_params: Vec<String> = non_id_fields
+    let non_id_params: Vec<String> = lp
+        .non_id_columns
         .iter()
         .map(|s| format!("self.{}", s.as_str()))
         .collect();
-    let update_assigns: Vec<String> = non_id_fields
-        .iter()
-        .enumerate()
-        .map(|(i, s)| format!("{} = ?{}", s.as_str(), i + 1))
-        .collect();
-    let update_id_placeholder = non_id_fields.len() + 1;
 
+    // ----- save -----
     writeln!(out, "    pub fn save(&mut self) -> bool {{").unwrap();
     if has_validate {
         writeln!(out, "        let errors = self.validate();").unwrap();
@@ -331,11 +279,12 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
     // belongs_to: referenced parent must exist. Use the target's
     // `find` (which consults the same :memory: connection) so the
     // check stays in the test's transactional world.
-    for (fk, target) in &belongs_to_checks {
+    for check in &lp.belongs_to_checks {
+        let fk = check.foreign_key.as_str();
+        let target = check.target_class.0.as_str();
         writeln!(
             out,
-            "        if self.{fk} == 0 || {}::find(self.{fk}).is_none() {{",
-            target.0.as_str(),
+            "        if self.{fk} == 0 || {target}::find(self.{fk}).is_none() {{",
         )
         .unwrap();
         writeln!(out, "            return false;").unwrap();
@@ -345,19 +294,20 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
     writeln!(out, "            if self.id == 0 {{").unwrap();
     writeln!(
         out,
-        "                conn.execute(\n                    \"INSERT INTO {table} ({}) VALUES ({})\",\n                    rusqlite::params![{}],\n                ).expect(\"INSERT {table}\");",
-        insert_cols.join(", "),
-        insert_placeholders.join(", "),
-        insert_params.join(", "),
+        "                conn.execute(\n                    {:?},\n                    rusqlite::params![{}],\n                ).expect(\"INSERT {}\");",
+        lp.insert_sql,
+        non_id_params.join(", "),
+        lp.table.as_str(),
     )
     .unwrap();
     writeln!(out, "                self.id = conn.last_insert_rowid();").unwrap();
     writeln!(out, "            }} else {{").unwrap();
     writeln!(
         out,
-        "                conn.execute(\n                    \"UPDATE {table} SET {} WHERE id = ?{update_id_placeholder}\",\n                    rusqlite::params![{}, self.id],\n                ).expect(\"UPDATE {table}\");",
-        update_assigns.join(", "),
-        insert_params.join(", "),
+        "                conn.execute(\n                    {:?},\n                    rusqlite::params![{}, self.id],\n                ).expect(\"UPDATE {}\");",
+        lp.update_sql,
+        non_id_params.join(", "),
+        lp.table.as_str(),
     )
     .unwrap();
     writeln!(out, "            }}").unwrap();
@@ -371,26 +321,17 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
     // Cascade dependent children first so their own `destroy`
     // callbacks run (matching Rails' `dependent: :destroy`), then
     // remove the parent row.
-    for (target, fk) in &dependent_children {
-        let child_class = target.0.as_str();
-        let child_table = app
-            .models
-            .iter()
-            .find(|m| m.name.0.as_str() == child_class)
-            .map(|m| m.table.0.as_str().to_string())
-            .unwrap_or_else(|| crate::naming::pluralize_snake(child_class));
-        writeln!(out, "        let dependents: Vec<{child_class}> = crate::db::with_conn(|conn| {{").unwrap();
-        let select_cols: Vec<String> = app
-            .models
-            .iter()
-            .find(|m| m.name.0.as_str() == child_class)
-            .map(|m| m.attributes.fields.keys().map(|s| s.as_str().to_string()).collect())
-            .unwrap_or_default();
-        let select_cols_joined = select_cols.join(", ");
+    for dc in &lp.dependent_children {
+        let child_class = dc.child_class.0.as_str();
         writeln!(
             out,
-            "            let mut stmt = conn.prepare(\"SELECT {select_cols_joined} FROM {child_table} WHERE {fk} = ?1\").expect(\"prepare child select\");",
-            fk = fk.as_str(),
+            "        let dependents: Vec<{child_class}> = crate::db::with_conn(|conn| {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            let mut stmt = conn.prepare({:?}).expect(\"prepare child select\");",
+            dc.select_by_parent_sql,
         )
         .unwrap();
         writeln!(
@@ -398,8 +339,8 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
             "            let rows = stmt.query_map(rusqlite::params![self.id], |r| Ok({child_class} {{"
         )
         .unwrap();
-        for (i, col) in select_cols.iter().enumerate() {
-            writeln!(out, "                {col}: r.get({i})?,").unwrap();
+        for (i, col) in dc.child_columns.iter().enumerate() {
+            writeln!(out, "                {}: r.get({i})?,", col.as_str()).unwrap();
         }
         writeln!(out, "            }})).expect(\"query child rows\");").unwrap();
         writeln!(out, "            rows.filter_map(|r| r.ok()).collect()").unwrap();
@@ -411,7 +352,9 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
     writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
     writeln!(
         out,
-        "            conn.execute(\"DELETE FROM {table} WHERE id = ?1\", rusqlite::params![self.id])\n                .expect(\"DELETE {table}\");",
+        "            conn.execute({:?}, rusqlite::params![self.id])\n                .expect(\"DELETE {}\");",
+        lp.delete_sql,
+        lp.table.as_str(),
     )
     .unwrap();
     writeln!(out, "        }});").unwrap();
@@ -423,30 +366,26 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool,
     writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
     writeln!(
         out,
-        "            conn.query_row(\"SELECT COUNT(*) FROM {table}\", [], |r| r.get(0))\n                .expect(\"count {table}\")",
+        "            conn.query_row({:?}, [], |r| r.get(0))\n                .expect(\"count {}\")",
+        lp.count_sql,
+        lp.table.as_str(),
     )
     .unwrap();
     writeln!(out, "        }})").unwrap();
     writeln!(out, "    }}").unwrap();
 
     // ----- find (associated function) -----
-    let select_cols: Vec<String> = model
-        .attributes
-        .fields
-        .keys()
-        .map(|s| s.as_str().to_string())
-        .collect();
     writeln!(out).unwrap();
     writeln!(out, "    pub fn find(id: i64) -> Option<{class}> {{").unwrap();
     writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
     writeln!(
         out,
-        "            conn.query_row(\n                \"SELECT {} FROM {table} WHERE id = ?1\",\n                rusqlite::params![id],",
-        select_cols.join(", "),
+        "            conn.query_row(\n                {:?},\n                rusqlite::params![id],",
+        lp.select_by_id_sql,
     )
     .unwrap();
     writeln!(out, "                |r| Ok({class} {{").unwrap();
-    for (i, field) in model.attributes.fields.keys().enumerate() {
+    for (i, field) in lp.columns.iter().enumerate() {
         writeln!(out, "                    {}: r.get({i})?,", field.as_str()).unwrap();
     }
     writeln!(out, "                }}),\n            ).ok()").unwrap();

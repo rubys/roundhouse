@@ -17,8 +17,10 @@
 //! exercises the pattern. If it works, follow-ups cover query algebra,
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
+pub mod persistence;
 pub mod schema_sql;
 pub mod validations;
 
+pub use persistence::{lower_persistence, BelongsToCheck, DependentChild, LoweredPersistence};
 pub use schema_sql::{lower_schema, sqlite_type};
 pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};
