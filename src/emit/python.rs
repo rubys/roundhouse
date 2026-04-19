@@ -36,10 +36,19 @@ use crate::ty::Ty;
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
 const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
-/// Python HTTP runtime — Phase 4c compile-only stubs. Copied verbatim
-/// into generated projects as `app/http.py` when any controller
-/// emits. Mirrors the five sibling twins.
+/// Python HTTP runtime — Phase 4d pass-2 shape. `ActionResponse`,
+/// `ActionContext`, and the Router match table live here; copied
+/// verbatim into generated projects as `app/http.py` when any
+/// controller emits. Mirrors the six sibling twins.
 const HTTP_SOURCE: &str = include_str!("../../runtime/python/http.py");
+/// Pass-2 test-support runtime. `TestClient` + `TestResponse` with
+/// Rails-shaped assertions. Ships as `app/test_support.py`.
+const TEST_SUPPORT_SOURCE: &str =
+    include_str!("../../runtime/python/test_support.py");
+/// View helpers — `link_to`, `button_to`, `FormBuilder`, etc.
+/// Ships as `app/view_helpers.py` when views emit.
+const VIEW_HELPERS_SOURCE: &str =
+    include_str!("../../runtime/python/view_helpers.py");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
@@ -64,10 +73,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/http.py"),
             content: HTTP_SOURCE.to_string(),
         });
-        let known_models: Vec<Symbol> =
-            app.models.iter().map(|m| m.name.0.clone()).collect();
-        files.push(emit_controllers(app, &known_models));
+        files.push(EmittedFile {
+            path: PathBuf::from("app/test_support.py"),
+            content: TEST_SUPPORT_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/view_helpers.py"),
+            content: VIEW_HELPERS_SOURCE.to_string(),
+        });
+        files.push(emit_py_route_helpers(app));
+        files.extend(emit_controllers_pass2(app));
     }
+    files.extend(emit_py_views(app));
     if !app.routes.entries.is_empty() {
         files.push(emit_routes(app));
     }
@@ -282,6 +299,59 @@ fn emit_persistence_methods_py(
         .collect();
     writeln!(out, "{}", kw.join(",\n")).unwrap();
     writeln!(out, "        )").unwrap();
+
+    // ----- all -----
+    let select_all_sql = positional_placeholders_py(&lp.select_all_sql);
+    writeln!(out).unwrap();
+    writeln!(out, "    @classmethod").unwrap();
+    writeln!(out, "    def all(cls) -> list[{class}]:").unwrap();
+    writeln!(out, "        from app import db").unwrap();
+    writeln!(out, "        rows = db.query_all({select_all_sql:?})").unwrap();
+    writeln!(out, "        return [cls(").unwrap();
+    writeln!(out, "{}", kw.join(",\n")).unwrap();
+    writeln!(out, "        ) for row in rows]").unwrap();
+
+    // ----- last -----
+    let select_last_sql = positional_placeholders_py(&lp.select_last_sql);
+    writeln!(out).unwrap();
+    writeln!(out, "    @classmethod").unwrap();
+    writeln!(out, "    def last(cls) -> {class} | None:").unwrap();
+    writeln!(out, "        from app import db").unwrap();
+    writeln!(out, "        row = db.query_one({select_last_sql:?})").unwrap();
+    writeln!(out, "        if row is None:").unwrap();
+    writeln!(out, "            return None").unwrap();
+    writeln!(out, "        return cls(").unwrap();
+    writeln!(out, "{}", kw.join(",\n")).unwrap();
+    writeln!(out, "        )").unwrap();
+
+    // ----- reload -----
+    writeln!(out).unwrap();
+    writeln!(out, "    def reload(self) -> None:").unwrap();
+    writeln!(out, "        fresh = type(self).find(self.id)").unwrap();
+    writeln!(out, "        if fresh is not None:").unwrap();
+    for col in &lp.columns {
+        writeln!(out, "            self.{0} = fresh.{0}", col.as_str()).unwrap();
+    }
+
+    // ----- has_many associations as property accessors -----
+    for dc in &lp.dependent_children {
+        let child_class = dc.child_class.0.as_str();
+        let assoc = crate::naming::pluralize_snake(child_class);
+        let child_select = positional_placeholders_py(&dc.select_by_parent_sql);
+        writeln!(out).unwrap();
+        writeln!(out, "    @property").unwrap();
+        writeln!(out, "    def {assoc}(self) -> list[{child_class}]:").unwrap();
+        writeln!(out, "        from app import db").unwrap();
+        writeln!(out, "        rows = db.query_all({child_select:?}, [self.id])").unwrap();
+        let ckw: Vec<String> = dc
+            .child_columns
+            .iter()
+            .map(|c| format!("            {0}=row[{0:?}]", c.as_str()))
+            .collect();
+        writeln!(out, "        return [{child_class}(").unwrap();
+        writeln!(out, "{}", ckw.join(",\n")).unwrap();
+        writeln!(out, "        ) for row in rows]").unwrap();
+    }
 }
 
 /// SQLite `?N` → Python's stdlib sqlite3 positional `?`. Same
@@ -578,16 +648,441 @@ fn first_param(receiver: &str, params: &[crate::ident::Symbol]) -> String {
 // so Python's unused-method warnings stay quiet — `@unittest.skip`-ped
 // controller tests never invoke them at runtime.
 
+/// Pass-2 controller emit — one module per controller under
+/// `app/controllers/`. Each action is a module-level function
+/// returning `http.ActionResponse`. The `Router` in
+/// `app/http.py` resolves handlers via `getattr(module, action)`,
+/// so controllers are registered by module reference rather than
+/// as class-level methods.
+fn emit_controllers_pass2(app: &App) -> Vec<EmittedFile> {
+    let known_models: Vec<Symbol> =
+        app.models.iter().map(|m| m.name.0.clone()).collect();
+    let mut files = Vec::new();
+    files.push(EmittedFile {
+        path: PathBuf::from("app/controllers/__init__.py"),
+        content: String::new(),
+    });
+    for c in &app.controllers {
+        files.push(emit_controller_file_pass2(c, &known_models, app));
+    }
+    files
+}
+
+fn emit_controller_file_pass2(
+    c: &Controller,
+    known_models: &[Symbol],
+    _app: &App,
+) -> EmittedFile {
+    let name = c.name.0.as_str();
+    let file_stem = crate::naming::snake_case(name);
+    let resource = resource_from_controller_name_py(name);
+    let model_class = crate::naming::singularize_camelize(&resource);
+    let has_model = known_models.iter().any(|m| m.as_str() == model_class);
+    let parent = find_nested_parent_py(name);
+    let permitted = permitted_fields_for_py(c, &resource)
+        .unwrap_or_else(|| default_permitted_fields_py(&model_class));
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "from __future__ import annotations").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "from app import http, views").unwrap();
+    writeln!(s, "from app.route_helpers import *  # noqa: F401, F403").unwrap();
+    if !known_models.is_empty() {
+        writeln!(s, "from app.models import *  # noqa: F401, F403").unwrap();
+    }
+    writeln!(s).unwrap();
+
+    let (public_actions, _private) = crate::lower::split_public_private(c);
+    for action in &public_actions {
+        emit_py_action_template(
+            &mut s,
+            action,
+            &resource,
+            &model_class,
+            has_model,
+            parent.as_ref(),
+            &permitted,
+        );
+        writeln!(s).unwrap();
+    }
+
+    EmittedFile {
+        path: PathBuf::from(format!("app/controllers/{file_stem}.py")),
+        content: s,
+    }
+}
+
+/// `ArticlesController` → `"article"`; `ApplicationController` → `""`.
+fn resource_from_controller_name_py(name: &str) -> String {
+    let trimmed = name.strip_suffix("Controller").unwrap_or(name);
+    crate::naming::singularize(&crate::naming::snake_case(trimmed))
+}
+
+#[derive(Clone, Debug)]
+struct PyNestedParent {
+    singular: String,
+    plural: String,
+}
+
+fn find_nested_parent_py(controller_name: &str) -> Option<PyNestedParent> {
+    let resource = resource_from_controller_name_py(controller_name);
+    if resource == "comment" {
+        Some(PyNestedParent {
+            singular: "article".to_string(),
+            plural: "articles".to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+fn permitted_fields_for_py(c: &Controller, resource: &str) -> Option<Vec<String>> {
+    use crate::dialect::ControllerBodyItem;
+    let helper_name = format!("{}_params", resource);
+    let action = c.body.iter().find_map(|item| match item {
+        ControllerBodyItem::Action { action, .. } if action.name.as_str() == helper_name => {
+            Some(action)
+        }
+        _ => None,
+    })?;
+    extract_permitted_from_expr_py(&action.body)
+}
+
+fn extract_permitted_from_expr_py(expr: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
+        if method.as_str() == "expect" && crate::lower::is_params_expr(r) {
+            if let Some(arg) = args.first() {
+                if let ExprNode::Hash { entries, .. } = &*arg.node {
+                    if let Some((_, value)) = entries.first() {
+                        if let ExprNode::Array { elements, .. } = &*value.node {
+                            let fields: Vec<String> = elements
+                                .iter()
+                                .filter_map(|e| match &*e.node {
+                                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                                        Some(value.as_str().to_string())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if !fields.is_empty() {
+                                return Some(fields);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let ExprNode::Seq { exprs } = &*expr.node {
+        for e in exprs {
+            if let Some(v) = extract_permitted_from_expr_py(e) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn default_permitted_fields_py(model_class: &str) -> Vec<String> {
+    match model_class {
+        "Article" => vec!["title".to_string(), "body".to_string()],
+        "Comment" => vec!["commenter".to_string(), "body".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn emit_py_action_template(
+    out: &mut String,
+    action: &Action,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&PyNestedParent>,
+    permitted: &[String],
+) {
+    let raw = action.name.as_str();
+    // Python reserves `new` less formally, but the Router resolves
+    // `new` actions through `new_` to avoid collisions with Python's
+    // `new` idioms in `Model.new(...)`.
+    let name = if raw == "new" { "new_" } else { raw };
+    match raw {
+        "index" => emit_py_index(out, name, model_class, has_model),
+        "show" => emit_py_show(out, name, model_class, has_model, parent),
+        "new" => emit_py_new(out, name, model_class, has_model),
+        "edit" => emit_py_edit(out, name, model_class, has_model, parent),
+        "create" => emit_py_create(
+            out, name, resource, model_class, has_model, parent, permitted,
+        ),
+        "update" => emit_py_update(
+            out, name, resource, model_class, has_model, permitted,
+        ),
+        "destroy" => {
+            emit_py_destroy(out, name, model_class, has_model, parent)
+        }
+        _ => {
+            writeln!(
+                out,
+                "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            writeln!(out, "    return http.ActionResponse(status=501)").unwrap();
+        }
+    }
+}
+
+fn py_view_fn(model_class: &str, suffix: &str) -> String {
+    let plural = crate::naming::pluralize_snake(model_class);
+    format!("render_{plural}_{}", suffix.to_lowercase())
+}
+
+fn emit_py_index(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+) {
+    let view_fn = py_view_fn(model_class, "index");
+    writeln!(
+        out,
+        "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if has_model {
+        writeln!(out, "    records = {model_class}.all()").unwrap();
+        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(records))").unwrap();
+    } else {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+    }
+}
+
+fn emit_py_show(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+    _parent: Option<&PyNestedParent>,
+) {
+    let view_fn = py_view_fn(model_class, "show");
+    writeln!(
+        out,
+        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if has_model {
+        writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+        writeln!(
+            out,
+            "    record = {model_class}.find(record_id) or {model_class}()"
+        )
+        .unwrap();
+        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
+    } else {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+    }
+}
+
+fn emit_py_new(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+) {
+    let view_fn = py_view_fn(model_class, "new");
+    writeln!(
+        out,
+        "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if has_model {
+        writeln!(out, "    record = {model_class}()").unwrap();
+        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
+    } else {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+    }
+}
+
+fn emit_py_edit(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+    _parent: Option<&PyNestedParent>,
+) {
+    let view_fn = py_view_fn(model_class, "edit");
+    writeln!(
+        out,
+        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if has_model {
+        writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+        writeln!(
+            out,
+            "    record = {model_class}.find(record_id) or {model_class}()"
+        )
+        .unwrap();
+        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
+    } else {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+    }
+}
+
+fn emit_py_create(
+    out: &mut String,
+    name: &str,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&PyNestedParent>,
+    permitted: &[String],
+) {
+    writeln!(
+        out,
+        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if !has_model {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+        return;
+    }
+    writeln!(out, "    record = {model_class}()").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "    record.{}_id = int(context.params[\"{}_id\"])",
+            p.singular, p.singular
+        )
+        .unwrap();
+    }
+    for field in permitted {
+        writeln!(
+            out,
+            "    record.{field} = context.params.get(\"{resource}[{field}]\", \"\")"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    if record.save():").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "        return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+            p.singular, p.singular,
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
+        )
+        .unwrap();
+    }
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+            p.singular, p.singular,
+        )
+        .unwrap();
+    } else {
+        let view_fn = py_view_fn(model_class, "new");
+        writeln!(
+            out,
+            "    return http.ActionResponse(status=422, body=views.{view_fn}(record))"
+        )
+        .unwrap();
+    }
+}
+
+fn emit_py_update(
+    out: &mut String,
+    name: &str,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    permitted: &[String],
+) {
+    writeln!(
+        out,
+        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if !has_model {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+        return;
+    }
+    writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+    writeln!(
+        out,
+        "    record = {model_class}.find(record_id) or {model_class}()"
+    )
+    .unwrap();
+    for field in permitted {
+        writeln!(
+            out,
+            "    if \"{resource}[{field}]\" in context.params: record.{field} = context.params[\"{resource}[{field}]\"]"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    if record.save():").unwrap();
+    writeln!(
+        out,
+        "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
+    )
+    .unwrap();
+    let edit_view = py_view_fn(model_class, "edit");
+    writeln!(
+        out,
+        "    return http.ActionResponse(status=422, body=views.{edit_view}(record))"
+    )
+    .unwrap();
+}
+
+fn emit_py_destroy(
+    out: &mut String,
+    name: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&PyNestedParent>,
+) {
+    writeln!(
+        out,
+        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+    )
+    .unwrap();
+    if !has_model {
+        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+        return;
+    }
+    writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+    writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
+    writeln!(out, "    if record is not None: record.destroy()").unwrap();
+    if let Some(p) = parent {
+        writeln!(
+            out,
+            "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+            p.singular, p.singular,
+        )
+        .unwrap();
+    } else {
+        let plural = crate::naming::pluralize_snake(model_class);
+        writeln!(
+            out,
+            "    return http.ActionResponse(status=303, location={plural}_path())"
+        )
+        .unwrap();
+    }
+}
+
+// Legacy pass-1 emit retained for any code that still references
+// `emit_controllers`; the public entry point is `emit_controllers_pass2`.
+#[allow(dead_code)]
 fn emit_controllers(app: &App, known_models: &[Symbol]) -> EmittedFile {
     let mut s = String::new();
     writeln!(s, "# Generated by Roundhouse.").unwrap();
     writeln!(s, "from __future__ import annotations").unwrap();
     writeln!(s, "from . import http").unwrap();
     if !known_models.is_empty() {
-        // Generated models live in app/models.py. The
-        // `from .models import *` pulls every class name in so
-        // emitted bodies can reference `Article`, `Comment`, etc.
-        // by bare name.
         writeln!(s, "from .models import *  # noqa: F401, F403").unwrap();
     }
     for controller in &app.controllers {
@@ -865,21 +1360,974 @@ fn emit_routes(app: &App) -> EmittedFile {
     writeln!(s, "# Generated by Roundhouse.").unwrap();
     writeln!(s, "from __future__ import annotations").unwrap();
     writeln!(s).unwrap();
-    writeln!(s, "routes: list[dict] = [").unwrap();
-    let mut flat: Vec<(String, String, String, String)> = Vec::new();
+    writeln!(s, "from app.http import Router").unwrap();
+
+    // Collect controller module references the routes touch.
+    let mut controllers: Vec<String> = Vec::new();
     for entry in &app.routes.entries {
-        collect_flat_routes(entry, &mut flat, None);
+        collect_controller_refs_py(entry, &mut controllers);
     }
-    for (method, path, controller, action) in flat {
-        writeln!(
-            s,
-            "    {{\"method\": {:?}, \"path\": {:?}, \"controller\": {:?}, \"action\": {:?}}},",
-            method, path, controller, action,
-        )
-        .unwrap();
+    for ctrl in &controllers {
+        let stem = crate::naming::snake_case(ctrl);
+        writeln!(s, "from app.controllers import {stem} as {ctrl}").unwrap();
     }
-    writeln!(s, "]").unwrap();
+    writeln!(s).unwrap();
+
+    // Reset before registering — re-imports during tests (pytest,
+    // unittest rerun) shouldn't accumulate duplicate entries.
+    writeln!(s, "Router.reset()").unwrap();
+
+    for entry in &app.routes.entries {
+        emit_py_route_spec(&mut s, entry);
+    }
+
     EmittedFile { path: PathBuf::from("app/routes.py"), content: s }
+}
+
+fn collect_controller_refs_py(spec: &RouteSpec, out: &mut Vec<String>) {
+    let mut push = |name: String, out: &mut Vec<String>| {
+        if !out.iter().any(|c| c == &name) {
+            out.push(name);
+        }
+    };
+    match spec {
+        RouteSpec::Explicit { controller, .. } => {
+            push(controller.0.to_string(), out);
+        }
+        RouteSpec::Root { target } => {
+            if let Some((c, _)) = target.split_once('#') {
+                push(controller_class_name(c), out);
+            }
+        }
+        RouteSpec::Resources { name, nested, .. } => {
+            push(controller_class_name(name.as_str()), out);
+            for child in nested {
+                collect_controller_refs_py(child, out);
+            }
+        }
+    }
+}
+
+fn emit_py_route_spec(out: &mut String, spec: &RouteSpec) {
+    match spec {
+        RouteSpec::Explicit { method, path, controller, action, .. } => {
+            let verb = match method {
+                crate::dialect::HttpMethod::Get => "get",
+                crate::dialect::HttpMethod::Post => "post",
+                crate::dialect::HttpMethod::Put => "put",
+                crate::dialect::HttpMethod::Patch => "patch",
+                crate::dialect::HttpMethod::Delete => "delete",
+                _ => "get",
+            };
+            writeln!(
+                out,
+                "Router.{verb}({:?}, {}, {:?})",
+                path,
+                controller.0,
+                action.as_str(),
+            )
+            .unwrap();
+        }
+        RouteSpec::Root { target } => {
+            let (controller, action) = target
+                .split_once('#')
+                .map(|(c, a)| (controller_class_name(c), a.to_string()))
+                .unwrap_or_else(|| (target.clone(), "index".to_string()));
+            writeln!(out, "Router.root({controller}, {action:?})").unwrap();
+        }
+        RouteSpec::Resources { name, only, except: _, nested } => {
+            let controller = controller_class_name(name.as_str());
+            let mut opts: Vec<String> = Vec::new();
+            if !only.is_empty() {
+                let parts: Vec<String> =
+                    only.iter().map(|s| format!("{:?}", s.as_str())).collect();
+                opts.push(format!("only=[{}]", parts.join(", ")));
+            }
+            if !nested.is_empty() {
+                let mut nested_parts: Vec<String> = Vec::new();
+                for child in nested {
+                    if let Some(part) = py_nested_spec_entry(child) {
+                        nested_parts.push(part);
+                    }
+                }
+                if !nested_parts.is_empty() {
+                    opts.push(format!("nested=[{}]", nested_parts.join(", ")));
+                }
+            }
+            if opts.is_empty() {
+                writeln!(
+                    out,
+                    "Router.resources({:?}, {})",
+                    name.as_str(),
+                    controller
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "Router.resources({:?}, {}, {})",
+                    name.as_str(),
+                    controller,
+                    opts.join(", ")
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+fn py_nested_spec_entry(spec: &RouteSpec) -> Option<String> {
+    let RouteSpec::Resources { name, only, except: _, nested: _ } = spec else {
+        return None;
+    };
+    let controller = controller_class_name(name.as_str());
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("\"name\": {:?}", name.as_str()));
+    parts.push(format!("\"controller\": {controller}"));
+    if !only.is_empty() {
+        let items: Vec<String> =
+            only.iter().map(|s| format!("{:?}", s.as_str())).collect();
+        parts.push(format!("\"only\": [{}]", items.join(", ")));
+    }
+    Some(format!("{{{}}}", parts.join(", ")))
+}
+
+/// Emit `app/route_helpers.py` — one `<as_name>_path(args)`
+/// function per unique route `as_name`, derived from the
+/// flattened route table. Mirrors the Rust/TS/Crystal twins with
+/// Python naming (snake_case, no `Path` suffix).
+fn emit_py_route_helpers(app: &App) -> EmittedFile {
+    let flat = flatten_py_routes(app);
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "from __future__ import annotations").unwrap();
+    writeln!(s).unwrap();
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for route in &flat {
+        if !seen.insert(route.as_name.clone()) {
+            continue;
+        }
+        let fn_name = format!("{}_path", route.as_name);
+        let sig_params: Vec<String> = route
+            .path_params
+            .iter()
+            .map(|p| format!("{p}: int = 0"))
+            .collect();
+        let sig = sig_params.join(", ");
+        let body = if route.path_params.is_empty() {
+            format!("return {:?}", route.path)
+        } else {
+            // Build an f-string with ${param} replaced by {param}.
+            let mut tmpl = String::new();
+            let mut chars = route.path.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == ':' {
+                    let mut ident = String::new();
+                    while let Some(&nc) = chars.peek() {
+                        if nc.is_alphanumeric() || nc == '_' {
+                            ident.push(nc);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    tmpl.push('{');
+                    tmpl.push_str(&ident);
+                    tmpl.push('}');
+                } else {
+                    tmpl.push(c);
+                }
+            }
+            format!("return f{:?}", tmpl)
+        };
+        writeln!(s, "def {fn_name}({sig}) -> str: {body}").unwrap();
+    }
+    EmittedFile {
+        path: PathBuf::from("app/route_helpers.py"),
+        content: s,
+    }
+}
+
+#[derive(Debug)]
+struct PyFlatRoute {
+    path: String,
+    as_name: String,
+    path_params: Vec<String>,
+}
+
+fn flatten_py_routes(app: &App) -> Vec<PyFlatRoute> {
+    let mut out = Vec::new();
+    for entry in &app.routes.entries {
+        collect_flat_py_routes(entry, &mut out, None);
+    }
+    out
+}
+
+fn collect_flat_py_routes(
+    spec: &RouteSpec,
+    out: &mut Vec<PyFlatRoute>,
+    scope_prefix: Option<(&str, &str)>,
+) {
+    match spec {
+        RouteSpec::Explicit { path, action, as_name, .. } => {
+            let (full_path, mut params) = nest_py_path(path, scope_prefix);
+            extract_py_path_params(&full_path, &mut params);
+            out.push(PyFlatRoute {
+                path: full_path,
+                as_name: as_name
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| action.to_string()),
+                path_params: params,
+            });
+        }
+        RouteSpec::Root { .. } => {
+            out.push(PyFlatRoute {
+                path: "/".to_string(),
+                as_name: "root".to_string(),
+                path_params: vec![],
+            });
+        }
+        RouteSpec::Resources { name, only, except, nested } => {
+            let resource_path = format!("/{name}");
+            let singular_low =
+                crate::naming::singularize_camelize(name.as_str()).to_lowercase();
+            for (action, _method, suffix) in standard_resource_actions() {
+                let action: &str = action;
+                let suffix: &str = suffix;
+                if !only.is_empty() && !only.iter().any(|s| s.as_str() == action) {
+                    continue;
+                }
+                if except.iter().any(|s| s.as_str() == action) {
+                    continue;
+                }
+                let path = format!("{resource_path}{suffix}");
+                let (full_path, mut params) = nest_py_path(&path, scope_prefix);
+                if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
+                    params.push("id".to_string());
+                }
+                let as_name = py_resource_as_name(
+                    action,
+                    &singular_low,
+                    name.as_str(),
+                    scope_prefix,
+                );
+                out.push(PyFlatRoute {
+                    path: full_path,
+                    as_name,
+                    path_params: params,
+                });
+            }
+            for child in nested {
+                collect_flat_py_routes(
+                    child,
+                    out,
+                    Some((&singular_low, name.as_str())),
+                );
+            }
+        }
+    }
+}
+
+fn nest_py_path(
+    path: &str,
+    scope_prefix: Option<(&str, &str)>,
+) -> (String, Vec<String>) {
+    match scope_prefix {
+        Some((parent, parent_plural)) => {
+            let full = format!("/{parent_plural}/:{parent}_id{path}");
+            let params = vec![format!("{parent}_id")];
+            (full, params)
+        }
+        None => (path.to_string(), vec![]),
+    }
+}
+
+fn extract_py_path_params(path: &str, params: &mut Vec<String>) {
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' {
+            let mut ident = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !ident.is_empty() && !params.iter().any(|p| p == &ident) {
+                params.push(ident);
+            }
+        }
+    }
+}
+
+fn py_resource_as_name(
+    action: &str,
+    singular_low: &str,
+    plural: &str,
+    scope_prefix: Option<(&str, &str)>,
+) -> String {
+    let parent_prefix = scope_prefix
+        .map(|(p, _)| format!("{p}_"))
+        .unwrap_or_default();
+    match action {
+        "index" => format!("{parent_prefix}{plural}"),
+        "create" => format!("{parent_prefix}{plural}"),
+        "new" => format!("new_{parent_prefix}{singular_low}"),
+        "show" => format!("{parent_prefix}{singular_low}"),
+        "edit" => format!("edit_{parent_prefix}{singular_low}"),
+        "update" => format!("{parent_prefix}{singular_low}"),
+        "destroy" => format!("{parent_prefix}{singular_low}"),
+        _ => format!("{parent_prefix}{singular_low}"),
+    }
+}
+
+// Views ----------------------------------------------------------------
+
+/// Emit `app/views.py` — one flat module with all view functions.
+/// Python's filenames can't contain dots-inside-stems cleanly
+/// (`articles.index.py` works but `articles/index.html.py`
+/// doesn't), so every view fn collapses into a single module. The
+/// controllers import as `from app import views` and call
+/// `views.render_articles_index(records)` etc.
+fn emit_py_views(app: &App) -> Vec<EmittedFile> {
+    if app.views.is_empty() && app.controllers.is_empty() {
+        return Vec::new();
+    }
+    let known_models: Vec<Symbol> =
+        app.models.iter().map(|m| m.name.0.clone()).collect();
+    let attrs_by_class: std::collections::BTreeMap<String, Vec<String>> = app
+        .models
+        .iter()
+        .map(|m| {
+            (
+                m.name.0.as_str().to_string(),
+                m.attributes
+                    .fields
+                    .keys()
+                    .map(|k| k.as_str().to_string())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s, "from __future__ import annotations").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "from typing import Any").unwrap();
+    writeln!(s, "from app import view_helpers as Helpers").unwrap();
+    writeln!(s, "from app.route_helpers import *  # noqa: F401, F403").unwrap();
+    if !known_models.is_empty() {
+        writeln!(s, "from app.models import *  # noqa: F401, F403").unwrap();
+    }
+    writeln!(s).unwrap();
+
+    let mut emitted_names: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+
+    for v in &app.views {
+        let fn_name = py_view_function_name(v.name.as_str());
+        if !emitted_names.insert(fn_name.clone()) {
+            continue;
+        }
+        emit_view_file_pass2_py(&mut s, v, &known_models, &attrs_by_class);
+        writeln!(s).unwrap();
+    }
+
+    // Stub missing standard CRUD views so controllers can always
+    // import. Same posture as TS's _stubs.ts.
+    for model in &app.models {
+        if model.attributes.fields.is_empty() {
+            continue;
+        }
+        let class = model.name.0.as_str();
+        let plural = crate::naming::pluralize_snake(class);
+        for (_, suffix) in [
+            ("Index", "index"),
+            ("Show", "show"),
+            ("New", "new"),
+            ("Edit", "edit"),
+        ] {
+            let view_name = format!("{plural}/{suffix}");
+            let fn_name = py_view_function_name(&view_name);
+            if emitted_names.insert(fn_name.clone()) {
+                writeln!(s, "def {fn_name}(_record: Any) -> str:").unwrap();
+                writeln!(s, "    return \"\"").unwrap();
+                writeln!(s).unwrap();
+            }
+        }
+    }
+
+    vec![EmittedFile {
+        path: PathBuf::from("app/views.py"),
+        content: s,
+    }]
+}
+
+/// `articles/index` → `render_articles_index`. Slash → underscore;
+/// partial-prefix underscores get stripped (`_article` → `article`).
+fn py_view_function_name(name: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for seg in name.split('/') {
+        let trimmed = seg.strip_prefix('_').unwrap_or(seg);
+        parts.push(trimmed.to_string());
+    }
+    format!("render_{}", parts.join("_"))
+}
+
+fn emit_view_file_pass2_py(
+    out: &mut String,
+    view: &crate::dialect::View,
+    known_models: &[Symbol],
+    attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    // Python doesn't rewrite ivars → locals in the AST; instead,
+    // `emit_py_view_expr_raw` / `emit_py_view_stmt_pass2` treat
+    // `Ivar { name }` the same as `Var { name }`. The arg name
+    // from `py_view_signature` matches the ivar name in ERB bodies
+    // (e.g. signature `articles: list[Article]` with ivar `@articles`).
+    let fn_name = py_view_function_name(view.name.as_str());
+
+    let (sig, arg_name, arg_model) =
+        py_view_signature(view.name.as_str(), known_models);
+    let attrs = arg_model
+        .as_ref()
+        .and_then(|c| attrs_by_class.get(c).cloned())
+        .unwrap_or_default();
+
+    writeln!(out, "def {fn_name}({sig}) -> str:").unwrap();
+    writeln!(out, "    _buf = \"\"").unwrap();
+
+    let mut locals: Vec<String> = vec!["_buf".to_string(), arg_name.clone()];
+    let ivar_names = py_collect_ivar_names(&view.body);
+    for n in &ivar_names {
+        if !locals.iter().any(|x| x == n) {
+            locals.push(n.clone());
+        }
+    }
+    let resource_dir = view
+        .name
+        .as_str()
+        .rsplit_once('/')
+        .map(|(d, _): (&str, &str)| d.to_string())
+        .unwrap_or_default();
+    let ctx = PyViewCtx {
+        locals,
+        arg_name: arg_name.clone(),
+        arg_attrs: attrs,
+        resource_dir,
+    };
+
+    let body_lines = emit_py_view_body(&view.body, &ctx);
+    for line in body_lines {
+        writeln!(out, "    {line}").unwrap();
+    }
+    writeln!(out, "    return _buf").unwrap();
+}
+
+struct PyViewCtx {
+    locals: Vec<String>,
+    arg_name: String,
+    arg_attrs: Vec<String>,
+    resource_dir: String,
+}
+
+impl PyViewCtx {
+    fn is_local(&self, n: &str) -> bool {
+        self.locals.iter().any(|x| x == n)
+    }
+    fn arg_has_attr(&self, name: &str, attr: &str) -> bool {
+        name == self.arg_name && self.arg_attrs.iter().any(|a| a == attr)
+    }
+}
+
+fn py_view_signature(
+    view_name: &str,
+    known_models: &[Symbol],
+) -> (String, String, Option<String>) {
+    let (dir, base) = view_name.rsplit_once('/').unwrap_or(("", view_name));
+    let is_partial = base.starts_with('_');
+    let stem = base.trim_start_matches('_');
+    let model_class = crate::naming::singularize_camelize(dir);
+    let model_exists = known_models.iter().any(|m| m.as_str() == model_class);
+    let singular = crate::naming::singularize(dir);
+
+    if is_partial {
+        let arg_name = if model_exists { singular.clone() } else { stem.to_string() };
+        if model_exists {
+            return (format!("{arg_name}: {model_class}"), arg_name, Some(model_class));
+        }
+        return (format!("{arg_name}: Any"), arg_name, None);
+    }
+    match stem {
+        "index" => {
+            let arg_name = dir.to_string();
+            if model_exists {
+                return (
+                    format!("{arg_name}: list[{model_class}]"),
+                    arg_name,
+                    Some(model_class),
+                );
+            }
+            return (format!("{arg_name}: list[Any]"), arg_name, None);
+        }
+        _ => {
+            let arg_name = singular.clone();
+            if model_exists {
+                return (format!("{arg_name}: {model_class}"), arg_name, Some(model_class));
+            }
+            return (format!("{arg_name}: Any"), arg_name, None);
+        }
+    }
+}
+
+fn emit_py_view_body(body: &Expr, ctx: &PyViewCtx) -> Vec<String> {
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let mut out = Vec::new();
+    for stmt in &stmts {
+        out.extend(emit_py_view_stmt_pass2(stmt, ctx));
+    }
+    if out.is_empty() {
+        out.push("pass".to_string());
+    }
+    out
+}
+
+fn emit_py_view_stmt_pass2(stmt: &Expr, ctx: &PyViewCtx) -> Vec<String> {
+    match &*stmt.node {
+        // Prologue `_buf = ""` — already written by `emit_view_file_pass2_py`.
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if name.as_str() == "_buf" =>
+        {
+            if let ExprNode::Lit { value: Literal::Str { value: s } } = &*value.node {
+                if s.is_empty() {
+                    return Vec::new();
+                }
+            }
+            // `_buf = _buf + X` — the working shape.
+            if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*value.node {
+                if method.as_str() == "+" && args.len() == 1 {
+                    if let ExprNode::Var { name: rn, .. } = &*recv.node {
+                        if rn.as_str() == "_buf" {
+                            let chunk = emit_py_view_append_pass2(&args[0], ctx);
+                            return chunk
+                                .lines()
+                                .map(|l| l.to_string())
+                                .collect();
+                        }
+                    }
+                }
+            }
+            vec!["pass  # TODO ERB: _buf shape".to_string()]
+        }
+        // Epilogue: bare `_buf` — dropped; we emit `return _buf` at the end.
+        ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
+        // Ivar read at statement level (rare) — drop; the view walker
+        // only cares about `_buf` assigns.
+        ExprNode::Ivar { .. } => Vec::new(),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_py = if is_py_simple_expr(cond, ctx) {
+                emit_py_view_expr_raw(cond, ctx)
+            } else {
+                "False".to_string()
+            };
+            let mut out = vec![format!("if {cond_py}:")];
+            let then_lines = emit_py_view_body(then_branch, ctx);
+            for line in then_lines {
+                out.push(format!("    {line}"));
+            }
+            let has_else = !matches!(
+                &*else_branch.node,
+                ExprNode::Lit { value: Literal::Nil }
+            );
+            if has_else {
+                out.push("else:".to_string());
+                for line in emit_py_view_body(else_branch, ctx) {
+                    out.push(format!("    {line}"));
+                }
+            }
+            out
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. }
+            if method.as_str() == "each" && args.is_empty() =>
+        {
+            if !is_py_simple_expr(recv, ctx) {
+                return vec!["pass  # TODO ERB: each over complex coll".to_string()];
+            }
+            let ExprNode::Lambda { params, body, .. } = &*block.node else {
+                return vec!["pass  # unexpected each block".to_string()];
+            };
+            let coll_s = emit_py_view_expr_raw(recv, ctx);
+            let var = params
+                .first()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| "item".into());
+            let inner_ctx = PyViewCtx {
+                locals: {
+                    let mut l = ctx.locals.clone();
+                    if !l.iter().any(|x| x == &var) {
+                        l.push(var.clone());
+                    }
+                    l
+                },
+                arg_name: ctx.arg_name.clone(),
+                arg_attrs: ctx.arg_attrs.clone(),
+                resource_dir: ctx.resource_dir.clone(),
+            };
+            let mut out = vec![format!("for {var} in {coll_s}:")];
+            let inner_lines = emit_py_view_body(body, &inner_ctx);
+            for line in inner_lines {
+                out.push(format!("    {line}"));
+            }
+            out
+        }
+        _ => vec!["pass  # TODO ERB: unknown stmt".to_string()],
+    }
+}
+
+fn emit_py_view_append_pass2(arg: &Expr, ctx: &PyViewCtx) -> String {
+    // Text chunk.
+    if let ExprNode::Lit { value: Literal::Str { value: s } } = &*arg.node {
+        return format!("_buf += {}", py_string_literal(s));
+    }
+    let inner = unwrap_to_s_py(arg);
+
+    // `render @coll` or `render "partial", locals` — expand.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "render" {
+            if args.len() == 1 {
+                return emit_py_render_call(&args[0], ctx);
+            }
+            if args.len() == 2 {
+                if let (
+                    ExprNode::Lit { value: Literal::Str { value: partial } },
+                    ExprNode::Hash { entries, .. },
+                ) = (&*args[0].node, &*args[1].node)
+                {
+                    let partial_fn = format!(
+                        "render_{}_{}",
+                        ctx.resource_dir,
+                        partial.trim_start_matches('_'),
+                    );
+                    if let Some((_, v)) = entries.first() {
+                        if is_py_simple_expr(v, ctx) {
+                            let arg_expr = emit_py_view_expr_raw(v, ctx);
+                            return format!("_buf += {partial_fn}({arg_expr})");
+                        }
+                    }
+                    return format!("_buf += {partial_fn}(None)");
+                }
+            }
+        }
+    }
+
+    // form_with / content_for — capturing helpers.
+    if let ExprNode::Send {
+        recv: None,
+        method,
+        args,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if is_py_capturing_helper(method.as_str()) {
+            return emit_py_captured_helper(method.as_str(), args, block, ctx);
+        }
+    }
+
+    // Simple interpolation.
+    if is_py_simple_expr(inner, ctx) {
+        return format!(
+            "_buf += str({})",
+            emit_py_view_expr_raw(inner, ctx),
+        );
+    }
+
+    "_buf += \"\"  # TODO ERB: complex interpolation".to_string()
+}
+
+fn is_py_capturing_helper(method: &str) -> bool {
+    matches!(method, "form_with" | "content_for")
+}
+
+fn emit_py_captured_helper(
+    method: &str,
+    args: &[Expr],
+    block: &Expr,
+    ctx: &PyViewCtx,
+) -> String {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return format!("_buf += \"\"  # TODO ERB: {method}");
+    };
+    let cls_expr = args
+        .iter()
+        .find_map(|a| py_extract_kwarg(a, "class"))
+        .filter(|e| is_py_simple_expr(e, ctx))
+        .map(|e| emit_py_view_expr_raw(e, ctx))
+        .unwrap_or_else(|| "\"\"".to_string());
+    match method {
+        "form_with" => {
+            // Snapshot-and-slice capture: track where the form
+            // block starts in `_buf`, append to `_buf` inline
+            // (block body emits `_buf += ...` statements at the
+            // same indent level), then wrap the appended span via
+            // `form_wrap`. Avoids nested `def` which can't share
+            // indent with the outer statement stream.
+            let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
+            let inner_ctx = PyViewCtx {
+                locals: {
+                    let mut l = ctx.locals.clone();
+                    l.push(pname.to_string());
+                    l
+                },
+                arg_name: ctx.arg_name.clone(),
+                arg_attrs: ctx.arg_attrs.clone(),
+                resource_dir: ctx.resource_dir.clone(),
+            };
+            let mut lines = vec![
+                "_form_begin = len(_buf)".to_string(),
+                format!("{pname} = Helpers.FormBuilder(None)"),
+            ];
+            for line in emit_py_view_body(body, &inner_ctx) {
+                lines.push(line);
+            }
+            lines.push(format!(
+                "_buf = _buf[:_form_begin] + Helpers.form_wrap(None, {cls_expr}, _buf[_form_begin:])"
+            ));
+            lines.join("\n")
+        }
+        _ => {
+            let _ = cls_expr;
+            "_buf += \"\"".to_string()
+        }
+    }
+}
+
+fn emit_py_render_call(arg: &Expr, ctx: &PyViewCtx) -> String {
+    match &*arg.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+            if ctx.is_local(name.as_str()) =>
+        {
+            let singular = crate::naming::singularize(name.as_str());
+            let partial_fn = format!("render_{}_{singular}", name.as_str());
+            let coll = name.to_string();
+            format!("_buf += \"\".join({partial_fn}(_r) for _r in {coll})")
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if args.is_empty()
+                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
+        {
+            let assoc_plural = method.as_str();
+            let singular = crate::naming::singularize(assoc_plural);
+            let partial_fn = format!("render_{assoc_plural}_{singular}");
+            let parent_name = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
+                _ => unreachable!(),
+            };
+            format!(
+                "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{assoc_plural})"
+            )
+        }
+        _ => "_buf += \"\"  # TODO ERB: render".to_string(),
+    }
+}
+
+fn py_extract_kwarg<'a>(arg: &'a Expr, key: &str) -> Option<&'a Expr> {
+    if let ExprNode::Hash { entries, .. } = &*arg.node {
+        for (k, v) in entries {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                if value.as_str() == key {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn unwrap_to_s_py(expr: &Expr) -> &Expr {
+    if let ExprNode::Send { recv: Some(inner), method, args, .. } = &*expr.node {
+        if method.as_str() == "to_s" && args.is_empty() {
+            return inner;
+        }
+    }
+    expr
+}
+
+fn py_string_literal(s: &str) -> String {
+    // Python's repr() gives a safely-escaped string literal.
+    // Prefer double-quoted form when the string has no embedded
+    // double-quote.
+    if !s.contains('"') && !s.contains('\\') && !s.contains('\n') {
+        return format!("\"{}\"", s);
+    }
+    format!("{:?}", s)
+}
+
+fn is_py_simple_expr(expr: &Expr, ctx: &PyViewCtx) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            ctx.is_local(name.as_str())
+        }
+        ExprNode::Send { recv: Some(r), method, args, block, .. } => {
+            if !args.is_empty() || block.is_some() {
+                return false;
+            }
+            let clean = method.as_str().trim_end_matches('?').trim_end_matches('!');
+            if clean.is_empty() {
+                return false;
+            }
+            if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
+                if ctx.arg_has_attr(name.as_str(), clean) {
+                    return true;
+                }
+                if ctx.is_local(name.as_str())
+                    && matches!(
+                        method.as_str(),
+                        "any?" | "none?" | "present?" | "empty?"
+                    )
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        ExprNode::StringInterp { parts } => parts.iter().all(|p| match p {
+            crate::expr::InterpPart::Text { .. } => true,
+            crate::expr::InterpPart::Expr { expr } => is_py_simple_expr(expr, ctx),
+        }),
+        _ => false,
+    }
+}
+
+fn emit_py_view_expr_raw(expr: &Expr, ctx: &PyViewCtx) -> String {
+    match &*expr.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            let method_s = method.as_str();
+            if args.is_empty() {
+                if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
+                    if ctx.is_local(name.as_str()) {
+                        match method_s {
+                            "any?" | "present?" => return format!("(len({name}) > 0)"),
+                            "none?" | "empty?" => return format!("(len({name}) == 0)"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let recv_s = emit_py_view_expr_raw(r, ctx);
+            let clean = method_s.trim_end_matches('?').trim_end_matches('!');
+            if args.is_empty() {
+                format!("{recv_s}.{clean}")
+            } else {
+                let args_s: Vec<String> = args
+                    .iter()
+                    .map(|a| emit_py_view_expr_raw(a, ctx))
+                    .collect();
+                format!("{recv_s}.{clean}({})", args_s.join(", "))
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut out = String::from("f\"");
+            for p in parts {
+                match p {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            if c == '"' || c == '\\' {
+                                out.push('\\');
+                            }
+                            out.push(c);
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        out.push('{');
+                        out.push_str(&emit_py_view_expr_raw(expr, ctx));
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
+            out
+        }
+        _ => "\"\"".to_string(),
+    }
+}
+
+fn py_collect_ivar_names(expr: &Expr) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    py_collect_ivars_into(expr, &mut out);
+    out
+}
+
+fn py_collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
+    match &*expr.node {
+        ExprNode::Ivar { name } => {
+            let n = name.to_string();
+            if !out.iter().any(|existing| existing == &n) {
+                out.push(n);
+            }
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Ivar { name } = target {
+                let n = name.to_string();
+                if !out.iter().any(|existing| existing == &n) {
+                    out.push(n);
+                }
+            }
+            py_collect_ivars_into(value, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                py_collect_ivars_into(r, out);
+            }
+            for a in args {
+                py_collect_ivars_into(a, out);
+            }
+            if let Some(b) = block {
+                py_collect_ivars_into(b, out);
+            }
+        }
+        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+            for e in exprs {
+                py_collect_ivars_into(e, out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                py_collect_ivars_into(k, out);
+                py_collect_ivars_into(v, out);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            py_collect_ivars_into(cond, out);
+            py_collect_ivars_into(then_branch, out);
+            py_collect_ivars_into(else_branch, out);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            py_collect_ivars_into(left, out);
+            py_collect_ivars_into(right, out);
+        }
+        ExprNode::Lambda { body, .. } => py_collect_ivars_into(body, out),
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    py_collect_ivars_into(expr, out);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_flat_routes(
@@ -1333,24 +2781,35 @@ fn emit_py_test(tm: &TestModule, app: &App) -> EmittedFile {
         model_attrs: &model_attrs,
     };
 
+    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
+
     let mut s = String::new();
     writeln!(s, "# Generated by Roundhouse.").unwrap();
     writeln!(s, "from __future__ import annotations").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "import unittest").unwrap();
     writeln!(s).unwrap();
+    if is_controller_test {
+        // Side-effect import: app.routes registers handlers on the
+        // Router at module load. Needed before any dispatch.
+        writeln!(s, "import app.routes  # noqa: F401").unwrap();
+        writeln!(s, "from app.test_support import TestClient").unwrap();
+        writeln!(s, "from app.route_helpers import *  # noqa: F401, F403").unwrap();
+    }
     // Import every model so Class.new struct-literals resolve, plus all
     // fixture accessors.
-    writeln!(
-        s,
-        "from app.models import {}",
-        known_models
-            .iter()
-            .map(|m| m.as_str().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-    .unwrap();
+    if !known_models.is_empty() {
+        writeln!(
+            s,
+            "from app.models import {}",
+            known_models
+                .iter()
+                .map(|m| m.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .unwrap();
+    }
     if !app.fixtures.is_empty() {
         writeln!(s, "from tests import fixtures").unwrap();
     }
@@ -1367,16 +2826,19 @@ fn emit_py_test(tm: &TestModule, app: &App) -> EmittedFile {
         writeln!(s, "        fixtures.setup()").unwrap();
     }
 
-    // Controller tests @unittest.skip wholesale — Phase 4 HTTP
-    // runtime isn't wired.
-    let is_controller_test = tm.name.0.as_str().ends_with("ControllerTest");
     for test in &tm.tests {
         let fn_name = format!("test_{}", test_name_snake_py(&test.name));
         writeln!(s).unwrap();
         if is_controller_test {
-            writeln!(s, "    @unittest.skip(\"Phase 4: needs HTTP runtime\")").unwrap();
             writeln!(s, "    def {fn_name}(self):").unwrap();
-            writeln!(s, "        pass").unwrap();
+            let body = emit_py_controller_test_body(test, app, &ctx);
+            if body.is_empty() {
+                writeln!(s, "        pass").unwrap();
+            } else {
+                for line in body.lines() {
+                    writeln!(s, "        {line}").unwrap();
+                }
+            }
         } else if test_needs_runtime_unsupported_py(test) {
             writeln!(
                 s,
@@ -1405,6 +2867,290 @@ fn emit_py_test(tm: &TestModule, app: &App) -> EmittedFile {
         path: PathBuf::from(format!("tests/test_{stem}.py")),
         content: s,
     }
+}
+
+/// Emit a single controller test body. Walks the test AST via the
+/// shared `test_body_stmts` helper and dispatches each statement
+/// through the shared `classify_controller_test_send` classifier
+/// plus a Python render table.
+fn emit_py_controller_test_body(test: &Test, app: &App, ctx: &PyTestCtx) -> String {
+    let mut out = String::new();
+    out.push_str("client = TestClient()\n");
+    // Prime ivars read without assignment: `@article` → `article = fixtures.articles_one()`.
+    let walked = crate::lower::walk_controller_ivars(&test.body);
+    for ivar in walked.ivars_read_without_assign() {
+        // Match convention: `@article` with fixture prefix `articles`
+        // binds to `fixtures.articles_one()`. The fixture_names in ctx
+        // are plural fixture names.
+        let plural = crate::naming::pluralize_snake(ivar.as_str());
+        if ctx.fixture_names.iter().any(|s| s.as_str() == plural) {
+            out.push_str(&format!(
+                "{} = fixtures.{}_one()\n",
+                ivar.as_str(),
+                plural,
+            ));
+        }
+    }
+
+    for stmt in crate::lower::test_body_stmts(&test.body) {
+        let rendered = emit_py_ctrl_test_stmt(stmt, app, ctx);
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    out
+}
+
+fn emit_py_ctrl_test_stmt(stmt: &Expr, app: &App, ctx: &PyTestCtx) -> String {
+    match &*stmt.node {
+        ExprNode::Send { recv: None, method, args, block, .. } => {
+            emit_py_ctrl_test_send(method.as_str(), args, block.as_ref(), app, ctx)
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            if method.as_str() == "reload" {
+                let recv_s = match &*r.node {
+                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
+                    _ => emit_py_ctrl_test_expr(r, app, ctx),
+                };
+                return format!("{recv_s}.reload()");
+            }
+            let recv_s = emit_py_ctrl_test_expr(r, app, ctx);
+            let args_s: Vec<String> =
+                args.iter().map(|a| emit_py_ctrl_test_expr(a, app, ctx)).collect();
+            if args_s.is_empty() {
+                // Attribute read vs method call — for controller
+                // tests we always parens (simpler than tracking).
+                format!("{recv_s}.{method}()")
+            } else {
+                format!("{recv_s}.{method}({})", args_s.join(", "))
+            }
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            format!("{name} = {}", emit_py_ctrl_test_expr(value, app, ctx))
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            format!("{name} = {}", emit_py_ctrl_test_expr(value, app, ctx))
+        }
+        _ => emit_py_ctrl_test_expr(stmt, app, ctx),
+    }
+}
+
+fn emit_py_ctrl_test_send(
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    app: &App,
+    ctx: &PyTestCtx,
+) -> String {
+    use crate::lower::{AssertSelectKind, ControllerTestSend};
+    match crate::lower::classify_controller_test_send(method, args, block) {
+        Some(ControllerTestSend::HttpGet { url }) => {
+            let u = emit_py_url_expr(url, app, ctx);
+            format!("resp = client.get({u})")
+        }
+        Some(ControllerTestSend::HttpWrite { method, url, params }) => {
+            let u = emit_py_url_expr(url, app, ctx);
+            let body = params
+                .map(|h| flatten_py_params_to_form(h, None, app, ctx))
+                .unwrap_or_else(|| "{}".to_string());
+            format!("resp = client.{method}({u}, {body})")
+        }
+        Some(ControllerTestSend::HttpDelete { url }) => {
+            let u = emit_py_url_expr(url, app, ctx);
+            format!("resp = client.delete({u})")
+        }
+        Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
+            "success" => "resp.assert_ok()".to_string(),
+            "unprocessable_entity" => "resp.assert_unprocessable()".to_string(),
+            other => format!("resp.assert_status(200)  # TODO: {other:?}"),
+        },
+        Some(ControllerTestSend::AssertRedirectedTo { url }) => {
+            let u = emit_py_url_expr(url, app, ctx);
+            format!("resp.assert_redirected_to({u})")
+        }
+        Some(ControllerTestSend::AssertSelect { selector, kind }) => {
+            emit_py_assert_select_classified(selector, kind, app, ctx)
+        }
+        Some(ControllerTestSend::AssertDifference { method: _, count_expr, delta, block }) => {
+            emit_py_assert_difference_classified(count_expr, delta, block, app, ctx)
+        }
+        Some(ControllerTestSend::AssertEqual { expected, actual }) => {
+            let e = emit_py_ctrl_test_expr(expected, app, ctx);
+            let a = emit_py_ctrl_test_expr(actual, app, ctx);
+            format!("self.assertEqual({a}, {e})")
+        }
+        None => {
+            let args_s: Vec<String> =
+                args.iter().map(|a| emit_py_ctrl_test_expr(a, app, ctx)).collect();
+            if args_s.is_empty() {
+                format!("{method}()")
+            } else {
+                format!("{method}({})", args_s.join(", "))
+            }
+        }
+    }
+}
+
+fn emit_py_url_expr(expr: &Expr, app: &App, ctx: &PyTestCtx) -> String {
+    use crate::lower::UrlArg;
+    let Some(helper) = crate::lower::classify_url_expr(expr) else {
+        return emit_py_ctrl_test_expr(expr, app, ctx);
+    };
+    let helper_name = format!("{}_path", helper.helper_base);
+    let args_s: Vec<String> = helper
+        .args
+        .iter()
+        .map(|a| match a {
+            UrlArg::IvarOrVarId(name) => format!("{name}.id"),
+            UrlArg::ModelLast(class) => format!("{}.last().id", class.as_str()),
+            UrlArg::Raw(e) => emit_py_ctrl_test_expr(e, app, ctx),
+        })
+        .collect();
+    format!("{helper_name}({})", args_s.join(", "))
+}
+
+fn emit_py_assert_select_classified(
+    selector_expr: &Expr,
+    kind: crate::lower::AssertSelectKind<'_>,
+    app: &App,
+    ctx: &PyTestCtx,
+) -> String {
+    use crate::lower::AssertSelectKind;
+    let ExprNode::Lit { value: Literal::Str { value: selector } } =
+        &*selector_expr.node
+    else {
+        return format!(
+            "resp.assert_select({})  # TODO: dynamic selector",
+            emit_py_ctrl_test_expr(selector_expr, app, ctx),
+        );
+    };
+    match kind {
+        AssertSelectKind::Text(expr) => {
+            let text = emit_py_ctrl_test_expr(expr, app, ctx);
+            format!("resp.assert_select_text({selector:?}, {text})")
+        }
+        AssertSelectKind::Minimum(expr) => {
+            let n = emit_py_ctrl_test_expr(expr, app, ctx);
+            format!("resp.assert_select_min({selector:?}, {n})")
+        }
+        AssertSelectKind::SelectorBlock(b) => {
+            let mut out = String::new();
+            out.push_str(&format!("resp.assert_select({selector:?})\n"));
+            let inner_body = match &*b.node {
+                ExprNode::Lambda { body, .. } => body,
+                _ => b,
+            };
+            for stmt in crate::lower::test_body_stmts(inner_body) {
+                out.push_str(&emit_py_ctrl_test_stmt(stmt, app, ctx));
+                out.push('\n');
+            }
+            out.trim_end().to_string()
+        }
+        AssertSelectKind::SelectorOnly => {
+            format!("resp.assert_select({selector:?})")
+        }
+    }
+}
+
+fn emit_py_assert_difference_classified(
+    count_expr_str: String,
+    expected_delta: i64,
+    block: Option<&Expr>,
+    app: &App,
+    ctx: &PyTestCtx,
+) -> String {
+    // `Article.count` → `Article.count()` in Python.
+    let count_expr = count_expr_str
+        .split_once('.')
+        .map(|(cls, m)| format!("{cls}.{m}()"))
+        .unwrap_or_else(|| count_expr_str.clone());
+
+    let mut out = String::new();
+    out.push_str(&format!("_before = {count_expr}\n"));
+    if let Some(b) = block {
+        let inner_body = match &*b.node {
+            ExprNode::Lambda { body, .. } => body,
+            _ => b,
+        };
+        for stmt in crate::lower::test_body_stmts(inner_body) {
+            out.push_str(&emit_py_ctrl_test_stmt(stmt, app, ctx));
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!("_after = {count_expr}\n"));
+    out.push_str(&format!("self.assertEqual(_after - _before, {expected_delta})"));
+    out
+}
+
+fn emit_py_ctrl_test_expr(expr: &Expr, app: &App, ctx: &PyTestCtx) -> String {
+    match &*expr.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Const { path } => {
+            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            let m = method.as_str();
+            if m == "last" && args.is_empty() {
+                if let ExprNode::Const { path } = &*r.node {
+                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    return format!("{class}.last()");
+                }
+            }
+            if m == "count" && args.is_empty() {
+                if let ExprNode::Const { path } = &*r.node {
+                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    return format!("{class}.count()");
+                }
+            }
+            if args.is_empty() {
+                // Attribute access for ivar.attr / var.attr shapes;
+                // method call otherwise. Python has no null-coalescing
+                // the way TS does, so use attribute by default.
+                let recv_s = match &*r.node {
+                    ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
+                    _ => emit_py_ctrl_test_expr(r, app, ctx),
+                };
+                return format!("{recv_s}.{m}");
+            }
+            let recv_s = emit_py_ctrl_test_expr(r, app, ctx);
+            let args_s: Vec<String> =
+                args.iter().map(|a| emit_py_ctrl_test_expr(a, app, ctx)).collect();
+            format!("{recv_s}.{m}({})", args_s.join(", "))
+        }
+        ExprNode::Send { recv: None, method, args, .. } => {
+            if method.as_str().ends_with("_url") || method.as_str().ends_with("_path") {
+                return emit_py_url_expr(expr, app, ctx);
+            }
+            let args_s: Vec<String> =
+                args.iter().map(|a| emit_py_ctrl_test_expr(a, app, ctx)).collect();
+            if args_s.is_empty() {
+                method.to_string()
+            } else {
+                format!("{method}({})", args_s.join(", "))
+            }
+        }
+        _ => format!("None  # TODO expr"),
+    }
+}
+
+/// Flatten `{ article: { title: "X", body: "Y" } }` into a Python
+/// dict literal `{ "article[title]": "X", "article[body]": "Y" }`
+/// — matching the TestClient's form-body shape.
+fn flatten_py_params_to_form(
+    expr: &Expr,
+    scope: Option<&str>,
+    app: &App,
+    ctx: &PyTestCtx,
+) -> String {
+    let pairs: Vec<String> = crate::lower::flatten_params_pairs(expr, scope)
+        .into_iter()
+        .map(|(key, value)| {
+            let val = emit_py_ctrl_test_expr(value, app, ctx);
+            format!("{key:?}: str({val})")
+        })
+        .collect();
+    format!("{{{}}}", pairs.join(", "))
 }
 
 fn test_name_snake_py(desc: &str) -> String {

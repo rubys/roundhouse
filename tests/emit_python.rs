@@ -30,8 +30,16 @@ fn emits_expected_files() {
     let files = python::emit(&app);
     let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
     assert!(paths.contains(&"app/models.py".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"app/controllers.py".to_string()), "got {paths:?}");
+    // Pass-2 emits one controller module per resource under
+    // `app/controllers/`, not a single `controllers.py` file.
+    assert!(
+        paths.contains(&"app/controllers/posts_controller.py".to_string()),
+        "got {paths:?}",
+    );
     assert!(paths.contains(&"app/routes.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/route_helpers.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/test_support.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/views.py".to_string()), "got {paths:?}");
 }
 
 #[test]
@@ -59,23 +67,51 @@ fn model_methods_annotate_return_type() {
 }
 
 #[test]
-fn controller_actions_are_async_methods() {
+fn controller_actions_are_module_functions() {
+    // Pass-2 shape: one module per controller under
+    // `app/controllers/`, with module-level `def <action>(context)`
+    // functions returning `http.ActionResponse`. The Router resolves
+    // actions via `getattr(module, action_name)`.
     let app = analyzed_app();
     let files = python::emit(&app);
-    let content = find(&files, "app/controllers.py");
-    assert!(content.contains("class PostsController:"), "got:\n{content}");
-    for action in &["async def index(self)", "async def show(self)", "async def create(self)", "async def destroy(self)"] {
+    let content = find(&files, "app/controllers/posts_controller.py");
+    for action in &[
+        "def index(",
+        "def show(",
+        "def create(",
+        "def destroy(",
+    ] {
         assert!(content.contains(action), "missing {action} in:\n{content}");
     }
+    assert!(content.contains("http.ActionResponse"), "got:\n{content}");
 }
 
 #[test]
-fn routes_file_is_a_list_of_dicts() {
+fn routes_register_on_router() {
+    // Pass-2 shape: routes.py side-effect-imports controller
+    // modules and calls `Router.resources(...)` / `Router.root(...)`
+    // at module load, wiring the runtime match table.
     let app = analyzed_app();
     let files = python::emit(&app);
     let content = find(&files, "app/routes.py");
-    assert!(content.contains("routes: list[dict] = ["), "got:\n{content}");
-    assert!(content.contains("\"method\": \"GET\""), "got:\n{content}");
-    assert!(content.contains("\"path\": \"/posts\""), "got:\n{content}");
-    assert!(content.contains("\"controller\": \"PostsController\""), "got:\n{content}");
+    assert!(content.contains("from app.http import Router"), "got:\n{content}");
+    assert!(content.contains("Router.reset()"), "got:\n{content}");
+    assert!(
+        content.contains("from app.controllers import posts_controller as PostsController"),
+        "got:\n{content}",
+    );
+    // tiny-blog uses explicit get/post routes, not `resources`.
+    assert!(
+        content.contains("Router.get(\"/posts\", PostsController, \"index\")"),
+        "got:\n{content}",
+    );
+}
+
+#[test]
+fn route_helpers_emit_path_functions() {
+    let app = analyzed_app();
+    let files = python::emit(&app);
+    let content = find(&files, "app/route_helpers.py");
+    assert!(content.contains("def posts_path() -> str"), "got:\n{content}");
+    assert!(content.contains("def post_path(id: int"), "got:\n{content}");
 }
