@@ -613,7 +613,7 @@ fn emit_controller(controller: &Controller, known_models: &[Symbol]) -> EmittedF
     // actions after are private helpers (`set_article`, `*_params`).
     // `controller.body` preserves source order, so a single pass is
     // enough.
-    let (public_actions, private_actions) = split_public_private(controller);
+    let (public_actions, private_actions) = crate::lower::split_public_private(controller);
 
     // Self-methods: the names of every action, public or private.
     // Bare-name Sends matching one emit as `Self::name(...)`.
@@ -696,103 +696,26 @@ fn emit_action(out: &mut String, action: &Action, ctx: EmitCtx) {
 /// stub `let mut` at the top of the function. Second tuple element is
 /// the resolved model class name (`"Article"` for `@article`) or
 /// `None` when the ivar name doesn't singularize to a known model.
+///
+/// The IR walk itself lives in `lower::controller::walk_controller_ivars`
+/// — shared with the Crystal + Go emitters. This function just picks
+/// the "referenced but unassigned" slice and maps each name through
+/// singularization against `known_models`.
 fn referenced_but_unassigned_ivars(
     body: &Expr,
     known_models: &[Symbol],
 ) -> Vec<(String, Option<String>)> {
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut assigned: BTreeSet<String> = BTreeSet::new();
-    // Preserve first-seen order so output is deterministic.
-    let mut referenced: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    walk_ivars(body, &mut assigned, &mut referenced, &mut seen);
-
-    // Cache model-name lookups so repeated references don't re-singularize.
-    let mut out: Vec<(String, Option<String>)> = Vec::new();
-    let mut resolved: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for name in referenced {
-        if assigned.contains(&name) {
-            continue;
-        }
-        let model = resolved
-            .entry(name.clone())
-            .or_insert_with(|| {
-                let class = crate::naming::singularize_camelize(&name);
-                known_models
-                    .iter()
-                    .find(|m| m.as_str() == class)
-                    .map(|_| class)
-            })
-            .clone();
-        out.push((name, model));
-    }
-    out
-}
-
-fn walk_ivars(
-    e: &Expr,
-    assigned: &mut std::collections::BTreeSet<String>,
-    referenced: &mut Vec<String>,
-    seen: &mut std::collections::BTreeSet<String>,
-) {
-    match &*e.node {
-        ExprNode::Ivar { name } => {
-            let n = name.to_string();
-            if seen.insert(n.clone()) {
-                referenced.push(n);
-            }
-        }
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            assigned.insert(name.to_string());
-            walk_ivars(value, assigned, referenced, seen);
-        }
-        ExprNode::Assign { value, .. } => walk_ivars(value, assigned, referenced, seen),
-        ExprNode::Seq { exprs } => {
-            for child in exprs {
-                walk_ivars(child, assigned, referenced, seen);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_ivars(cond, assigned, referenced, seen);
-            walk_ivars(then_branch, assigned, referenced, seen);
-            walk_ivars(else_branch, assigned, referenced, seen);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_ivars(left, assigned, referenced, seen);
-            walk_ivars(right, assigned, referenced, seen);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                walk_ivars(r, assigned, referenced, seen);
-            }
-            for a in args {
-                walk_ivars(a, assigned, referenced, seen);
-            }
-            if let Some(b) = block {
-                walk_ivars(b, assigned, referenced, seen);
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_ivars(k, assigned, referenced, seen);
-                walk_ivars(v, assigned, referenced, seen);
-            }
-        }
-        ExprNode::Array { elements, .. } => {
-            for el in elements {
-                walk_ivars(el, assigned, referenced, seen);
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_ivars(body, assigned, referenced, seen),
-        ExprNode::StringInterp { parts } => {
-            for part in parts {
-                if let crate::expr::InterpPart::Expr { expr } = part {
-                    walk_ivars(expr, assigned, referenced, seen);
-                }
-            }
-        }
-        _ => {}
-    }
+    let walked = crate::lower::walk_controller_ivars(body);
+    walked
+        .ivars_read_without_assign()
+        .into_iter()
+        .map(|name| {
+            let class =
+                crate::lower::singularize_to_model(name.as_str(), known_models)
+                    .map(|s| s.as_str().to_string());
+            (name.as_str().to_string(), class)
+        })
+        .collect()
 }
 
 /// Emit a controller action body as a sequence of `;`-terminated
@@ -885,30 +808,6 @@ fn emit_private_helper(out: &mut String, action: &Action, ctx: EmitCtx) {
     .unwrap();
     writeln!(out, "        Default::default()").unwrap();
     writeln!(out, "    }}").unwrap();
-}
-
-/// Walk `controller.body` in source order; actions before the `private`
-/// marker go to the public bucket, actions after to the private one.
-/// Filters and Unknown items are informational-only for emit.
-fn split_public_private(controller: &Controller) -> (Vec<Action>, Vec<Action>) {
-    use crate::dialect::ControllerBodyItem;
-    let mut public_actions = Vec::new();
-    let mut private_actions = Vec::new();
-    let mut seen_private = false;
-    for item in &controller.body {
-        match item {
-            ControllerBodyItem::PrivateMarker { .. } => seen_private = true,
-            ControllerBodyItem::Action { action, .. } => {
-                if seen_private {
-                    private_actions.push(action.clone());
-                } else {
-                    public_actions.push(action.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    (public_actions, private_actions)
 }
 
 /// Context threaded through expression emission. Grows as emission
@@ -1400,9 +1299,11 @@ fn emit_controller_send(
     // outermost chain method is query-ish; lower chain methods hitch a
     // ride because we emit from the tail.
     if let Some(r) = recv {
-        if is_query_builder_method(method) {
-            if let Some(target_class) = chain_target_class(r, ctx) {
-                return Some(format!("Vec::<{target_class}>::new()"));
+        if crate::lower::is_query_builder_method(method) {
+            if let Some(target_class) =
+                crate::lower::chain_target_class(r, ctx.known_models)
+            {
+                return Some(format!("Vec::<{}>::new()", target_class.as_str()));
             }
             return Some("todo!(\"query chain\")".to_string());
         }
@@ -1425,7 +1326,7 @@ fn emit_controller_send(
     // `ParamValue` for a helper return, etc.) is satisfied.
     if method == "expect" {
         if let Some(r) = recv {
-            if is_params_expr(r) {
+            if crate::lower::is_params_expr(r) {
                 return Some("todo!(\"params.expect\")".to_string());
             }
         }
@@ -1476,7 +1377,7 @@ fn emit_controller_send(
     // receivers. For the simple lexical case (Var { name: "format" }
     // or Ivar), rewrite here.
     if let Some(r) = recv {
-        if matches!(method, "html" | "json") && is_format_binding(r) {
+        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
             match method {
                 "html" => {
                     let body_s = block
@@ -1553,7 +1454,7 @@ fn emit_controller_send(
     // awkward to give one a sane return type).
     if method == "[]" {
         if let Some(r) = recv {
-            if is_params_expr(r) {
+            if crate::lower::is_params_expr(r) {
                 let arg = args_s.first().cloned().unwrap_or_default();
                 return Some(format!("crate::http::params().expect({arg})"));
             }
@@ -1589,9 +1490,12 @@ fn emit_controller_send(
             } = &*r.node
             {
                 if inner_args.is_empty() {
-                    let target = singularize_to_model(assoc_method.as_str(), ctx.known_models);
+                    let target = crate::lower::singularize_to_model(
+                        assoc_method.as_str(),
+                        ctx.known_models,
+                    );
                     if let Some(target) = target {
-                        return Some(format!("{target}::default()"));
+                        return Some(format!("{}::default()", target.as_str()));
                     }
                     return Some("todo!(\"association build\")".to_string());
                 }
@@ -1632,84 +1536,6 @@ fn emit_respond_to_body(body: &Expr, ctx: EmitCtx) -> String {
             format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}};")
         }
         _ => format!("{};", emit_expr(body, ctx)),
-    }
-}
-
-/// True when an expression references the implicit `params` object —
-/// either a bare `Send { recv: None, method: "params" }` or an ivar
-/// named `params`. Used by `params.expect(...)` rewriting.
-fn is_params_expr(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Send { recv: None, method, args, .. }
-            if method.as_str() == "params" && args.is_empty()
-    )
-}
-
-/// True when an expression is the block parameter name bound by
-/// `respond_to do |format|` — today just the local `format` var.
-fn is_format_binding(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Var { name, .. } if name.as_str() == "format"
-    )
-}
-
-/// Query-builder method names that don't have a Phase 4c runtime —
-/// chains including these collapse to `Vec::<Target>::new()` at emit.
-/// `all` lives here too: the generated model has no `all` method yet,
-/// and controllers calling it would otherwise fail to compile.
-fn is_query_builder_method(method: &str) -> bool {
-    matches!(
-        method,
-        "all"
-            | "includes"
-            | "order"
-            | "where"
-            | "group"
-            | "limit"
-            | "offset"
-            | "joins"
-            | "distinct"
-            | "select"
-            | "pluck"
-            | "first"
-            | "last"
-    )
-}
-
-/// Walk a Send chain left until hitting a `Const { path }` — returns
-/// the final segment (presumed class name) when it's a known model.
-/// Used to pick the element type for `Vec::<T>::new()` chain punts.
-fn chain_target_class(e: &Expr, ctx: EmitCtx) -> Option<String> {
-    let mut cur = e;
-    loop {
-        match &*cur.node {
-            ExprNode::Const { path } => {
-                let class = path.last()?;
-                if ctx.known_models.iter().any(|m| m == class) {
-                    return Some(class.as_str().to_string());
-                }
-                return None;
-            }
-            ExprNode::Send { recv: Some(r), .. } => {
-                cur = r;
-            }
-            _ => return None,
-        }
-    }
-}
-
-/// Resolve a HasMany association name (`comments`) to its target
-/// model class (`Comment`) by singularizing and checking
-/// `ctx.known_models`. Returns `None` when the name doesn't resolve —
-/// callers fall back to `todo!()`.
-fn singularize_to_model(assoc: &str, known_models: &[Symbol]) -> Option<String> {
-    let class = crate::naming::singularize_camelize(assoc);
-    if known_models.iter().any(|m| m.as_str() == class) {
-        Some(class)
-    } else {
-        None
     }
 }
 

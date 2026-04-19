@@ -271,7 +271,7 @@ fn emit_controller(c: &Controller, known_models: &[Symbol]) -> EmittedFile {
     writeln!(s).unwrap();
 
     let (public_actions, private_actions) =
-        split_public_private_go(c);
+        crate::lower::split_public_private(c);
     let self_methods: Vec<Symbol> = public_actions
         .iter()
         .chain(private_actions.iter())
@@ -378,116 +378,28 @@ fn go_default(ty: &Ty) -> String {
     }
 }
 
-fn split_public_private_go(c: &Controller) -> (Vec<Action>, Vec<Action>) {
-    use crate::dialect::ControllerBodyItem;
-    let mut pubs = Vec::new();
-    let mut privs = Vec::new();
-    let mut seen_private = false;
-    for item in &c.body {
-        match item {
-            ControllerBodyItem::PrivateMarker { .. } => seen_private = true,
-            ControllerBodyItem::Action { action, .. } => {
-                if seen_private {
-                    privs.push(action.clone())
-                } else {
-                    pubs.push(action.clone())
-                }
-            }
-            _ => {}
-        }
-    }
-    (pubs, privs)
-}
-
 /// Gather every ivar any action/helper references, paired with its
 /// Go field type. `@article` → `*Article`; `@articles` → `[]*Article`;
 /// fall back to `interface{}` when the name doesn't resolve to a
-/// known model (no concrete type to guess).
+/// known model (no concrete type to guess). IR walk is shared with
+/// Rust + Crystal via `lower::controller`.
 fn collect_controller_ivars_go(
     c: &Controller,
     known_models: &[Symbol],
 ) -> Vec<(String, String)> {
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut order: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for action in c.actions() {
-        walk_ivars_go(&action.body, &mut seen, &mut order);
+        let walked = crate::lower::walk_controller_ivars(&action.body);
+        for name in walked.referenced {
+            let name_s = name.as_str().to_string();
+            if seen.insert(name_s.clone()) {
+                let ty = guess_ivar_type_go(&name_s, known_models);
+                out.push((name_s, ty));
+            }
+        }
     }
-    order
-        .into_iter()
-        .map(|name| {
-            let ty = guess_ivar_type_go(&name, known_models);
-            (name, ty)
-        })
-        .collect()
-}
-
-fn walk_ivars_go(
-    e: &Expr,
-    seen: &mut std::collections::BTreeSet<String>,
-    order: &mut Vec<String>,
-) {
-    match &*e.node {
-        ExprNode::Ivar { name } => {
-            let n = name.to_string();
-            if seen.insert(n.clone()) {
-                order.push(n);
-            }
-        }
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let n = name.to_string();
-            if seen.insert(n.clone()) {
-                order.push(n);
-            }
-            walk_ivars_go(value, seen, order);
-        }
-        ExprNode::Assign { value, .. } => walk_ivars_go(value, seen, order),
-        ExprNode::Seq { exprs } => {
-            for child in exprs {
-                walk_ivars_go(child, seen, order);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_ivars_go(cond, seen, order);
-            walk_ivars_go(then_branch, seen, order);
-            walk_ivars_go(else_branch, seen, order);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_ivars_go(left, seen, order);
-            walk_ivars_go(right, seen, order);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                walk_ivars_go(r, seen, order);
-            }
-            for a in args {
-                walk_ivars_go(a, seen, order);
-            }
-            if let Some(b) = block {
-                walk_ivars_go(b, seen, order);
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_ivars_go(k, seen, order);
-                walk_ivars_go(v, seen, order);
-            }
-        }
-        ExprNode::Array { elements, .. } => {
-            for el in elements {
-                walk_ivars_go(el, seen, order);
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_ivars_go(body, seen, order),
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let crate::expr::InterpPart::Expr { expr } = p {
-                    walk_ivars_go(expr, seen, order);
-                }
-            }
-        }
-        _ => {}
-    }
+    out
 }
 
 fn guess_ivar_type_go(name: &str, known_models: &[Symbol]) -> String {
@@ -504,15 +416,6 @@ fn guess_ivar_type_go(name: &str, known_models: &[Symbol]) -> String {
     // — Phase 4c's fixtures don't hit this path, but the annotation
     // keeps Go's type-checker happy if they did.
     "interface{}".to_string()
-}
-
-fn singularize_to_model_go(assoc: &str, known_models: &[Symbol]) -> Option<String> {
-    let class = crate::naming::singularize_camelize(assoc);
-    if known_models.iter().any(|m| m.as_str() == class) {
-        Some(class)
-    } else {
-        None
-    }
 }
 
 /// Controller-scope emit context. Threaded through the Go Send
@@ -669,7 +572,7 @@ fn emit_controller_send_go(
     // `params.expect(...)` — Params has a variadic Expect stub.
     if method == "expect" {
         if let Some(r) = recv {
-            if is_params_expr_go(r) {
+            if crate::lower::is_params_expr(r) {
                 return Some(format!("Params().Expect({})", args_s.join(", ")));
             }
         }
@@ -678,7 +581,7 @@ fn emit_controller_send_go(
     // `params[:id]` / `params["id"]` → Params().At(...).
     if method == "[]" {
         if let Some(r) = recv {
-            if is_params_expr_go(r) {
+            if crate::lower::is_params_expr(r) {
                 let arg = args_s.first().cloned().unwrap_or_default();
                 return Some(format!("Params().At({arg})"));
             }
@@ -738,10 +641,11 @@ fn emit_controller_send_go(
             } else if let ExprNode::Send { method: assoc_method, .. } = &*r.node {
                 // `<assoc>.find(x)` — collection lookup, no runtime.
                 // Default-construct the target model.
-                if let Some(target) =
-                    singularize_to_model_go(assoc_method.as_str(), ctx.known_models)
-                {
-                    return Some(format!("&{target}{{}}"));
+                if let Some(target) = crate::lower::singularize_to_model(
+                    assoc_method.as_str(),
+                    ctx.known_models,
+                ) {
+                    return Some(format!("&{}{{}}", target.as_str()));
                 }
                 return Some("nil".to_string());
             }
@@ -750,9 +654,11 @@ fn emit_controller_send_go(
 
     // Unsupported query-builder chains collapse to empty slices.
     if let Some(r) = recv {
-        if is_query_builder_method_go(method) {
-            if let Some(target) = chain_target_class_go(r, ctx) {
-                return Some(format!("[]*{target}{{}}"));
+        if crate::lower::is_query_builder_method(method) {
+            if let Some(target) =
+                crate::lower::chain_target_class(r, ctx.known_models)
+            {
+                return Some(format!("[]*{}{{}}", target.as_str()));
             }
             return Some("nil".to_string());
         }
@@ -775,7 +681,7 @@ fn emit_controller_send_go(
     // meaningful inside a respond_to block. Recognize by receiver
     // binding name `format`.
     if let Some(r) = recv {
-        if matches!(method, "html" | "json") && is_format_binding_go(r) {
+        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
             match method {
                 "html" => {
                     let body = block.unwrap_or(r);
@@ -829,10 +735,11 @@ fn emit_controller_send_go(
             } = &*r.node
             {
                 if inner_args.is_empty() {
-                    if let Some(target) =
-                        singularize_to_model_go(assoc_method.as_str(), ctx.known_models)
-                    {
-                        return Some(format!("&{target}{{}}"));
+                    if let Some(target) = crate::lower::singularize_to_model(
+                        assoc_method.as_str(),
+                        ctx.known_models,
+                    ) {
+                        return Some(format!("&{}{{}}", target.as_str()));
                     }
                     return Some("nil".to_string());
                 }
@@ -886,57 +793,6 @@ fn emit_respond_to_branch_body(e: &Expr, ctx: GoCtx) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => emit_stmt_go_ctx(body, ctx),
-    }
-}
-
-fn is_params_expr_go(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Send { recv: None, method, args, .. }
-            if method.as_str() == "params" && args.is_empty()
-    )
-}
-
-fn is_format_binding_go(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Var { name, .. } if name.as_str() == "format"
-    )
-}
-
-fn is_query_builder_method_go(method: &str) -> bool {
-    matches!(
-        method,
-        "all"
-            | "includes"
-            | "order"
-            | "where"
-            | "group"
-            | "limit"
-            | "offset"
-            | "joins"
-            | "distinct"
-            | "select"
-            | "pluck"
-            | "first"
-            | "last"
-    )
-}
-
-fn chain_target_class_go(e: &Expr, ctx: GoCtx) -> Option<String> {
-    let mut cur = e;
-    loop {
-        match &*cur.node {
-            ExprNode::Const { path } => {
-                let class = path.last()?;
-                if ctx.known_models.iter().any(|m| m == class) {
-                    return Some(class.as_str().to_string());
-                }
-                return None;
-            }
-            ExprNode::Send { recv: Some(r), .. } => cur = r,
-            _ => return None,
-        }
     }
 }
 

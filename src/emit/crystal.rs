@@ -537,7 +537,7 @@ fn emit_controller(out: &mut String, c: &Controller, known_models: &[Symbol]) {
     let name = c.name.0.as_str();
     writeln!(out, "class {name}").unwrap();
 
-    let (public_actions, private_actions) = split_public_private_cr(c);
+    let (public_actions, private_actions) = crate::lower::split_public_private(c);
     let self_methods: Vec<Symbol> = public_actions
         .iter()
         .chain(private_actions.iter())
@@ -620,128 +620,35 @@ fn emit_private_helper(out: &mut String, a: &Action) {
     writeln!(out, "  end").unwrap();
 }
 
-/// Walk a controller's source-ordered body and split actions into
-/// those before vs after the `private` marker.
-fn split_public_private_cr(c: &Controller) -> (Vec<Action>, Vec<Action>) {
-    use crate::dialect::ControllerBodyItem;
-    let mut pubs = Vec::new();
-    let mut privs = Vec::new();
-    let mut seen_private = false;
-    for item in &c.body {
-        match item {
-            ControllerBodyItem::PrivateMarker { .. } => seen_private = true,
-            ControllerBodyItem::Action { action, .. } => {
-                if seen_private {
-                    privs.push(action.clone())
-                } else {
-                    pubs.push(action.clone())
-                }
-            }
-            _ => {}
-        }
-    }
-    (pubs, privs)
-}
-
-/// Gather every ivar any action / private helper reads or writes, and
-/// pair it with its Crystal type. Used to emit class-level ivar
-/// declarations — Crystal otherwise can't infer `@article`'s type in
-/// an action that only reads it.
+/// Gather every ivar any action / private helper reads or writes,
+/// paired with its Crystal class-scope declaration snippet
+/// (`Article = Article.new` for a singular model ivar,
+/// `Array(Article) = [] of Article` for a plural). The IR walk is
+/// shared with Rust and Go via `lower::controller`; the declaration
+/// rendering is Crystal-specific.
 fn collect_controller_ivars(
     c: &Controller,
     known_models: &[Symbol],
 ) -> Vec<(String, String)> {
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut order: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut order: Vec<(String, String)> = Vec::new();
     for action in c.actions() {
-        walk_ivars_cr(&action.body, &mut seen, &mut order);
-    }
-    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
-    for name in &order {
-        let ty = guess_ivar_type_cr(name, known_models);
-        resolved.insert(name.clone(), ty);
+        let walked = crate::lower::walk_controller_ivars(&action.body);
+        for name in walked.referenced {
+            let name_s = name.as_str().to_string();
+            if seen.insert(name_s.clone()) {
+                let ty = guess_ivar_type_cr(&name_s, known_models);
+                order.push((name_s, ty));
+            }
+        }
     }
     order
-        .into_iter()
-        .map(|n| {
-            let ty = resolved.remove(&n).unwrap();
-            (n, ty)
-        })
-        .collect()
 }
 
-fn walk_ivars_cr(
-    e: &Expr,
-    seen: &mut std::collections::BTreeSet<String>,
-    order: &mut Vec<String>,
-) {
-    match &*e.node {
-        ExprNode::Ivar { name } => {
-            let n = name.to_string();
-            if seen.insert(n.clone()) {
-                order.push(n);
-            }
-        }
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let n = name.to_string();
-            if seen.insert(n.clone()) {
-                order.push(n);
-            }
-            walk_ivars_cr(value, seen, order);
-        }
-        ExprNode::Assign { value, .. } => walk_ivars_cr(value, seen, order),
-        ExprNode::Seq { exprs } => {
-            for child in exprs {
-                walk_ivars_cr(child, seen, order);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_ivars_cr(cond, seen, order);
-            walk_ivars_cr(then_branch, seen, order);
-            walk_ivars_cr(else_branch, seen, order);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_ivars_cr(left, seen, order);
-            walk_ivars_cr(right, seen, order);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                walk_ivars_cr(r, seen, order);
-            }
-            for a in args {
-                walk_ivars_cr(a, seen, order);
-            }
-            if let Some(b) = block {
-                walk_ivars_cr(b, seen, order);
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_ivars_cr(k, seen, order);
-                walk_ivars_cr(v, seen, order);
-            }
-        }
-        ExprNode::Array { elements, .. } => {
-            for el in elements {
-                walk_ivars_cr(el, seen, order);
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_ivars_cr(body, seen, order),
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let crate::expr::InterpPart::Expr { expr } = p {
-                    walk_ivars_cr(expr, seen, order);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Guess a Crystal ivar type from the Ruby name. `@article` → `Article`;
-/// `@articles` → `Array(Article)`; everything else falls back to
-/// `Roundhouse::Http::Response` (a safe type that accepts `.new`).
+/// Guess a Crystal ivar declaration snippet from the Ruby name.
+/// `@article` → `Article = Article.new`; `@articles` →
+/// `Array(Article) = [] of Article`. Unresolved names fall back to a
+/// Response-typed default so Crystal's inference stays happy.
 fn guess_ivar_type_cr(name: &str, known_models: &[Symbol]) -> String {
     let singular_class = crate::naming::singularize_camelize(name);
     let is_plural = singular_class.to_lowercase() != name.to_lowercase();
@@ -751,9 +658,6 @@ fn guess_ivar_type_cr(name: &str, known_models: &[Symbol]) -> String {
         }
         return format!("{singular_class} = {singular_class}.new");
     }
-    // Fallback — any non-model ivar defaults to a Response. In
-    // practice real controllers don't reach here in the Phase 4c
-    // fixtures; the annotation just keeps Crystal's inference happy.
     "Roundhouse::Http::Response = Roundhouse::Http::Response.new".to_string()
 }
 
@@ -903,10 +807,11 @@ fn emit_controller_send_cr(
                     }
                 }
             } else if let ExprNode::Send { method: assoc_method, .. } = &*r.node {
-                if let Some(target) =
-                    singularize_to_model_cr(assoc_method.as_str(), ctx.known_models)
-                {
-                    return Some(format!("{target}.new"));
+                if let Some(target) = crate::lower::singularize_to_model(
+                    assoc_method.as_str(),
+                    ctx.known_models,
+                ) {
+                    return Some(format!("{}.new", target.as_str()));
                 }
             }
         }
@@ -914,9 +819,11 @@ fn emit_controller_send_cr(
 
     // Unsupported query-builder chains collapse to `[] of Target`.
     if let Some(r) = recv {
-        if is_query_builder_method_cr(method) {
-            if let Some(target) = chain_target_class_cr(r, ctx) {
-                return Some(format!("[] of {target}"));
+        if crate::lower::is_query_builder_method(method) {
+            if let Some(target) =
+                crate::lower::chain_target_class(r, ctx.known_models)
+            {
+                return Some(format!("[] of {}", target.as_str()));
             }
             return Some("[] of typeof(nil)".to_string());
         }
@@ -939,7 +846,7 @@ fn emit_controller_send_cr(
     // inside a `respond_to` block; the generic emit_expr path above
     // routes these here via the controller ctx.
     if let Some(r) = recv {
-        if matches!(method, "html" | "json") && is_format_binding_cr(r) {
+        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
             let body = block.unwrap_or(r);
             let body_s = emit_block_body_ctrl_cr(body, ctx);
             return Some(match method {
@@ -1001,10 +908,11 @@ fn emit_controller_send_cr(
             } = &*r.node
             {
                 if inner_args.is_empty() {
-                    if let Some(target) =
-                        singularize_to_model_cr(assoc_method.as_str(), ctx.known_models)
-                    {
-                        return Some(format!("{target}.new"));
+                    if let Some(target) = crate::lower::singularize_to_model(
+                        assoc_method.as_str(),
+                        ctx.known_models,
+                    ) {
+                        return Some(format!("{}.new", target.as_str()));
                     }
                     return Some("nil".to_string());
                 }
@@ -1053,58 +961,6 @@ fn emit_block_body_ctrl_cr(e: &Expr, ctx: CrCtx) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => emit_stmt_cr(inner, ctx),
-    }
-}
-
-fn is_format_binding_cr(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Var { name, .. } if name.as_str() == "format"
-    )
-}
-
-fn is_query_builder_method_cr(method: &str) -> bool {
-    matches!(
-        method,
-        "all"
-            | "includes"
-            | "order"
-            | "where"
-            | "group"
-            | "limit"
-            | "offset"
-            | "joins"
-            | "distinct"
-            | "select"
-            | "pluck"
-            | "first"
-            | "last"
-    )
-}
-
-fn chain_target_class_cr(e: &Expr, ctx: CrCtx) -> Option<String> {
-    let mut cur = e;
-    loop {
-        match &*cur.node {
-            ExprNode::Const { path } => {
-                let class = path.last()?;
-                if ctx.known_models.iter().any(|m| m == class) {
-                    return Some(class.as_str().to_string());
-                }
-                return None;
-            }
-            ExprNode::Send { recv: Some(r), .. } => cur = r,
-            _ => return None,
-        }
-    }
-}
-
-fn singularize_to_model_cr(assoc: &str, known_models: &[Symbol]) -> Option<String> {
-    let class = crate::naming::singularize_camelize(assoc);
-    if known_models.iter().any(|m| m.as_str() == class) {
-        Some(class)
-    } else {
-        None
     }
 }
 

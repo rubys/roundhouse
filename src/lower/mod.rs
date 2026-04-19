@@ -18,12 +18,17 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod associations;
+pub mod controller;
 pub mod fixtures;
 pub mod persistence;
 pub mod schema_sql;
 pub mod validations;
 
 pub use associations::{resolve_has_many, HasManyRef};
+pub use controller::{
+    chain_target_class, is_format_binding, is_params_expr, is_query_builder_method,
+    singularize_to_model, split_public_private, walk_controller_ivars, WalkedIvars,
+};
 pub use fixtures::{
     lower_fixtures, LoweredFixture, LoweredFixtureField, LoweredFixtureRecord, LoweredFixtureSet,
     LoweredFixtureValue,
