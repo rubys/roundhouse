@@ -35,6 +35,7 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
+const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
@@ -44,6 +45,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/runtime.py"),
             content: RUNTIME_SOURCE.to_string(),
         });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/db.py"),
+            content: DB_SOURCE.to_string(),
+        });
+        files.push(emit_schema_sql_py(app));
         files.push(EmittedFile {
             path: PathBuf::from("app/__init__.py"),
             content: String::new(),
@@ -93,12 +99,12 @@ fn emit_models(app: &App) -> EmittedFile {
     }
     for model in &app.models {
         writeln!(s).unwrap();
-        emit_model(&mut s, model);
+        emit_model(&mut s, model, app);
     }
     EmittedFile { path: PathBuf::from("app/models.py"), content: s }
 }
 
-fn emit_model(out: &mut String, model: &Model) {
+fn emit_model(out: &mut String, model: &Model, app: &App) {
     let name = model.name.0.as_str();
     writeln!(out, "class {name}:").unwrap();
     let has_fields = !model.attributes.fields.is_empty();
@@ -136,9 +142,177 @@ fn emit_model(out: &mut String, model: &Model) {
     if !lowered.is_empty() {
         writeln!(out).unwrap();
         emit_validate_method_py(out, &lowered);
-        writeln!(out).unwrap();
-        writeln!(out, "    def save(self) -> bool:").unwrap();
-        writeln!(out, "        return len(self.validate()) == 0").unwrap();
+    }
+    // Skip persistence for abstract models (no columns beyond id).
+    let has_table = model
+        .attributes
+        .fields
+        .keys()
+        .any(|k| k.as_str() != "id");
+    if has_table {
+        emit_persistence_methods_py(out, model, !lowered.is_empty(), app);
+    }
+}
+
+/// Render save/destroy/count/find for a model against the stdlib
+/// `sqlite3`-backed test connection. Save/destroy are instance
+/// methods; count/find are classmethods.
+fn emit_persistence_methods_py(
+    out: &mut String,
+    model: &Model,
+    has_validate: bool,
+    app: &App,
+) {
+    let lp = crate::lower::lower_persistence(model, app);
+    let class = lp.class.0.as_str();
+
+    let insert_sql = positional_placeholders_py(&lp.insert_sql);
+    let update_sql = positional_placeholders_py(&lp.update_sql);
+    let delete_sql = positional_placeholders_py(&lp.delete_sql);
+    let select_by_id_sql = positional_placeholders_py(&lp.select_by_id_sql);
+
+    let non_id_args: Vec<String> = lp
+        .non_id_columns
+        .iter()
+        .map(|s| format!("self.{}", s.as_str()))
+        .collect();
+
+    // ----- save -----
+    writeln!(out).unwrap();
+    writeln!(out, "    def save(self) -> bool:").unwrap();
+    if has_validate {
+        writeln!(out, "        if self.validate():").unwrap();
+        writeln!(out, "            return False").unwrap();
+    }
+    for check in &lp.belongs_to_checks {
+        let fk = check.foreign_key.as_str();
+        let target = check.target_class.0.as_str();
+        writeln!(
+            out,
+            "        if not self.{fk} or {target}.find(self.{fk}) is None:",
+        )
+        .unwrap();
+        writeln!(out, "            return False").unwrap();
+    }
+    writeln!(out, "        from app import db").unwrap();
+    writeln!(out, "        if not self.id:").unwrap();
+    writeln!(
+        out,
+        "            self.id = db.execute(\n                {insert_sql:?},\n                [{}],\n            )",
+        non_id_args.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "        else:").unwrap();
+    writeln!(
+        out,
+        "            db.execute(\n                {update_sql:?},\n                [{}, self.id],\n            )",
+        non_id_args.join(", "),
+    )
+    .unwrap();
+    writeln!(out, "        return True").unwrap();
+
+    // ----- destroy -----
+    writeln!(out).unwrap();
+    writeln!(out, "    def destroy(self) -> None:").unwrap();
+    writeln!(out, "        from app import db").unwrap();
+    for dc in &lp.dependent_children {
+        let child_class = dc.child_class.0.as_str();
+        let child_select = positional_placeholders_py(&dc.select_by_parent_sql);
+        writeln!(
+            out,
+            "        children = db.query_all({child_select:?}, [self.id])",
+        )
+        .unwrap();
+        writeln!(out, "        for row in children:").unwrap();
+        writeln!(out, "            child = {child_class}(").unwrap();
+        let kw: Vec<String> = dc
+            .child_columns
+            .iter()
+            .map(|c| format!("                {0}=row[{0:?}]", c.as_str()))
+            .collect();
+        writeln!(out, "{}", kw.join(",\n")).unwrap();
+        writeln!(out, "            )").unwrap();
+        writeln!(out, "            child.destroy()").unwrap();
+    }
+    writeln!(
+        out,
+        "        db.execute({delete_sql:?}, [self.id])",
+    )
+    .unwrap();
+
+    // ----- count -----
+    writeln!(out).unwrap();
+    writeln!(out, "    @classmethod").unwrap();
+    writeln!(out, "    def count(cls) -> int:").unwrap();
+    writeln!(out, "        from app import db").unwrap();
+    writeln!(
+        out,
+        "        return db.scalar({:?}) or 0",
+        lp.count_sql,
+    )
+    .unwrap();
+
+    // ----- find -----
+    writeln!(out).unwrap();
+    writeln!(out, "    @classmethod").unwrap();
+    writeln!(out, "    def find(cls, id: int) -> {class} | None:").unwrap();
+    writeln!(out, "        from app import db").unwrap();
+    writeln!(
+        out,
+        "        row = db.query_one({select_by_id_sql:?}, [id])",
+    )
+    .unwrap();
+    writeln!(out, "        if row is None:").unwrap();
+    writeln!(out, "            return None").unwrap();
+    writeln!(out, "        return cls(").unwrap();
+    let kw: Vec<String> = lp
+        .columns
+        .iter()
+        .map(|c| format!("            {0}=row[{0:?}]", c.as_str()))
+        .collect();
+    writeln!(out, "{}", kw.join(",\n")).unwrap();
+    writeln!(out, "        )").unwrap();
+}
+
+/// SQLite `?N` → Python's stdlib sqlite3 positional `?`. Same
+/// workaround as Crystal / Go / TS / Elixir.
+fn positional_placeholders_py(sql: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '?' {
+            out.push('?');
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `app/schema_sql.py` — Python module exposing the target-neutral
+/// DDL as `CREATE_TABLES`. sqlite3's `executescript` handles
+/// multi-statement strings directly, so no splitting needed.
+fn emit_schema_sql_py(app: &App) -> EmittedFile {
+    let ddl = crate::lower::lower_schema(&app.schema);
+    // Use a Python triple-quoted raw string so the DDL renders with
+    // its original line breaks and doesn't need escape-sequence
+    // handling. Raw so backslashes in identifiers (none today but
+    // defensive) pass through.
+    let mut s = String::new();
+    writeln!(s, "# Generated by Roundhouse.").unwrap();
+    writeln!(s).unwrap();
+    writeln!(s, "CREATE_TABLES = r\"\"\"").unwrap();
+    s.push_str(&ddl);
+    writeln!(s, "\"\"\"").unwrap();
+    EmittedFile {
+        path: PathBuf::from("app/schema_sql.py"),
+        content: s,
     }
 }
 
