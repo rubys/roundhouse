@@ -1203,6 +1203,7 @@ fn emit_ex_test(tm: &TestModule, app: &App) -> EmittedFile {
     let model_attrs: Vec<Symbol> = attrs_set.into_iter().collect();
 
     let ctx = ExTestCtx {
+        app,
         fixture_names: &fixture_names,
         known_models: &known_models,
         model_attrs: &model_attrs,
@@ -1251,6 +1252,7 @@ fn emit_ex_test(tm: &TestModule, app: &App) -> EmittedFile {
 
 #[derive(Clone, Copy)]
 struct ExTestCtx<'a> {
+    app: &'a App,
     fixture_names: &'a [Symbol],
     known_models: &'a [Symbol],
     model_attrs: &'a [Symbol],
@@ -1283,8 +1285,8 @@ fn emit_ex_test_expr(e: &Expr, ctx: ExTestCtx) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_ex_test_send(recv.as_ref(), method.as_str(), args, ctx)
+        ExprNode::Send { recv, method, args, block, .. } => {
+            emit_ex_test_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx)
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
@@ -1323,6 +1325,7 @@ fn emit_ex_test_send(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
     ctx: ExTestCtx,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_ex_test_expr(a, ctx)).collect();
@@ -1335,6 +1338,55 @@ fn emit_ex_test_send(
         if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*args[0].node {
             let ns = crate::naming::camelize(method);
             return format!("Fixtures.{ns}.{}()", sym.as_str());
+        }
+    }
+
+    // assert_difference("Class.count", delta) do ... end →
+    // `_before = ...; <body>; _after = ...; assert _after - _before == delta`.
+    if recv.is_none() && method == "assert_difference" {
+        if let Some(body) = block {
+            if let Some(count_expr) = args
+                .first()
+                .and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        rewrite_ruby_dot_call_ex(value)
+                    }
+                    _ => None,
+                })
+            {
+                let delta = args_s.get(1).cloned().unwrap_or_else(|| "1".into());
+                let body_s = emit_block_body_ex(body, ctx);
+                return format!(
+                    "_before = {count_expr}\n{body_s}\n_after = {count_expr}\nassert _after - _before == {delta}"
+                );
+            }
+        }
+    }
+
+    // owner.<assoc>.create(hash) / .build(hash) — HasMany rewrite
+    // wrapped in an anonymous function so the record (with its
+    // assigned id) becomes available as the expression's value.
+    if (method == "create" || method == "build") && args.len() == 1 {
+        if let Some(outer_recv) = recv {
+            if let ExprNode::Send {
+                recv: Some(assoc_recv),
+                method: assoc_method,
+                args: inner_args,
+                ..
+            } = &*outer_recv.node
+            {
+                if inner_args.is_empty() {
+                    if let Some(s) = try_emit_assoc_create_ex(
+                        assoc_recv,
+                        assoc_method.as_str(),
+                        args,
+                        method,
+                        ctx,
+                    ) {
+                        return s;
+                    }
+                }
+            }
         }
     }
 
@@ -1409,7 +1461,7 @@ fn emit_ex_test_send(
             if is_class_call {
                 // Module.function(args) — Elixir's module-function-call form.
                 if args_s.is_empty() {
-                    format!("{recv_s}.{method}({recv_s_ref})", recv_s_ref = recv_s)
+                    format!("{recv_s}.{method}()")
                 } else {
                     format!("{recv_s}.{method}({})", args_s.join(", "))
                 }
@@ -1418,10 +1470,10 @@ fn emit_ex_test_send(
                     && ctx.model_attrs.iter().any(|s| s.as_str() == method);
                 if is_attr {
                     format!("{recv_s}.{method}")
-                } else if method == "save" && args_s.is_empty() {
-                    // `article.save` in Ruby → `Module.save(article)` in Elixir.
-                    // The receiver's struct module is conventionally `@__
-                    // struct__` value.
+                } else if matches!(method, "save" | "destroy") && args_s.is_empty() {
+                    // Instance-method-like call on a model record:
+                    // `article.save` / `article.destroy` in Ruby →
+                    // `Module.save(article)` / `Module.destroy(article)`.
                     format!("{}(\n      {recv_s}\n    )", ex_module_fn_for(r, method))
                 } else if args_s.is_empty() {
                     format!("{recv_s}.{method}")
@@ -1430,6 +1482,91 @@ fn emit_ex_test_send(
                 }
             }
         }
+    }
+}
+
+/// Parse a Ruby-style `"Class.method"` expression into Elixir
+/// `Class.method()`. Capitalized LHS → module function call;
+/// lowercase LHS → instance field access (same as in the other
+/// targets).
+fn rewrite_ruby_dot_call_ex(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    let (lhs, rhs) = trimmed.split_once('.')?;
+    let is_ident = |s: &str| {
+        !s.is_empty()
+            && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if !is_ident(lhs) || !is_ident(rhs) {
+        return None;
+    }
+    let is_class = lhs.chars().next().is_some_and(|c| c.is_uppercase());
+    if is_class {
+        Some(format!("{lhs}.{rhs}()"))
+    } else {
+        Some(format!("{lhs}.{rhs}"))
+    }
+}
+
+/// Render a Ruby block body as Elixir statements, peeling one
+/// Lambda layer. Ruby `do ... end` lowers to `ExprNode::Lambda`.
+fn emit_block_body_ex(e: &Expr, ctx: ExTestCtx) -> String {
+    let inner = match &*e.node {
+        ExprNode::Lambda { body, .. } => body,
+        _ => e,
+    };
+    match &*inner.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .map(|s| emit_ex_test_stmt(s, ctx))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_ex_test_stmt(inner, ctx),
+    }
+}
+
+fn try_emit_assoc_create_ex(
+    owner: &Expr,
+    assoc_name: &str,
+    args: &[Expr],
+    outer_method: &str,
+    ctx: ExTestCtx,
+) -> Option<String> {
+    let resolved = crate::lower::resolve_has_many(
+        &Symbol::from(assoc_name),
+        owner.ty.as_ref(),
+        ctx.app,
+    )?;
+    let target_class = resolved.target_class.0.as_str();
+    let foreign_key = resolved.foreign_key.as_str();
+
+    let owner_s = emit_ex_test_expr(owner, ctx);
+    let hash_entries = match &args.first()?.node.as_ref() {
+        ExprNode::Hash { entries, .. } => entries.clone(),
+        _ => return None,
+    };
+
+    let mut pairs: Vec<String> = vec![format!("{foreign_key}: {owner_s}.id")];
+    for (k, v) in &hash_entries {
+        if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
+            pairs.push(format!(
+                "{}: {}",
+                field_name.as_str(),
+                emit_ex_test_expr(v, ctx),
+            ));
+        }
+    }
+    let struct_lit = format!("%{target_class}{{{}}}", pairs.join(", "));
+    // Elixir has no direct "block expression" — an anonymous function
+    // call is the standard way to evaluate a sequence and yield the
+    // last value. `.create` saves and returns the record with its id
+    // assigned; `.build` just constructs.
+    if outer_method == "create" {
+        Some(format!(
+            "(fn ->\n      record = {struct_lit}\n      {target_class}.save(record)\n      %{{record | id: Roundhouse.Db.last_insert_rowid()}}\n    end).()"
+        ))
+    } else {
+        Some(struct_lit)
     }
 }
 
@@ -1447,13 +1584,13 @@ fn ex_module_fn_for(recv: &Expr, method: &str) -> String {
     format!("??.{method}") // fallback; should be rare
 }
 
-fn test_needs_runtime_unsupported_ex(test: &Test) -> bool {
-    let known_name = matches!(test.name.as_str(), "requires valid article");
-    if known_name {
-        return true;
-    }
-    test_body_uses_unsupported_ex(&test.body)
+fn test_needs_runtime_unsupported_ex(_test: &Test) -> bool {
+    // Phase 3 rounded out Elixir's real-blog coverage. Keep as a
+    // future-guard; no current pattern forces a skip.
+    false
 }
+
+#[allow(dead_code)]
 
 fn test_body_uses_unsupported_ex(e: &Expr) -> bool {
     use crate::expr::InterpPart;
