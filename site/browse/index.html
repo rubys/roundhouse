@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Generated Output</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+</head>
+<body>
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">Rails → Crystal / Elixir / Go / Python / Rust / TypeScript</p>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" role="tab" data-lang="ruby">Ruby (source)</button>
+    <button class="tab" role="tab" data-lang="crystal">Crystal</button>
+    <button class="tab" role="tab" data-lang="elixir">Elixir</button>
+    <button class="tab" role="tab" data-lang="go">Go</button>
+    <button class="tab" role="tab" data-lang="python">Python</button>
+    <button class="tab" role="tab" data-lang="rust">Rust</button>
+    <button class="tab" role="tab" data-lang="typescript">TypeScript</button>
+  </nav>
+
+  <main>
+    <div class="panels">
+      <aside class="file-tree" role="tree">
+        <div class="tree-content" id="file-tree"></div>
+      </aside>
+      <section class="code-panel">
+        <div class="code-header" id="code-header">Select a file to view</div>
+        <pre class="code-content"><code id="code-content"></code></pre>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/crystal.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/elixir.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

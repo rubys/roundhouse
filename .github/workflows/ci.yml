@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -------------------------------------------------------------------
+  # Library correctness. Runs the default (non-ignored) test suite:
+  # ingest / analyze / IR round-trip / per-target emit snapshot tests.
+  # -------------------------------------------------------------------
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --all-targets
+
+  # -------------------------------------------------------------------
+  # One job per target language. Each generates a project from the
+  # fixtures in-process and runs the target's real toolchain over it.
+  # -------------------------------------------------------------------
+  toolchain-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --test rust_toolchain -- --ignored
+        run: cargo test --test rust_toolchain -- --ignored --nocapture
+
+  toolchain-crystal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - name: cargo test --test crystal_toolchain -- --ignored
+        run: cargo test --test crystal_toolchain -- --ignored --nocapture
+
+  toolchain-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: cargo test --test typescript_toolchain -- --ignored
+        run: cargo test --test typescript_toolchain -- --ignored --nocapture
+
+  toolchain-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: cargo test --test go_toolchain -- --ignored
+        run: cargo test --test go_toolchain -- --ignored --nocapture
+
+  toolchain-elixir:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+      - name: cargo test --test elixir_toolchain -- --ignored
+        run: cargo test --test elixir_toolchain -- --ignored --nocapture
+
+  toolchain-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: cargo test --test python_toolchain -- --ignored
+        run: cargo test --test python_toolchain -- --ignored --nocapture
+
+  # -------------------------------------------------------------------
+  # Build the Pages site: per-target manifests (real-blog fixture) +
+  # static HTML/CSS/JS from site/. Gated on every toolchain job so a
+  # broken target never publishes a misleading manifest.
+  # -------------------------------------------------------------------
+  build-site:
+    needs:
+      - unit
+      - toolchain-rust
+      - toolchain-crystal
+      - toolchain-typescript
+      - toolchain-go
+      - toolchain-elixir
+      - toolchain-python
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo run --bin build-site
+        run: cargo run --release --bin build-site
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build-site
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

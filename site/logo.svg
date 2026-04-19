@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Roundhouse logo">
+  <title>Roundhouse</title>
+  <desc>A top-down roundhouse: a single input track on the left enters a turntable at the center; six short colored track stubs radiate outward toward (but stop short of) the outer wall, one per target language. Rails in, many rails out.</desc>
+
+  <!-- Outer wall (broken on the left where the input track enters).
+       Arc from upper-left gap (28.2, 86.7) clockwise the long way
+       around to lower-left gap (28.2, 169.3). -->
+  <path d="M 28.2 86.7 A 108 108 0 1 1 28.2 169.3"
+        fill="none" stroke="#1a2332" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Eight bay spokes, from the turntable edge (r=28) out to the
+       outer wall (r=108). Spokes at 22.5° + 45°·k; the sector
+       centered on 180° (between the 157.5° and 202.5° spokes) is the
+       input bay, all others are target bays. -->
+  <g stroke="#1a2332" stroke-width="4" stroke-linecap="round">
+    <line x1="153.9" y1="138.7" x2="227.8" y2="169.3"/>
+    <line x1="138.7" y1="153.9" x2="169.3" y2="227.8"/>
+    <line x1="117.3" y1="153.9" x2="86.7"  y2="227.8"/>
+    <line x1="102.1" y1="138.7" x2="28.2"  y2="169.3"/>
+    <line x1="102.1" y1="117.3" x2="28.2"  y2="86.7"/>
+    <line x1="117.3" y1="102.1" x2="86.7"  y2="28.2"/>
+    <line x1="138.7" y1="102.1" x2="169.3" y2="28.2"/>
+    <line x1="153.9" y1="117.3" x2="227.8" y2="86.7"/>
+  </g>
+
+  <!-- Input track: twin rails entering from the left edge, passing
+       through the wall gap at y=128, terminating at the turntable.
+       Gauge 7 (rails at y=124.5 and y=131.5), same as target rails. -->
+  <g stroke="#1a2332" stroke-width="3" stroke-linecap="round">
+    <line x1="0"  y1="124.5" x2="100" y2="124.5"/>
+    <line x1="0"  y1="131.5" x2="100" y2="131.5"/>
+    <!-- Railway ties — four evenly spaced short perpendiculars. -->
+    <line x1="15" y1="120"   x2="15"  y2="136"/>
+    <line x1="35" y1="120"   x2="35"  y2="136"/>
+    <line x1="55" y1="120"   x2="55"  y2="136"/>
+    <line x1="75" y1="120"   x2="75"  y2="136"/>
+  </g>
+
+  <!-- Turntable — the typed IR at the center. -->
+  <circle cx="128" cy="128" r="28" fill="#E87A5D"/>
+
+  <!-- Target-language track stubs. Each is a pair of parallel rails
+       centered on its bay's midpoint angle. Inner end at r=38 (just
+       outside the turntable), outer end at r=88 (stops ~20 units short
+       of the outer wall, r=108). Gauge 7, stroke-width 3, rounded caps.
+       Six targets — the 225° bay (upper-left, adjacent to the input) is
+       left blank as breathing room. -->
+
+  <!-- 0° east — Go -->
+  <g stroke="#00ADD8" stroke-width="3" stroke-linecap="round">
+    <line x1="166" y1="131.5" x2="216" y2="131.5"/>
+    <line x1="166" y1="124.5" x2="216" y2="124.5"/>
+  </g>
+  <!-- 45° SE — TypeScript -->
+  <g stroke="#3178C6" stroke-width="3" stroke-linecap="round">
+    <line x1="152.4" y1="157.35" x2="187.76" y2="192.71"/>
+    <line x1="157.35" y1="152.4" x2="192.71" y2="187.76"/>
+  </g>
+  <!-- 90° south — Python -->
+  <g stroke="#FFD43B" stroke-width="3" stroke-linecap="round">
+    <line x1="124.5" y1="166" x2="124.5" y2="216"/>
+    <line x1="131.5" y1="166" x2="131.5" y2="216"/>
+  </g>
+  <!-- 135° SW — Elixir -->
+  <g stroke="#6E4A7E" stroke-width="3" stroke-linecap="round">
+    <line x1="98.66"  y1="152.4"  x2="63.3"  y2="187.76"/>
+    <line x1="103.61" y1="157.35" x2="68.25" y2="192.71"/>
+  </g>
+  <!-- 270° north — Rust -->
+  <g stroke="#DEA584" stroke-width="3" stroke-linecap="round">
+    <line x1="131.5" y1="90" x2="131.5" y2="40"/>
+    <line x1="124.5" y1="90" x2="124.5" y2="40"/>
+  </g>
+  <!-- 315° NE — Crystal -->
+  <g stroke="#776791" stroke-width="3" stroke-linecap="round">
+    <line x1="157.35" y1="103.61" x2="192.71" y2="68.25"/>
+    <line x1="152.4"  y1="98.66"  x2="187.76" y2="63.3"/>
+  </g>
+</svg>

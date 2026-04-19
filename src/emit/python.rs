@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
-    Action, Association, Controller, Fixture, MethodDef, Model, RouteSpec, Test, TestModule,
+    Action, Association, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
 };
 use crate::ident::Symbol;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
