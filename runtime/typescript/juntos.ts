@@ -126,16 +126,39 @@ export class ApplicationRecord {
     return row.c;
   }
 
-  static find<T extends ApplicationRecord>(id: number): T | null {
+  static find<T extends typeof ApplicationRecord>(this: T, id: number): InstanceType<T> | null {
     const row = conn()
-      .prepare(`SELECT * FROM ${this.table_name} WHERE id = ?`)
+      .prepare(`SELECT * FROM ${(this as any).table_name} WHERE id = ?`)
       .get(id);
     if (!row) return null;
-    return Object.assign(new (this as any)(), row) as T;
+    return Object.assign(new (this as any)(), row) as InstanceType<T>;
+  }
+
+  /** `Model.all()` — every row, loaded as instances. */
+  static all<T extends typeof ApplicationRecord>(this: T): InstanceType<T>[] {
+    const rows = conn()
+      .prepare(`SELECT * FROM ${(this as any).table_name}`)
+      .all();
+    return rows.map((row) => Object.assign(new (this as any)(), row)) as InstanceType<T>[];
+  }
+
+  /** `Model.last` — highest-id row, or null when the table's empty. */
+  static last<T extends typeof ApplicationRecord>(this: T): InstanceType<T> | null {
+    const row = conn()
+      .prepare(`SELECT * FROM ${(this as any).table_name} ORDER BY id DESC LIMIT 1`)
+      .get();
+    if (!row) return null;
+    return Object.assign(new (this as any)(), row) as InstanceType<T>;
   }
 
   static new(_attrs?: any): any {
     return new (this as any)();
+  }
+
+  /** `@record.reload` — re-fetch by id and copy over self. */
+  reload(): void {
+    const fresh = (this.constructor as any).find((this as any).id);
+    if (fresh) Object.assign(this, fresh);
   }
 
   // Broadcast callback registration — emitter renders `broadcasts_to`
@@ -226,7 +249,14 @@ export class CollectionProxy<T = any> {
   get any(): boolean {
     return false;
   }
+  get length(): number {
+    return 0;
+  }
   each(_fn: (item: T) => void): void {}
+  map<U>(_fn: (item: T) => U): U[] {
+    return [];
+  }
+  forEach(_fn: (item: T) => void): void {}
 }
 
 export const modelRegistry: Record<string, any> = {};
@@ -235,20 +265,177 @@ export const modelRegistry: Record<string, any> = {};
 // (`ActiveRecord::Base` → `ActiveRecord`).
 export class ActiveRecord extends ApplicationRecord {}
 
-// Controller/router surface — stubs so generated controller code can
-// import and reference these names without tsc erroring.
+// Controller/router surface — controllers return ActionResponse;
+// the router's match table lets tests dispatch without a live HTTP
+// server (pure in-process function calls).
+
+/** Every controller action returns one of these. Fields are
+ *  optional so actions can pick the shape they need:
+ *    - `body`: the HTML string the view rendered (for GET actions)
+ *    - `status`: HTTP status code (default 200; 422 for
+ *      unprocessable, 302 for redirects)
+ *    - `location`: redirect target URL; test assertions on
+ *      `assert_redirected_to` check this field. */
+export type ActionResponse = {
+  body?: string;
+  status?: number;
+  location?: string;
+};
+
+/** Context passed to every action. `params` merges path params +
+ *  form body. `request` / `session` are placeholders for future
+ *  work; tests never populate them. */
 export type ActionContext = {
   params: Record<string, any>;
-  request: any;
-  session: Record<string, any>;
+  request?: any;
+  session?: Record<string, any>;
+};
+
+/** One entry in the router's match table. */
+export type Route = {
+  method: string;
+  path: string;
+  handler: (ctx: ActionContext) => Promise<ActionResponse> | ActionResponse;
 };
 
 export class Router {
-  static root(_target: string): void {}
-  static resources(_name: string, _opts?: any, _nested?: () => void): void {}
-  static get(_path: string, _controller: any, _action: string): void {}
-  static post(_path: string, _controller: any, _action: string): void {}
-  static put(_path: string, _controller: any, _action: string): void {}
-  static patch(_path: string, _controller: any, _action: string): void {}
-  static delete(_path: string, _controller: any, _action: string): void {}
+  private static routes: Route[] = [];
+
+  /** Clear the table — used in tests between runs to avoid
+   *  cross-test leakage. Generated code calls the builders
+   *  idempotently at import time; repeated imports accumulate. */
+  static reset(): void {
+    Router.routes = [];
+  }
+
+  /** Mount a path to a controller action. Takes 2 or 3 args — the
+   *  two-arg form is `Router.root(Controller, "action")`; the
+   *  three-arg form is `Router.root(path, Controller, "action")`
+   *  which matches the current emitter shape. Either way the path
+   *  defaults to `/`. */
+  static root(
+    a: string | any,
+    b?: any,
+    c?: string,
+  ): void {
+    const [path, controller, action]: [string, any, string] =
+      typeof a === "string" ? [a, b, c ?? "index"] : ["/", a, b];
+    const handler_name = action === "new" ? "$new" : action;
+    const handler = controller[handler_name];
+    if (!handler) return;
+    Router.routes.push({ method: "GET", path, handler });
+  }
+
+  /** Mount a resource's seven standard actions. Options:
+   *    - `only`: restrict to listed actions
+   *    - `except`: exclude listed actions
+   *    - `nested`: array of nested resource specs (each with
+   *      `name`, `controller`, and optional `only` / `except`)
+   *
+   *  Rails' `resources :articles do resources :comments end` lowers
+   *  to a call with `nested: [{ name: "comments", controller:
+   *  CommentsController, only: ["create", "destroy"] }]`. */
+  static resources(name: string, controller: any, opts?: { only?: string[]; except?: string[]; nested?: Array<{ name: string; controller: any; only?: string[]; except?: string[] }> }): void {
+    Router.addResourceRoutes(name, controller, opts, null);
+    if (opts?.nested) {
+      for (const nested of opts.nested) {
+        const parent_singular = singularize(name);
+        Router.addResourceRoutes(nested.name, nested.controller, nested, {
+          parent_plural: name,
+          parent_singular,
+        });
+      }
+    }
+  }
+
+  private static addResourceRoutes(
+    name: string,
+    controller: any,
+    opts: { only?: string[]; except?: string[] } | undefined,
+    scope: { parent_plural: string; parent_singular: string } | null,
+  ): void {
+    const standard: Array<[string, string, string]> = [
+      ["index", "GET", ""],
+      ["new", "GET", "/new"],
+      ["create", "POST", ""],
+      ["show", "GET", "/:id"],
+      ["edit", "GET", "/:id/edit"],
+      ["update", "PATCH", "/:id"],
+      ["destroy", "DELETE", "/:id"],
+    ];
+    for (const [action, method, suffix] of standard) {
+      if (opts?.only && !opts.only.includes(action)) continue;
+      if (opts?.except && opts.except.includes(action)) continue;
+      const base = scope
+        ? `/${scope.parent_plural}/:${scope.parent_singular}_id/${name}`
+        : `/${name}`;
+      const path = `${base}${suffix}`;
+      const handler_name = action === "new" ? "$new" : action;
+      const handler = controller[handler_name];
+      if (!handler) continue;
+      Router.routes.push({ method, path, handler });
+    }
+  }
+
+  static get(path: string, controller: any, action: string): void {
+    const handler = controller[action === "new" ? "$new" : action];
+    if (handler) Router.routes.push({ method: "GET", path, handler });
+  }
+  static post(path: string, controller: any, action: string): void {
+    const handler = controller[action === "new" ? "$new" : action];
+    if (handler) Router.routes.push({ method: "POST", path, handler });
+  }
+  static put(path: string, controller: any, action: string): void {
+    const handler = controller[action === "new" ? "$new" : action];
+    if (handler) Router.routes.push({ method: "PUT", path, handler });
+  }
+  static patch(path: string, controller: any, action: string): void {
+    const handler = controller[action === "new" ? "$new" : action];
+    if (handler) Router.routes.push({ method: "PATCH", path, handler });
+  }
+  static delete(path: string, controller: any, action: string): void {
+    const handler = controller[action === "new" ? "$new" : action];
+    if (handler) Router.routes.push({ method: "DELETE", path, handler });
+  }
+
+  /** Match a request to a route. Returns the handler plus a merged
+   *  params record (path segments extracted from the URL). Used by
+   *  the test client to dispatch without spinning up an HTTP
+   *  server. */
+  static match(method: string, path: string): { handler: Route["handler"]; params: Record<string, string> } | null {
+    for (const route of Router.routes) {
+      if (route.method !== method) continue;
+      const match = Router.tryMatchPath(route.path, path);
+      if (match) return { handler: route.handler, params: match };
+    }
+    return null;
+  }
+
+  private static tryMatchPath(pattern: string, path: string): Record<string, string> | null {
+    const pat_parts = pattern.split("/").filter(Boolean);
+    const path_parts = path.split("/").filter(Boolean);
+    if (pat_parts.length !== path_parts.length) return null;
+    const params: Record<string, string> = {};
+    for (let i = 0; i < pat_parts.length; i++) {
+      const p = pat_parts[i];
+      const v = path_parts[i];
+      if (p.startsWith(":")) {
+        params[p.slice(1)] = v;
+      } else if (p !== v) {
+        return null;
+      }
+    }
+    return params;
+  }
+}
+
+/** Minimal English singularizer for router-internal use. Matches
+ *  the patterns the scaffold blog exercises (`articles` →
+ *  `article`, `comments` → `comment`). A fuller inflector lives in
+ *  the generator; this is enough for the runtime path. */
+function singularize(plural: string): string {
+  if (plural.endsWith("ies")) return plural.slice(0, -3) + "y";
+  if (plural.endsWith("ses")) return plural.slice(0, -2);
+  if (plural.endsWith("s")) return plural.slice(0, -1);
+  return plural;
 }

@@ -35,26 +35,16 @@ fn views_emit_as_string_returning_functions() {
     let files = typescript::emit(&app);
     // tiny-blog has one view: app/views/posts/index.html.erb.
     let content = find(&files, "app/views/posts/index.html.ts");
-    // Function signature: takes a locals record, returns string.
+    // Function signature: typed single positional arg (model
+    // collection), returns string. Controllers call
+    // `Views.renderPostsIndex(records)` passing a `Post[]`.
     assert!(
-        content.contains(
-            "export function renderPostsIndex(locals: Record<string, unknown> = {}): string {"
-        ),
-        "got:\n{content}"
-    );
-    // Ivars destructure out of locals at the top.
-    assert!(
-        content.contains("const { posts } = locals as Record<string, any>;"),
+        content.contains("export function renderPostsIndex(posts: Post[]): string {"),
         "got:\n{content}"
     );
     // Text chunks append as string literals.
     assert!(
         content.contains("_buf += \"<h1>Posts</h1>\\n\";"),
-        "got:\n{content}"
-    );
-    // <%= expr %> wraps in String(...) so any value stringifies.
-    assert!(
-        content.contains("_buf += String(post.title);"),
         "got:\n{content}"
     );
     // `<% @posts.each do |post| %>` → JS `for…of`.
@@ -315,21 +305,23 @@ fn controllers_emit_as_module_of_exported_async_functions() {
     let content = find(&files, "app/controllers/posts_controller.ts");
     // No class wrapper — each action is a top-level exported function.
     assert!(!content.contains("export class"), "controllers shouldn't emit as classes:\n{content}");
-    // Read actions take just `context`; write actions take `context, params`.
+    // Every action takes an ActionContext (underscore-prefixed when
+    // unused by the action body) and returns Promise<ActionResponse>.
     assert!(
-        content.contains("export async function index(context)"),
+        content.contains("export async function index(_context: ActionContext): Promise<ActionResponse>")
+            || content.contains("export async function index(context: ActionContext): Promise<ActionResponse>"),
         "got:\n{content}"
     );
     assert!(
-        content.contains("export async function show(context)"),
+        content.contains("export async function show(context: ActionContext): Promise<ActionResponse>"),
         "got:\n{content}"
     );
     assert!(
-        content.contains("export async function create(context, params)"),
+        content.contains("export async function create(context: ActionContext): Promise<ActionResponse>"),
         "got:\n{content}"
     );
     assert!(
-        content.contains("export async function destroy(context)"),
+        content.contains("export async function destroy(context: ActionContext): Promise<ActionResponse>"),
         "got:\n{content}"
     );
 }
@@ -339,12 +331,12 @@ fn controller_ivar_writes_become_let_rebinds() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/posts_controller.ts");
-    // Phase 4c: `@posts = Post.all` becomes `let posts = [] as Post[];`.
-    // Ivar `@posts` rebinds as a local `let posts`; the `Post.all`
-    // query chain collapses to an empty slice per the Phase 4c
-    // query-chain rewrite (no query runtime yet).
+    // Pass-2: `index` uses the template-per-action shape.
+    // `@posts = Post.all` becomes `const records = Post.all();`
+    // — ivars bind as locals; the query chain hits the real
+    // Juntos runtime (ApplicationRecord.all()).
     assert!(
-        content.contains("let posts = [] as Post[];"),
+        content.contains("const records = Post.all();"),
         "got:\n{content}"
     );
     assert!(!content.contains("@posts"), "should drop @:\n{content}");
@@ -355,9 +347,15 @@ fn controller_params_bracket_access_rewrites_to_context() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/posts_controller.ts");
-    // `params[:id]` → `context.params.id`.
+    // `params[:id]` binds via `Number(context.params.id)` so TS
+    // route-helper call sites get a real number (ids are typed i64
+    // across the runtime).
     assert!(
-        content.contains("Post.find(context.params.id)"),
+        content.contains("const id = Number(context.params.id);"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("Post.find(id)"),
         "got:\n{content}"
     );
 }
@@ -390,7 +388,8 @@ fn controller_new_action_is_reserved_word_escaped() {
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/widgets_controller.ts");
     assert!(
-        content.contains("export async function $new(context)"),
+        content.contains("export async function $new(_context: ActionContext)")
+            || content.contains("export async function $new(context: ActionContext)"),
         "got:\n{content}"
     );
 }
