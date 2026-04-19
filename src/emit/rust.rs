@@ -17,7 +17,7 @@ use super::EmittedFile;
 use crate::App;
 use crate::dialect::{Action, Association, Controller, Fixture, MethodDef, Model, Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::naming::snake_case;
 use crate::ty::Ty;
 
@@ -238,7 +238,7 @@ fn emit_models(app: &App) -> EmittedFile {
         let has_methods = model.methods().next().is_some();
         if has_methods || !lowered.is_empty() {
             writeln!(s).unwrap();
-            emit_model_impl(&mut s, model, &lowered);
+            emit_model_impl(&mut s, model, &lowered, app);
         }
     }
     EmittedFile { path: PathBuf::from("src/models.rs"), content: s }
@@ -261,6 +261,7 @@ fn emit_model_impl(
     out: &mut String,
     model: &Model,
     validations: &[crate::lower::LoweredValidation],
+    app: &App,
 ) {
     writeln!(out, "impl {} {{", model.name.0).unwrap();
     // Collect the names of attributes + methods on this class. Used by
@@ -296,7 +297,7 @@ fn emit_model_impl(
     if !first || !validations.is_empty() {
         writeln!(out).unwrap();
     }
-    emit_persistence_methods(out, model, !validations.is_empty());
+    emit_persistence_methods(out, model, !validations.is_empty(), app);
     writeln!(out, "}}").unwrap();
 }
 
@@ -306,9 +307,40 @@ fn emit_model_impl(
 /// sync with the struct field order. `id` is excluded from INSERT
 /// columns — SQLite's AUTOINCREMENT assigns it — and becomes the WHERE
 /// key for UPDATE / DELETE / find.
-fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool) {
+fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool, app: &App) {
     let table = model.table.0.as_str();
     let class = model.name.0.as_str();
+
+    // belongs_to existence checks run inside `save` after structural
+    // validation. Rails' default (since 5.0) treats a dangling FK as
+    // an invalid record, so `Comment.new(article_id: 999).save` must
+    // return false without touching the DB.
+    let belongs_to_checks: Vec<(&Symbol, &ClassId)> = model
+        .associations()
+        .filter_map(|a| match a {
+            Association::BelongsTo { foreign_key, target, optional: false, .. } => {
+                Some((foreign_key, target))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // has_many with `dependent: :destroy` — `destroy` on this model
+    // must first delete each dependent child (so each child's own
+    // destroy callbacks fire, matching Rails semantics) before the
+    // parent row goes.
+    let dependent_children: Vec<(ClassId, &Symbol)> = model
+        .associations()
+        .filter_map(|a| match a {
+            Association::HasMany {
+                target,
+                foreign_key,
+                dependent: crate::dialect::Dependent::Destroy,
+                ..
+            } => Some((target.clone(), foreign_key)),
+            _ => None,
+        })
+        .collect();
 
     // Partition attributes into `id` and everything else. The SQL
     // column list is the "everything else"; the id column anchors
@@ -342,6 +374,19 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool)
         writeln!(out, "        let errors = self.validate();").unwrap();
         writeln!(out, "        if !errors.is_empty() {{ return false; }}").unwrap();
     }
+    // belongs_to: referenced parent must exist. Use the target's
+    // `find` (which consults the same :memory: connection) so the
+    // check stays in the test's transactional world.
+    for (fk, target) in &belongs_to_checks {
+        writeln!(
+            out,
+            "        if self.{fk} == 0 || {}::find(self.{fk}).is_none() {{",
+            target.0.as_str(),
+        )
+        .unwrap();
+        writeln!(out, "            return false;").unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
     writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
     writeln!(out, "            if self.id == 0 {{").unwrap();
     writeln!(
@@ -369,6 +414,46 @@ fn emit_persistence_methods(out: &mut String, model: &Model, has_validate: bool)
     // ----- destroy -----
     writeln!(out).unwrap();
     writeln!(out, "    pub fn destroy(&self) {{").unwrap();
+    // Cascade dependent children first so their own `destroy`
+    // callbacks run (matching Rails' `dependent: :destroy`), then
+    // remove the parent row.
+    for (target, fk) in &dependent_children {
+        let child_class = target.0.as_str();
+        let child_table = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == child_class)
+            .map(|m| m.table.0.as_str().to_string())
+            .unwrap_or_else(|| crate::naming::pluralize_snake(child_class));
+        writeln!(out, "        let dependents: Vec<{child_class}> = crate::db::with_conn(|conn| {{").unwrap();
+        let select_cols: Vec<String> = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == child_class)
+            .map(|m| m.attributes.fields.keys().map(|s| s.as_str().to_string()).collect())
+            .unwrap_or_default();
+        let select_cols_joined = select_cols.join(", ");
+        writeln!(
+            out,
+            "            let mut stmt = conn.prepare(\"SELECT {select_cols_joined} FROM {child_table} WHERE {fk} = ?1\").expect(\"prepare child select\");",
+            fk = fk.as_str(),
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            let rows = stmt.query_map(rusqlite::params![self.id], |r| Ok({child_class} {{"
+        )
+        .unwrap();
+        for (i, col) in select_cols.iter().enumerate() {
+            writeln!(out, "                {col}: r.get({i})?,").unwrap();
+        }
+        writeln!(out, "            }})).expect(\"query child rows\");").unwrap();
+        writeln!(out, "            rows.filter_map(|r| r.ok()).collect()").unwrap();
+        writeln!(out, "        }});").unwrap();
+        writeln!(out, "        for child in &dependents {{").unwrap();
+        writeln!(out, "            child.destroy();").unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
     writeln!(out, "        crate::db::with_conn(|conn| {{").unwrap();
     writeln!(
         out,
@@ -625,6 +710,10 @@ struct EmitCtx<'a> {
     /// annotation isn't populated (the analyzer doesn't walk test
     /// bodies today; a future pass could remove this fallback).
     model_attrs: &'a [Symbol],
+    /// `Some` when test-body emission needs to consult cross-model
+    /// associations (`owner.assoc.create(hash)` rewrite). Defaults to
+    /// `None` for emit paths outside tests.
+    app: Option<&'a App>,
 }
 
 fn emit_body(body: &Expr, ctx: EmitCtx) -> String {
@@ -901,6 +990,28 @@ fn emit_test_send(
         }
     }
 
+    // `owner.<assoc>.create(hash)` / `.build(hash)` — HasMany association
+    // surface. Rewrite to a struct-literal of the target model with the
+    // foreign key pre-filled from `owner.id`, plus `save()` for the
+    // `create` variant. No runtime association proxy required.
+    if (method == "create" || method == "build") && args.len() == 1 {
+        if let Some(outer_recv) = recv {
+            if let ExprNode::Send { recv: Some(assoc_recv), method: assoc_method, args: inner_args, .. } = &*outer_recv.node {
+                if inner_args.is_empty() {
+                    if let Some(s) = try_emit_assoc_create(
+                        assoc_recv,
+                        assoc_method.as_str(),
+                        args,
+                        method,
+                        ctx,
+                    ) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+
     // `Class.new(hash)` → struct literal when Class is a known model.
     if let Some(r) = recv {
         if method == "new" && args.len() == 1 {
@@ -934,6 +1045,67 @@ fn emit_test_send(
     }
 
     None
+}
+
+/// Rewrite `owner.<assoc>.create(hash)` / `.build(hash)` into a
+/// struct-literal construction of the target model, with the foreign
+/// key prefilled from `owner.id`. Returns `None` when the pattern
+/// doesn't apply (e.g. we can't identify `<assoc>` as a HasMany on any
+/// known model) so callers fall through to generic emission.
+fn try_emit_assoc_create(
+    owner: &Expr,
+    assoc_name: &str,
+    args: &[Expr],
+    outer_method: &str,
+    ctx: EmitCtx,
+) -> Option<String> {
+    let app = ctx.app?;
+    // Find any HasMany across all models that matches the association
+    // name. Real-blog has unique names; a future fixture with two
+    // classes both named `comments` would need owner-type dispatch.
+    let (target_class, foreign_key) = app.models.iter().find_map(|m| {
+        m.associations().find_map(|a| match a {
+            Association::HasMany { name, target, foreign_key, .. } if name.as_str() == assoc_name => {
+                Some((target.0.as_str().to_string(), foreign_key.as_str().to_string()))
+            }
+            _ => None,
+        })
+    })?;
+
+    let owner_s = emit_expr(owner, ctx);
+    let hash_entries = match &args.first()?.node.as_ref() {
+        ExprNode::Hash { entries, .. } => entries.clone(),
+        _ => return None,
+    };
+
+    let mut field_lines: Vec<String> = Vec::new();
+    field_lines.push(format!("                {foreign_key}: {owner_s}.id,"));
+    for (k, v) in &hash_entries {
+        if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
+            field_lines.push(format!(
+                "                {}: {},",
+                field_name.as_str(),
+                emit_expr(v, ctx),
+            ));
+        }
+    }
+
+    let struct_lit = format!(
+        "{} {{\n{}\n                ..Default::default()\n            }}",
+        target_class,
+        field_lines.join("\n"),
+    );
+    // `.build` returns the unsaved record; `.create` saves it first.
+    // Both yield the record so tests can read `.article_id` etc. The
+    // `let mut` is needed for the `save()` path; harmless for build.
+    let body = if outer_method == "create" {
+        format!(
+            "{{\n            let mut r = {struct_lit};\n            r.save();\n            r\n        }}"
+        )
+    } else {
+        format!("{{\n            let mut r = {struct_lit};\n            r\n        }}")
+    };
+    Some(body)
 }
 
 /// Render an `assert_not_nil` (or `assert_nil`) with type-aware truthiness.
@@ -1267,6 +1439,7 @@ fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
         fixture_names: &fixture_names,
         known_models: &known_models,
         model_attrs: &model_attrs,
+        app: Some(app),
     };
 
     for test in &tm.tests {
