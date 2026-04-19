@@ -339,8 +339,14 @@ fn controller_ivar_writes_become_let_rebinds() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/posts_controller.ts");
-    // `@posts = Post.all` → `let posts = Post.all;`. The `@` dies.
-    assert!(content.contains("let posts = Post.all;"), "got:\n{content}");
+    // Phase 4c: `@posts = Post.all` becomes `let posts = [] as Post[];`.
+    // Ivar `@posts` rebinds as a local `let posts`; the `Post.all`
+    // query chain collapses to an empty slice per the Phase 4c
+    // query-chain rewrite (no query runtime yet).
+    assert!(
+        content.contains("let posts = [] as Post[];"),
+        "got:\n{content}"
+    );
     assert!(!content.contains("@posts"), "should drop @:\n{content}");
 }
 
