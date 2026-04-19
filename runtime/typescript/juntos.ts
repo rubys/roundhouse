@@ -1,55 +1,151 @@
 // Roundhouse TypeScript runtime — minimal Juntos-shape stub.
 //
-// The TS emitter targets Juntos (https://www.ruby2js.com/docs/juntos/),
-// whose runtime is a substantial npm package. For a self-contained
-// generated project that type-checks under `tsc` without requiring a
-// real npm install, this stub provides just enough of Juntos's surface:
-// classes/types the emitted code imports. A real Juntos runtime
-// swaps in via tsconfig path mapping when that's available.
-//
-// Everything here is intentionally permissive (`any` types, empty
-// implementations) — this is for type-checking the generated code,
-// not for running it. Production deployments will use the real
-// Juntos package.
+// The TS emitter targets Juntos (https://www.ruby2js.com/docs/juntos/).
+// This stub provides the subset the emitted project needs for Phase 3:
+// typed model surface, validation primitives, and a better-sqlite3-backed
+// persistence layer keyed on per-subclass metadata (table_name, columns,
+// belongsToChecks, dependentChildren). Real Juntos takes over in
+// production via tsconfig path mapping.
+
+import Database from "better-sqlite3";
+
+// ── DB connection lifecycle ──
+
+let _db: Database.Database | null = null;
+
+/** Open a fresh :memory: SQLite connection, run the schema DDL, and
+ *  install it in the module-level slot. Called from `Fixtures.setup`
+ *  at the top of every spec. */
+export function setupTestDb(schema_sql: string): void {
+  if (_db) _db.close();
+  _db = new Database(":memory:");
+  _db.exec(schema_sql);
+}
+
+/** Borrow the current connection. Throws if `setupTestDb` hasn't
+ *  been called yet. */
+export function conn(): Database.Database {
+  if (!_db) {
+    throw new Error("test db not initialized; call setupTestDb first");
+  }
+  return _db;
+}
+
+// ── Model surface ──
+
+/** A `{ fk, targetName }` pair the generated model declares as static
+ *  metadata so `save` can check that `belongs_to` references resolve.
+ *  `targetName` is a class name looked up in `modelRegistry` at
+ *  runtime — avoids circular import initialization pitfalls. */
+export interface BelongsToCheck {
+  fk: string;
+  targetName: string;
+}
+
+/** `{ fk, targetName }` pair for a `has_many dependent: :destroy`
+ *  relationship — `destroy` uses it to cascade. */
+export interface DependentChild {
+  fk: string;
+  targetName: string;
+}
 
 export class ApplicationRecord {
-  attributes: Record<string, any> = {};
-  errors: ErrorCollection = new ErrorCollection();
-
+  // Metadata subclasses populate. Defaults keep the base class usable
+  // on its own in tests that only exercise validation.
   static table_name: string = "";
   static columns: string[] = [];
+  static belongsToChecks: BelongsToCheck[] = [];
+  static dependentChildren: DependentChild[] = [];
 
-  static get all(): any[] {
-    return [];
+  id: number = 0;
+  errors: ErrorCollection = new ErrorCollection();
+
+  /** Rails-semantics `save`: runs validations (and belongs_to
+   *  existence checks) first; on success, INSERTs when `id === 0`
+   *  otherwise UPDATEs. Exposed as a getter to match Juntos's
+   *  property-style API. */
+  get save(): boolean {
+    this.errors = new ErrorCollection();
+    this.validate();
+    if (!this.errors.none) return false;
+
+    const cls = this.constructor as typeof ApplicationRecord;
+
+    for (const { fk, targetName } of cls.belongsToChecks) {
+      const fkVal = (this as any)[fk];
+      const target = modelRegistry[targetName] as typeof ApplicationRecord;
+      if (fkVal === 0 || fkVal == null || target.find(fkVal) === null) {
+        return false;
+      }
+    }
+
+    const db = conn();
+    const cols = cls.columns;
+    const placeholders = cols.map(() => "?").join(", ");
+    const values = cols.map((c) => (this as any)[c]);
+
+    if (this.id === 0) {
+      const sql = `INSERT INTO ${cls.table_name} (${cols.join(", ")}) VALUES (${placeholders})`;
+      const info = db.prepare(sql).run(...values);
+      this.id = Number(info.lastInsertRowid);
+    } else {
+      const sets = cols.map((c) => `${c} = ?`).join(", ");
+      const sql = `UPDATE ${cls.table_name} SET ${sets} WHERE id = ?`;
+      db.prepare(sql).run(...values, this.id);
+    }
+    return true;
   }
 
-  static find(_id: any): any {
-    return new (this as any)();
+  /** Cascade `dependent: :destroy` children first (so each child's
+   *  own destroy logic runs), then remove this row. */
+  get destroy(): this {
+    const cls = this.constructor as typeof ApplicationRecord;
+    const db = conn();
+
+    for (const { fk, targetName } of cls.dependentChildren) {
+      const target = modelRegistry[targetName] as typeof ApplicationRecord;
+      const rows = db
+        .prepare(
+          `SELECT * FROM ${target.table_name} WHERE ${fk} = ?`,
+        )
+        .all(this.id) as Record<string, any>[];
+      for (const row of rows) {
+        const child = Object.assign(new (target as any)(), row);
+        child.destroy;
+      }
+    }
+
+    db.prepare(`DELETE FROM ${cls.table_name} WHERE id = ?`).run(this.id);
+    return this;
+  }
+
+  static count(): number {
+    const row = conn()
+      .prepare(`SELECT COUNT(*) AS c FROM ${this.table_name}`)
+      .get() as { c: number };
+    return row.c;
+  }
+
+  static find<T extends ApplicationRecord>(id: number): T | null {
+    const row = conn()
+      .prepare(`SELECT * FROM ${this.table_name} WHERE id = ?`)
+      .get(id);
+    if (!row) return null;
+    return Object.assign(new (this as any)(), row) as T;
   }
 
   static new(_attrs?: any): any {
     return new (this as any)();
   }
 
-  // Broadcast callback registration — the emitter renders
-  // `broadcasts_to` declarations as post-class-body calls to these.
-  // Real Juntos dispatches to Turbo Stream broadcasts; the stub just
-  // accepts the callback and does nothing.
+  // Broadcast callback registration — emitter renders `broadcasts_to`
+  // declarations as post-class-body calls to these. Stub dispatches
+  // nothing; real Juntos pushes to Turbo Stream channels.
   static afterSave(_fn: (record: any) => any): void {}
   static afterDestroy(_fn: (record: any) => any): void {}
   static afterCreate(_fn: (record: any) => any): void {}
   static afterUpdate(_fn: (record: any) => any): void {}
   static afterCommit(_fn: (record: any) => any): void {}
-
-  get save(): boolean {
-    this.errors = new ErrorCollection();
-    this.validate();
-    return this.errors.none;
-  }
-
-  get destroy(): this {
-    return this;
-  }
 
   validate(): void {}
 
