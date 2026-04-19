@@ -29,6 +29,12 @@ use crate::ty::Ty;
 /// project's `src/runtime.rs`.
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/rust/runtime.rs");
 
+/// Source of the Roundhouse Rust DB runtime. Same pattern as
+/// `RUNTIME_SOURCE`: one hand-written file (`runtime/rust/db.rs`)
+/// copied verbatim into the generated project as `src/db.rs`.
+/// Owns the per-test SQLite connection.
+const DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
@@ -46,6 +52,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("src/runtime.rs"),
             content: RUNTIME_SOURCE.to_string(),
+        });
+        // DB runtime — thread-local SQLite connection + helpers used
+        // by save/destroy/count/find. Verbatim-copied, same posture
+        // as `runtime.rs`.
+        files.push(EmittedFile {
+            path: PathBuf::from("src/db.rs"),
+            content: DB_SOURCE.to_string(),
         });
         // Schema SQL — `CREATE TABLE` statements derived from the
         // ingested db/schema.rb. Phase 3 test harness uses this to
@@ -114,6 +127,7 @@ fn emit_lib_rs(app: &App) -> EmittedFile {
     writeln!(s).unwrap();
     if !app.models.is_empty() {
         writeln!(s, "pub mod runtime;").unwrap();
+        writeln!(s, "pub mod db;").unwrap();
         writeln!(s, "pub mod schema_sql;").unwrap();
         writeln!(s, "pub mod models;").unwrap();
     }
