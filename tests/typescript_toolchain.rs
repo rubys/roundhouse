@@ -19,8 +19,8 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
-fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-ts-check-{fixture}"))
+fn scratch_dir(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("roundhouse-ts-check-{tag}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
@@ -43,6 +43,26 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 }
 
 fn assert_tsc_passes(fixture: &str, scratch: &Path) {
+    // Install declared devDependencies (`@types/node`) so tsc can
+    // resolve `node:test` / `node:assert/strict` in the emitted specs.
+    let install = Command::new("npm")
+        .arg("install")
+        .arg("--silent")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .current_dir(scratch)
+        .output()
+        .expect("run npm install");
+    assert!(
+        install.status.success(),
+        "npm install failed for {fixture} at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr),
+    );
+
     // `npx tsc` resolves to a typosquatting-prevention stub; use
     // `--package=typescript` to pull the real compiler. `--yes`
     // auto-installs on first run and caches for subsequent ones.
@@ -82,7 +102,7 @@ fn tiny_blog_tsc_passes() {
 #[ignore]
 fn real_blog_tsc_passes() {
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-tsc");
     generate_project(fixture, &scratch);
     assert_tsc_passes("real-blog", &scratch);
 }
@@ -95,7 +115,7 @@ fn real_blog_node_test_passes() {
     // zero failures. Mirrors the Rust/Crystal Phase 2 bar —
     // Phase-3-dependent tests are marked `test.skip(...)`.
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog");
+    let scratch = scratch_dir("real-blog-node");
     generate_project(fixture, &scratch);
 
     // Shell invocation so glob expansion picks up every test file —

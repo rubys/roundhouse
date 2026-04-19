@@ -72,16 +72,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 }
 
 /// Minimal package.json. `"type": "module"` matches the ESM import/
-/// export style the emitter produces. No dependencies listed — the
-/// tsconfig `paths` alias resolves `"juntos"` to our local stub so
-/// tsc type-checks without needing `npm install`.
+/// export style the emitter produces. `@types/node` is required so
+/// tsc can resolve `node:test` / `node:assert/strict` imports in the
+/// emitted spec files. The tsconfig `paths` alias resolves `"juntos"`
+/// to our local stub.
 fn emit_package_json() -> EmittedFile {
     let content = "\
 {
   \"name\": \"app\",
   \"version\": \"0.1.0\",
   \"private\": true,
-  \"type\": \"module\"
+  \"type\": \"module\",
+  \"devDependencies\": {
+    \"@types/node\": \"^20\"
+  }
 }
 ";
     EmittedFile {
