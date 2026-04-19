@@ -999,159 +999,132 @@ fn emit_controller_send_ex(
     block: Option<&Expr>,
     ctx: ExCtrlCtx,
 ) -> Option<String> {
+    use crate::lower::SendKind;
     let args_s: Vec<String> =
         args.iter().map(|a| emit_expr_ctrl_ex(a, ctx)).collect();
 
-    // `respond_to do |format| body end` — flatten inline. Elixir has
-    // no FormatRouter; the HTML branch body emits directly at the
-    // call site.
-    if recv.is_none() && method == "respond_to" && block.is_some() {
-        let inner = match &*block.unwrap().node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => block.unwrap(),
-        };
-        return Some(emit_block_ctrl_ex(inner, ctx));
-    }
+    // Try the shared classifier first. Elixir's unique rewrite —
+    // struct-method-to-Module-function for model-typed receivers —
+    // runs after the classifier returns None. (Not in the shared
+    // enum: only Elixir needs this rewrite; the other three targets
+    // have real method dispatch.)
+    if let Some(kind) =
+        crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)
+    {
+        return Some(match kind {
+            // respond_to flattens inline in Elixir — no FormatRouter.
+            SendKind::RespondToBlock { body } => emit_block_ctrl_ex(body, ctx),
 
-    // `format.html { body }` → body (unwrap). `format.json { body }`
-    // → TODO comment. Only applies when the receiver binding name is
-    // `format` (the respond_to block param).
-    if let Some(r) = recv {
-        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
-            match method {
-                "html" => {
-                    let body = block.unwrap_or(r);
-                    let inner = match &*body.node {
-                        ExprNode::Lambda { body, .. } => body,
-                        _ => body,
-                    };
-                    return Some(emit_block_ctrl_ex(inner, ctx));
-                }
-                "json" => {
-                    return Some("# TODO: JSON branch (Phase 4e)".to_string());
-                }
-                _ => unreachable!(),
+            // format.html { body } unwraps to just `body` inline.
+            SendKind::FormatHtml { body } => emit_block_ctrl_ex(body, ctx),
+            SendKind::FormatJson => "# TODO: JSON branch (Phase 4e)".to_string(),
+
+            SendKind::ParamsAccess => "params".to_string(),
+            // `params.expect(...)` and `params[:k]` pass through the
+            // dynamic runtime unchanged — Elixir doesn't typecheck
+            // these at compile, and the stub exists so hand-written
+            // code compiles.
+            SendKind::ParamsExpect { .. } => {
+                format!("params.expect({})", args_s.join(", "))
             }
-        }
-    }
-
-    // `Model.new` / `Model.new(...)` → `%Model{}`. Emitted models
-    // have no constructor, and Phase 4c doesn't pass struct literal
-    // field values through Params.
-    if method == "new" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        return Some(format!("%{}{{}}", class));
-                    }
-                }
+            SendKind::ParamsIndex { .. } => {
+                let arg = args_s.first().cloned().unwrap_or_default();
+                format!("params[{arg}]")
             }
-        }
-    }
 
-    // Unsupported query-builder chains collapse to `[]`. Elixir is
-    // dynamically typed, so an untyped empty list is fine.
-    if let Some(r) = recv {
-        if crate::lower::is_query_builder_method(method) {
-            let _ = r;
-            return Some("[]".to_string());
-        }
-    }
-
-    // `<assoc>.find(x)` on a non-Const receiver / `<assoc>.build(h)`
-    // / `<assoc>.create(h)` — default-construct the target.
-    if matches!(method, "find" | "build" | "create") {
-        if let Some(r) = recv {
-            if let ExprNode::Send { method: assoc_method, args: inner_args, .. } =
-                &*r.node
-            {
-                if inner_args.is_empty() {
-                    if let Some(target) = crate::lower::singularize_to_model(
-                        assoc_method.as_str(),
-                        ctx.known_models,
-                    ) {
-                        return Some(format!("%{}{{}}", target.as_str()));
-                    }
-                }
+            SendKind::ModelNew { class } => format!("%{}{{}}", class.as_str()),
+            // Model.find(x) passes through — the generated Elixir
+            // model module has a `find/1` function and returns the
+            // struct-or-nil; callers assign directly.
+            SendKind::ModelFind { class, .. } => {
+                let arg = args_s.first().cloned().unwrap_or_default();
+                format!("{}.find({arg})", class.as_str())
             }
-        }
-    }
 
-    // `article.save!` → strip the bang before the model-function
-    // rewrite below picks up the stripped name. Phase 4c doesn't
-    // distinguish the raise-vs-return variants semantically; drop `!`
-    // uniformly.
-    let effective_method = match method {
-        "destroy!" | "save!" | "update!" => &method[..method.len() - 1],
-        other => other,
-    };
+            SendKind::AssocLookup { target, .. } => format!("%{}{{}}", target.as_str()),
 
-    // `x.update(...)` — no Phase 4c runtime; boolean stub.
-    if method == "update" {
-        if let Some(r) = recv {
-            if !matches!(&*r.node, ExprNode::Const { .. }) {
-                let _ = r;
-                return Some("false".to_string());
+            SendKind::QueryChain { .. } => "[]".to_string(),
+
+            SendKind::PathOrUrlHelper => "\"\"".to_string(),
+
+            // Bang strip: `article.save!` → `Article.save(article)`
+            // (combined with the Module.fn rewrite below for model
+            // receivers) or just `recv.stripped` otherwise.
+            SendKind::BangStrip { recv, stripped_method, args: _ } => {
+                elixir_render_module_or_field_call(
+                    recv,
+                    stripped_method,
+                    &args_s,
+                    ctx,
+                )
             }
-        }
+
+            SendKind::InstanceUpdate => "false".to_string(),
+
+            SendKind::Render { .. } => format!("render({})", args_s.join(", ")),
+            SendKind::RedirectTo { .. } => {
+                format!("redirect_to({})", args_s.join(", "))
+            }
+            SendKind::Head { .. } => format!("head({})", args_s.join(", ")),
+        });
     }
 
-    // `article.save` / `article.destroy` / `article.something` on a
-    // model-typed local variable → `Article.save(article)` /
-    // `Article.destroy(article)`. Elixir doesn't have method dispatch
-    // on structs; the idiomatic form is module-function-call with the
-    // struct as first arg. Recognise the shape by checking whether
-    // the receiver's Var name singularizes to a known model.
+    // Elixir-specific rewrite: `article.save` / `article.destroy` on
+    // a model-typed local variable → `Article.save(article)`. Elixir
+    // doesn't have struct method dispatch; the idiomatic form is
+    // module-function-call with the struct as first arg. Recognise
+    // the shape by checking whether the receiver's Var/Ivar name
+    // singularizes to a known model.
     if let Some(r) = recv {
         if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
-            if let Some(target) = crate::lower::singularize_to_model(
-                name.as_str(),
-                ctx.known_models,
-            ) {
-                // Skip struct field reads — those stay as `article.title`
-                // etc. Heuristic: if the method is a known AR verb
-                // (save/destroy/update/etc.) route through Module.func;
-                // otherwise leave as field access.
-                if is_ar_verb_ex(effective_method) {
-                    let recv_s = name.to_string();
-                    if args_s.is_empty() {
-                        return Some(format!(
-                            "{}.{}({})",
-                            target.as_str(),
-                            effective_method,
-                            recv_s,
-                        ));
-                    }
-                    return Some(format!(
-                        "{}.{}({}, {})",
-                        target.as_str(),
-                        effective_method,
-                        recv_s,
-                        args_s.join(", "),
-                    ));
-                }
+            if crate::lower::singularize_to_model(name.as_str(), ctx.known_models)
+                .is_some()
+                && is_ar_verb_ex(method)
+            {
+                return Some(elixir_render_module_or_field_call(
+                    r, method, &args_s, ctx,
+                ));
             }
         }
     }
 
-    // Bare `*_path` / `*_url` — Rails URL helpers. Placeholder string.
-    if recv.is_none()
-        && block.is_none()
-        && (method.ends_with("_path") || method.ends_with("_url"))
-    {
-        return Some("\"\"".to_string());
-    }
-
-    // Bare `render` / `redirect_to` / `head` are already imported
-    // from Roundhouse.Http; fall through to the plain emit (which
-    // produces `render(...)` / `redirect_to(...)` / `head(...)` —
-    // both valid Elixir after the import).
-    //
-    // Bare-name Send matching a self-method: ditto; Elixir functions
-    // in the same module call naturally without a receiver qualifier.
-
     None
+}
+
+/// Given a model-typed receiver + verb, render `Module.verb(recv,
+/// args)`. For non-model receivers, fall back to plain `recv.verb(
+/// args)`. Used by both the `BangStrip` and the Elixir-specific
+/// AR-verb-on-model rewrites.
+fn elixir_render_module_or_field_call(
+    recv: &Expr,
+    verb: &str,
+    args_s: &[String],
+    ctx: ExCtrlCtx,
+) -> String {
+    if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*recv.node {
+        if let Some(target) =
+            crate::lower::singularize_to_model(name.as_str(), ctx.known_models)
+        {
+            let recv_s = name.to_string();
+            return if args_s.is_empty() {
+                format!("{}.{}({})", target.as_str(), verb, recv_s)
+            } else {
+                format!(
+                    "{}.{}({}, {})",
+                    target.as_str(),
+                    verb,
+                    recv_s,
+                    args_s.join(", "),
+                )
+            };
+        }
+    }
+    let recv_s = emit_expr_ctrl_ex(recv, ctx);
+    if args_s.is_empty() {
+        format!("{recv_s}.{verb}")
+    } else {
+        format!("{recv_s}.{verb}({})", args_s.join(", "))
+    }
 }
 
 // Router ---------------------------------------------------------------

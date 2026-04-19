@@ -26,8 +26,9 @@ pub mod validations;
 
 pub use associations::{resolve_has_many, HasManyRef};
 pub use controller::{
-    chain_target_class, is_format_binding, is_params_expr, is_query_builder_method,
-    singularize_to_model, split_public_private, walk_controller_ivars, WalkedIvars,
+    chain_target_class, classify_controller_send, is_format_binding, is_params_expr,
+    is_query_builder_method, singularize_to_model, split_public_private,
+    walk_controller_ivars, SendKind, WalkedIvars,
 };
 pub use fixtures::{
     lower_fixtures, LoweredFixture, LoweredFixtureField, LoweredFixtureRecord, LoweredFixtureSet,

@@ -755,9 +755,9 @@ fn emit_send_cr(
     emit_send(recv, method, args)
 }
 
-/// Controller-scope Send rewrites. Mirrors Rust's
-/// `emit_controller_send`. Returns `Some(rendered)` when a Phase 4c
-/// rule applies, `None` to fall through.
+/// Controller-scope Send rewrites. Drives off the shared classifier
+/// `lower::classify_controller_send`; each arm is a render-table
+/// entry from `SendKind` → Crystal syntax.
 fn emit_controller_send_cr(
     recv: Option<&Expr>,
     method: &str,
@@ -765,162 +765,76 @@ fn emit_controller_send_cr(
     block: Option<&Expr>,
     ctx: CrCtx,
 ) -> Option<String> {
-    // Render args with the controller ctx so nested `*_path` helpers
-    // and other controller-specific shapes pick up their rewrites too
-    // — plain `emit_expr` doesn't know about ctx.
+    use crate::lower::SendKind;
+    // Render args with controller ctx so nested rewrites apply.
     let args_s: Vec<String> = args.iter().map(|a| emit_expr_cr(a, ctx)).collect();
 
-    // Bare `params` → the module-level stub accessor.
-    if recv.is_none() && method == "params" && args_s.is_empty() && block.is_none() {
-        return Some("Roundhouse::Http.params".to_string());
-    }
+    let kind =
+        crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => "Roundhouse::Http.params".to_string(),
 
-    // `Model.new` / `Model.new(anything)` — models have a zero-arg
-    // constructor via property defaults; any hash / params object
-    // passed in Phase 4c has no matching overload.
-    if method == "new" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        return Some(format!("{}.new", class));
-                    }
-                }
-            }
+        // Crystal's `Params#expect` stub swallows any arg shape, so
+        // pass through unmodified — the plain `recv.method(args)`
+        // rendering works.
+        SendKind::ParamsExpect { .. } => {
+            format!("Roundhouse::Http.params.expect({})", args_s.join(", "))
         }
-    }
-
-    // `Model.find(x)` — strips the `?` via `.not_nil!` so the declared
-    // ivar type (`@article : Article`) accepts the assignment. Phase
-    // 4c tests stay `pending` so `.not_nil!` never runs at runtime.
-    //
-    // `<assoc>.find(x)` — collection lookup. No runtime; default-
-    // construct the target model via singularization of the assoc
-    // method name. Matches the `.build` / `.create` handling below.
-    if method == "find" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        let arg = args_s.first().cloned().unwrap_or_default();
-                        return Some(format!("{class}.find({arg}).not_nil!"));
-                    }
-                }
-            } else if let ExprNode::Send { method: assoc_method, .. } = &*r.node {
-                if let Some(target) = crate::lower::singularize_to_model(
-                    assoc_method.as_str(),
-                    ctx.known_models,
-                ) {
-                    return Some(format!("{}.new", target.as_str()));
-                }
-            }
+        SendKind::ParamsIndex { .. } => {
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("Roundhouse::Http.params[{arg}]")
         }
-    }
 
-    // Unsupported query-builder chains collapse to `[] of Target`.
-    if let Some(r) = recv {
-        if crate::lower::is_query_builder_method(method) {
-            if let Some(target) =
-                crate::lower::chain_target_class(r, ctx.known_models)
-            {
-                return Some(format!("[] of {}", target.as_str()));
-            }
-            return Some("[] of typeof(nil)".to_string());
+        SendKind::ModelNew { class } => format!("{}.new", class.as_str()),
+
+        SendKind::ModelFind { class, .. } => {
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("{}.find({arg}).not_nil!", class.as_str())
         }
-    }
 
-    // `respond_to do |format| ... end` → `Roundhouse::Http.respond_to do |__fr| ... end`.
-    if recv.is_none() && method == "respond_to" && block.is_some() {
-        let inner = match &*block.unwrap().node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => block.unwrap(),
-        };
-        let body_s = emit_respond_to_body_cr(inner, ctx);
-        return Some(format!(
-            "Roundhouse::Http.respond_to do |__fr|\n{}\nend",
-            indent(&body_s, 1),
-        ));
-    }
+        SendKind::AssocLookup { target, .. } => format!("{}.new", target.as_str()),
 
-    // `format.html { body }` / `format.json { body }` — only meaningful
-    // inside a `respond_to` block; the generic emit_expr path above
-    // routes these here via the controller ctx.
-    if let Some(r) = recv {
-        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
-            let body = block.unwrap_or(r);
+        SendKind::QueryChain { target: Some(target) } => {
+            format!("[] of {}", target.as_str())
+        }
+        SendKind::QueryChain { target: None } => "[] of typeof(nil)".to_string(),
+
+        SendKind::PathOrUrlHelper => "\"\"".to_string(),
+
+        // Crystal accepts `!` in method names; the bang-strip variant
+        // doesn't apply here. Render the method name verbatim.
+        SendKind::BangStrip { recv, stripped_method, args: _ } => {
+            let recv_s = emit_expr_cr(recv, ctx);
+            format!("{recv_s}.{stripped_method}!")
+        }
+
+        SendKind::InstanceUpdate => "false".to_string(),
+
+        SendKind::Render { .. } => {
+            format!("Roundhouse::Http.render({})", args_s.join(", "))
+        }
+        SendKind::RedirectTo { .. } => {
+            format!("Roundhouse::Http.redirect_to({})", args_s.join(", "))
+        }
+        SendKind::Head { .. } => {
+            format!("Roundhouse::Http.head({})", args_s.join(", "))
+        }
+
+        SendKind::RespondToBlock { body } => {
+            let body_s = emit_respond_to_body_cr(body, ctx);
+            format!(
+                "Roundhouse::Http.respond_to do |__fr|\n{}\nend",
+                indent(&body_s, 1),
+            )
+        }
+
+        SendKind::FormatHtml { body } => {
             let body_s = emit_block_body_ctrl_cr(body, ctx);
-            return Some(match method {
-                "html" => format!("__fr.html do\n{}\nend", indent(&body_s, 1)),
-                "json" => "# TODO: JSON branch (Phase 4e)".to_string(),
-                _ => unreachable!(),
-            });
+            format!("__fr.html do\n{}\nend", indent(&body_s, 1))
         }
-    }
 
-    // Bare `render` / `redirect_to` / `head` → `Roundhouse::Http.*`.
-    if recv.is_none() && block.is_none() {
-        match method {
-            "render" => {
-                return Some(format!("Roundhouse::Http.render({})", args_s.join(", ")));
-            }
-            "redirect_to" => {
-                return Some(format!(
-                    "Roundhouse::Http.redirect_to({})",
-                    args_s.join(", ")
-                ));
-            }
-            "head" => {
-                return Some(format!("Roundhouse::Http.head({})", args_s.join(", ")));
-            }
-            _ => {}
-        }
-    }
-
-    // Bare `*_path` / `*_url` — Rails URL helpers. No runtime; a
-    // placeholder string keeps the call site typed (Crystal can't
-    // use Rust's `!` divergence trick).
-    if recv.is_none()
-        && block.is_none()
-        && (method.ends_with("_path") || method.ends_with("_url"))
-    {
-        return Some("\"\"".to_string());
-    }
-
-    // `@article.update(...)` — no Phase 4c update method on models.
-    if method == "update" {
-        if let Some(r) = recv {
-            if !matches!(&*r.node, ExprNode::Const { .. }) {
-                let _ = r;
-                return Some("false".to_string());
-            }
-        }
-    }
-
-    // `article.comments.build(hash)` — Crystal `.build` on a collection
-    // has no runtime. Resolve via singularization, default-construct.
-    if method == "build" || method == "create" {
-        if let Some(r) = recv {
-            if let ExprNode::Send {
-                recv: Some(_),
-                method: assoc_method,
-                args: inner_args,
-                ..
-            } = &*r.node
-            {
-                if inner_args.is_empty() {
-                    if let Some(target) = crate::lower::singularize_to_model(
-                        assoc_method.as_str(),
-                        ctx.known_models,
-                    ) {
-                        return Some(format!("{}.new", target.as_str()));
-                    }
-                    return Some("nil".to_string());
-                }
-            }
-        }
-    }
-
-    None
+        SendKind::FormatJson => "# TODO: JSON branch (Phase 4e)".to_string(),
+    })
 }
 
 /// Emit a `respond_to` block body where `format.*` calls get rewritten

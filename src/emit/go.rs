@@ -560,46 +560,14 @@ fn emit_controller_send_go(
     block: Option<&Expr>,
     ctx: GoCtx,
 ) -> Option<String> {
-    // Render args with the controller ctx so nested rewrites apply.
+    use crate::lower::SendKind;
+    // Render args with controller ctx so nested rewrites apply.
     let args_s: Vec<String> =
         args.iter().map(|a| emit_expr_go_ctx(a, ctx)).collect();
 
-    // Bare `params` → the package-level stub accessor.
-    if recv.is_none() && method == "params" && args_s.is_empty() && block.is_none() {
-        return Some("Params()".to_string());
-    }
-
-    // `params.expect(...)` — Params has a variadic Expect stub.
-    if method == "expect" {
-        if let Some(r) = recv {
-            if crate::lower::is_params_expr(r) {
-                return Some(format!("Params().Expect({})", args_s.join(", ")));
-            }
-        }
-    }
-
-    // `params[:id]` / `params["id"]` → Params().At(...).
-    if method == "[]" {
-        if let Some(r) = recv {
-            if crate::lower::is_params_expr(r) {
-                let arg = args_s.first().cloned().unwrap_or_default();
-                return Some(format!("Params().At({arg})"));
-            }
-        }
-    }
-
-    // Strip Rails' bang from destroy!/save!/update! — Go idents don't
-    // accept `!`.
-    if let Some(r) = recv {
-        if matches!(method, "destroy!" | "save!" | "update!") {
-            let recv_s = emit_expr_go_ctx(r, ctx);
-            let stripped = go_method_name(&method[..method.len() - 1]);
-            return Some(format!("{recv_s}.{stripped}()"));
-        }
-    }
-
-    // Bare-name Send on implicit self: forward to receiver method. In
-    // controllers that means `c.MethodName(...)`.
+    // Self-method bare call doesn't go through the shared classifier
+    // — it's specific to Go's struct-method dispatch (`c.Foo()`
+    // syntax). Handled here before the classifier runs.
     if recv.is_none() && block.is_none() {
         if ctx.self_methods.iter().any(|s| s.as_str() == method) {
             let go_m = go_method_name(method);
@@ -610,154 +578,68 @@ fn emit_controller_send_go(
         }
     }
 
-    // `Model.new` / `Model.new(...)` — models have no constructor, so
-    // emit a struct-literal pointer. The test-scope path renders hash
-    // args into struct fields; controller ctx punts the args since we
-    // can't typecheck Params as struct-field source.
-    if method == "new" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        return Some(format!("&{}{{}}", class));
-                    }
-                }
-            }
+    let kind =
+        crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => "Params()".to_string(),
+        SendKind::ParamsExpect { .. } => {
+            format!("Params().Expect({})", args_s.join(", "))
         }
-    }
-
-    // `Model.find(x)` → existing `ModelFind(x)` package-level func.
-    // Returns `*Model` — nullable via nil — so the declared field
-    // type (`*Model`) accepts it directly.
-    if method == "find" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        let arg = args_s.first().cloned().unwrap_or_default();
-                        return Some(format!("{class}Find({arg})"));
-                    }
-                }
-            } else if let ExprNode::Send { method: assoc_method, .. } = &*r.node {
-                // `<assoc>.find(x)` — collection lookup, no runtime.
-                // Default-construct the target model.
-                if let Some(target) = crate::lower::singularize_to_model(
-                    assoc_method.as_str(),
-                    ctx.known_models,
-                ) {
-                    return Some(format!("&{}{{}}", target.as_str()));
-                }
-                return Some("nil".to_string());
-            }
+        SendKind::ParamsIndex { .. } => {
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("Params().At({arg})")
         }
-    }
 
-    // Unsupported query-builder chains collapse to empty slices.
-    if let Some(r) = recv {
-        if crate::lower::is_query_builder_method(method) {
-            if let Some(target) =
-                crate::lower::chain_target_class(r, ctx.known_models)
-            {
-                return Some(format!("[]*{}{{}}", target.as_str()));
-            }
-            return Some("nil".to_string());
+        SendKind::ModelNew { class } => format!("&{}{{}}", class.as_str()),
+
+        SendKind::ModelFind { class, .. } => {
+            // Go's ModelFind already returns *Model (nullable via
+            // nil) — no unwrap wrapper needed.
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("{}Find({arg})", class.as_str())
         }
-    }
 
-    // `respond_to do |format| ... end` → `RespondTo(func(fr) *Response { ... })`.
-    if recv.is_none() && method == "respond_to" && block.is_some() {
-        let inner = match &*block.unwrap().node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => block.unwrap(),
-        };
-        let body_s = emit_respond_to_body_go(inner, ctx);
-        return Some(format!(
-            "RespondTo(func(fr *FormatRouter) *Response {{\n{}\n\treturn &Response{{}}\n}})",
-            indent_go(&body_s, 1),
-        ));
-    }
+        SendKind::AssocLookup { target, .. } => format!("&{}{{}}", target.as_str()),
 
-    // `format.html { body }` / `format.json { body }` — only
-    // meaningful inside a respond_to block. Recognize by receiver
-    // binding name `format`.
-    if let Some(r) = recv {
-        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
-            match method {
-                "html" => {
-                    let body = block.unwrap_or(r);
-                    let body_s = emit_respond_to_branch_body(body, ctx);
-                    return Some(format!(
-                        "fr.Html(func() *Response {{\n{}\n\treturn &Response{{}}\n}})",
-                        indent_go(&body_s, 1),
-                    ));
-                }
-                "json" => {
-                    return Some("// TODO: JSON branch (Phase 4e)".to_string());
-                }
-                _ => unreachable!(),
-            }
+        SendKind::QueryChain { target: Some(target) } => {
+            format!("[]*{}{{}}", target.as_str())
         }
-    }
+        SendKind::QueryChain { target: None } => "nil".to_string(),
 
-    // Bare `render` / `redirect_to` / `head` → package-level funcs.
-    if recv.is_none() && block.is_none() {
-        match method {
-            "render" => {
-                return Some(format!("Render({})", args_s.join(", ")));
-            }
-            "redirect_to" => {
-                return Some(format!("RedirectTo({})", args_s.join(", ")));
-            }
-            "head" => {
-                return Some(format!("Head({})", args_s.join(", ")));
-            }
-            _ => {}
+        SendKind::PathOrUrlHelper => "\"\"".to_string(),
+
+        SendKind::BangStrip { recv, stripped_method, .. } => {
+            let recv_s = emit_expr_go_ctx(recv, ctx);
+            let go_m = go_method_name(stripped_method);
+            format!("{recv_s}.{go_m}()")
         }
-    }
 
-    // Bare `*_path` / `*_url` — Rails URL helpers. Placeholder string.
-    if recv.is_none()
-        && block.is_none()
-        && (method.ends_with("_path") || method.ends_with("_url"))
-    {
-        return Some("\"\"".to_string());
-    }
+        SendKind::InstanceUpdate => "false".to_string(),
 
-    // `<assoc>.build(hash)` / `<assoc>.create(hash)` — default-
-    // construct the target model.
-    if method == "build" || method == "create" {
-        if let Some(r) = recv {
-            if let ExprNode::Send {
-                recv: Some(_),
-                method: assoc_method,
-                args: inner_args,
-                ..
-            } = &*r.node
-            {
-                if inner_args.is_empty() {
-                    if let Some(target) = crate::lower::singularize_to_model(
-                        assoc_method.as_str(),
-                        ctx.known_models,
-                    ) {
-                        return Some(format!("&{}{{}}", target.as_str()));
-                    }
-                    return Some("nil".to_string());
-                }
-            }
+        SendKind::Render { .. } => format!("Render({})", args_s.join(", ")),
+        SendKind::RedirectTo { .. } => {
+            format!("RedirectTo({})", args_s.join(", "))
         }
-    }
+        SendKind::Head { .. } => format!("Head({})", args_s.join(", ")),
 
-    // `@article.update(...)` — Phase 4c has no update method.
-    if method == "update" {
-        if let Some(r) = recv {
-            if !matches!(&*r.node, ExprNode::Const { .. }) {
-                let _ = r;
-                return Some("false".to_string());
-            }
+        SendKind::RespondToBlock { body } => {
+            let body_s = emit_respond_to_body_go(body, ctx);
+            format!(
+                "RespondTo(func(fr *FormatRouter) *Response {{\n{}\n\treturn &Response{{}}\n}})",
+                indent_go(&body_s, 1),
+            )
         }
-    }
 
-    None
+        SendKind::FormatHtml { body } => {
+            let body_s = emit_respond_to_branch_body(body, ctx);
+            format!(
+                "fr.Html(func() *Response {{\n{}\n\treturn &Response{{}}\n}})",
+                indent_go(&body_s, 1),
+            )
+        }
+
+        SendKind::FormatJson => "// TODO: JSON branch (Phase 4e)".to_string(),
+    })
 }
 
 fn emit_respond_to_body_go(body: &Expr, ctx: GoCtx) -> String {

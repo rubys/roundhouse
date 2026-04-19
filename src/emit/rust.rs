@@ -1258,10 +1258,10 @@ fn rewrite_ruby_dot_call(expr: &str) -> Option<String> {
     }
 }
 
-/// Controller-scope Send rewrites. Returns `Some(rendered)` when a
-/// Phase 4c rule applies (HTTP surface, `params`, destroy-bang
-/// stripping), `None` to fall through to the normal paths. Activated
-/// by `EmitCtx::in_controller`.
+/// Controller-scope Send rewrites. Drives off the shared classifier
+/// `lower::classify_controller_send`; every arm below is a
+/// render-table entry from `SendKind` → Rust syntax. Returns `None`
+/// when the classifier doesn't match (falls through to plain Send).
 fn emit_controller_send(
     recv: Option<&Expr>,
     method: &str,
@@ -1270,240 +1270,86 @@ fn emit_controller_send(
     block: Option<&Expr>,
     ctx: EmitCtx,
 ) -> Option<String> {
-    // Bare `params` — lowers to `crate::http::params()`. Matches the
-    // zero-arg Send shape the parser uses for implicit-self references.
-    if recv.is_none() && method == "params" && args_s.is_empty() && block.is_none() {
-        return Some("crate::http::params()".to_string());
-    }
+    use crate::lower::SendKind;
+    let kind =
+        crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => "crate::http::params()".to_string(),
 
-    // `Model.new` / `Model.new(anything)` — controllers pass opaque
-    // Params (via `article_params()`), not the hash literal the test
-    // rewrite can destructure, so fall back to `Model::default()`. The
-    // hash-literal form is still handled by `emit_test_send` when
-    // `in_test` is set.
-    if method == "new" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        return Some(format!("{}::default()", class));
-                    }
-                }
-            }
+        SendKind::ParamsExpect { .. } => "todo!(\"params.expect\")".to_string(),
+
+        SendKind::ParamsIndex { .. } => {
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("crate::http::params().expect({arg})")
         }
-    }
 
-    // `Class.<unsupported query method>` / chain continuations — Phase
-    // 4c has no query builder runtime. Emit the whole chain as a
-    // default-constructed collection. We only hit this arm when the
-    // outermost chain method is query-ish; lower chain methods hitch a
-    // ride because we emit from the tail.
-    if let Some(r) = recv {
-        if crate::lower::is_query_builder_method(method) {
-            if let Some(target_class) =
-                crate::lower::chain_target_class(r, ctx.known_models)
-            {
-                return Some(format!("Vec::<{}>::new()", target_class.as_str()));
-            }
-            return Some("todo!(\"query chain\")".to_string());
+        SendKind::ModelNew { class } => format!("{}::default()", class.as_str()),
+
+        SendKind::ModelFind { class, .. } => {
+            let arg = args_s.first().cloned().unwrap_or_default();
+            format!("{}::find({arg}).unwrap_or_default()", class.as_str())
         }
-    }
 
-    // Bare `*_path` / `*_url` — Rails URL helpers. No runtime yet; emit
-    // `todo!()` whose `!` type unifies wherever they're passed
-    // (`redirect_to(...)`, string concat, etc.). Accepts zero or more
-    // positional args — the route's signature varies, but todo!()
-    // doesn't care.
-    if recv.is_none()
-        && block.is_none()
-        && (method.ends_with("_path") || method.ends_with("_url"))
-    {
-        return Some("todo!(\"route helper\")".to_string());
-    }
+        SendKind::AssocLookup { target, .. } => format!("{}::default()", target.as_str()),
 
-    // `params.expect(...)` — punt on the parameter shape; `todo!()`
-    // has type `!`, so the caller's expected type (i64 for `find`,
-    // `ParamValue` for a helper return, etc.) is satisfied.
-    if method == "expect" {
-        if let Some(r) = recv {
-            if crate::lower::is_params_expr(r) {
-                return Some("todo!(\"params.expect\")".to_string());
-            }
+        SendKind::QueryChain { target: Some(target) } => {
+            format!("Vec::<{}>::new()", target.as_str())
         }
-    }
+        SendKind::QueryChain { target: None } => "todo!(\"query chain\")".to_string(),
 
-    // Strip Rails' destroy-bang: Rust idents don't allow `!`. Emit
-    // `x.destroy()` for both `destroy` and `destroy!`, same for
-    // `save!` / `update!` while we're here.
-    if let Some(r) = recv {
-        if matches!(method, "destroy!" | "save!" | "update!") {
-            let recv_s = emit_expr(r, ctx);
-            let stripped = &method[..method.len() - 1];
-            return Some(format!("{recv_s}.{stripped}()"));
+        SendKind::PathOrUrlHelper => "todo!(\"route helper\")".to_string(),
+
+        SendKind::BangStrip { recv, stripped_method, .. } => {
+            let recv_s = emit_expr(recv, ctx);
+            format!("{recv_s}.{stripped_method}()")
         }
-    }
 
-    // `respond_to do |format| ... end` → `crate::http::respond_to(
-    // |__fr| { <body with format.* calls rewritten> })`. The body's
-    // `format.html` / `format.json` Sends pick up `__fr` as the
-    // receiver via the generic emit path (they're matched on method
-    // name alone in the rewritten block). Phase 4c wires the HTML
-    // branch; JSON is a TODO comment.
-    if recv.is_none() && method == "respond_to" && block.is_some() {
-        let block_expr = block.unwrap();
-        // The Ruby block is a Lambda with one param (`|format|`);
-        // drop the lambda wrapper and render its body with a
-        // `format_router_binding` override so `format.html/.json`
-        // land on `__fr`.
-        let inner = match &*block_expr.node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => block_expr,
-        };
-        let body_rendered = emit_respond_to_body(inner, ctx);
-        let indented = body_rendered
-            .lines()
-            .map(|l| format!("    {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(format!(
-            "crate::http::respond_to(|__fr| {{\n{indented}\n    Response::default()\n}})"
-        ));
-    }
+        SendKind::InstanceUpdate => "todo!(\"Model::update\")".to_string(),
 
-    // `format.html { ... }` / `format.json { ... }` — only meaningful
-    // inside a `respond_to` block; outside, fall through. The
-    // respond_to emitter recurses into the block using a tagged
-    // `ExprNode` marker path so this arm can recognise rewritten
-    // receivers. For the simple lexical case (Var { name: "format" }
-    // or Ivar), rewrite here.
-    if let Some(r) = recv {
-        if matches!(method, "html" | "json") && crate::lower::is_format_binding(r) {
-            match method {
-                "html" => {
-                    let body_s = block
-                        .map(|b| emit_block_body(b, ctx))
-                        .unwrap_or_else(|| "    Response::default()".to_string());
-                    return Some(format!("__fr.html(|| {{\n{body_s}\n}})"));
-                }
-                "json" => {
-                    // JSON branch deferred to a later Phase 4 stage.
-                    return Some(
-                        "/* TODO: JSON branch (Phase 4e) */ Response::default()"
-                            .to_string(),
-                    );
-                }
-                _ => unreachable!(),
-            }
+        SendKind::Render { .. } => {
+            let arg = args_tuple_or_single(args_s);
+            format!("crate::http::render({arg})")
         }
-    }
 
-    // Bare `render` / `redirect_to` / `head` calls — route to the
-    // `crate::http::*` stubs. Accept any arg shape (symbol, hash,
-    // multiple args); the stubs are generic.
-    if recv.is_none() && block.is_none() {
-        match method {
-            "render" => {
-                let arg = args_tuple_or_single(args_s);
-                return Some(format!("crate::http::render({arg})"));
-            }
-            "redirect_to" => {
-                return Some(match args_s.len() {
-                    0 => "crate::http::redirect_to(())".to_string(),
-                    1 => format!("crate::http::redirect_to({})", args_s[0]),
-                    _ => format!(
-                        "crate::http::redirect_to_with({}, ({}))",
-                        args_s[0],
-                        args_s[1..].join(", "),
-                    ),
-                });
-            }
-            "head" => {
-                let arg = args_tuple_or_single(args_s);
-                return Some(format!("crate::http::head({arg})"));
-            }
-            _ => {}
-        }
-    }
+        SendKind::RedirectTo { .. } => match args_s.len() {
+            0 => "crate::http::redirect_to(())".to_string(),
+            1 => format!("crate::http::redirect_to({})", args_s[0]),
+            _ => format!(
+                "crate::http::redirect_to_with({}, ({}))",
+                args_s[0],
+                args_s[1..].join(", "),
+            ),
+        },
 
-    // `<assoc>.find(id)` — instance-side `.find` isn't the model's
-    // class-method `find`; it's a collection lookup without a Phase
-    // 4c runtime. Punt to `todo!()`. Class-method `Model::find(id)`
-    // (recv is a `Const`) is still supported — and in controllers the
-    // binding type we annotate (`Post`) doesn't match `find`'s
-    // `Option<Post>` return, so tack on `.unwrap_or_default()`.
-    if method == "find" {
-        if let Some(r) = recv {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|m| m == class) {
-                        let arg = args_s.first().cloned().unwrap_or_default();
-                        return Some(format!(
-                            "{class}::find({arg}).unwrap_or_default()"
-                        ));
-                    }
-                }
-            } else {
-                return Some("todo!(\"assoc find\")".to_string());
-            }
+        SendKind::Head { .. } => {
+            let arg = args_tuple_or_single(args_s);
+            format!("crate::http::head({arg})")
         }
-    }
 
-    // `params[:id]` / `params["id"]` — Ruby's index method on the
-    // params object. Route through the stub's generic `expect` rather
-    // than indexing (Params has no `Index` impl — generics make it
-    // awkward to give one a sane return type).
-    if method == "[]" {
-        if let Some(r) = recv {
-            if crate::lower::is_params_expr(r) {
-                let arg = args_s.first().cloned().unwrap_or_default();
-                return Some(format!("crate::http::params().expect({arg})"));
-            }
+        SendKind::RespondToBlock { body } => {
+            let body_rendered = emit_respond_to_body(body, ctx);
+            let indented = body_rendered
+                .lines()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "crate::http::respond_to(|__fr| {{\n{indented}\n    Response::default()\n}})"
+            )
         }
-    }
 
-    // `@article.update(hash)` — Phase 4c has no `update` runtime
-    // method on models. Punt with todo!() (divergent, so the `bool`
-    // expected by surrounding `if` conditions still typechecks).
-    if let Some(r) = recv {
-        if method == "update" {
-            // Only punt when recv looks like a model instance (ivar,
-            // local); class-call `X::update` is handled elsewhere.
-            let is_class_call = matches!(&*r.node, ExprNode::Const { .. });
-            if !is_class_call {
-                let _ = r;
-                let _ = args;
-                return Some("todo!(\"Model::update\")".to_string());
-            }
+        SendKind::FormatHtml { body } => {
+            // Re-wrap in a synthetic expr so emit_block_body sees the
+            // same shape it did under the old code path (a Seq or
+            // single expr as the block body).
+            let body_s = emit_block_body(body, ctx);
+            format!("__fr.html(|| {{\n{body_s}\n}})")
         }
-        // `article.comments.build(hash)` — association-builder on a
-        // controller context. Punt to `<Target>::default()` rather than
-        // `todo!()` so the resulting `let mut comment = ...` binds a
-        // concrete type (later `comment.save()` needs a real struct).
-        // Target class name comes from singularizing the chain's
-        // association name and checking known models.
-        if method == "build" || method == "create" {
-            if let ExprNode::Send {
-                recv: Some(_),
-                method: assoc_method,
-                args: inner_args,
-                ..
-            } = &*r.node
-            {
-                if inner_args.is_empty() {
-                    let target = crate::lower::singularize_to_model(
-                        assoc_method.as_str(),
-                        ctx.known_models,
-                    );
-                    if let Some(target) = target {
-                        return Some(format!("{}::default()", target.as_str()));
-                    }
-                    return Some("todo!(\"association build\")".to_string());
-                }
-            }
-        }
-    }
 
-    None
+        SendKind::FormatJson => {
+            "/* TODO: JSON branch (Phase 4e) */ Response::default()".to_string()
+        }
+    })
 }
 
 /// Render a `respond_to` block body. The body is usually an
