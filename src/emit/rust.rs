@@ -830,7 +830,9 @@ fn emit_expr(e: &Expr, ctx: EmitCtx) -> String {
                 format!("format!({fmt:?}, {})", args.join(", "))
             }
         }
-        ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args, ctx),
+        ExprNode::Send { recv, method, args, block, .. } => {
+            emit_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx)
+        }
         ExprNode::Assign { target: _, value } => emit_expr(value, ctx),
         ExprNode::Seq { exprs } => {
             exprs.iter().map(|e| emit_expr(e, ctx)).collect::<Vec<_>>().join("; ")
@@ -848,25 +850,38 @@ fn emit_expr(e: &Expr, ctx: EmitCtx) -> String {
 /// Emit an expression as the body of a `{ ... }` block, indented one level.
 /// For a Seq, each non-tail statement gets a trailing `;`; the tail stays
 /// as the block's value expression. For a single expression, emit it alone.
+/// Ruby blocks lower to `ExprNode::Lambda` in the IR, so peel one Lambda
+/// layer and emit its body — callers treat Ruby `do ... end` as block
+/// statements, not as closures.
 fn emit_block_body(e: &Expr, ctx: EmitCtx) -> String {
-    let raw = match &*e.node {
+    let inner = match &*e.node {
+        ExprNode::Lambda { body, .. } => body,
+        _ => e,
+    };
+    let raw = match &*inner.node {
         ExprNode::Seq { exprs } => {
             let mut lines: Vec<String> = Vec::new();
-            for (i, inner) in exprs.iter().enumerate() {
+            for (i, stmt) in exprs.iter().enumerate() {
                 if i == exprs.len() - 1 {
-                    lines.push(emit_expr(inner, ctx));
+                    lines.push(emit_expr(stmt, ctx));
                 } else {
-                    lines.push(format!("{};", emit_expr(inner, ctx)));
+                    lines.push(format!("{};", emit_expr(stmt, ctx)));
                 }
             }
             lines.join("\n")
         }
-        _ => emit_expr(e, ctx),
+        _ => emit_expr(inner, ctx),
     };
     raw.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
 }
 
-fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], ctx: EmitCtx) -> String {
+fn emit_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    ctx: EmitCtx,
+) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(a, ctx)).collect();
 
     // `recv[args]` sugar for the `[]` method.
@@ -880,8 +895,10 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], ctx: EmitCtx) -> 
     //   - `assert_not x` → `assert!(!x)`
     //   - `assert_not_nil x` → type-aware truthiness check
     //   - `Class.new(hash)` where Class is a known model → struct literal
+    //   - `owner.assoc.{build,create}(hash)` → struct-literal rewrite
+    //   - `assert_difference(expr, delta) { body }` → inline before/after
     if ctx.in_test {
-        if let Some(s) = emit_test_send(recv, method, args, &args_s, ctx) {
+        if let Some(s) = emit_test_send(recv, method, args, &args_s, block, ctx) {
             return s;
         }
     }
@@ -953,8 +970,31 @@ fn emit_test_send(
     method: &str,
     args: &[Expr],
     args_s: &[String],
+    block: Option<&Expr>,
     ctx: EmitCtx,
 ) -> Option<String> {
+    // `assert_difference("Class.count", delta) { body }` — measures the
+    // named count expression before and after the block, asserts the
+    // delta matches. Rails' convention is a string holding the Ruby
+    // expression to re-evaluate; we parse the common `Class.count`
+    // shape into `Class::count()` at emit time.
+    if recv.is_none() && method == "assert_difference" {
+        if let Some(body) = block {
+            if let Some(count_expr) = args
+                .first()
+                .and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => rewrite_ruby_dot_call(value),
+                    _ => None,
+                })
+            {
+                let delta = args_s.get(1).cloned().unwrap_or_else(|| "1_i64".into());
+                let body_s = emit_block_body(body, ctx);
+                return Some(format!(
+                    "{{\n            let _before = {count_expr};\n            {{\n{body_s}\n            }}\n            let _after = {count_expr};\n            assert_eq!(_after - _before, {delta})\n        }}",
+                ));
+            }
+        }
+    }
     // `articles(:one)` → `fixtures::articles::one()`
     if recv.is_none()
         && args.len() == 1
@@ -1045,6 +1085,30 @@ fn emit_test_send(
     }
 
     None
+}
+
+/// Parse a Ruby-style `"Class.method"` expression string into Rust
+/// `Class::method()` syntax, for use inside `assert_difference` and
+/// similar helpers that take a string expression. Returns `None` for
+/// shapes we don't handle; caller falls back to a TODO.
+fn rewrite_ruby_dot_call(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    let (lhs, rhs) = trimmed.split_once('.')?;
+    let is_ident = |s: &str| {
+        !s.is_empty() && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if !is_ident(lhs) || !is_ident(rhs) {
+        return None;
+    }
+    // Capitalized LHS looks like a class name → `Class::method()`.
+    // Lowercase LHS looks like an instance → `lhs.method()`.
+    let is_class = lhs.chars().next().is_some_and(|c| c.is_uppercase());
+    if is_class {
+        Some(format!("{lhs}::{rhs}()"))
+    } else {
+        Some(format!("{lhs}.{rhs}"))
+    }
 }
 
 /// Rewrite `owner.<assoc>.create(hash)` / `.build(hash)` into a
@@ -1515,123 +1579,20 @@ fn test_fn_name(desc: &str) -> String {
 }
 
 /// Heuristic: does the test body reference runtime support we haven't
-/// built yet? Walks for known "Phase 3" markers (assert_difference,
-/// a `destroy` / `destroy!` Send, `Class.count` aggregate), plus a
-/// hand-maintained list of tests whose semantics would silently fail
-/// with our no-DB save() (e.g., `belongs_to` existence checks).
+/// built yet? Phase 3 brought SQLite-backed persistence, associations,
+/// belongs_to existence, dependent destroy, and assert_difference —
+/// all previous skip reasons for real-blog now have emit support.
+/// Keep the walk as a safety net for any future test body whose shape
+/// exceeds what the current emitter handles; real-blog currently
+/// triggers none of the remaining cases.
 fn test_needs_runtime_unsupported(test: &Test) -> bool {
-    // Name-based short-circuits for tests that would compile but fail
-    // at runtime without a persistence layer. Lean; update as new
-    // fixtures surface similar cases.
-    let known_name_ignored = matches!(
-        test.name.as_str(),
-        "requires valid article"
-    );
-    if known_name_ignored {
-        return true;
-    }
-    // AST walk for runtime-dependent primitives.
     test_body_uses_unsupported(&test.body)
 }
 
-fn test_body_uses_unsupported(e: &Expr) -> bool {
-    use crate::expr::InterpPart;
-    let self_hit = match &*e.node {
-        ExprNode::Send { recv, method, .. } => {
-            let m = method.as_str();
-            if m == "assert_difference" || m == "destroy" || m == "destroy!" {
-                true
-            } else if m == "count"
-                && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }))
-            {
-                true
-            } else if m == "build" || m == "create" || m == "create!" {
-                // Association-flavored constructors (`article.comments
-                // .build(...)`, `.create(...)`) need association stubs
-                // roundhouse doesn't emit yet — Phase 3 material.
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
-    };
-    if self_hit {
-        return true;
-    }
-    // Recurse into children.
-    match &*e.node {
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                if test_body_uses_unsupported(r) {
-                    return true;
-                }
-            }
-            for a in args {
-                if test_body_uses_unsupported(a) {
-                    return true;
-                }
-            }
-            if let Some(b) = block {
-                if test_body_uses_unsupported(b) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
-            for e in exprs {
-                if test_body_uses_unsupported(e) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                if test_body_uses_unsupported(k) || test_body_uses_unsupported(v) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    if test_body_uses_unsupported(expr) {
-                        return true;
-                    }
-                }
-            }
-        }
-        ExprNode::BoolOp { left, right, .. }
-        | ExprNode::RescueModifier { expr: left, fallback: right } => {
-            if test_body_uses_unsupported(left) || test_body_uses_unsupported(right) {
-                return true;
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            if test_body_uses_unsupported(cond)
-                || test_body_uses_unsupported(then_branch)
-                || test_body_uses_unsupported(else_branch)
-            {
-                return true;
-            }
-        }
-        ExprNode::Let { value, body, .. } => {
-            if test_body_uses_unsupported(value) || test_body_uses_unsupported(body) {
-                return true;
-            }
-        }
-        ExprNode::Lambda { body, .. } => {
-            if test_body_uses_unsupported(body) {
-                return true;
-            }
-        }
-        ExprNode::Assign { value, .. } => {
-            if test_body_uses_unsupported(value) {
-                return true;
-            }
-        }
-        _ => {}
-    }
+fn test_body_uses_unsupported(_e: &Expr) -> bool {
+    // Phase 3 rounded out the list of Ruby/Rails primitives the Rust
+    // emitter handles; no real-blog pattern currently forces a skip.
+    // Add shape-specific checks back here if a future fixture demands.
     false
 }
 
