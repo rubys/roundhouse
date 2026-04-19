@@ -44,6 +44,38 @@ type Comment struct {
 \tPostID int64
 }
 
+func (c *Comment) Save() bool {
+\tif c.PostID == 0 || PostFind(c.PostID) == nil { return false }
+\tdb := Conn()
+\tif c.ID == 0 {
+\t\tres, err := db.Exec(\"INSERT INTO comments (body, post_id) VALUES (?, ?)\", c.Body, c.PostID)
+\t\tif err != nil { panic(err) }
+\t\tid, _ := res.LastInsertId()
+\t\tc.ID = id
+\t} else {
+\t\t_, err := db.Exec(\"UPDATE comments SET body = ?, post_id = ? WHERE id = ?\", c.Body, c.PostID, c.ID)
+\t\tif err != nil { panic(err) }
+\t}
+\treturn true
+}
+
+func (c *Comment) Destroy() {
+\tif _, err := Conn().Exec(\"DELETE FROM comments WHERE id = ?\", c.ID); err != nil { panic(err) }
+}
+
+func CommentCount() int64 {
+\tvar n int64
+\tif err := Conn().QueryRow(\"SELECT COUNT(*) FROM comments\").Scan(&n); err != nil { panic(err) }
+\treturn n
+}
+
+func CommentFind(id int64) *Comment {
+\trow := Conn().QueryRow(\"SELECT id, body, post_id FROM comments WHERE id = ?\", id)
+\tvar r Comment
+\tif err := row.Scan(&r.ID, &r.Body, &r.PostID); err != nil { return nil }
+\treturn &r
+}
+
 type Post struct {
 \tID int64
 \tTitle string
@@ -62,7 +94,35 @@ func (p *Post) Validate() []ValidationError {
 }
 
 func (p *Post) Save() bool {
-\treturn len(p.Validate()) == 0
+\tif len(p.Validate()) > 0 { return false }
+\tdb := Conn()
+\tif p.ID == 0 {
+\t\tres, err := db.Exec(\"INSERT INTO posts (title) VALUES (?)\", p.Title)
+\t\tif err != nil { panic(err) }
+\t\tid, _ := res.LastInsertId()
+\t\tp.ID = id
+\t} else {
+\t\t_, err := db.Exec(\"UPDATE posts SET title = ? WHERE id = ?\", p.Title, p.ID)
+\t\tif err != nil { panic(err) }
+\t}
+\treturn true
+}
+
+func (p *Post) Destroy() {
+\tif _, err := Conn().Exec(\"DELETE FROM posts WHERE id = ?\", p.ID); err != nil { panic(err) }
+}
+
+func PostCount() int64 {
+\tvar n int64
+\tif err := Conn().QueryRow(\"SELECT COUNT(*) FROM posts\").Scan(&n); err != nil { panic(err) }
+\treturn n
+}
+
+func PostFind(id int64) *Post {
+\trow := Conn().QueryRow(\"SELECT id, title FROM posts WHERE id = ?\", id)
+\tvar r Post
+\tif err := row.Scan(&r.ID, &r.Title); err != nil { return nil }
+\treturn &r
 }
 ";
     assert_eq!(models.content, expected);
