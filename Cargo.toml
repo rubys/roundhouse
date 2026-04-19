@@ -6,6 +6,8 @@ rust-version = "1.85"
 authors = ["Sam Ruby <sam@rubyred.us>"]
 description = "Rails as a specification; deployment is a build flag"
 license = "MIT OR Apache-2.0"
+homepage = "https://rubys.github.io/roundhouse/"
+repository = "https://github.com/rubys/roundhouse"
 publish = false
 
 [dependencies]
