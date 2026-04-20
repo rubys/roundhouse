@@ -22,7 +22,7 @@ pub mod schema;
 pub mod span;
 pub mod ty;
 
-pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
+pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};
 pub use app::App;
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,

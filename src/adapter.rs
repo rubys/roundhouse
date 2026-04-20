@@ -53,19 +53,40 @@ pub enum ArMethodKind {
 }
 
 /// A database adapter declares which AR methods are DB reads, DB
-/// writes, or neither. `Send + Sync` so `Analyzer` can hold a boxed
-/// adapter and be shared freely across threads.
+/// writes, or neither, and — per the adapter's backend — which
+/// effects suspend (drive `await` insertion in async-capable
+/// emitters). `Send + Sync` so `Analyzer` can hold a boxed adapter
+/// and be shared freely across threads.
 ///
-/// Deliberately minimal for the current refactor: only the
-/// effect-classification surface the analyzer already needs.
-/// Capability checks, async-suspension profiles, and diagnostic
-/// producers come as future trait methods when their respective
-/// consumers land.
+/// Capability checks and diagnostic producers come as future trait
+/// methods when their respective consumers land.
 pub trait DatabaseAdapter: Send + Sync {
     /// Classify `method` (an AR method name — no receiver context,
     /// since this is called only after the analyzer has confirmed
     /// the receiver is a class with a bound table).
     fn classify_ar_method(&self, method: &str) -> ArMethodKind;
+
+    /// Does this effect suspend under this adapter's backend?
+    ///
+    /// Async-capable emitters (Rust/axum, TypeScript/Juntos,
+    /// Python/FastAPI) consult this per Send site: when any effect
+    /// on the expression is suspending, an `await` / `.await`
+    /// prefix gets emitted. Sync-only backends (the default
+    /// `SqliteAdapter`, wrapping `better-sqlite3` / `rusqlite` /
+    /// stdlib `sqlite3`) return false uniformly — nothing
+    /// suspends, so emitted code is unconditionally synchronous.
+    ///
+    /// The default impl returns false for every effect — adapters
+    /// that support async backends override, classifying specific
+    /// effect variants (typically `DbRead` / `DbWrite` / `Net`) as
+    /// suspending. Adapters that want to classify by the effect's
+    /// payload (e.g., only suspending on a particular table) pass
+    /// the full `Effect` reference; today's `SqliteAsyncAdapter`
+    /// ignores payload and suspends on any DB effect.
+    fn is_suspending_effect(&self, effect: &crate::effect::Effect) -> bool {
+        let _ = effect;
+        false
+    }
 }
 
 /// The default adapter: SQLite semantics. Accepts the full AR query
@@ -106,6 +127,53 @@ impl DatabaseAdapter for SqliteAdapter {
             }
         }
         ArMethodKind::Unknown
+    }
+}
+
+/// SQLite semantics with async suspension — everything the default
+/// `SqliteAdapter` classifies, but with `DbRead` and `DbWrite`
+/// flagged as suspending so async-capable emitters insert `await`
+/// at every AR call site.
+///
+/// Role: the minimum-divergence second adapter. Shares the full
+/// AR surface with `SqliteAdapter` (same catalog lookups, same
+/// `classify_ar_method` behavior) — differs only on the
+/// suspending-effects axis. Exercises the metamodel's
+/// polymorphism and the eventual effects-consumption machinery
+/// without introducing a novel SQL dialect, capability profile,
+/// or runtime integration.
+///
+/// Under the hood there's no "async SQLite" today — `better-
+/// sqlite3` / `rusqlite` / stdlib `sqlite3` are all sync. Emitted
+/// `await` against them is a no-op (`await` of a non-Promise
+/// returns the value unchanged in JS / TS; Rust's `.await` on a
+/// ready future is immediate). That's the point: validate the
+/// async-emission plumbing against a backend we know works,
+/// before introducing a real async backend (IndexedDB, D1, pg-
+/// on-Node) where the awaits become load-bearing.
+///
+/// Future real async adapters (e.g., `IndexedDbAdapter`,
+/// `D1Adapter`, `PostgresTokioAdapter`) will have the same
+/// `is_suspending_effect` profile plus additional divergences:
+/// different capability profiles, possibly refusing some AR
+/// methods, different runtime symbol maps.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SqliteAsyncAdapter;
+
+impl DatabaseAdapter for SqliteAsyncAdapter {
+    fn classify_ar_method(&self, method: &str) -> ArMethodKind {
+        // Same AR surface as the sync SqliteAdapter. The divergence
+        // lives entirely in `is_suspending_effect` below — we
+        // delegate to the catalog-backed classification to keep
+        // the two adapters in lockstep on the AR method surface.
+        SqliteAdapter.classify_ar_method(method)
+    }
+
+    fn is_suspending_effect(&self, effect: &crate::effect::Effect) -> bool {
+        matches!(
+            effect,
+            crate::effect::Effect::DbRead { .. } | crate::effect::Effect::DbWrite { .. },
+        )
     }
 }
 
@@ -163,6 +231,94 @@ mod tests {
         let a = NoDbAdapter;
         for m in ["all", "find", "save", "destroy", "count"] {
             assert_eq!(a.classify_ar_method(m), ArMethodKind::Unknown);
+        }
+    }
+
+    // Suspending-effects — the axis along which SqliteAsyncAdapter
+    // diverges from the default sync SqliteAdapter.
+
+    fn table(name: &str) -> crate::ident::TableRef {
+        crate::ident::TableRef(crate::ident::Symbol::from(name))
+    }
+
+    #[test]
+    fn sqlite_sync_suspends_nothing() {
+        use crate::effect::Effect;
+        let a = SqliteAdapter;
+        let cases = [
+            Effect::DbRead { table: table("articles") },
+            Effect::DbWrite { table: table("articles") },
+            Effect::Io,
+            Effect::Time,
+            Effect::Random,
+            Effect::Log,
+            Effect::Net { host: None },
+        ];
+        for e in &cases {
+            assert!(
+                !a.is_suspending_effect(e),
+                "SqliteAdapter should not suspend on {e:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_async_suspends_db_effects() {
+        use crate::effect::Effect;
+        let a = SqliteAsyncAdapter;
+        for e in [
+            Effect::DbRead { table: table("articles") },
+            Effect::DbWrite { table: table("articles") },
+            Effect::DbRead { table: table("comments") },
+            Effect::DbWrite { table: table("comments") },
+        ] {
+            assert!(
+                a.is_suspending_effect(&e),
+                "SqliteAsyncAdapter should suspend on {e:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_async_does_not_suspend_non_db_effects() {
+        use crate::effect::Effect;
+        let a = SqliteAsyncAdapter;
+        // IO / Time / Random / Log / Net don't classify as
+        // DB-suspending under SqliteAsyncAdapter — async is
+        // specific to the DB backend, not universal. A future
+        // AsyncNetAdapter would add Net to its suspending set;
+        // that's a separate profile, not this one.
+        for e in [
+            Effect::Io,
+            Effect::Time,
+            Effect::Random,
+            Effect::Log,
+            Effect::Net { host: None },
+            Effect::Net { host: Some("example.com".into()) },
+        ] {
+            assert!(
+                !a.is_suspending_effect(&e),
+                "SqliteAsyncAdapter should not suspend on {e:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sync_and_async_share_ar_classification() {
+        // The two adapters differ only in suspending-effects;
+        // their AR method classification is identical because
+        // both consult the shared catalog.
+        let sync = SqliteAdapter;
+        let async_ = SqliteAsyncAdapter;
+        for m in [
+            "all", "find", "where", "limit", "save", "destroy",
+            "count", "pluck", "unknown_method", "title",
+        ] {
+            assert_eq!(
+                sync.classify_ar_method(m),
+                async_.classify_ar_method(m),
+                "AR classification should match for `{m}`",
+            );
         }
     }
 }
