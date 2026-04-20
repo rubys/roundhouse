@@ -1083,20 +1083,23 @@ fn emit_ts_action(
             writeln!(out, "}}").unwrap();
         }
         ActionKind::Show | ActionKind::Edit => {
-            let suffix = if la.kind == ActionKind::Show { "Show" } else { "Edit" };
-            let view_fn = ts_view_fn(model_class, suffix);
-            writeln!(
-                out,
-                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
+            // Migrated to the walker path — the normalization
+            // pipeline (resolve_before_actions, etc.) plus
+            // emit_ts_action_body produces the right code for the
+            // canonical scaffold shape: body is empty or `@record =
+            // Model.find(...)`, set_article-style before_action
+            // populates the record, implicit render terminates.
             if la.has_model {
-                find_record(out);
-                writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
+                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
             } else {
+                writeln!(
+                    out,
+                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
+                )
+                .unwrap();
                 writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
             }
-            writeln!(out, "}}").unwrap();
         }
         ActionKind::New => {
             let view_fn = ts_view_fn(model_class, "New");
@@ -1242,44 +1245,55 @@ fn emit_ts_action(
             writeln!(out, "}}").unwrap();
         }
         ActionKind::Unknown => {
-            let ctx = TsCtrlCtx {
-                known_models,
-                model_class,
-                resource,
-                parent: la.parent.as_ref(),
-            };
-            // Pre-emit normalization pipeline — each pass is
-            // target-neutral and lives in `src/lower/`:
-            //   1. resolve_before_actions prepends each applicable
-            //      before_action callback's body to the action body,
-            //      so set_article-style ivar population is visible.
-            //   2. unwrap_respond_to collapses `respond_to {
-            //      format.html { … } format.json { … } }` into just
-            //      its HTML branch (JSON deferred per Phase 4c).
-            //   3. synthesize_implicit_render appends a `render
-            //      :<action>` terminal when the body doesn't end in
-            //      one — encodes the Rails implicit-render convention.
-            //   4. rewrite_for_controller lifts ivars to locals and
-            //      rewrites params[:k] to context.params.k.
-            // After this the walker sees a flat, terminal-bearing
-            // body with no Rails idioms left.
-            let with_callbacks =
-                crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
-            let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
-            let normalized =
-                crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
-            let rewritten = rewrite_for_controller(&normalized);
-            let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
-            let ctx_param = if uses_context { "context" } else { "_context" };
-            writeln!(
-                out,
-                "export async function {name}({ctx_param}: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
-            out.push_str(&body_src);
-            writeln!(out, "}}").unwrap();
+            emit_ts_action_via_walker(out, la, body, known_models, controller, name);
         }
     }
+}
+
+/// Run the normalization pipeline and statement walker against one
+/// action body, then write the `export async function …` wrapper.
+/// Shared by every ActionKind arm that has migrated off the
+/// hand-coded scaffold template — presently Show / Edit / Unknown,
+/// growing as more arms migrate.
+///
+/// The pipeline's four passes (resolve_before_actions → unwrap_
+/// respond_to → synthesize_implicit_render → rewrite_for_controller)
+/// all live in `src/lower/` except the last, which is TS-specific.
+/// See `src/lower/controller.rs` for the shared passes.
+fn emit_ts_action_via_walker(
+    out: &mut String,
+    la: &crate::lower::LoweredAction,
+    body: &Expr,
+    known_models: &[Symbol],
+    controller: &Controller,
+    name: &str,
+) {
+    let ctx = TsCtrlCtx {
+        known_models,
+        model_class: la.model_class.as_str(),
+        resource: la.resource.as_str(),
+        parent: la.parent.as_ref(),
+    };
+    let with_callbacks =
+        crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
+    let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
+    let normalized =
+        crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
+    let rewritten = rewrite_for_controller(&normalized);
+    let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
+    // uses_context is set by SendKind arms that render `context.*`,
+    // but rewrite_for_controller can also produce `context.params.k`
+    // as a plain chained Send that falls through the generic path.
+    // Post-scan the body to catch those.
+    let uses_context = uses_context || body_src.contains("context.");
+    let ctx_param = if uses_context { "context" } else { "_context" };
+    writeln!(
+        out,
+        "export async function {name}({ctx_param}: ActionContext): Promise<ActionResponse> {{",
+    )
+    .unwrap();
+    out.push_str(&body_src);
+    writeln!(out, "}}").unwrap();
 }
 
 /// Immutable context for walking a controller action body — the
@@ -1432,9 +1446,21 @@ fn emit_ts_controller_send(
             let key_s = emit_ts_ctrl_expr(key, ctx, state);
             ControllerStmt::Expr(format!("context.params[{key_s}]"))
         }
-        SendKind::ParamsExpect { .. } => {
+        SendKind::ParamsExpect { args } => {
             state.uses_context = true;
-            ControllerStmt::Expr("context.params /* TODO: params.expect */".to_string())
+            // Single-symbol shape `params.expect(:id)` renders the
+            // same as `params[:id]` after rewrite — the value at
+            // that key. The strong-params hash shape
+            // `params.expect(article: [:title, :body])` is left as
+            // a TODO; it's handled per-target via `la.permitted`
+            // metadata in the scaffold Create/Update path.
+            let fragment = match args.first().map(|e| &*e.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value: key } }) => {
+                    format!("context.params.{}", key.as_str())
+                }
+                _ => "context.params /* TODO: params.expect hash */".to_string(),
+            };
+            ControllerStmt::Expr(fragment)
         }
         SendKind::ModelNew { class } => {
             ControllerStmt::Expr(format!("new {}()", class.as_str()))
