@@ -111,10 +111,12 @@ fn show_action_finds_record_by_id_param() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
     let content = find(&files, "lib/posts_controller.ex");
-    // Phase 4d pass-2: show action reads `id` from context.params,
-    // calls `Model.find/1`, falls back to an empty struct.
+    // Walker path: `@post = Post.find(params[:id])` inlines the
+    // id extraction at the call site — a single-expression
+    // `Post.find(String.to_integer(to_string(context.params["id"])))
+    // || %Post{}` replacing the scaffold's two-step record_id bind.
     assert!(
-        content.contains("Post.find(record_id) || %Post{}"),
+        content.contains("Post.find(String.to_integer(to_string(context.params[\"id\"]))) || %Post{}"),
         "got:\n{content}"
     );
 }

@@ -860,7 +860,7 @@ fn emit_controller_file_pass2(
             parent.as_ref(),
             &permitted,
         );
-        emit_ex_action(&mut s, &la);
+        emit_ex_action(&mut s, &la, &action.body, known_models, c);
         writeln!(s).unwrap();
     }
     writeln!(s, "end").unwrap();
@@ -877,228 +877,406 @@ fn ex_view_fn(model_class: &str, suffix: &str) -> String {
     format!("render_{plural}_{}", suffix.to_lowercase())
 }
 
-/// Render one LoweredAction as an Elixir `def`. Mirrors the Go
-/// and Python renderers; key Elixir specifics are the `%{record |
-/// k: v}` struct-update syntax, the `String.to_integer(to_string(
-/// ...))` coercion from stringly params, and the trailing `_context`
-/// dance that --warnings-as-errors insists on.
-fn emit_ex_action(out: &mut String, la: &crate::lower::LoweredAction) {
-    use crate::lower::ActionKind;
+/// Render one LoweredAction as an Elixir `def`. Body emission flows
+/// through the walker; the ActionKind dispatch is gone (precedent
+/// from TS/Rust/Python/Crystal/Go). Elixir's key distinctive
+/// idioms: immutable structs, `%{r | field: v}` update syntax,
+/// `Module.function(struct)` dispatch (so `record.save` becomes
+/// `Model.save(record)`).
+fn emit_ex_action(
+    out: &mut String,
+    la: &crate::lower::LoweredAction,
+    body: &Expr,
+    known_models: &[Symbol],
+    controller: &Controller,
+) {
     let name = la.name.as_str();
-    let model_class = la.model_class.as_str();
-    let resource = la.resource.as_str();
 
-    let empty_stub = |out: &mut String, reads_ctx: bool| {
-        let arg = if reads_ctx { "context" } else { "_context" };
-        writeln!(out, "  def {name}({arg}) do").unwrap();
+    if !la.has_model {
+        writeln!(out, "  def {name}(_context) do").unwrap();
         writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
         writeln!(out, "  end").unwrap();
-    };
+        return;
+    }
 
-    let load_record = |out: &mut String| {
-        writeln!(
-            out,
-            "    record_id = String.to_integer(to_string(context.params[\"id\"]))"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    record = {model_class}.find(record_id) || %{model_class}{{}}"
-        )
-        .unwrap();
-    };
+    let normalized =
+        crate::lower::normalize_action_body(controller, la.name.as_str(), body);
 
-    match la.kind {
-        ActionKind::Index => {
-            let view_fn = ex_view_fn(model_class, "index");
-            writeln!(out, "  def {name}(_context) do").unwrap();
-            if la.has_model {
-                writeln!(out, "    records = {model_class}.all()").unwrap();
-                writeln!(
-                    out,
-                    "    %ActionResponse{{body: App.Views.{view_fn}(records)}}"
-                )
-                .unwrap();
-            } else {
-                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+    let ctx = ExActionCtx {
+        known_models,
+        model_class: la.model_class.as_str(),
+        resource: la.resource.as_str(),
+        parent: la.parent.as_ref(),
+        permitted: &la.permitted,
+    };
+    let mut state = ExActionState::new();
+    let mut body_src = String::new();
+    emit_ex_ctrl_stmt(&normalized, &mut body_src, &ctx, 2, &mut state);
+
+    let arg = if state.uses_context || body_src.contains("context") {
+        "context"
+    } else {
+        "_context"
+    };
+    writeln!(out, "  def {name}({arg}) do").unwrap();
+    out.push_str(&body_src);
+    writeln!(out, "  end").unwrap();
+}
+
+struct ExActionCtx<'a> {
+    known_models: &'a [Symbol],
+    model_class: &'a str,
+    resource: &'a str,
+    parent: Option<&'a crate::lower::NestedParent>,
+    permitted: &'a [String],
+}
+
+struct ExActionState {
+    uses_context: bool,
+    last_local: Option<String>,
+    /// True when the most recently bound local was created by the
+    /// Create-pattern expansion (a brand-new struct). The Elixir
+    /// post-save id rebind only applies in that case — Update
+    /// flows load an existing record whose id is already set, so
+    /// rebinding to `last_insert_rowid()` would corrupt it.
+    last_local_is_new: bool,
+}
+
+impl ExActionState {
+    fn new() -> Self { Self { uses_context: false, last_local: None, last_local_is_new: false } }
+}
+
+fn emit_ex_ctrl_stmt(
+    expr: &Expr,
+    out: &mut String,
+    ctx: &ExActionCtx<'_>,
+    depth: usize,
+    state: &mut ExActionState,
+) {
+    let indent = "  ".repeat(depth);
+    match &*expr.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                emit_ex_ctrl_stmt(e, out, ctx, depth, state);
             }
-            writeln!(out, "  end").unwrap();
         }
-        ActionKind::Show | ActionKind::Edit => {
-            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
-            let view_fn = ex_view_fn(model_class, suffix);
-            let arg = if la.has_model { "context" } else { "_context" };
-            writeln!(out, "  def {name}({arg}) do").unwrap();
-            if la.has_model {
-                load_record(out);
-                writeln!(
-                    out,
-                    "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
-                )
-                .unwrap();
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if let Some(class) = crate::lower::model_new_with_strong_params(
+                value, ctx.known_models, ctx.resource,
+            ) {
+                emit_ex_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
+                state.last_local_is_new = true;
             } else {
-                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+                let rhs = emit_ex_ctrl_expr(value, ctx, state);
+                writeln!(out, "{indent}{name} = {rhs}").unwrap();
+                state.last_local_is_new = false;
             }
-            writeln!(out, "  end").unwrap();
+            state.last_local = Some(name.as_str().to_string());
         }
-        ActionKind::New => {
-            let view_fn = ex_view_fn(model_class, "new");
-            writeln!(out, "  def {name}(_context) do").unwrap();
-            if la.has_model {
-                writeln!(out, "    record = %{model_class}{{}}").unwrap();
-                writeln!(
-                    out,
-                    "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let update_recv = crate::lower::update_with_strong_params(cond, ctx.resource);
+            let (cond_s, is_save_cond, save_recv_opt) = if let Some(recv) = update_recv {
+                let recv_s = emit_ex_ctrl_expr(recv, ctx, state);
+                emit_ex_update_field_assigns(out, &recv_s, &indent, ctx, state);
+                (
+                    format!("{}.save({recv_s})", ctx.model_class),
+                    true,
+                    Some(recv_s),
                 )
-                .unwrap();
             } else {
-                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-            }
-            writeln!(out, "  end").unwrap();
-        }
-        ActionKind::Create => {
-            if !la.has_model {
-                empty_stub(out, false);
-                return;
-            }
-            let uses_context = la.parent.is_some() || !la.permitted.is_empty();
-            let arg = if uses_context { "context" } else { "_context" };
-            writeln!(out, "  def {name}({arg}) do").unwrap();
-            writeln!(out, "    record = %{model_class}{{}}").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "    record = %{{record | {0}_id: String.to_integer(to_string(context.params[\"{0}_id\"]))}}",
-                    p.singular
-                )
-                .unwrap();
-            }
-            let field_assigns: Vec<String> = la
-                .permitted
-                .iter()
-                .map(|field| {
-                    format!(
-                        "{field}: Map.get(context.params, \"{resource}[{field}]\", \"\")"
+                let s = emit_ex_ctrl_expr(cond, ctx, state);
+                // Recognize save-cond so we can synthesize the
+                // post-save id rebind Elixir needs (the runtime's
+                // save/1 doesn't mutate; last_insert_rowid() is the
+                // bridge back to a record with the assigned id).
+                let bare_save = detect_save_cond(cond, ctx);
+                (s, bare_save.is_some(), bare_save)
+            };
+            writeln!(out, "{indent}if {cond_s} do").unwrap();
+            // Post-save id rebind — Elixir's save/1 doesn't mutate,
+            // so newly-inserted records lack their id. Gate on:
+            //   * the cond was a `.save` on a local (is_save_cond)
+            //   * the local was freshly built via Create-pattern
+            //     (last_local_is_new) — Update flows already have
+            //     the id from ModelFind, rebinding would corrupt it
+            //   * top-level resource (no parent) — nested redirects
+            //     target the parent, so the rebind would leave the
+            //     freshly-bound local unused, tripping
+            //     --warnings-as-errors
+            if is_save_cond && state.last_local_is_new && ctx.parent.is_none() {
+                if let Some(recv_s) = save_recv_opt {
+                    let inner_indent = "  ".repeat(depth + 1);
+                    writeln!(
+                        out,
+                        "{inner_indent}{recv_s} = %{{{recv_s} | id: Roundhouse.Db.last_insert_rowid()}}",
                     )
-                })
-                .collect();
-            if !field_assigns.is_empty() {
-                writeln!(
-                    out,
-                    "    record = %{{record | {}}}",
-                    field_assigns.join(", ")
-                )
-                .unwrap();
+                    .unwrap();
+                }
             }
-            writeln!(out, "    if {model_class}.save(record) do").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-                    p.singular,
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    out,
-                    "      record = %{{record | id: Roundhouse.Db.last_insert_rowid()}}"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
-                )
-                .unwrap();
+            emit_ex_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+            if !crate::lower::is_empty_body(else_branch) {
+                writeln!(out, "{indent}else").unwrap();
+                emit_ex_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
             }
-            writeln!(out, "    else").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-                    p.singular,
-                )
-                .unwrap();
-            } else {
-                let view_fn = ex_view_fn(model_class, "new");
-                writeln!(
-                    out,
-                    "      %ActionResponse{{status: 422, body: App.Views.{view_fn}(record)}}"
-                )
-                .unwrap();
-            }
-            writeln!(out, "    end").unwrap();
-            writeln!(out, "  end").unwrap();
+            writeln!(out, "{indent}end").unwrap();
         }
-        ActionKind::Update => {
-            if !la.has_model {
-                empty_stub(out, false);
-                return;
+        ExprNode::Send { recv, method, args, block, .. } => {
+            match emit_ex_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+                Some(ExCtrlStmt::Response(r)) => writeln!(out, "{indent}{r}").unwrap(),
+                Some(ExCtrlStmt::Expr(s)) => writeln!(out, "{indent}{s}").unwrap(),
+                None => {
+                    let s = emit_ex_ctrl_expr(expr, ctx, state);
+                    writeln!(out, "{indent}{s}").unwrap();
+                }
             }
-            writeln!(out, "  def {name}(context) do").unwrap();
-            load_record(out);
-            for field in &la.permitted {
-                writeln!(
-                    out,
-                    "    record = if Map.has_key?(context.params, \"{resource}[{field}]\"), do: %{{record | {field}: context.params[\"{resource}[{field}]\"]}}, else: record"
-                )
-                .unwrap();
-            }
-            writeln!(out, "    if {model_class}.save(record) do").unwrap();
-            writeln!(
-                out,
-                "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
-            )
-            .unwrap();
-            writeln!(out, "    else").unwrap();
-            let edit_view = ex_view_fn(model_class, "edit");
-            writeln!(
-                out,
-                "      %ActionResponse{{status: 422, body: App.Views.{edit_view}(record)}}"
-            )
-            .unwrap();
-            writeln!(out, "    end").unwrap();
-            writeln!(out, "  end").unwrap();
         }
-        ActionKind::Destroy => {
-            if !la.has_model {
-                empty_stub(out, false);
-                return;
+        _ => {
+            let s = emit_ex_ctrl_expr(expr, ctx, state);
+            if !s.is_empty() {
+                writeln!(out, "{indent}{s}").unwrap();
             }
-            writeln!(out, "  def {name}(context) do").unwrap();
-            writeln!(
-                out,
-                "    record_id = String.to_integer(to_string(context.params[\"id\"]))"
-            )
-            .unwrap();
-            writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
-            writeln!(
-                out,
-                "    if record != nil, do: {model_class}.destroy(record)"
-            )
-            .unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "    %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-                    p.singular,
-                )
-                .unwrap();
-            } else {
-                let plural = crate::naming::pluralize_snake(model_class);
-                writeln!(
-                    out,
-                    "    %ActionResponse{{status: 303, location: {plural}_path()}}"
-                )
-                .unwrap();
-            }
-            writeln!(out, "  end").unwrap();
-        }
-        ActionKind::Unknown => {
-            writeln!(out, "  def {name}(_context) do").unwrap();
-            writeln!(out, "    %ActionResponse{{status: 501}}").unwrap();
-            writeln!(out, "  end").unwrap();
         }
     }
+}
+
+fn emit_ex_ctrl_expr(expr: &Expr, ctx: &ExActionCtx<'_>, state: &mut ExActionState) -> String {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+        if let Some(stmt) = emit_ex_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+            return match stmt { ExCtrlStmt::Response(r) => r, ExCtrlStmt::Expr(s) => s };
+        }
+        let args_s: Vec<String> = args.iter().map(|a| emit_ex_ctrl_expr(a, ctx, state)).collect();
+        return match recv {
+            None if args.is_empty() => method.to_string(),
+            None => format!("{method}({})", args_s.join(", ")),
+            Some(r) => {
+                // Elixir can't call `recv.method(args)` the way OO
+                // languages do. For known-model method calls on a
+                // local (e.g. `post.save` or `post.destroy`),
+                // rewrite to `Module.method(local, args...)`.
+                let recv_s = emit_ex_ctrl_expr(r, ctx, state);
+                if is_bare_ex_ident(&recv_s) {
+                    let all_args: Vec<String> = std::iter::once(recv_s)
+                        .chain(args_s.iter().cloned())
+                        .collect();
+                    format!("{}.{method}({})", ctx.model_class, all_args.join(", "))
+                } else {
+                    // Map/struct field access stays as `recv.field`.
+                    if args.is_empty() {
+                        format!("{recv_s}.{method}")
+                    } else {
+                        format!("{recv_s}.{method}({})", args_s.join(", "))
+                    }
+                }
+            }
+        };
+    }
+    if let ExprNode::Ivar { name } = &*expr.node {
+        return name.to_string();
+    }
+    emit_expr(expr, None)
+}
+
+enum ExCtrlStmt { Response(String), Expr(String) }
+
+fn emit_ex_ctrl_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    ctx: &ExActionCtx<'_>,
+    state: &mut ExActionState,
+) -> Option<ExCtrlStmt> {
+    use crate::lower::SendKind;
+    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => {
+            state.uses_context = true;
+            ExCtrlStmt::Expr("context.params".to_string())
+        }
+        SendKind::ParamsIndex { key } => {
+            state.uses_context = true;
+            match &*key.node {
+                ExprNode::Lit { value: Literal::Sym { value: k } } => ExCtrlStmt::Expr(
+                    format!("String.to_integer(to_string(context.params[\"{}\"]))", k.as_str()),
+                ),
+                _ => {
+                    let ks = emit_ex_ctrl_expr(key, ctx, state);
+                    ExCtrlStmt::Expr(format!("context.params[{ks}]"))
+                }
+            }
+        }
+        SendKind::ParamsExpect { args: pe_args } => {
+            state.uses_context = true;
+            match pe_args.first().map(|e| &*e.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value: k } }) => ExCtrlStmt::Expr(
+                    format!("String.to_integer(to_string(context.params[\"{}\"]))", k.as_str()),
+                ),
+                _ => ExCtrlStmt::Expr("context.params # TODO: params.expect hash".to_string()),
+            }
+        }
+        SendKind::ModelNew { class } => ExCtrlStmt::Expr(format!("%{}{{}}", class.as_str())),
+        SendKind::ModelFind { class, id } => {
+            let id_s = emit_ex_ctrl_expr(id, ctx, state);
+            ExCtrlStmt::Expr(format!("{}.find({id_s}) || %{}{{}}", class.as_str(), class.as_str()))
+        }
+        SendKind::QueryChain { target: Some(target) } => {
+            ExCtrlStmt::Expr(format!("{}.all()", target.as_str()))
+        }
+        SendKind::QueryChain { target: None } => ExCtrlStmt::Expr("[]".to_string()),
+        SendKind::AssocLookup { target, outer_method } => match outer_method {
+            "find" => {
+                let id_s = args.first().map(|a| emit_ex_ctrl_expr(a, ctx, state))
+                    .unwrap_or_else(|| "0".to_string());
+                ExCtrlStmt::Expr(format!("{}.find({id_s}) || %{}{{}}", target.as_str(), target.as_str()))
+            }
+            _ => ExCtrlStmt::Expr(format!("%{}{{}}", target.as_str())),
+        },
+        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+            // Elixir: `record.save!` → `Model.save(record)`.
+            let recv_s = emit_ex_ctrl_expr(recv, ctx, state);
+            let mut call_args = vec![recv_s];
+            for a in bs_args {
+                call_args.push(emit_ex_ctrl_expr(a, ctx, state));
+            }
+            ExCtrlStmt::Expr(format!(
+                "{}.{stripped_method}({})",
+                ctx.model_class,
+                call_args.join(", "),
+            ))
+        }
+        SendKind::InstanceUpdate => ExCtrlStmt::Expr("false".to_string()),
+        SendKind::PathOrUrlHelper => {
+            let helper = method.strip_suffix("_path").or_else(|| method.strip_suffix("_url"))
+                .unwrap_or(method);
+            ExCtrlStmt::Expr(format!("{helper}_path()"))
+        }
+        SendKind::Render { args } => ExCtrlStmt::Response(emit_ex_render(args, ctx, state)),
+        SendKind::RedirectTo { args } => ExCtrlStmt::Response(emit_ex_redirect_to(args, ctx, state)),
+        SendKind::Head { args } => {
+            let status = args.first().and_then(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                    Some(crate::lower::status_sym_to_code(s.as_str())),
+                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                _ => None,
+            }).unwrap_or(200);
+            ExCtrlStmt::Response(format!("%ActionResponse{{status: {status}}}"))
+        }
+        SendKind::RespondToBlock { .. }
+        | SendKind::FormatHtml { .. }
+        | SendKind::FormatJson => ExCtrlStmt::Expr(
+            "%ActionResponse{} # unreachable: respond_to not normalized".to_string(),
+        ),
+    })
+}
+
+fn emit_ex_render(args: &[Expr], ctx: &ExActionCtx<'_>, state: &mut ExActionState) -> String {
+    if let Some(first) = args.first() {
+        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+            let view_fn = ex_view_fn(ctx.model_class, sym.as_str());
+            let arg = state.last_local.clone().unwrap_or_else(|| "nil".to_string());
+            let body_part = format!("body: App.Views.{view_fn}({arg})");
+            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                Some(status) => format!("%ActionResponse{{status: {status}, {body_part}}}"),
+                None => format!("%ActionResponse{{{body_part}}}"),
+            };
+        }
+        let body_s = emit_ex_ctrl_expr(first, ctx, state);
+        return format!("%ActionResponse{{body: {body_s}}}");
+    }
+    "%ActionResponse{}".to_string()
+}
+
+fn emit_ex_redirect_to(args: &[Expr], ctx: &ExActionCtx<'_>, state: &mut ExActionState) -> String {
+    let Some(first) = args.first() else {
+        return "%ActionResponse{status: 303}".to_string();
+    };
+    let loc = emit_ex_ctrl_expr(first, ctx, state);
+    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+    if is_bare_ex_ident(&loc) {
+        let helper = format!("{loc}_path");
+        let id_access = format!("{loc}.id");
+        return format!("%ActionResponse{{status: {status}, location: {helper}({id_access})}}");
+    }
+    format!("%ActionResponse{{status: {status}, location: {loc}}}")
+}
+
+fn emit_ex_create_expansion(
+    out: &mut String,
+    var_name: &str,
+    class: &str,
+    indent: &str,
+    ctx: &ExActionCtx<'_>,
+    state: &mut ExActionState,
+) {
+    writeln!(out, "{indent}{var_name} = %{class}{{}}").unwrap();
+    if let Some(parent) = ctx.parent {
+        writeln!(
+            out,
+            "{indent}{var_name} = %{{{var_name} | {0}_id: String.to_integer(to_string(context.params[\"{0}_id\"]))}}",
+            parent.singular,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+    if !ctx.permitted.is_empty() {
+        let assigns: Vec<String> = ctx
+            .permitted
+            .iter()
+            .map(|f| format!("{f}: Map.get(context.params, \"{}[{f}]\", \"\")", ctx.resource))
+            .collect();
+        writeln!(
+            out,
+            "{indent}{var_name} = %{{{var_name} | {}}}",
+            assigns.join(", "),
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+fn emit_ex_update_field_assigns(
+    out: &mut String,
+    recv_s: &str,
+    indent: &str,
+    ctx: &ExActionCtx<'_>,
+    state: &mut ExActionState,
+) {
+    for field in ctx.permitted {
+        writeln!(
+            out,
+            "{indent}{recv_s} = if Map.has_key?(context.params, \"{0}[{field}]\"), do: %{{{recv_s} | {field}: context.params[\"{0}[{field}]\"]}}, else: {recv_s}",
+            ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+/// If `cond` is the shape `<recv>.save` (a Send where we'd rewrite
+/// to `Model.save(recv)`), return the receiver's emitted string —
+/// callers use it to synthesize the post-save id rebind Elixir
+/// needs. Returns None for any other cond shape.
+fn detect_save_cond(cond: &Expr, _ctx: &ExActionCtx<'_>) -> Option<String> {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "save" || !args.is_empty() {
+        return None;
+    }
+    // Must be on a local (ivar rewritten to Var, or still Var).
+    match &*r.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+fn is_bare_ex_ident(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return false; }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first == b'_') { return false; }
+    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 // Pass-2 route helpers -------------------------------------------------
