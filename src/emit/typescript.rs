@@ -1052,197 +1052,21 @@ fn emit_ts_action(
     known_models: &[Symbol],
     controller: &Controller,
 ) {
-    use crate::lower::ActionKind;
     let name = if la.name == "new" { "$new" } else { la.name.as_str() };
-    let model_class = la.model_class.as_str();
-    let resource = la.resource.as_str();
-
-    let find_record = |out: &mut String| {
-        writeln!(out, "  const id = Number(context.params.id);").unwrap();
+    if la.has_model {
+        emit_ts_action_via_walker(out, la, body, known_models, controller, name);
+    } else {
+        // Actions on controllers with no associated model (e.g.
+        // ApplicationController) emit a 200-empty stub; the walker
+        // would try to synthesize a view-fn reference that doesn't
+        // resolve.
         writeln!(
             out,
-            "  const record = {model_class}.find(id) ?? new {model_class}();"
+            "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
         )
         .unwrap();
-    };
-
-    match la.kind {
-        ActionKind::Index => {
-            if la.has_model {
-                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
-            } else {
-                writeln!(
-                    out,
-                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-                )
-                .unwrap();
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-            }
-        }
-        ActionKind::Show | ActionKind::Edit => {
-            // Migrated to the walker path — the normalization
-            // pipeline (resolve_before_actions, etc.) plus
-            // emit_ts_action_body produces the right code for the
-            // canonical scaffold shape: body is empty or `@record =
-            // Model.find(...)`, set_article-style before_action
-            // populates the record, implicit render terminates.
-            if la.has_model {
-                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
-            } else {
-                writeln!(
-                    out,
-                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-                )
-                .unwrap();
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-            }
-        }
-        ActionKind::New => {
-            if la.has_model {
-                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
-            } else {
-                writeln!(
-                    out,
-                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-                )
-                .unwrap();
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-            }
-        }
-        ActionKind::Create => {
-            writeln!(
-                out,
-                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
-            if !la.has_model {
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-                return;
-            }
-            writeln!(out, "  const record = new {model_class}();").unwrap();
-            if let Some(parent) = &la.parent {
-                writeln!(
-                    out,
-                    "  (record as any).{}_id = Number(context.params.{}_id);",
-                    parent.singular, parent.singular,
-                )
-                .unwrap();
-            }
-            for field in &la.permitted {
-                writeln!(
-                    out,
-                    "  (record as any).{field} = context.params[\"{resource}[{field}]\"] ?? \"\";",
-                )
-                .unwrap();
-            }
-            writeln!(out, "  if (record.save) {{").unwrap();
-            if let Some(parent) = &la.parent {
-                writeln!(
-                    out,
-                    "    return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-                    parent.singular,
-                    parent.singular,
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    out,
-                    "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
-                )
-                .unwrap();
-            }
-            writeln!(out, "  }}").unwrap();
-            if let Some(parent) = &la.parent {
-                // Comment scaffold redirects back to parent even on
-                // validation failure (`redirect_to @article, alert: ...`).
-                writeln!(
-                    out,
-                    "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-                    parent.singular, parent.singular,
-                )
-                .unwrap();
-            } else {
-                let view_fn = ts_view_fn(model_class, "New");
-                writeln!(
-                    out,
-                    "  return {{ status: 422, body: Views.{view_fn}(record) }};",
-                )
-                .unwrap();
-            }
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::Update => {
-            writeln!(
-                out,
-                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
-            if !la.has_model {
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-                return;
-            }
-            find_record(out);
-            for field in &la.permitted {
-                writeln!(
-                    out,
-                    "  if (context.params[\"{resource}[{field}]\"] !== undefined) {{ (record as any).{field} = context.params[\"{resource}[{field}]\"]; }}",
-                )
-                .unwrap();
-            }
-            writeln!(out, "  if (record.save) {{").unwrap();
-            writeln!(
-                out,
-                "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
-            )
-            .unwrap();
-            writeln!(out, "  }}").unwrap();
-            let edit_view = ts_view_fn(model_class, "Edit");
-            writeln!(
-                out,
-                "  return {{ status: 422, body: Views.{edit_view}(record) }};",
-            )
-            .unwrap();
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::Destroy => {
-            writeln!(
-                out,
-                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
-            if !la.has_model {
-                writeln!(out, "  return {{ body: \"\" }};").unwrap();
-                writeln!(out, "}}").unwrap();
-                return;
-            }
-            writeln!(out, "  const id = Number(context.params.id);").unwrap();
-            writeln!(out, "  const record = {model_class}.find(id);").unwrap();
-            writeln!(out, "  if (record) {{ record.destroy; }}").unwrap();
-            if let Some(parent) = &la.parent {
-                writeln!(
-                    out,
-                    "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-                    parent.singular, parent.singular,
-                )
-                .unwrap();
-            } else {
-                let plural = crate::naming::pluralize_snake(model_class);
-                writeln!(
-                    out,
-                    "  return {{ status: 303, location: routeHelpers.{plural}Path() }};",
-                )
-                .unwrap();
-            }
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::Unknown => {
-            emit_ts_action_via_walker(out, la, body, known_models, controller, name);
-        }
+        writeln!(out, "  return {{ body: \"\" }};").unwrap();
+        writeln!(out, "}}").unwrap();
     }
 }
 
@@ -1269,6 +1093,7 @@ fn emit_ts_action_via_walker(
         model_class: la.model_class.as_str(),
         resource: la.resource.as_str(),
         parent: la.parent.as_ref(),
+        permitted: &la.permitted,
     };
     let with_callbacks =
         crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
@@ -1300,6 +1125,10 @@ struct TsCtrlCtx<'a> {
     model_class: &'a str,
     resource: &'a str,
     parent: Option<&'a crate::lower::NestedParent>,
+    /// Fields extracted by the `<resource>_params` helper — used by
+    /// the strong-params macro to expand `Model.new(post_params)` and
+    /// `x.update(post_params)` into per-field assigns.
+    permitted: &'a [String],
 }
 
 /// Mutable walker state. `uses_context` tracks whether the body
@@ -1354,19 +1183,45 @@ fn emit_ts_ctrl_stmt(
             }
         }
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            let rhs = emit_ts_ctrl_expr(value, ctx, state);
-            writeln!(out, "{indent}const {name} = {rhs};").unwrap();
-            state.last_local = Some(name.as_str().to_string());
+            // Strong-params macro: `x = Model.new(<resource>_params)`
+            // → `const x = new Model(); x.f1 = params[...]; ...`.
+            // Falls through to the generic Assign path when the RHS
+            // doesn't match the Create-scaffold shape.
+            if let Some(class) = model_new_with_strong_params(value, ctx) {
+                emit_ts_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
+                state.last_local = Some(name.as_str().to_string());
+            } else {
+                let rhs = emit_ts_ctrl_expr(value, ctx, state);
+                writeln!(out, "{indent}const {name} = {rhs};").unwrap();
+                state.last_local = Some(name.as_str().to_string());
+            }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = emit_ts_ctrl_expr(cond, ctx, state);
-            writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
-            emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-            if !is_empty_expr(else_branch) {
-                writeln!(out, "{indent}}} else {{").unwrap();
-                emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+            // Strong-params macro: `if x.update(<resource>_params)
+            // then A else B end` → per-field conditional assigns,
+            // then `if (x.save) { A } else { B }`. Falls through to
+            // the generic If path when the cond isn't the Update-
+            // scaffold shape.
+            if let Some(recv) = update_with_strong_params(cond, ctx) {
+                let recv_s = emit_ts_ctrl_expr(recv, ctx, state);
+                emit_ts_update_field_assigns(out, &recv_s, &indent, ctx, state);
+                writeln!(out, "{indent}if ({recv_s}.save) {{").unwrap();
+                emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !is_empty_expr(else_branch) {
+                    writeln!(out, "{indent}}} else {{").unwrap();
+                    emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}}}").unwrap();
+            } else {
+                let cond_s = emit_ts_ctrl_expr(cond, ctx, state);
+                writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
+                emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !is_empty_expr(else_branch) {
+                    writeln!(out, "{indent}}} else {{").unwrap();
+                    emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}}}").unwrap();
             }
-            writeln!(out, "{indent}}}").unwrap();
         }
         ExprNode::Send { recv, method, args, block, .. } => {
             match emit_ts_controller_send(
@@ -1469,10 +1324,27 @@ fn emit_ts_controller_send(
                 class.as_str(),
             ))
         }
-        SendKind::AssocLookup { target, outer_method } => ControllerStmt::Expr(format!(
-            "new {}() /* TODO: {outer_method} */",
-            target.as_str()
-        )),
+        SendKind::AssocLookup { target, outer_method } => {
+            // Render per outer-method:
+            //   `.find(id)` → `Target.find(id)` — same runtime as ModelFind.
+            //   `.build(...)` / `.create(...)` with strong_params arg
+            //     — handled at the Assign level; this arm fires only
+            //     if the pattern escaped the Assign catcher. Emit the
+            //     `new Target()` fallback.
+            let target_s = target.as_str();
+            match outer_method {
+                "find" => {
+                    let id_s = args
+                        .first()
+                        .map(|a| emit_ts_ctrl_expr(a, ctx, state))
+                        .unwrap_or_else(|| "0".to_string());
+                    ControllerStmt::Expr(format!("{target_s}.find({id_s})"))
+                }
+                _ => ControllerStmt::Expr(format!(
+                    "new {target_s}() /* TODO: {outer_method} */"
+                )),
+            }
+        }
         SendKind::QueryChain { target: Some(target) } => {
             // Collapse every `.all/.includes/.order/.where/...` chain
             // to `Model.all()` — the Juntos runtime exposes `all()`
@@ -1491,10 +1363,21 @@ fn emit_ts_controller_send(
             lower_first_char(&crate::naming::camelize(method)),
         )),
         SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+            // Juntos's runtime defines `get save()` and `get destroy()`
+            // as getters, not methods. For the zero-arg bang calls
+            // (`save!`, `destroy!`) emit property access (no parens);
+            // for bang-with-args (`update!(h)`) emit a method call.
             let recv_s = emit_ts_ctrl_expr(recv, ctx, state);
-            let args_s: Vec<String> =
-                bs_args.iter().map(|a| emit_ts_ctrl_expr(a, ctx, state)).collect();
-            ControllerStmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
+            if bs_args.is_empty() {
+                ControllerStmt::Expr(format!("{recv_s}.{stripped_method}"))
+            } else {
+                let args_s: Vec<String> =
+                    bs_args.iter().map(|a| emit_ts_ctrl_expr(a, ctx, state)).collect();
+                ControllerStmt::Expr(format!(
+                    "{recv_s}.{stripped_method}({})",
+                    args_s.join(", "),
+                ))
+            }
         }
         SendKind::InstanceUpdate => {
             ControllerStmt::Expr("false /* TODO: instance update */".to_string())
@@ -1555,8 +1438,8 @@ fn emit_ts_render(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -
     // `render :show` / `render :new` → view fn lookup keyed off the
     // symbol name. `render Article` / `render record` / `render
     // json: ...` — fall back to emitting the first arg as the body
-    // payload. Extra args (status:, location:, ...) flow in as
-    // response fields.
+    // payload. A `status:` kwarg (`render :new, status:
+    // :unprocessable_entity`) adds a `status` field to the response.
     //
     // The view-fn arg is `state.last_local` — the most recently
     // bound local in the body, which for scaffold-shape actions is
@@ -1571,7 +1454,11 @@ fn emit_ts_render(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -
                 .last_local
                 .clone()
                 .unwrap_or_else(|| "undefined as any".to_string());
-            return format!("return {{ body: Views.{view_fn}({arg}) }};");
+            let body_part = format!("body: Views.{view_fn}({arg})");
+            return match extract_status_from_kwargs(&args[1..]) {
+                Some(status) => format!("return {{ status: {status}, {body_part} }};"),
+                None => format!("return {{ {body_part} }};"),
+            };
         }
         let body_s = emit_ts_ctrl_expr(first, ctx, state);
         return format!("return {{ body: {body_s} }};");
@@ -1581,24 +1468,216 @@ fn emit_ts_render(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -
 
 fn emit_ts_redirect_to(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -> String {
     // `redirect_to foo_path` → PathOrUrlHelper (handled via first
-    // arg's Send rewrite). `redirect_to @article` — an ivar that
+    // arg's Send rewrite — the resulting string already contains
+    // `routeHelpers.…`). `redirect_to @article` — an ivar that
     // rewrite_for_controller has already turned into a local —
-    // resolves to a route helper keyed off the model's singular.
+    // resolves to a route helper keyed off the *local's name*
+    // (not `ctx.resource`, because for nested controllers the
+    // redirect target is often the parent resource, e.g. a
+    // comment's `redirect_to @article`).
+    //
+    // A `status:` kwarg (`redirect_to @article, status: :see_other`)
+    // overrides the default 303.
     let Some(first) = args.first() else {
         return "return { status: 303 };".to_string();
     };
     let loc = emit_ts_ctrl_expr(first, ctx, state);
-    // Heuristic: a bare local (matches `[a-z_][a-z0-9_]*`) looks
-    // like `redirect_to @article` → route helper. A call-shaped
-    // string already has `routeHelpers.…` in it.
-    if is_bare_ident(&loc) && !ctx.resource.is_empty() {
-        let helper = lower_first_char(&crate::naming::camelize(ctx.resource));
+    let status = extract_status_from_kwargs(&args[1..]).unwrap_or_else(|| "303".to_string());
+    let _ = ctx; // resource unused; helper stem comes from the local name
+    if is_bare_ident(&loc) {
+        let helper = lower_first_char(&crate::naming::camelize(&loc));
         let id_access = format!("({} as any).id", loc);
         return format!(
-            "return {{ status: 303, location: routeHelpers.{helper}Path({id_access}) }};",
+            "return {{ status: {status}, location: routeHelpers.{helper}Path({id_access}) }};",
         );
     }
-    format!("return {{ status: 303, location: {loc} }};")
+    format!("return {{ status: {status}, location: {loc} }};")
+}
+
+/// Recognize a Create-scaffold instantiation: either
+///   `Model.new(<resource>_params)`                (top-level resource)
+/// or
+///   `@parent.<assoc>.build(<resource>_params)`    (nested resource)
+/// where the target class resolves to one of the app's known
+/// models. Returns the target class symbol so the walker can emit
+/// `new Class()` plus per-field assigns.
+fn model_new_with_strong_params(value: &Expr, ctx: &TsCtrlCtx<'_>) -> Option<Symbol> {
+    let ExprNode::Send { recv, method, args, .. } = &*value.node else {
+        return None;
+    };
+    if args.len() != 1 || !is_resource_params_call(&args[0], ctx.resource) {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    // Top-level: `Model.new(...)`.
+    if method.as_str() == "new" {
+        if let ExprNode::Const { path } = &*r.node {
+            let class = path.last()?;
+            ctx.known_models.iter().find(|m| *m == class)?;
+            return Some(class.clone());
+        }
+    }
+    // Nested: `<parent>.<assoc>.build(...)` — the inner Send's
+    // method (a plural association like `comments`) singularizes
+    // to a known model (`Comment`).
+    if method.as_str() == "build" {
+        if let ExprNode::Send {
+            recv: Some(_),
+            method: assoc_method,
+            args: inner_args,
+            ..
+        } = &*r.node
+        {
+            if inner_args.is_empty() {
+                if let Some(target) =
+                    crate::lower::singularize_to_model(assoc_method.as_str(), ctx.known_models)
+                {
+                    return Some(target);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recognize the Update-scaffold pattern: `<recv>.update(<resource>_params)`
+/// on a non-Const receiver (a local, not a class method). Returns
+/// the receiver Expr so the walker can emit `<recv>.save`.
+fn update_with_strong_params<'a>(
+    cond: &'a Expr,
+    ctx: &TsCtrlCtx<'_>,
+) -> Option<&'a Expr> {
+    let ExprNode::Send { recv, method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "update" || args.len() != 1 {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    if matches!(&*r.node, ExprNode::Const { .. }) {
+        return None;
+    }
+    if !is_resource_params_call(&args[0], ctx.resource) {
+        return None;
+    }
+    Some(r)
+}
+
+/// True when `expr` is a zero-arg, zero-block, no-receiver call to
+/// the resource's strong-params helper — e.g. `post_params` when
+/// the resource is `post`, `article_params` when it's `article`.
+fn is_resource_params_call(expr: &Expr, resource: &str) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if !args.is_empty() || block.is_some() {
+        return false;
+    }
+    let expected = format!("{resource}_params");
+    method.as_str() == expected
+}
+
+/// Emit the Create-scaffold expansion: `new Class()` bind, nested-
+/// parent foreign-key assign (if any), then per-field assigns
+/// keyed off `ctx.permitted`. The scaffold `?? ""` default makes
+/// empty-string form submissions round-trip correctly through
+/// validation (which the walker doesn't yet model separately).
+fn emit_ts_create_expansion(
+    out: &mut String,
+    var_name: &str,
+    class: &str,
+    indent: &str,
+    ctx: &TsCtrlCtx<'_>,
+    state: &mut TsCtrlState,
+) {
+    writeln!(out, "{indent}const {var_name} = new {class}();").unwrap();
+    if let Some(parent) = ctx.parent {
+        writeln!(
+            out,
+            "{indent}({var_name} as any).{}_id = Number(context.params.{}_id);",
+            parent.singular, parent.singular,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+    for field in ctx.permitted {
+        writeln!(
+            out,
+            "{indent}({var_name} as any).{field} = context.params[\"{}[{field}]\"] ?? \"\";",
+            ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+/// Emit the Update-scaffold's per-field conditional assigns: only
+/// overwrite the field if the matching params key was supplied.
+/// Mirrors the scaffold template's behavior so partial updates
+/// (PATCH with a subset of fields) don't zero out unspecified
+/// columns.
+fn emit_ts_update_field_assigns(
+    out: &mut String,
+    recv_s: &str,
+    indent: &str,
+    ctx: &TsCtrlCtx<'_>,
+    state: &mut TsCtrlState,
+) {
+    for field in ctx.permitted {
+        writeln!(
+            out,
+            "{indent}if (context.params[\"{}[{field}]\"] !== undefined) {{ ({recv_s} as any).{field} = context.params[\"{}[{field}]\"]; }}",
+            ctx.resource, ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+/// Map a Rails status symbol (`:see_other`, `:unprocessable_entity`)
+/// to its HTTP numeric code. Covers the codes the scaffold blog
+/// templates use; unknown symbols fall back to 500.
+fn status_sym_to_code(sym: &str) -> u16 {
+    match sym {
+        "ok" => 200,
+        "created" => 201,
+        "no_content" => 204,
+        "see_other" => 303,
+        "not_modified" => 304,
+        "bad_request" => 400,
+        "unauthorized" => 401,
+        "not_found" => 404,
+        "unprocessable_entity" => 422,
+        _ => 500,
+    }
+}
+
+/// Walk `render` / `redirect_to` keyword args for a `status:` key
+/// and return its numeric string. Accepts symbol values
+/// (`status: :see_other`) and integer literals (`status: 303`).
+/// Returns None when no status: is supplied.
+fn extract_status_from_kwargs(args: &[Expr]) -> Option<String> {
+    for arg in args {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                continue;
+            };
+            if key.as_str() != "status" {
+                continue;
+            }
+            match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value: s } } => {
+                    return Some(status_sym_to_code(s.as_str()).to_string());
+                }
+                ExprNode::Lit { value: Literal::Int { value: n } } => {
+                    return Some(n.to_string());
+                }
+                _ => return None,
+            }
+        }
+    }
+    None
 }
 
 fn is_bare_ident(s: &str) -> bool {

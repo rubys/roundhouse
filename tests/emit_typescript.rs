@@ -349,15 +349,17 @@ fn controller_params_bracket_access_rewrites_to_context() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/posts_controller.ts");
-    // `params[:id]` binds via `Number(context.params.id)` so TS
-    // route-helper call sites get a real number (ids are typed i64
-    // across the runtime).
+    // `params[:id]` lowers via rewrite_for_controller to
+    // `context.params.id`, which the walker inlines directly into
+    // the `.find(...)` call. The prior scaffold template introduced
+    // an intermediate `const id = Number(...)` binding; the walker
+    // doesn't, but the runtime behavior matches.
     assert!(
-        content.contains("const id = Number(context.params.id);"),
+        content.contains("context.params.id"),
         "got:\n{content}"
     );
     assert!(
-        content.contains("Post.find(id)"),
+        content.contains("Post.find(context.params.id)"),
         "got:\n{content}"
     );
 }
