@@ -61,6 +61,24 @@ const TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/typescript/test_su
 const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/typescript/view_helpers.ts");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
+    // Default adapter for backward-compatible callers. Matches
+    // pre-adapter-consumption behavior — nothing suspends, no
+    // awaits beyond the `async function` wrapper that was already
+    // there.
+    emit_with_adapter(app, &crate::adapter::SqliteAdapter)
+}
+
+/// Emit with an explicit adapter. Async-capable targets (this one,
+/// eventually Rust and Python) consult the adapter's
+/// `is_suspending_effect` per Send site and insert `await` where
+/// effects suspend. `SqliteAdapter` suspends nothing; `SqliteAsync
+/// Adapter` suspends on DB effects — emit a fully-awaited body
+/// that can later be pointed at a real async backend (IndexedDB,
+/// D1, pg-on-Node) without further emitter changes.
+pub fn emit_with_adapter(
+    app: &App,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
+) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(emit_package_json());
     files.push(emit_tsconfig_json(app));
@@ -86,7 +104,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             content: VIEW_HELPERS_SOURCE.to_string(),
         });
         files.push(emit_ts_route_helpers(app));
-        files.extend(emit_controllers(app));
+        files.extend(emit_controllers(app, adapter));
     }
     files.extend(emit_views(app));
     if !app.routes.entries.is_empty() {
@@ -960,16 +978,24 @@ fn lower_first_char(s: &str) -> String {
 }
 
 
-fn emit_controllers(app: &App) -> Vec<EmittedFile> {
+fn emit_controllers(
+    app: &App,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
+) -> Vec<EmittedFile> {
     let known_models: Vec<Symbol> =
         app.models.iter().map(|m| m.name.0.clone()).collect();
     app.controllers
         .iter()
-        .map(|c| emit_controller_file(c, &known_models, app))
+        .map(|c| emit_controller_file(c, &known_models, app, adapter))
         .collect()
 }
 
-fn emit_controller_file(c: &Controller, known_models: &[Symbol], app: &App) -> EmittedFile {
+fn emit_controller_file(
+    c: &Controller,
+    known_models: &[Symbol],
+    app: &App,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
+) -> EmittedFile {
     let name = c.name.0.as_str();
     let file_stem = crate::naming::snake_case(name);
     let resource = crate::lower::resource_from_controller_name(name);
@@ -1015,7 +1041,7 @@ fn emit_controller_file(c: &Controller, known_models: &[Symbol], app: &App) -> E
             parent.as_ref(),
             &permitted,
         );
-        emit_ts_action(&mut s, &la, &action.body, known_models, c);
+        emit_ts_action(&mut s, &la, &action.body, known_models, c, adapter);
     }
 
     // Namespace object — same shape as before but only public actions.
@@ -1055,10 +1081,11 @@ fn emit_ts_action(
     body: &Expr,
     known_models: &[Symbol],
     controller: &Controller,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
 ) {
     let name = if la.name == "new" { "$new" } else { la.name.as_str() };
     if la.has_model {
-        emit_ts_action_via_walker(out, la, body, known_models, controller, name);
+        emit_ts_action_via_walker(out, la, body, known_models, controller, name, adapter);
     } else {
         // Actions on controllers with no associated model (e.g.
         // ApplicationController) emit a 200-empty stub; the walker
@@ -1085,6 +1112,7 @@ fn emit_ts_action_via_walker(
     known_models: &[Symbol],
     controller: &Controller,
     name: &str,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
 ) {
     use crate::lower::CtrlWalker;
     let normalized =
@@ -1097,6 +1125,7 @@ fn emit_ts_action_via_walker(
             resource: la.resource.as_str(),
             parent: la.parent.as_ref(),
             permitted: &la.permitted,
+            adapter,
         },
         state: crate::lower::WalkState::new(),
     };
@@ -1128,9 +1157,18 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
     fn state_mut(&mut self) -> &mut crate::lower::WalkState { &mut self.state }
     fn indent_unit(&self) -> &'static str { "  " }
 
+    fn suspending_prefix(&self) -> &'static str { "await " }
+
     fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
+        // Prepend `await` when the RHS expression has any effect
+        // the adapter flags as suspending. Under the default
+        // SqliteAdapter, nothing suspends — output is identical to
+        // the pre-consumption behavior. Under SqliteAsyncAdapter,
+        // AR Sends pick up `await`.
+        let suspends = self.ctx.expr_suspends(value);
         let rhs = self.render_expr(value);
-        writeln!(out, "{indent}const {name} = {rhs};").unwrap();
+        let prefix = if suspends { "await " } else { "" };
+        writeln!(out, "{indent}const {name} = {prefix}{rhs};").unwrap();
     }
 
     fn write_create_expansion(
@@ -1172,8 +1210,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
         is_tail: bool,
         out: &mut String,
     ) {
+        let suspends = self.ctx.expr_suspends(cond);
         let cond_s = self.render_expr(cond);
-        writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
+        let cond_awaited = if suspends { format!("await {cond_s}") } else { cond_s };
+        writeln!(out, "{indent}if ({cond_awaited}) {{").unwrap();
         self.walk_stmt(then_branch, out, depth + 1, is_tail);
         if !crate::lower::is_empty_body(else_branch) {
             writeln!(out, "{indent}}} else {{").unwrap();
@@ -1217,6 +1257,12 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
     }
 
     fn write_expr_stmt(&mut self, s: &str, indent: &str, out: &mut String) {
+        // Note: callers of `walk_stmt` who route Send nodes
+        // through `render_send_stmt` produce a rendered fragment
+        // and hand it here; the suspension decision has to happen
+        // at the walker's Send-dispatch site where the original
+        // Expr is still available. See the walker's expression-
+        // node handling in `walk_stmt`.
         writeln!(out, "{indent}{s};").unwrap();
     }
 

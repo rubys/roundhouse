@@ -824,3 +824,133 @@ fn controllers_export_namespace_object() {
         "got:\n{content}"
     );
 }
+
+// Adapter-driven await insertion -----------------------------------------
+//
+// Under the default `SqliteAdapter`, nothing suspends — emitted TS is
+// unchanged from the pre-consumption behavior (the `async function`
+// wrapper remains but no `await` inside action bodies). Under
+// `SqliteAsyncAdapter`, DB-touching Sends pick up `await` at statement-
+// level expression sites: RHS of an assign, condition of an if, plain
+// expression statements. Non-DB effects (Io from `redirect_to` / `render`)
+// don't suspend under this adapter (SqliteAsync is DB-scoped) so those
+// Sends stay unawaited.
+
+#[test]
+fn sync_adapter_omits_awaits_inside_action_bodies() {
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // The `async function` wrappers remain — they were there before
+    // adapters existed. What should be absent is any `await` inside
+    // the body under the sync adapter.
+    for action in ["index", "show", "destroy", "create"] {
+        let idx = content
+            .find(&format!("export async function {action}"))
+            .unwrap_or_else(|| panic!("expected {action} function in:\n{content}"));
+        let after = &content[idx..];
+        let end = after.find("\n}").unwrap_or(after.len());
+        let body = &after[..end];
+        assert!(
+            !body.contains(" await "),
+            "sync adapter should not emit `await` in {action} body:\n{body}",
+        );
+    }
+}
+
+#[test]
+fn async_adapter_awaits_model_find_on_assign_rhs() {
+    // `@post = Post.find(params[:id])` → the compound RHS
+    // `Post.find(id) ?? new Post()` gets wrapped in `await (...)`
+    // under SqliteAsyncAdapter. The fallback-wrap is a TS emission
+    // detail; the suspension happens at the outer assign level.
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    assert!(
+        content.contains("const post = await ") && content.contains("Post.find("),
+        "expected `const post = await (...Post.find...)` shape in:\n{content}",
+    );
+}
+
+#[test]
+fn async_adapter_awaits_model_all_on_assign_rhs() {
+    // `@posts = Post.all` → `const posts = await Post.all();`
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    assert!(
+        content.contains("const posts = await Post.all()"),
+        "expected `const posts = await Post.all()` in:\n{content}",
+    );
+}
+
+#[test]
+fn async_adapter_awaits_destroy_as_statement() {
+    // `@post.destroy` as a bare statement → `await post.destroy;`
+    // under SqliteAsyncAdapter. The Send is DbWrite; the adapter
+    // flags it as suspending; the Send-at-statement path in
+    // `walk_stmt` prepends the walker's `suspending_prefix`.
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    assert!(
+        content.contains("await post.destroy"),
+        "expected `await post.destroy` in:\n{content}",
+    );
+}
+
+#[test]
+fn async_adapter_does_not_await_non_db_sends() {
+    // `redirect_to posts_path` carries `Io`, not `DbRead`/`DbWrite`.
+    // SqliteAsyncAdapter suspends only DB effects, so `Io`-bearing
+    // sends stay unawaited even under the async adapter. This is the
+    // intended scoping — `await` tracks DB-specific suspension, not
+    // universal "has effect" semantics.
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    // Find every `redirect_to`-style return and confirm no `await`
+    // prefix. (The scaffold destroy action uses a bare `return`
+    // with the path helper; we look for `return {` patterns in the
+    // response-shape emission.)
+    assert!(
+        !content.contains("await return"),
+        "redirect responses should not gain `await` under SqliteAsync:\n{content}",
+    );
+    // Also verify: the `return { body:` / `return { status:`
+    // response fragments stay plain.
+    for line in content.lines() {
+        if line.contains("return {") {
+            assert!(
+                !line.contains("await "),
+                "response statement should not be awaited: `{line}`",
+            );
+        }
+    }
+}
+
+#[test]
+fn sync_and_async_differ_only_on_awaits() {
+    // Byte-diff the two outputs: the only differences should be
+    // `await ` insertions. Same actions, same function bodies
+    // otherwise.
+    let app = analyzed_app();
+    let sync = typescript::emit_with_adapter(&app, &roundhouse::SqliteAdapter);
+    let async_ = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let sync_content = find(&sync, "app/controllers/posts_controller.ts");
+    let async_content = find(&async_, "app/controllers/posts_controller.ts");
+
+    // Async version must be longer (contains awaits).
+    assert!(
+        async_content.len() > sync_content.len(),
+        "async output should be larger (awaits added)",
+    );
+    // Stripping every `await ` from the async output should match
+    // the sync output byte-for-byte.
+    let stripped = async_content.replace("await ", "");
+    assert_eq!(
+        stripped, sync_content,
+        "async - sync difference must be only `await ` insertions",
+    );
+}

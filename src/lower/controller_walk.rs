@@ -14,6 +14,7 @@
 //! methods — there's no pre_assign hook, since those nuances
 //! fit naturally inside `write_assign` and `write_if`.
 
+use crate::adapter::DatabaseAdapter;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
 use crate::lower::NestedParent;
@@ -27,6 +28,28 @@ pub struct WalkCtx<'a> {
     pub resource: &'a str,
     pub parent: Option<&'a NestedParent>,
     pub permitted: &'a [String],
+    /// Active database adapter for this emission run. Async-capable
+    /// emitters (TS/Rust/Python) consult
+    /// `adapter.is_suspending_effect(...)` at Send sites to decide
+    /// whether to emit `await`; sync emitters (Go/Crystal/Elixir/
+    /// Ruby) ignore it. Default when not otherwise specified is
+    /// `&SqliteAdapter`, which suspends on no effects —
+    /// behavior-preserving for all pre-adapter emission paths.
+    pub adapter: &'a dyn DatabaseAdapter,
+}
+
+impl<'a> WalkCtx<'a> {
+    /// True when `expr` has any effect that suspends under the
+    /// active adapter. Emitters use this at statement-level
+    /// expression sites (RHS of an assign, condition of an if,
+    /// body of an expression-statement) to decide whether to emit
+    /// `await` / `.await`.
+    pub fn expr_suspends(&self, expr: &Expr) -> bool {
+        expr.effects
+            .effects
+            .iter()
+            .any(|e| self.adapter.is_suspending_effect(e))
+    }
 }
 
 /// Mutable walker state threaded through the dispatch.
@@ -150,6 +173,23 @@ pub trait CtrlWalker<'a>: Sized {
         block: Option<&Expr>,
     ) -> Option<Stmt>;
 
+    /// Target-specific prefix string for a Send expression whose
+    /// effect set intersects the adapter's suspending-effects
+    /// profile. Sync targets (Go / Crystal / Elixir / Ruby) return
+    /// the empty string — nothing suspends in their emission
+    /// model, regardless of adapter. Async prefix-style targets
+    /// (TypeScript → `"await "`, Python → `"await "`) override.
+    ///
+    /// Postfix-style targets (Rust's `.await`) don't fit the
+    /// prefix model; when Rust wires up to this machinery, it'll
+    /// need either a companion `suspending_postfix` hook or a
+    /// `wrap_suspending(String) -> String` that replaces both.
+    /// Today's only consumer is TypeScript's prefix form, so the
+    /// minimum-surface hook is sufficient.
+    fn suspending_prefix(&self) -> &'static str {
+        ""
+    }
+
     /// Top-level entry: walk a normalized action body, producing
     /// the target's inside-function-body text. Caller is expected
     /// to wrap the result in the fn signature + closing brace.
@@ -206,6 +246,13 @@ pub trait CtrlWalker<'a>: Sized {
                 }
             }
             ExprNode::Send { recv, method, args, block, .. } => {
+                // Decide the await prefix ONCE based on the
+                // Send's effects + the adapter's suspending-
+                // effects profile. Render responses stay plain
+                // (`return { status: ... }` doesn't need await);
+                // Expr-shaped Sends get the prefix prepended.
+                let suspends = self.ctx().expr_suspends(expr);
+                let prefix = if suspends { self.suspending_prefix() } else { "" };
                 match self.render_send_stmt(
                     recv.as_ref(), method.as_str(), args, block.as_ref(),
                 ) {
@@ -213,11 +260,13 @@ pub trait CtrlWalker<'a>: Sized {
                         self.write_response_stmt(&r, is_tail, &indent, out);
                     }
                     Some(Stmt::Expr(s)) => {
-                        self.write_expr_stmt(&s, &indent, out);
+                        let wrapped = if suspends { format!("{prefix}{s}") } else { s };
+                        self.write_expr_stmt(&wrapped, &indent, out);
                     }
                     None => {
                         let s = self.render_expr(expr);
-                        self.write_expr_stmt(&s, &indent, out);
+                        let wrapped = if suspends { format!("{prefix}{s}") } else { s };
+                        self.write_expr_stmt(&wrapped, &indent, out);
                     }
                 }
             }

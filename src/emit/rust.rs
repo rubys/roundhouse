@@ -1881,6 +1881,7 @@ fn emit_rust_action(
             resource: la.resource.as_str(),
             parent: la.parent.as_ref(),
             permitted: &la.permitted,
+            adapter: &crate::adapter::SqliteAdapter,
         },
         state: crate::lower::WalkState::new(),
     };
