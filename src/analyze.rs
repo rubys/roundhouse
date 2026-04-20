@@ -295,7 +295,7 @@ impl Analyzer {
             // the callback targets (`set_article`) are themselves actions.
             for action in controller.actions_mut() {
                 self.analyze_expr(&mut action.body, &ctx);
-                action.effects = self.collect_effects(&action.body, &ctx);
+                action.effects = self.collect_effects(&mut action.body, &ctx);
             }
 
             // Snapshot each action's ivar_bindings. Used both to resolve
@@ -325,7 +325,7 @@ impl Analyzer {
                             local_bindings: HashMap::new(),
                         };
                         self.analyze_expr(&mut action.body, &inner_ctx);
-                        action.effects = self.collect_effects(&action.body, &inner_ctx);
+                        action.effects = self.collect_effects(&mut action.body, &inner_ctx);
                     }
                 }
             }
@@ -361,7 +361,7 @@ impl Analyzer {
             }
             for method in model.methods_mut() {
                 self.analyze_expr(&mut method.body, &class_ctx);
-                method.effects = self.collect_effects(&method.body, &class_ctx);
+                method.effects = self.collect_effects(&mut method.body, &class_ctx);
             }
         }
         // Partial-locals channel: we need action/top-level views analyzed first
@@ -401,14 +401,26 @@ impl Analyzer {
         }
     }
 
-    fn collect_effects(&self, expr: &Expr, ctx: &Ctx) -> EffectSet {
+    fn collect_effects(&self, expr: &mut Expr, ctx: &Ctx) -> EffectSet {
         let mut set = BTreeSet::new();
         self.visit_effects(expr, ctx, &mut set);
         EffectSet { effects: set }
     }
 
-    fn visit_effects(&self, expr: &Expr, ctx: &Ctx, out: &mut BTreeSet<Effect>) {
-        match &*expr.node {
+    /// Walk a typed expression tree computing each node's *local* effects
+    /// (those the node itself contributes — typically only non-empty for
+    /// `Send` onto an effectful method) and writing them to `expr.effects`.
+    /// The running aggregate `out` collects effects across the subtree so
+    /// the caller can still populate per-action / per-method totals.
+    ///
+    /// Two-pass analyze (before_action seeding) calls this a second time
+    /// with a richer ctx; every per-node `expr.effects` write here
+    /// overwrites the earlier value, so annotations stay consistent with
+    /// the final typed tree.
+    fn visit_effects(&self, expr: &mut Expr, ctx: &Ctx, out: &mut BTreeSet<Effect>) {
+        let mut local: BTreeSet<Effect> = BTreeSet::new();
+
+        match &mut *expr.node {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
@@ -467,8 +479,13 @@ impl Analyzer {
                     }
                     None => ctx.self_ty.clone(),
                 };
+                // Local effects for THIS Send — the dispatched method's
+                // declared side-effect class, determined from the receiver
+                // type + method name. Sub-expressions (receiver, args,
+                // block) contribute their own local effects via their own
+                // annotations; not folded into this node's `local`.
                 if let Some(ty) = recv_ty {
-                    self.contribute_send_effect(&ty, method, out);
+                    self.contribute_send_effect(&ty, method, &mut local);
                 }
                 for a in args { self.visit_effects(a, ctx, out); }
                 if let Some(b) = block { self.visit_effects(b, ctx, out); }
@@ -481,8 +498,8 @@ impl Analyzer {
             ExprNode::Case { scrutinee, arms } => {
                 self.visit_effects(scrutinee, ctx, out);
                 for arm in arms {
-                    if let Some(g) = &arm.guard { self.visit_effects(g, ctx, out); }
-                    self.visit_effects(&arm.body, ctx, out);
+                    if let Some(g) = &mut arm.guard { self.visit_effects(g, ctx, out); }
+                    self.visit_effects(&mut arm.body, ctx, out);
                 }
             }
             ExprNode::Seq { exprs } => {
@@ -507,6 +524,13 @@ impl Analyzer {
                 // class hierarchies. Skip for now.
             }
         }
+
+        // Persist local effects onto this node and feed the running
+        // aggregate. Overwrite rather than merge: the caller may re-invoke
+        // (two-pass before_action seeding), and each pass computes local
+        // effects from scratch against the current typed tree.
+        out.extend(local.iter().cloned());
+        expr.effects = EffectSet { effects: local };
     }
 
     fn contribute_send_effect(&self, recv_ty: &Ty, method: &Symbol, out: &mut BTreeSet<Effect>) {

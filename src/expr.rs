@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::effect::EffectSet;
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -16,6 +17,15 @@ pub struct Expr {
     pub node: Box<ExprNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ty: Option<Ty>,
+    /// Side-effects this expression may perform. Populated by the analyzer
+    /// during the same pass that assigns `ty`; ingest leaves it empty.
+    /// Set semantics — the effects this node contributes *locally* (direct
+    /// Sends on Active Record methods, `render`/`redirect_to` I/O, etc.);
+    /// effects of nested subexpressions live on those subexpressions.
+    /// Readers that want the transitive effect of a subtree can fold over
+    /// the walk (same shape as the per-action aggregation in `analyze`).
+    #[serde(default, skip_serializing_if = "EffectSet::is_pure")]
+    pub effects: EffectSet,
     /// Set when this Expr is a `Seq` member whose source was preceded
     /// by a blank line. Meaningless outside that context; emit honors
     /// it when walking a `Seq` body. Populated from source offsets
@@ -26,7 +36,13 @@ pub struct Expr {
 
 impl Expr {
     pub fn new(span: Span, node: ExprNode) -> Self {
-        Self { span, node: Box::new(node), ty: None, leading_blank_line: false }
+        Self {
+            span,
+            node: Box::new(node),
+            ty: None,
+            effects: EffectSet::pure(),
+            leading_blank_line: false,
+        }
     }
 }
 

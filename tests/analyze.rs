@@ -358,6 +358,222 @@ fn actions_without_db_calls_stay_pure() {
     assert!(action.effects.effects.is_empty(), "expected empty effects for empty body");
 }
 
+// Per-expression effect annotation --------------------------------------
+//
+// These tests exercise the `expr.effects` field: the analyzer assigns
+// each node its local side-effect contribution (typically non-empty only
+// on Send nodes whose dispatched method is classified as effectful).
+// The per-action aggregate (`action.effects`) must stay equal to the
+// set-union of every node's local effects in the subtree — an invariant
+// that gives future adapters/emitters a stable contract for reading
+// effects off individual expressions.
+
+#[test]
+fn per_expr_effects_populated_on_send_site() {
+    // `@posts = Post.all` — the inner Send carries DbRead(posts) as its
+    // local effect; the Assign wrapper and the Const(Post) receiver are
+    // pure, proving effects stay local to the dispatching node.
+    let app = analyzed_app();
+    let posts_read = Effect::DbRead { table: TableRef(Symbol::from("posts")) };
+
+    let index = app.controllers[0]
+        .actions()
+        .find(|a| a.name.as_str() == "index")
+        .unwrap();
+    let ExprNode::Assign { value, .. } = &*index.body.node else { panic!() };
+    assert!(
+        value.effects.effects.contains(&posts_read),
+        "Post.all Send should carry DbRead(posts); got {:?}",
+        value.effects.effects,
+    );
+    assert!(
+        index.body.effects.is_pure(),
+        "Assign wrapper has no local effect; got {:?}",
+        index.body.effects.effects,
+    );
+    let ExprNode::Send { recv, .. } = &*value.node else { panic!() };
+    assert!(
+        recv.as_ref().unwrap().effects.is_pure(),
+        "Const(Post) receiver is pure",
+    );
+}
+
+#[test]
+fn per_expr_effects_on_instance_dispatch() {
+    // `@post.destroy` — the Send carries DbWrite(posts) via the ivar
+    // binding (analyzer tracked @post : Post from the prior Assign).
+    // The receiver (Ivar read) is itself pure.
+    let app = analyzed_app();
+    let posts_write = Effect::DbWrite { table: TableRef(Symbol::from("posts")) };
+
+    let destroy = app.controllers[0]
+        .actions()
+        .find(|a| a.name.as_str() == "destroy")
+        .unwrap();
+    let ExprNode::Seq { exprs } = &*destroy.body.node else { panic!() };
+    // body: [find-assign, destroy, redirect]. Find the `@post.destroy` Send.
+    let destroy_send = exprs
+        .iter()
+        .find(|e| matches!(
+            &*e.node,
+            ExprNode::Send { method, .. } if method.as_str() == "destroy"
+        ))
+        .expect("destroy Send present");
+    assert!(
+        destroy_send.effects.effects.contains(&posts_write),
+        "@post.destroy should carry DbWrite(posts); got {:?}",
+        destroy_send.effects.effects,
+    );
+    let ExprNode::Send { recv, .. } = &*destroy_send.node else { panic!() };
+    assert!(
+        recv.as_ref().unwrap().effects.is_pure(),
+        "Ivar read is pure",
+    );
+}
+
+#[test]
+fn per_expr_effects_on_io_calls() {
+    // `redirect_to posts_path` — classified as Io per the
+    // ApplicationController synthetic-method effect table.
+    let app = analyzed_app();
+    let destroy = app.controllers[0]
+        .actions()
+        .find(|a| a.name.as_str() == "destroy")
+        .unwrap();
+    let ExprNode::Seq { exprs } = &*destroy.body.node else { panic!() };
+    let redirect = exprs
+        .iter()
+        .find(|e| matches!(
+            &*e.node,
+            ExprNode::Send { method, .. } if method.as_str() == "redirect_to"
+        ))
+        .expect("redirect_to Send present");
+    assert!(
+        redirect.effects.effects.contains(&Effect::Io),
+        "redirect_to should carry Io; got {:?}",
+        redirect.effects.effects,
+    );
+}
+
+#[test]
+fn action_aggregate_equals_subtree_fold() {
+    // Invariant: `action.effects` equals the set-union of every
+    // per-expression `effects` in the action's body. The analyzer
+    // computes both in one pass; if they diverge, per-expression
+    // population is broken.
+    use roundhouse::expr::{Expr, InterpPart};
+    use std::collections::BTreeSet;
+
+    fn fold(expr: &Expr, acc: &mut BTreeSet<Effect>) {
+        acc.extend(expr.effects.effects.iter().cloned());
+        match &*expr.node {
+            ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. } => {}
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    fold(k, acc);
+                    fold(v, acc);
+                }
+            }
+            ExprNode::Array { elements, .. } => {
+                for e in elements {
+                    fold(e, acc);
+                }
+            }
+            ExprNode::StringInterp { parts } => {
+                for p in parts {
+                    if let InterpPart::Expr { expr } = p {
+                        fold(expr, acc);
+                    }
+                }
+            }
+            ExprNode::BoolOp { left, right, .. } => {
+                fold(left, acc);
+                fold(right, acc);
+            }
+            ExprNode::RescueModifier { expr, fallback } => {
+                fold(expr, acc);
+                fold(fallback, acc);
+            }
+            ExprNode::Let { value, body, .. } => {
+                fold(value, acc);
+                fold(body, acc);
+            }
+            ExprNode::Lambda { body, .. } => fold(body, acc),
+            ExprNode::Apply { fun, args, block } => {
+                fold(fun, acc);
+                for a in args {
+                    fold(a, acc);
+                }
+                if let Some(b) = block {
+                    fold(b, acc);
+                }
+            }
+            ExprNode::Send { recv, args, block, .. } => {
+                if let Some(r) = recv {
+                    fold(r, acc);
+                }
+                for a in args {
+                    fold(a, acc);
+                }
+                if let Some(b) = block {
+                    fold(b, acc);
+                }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                fold(cond, acc);
+                fold(then_branch, acc);
+                fold(else_branch, acc);
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                fold(scrutinee, acc);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        fold(g, acc);
+                    }
+                    fold(&arm.body, acc);
+                }
+            }
+            ExprNode::Seq { exprs } => {
+                for e in exprs {
+                    fold(e, acc);
+                }
+            }
+            ExprNode::Assign { target, value } => {
+                fold(value, acc);
+                match target {
+                    LValue::Attr { recv, .. } => fold(recv, acc),
+                    LValue::Index { recv, index } => {
+                        fold(recv, acc);
+                        fold(index, acc);
+                    }
+                    _ => {}
+                }
+            }
+            ExprNode::Yield { args } => {
+                for a in args {
+                    fold(a, acc);
+                }
+            }
+            ExprNode::Raise { value } => fold(value, acc),
+        }
+    }
+
+    let app = analyzed_app();
+    for action in app.controllers[0].actions() {
+        let mut folded: BTreeSet<Effect> = BTreeSet::new();
+        fold(&action.body, &mut folded);
+        assert_eq!(
+            folded,
+            action.effects.effects,
+            "action {} — tree fold should equal the aggregate",
+            action.name.as_str(),
+        );
+    }
+}
+
 // P1 — local variable tracking ------------------------------------------
 
 /// Wraps a body expression in a minimal Controller/Action, runs the

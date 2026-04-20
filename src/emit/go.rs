@@ -1334,6 +1334,7 @@ fn rewrite_bare_attrs_to_receiver(
             name: Symbol::from(receiver_var),
         }),
         ty: None,
+        effects: crate::effect::EffectSet::pure(),
         leading_blank_line: false,
     };
     let new_node = match &*e.node {
@@ -1451,6 +1452,7 @@ fn rewrite_bare_attrs_to_receiver(
         span: e.span,
         node: Box::new(new_node),
         ty: e.ty.clone(),
+        effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
     }
 }

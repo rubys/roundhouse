@@ -1133,6 +1133,7 @@ fn rewrite_view_body_ivars_cr(expr: &Expr) -> Expr {
         span: expr.span,
         node: Box::new(new_node),
         ty: expr.ty.clone(),
+        effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
     }
 }

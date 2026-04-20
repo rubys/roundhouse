@@ -867,6 +867,7 @@ fn rewrite_bare_attrs_to_ivars(
         span: e.span,
         node: Box::new(new_node),
         ty: e.ty.clone(),
+        effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
     }
 }
@@ -1345,6 +1346,7 @@ fn rewrite_for_controller(expr: &Expr) -> Expr {
         span: expr.span,
         node: Box::new(new_node),
         ty: expr.ty.clone(),
+        effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
     }
 }

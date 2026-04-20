@@ -620,6 +620,7 @@ fn rewrite_bare_attrs_to_ivars_py(e: &Expr, attrs: &[Symbol]) -> Expr {
         span: e.span,
         node: Box::new(new_node),
         ty: e.ty.clone(),
+        effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
     }
 }
