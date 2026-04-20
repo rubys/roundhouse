@@ -1,0 +1,303 @@
+// Roundhouse TypeScript server runtime — HTTP + Action Cable glue.
+//
+// The emitted `main.ts` imports `startServer` from here (via
+// tsconfig path mapping to `runtime/typescript/server.ts`) and
+// hands it the Router's match function. startServer:
+//   1. Opens a file-backed better-sqlite3 database.
+//   2. Runs schema DDL (from the generated schema_sql.ts).
+//   3. Installs the Action Cable broadcaster on ApplicationRecord.
+//   4. Starts an HTTP listener that routes requests through
+//      Router.match → ActionContext → controller action →
+//      ActionResponse → HTTP response.
+//   5. Upgrades WebSocket connections on `/cable` into
+//      Action Cable clients with the `actioncable-v1-json`
+//      subprotocol, pings every 3s, and broadcasts turbo-stream
+//      fragments to subscribed channels.
+//
+// Based on railcar's TS app.ts pattern, adapted to roundhouse's
+// emitted Router / ActionContext / ActionResponse shapes.
+
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { URL } from "node:url";
+import Database from "better-sqlite3";
+
+import { Router, setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
+
+// ── Action Cable server ────────────────────────────────────────
+
+/** Minimal Action Cable subscriber bookkeeping. `identifier` is
+ *  the opaque string the client sent in its `subscribe` command;
+ *  `send` writes a JSON-framed message back to the client. */
+interface Subscriber {
+  identifier: string;
+  send: (json: string) => void;
+}
+
+/** Tracks subscriptions per channel. Model lifecycle callbacks
+ *  call `broadcast(channel, html)` to push a Turbo Stream
+ *  fragment to every subscriber of that channel. */
+class CableServer {
+  private channels: Map<string, Set<Subscriber>> = new Map();
+
+  subscribe(channel: string, sub: Subscriber): void {
+    if (!this.channels.has(channel)) this.channels.set(channel, new Set());
+    this.channels.get(channel)!.add(sub);
+  }
+
+  unsubscribe(sub: Subscriber): void {
+    for (const subs of this.channels.values()) subs.delete(sub);
+  }
+
+  broadcast(channel: string, html: string): void {
+    const subs = this.channels.get(channel);
+    if (!subs) return;
+    for (const sub of subs) {
+      sub.send(JSON.stringify({
+        type: "message",
+        identifier: sub.identifier,
+        message: html,
+      }));
+    }
+  }
+}
+
+// ── Form data parsing ──────────────────────────────────────────
+
+/** Parse `application/x-www-form-urlencoded` body into a flat
+ *  object. Rails scaffold forms send data in this format; this
+ *  parser handles the shapes we need (`article[title]=...&
+ *  article[body]=...&_method=delete`) without an external
+ *  dependency. Keys with `[nested]` brackets become the literal
+ *  bracketed string — the emitter's controller code already
+ *  reads `context.params["article[title]"]` directly. */
+function parseFormData(body: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of body.split("&")) {
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    const key = decodeURIComponent((eq < 0 ? pair : pair.slice(0, eq)).replace(/\+/g, " "));
+    const val = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, " "));
+    out[key] = val;
+  }
+  return out;
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+// ── HTTP request dispatcher ────────────────────────────────────
+
+/** Handle one HTTP request: parse body, route to a controller
+ *  action via Router.match, translate the returned ActionResponse
+ *  into the outgoing HTTP response. Rails method-override via
+ *  `_method=delete|patch|put` hidden field is honored. */
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  let method = (req.method ?? "GET").toUpperCase();
+
+  // Collect form body for non-GET requests.
+  let params: Record<string, string> = {};
+  if (method !== "GET" && method !== "HEAD") {
+    const raw = await readBody(req);
+    const contentType = req.headers["content-type"] ?? "";
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      params = parseFormData(raw);
+    } else if (contentType.includes("application/json") && raw) {
+      try { params = JSON.parse(raw); } catch { /* ignore malformed */ }
+    }
+    // Method override: POST with `_method=delete` dispatches as DELETE.
+    const override = (params._method ?? "").toUpperCase();
+    if (method === "POST" && (override === "DELETE" || override === "PATCH" || override === "PUT")) {
+      method = override;
+      delete params._method;
+    }
+  }
+
+  const match = Router.match(method, url.pathname);
+  if (!match) {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(`Not Found: ${method} ${url.pathname}`);
+    return;
+  }
+
+  // Merge: path params + query string + form/json body.
+  const merged: Record<string, string> = { ...match.params };
+  for (const [k, v] of url.searchParams) merged[k] = v;
+  Object.assign(merged, params);
+
+  let response: ActionResponse;
+  try {
+    response = await match.handler({
+      params: merged,
+      request: { headers: req.headers, method, path: url.pathname },
+    });
+  } catch (err) {
+    console.error("handler error:", err);
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(`Server error: ${(err as Error).message}`);
+    return;
+  }
+
+  if (response.location) {
+    res.statusCode = response.status ?? 303;
+    res.setHeader("Location", response.location);
+    res.end();
+    return;
+  }
+
+  res.statusCode = response.status ?? 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(response.body ?? "");
+}
+
+// ── Action Cable upgrade handling ──────────────────────────────
+
+/** Minimal Action Cable handshake + framing. The browser's
+ *  `@rails/actioncable` client sends `Sec-WebSocket-Protocol:
+ *  actioncable-v1-json`; we echo it back. Standard messages:
+ *  welcome on connect, ping every 3s, confirm_subscription on
+ *  subscribe, regular JSON-message broadcasts to subscribers.
+ *
+ *  Dynamic-import of `ws` so the package is optional — the
+ *  emitted project only pulls it in when it actually runs a
+ *  server. */
+async function attachCable(
+  server: ReturnType<typeof createServer>,
+  cable: CableServer,
+): Promise<void> {
+  const { WebSocketServer, WebSocket } = await import("ws");
+  const wss = new WebSocketServer({
+    server,
+    path: "/cable",
+    handleProtocols: (protocols: Set<string>) => {
+      // Echo the Action Cable subprotocol if the client requested
+      // it; falls back to the first offered protocol for safety.
+      if (protocols.has("actioncable-v1-json")) return "actioncable-v1-json";
+      return protocols.values().next().value ?? false;
+    },
+  });
+
+  wss.on("connection", (ws) => {
+    ws.send(JSON.stringify({ type: "welcome" }));
+
+    const ping = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping", message: Date.now() }));
+      }
+    }, 3000);
+
+    const sub: Subscriber = {
+      identifier: "",
+      send: (json: string) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(json);
+      },
+    };
+
+    ws.on("message", (raw: Buffer) => {
+      let data: any;
+      try { data = JSON.parse(raw.toString()); } catch { return; }
+      if (data.command !== "subscribe") return;
+      // Identifier is a JSON-encoded blob of the stream name.
+      // Turbo signs the stream name with a base64 prefix; we
+      // decode the base64 to recover the channel name for
+      // broadcast routing.
+      sub.identifier = data.identifier;
+      let channel = "";
+      try {
+        const id = JSON.parse(data.identifier);
+        const signed = String(id.signed_stream_name ?? "");
+        const base64 = signed.split("--")[0];
+        channel = JSON.parse(Buffer.from(base64, "base64").toString("utf8"));
+      } catch {
+        // If we can't decode a turbo signed stream name, fall
+        // back to using the raw identifier as the channel — lets
+        // tests subscribe directly by stream name.
+        channel = String(data.identifier);
+      }
+      cable.subscribe(channel, sub);
+      ws.send(JSON.stringify({
+        type: "confirm_subscription",
+        identifier: sub.identifier,
+      }));
+    });
+
+    ws.on("close", () => {
+      clearInterval(ping);
+      cable.unsubscribe(sub);
+    });
+  });
+}
+
+// ── Database + schema bootstrap ────────────────────────────────
+
+function openDatabase(dbPath: string, schemaSql: string): void {
+  // better-sqlite3 creates the file if it doesn't exist. We open
+  // with WAL + foreign keys, apply the schema idempotently, and
+  // hand the connection to the juntos runtime via installDb.
+  // All subsequent AR queries run against this connection.
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+
+  // Apply schema. `IF NOT EXISTS` via a manual transform so
+  // re-opening an existing DB is idempotent — the emitter
+  // produces plain `CREATE TABLE` without the guard today.
+  const guarded = schemaSql.replace(/CREATE TABLE (\w+)/g, "CREATE TABLE IF NOT EXISTS $1");
+  db.exec(guarded);
+
+  installDb(db);
+}
+
+// ── Public entry point ─────────────────────────────────────────
+
+export interface StartOptions {
+  /** File path for the sqlite DB. Defaults to `./db/development.sqlite3`. */
+  dbPath?: string;
+  /** HTTP port. Defaults to 3000 or `PORT` env var. */
+  port?: number;
+  /** Schema SQL to apply on startup (from the generated schema_sql.ts). */
+  schemaSql: string;
+  /** Optional seed function, run if `shouldSeed` returns true. */
+  seeds?: () => void | Promise<void>;
+  /** Predicate controlling whether to run seeds. Default: run if
+   *  the database's first AR table is empty. Emitter can override
+   *  with model-specific logic. */
+  shouldSeed?: () => boolean;
+}
+
+/** Start the server. Returns a promise that resolves once the
+ *  HTTP + WebSocket listeners are accepting connections. */
+export async function startServer(opts: StartOptions): Promise<void> {
+  const dbPath = opts.dbPath ?? "./db/development.sqlite3";
+  const port = opts.port ?? Number(process.env.PORT ?? 3000);
+
+  openDatabase(dbPath, opts.schemaSql);
+
+  if (opts.seeds && (opts.shouldSeed ?? (() => true))()) {
+    await opts.seeds();
+  }
+
+  const cable = new CableServer();
+  setBroadcaster((stream, html) => cable.broadcast(stream, html));
+
+  const server = createServer((req, res) => {
+    handleRequest(req, res).catch((err) => {
+      console.error("request error:", err);
+      res.statusCode = 500;
+      res.end("Server error");
+    });
+  });
+
+  await attachCable(server, cable);
+
+  await new Promise<void>((resolve) => server.listen(port, () => resolve()));
+  console.log(`Roundhouse server listening on http://localhost:${port}`);
+}

@@ -13,20 +13,32 @@ import Database from "better-sqlite3";
 
 let _db: Database.Database | null = null;
 
-/** Open a fresh :memory: SQLite connection, run the schema DDL, and
- *  install it in the module-level slot. Called from `Fixtures.setup`
- *  at the top of every spec. */
-export function setupTestDb(schema_sql: string): void {
-  if (_db) _db.close();
-  _db = new Database(":memory:");
-  _db.exec(schema_sql);
+/** Install an already-opened database in the module-level slot.
+ *  Production path: the server opens a file-backed DB and calls
+ *  this. Subsequent `conn()` calls return the installed db. */
+export function installDb(db: Database.Database): void {
+  if (_db && _db !== db) {
+    try { _db.close(); } catch { /* best-effort */ }
+  }
+  _db = db;
 }
 
-/** Borrow the current connection. Throws if `setupTestDb` hasn't
- *  been called yet. */
+/** Open a fresh :memory: SQLite connection, run the schema DDL, and
+ *  install it in the module-level slot. Called from `Fixtures.setup`
+ *  at the top of every spec. Production callers open their own file-
+ *  backed connection and use `installDb` instead. */
+export function setupTestDb(schema_sql: string): void {
+  const db = new Database(":memory:");
+  db.exec(schema_sql);
+  installDb(db);
+}
+
+/** Borrow the current connection. Throws if no database has been
+ *  installed — tests call `setupTestDb`; the server calls
+ *  `installDb` after opening its file-backed DB. */
 export function conn(): Database.Database {
   if (!_db) {
-    throw new Error("test db not initialized; call setupTestDb first");
+    throw new Error("db not initialized; call setupTestDb or installDb first");
   }
   return _db;
 }
