@@ -1369,15 +1369,15 @@ fn controller_class_name(short: &str) -> String {
 fn emit_controller_file_pass2(
     c: &Controller,
     known_models: &[Symbol],
-    _app: &App,
+    app: &App,
 ) -> EmittedFile {
     let module = c.name.0.as_str();
-    let resource = resource_from_controller_name_ex(module);
+    let resource = crate::lower::resource_from_controller_name(module);
     let model_class = crate::naming::singularize_camelize(&resource);
     let has_model = known_models.iter().any(|m| m.as_str() == model_class);
-    let parent = find_nested_parent_ex(module);
-    let permitted = permitted_fields_for_ex(c, &resource)
-        .unwrap_or_else(|| default_permitted_fields_ex(&model_class));
+    let parent = crate::lower::find_nested_parent(app, module);
+    let permitted = crate::lower::permitted_fields_for(c, &resource)
+        .unwrap_or_else(|| crate::lower::default_permitted_fields(app, &model_class));
 
     let (public_actions, _private) = crate::lower::split_public_private(c);
 
@@ -1411,87 +1411,6 @@ fn emit_controller_file_pass2(
     }
 }
 
-fn resource_from_controller_name_ex(name: &str) -> String {
-    let trimmed = name.strip_suffix("Controller").unwrap_or(name);
-    crate::naming::singularize(&crate::naming::snake_case(trimmed))
-}
-
-#[derive(Clone, Debug)]
-struct ExNestedParent {
-    singular: String,
-    #[allow(dead_code)]
-    plural: String,
-}
-
-fn find_nested_parent_ex(controller_name: &str) -> Option<ExNestedParent> {
-    let resource = resource_from_controller_name_ex(controller_name);
-    if resource == "comment" {
-        Some(ExNestedParent {
-            singular: "article".to_string(),
-            plural: "articles".to_string(),
-        })
-    } else {
-        None
-    }
-}
-
-fn permitted_fields_for_ex(c: &Controller, resource: &str) -> Option<Vec<String>> {
-    use crate::dialect::ControllerBodyItem;
-    let helper_name = format!("{}_params", resource);
-    let action = c.body.iter().find_map(|item| match item {
-        ControllerBodyItem::Action { action, .. }
-            if action.name.as_str() == helper_name =>
-        {
-            Some(action)
-        }
-        _ => None,
-    })?;
-    extract_permitted_from_expr_ex(&action.body)
-}
-
-fn extract_permitted_from_expr_ex(expr: &Expr) -> Option<Vec<String>> {
-    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
-        if method.as_str() == "expect" && crate::lower::is_params_expr(r) {
-            if let Some(arg) = args.first() {
-                if let ExprNode::Hash { entries, .. } = &*arg.node {
-                    if let Some((_, value)) = entries.first() {
-                        if let ExprNode::Array { elements, .. } = &*value.node {
-                            let fields: Vec<String> = elements
-                                .iter()
-                                .filter_map(|e| match &*e.node {
-                                    ExprNode::Lit {
-                                        value: Literal::Sym { value },
-                                    } => Some(value.as_str().to_string()),
-                                    _ => None,
-                                })
-                                .collect();
-                            if !fields.is_empty() {
-                                return Some(fields);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let ExprNode::Seq { exprs } = &*expr.node {
-        for e in exprs {
-            if let Some(v) = extract_permitted_from_expr_ex(e) {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
-fn default_permitted_fields_ex(model_class: &str) -> Vec<String> {
-    match model_class {
-        "Article" => vec!["title".to_string(), "body".to_string()],
-        "Comment" => vec!["commenter".to_string(), "body".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 fn ex_view_fn(model_class: &str, suffix: &str) -> String {
     let plural = crate::naming::pluralize_snake(model_class);
     format!("render_{plural}_{}", suffix.to_lowercase())
@@ -1503,7 +1422,7 @@ fn emit_ex_action_template(
     resource: &str,
     model_class: &str,
     has_model: bool,
-    parent: Option<&ExNestedParent>,
+    parent: Option<&crate::lower::NestedParent>,
     permitted: &[String],
 ) {
     let raw = action.name.as_str();
@@ -1599,7 +1518,7 @@ fn emit_ex_create(
     resource: &str,
     model_class: &str,
     has_model: bool,
-    parent: Option<&ExNestedParent>,
+    parent: Option<&crate::lower::NestedParent>,
     permitted: &[String],
 ) {
     let uses_context = has_model && (parent.is_some() || !permitted.is_empty());
@@ -1719,7 +1638,7 @@ fn emit_ex_destroy(
     name: &str,
     model_class: &str,
     has_model: bool,
-    parent: Option<&ExNestedParent>,
+    parent: Option<&crate::lower::NestedParent>,
 ) {
     let arg = if has_model { "context" } else { "_context" };
     writeln!(out, "  def {name}({arg}) do").unwrap();

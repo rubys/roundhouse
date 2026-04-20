@@ -28,8 +28,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::dialect::{Action, Controller, ControllerBodyItem};
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::App;
+use crate::dialect::{Action, Controller, ControllerBodyItem, RouteSpec};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming;
 
@@ -496,4 +497,159 @@ fn unwrap_lambda(e: &Expr) -> &Expr {
         ExprNode::Lambda { body, .. } => body,
         _ => e,
     }
+}
+
+// Pass-2 shared helpers ------------------------------------------------
+//
+// Every target emitter's pass-2 controller rendering needs the same
+// four pieces of analysis: the resource name (singular snake_case
+// from the controller class), whether the controller is a nested
+// child of another resource, the list of fields its `_params`
+// helper permits, and a fallback list when the helper can't be
+// parsed. Lifted from six near-identical per-target copies; the
+// only variation was Rust's app-driven route-table walk for nested
+// parents (vs. hardcoded "comment → article" in the other five) —
+// we keep the Rust shape as canonical since it scales.
+
+/// `ArticlesController` → `"article"`. `ApplicationController` →
+/// `"application"`. Used to look up the `<resource>_params` helper
+/// and to build default redirect paths.
+pub fn resource_from_controller_name(class_name: &str) -> String {
+    let trimmed = class_name.strip_suffix("Controller").unwrap_or(class_name);
+    naming::singularize(&naming::snake_case(trimmed))
+}
+
+/// One nested-parent entry, carrying both forms for use in route
+/// helpers and typed destinations. `singular` is the Ruby-style
+/// singular ("article"); `plural` is the route segment
+/// ("articles").
+#[derive(Clone, Debug)]
+pub struct NestedParent {
+    pub singular: String,
+    pub plural: String,
+}
+
+/// Walk the route table looking for a `resources :plural do resources
+/// :child ... end` shape where `child` matches this controller's
+/// resource. Returns the parent's (singular, plural) pair so the
+/// emitter can emit `parent_id` path params and parent-redirects.
+///
+/// Recurses into nested blocks so deeper-than-two-level nesting
+/// still resolves correctly.
+pub fn find_nested_parent(app: &App, controller_class_name: &str) -> Option<NestedParent> {
+    let resource = resource_from_controller_name(controller_class_name);
+    let child_plural = naming::pluralize_snake(&naming::camelize(&resource));
+    find_nested_parent_in(&app.routes.entries, &child_plural)
+}
+
+fn find_nested_parent_in(
+    entries: &[RouteSpec],
+    child_plural: &str,
+) -> Option<NestedParent> {
+    for entry in entries {
+        if let RouteSpec::Resources { name, nested, .. } = entry {
+            for child in nested {
+                if let RouteSpec::Resources { name: child_name, .. } = child {
+                    if child_name.as_str() == child_plural {
+                        let parent_singular =
+                            naming::singularize_camelize(name.as_str()).to_lowercase();
+                        return Some(NestedParent {
+                            singular: parent_singular,
+                            plural: name.as_str().to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(p) = find_nested_parent_in(nested, child_plural) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Dig the `<resource>_params` private helper out of the controller
+/// and extract the permitted field names from its
+/// `params.expect(scope: [:field1, :field2])` body. Returns `None`
+/// when the helper doesn't exist or the body doesn't match the
+/// canonical Rails scaffold shape — callers fall back to
+/// `default_permitted_fields`.
+pub fn permitted_fields_for(
+    controller: &Controller,
+    resource: &str,
+) -> Option<Vec<String>> {
+    let helper_name = format!("{resource}_params");
+    let action = controller.body.iter().find_map(|item| match item {
+        ControllerBodyItem::Action { action, .. }
+            if action.name.as_str() == helper_name =>
+        {
+            Some(action)
+        }
+        _ => None,
+    })?;
+    extract_permitted_from_expr(&action.body)
+}
+
+/// Walk an expression looking for a `params.expect(<scope>: [:f1,
+/// :f2])` call and return the field name list. Recurses into Seqs
+/// so a helper with a guard or local first still resolves.
+pub fn extract_permitted_from_expr(expr: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
+        if method.as_str() == "expect" && is_params_expr(r) {
+            if let Some(arg) = args.first() {
+                if let ExprNode::Hash { entries, .. } = &*arg.node {
+                    if let Some((_, value)) = entries.first() {
+                        if let ExprNode::Array { elements, .. } = &*value.node {
+                            let fields: Vec<String> = elements
+                                .iter()
+                                .filter_map(|e| match &*e.node {
+                                    ExprNode::Lit {
+                                        value: Literal::Sym { value },
+                                    } => Some(value.as_str().to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !fields.is_empty() {
+                                return Some(fields);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let ExprNode::Seq { exprs } = &*expr.node {
+        for e in exprs {
+            if let Some(v) = extract_permitted_from_expr(e) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Fallback permitted-field list when the `<resource>_params` helper
+/// isn't recognizable. Returns the model's non-id, non-timestamp,
+/// non-foreign-key attributes — a safe default that matches what
+/// the Rails scaffold generator would produce.
+pub fn default_permitted_fields(app: &App, model_class: &str) -> Vec<String> {
+    let Some(model) = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == model_class)
+    else {
+        return Vec::new();
+    };
+    model
+        .attributes
+        .fields
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .filter(|name| {
+            name != "id"
+                && name != "created_at"
+                && name != "updated_at"
+                && !name.ends_with("_id")
+        })
+        .collect()
 }

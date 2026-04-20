@@ -612,13 +612,19 @@ fn emit_controller_pass2(out: &mut String, c: &Controller, app: &App) {
     let actions_mod = format!("{name}Actions");
     writeln!(out, "module {actions_mod}").unwrap();
 
-    let resource = resource_from_controller_name_cr(name);
-    let singular = crate::naming::singularize(&resource);
+    // Crystal traditionally computed a plural `resource` and singular
+    // separately; with the shared helpers, we take the singular from
+    // `resource_from_controller_name` and derive plural for downstream
+    // uses (emit helpers still key off plural).
+    let singular = crate::lower::resource_from_controller_name(name);
+    let resource = crate::naming::pluralize_snake(&crate::naming::camelize(&singular));
     let model_class = crate::naming::camelize(&singular);
     let known_models: Vec<Symbol> =
         app.models.iter().map(|m| m.name.0.clone()).collect();
     let has_model = known_models.iter().any(|m| m.as_str() == model_class);
-    let nested_parent = find_nested_parent_cr(&resource, app);
+    let parent = crate::lower::find_nested_parent(app, name);
+    let permitted = crate::lower::permitted_fields_for(c, &singular)
+        .unwrap_or_else(|| crate::lower::default_permitted_fields(app, &model_class));
 
     let standard = ["index", "show", "new", "edit", "create", "update", "destroy"];
     for action_name in standard {
@@ -636,29 +642,12 @@ fn emit_controller_pass2(out: &mut String, c: &Controller, app: &App) {
             &singular,
             &model_class,
             has_model,
-            nested_parent.as_deref(),
-            c,
+            parent.as_ref().map(|p| p.singular.as_str()),
+            &permitted,
         );
     }
 
     writeln!(out, "end").unwrap();
-}
-
-fn resource_from_controller_name_cr(class_name: &str) -> String {
-    let stripped = class_name.strip_suffix("Controller").unwrap_or(class_name);
-    crate::naming::snake_case(stripped)
-}
-
-fn find_nested_parent_cr(resource: &str, _app: &App) -> Option<String> {
-    // Hardcoded for the scaffold blog: comments nest under articles.
-    // A proper implementation would walk `app.routes.entries` for a
-    // Resources-with-nested matching this resource; leave that for
-    // when a second fixture needs it.
-    if resource == "comments" {
-        Some("article".to_string())
-    } else {
-        None
-    }
 }
 
 fn emit_cr_action_template(
@@ -669,7 +658,7 @@ fn emit_cr_action_template(
     model_class: &str,
     has_model: bool,
     nested_parent: Option<&str>,
-    c: &Controller,
+    permitted: &[String],
 ) {
     let response_ty = "Roundhouse::Http::ActionResponse";
     let ctx_ty = "Roundhouse::Http::ActionContext";
@@ -683,7 +672,6 @@ fn emit_cr_action_template(
     };
     writeln!(out, "  def self.{action_method_name}(context : {ctx_ty}) : {response_ty}").unwrap();
 
-    let permitted = permitted_fields_for_cr(c, resource, singular);
     let model_class = model_class.to_string();
 
     match action {
@@ -752,7 +740,7 @@ fn emit_cr_action_template(
                     )
                     .unwrap();
                 }
-                for field in &permitted {
+                for field in permitted {
                     writeln!(
                         out,
                         "    record.{field} = context.params.fetch(\"{resource_singular}[{field}]\", \"\")",
@@ -800,7 +788,7 @@ fn emit_cr_action_template(
             if has_model {
                 writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
                 writeln!(out, "    record = {model_class}.find(id) || {model_class}.new").unwrap();
-                for field in &permitted {
+                for field in permitted {
                     writeln!(
                         out,
                         "    if v = context.params[\"{resource_singular}[{field}]\"]?",
@@ -863,88 +851,6 @@ fn emit_cr_action_template(
     writeln!(out, "  end").unwrap();
 }
 
-fn permitted_fields_for_cr(c: &Controller, _resource: &str, singular: &str) -> Vec<String> {
-    // Walk action bodies for `params.expect(<singular>: [:f1, :f2, ...])`.
-    // Fall back to scaffold defaults if no expect found (title/body for
-    // articles, commenter/body for comments, etc.).
-    for a in c.actions() {
-        if let Some(f) = extract_permitted_from_expr_cr(&a.body, singular) {
-            if !f.is_empty() {
-                return f;
-            }
-        }
-    }
-    default_permitted_fields_cr(singular)
-}
-
-fn extract_permitted_from_expr_cr(e: &Expr, singular: &str) -> Option<Vec<String>> {
-    match &*e.node {
-        ExprNode::Send { method, args, .. } if method.as_str() == "expect" => {
-            for arg in args {
-                if let ExprNode::Hash { entries, .. } = &*arg.node {
-                    for (k, v) in entries {
-                        if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                            if value.as_str() == singular {
-                                if let ExprNode::Array { elements, .. } = &*v.node {
-                                    let fields: Vec<String> = elements
-                                        .iter()
-                                        .filter_map(|el| match &*el.node {
-                                            ExprNode::Lit { value: Literal::Sym { value } } => {
-                                                Some(value.as_str().to_string())
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    return Some(fields);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
-        ExprNode::Seq { exprs } => {
-            for sub in exprs {
-                if let Some(f) = extract_permitted_from_expr_cr(sub, singular) {
-                    return Some(f);
-                }
-            }
-            None
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                if let Some(f) = extract_permitted_from_expr_cr(r, singular) {
-                    return Some(f);
-                }
-            }
-            for a in args {
-                if let Some(f) = extract_permitted_from_expr_cr(a, singular) {
-                    return Some(f);
-                }
-            }
-            if let Some(b) = block {
-                return extract_permitted_from_expr_cr(b, singular);
-            }
-            None
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            extract_permitted_from_expr_cr(cond, singular)
-                .or_else(|| extract_permitted_from_expr_cr(then_branch, singular))
-                .or_else(|| extract_permitted_from_expr_cr(else_branch, singular))
-        }
-        ExprNode::Lambda { body, .. } => extract_permitted_from_expr_cr(body, singular),
-        _ => None,
-    }
-}
-
-fn default_permitted_fields_cr(singular: &str) -> Vec<String> {
-    match singular {
-        "article" => vec!["title".into(), "body".into()],
-        "comment" => vec!["commenter".into(), "body".into()],
-        _ => Vec::new(),
-    }
-}
 
 /// Map a model class name + view action (`"Article" + "Show"`) to
 /// the Crystal view fn name (`render_articles_show`). Still used by

@@ -277,6 +277,7 @@ func PostsShow(ctx *ActionContext) ActionResponse {
 
 func PostsCreate(ctx *ActionContext) ActionResponse {
 \trecord := &Post{}
+\trecord.Title = ctx.Params[\"post[title]\"]
 \tif record.Save() {
 \t\treturn ActionResponse{Status: 303, Location: PostPath(record.ID)}
 \t}
