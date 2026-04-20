@@ -495,6 +495,116 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
 }
 
 #[test]
+fn custom_action_with_respond_to_flattens_to_html_branch() {
+    // A custom action whose body is `respond_to { format.html {
+    // redirect_to articles_path } format.json { head } }` — the
+    // unwrap_respond_to lowering pass flattens this to just the
+    // redirect, which the walker then renders as a 303.
+    use roundhouse::{
+        Action, ClassId, Controller, ControllerBodyItem, EffectSet, Expr, ExprNode,
+        RenderTarget, Row, Symbol,
+    };
+    use roundhouse::ident::{TableRef, VarId};
+    use roundhouse::span::Span;
+    use roundhouse::Model;
+    fn lambda(body: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![],
+                block_param: None,
+                body,
+                block_style: roundhouse::expr::BlockStyle::Do,
+            },
+        )
+    }
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+    fn send_with_block(recv: Option<Expr>, method: &str, block: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args: vec![],
+                block: Some(block),
+                parenthesized: false,
+            },
+        )
+    }
+    let format_var = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from("format") },
+    );
+    let html_call = send_with_block(
+        Some(format_var.clone()),
+        "html",
+        lambda(send(None, "redirect_to", vec![send(None, "articles_path", vec![])])),
+    );
+    let json_call = send_with_block(
+        Some(format_var),
+        "json",
+        lambda(send(None, "head", vec![])),
+    );
+    let pair = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq { exprs: vec![html_call, json_call] },
+    );
+    let body = send_with_block(None, "respond_to", lambda(pair));
+
+    let mut app = roundhouse::App::new();
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![],
+    });
+    app.controllers.push(Controller {
+        name: ClassId(Symbol::from("ArticlesController")),
+        parent: None,
+        body: vec![ControllerBodyItem::Action {
+            action: Action {
+                name: Symbol::from("archive_all"),
+                params: Row::closed(),
+                body,
+                renders: RenderTarget::Inferred,
+                effects: EffectSet::pure(),
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/articles_controller.ts");
+    // html-branch redirect lifted out of the respond_to; json dropped.
+    assert!(
+        content.contains("return { status: 303, location: routeHelpers.articlesPath() };"),
+        "respond_to html branch should emit as redirect, got:\n{content}"
+    );
+    // No unreachable-stub comment — the pass flattened successfully.
+    assert!(
+        !content.contains("unreachable: respond_to"),
+        "respond_to should have been flattened, got:\n{content}"
+    );
+    // No TODO leftover from the old walker stub.
+    assert!(
+        !content.contains("TODO: respond_to"),
+        "old respond_to TODO should be gone, got:\n{content}"
+    );
+}
+
+#[test]
 fn custom_action_without_terminal_gets_implicit_render() {
     // A custom action body with no explicit render/redirect_to/head
     // should get a synthesized `render :<action>` appended by the

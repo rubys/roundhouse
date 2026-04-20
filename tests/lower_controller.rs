@@ -8,7 +8,7 @@
 
 use roundhouse::expr::{Expr, ExprNode, Literal};
 use roundhouse::ident::Symbol;
-use roundhouse::lower::{has_toplevel_terminal, synthesize_implicit_render};
+use roundhouse::lower::{has_toplevel_terminal, synthesize_implicit_render, unwrap_respond_to};
 use roundhouse::span::Span;
 
 fn lit_int(n: i64) -> Expr {
@@ -147,6 +147,144 @@ fn synthesize_implicit_render_is_noop_when_terminal_present() {
         "pass should be a no-op; got {:?}",
         out.node,
     );
+}
+
+// -- unwrap_respond_to ----------------------------------------------
+
+fn lambda(body: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![],
+            block_param: None,
+            body,
+            block_style: roundhouse::expr::BlockStyle::Do,
+        },
+    )
+}
+
+fn send_with_block(recv: Option<Expr>, method: &str, block: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv,
+            method: Symbol::from(method),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    )
+}
+
+/// Build `format.<branch> { body }` — the canonical respond_to
+/// inner-call shape. The `format` receiver must be a Var (the
+/// block param introduced by `do |format|`), not a Send —
+/// `is_format_binding` specifically pattern-matches the Var form.
+fn format_call(branch: &str, body: Expr) -> Expr {
+    let format_recv = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var {
+            id: roundhouse::ident::VarId(0),
+            name: Symbol::from("format"),
+        },
+    );
+    send_with_block(Some(format_recv), branch, lambda(body))
+}
+
+/// Build `respond_to do |format| { body } end`.
+fn respond_to(body: Expr) -> Expr {
+    send_with_block(None, "respond_to", lambda(body))
+}
+
+#[test]
+fn unwrap_respond_to_flattens_simple_html_json_pair() {
+    // `respond_to { format.html { redirect_to(:x) }; format.json { head } }`
+    // → `redirect_to(:x)` (html kept, json dropped).
+    let body = seq(vec![
+        format_call("html", send(None, "redirect_to", vec![lit_int(1)])),
+        format_call("json", send(None, "head", vec![])),
+    ]);
+    let out = unwrap_respond_to(&respond_to(body));
+    // The Seq wrapping a single expr collapses — walker sees a bare Send.
+    let ExprNode::Send { method, .. } = &*out.node else {
+        panic!("expected bare Send, got {:?}", out.node);
+    };
+    assert_eq!(method.as_str(), "redirect_to");
+}
+
+#[test]
+fn unwrap_respond_to_drops_json_only_branch() {
+    // `respond_to { format.json { ... } }` with no html — flattens
+    // to an empty Seq. Downstream `synthesize_implicit_render` will
+    // then append a terminal.
+    let body = seq(vec![format_call("json", send(None, "head", vec![]))]);
+    let out = unwrap_respond_to(&respond_to(body));
+    match &*out.node {
+        ExprNode::Seq { exprs } => assert!(exprs.is_empty()),
+        other => panic!("expected empty Seq, got {:?}", other),
+    }
+}
+
+#[test]
+fn unwrap_respond_to_preserves_if_branching() {
+    // `respond_to { if cond; format.html { a1 }; format.json { b1 }
+    //                       else;  format.html { a2 }; format.json { b2 } end }`
+    // → `if cond; a1 else a2 end` — the if wrapper stays, each
+    // branch is replaced by its html contents.
+    let then_pair = seq(vec![
+        format_call("html", send(None, "render", vec![lit_int(1)])),
+        format_call("json", send(None, "head", vec![])),
+    ]);
+    let else_pair = seq(vec![
+        format_call("html", send(None, "render", vec![lit_int(2)])),
+        format_call("json", send(None, "head", vec![])),
+    ]);
+    let branched = if_expr(lit_int(0), then_pair, else_pair);
+    let out = unwrap_respond_to(&respond_to(branched));
+    let ExprNode::If { then_branch, else_branch, .. } = &*out.node else {
+        panic!("expected If, got {:?}", out.node);
+    };
+    // Each branch has been collapsed from a format pair to the html
+    // branch's render call.
+    let ExprNode::Send { method: m1, .. } = &*then_branch.node else {
+        panic!("expected Send in then, got {:?}", then_branch.node);
+    };
+    assert_eq!(m1.as_str(), "render");
+    let ExprNode::Send { method: m2, .. } = &*else_branch.node else {
+        panic!("expected Send in else, got {:?}", else_branch.node);
+    };
+    assert_eq!(m2.as_str(), "render");
+}
+
+#[test]
+fn unwrap_respond_to_is_noop_without_respond_to_call() {
+    // A body with no respond_to — the pass leaves it structurally
+    // equivalent (recursive walk reconstructs Nodes but same shape).
+    let body = seq(vec![
+        send(None, "redirect_to", vec![lit_int(1)]),
+    ]);
+    let out = unwrap_respond_to(&body);
+    assert!(matches!(&*out.node, ExprNode::Seq { .. }));
+}
+
+#[test]
+fn unwrap_respond_to_recurses_through_non_respond_to_structure() {
+    // `if cond; respond_to { format.html { a } } else; b end` —
+    // the respond_to inside the then-branch still unwraps.
+    let nested_then = respond_to(seq(vec![
+        format_call("html", send(None, "render", vec![lit_int(1)])),
+        format_call("json", send(None, "head", vec![])),
+    ]));
+    let body = if_expr(lit_int(0), nested_then, send(None, "render", vec![lit_int(2)]));
+    let out = unwrap_respond_to(&body);
+    let ExprNode::If { then_branch, .. } = &*out.node else {
+        panic!("expected If, got {:?}", out.node);
+    };
+    // then-branch's respond_to collapsed to a Send.
+    let ExprNode::Send { method, .. } = &*then_branch.node else {
+        panic!("expected Send in then, got {:?}", then_branch.node);
+    };
+    assert_eq!(method.as_str(), "render");
 }
 
 #[test]

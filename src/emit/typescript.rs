@@ -1247,14 +1247,21 @@ fn emit_ts_action(
                 resource,
                 parent: la.parent.as_ref(),
             };
-            // Rails' implicit-render convention is codified as a
-            // lowering pass — the walker always sees an explicit
-            // terminal Send. Runs before `rewrite_for_controller`
-            // so the synthesized `render :<action>` Seq element
-            // passes through the same ivar / params rewrites as the
-            // rest (no-op today since it contains neither).
+            // Pre-emit normalization pipeline — each pass is
+            // target-neutral and lives in `src/lower/`:
+            //   1. unwrap_respond_to collapses `respond_to {
+            //      format.html { … } format.json { … } }` into just
+            //      its HTML branch (JSON deferred per Phase 4c).
+            //   2. synthesize_implicit_render appends a `render
+            //      :<action>` terminal when the body doesn't end in
+            //      one — encodes the Rails implicit-render convention.
+            //   3. rewrite_for_controller lifts ivars to locals and
+            //      rewrites params[:k] to context.params.k.
+            // After this the walker sees a flat, terminal-bearing
+            // body with no Rails idioms left.
+            let flattened = crate::lower::unwrap_respond_to(body);
             let normalized =
-                crate::lower::synthesize_implicit_render(body, la.name.as_str());
+                crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
             let rewritten = rewrite_for_controller(&normalized);
             let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
             let ctx_param = if uses_context { "context" } else { "_context" };
@@ -1450,14 +1457,15 @@ fn emit_ts_controller_send(
                 .unwrap_or_else(|| "200".to_string());
             ControllerStmt::Return(format!("return {{ status: {status} }};"))
         }
-        // respond_to / format.html / format.json handling is TODO for
-        // the walker. For now, return a stub so the emitter doesn't
-        // crash on real-blog-shape controllers — scaffold dispatch
-        // still handles those actions via the ActionKind templates.
+        // respond_to / format.* — the `unwrap_respond_to` lowering
+        // pass flattens these before the walker runs, so they
+        // shouldn't be seen here. Kept as a defensive stub: if a
+        // shape escapes normalization the emitted marker makes it
+        // obvious in the output.
         SendKind::RespondToBlock { .. }
         | SendKind::FormatHtml { .. }
         | SendKind::FormatJson => ControllerStmt::Expr(
-            "/* TODO: respond_to / format dispatch */".to_string(),
+            "/* unreachable: respond_to not normalized */".to_string(),
         ),
     })
 }
