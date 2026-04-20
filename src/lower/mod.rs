@@ -22,6 +22,7 @@ pub mod controller;
 pub mod controller_test;
 pub mod fixtures;
 pub mod persistence;
+pub mod routes;
 pub mod schema_sql;
 pub mod validations;
 
@@ -44,5 +45,6 @@ pub use fixtures::{
     LoweredFixtureValue,
 };
 pub use persistence::{lower_persistence, BelongsToCheck, DependentChild, LoweredPersistence};
+pub use routes::{flatten_routes, standard_resource_actions, FlatRoute};
 pub use schema_sql::{lower_schema, sqlite_type};
 pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};

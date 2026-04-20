@@ -245,191 +245,14 @@ fn emit_controllers_mod(controllers: &[Controller]) -> EmittedFile {
 // emitted controller actions for redirects and the emitted tests for
 // URLs).
 
-/// One flattened concrete route — `method`, `path`, target
-/// controller class name, action symbol, optional `as:` name, and
-/// the list of path-param names in declaration order (for helpers:
-/// `article_path(id)`, `article_comment_path(article_id, id)`).
-#[derive(Debug)]
-struct FlatRoute {
-    method: HttpMethod,
-    path: String,
-    controller: String,
-    action: String,
-    as_name: String,
-    path_params: Vec<String>,
-}
-
-fn flatten_routes(app: &App) -> Vec<FlatRoute> {
-    let mut out = Vec::new();
-    for entry in &app.routes.entries {
-        collect_flat_routes_rust(entry, &mut out, None);
-    }
-    out
-}
-
-fn collect_flat_routes_rust(
-    spec: &crate::dialect::RouteSpec,
-    out: &mut Vec<FlatRoute>,
-    scope_prefix: Option<(&str, &str)>,
-) {
-    use crate::dialect::RouteSpec;
-    match spec {
-        RouteSpec::Explicit { method, path, controller, action, as_name, .. } => {
-            let (full_path, mut params) = nest_path(path, scope_prefix);
-            // Scan the path for `:segment` params not already captured
-            // by the parent scope. Explicit routes like
-            // `get "/posts/:id"` use this to pick up the `:id`.
-            extract_path_params(&full_path, &mut params);
-            out.push(FlatRoute {
-                method: method.clone(),
-                path: full_path,
-                controller: controller.0.to_string(),
-                action: action.to_string(),
-                as_name: as_name
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| action.to_string()),
-                path_params: params,
-            });
-        }
-        RouteSpec::Root { target } => {
-            if let Some((c, a)) = target.split_once('#') {
-                out.push(FlatRoute {
-                    method: HttpMethod::Get,
-                    path: "/".to_string(),
-                    controller: format!("{}Controller", crate::naming::camelize(c)),
-                    action: a.to_string(),
-                    as_name: "root".to_string(),
-                    path_params: vec![],
-                });
-            }
-        }
-        RouteSpec::Resources { name, only, except, nested } => {
-            let resource_path = format!("/{name}");
-            let controller_class =
-                format!("{}Controller", crate::naming::camelize(name.as_str()));
-            let singular_low =
-                crate::naming::singularize_camelize(name.as_str()).to_lowercase();
-
-            for (action, method, suffix) in standard_resource_actions_rust() {
-                let action: &str = action;
-                let suffix: &str = suffix;
-                if !only.is_empty() && !only.iter().any(|s| s.as_str() == action) {
-                    continue;
-                }
-                if except.iter().any(|s| s.as_str() == action) {
-                    continue;
-                }
-                let path = format!("{resource_path}{suffix}");
-                let (full_path, mut params) = nest_path(&path, scope_prefix);
-                // `:id` is a path param on the non-collection actions;
-                // nest_path only adds the parent's `:parent_id`.
-                if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
-                    params.push("id".to_string());
-                }
-                let as_name =
-                    resource_as_name(action, &singular_low, name.as_str(), scope_prefix);
-                out.push(FlatRoute {
-                    method: method.clone(),
-                    path: full_path,
-                    controller: controller_class.clone(),
-                    action: action.to_string(),
-                    as_name,
-                    path_params: params,
-                });
-            }
-            for child in nested {
-                collect_flat_routes_rust(child, out, Some((&singular_low, name.as_str())));
-            }
-        }
-    }
-}
-
-/// Prepend a scope's `/<parent>/:parent_id` prefix to a child path.
-/// Returns the full path and the list of path-param names in
-/// declaration order (parent first, then whatever the child path
-/// already has).
-fn nest_path(path: &str, scope_prefix: Option<(&str, &str)>) -> (String, Vec<String>) {
-    match scope_prefix {
-        Some((parent, parent_plural)) => {
-            let full = format!("/{parent_plural}/:{parent}_id{path}");
-            let mut params = vec![format!("{parent}_id")];
-            // the child path may already reference `:id`; pick it up
-            // later in the caller since nest_path doesn't know which
-            // suffix introduced which param.
-            let _ = path;
-            (full, params)
-        }
-        None => (path.to_string(), vec![]),
-    }
-}
-
-/// Walk a Rails-shape path (`/posts/:id/edit`, `/articles/:article_id/
-/// comments`) and append any `:param` segment names not already in
-/// `params`. Used by Explicit routes (which carry their `:id` inline
-/// rather than picking it up from a resources block).
-fn extract_path_params(path: &str, params: &mut Vec<String>) {
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == ':' {
-            let mut ident = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc.is_alphanumeric() || nc == '_' {
-                    ident.push(nc);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if !ident.is_empty() && !params.iter().any(|p| p == &ident) {
-                params.push(ident);
-            }
-        }
-    }
-}
-
-fn standard_resource_actions_rust() -> &'static [(&'static str, HttpMethod, &'static str)] {
-    // Kept here (not a const) so we can return borrowed HttpMethod
-    // values without cloning the enum. Matches Rails' seven RESTful
-    // actions + their default paths.
-    use HttpMethod::*;
-    &[
-        ("index", Get, ""),
-        ("new", Get, "/new"),
-        ("create", Post, ""),
-        ("show", Get, "/:id"),
-        ("edit", Get, "/:id/edit"),
-        ("update", Patch, "/:id"),
-        ("destroy", Delete, "/:id"),
-    ]
-}
-
-/// Generate the Rails route-helper name for a standard resource
-/// action. `index`/`create` on articles → `articles`; `show`/`edit`/
-/// `update`/`destroy` → `article`; `new` → `new_article`; `edit` →
-/// `edit_article`. When nested, the helper name takes the parent
-/// singular as a prefix: `article_comment` / `article_comments`.
-fn resource_as_name(
-    action: &str,
-    singular_low: &str,
-    plural: &str,
-    scope_prefix: Option<(&str, &str)>,
-) -> String {
-    let parent_prefix = scope_prefix.map(|(p, _)| format!("{p}_")).unwrap_or_default();
-    match action {
-        "index" | "create" => format!("{parent_prefix}{plural}"),
-        "new" => format!("new_{parent_prefix}{singular_low}"),
-        "edit" => format!("edit_{parent_prefix}{singular_low}"),
-        _ => format!("{parent_prefix}{singular_low}"),
-    }
-}
+use crate::lower::FlatRoute;
 
 /// Emit `src/router.rs` — `pub fn router() -> Router` wiring the
 /// flat route table to controller action fns. Groups routes by path
 /// so axum's MethodRouter chain (`.get(...).post(...)`) handles
 /// multi-verb endpoints correctly.
 fn emit_router(app: &App) -> EmittedFile {
-    let flat = flatten_routes(app);
+    let flat = crate::lower::flatten_routes(app);
     let mut s = String::new();
     writeln!(s, "// Generated by Roundhouse.").unwrap();
     writeln!(s).unwrap();
@@ -455,7 +278,7 @@ fn emit_router(app: &App) -> EmittedFile {
         let verbs: Vec<String> = routes
             .iter()
             .map(|r| {
-                let handler_path = controller_module_path(&r.controller);
+                let handler_path = controller_module_path(r.controller.0.as_str());
                 let verb = axum_verb_fn(&r.method);
                 format!("{verb}({handler_path}::{})", r.action)
             })
@@ -514,7 +337,7 @@ fn controller_module_path(class: &str) -> String {
 /// per path shape). Path params are `i64` by convention (Rails'
 /// default integer primary key).
 fn emit_route_helpers(app: &App) -> EmittedFile {
-    let flat = flatten_routes(app);
+    let flat = crate::lower::flatten_routes(app);
     let mut s = String::new();
     writeln!(s, "// Generated by Roundhouse.").unwrap();
     writeln!(s).unwrap();
