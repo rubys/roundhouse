@@ -1095,11 +1095,8 @@ fn emit_ts_action_via_walker(
         parent: la.parent.as_ref(),
         permitted: &la.permitted,
     };
-    let with_callbacks =
-        crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
-    let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
     let normalized =
-        crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
+        crate::lower::normalize_action_body(controller, la.name.as_str(), body);
     let rewritten = rewrite_for_controller(&normalized);
     let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
     // uses_context is set by SendKind arms that render `context.*`,
@@ -1211,7 +1208,7 @@ fn emit_ts_ctrl_stmt(
                 emit_ts_update_field_assigns(out, &recv_s, &indent, ctx, state);
                 writeln!(out, "{indent}if ({recv_s}.save) {{").unwrap();
                 emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !is_empty_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     writeln!(out, "{indent}}} else {{").unwrap();
                     emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
                 }
@@ -1220,7 +1217,7 @@ fn emit_ts_ctrl_stmt(
                 let cond_s = emit_ts_ctrl_expr(cond, ctx, state);
                 writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
                 emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !is_empty_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     writeln!(out, "{indent}}} else {{").unwrap();
                     emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
                 }
@@ -1577,11 +1574,6 @@ fn capitalize_ascii(s: &str) -> String {
     }
 }
 
-fn is_empty_expr(expr: &Expr) -> bool {
-    matches!(&*expr.node,
-        ExprNode::Seq { exprs } if exprs.is_empty())
-        || matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil })
-}
 
 
 /// Build a TS view fn name from a model class + action suffix.

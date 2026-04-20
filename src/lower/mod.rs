@@ -30,9 +30,9 @@ pub use associations::{resolve_has_many, HasManyRef};
 pub use controller::{
     chain_target_class, classify_controller_send, default_permitted_fields,
     extract_permitted_from_expr, extract_status_from_kwargs, find_nested_parent,
-    has_toplevel_terminal, is_format_binding, is_params_expr,
+    has_toplevel_terminal, is_empty_body, is_format_binding, is_params_expr,
     is_query_builder_method, is_resource_params_call, lower_action,
-    model_new_with_strong_params, permitted_fields_for,
+    model_new_with_strong_params, normalize_action_body, permitted_fields_for,
     resolve_before_actions, resource_from_controller_name, singularize_to_model,
     split_public_private, status_sym_to_code, synthesize_implicit_render,
     unwrap_respond_to, update_with_strong_params, walk_controller_ivars,

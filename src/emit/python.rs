@@ -745,11 +745,8 @@ fn emit_py_action(
 
     // Normalization pipeline — identical three target-neutral passes
     // every other emitter uses.
-    let with_callbacks =
-        crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
-    let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
     let normalized =
-        crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
+        crate::lower::normalize_action_body(controller, la.name.as_str(), body);
 
     let ctx = PyActionCtx {
         known_models,
@@ -852,7 +849,7 @@ fn emit_py_action_stmt(
                 emit_py_update_field_assigns(out, &recv_s, &indent, ctx, state);
                 writeln!(out, "{indent}if {recv_s}.save():").unwrap();
                 emit_py_action_stmt(then_branch, out, ctx, depth + 1, state);
-                if !is_empty_py_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     writeln!(out, "{indent}else:").unwrap();
                     emit_py_action_stmt(else_branch, out, ctx, depth + 1, state);
                 }
@@ -860,7 +857,7 @@ fn emit_py_action_stmt(
                 let cond_s = emit_py_action_expr(cond, ctx, state);
                 writeln!(out, "{indent}if {cond_s}:").unwrap();
                 emit_py_action_stmt(then_branch, out, ctx, depth + 1, state);
-                if !is_empty_py_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     writeln!(out, "{indent}else:").unwrap();
                     emit_py_action_stmt(else_branch, out, ctx, depth + 1, state);
                 }
@@ -1095,10 +1092,6 @@ fn is_bare_py_ident(s: &str) -> bool {
     bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn is_empty_py_expr(expr: &Expr) -> bool {
-    matches!(&*expr.node, ExprNode::Seq { exprs } if exprs.is_empty())
-        || matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil })
-}
 
 // Legacy pass-1 emit retained for any code that still references
 // `emit_controllers`; the public entry point is `emit_controllers_pass2`.

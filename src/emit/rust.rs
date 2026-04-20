@@ -1873,10 +1873,7 @@ fn emit_rust_action(
     // every other emitter. After this the walker sees a body with
     // before_action callbacks inlined, respond_to flattened, and an
     // explicit render/redirect/head terminal.
-    let with_callbacks =
-        crate::lower::resolve_before_actions(controller, name, body);
-    let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
-    let normalized = crate::lower::synthesize_implicit_render(&flattened, name);
+    let normalized = crate::lower::normalize_action_body(controller, name, body);
 
     let ctx = RsCtrlCtx {
         known_models,
@@ -1995,7 +1992,7 @@ fn emit_rs_ctrl_stmt_at(
                 writeln!(out, "{indent}if {recv_s}.save() {{").unwrap();
                 emit_rs_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
                 writeln!(out, "{indent}}} else {{").unwrap();
-                if !is_empty_rs_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     emit_rs_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
                 }
                 writeln!(out, "{indent}}}").unwrap();
@@ -2004,7 +2001,7 @@ fn emit_rs_ctrl_stmt_at(
                 writeln!(out, "{indent}if {cond_s} {{").unwrap();
                 emit_rs_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
                 writeln!(out, "{indent}}} else {{").unwrap();
-                if !is_empty_rs_expr(else_branch) {
+                if !crate::lower::is_empty_body(else_branch) {
                     emit_rs_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
                 }
                 writeln!(out, "{indent}}}").unwrap();
@@ -2307,11 +2304,6 @@ fn is_bare_rs_ident(s: &str) -> bool {
     bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn is_empty_rs_expr(expr: &Expr) -> bool {
-    matches!(&*expr.node,
-        ExprNode::Seq { exprs } if exprs.is_empty())
-        || matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil })
-}
 
 /// Emit the axum Path extractor(s) for an action. `with_id` adds the
 /// leaf `:id` param; nested routes always include the parent.

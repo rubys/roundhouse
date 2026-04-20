@@ -1016,6 +1016,40 @@ fn append_statement(body: &Expr, tail: Expr) -> Expr {
     Expr::new(body.span, ExprNode::Seq { exprs })
 }
 
+/// Apply the full pre-emit normalization pipeline to an action
+/// body — the canonical three-pass sequence every target emitter
+/// runs verbatim before walking. Returns a new `Expr`; the input
+/// body is untouched.
+///
+///   1. `resolve_before_actions` — inline `before_action` callback
+///      bodies into each action that uses them.
+///   2. `unwrap_respond_to` — flatten `respond_to { format.html {…}
+///      format.json {…} }` blocks to just their HTML branch.
+///   3. `synthesize_implicit_render` — append `render :<action>`
+///      when the body has no explicit response terminal.
+///
+/// Per-target ivar/params rewrites happen AFTER this pipeline
+/// (e.g. TS's `rewrite_for_controller`), since the rewrite shape
+/// differs between targets (JS-friendly `context.params.k` vs
+/// Rust's axum-extractor locals).
+pub fn normalize_action_body(
+    controller: &Controller,
+    action_name: &str,
+    body: &Expr,
+) -> Expr {
+    let with_callbacks = resolve_before_actions(controller, action_name, body);
+    let flattened = unwrap_respond_to(&with_callbacks);
+    synthesize_implicit_render(&flattened, action_name)
+}
+
+/// True when `body` is an empty `Seq` or a `nil` literal — the two
+/// shapes every walker needs to recognize so `if cond; A; end` with
+/// no else-branch doesn't emit a spurious empty `else { }` block.
+pub fn is_empty_body(body: &Expr) -> bool {
+    matches!(&*body.node, ExprNode::Seq { exprs } if exprs.is_empty())
+        || matches!(&*body.node, ExprNode::Lit { value: Literal::Nil })
+}
+
 // -- Pattern detection helpers (target-neutral) -------------------
 //
 // Every emitter's controller walker needs to recognize the same
