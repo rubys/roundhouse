@@ -495,6 +495,62 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
 }
 
 #[test]
+fn custom_action_without_terminal_gets_implicit_render() {
+    // A custom action body with no explicit render/redirect_to/head
+    // should get a synthesized `render :<action>` appended by the
+    // `synthesize_implicit_render` lowering pass. Verifies the pass
+    // is threaded into the TS walker path — the emitted function
+    // returns Views.renderArticlesHeadline(record), not a fallback
+    // stub.
+    use roundhouse::{
+        Action, ClassId, Controller, ControllerBodyItem, EffectSet, Expr, ExprNode,
+        Literal, RenderTarget, Row, Symbol,
+    };
+    use roundhouse::span::Span;
+    use roundhouse::ident::TableRef;
+    use roundhouse::Model;
+    let mut app = roundhouse::App::new();
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![],
+    });
+    app.controllers.push(Controller {
+        name: ClassId(Symbol::from("ArticlesController")),
+        parent: None,
+        body: vec![ControllerBodyItem::Action {
+            action: Action {
+                name: Symbol::from("headline"),
+                params: Row::closed(),
+                // Body: just a literal — no render/redirect/head.
+                body: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Int { value: 42 } },
+                ),
+                renders: RenderTarget::Inferred,
+                effects: EffectSet::pure(),
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/articles_controller.ts");
+    // Synthesized terminal becomes the view fn keyed by action name.
+    assert!(
+        content.contains("return { body: Views.renderArticlesHeadline(record) };"),
+        "implicit render should synthesize Views.renderArticlesHeadline, got:\n{content}"
+    );
+    // No empty-body fallback — the lowering pass makes it unnecessary.
+    assert!(
+        !content.contains("return { body: \"\" };"),
+        "fallback return should be gone, got:\n{content}"
+    );
+}
+
+#[test]
 fn routes_emit_router_method_calls() {
     // Use the real-blog fixture so we exercise `root` +
     // `resources` + nested resources — tiny-blog is all explicit verbs.

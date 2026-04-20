@@ -718,6 +718,86 @@ pub fn lower_action(
     }
 }
 
+// -- Pre-emit body normalization -----------------------------------
+//
+// Lowering passes that reshape an action's body `Expr` into a form
+// every target emitter can walk without per-target special cases.
+// These codify Rails semantics (implicit render, before_action
+// callbacks, respond_to dispatch, strong_params) once, so emitters
+// see a normalized body and stay thin.
+
+/// Append a synthesized `render :<action_name>` Send to `body` when
+/// `body` has no top-level render / redirect_to / head terminal.
+/// Encodes the Rails convention that an action falling off the end
+/// renders its eponymous view.
+///
+/// Target-neutral — every emitter walking the result sees an explicit
+/// terminal that `classify_controller_send` resolves to `Render`.
+/// Before this pass, each scaffold template synthesized the terminal
+/// ad-hoc at emit time; after, the walker path needs no special case.
+pub fn synthesize_implicit_render(body: &Expr, action_name: &str) -> Expr {
+    if has_toplevel_terminal(body) {
+        return body.clone();
+    }
+    let render = render_symbol_send(action_name, body.span);
+    append_statement(body, render)
+}
+
+/// True when `body` is guaranteed to hit a response-terminal
+/// (`render` / `redirect_to` / `head` / `respond_to`) at its top
+/// level — including every branch of the final if/else, since both
+/// branches must terminate for the action to have a response. A
+/// `respond_to` block counts as terminal because the emitter's
+/// SendKind render table expands it into per-format terminals.
+pub fn has_toplevel_terminal(body: &Expr) -> bool {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last().map_or(false, has_toplevel_terminal),
+        ExprNode::Send { recv: None, method, block, .. } => {
+            matches!(method.as_str(), "render" | "redirect_to" | "head")
+                || (method.as_str() == "respond_to" && block.is_some())
+        }
+        ExprNode::If { then_branch, else_branch, .. } => {
+            has_toplevel_terminal(then_branch) && has_toplevel_terminal(else_branch)
+        }
+        _ => false,
+    }
+}
+
+/// Build a synthetic `render :<name>` Send with the given span.
+/// Used by `synthesize_implicit_render`; span is inherited from the
+/// containing body so diagnostics / effect annotations point at a
+/// meaningful location rather than a free-floating synthetic span.
+fn render_symbol_send(action_name: &str, span: crate::span::Span) -> Expr {
+    let sym = Expr::new(
+        span,
+        ExprNode::Lit {
+            value: Literal::Sym { value: Symbol::from(action_name) },
+        },
+    );
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("render"),
+            args: vec![sym],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+/// Append `tail` as the final statement of `body`. If `body` is
+/// already a `Seq`, the result is a `Seq` with one more element;
+/// otherwise the result wraps both in a new `Seq`.
+fn append_statement(body: &Expr, tail: Expr) -> Expr {
+    let mut exprs = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    };
+    exprs.push(tail);
+    Expr::new(body.span, ExprNode::Seq { exprs })
+}
+
 /// Fallback permitted-field list when the `<resource>_params` helper
 /// isn't recognizable. Returns the model's non-id, non-timestamp,
 /// non-foreign-key attributes — a safe default that matches what

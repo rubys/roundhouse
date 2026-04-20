@@ -1247,7 +1247,15 @@ fn emit_ts_action(
                 resource,
                 parent: la.parent.as_ref(),
             };
-            let rewritten = rewrite_for_controller(body);
+            // Rails' implicit-render convention is codified as a
+            // lowering pass — the walker always sees an explicit
+            // terminal Send. Runs before `rewrite_for_controller`
+            // so the synthesized `render :<action>` Seq element
+            // passes through the same ivar / params rewrites as the
+            // rest (no-op today since it contains neither).
+            let normalized =
+                crate::lower::synthesize_implicit_render(body, la.name.as_str());
+            let rewritten = rewrite_for_controller(&normalized);
             let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
             let ctx_param = if uses_context { "context" } else { "_context" };
             writeln!(
@@ -1270,20 +1278,16 @@ struct TsCtrlCtx<'a> {
     parent: Option<&'a crate::lower::NestedParent>,
 }
 
-/// Walk a rewritten action body and emit TS statements at 2-space
+/// Walk a normalized action body and emit TS statements at 2-space
 /// depth=1 (inside the function). Returns `(body_src, uses_context)` —
 /// the caller picks `context` vs `_context` to avoid a TS unused-param
-/// warning in bodies that never reference params.
+/// warning in bodies that never reference params. Caller is expected
+/// to have run `synthesize_implicit_render` beforehand, so the body
+/// always terminates in an explicit render / redirect_to / head.
 fn emit_ts_action_body(body: &Expr, ctx: &TsCtrlCtx<'_>) -> (String, bool) {
     let mut out = String::new();
     let mut uses_context = false;
     emit_ts_ctrl_stmt(body, &mut out, ctx, 1, &mut uses_context);
-    // Fallback: if the body didn't produce any explicit return, append
-    // an empty-body 200 so the function's Promise<ActionResponse>
-    // contract is satisfied and tsc is happy.
-    if !body_has_toplevel_return(body) {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-    }
     (out, uses_context)
 }
 
@@ -1552,23 +1556,6 @@ fn is_empty_expr(expr: &Expr) -> bool {
         || matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil })
 }
 
-/// True when the top-level body contains a statement that the walker
-/// would render as `return …;`. Used by `emit_ts_action_body` to
-/// decide whether to append a fallback `return { body: "" };`.
-/// Conservative — only recognizes explicit render/redirect/head
-/// Sends at the outermost level, not nested inside if/else.
-fn body_has_toplevel_return(body: &Expr) -> bool {
-    match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().any(body_has_toplevel_return),
-        ExprNode::Send { recv: None, method, .. } => {
-            matches!(method.as_str(), "render" | "redirect_to" | "head")
-        }
-        ExprNode::If { then_branch, else_branch, .. } => {
-            body_has_toplevel_return(then_branch) && body_has_toplevel_return(else_branch)
-        }
-        _ => false,
-    }
-}
 
 /// Build a TS view fn name from a model class + action suffix.
 /// `Article`, `Show` → `renderArticlesShow`; `Article`, `Index` →
