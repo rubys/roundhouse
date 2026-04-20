@@ -283,7 +283,7 @@ fn emit_controller_pass2(c: &Controller, known_models: &[Symbol], app: &App) -> 
             parent.as_ref(),
             &permitted,
         );
-        emit_go_action(&mut s, c.name.0.as_str(), &la);
+        emit_go_action(&mut s, c.name.0.as_str(), &la, &action.body, known_models, c);
     }
 
     let fname = format!("app/{}.go", snake_case(name));
@@ -301,203 +301,372 @@ fn go_view_fn(model_class: &str, suffix: &str) -> String {
 }
 
 /// Render one LoweredAction as a top-level Go handler function.
-/// Replaces the seven per-action helpers; matches on
-/// `LoweredAction::kind` and reaches into the struct for the data
-/// each branch needs.
-fn emit_go_action(out: &mut String, controller: &str, la: &crate::lower::LoweredAction) {
-    use crate::lower::ActionKind;
+/// Body emission flows through the walker; the ActionKind dispatch
+/// is gone (TS/Rust/Python/Crystal precedent). Go's one wrinkle is
+/// nullable ModelFind — a pointer that may be nil — handled with a
+/// post-Assign nil-guard synthesized by the walker.
+fn emit_go_action(
+    out: &mut String,
+    controller: &str,
+    la: &crate::lower::LoweredAction,
+    body: &Expr,
+    known_models: &[Symbol],
+    controller_item: &Controller,
+) {
     let handler = go_action_handler_name(controller, &la.name);
-    let model_class = la.model_class.as_str();
-    let resource = la.resource.as_str();
 
-    let emit_empty_stub = |out: &mut String, reads_ctx: bool| {
-        let ctx_name = if reads_ctx { "ctx" } else { "_ctx" };
-        writeln!(out, "func {handler}({ctx_name} *ActionContext) ActionResponse {{").unwrap();
-        if reads_ctx {
-            writeln!(out, "\t_ = ctx").unwrap();
-        }
+    if !la.has_model {
+        writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
         writeln!(out, "\treturn ActionResponse{{}}").unwrap();
         writeln!(out, "}}").unwrap();
-    };
+        return;
+    }
 
-    let emit_find_id = |out: &mut String| {
-        writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-        writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-        writeln!(out, "\tif record == nil {{ record = &{model_class}{{}} }}").unwrap();
-    };
+    let normalized =
+        crate::lower::normalize_action_body(controller_item, la.name.as_str(), body);
 
-    let redirect_after_write = |out: &mut String, indent: &str| {
-        if let Some(p) = &la.parent {
-            writeln!(
-                out,
-                "{indent}parentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-                p.singular
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "{indent}return ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
-                pascalize_word(&p.singular)
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                out,
-                "{indent}return ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
-                pascalize_word(resource)
-            )
-            .unwrap();
-        }
+    let ctx = GoActionCtx {
+        known_models,
+        model_class: la.model_class.as_str(),
+        resource: la.resource.as_str(),
+        parent: la.parent.as_ref(),
+        permitted: &la.permitted,
     };
+    let mut state = GoActionState::new();
+    let mut body_src = String::new();
+    emit_go_ctrl_stmt(&normalized, &mut body_src, &ctx, 1, &mut state);
 
-    match la.kind {
-        ActionKind::Index => {
-            let view_fn = go_view_fn(model_class, "index");
-            writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
-            if la.has_model {
-                writeln!(out, "\trecords := {model_class}All()").unwrap();
-                writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(records)}}").unwrap();
-            } else {
-                writeln!(out, "\treturn ActionResponse{{}}").unwrap();
+    let ctx_name = if state.uses_context { "ctx" } else { "_ctx" };
+    writeln!(out, "func {handler}({ctx_name} *ActionContext) ActionResponse {{").unwrap();
+    out.push_str(&body_src);
+    writeln!(out, "}}").unwrap();
+}
+
+struct GoActionCtx<'a> {
+    known_models: &'a [Symbol],
+    model_class: &'a str,
+    resource: &'a str,
+    parent: Option<&'a crate::lower::NestedParent>,
+    permitted: &'a [String],
+}
+
+struct GoActionState {
+    uses_context: bool,
+    last_local: Option<String>,
+}
+
+impl GoActionState {
+    fn new() -> Self { Self { uses_context: false, last_local: None } }
+}
+
+fn emit_go_ctrl_stmt(
+    expr: &Expr,
+    out: &mut String,
+    ctx: &GoActionCtx<'_>,
+    depth: usize,
+    state: &mut GoActionState,
+) {
+    let indent = "\t".repeat(depth);
+    match &*expr.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                emit_go_ctrl_stmt(e, out, ctx, depth, state);
             }
-            writeln!(out, "}}").unwrap();
         }
-        ActionKind::Show | ActionKind::Edit => {
-            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
-            let view_fn = go_view_fn(model_class, suffix);
-            if !la.has_model {
-                emit_empty_stub(out, true);
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            // Create-scaffold macro.
+            if let Some(class) = crate::lower::model_new_with_strong_params(
+                value, ctx.known_models, ctx.resource,
+            ) {
+                emit_go_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
+                state.last_local = Some(name.as_str().to_string());
                 return;
             }
-            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-            emit_find_id(out);
-            writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::New => {
-            let view_fn = go_view_fn(model_class, "new");
-            writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
-            if la.has_model {
-                writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
-                writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
-            } else {
-                writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-            }
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::Create => {
-            if !la.has_model {
-                emit_empty_stub(out, true);
+            // ModelFind — nullable pointer in Go; append a nil-guard
+            // so downstream access doesn't panic on missing row.
+            if let Some((class, id_expr)) = model_find_shape(value, ctx.known_models) {
+                let id_s = emit_go_ctrl_expr(id_expr, ctx, state);
+                writeln!(out, "{indent}{name} := {class}Find({id_s})").unwrap();
+                writeln!(out, "{indent}if {name} == nil {{ {name} = &{class}{{}} }}").unwrap();
+                state.last_local = Some(name.as_str().to_string());
                 return;
             }
-            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-            writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
-            if let Some(p) = &la.parent {
-                let fk_field = go_field_name(&format!("{}_id", p.singular));
-                writeln!(
-                    out,
-                    "\trecord.{fk_field}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-                    p.singular
-                )
-                .unwrap();
-            }
-            for field in &la.permitted {
-                let go_field = go_field_name(field);
-                writeln!(
-                    out,
-                    "\trecord.{go_field} = ctx.Params[\"{resource}[{field}]\"]"
-                )
-                .unwrap();
-            }
-            writeln!(out, "\tif record.Save() {{").unwrap();
-            redirect_after_write(out, "\t\t");
-            writeln!(out, "\t}}").unwrap();
-            if la.parent.is_some() {
-                redirect_after_write(out, "\t");
+            let rhs = emit_go_ctrl_expr(value, ctx, state);
+            writeln!(out, "{indent}{name} := {rhs}").unwrap();
+            state.last_local = Some(name.as_str().to_string());
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
+                let recv_s = emit_go_ctrl_expr(recv, ctx, state);
+                emit_go_update_field_assigns(out, &recv_s, &indent, ctx, state);
+                writeln!(out, "{indent}if {recv_s}.Save() {{").unwrap();
+                emit_go_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !crate::lower::is_empty_body(else_branch) {
+                    writeln!(out, "{indent}}} else {{").unwrap();
+                    emit_go_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}}}").unwrap();
             } else {
-                let view_fn = go_view_fn(model_class, "new");
-                writeln!(
-                    out,
-                    "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
-                )
-                .unwrap();
+                let cond_s = emit_go_ctrl_expr(cond, ctx, state);
+                writeln!(out, "{indent}if {cond_s} {{").unwrap();
+                emit_go_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !crate::lower::is_empty_body(else_branch) {
+                    writeln!(out, "{indent}}} else {{").unwrap();
+                    emit_go_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}}}").unwrap();
             }
-            writeln!(out, "}}").unwrap();
         }
-        ActionKind::Update => {
-            if !la.has_model {
-                emit_empty_stub(out, true);
-                return;
+        ExprNode::Send { recv, method, args, block, .. } => {
+            match emit_go_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+                Some(GoCtrlStmt::Response(r)) => writeln!(out, "{indent}return {r}").unwrap(),
+                Some(GoCtrlStmt::Expr(s)) => writeln!(out, "{indent}{s}").unwrap(),
+                None => {
+                    let s = emit_go_ctrl_expr(expr, ctx, state);
+                    writeln!(out, "{indent}{s}").unwrap();
+                }
             }
-            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-            emit_find_id(out);
-            for field in &la.permitted {
-                let go_field = go_field_name(field);
-                writeln!(
-                    out,
-                    "\tif v, ok := ctx.Params[\"{resource}[{field}]\"]; ok {{ record.{go_field} = v }}"
-                )
-                .unwrap();
-            }
-            writeln!(out, "\tif record.Save() {{").unwrap();
-            writeln!(
-                out,
-                "\t\treturn ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
-                pascalize_word(resource)
-            )
-            .unwrap();
-            writeln!(out, "\t}}").unwrap();
-            let view_fn = go_view_fn(model_class, "edit");
-            writeln!(
-                out,
-                "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
-            )
-            .unwrap();
-            writeln!(out, "}}").unwrap();
         }
-        ActionKind::Destroy => {
-            if !la.has_model {
-                emit_empty_stub(out, true);
-                return;
+        _ => {
+            let s = emit_go_ctrl_expr(expr, ctx, state);
+            if !s.is_empty() {
+                writeln!(out, "{indent}{s}").unwrap();
             }
-            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-            writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-            writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-            writeln!(out, "\tif record != nil {{ record.Destroy() }}").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "\tparentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-                    p.singular
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "\treturn ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
-                    pascalize_word(&p.singular)
-                )
-                .unwrap();
-            } else {
-                let plural = crate::naming::pluralize_snake(model_class);
-                writeln!(
-                    out,
-                    "\treturn ActionResponse{{Status: 303, Location: {}Path()}}",
-                    pascalize_word(&plural)
-                )
-                .unwrap();
-            }
-            writeln!(out, "}}").unwrap();
-        }
-        ActionKind::Unknown => {
-            writeln!(
-                out,
-                "func {handler}(_ctx *ActionContext) ActionResponse {{"
-            )
-            .unwrap();
-            writeln!(out, "\treturn ActionResponse{{Status: 501}}").unwrap();
-            writeln!(out, "}}").unwrap();
         }
     }
+}
+
+fn emit_go_ctrl_expr(expr: &Expr, ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+        if let Some(stmt) = emit_go_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+            return match stmt { GoCtrlStmt::Response(r) => r, GoCtrlStmt::Expr(s) => s };
+        }
+        let args_s: Vec<String> = args.iter().map(|a| emit_go_ctrl_expr(a, ctx, state)).collect();
+        return match recv {
+            None if args.is_empty() => method.to_string(),
+            None => format!("{method}({})", args_s.join(", ")),
+            Some(r) => {
+                let recv_s = emit_go_ctrl_expr(r, ctx, state);
+                if args.is_empty() {
+                    format!("{recv_s}.{}()", pascalize_word(method.as_str()))
+                } else {
+                    format!("{recv_s}.{}({})", pascalize_word(method.as_str()), args_s.join(", "))
+                }
+            }
+        };
+    }
+    if let ExprNode::Ivar { name } = &*expr.node {
+        return name.to_string();
+    }
+    emit_expr(expr)
+}
+
+enum GoCtrlStmt { Response(String), Expr(String) }
+
+fn emit_go_ctrl_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    ctx: &GoActionCtx<'_>,
+    state: &mut GoActionState,
+) -> Option<GoCtrlStmt> {
+    use crate::lower::SendKind;
+    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => {
+            state.uses_context = true;
+            GoCtrlStmt::Expr("ctx.Params".to_string())
+        }
+        SendKind::ParamsIndex { key } => {
+            state.uses_context = true;
+            // `params[:id]` → `parseInt64(ctx.Params["id"])` — use a
+            // small inline-ish form: split into a `_, := strconv.ParseInt`
+            // only at the ModelFind call site would require special
+            // handling at Assign level. For now emit the discarded-
+            // error form: Go's `mustInt64` doesn't exist yet; emit
+            // the id-extraction pattern inline as a small function-
+            // call expression using the helper `ctxInt64`.
+            match &*key.node {
+                ExprNode::Lit { value: Literal::Sym { value: k } } => {
+                    GoCtrlStmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str()))
+                }
+                _ => {
+                    let k = emit_go_ctrl_expr(key, ctx, state);
+                    GoCtrlStmt::Expr(format!("ctx.Params[{k}]"))
+                }
+            }
+        }
+        SendKind::ParamsExpect { args: pe_args } => {
+            state.uses_context = true;
+            match pe_args.first().map(|e| &*e.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value: k } }) =>
+                    GoCtrlStmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str())),
+                _ => GoCtrlStmt::Expr("ctx.Params /* TODO: params.expect hash */".to_string()),
+            }
+        }
+        SendKind::ModelNew { class } => {
+            GoCtrlStmt::Expr(format!("&{}{{}}", class.as_str()))
+        }
+        SendKind::ModelFind { class, id } => {
+            // Bare expression form — nil-unsafe. The Assign arm
+            // detects this shape and emits a two-statement safe
+            // form. If we reach here, caller wanted an expression
+            // result; fall back to the unsafe form.
+            let id_s = emit_go_ctrl_expr(id, ctx, state);
+            GoCtrlStmt::Expr(format!("{}Find({id_s})", class.as_str()))
+        }
+        SendKind::QueryChain { target: Some(target) } => {
+            GoCtrlStmt::Expr(format!("{}All()", target.as_str()))
+        }
+        SendKind::QueryChain { target: None } => {
+            GoCtrlStmt::Expr("nil /* TODO: unresolved query chain */".to_string())
+        }
+        SendKind::AssocLookup { target, outer_method } => match outer_method {
+            "find" => {
+                let id_s = args.first().map(|a| emit_go_ctrl_expr(a, ctx, state))
+                    .unwrap_or_else(|| "0".to_string());
+                GoCtrlStmt::Expr(format!("{}Find({id_s})", target.as_str()))
+            }
+            _ => GoCtrlStmt::Expr(format!("&{}{{}}", target.as_str())),
+        },
+        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+            let recv_s = emit_go_ctrl_expr(recv, ctx, state);
+            let args_s: Vec<String> =
+                bs_args.iter().map(|a| emit_go_ctrl_expr(a, ctx, state)).collect();
+            GoCtrlStmt::Expr(format!(
+                "{recv_s}.{}({})",
+                pascalize_word(stripped_method),
+                args_s.join(", "),
+            ))
+        }
+        SendKind::InstanceUpdate => GoCtrlStmt::Expr("false".to_string()),
+        SendKind::PathOrUrlHelper => {
+            let helper = method.strip_suffix("_path").or_else(|| method.strip_suffix("_url"))
+                .unwrap_or(method);
+            GoCtrlStmt::Expr(format!("{}Path()", pascalize_word(helper)))
+        }
+        SendKind::Render { args } => GoCtrlStmt::Response(emit_go_render(args, ctx, state)),
+        SendKind::RedirectTo { args } => GoCtrlStmt::Response(emit_go_redirect_to(args, ctx, state)),
+        SendKind::Head { args } => {
+            let status = args.first().and_then(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                    Some(crate::lower::status_sym_to_code(s.as_str())),
+                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                _ => None,
+            }).unwrap_or(200);
+            GoCtrlStmt::Response(format!("ActionResponse{{Status: {status}}}"))
+        }
+        SendKind::RespondToBlock { .. }
+        | SendKind::FormatHtml { .. }
+        | SendKind::FormatJson => GoCtrlStmt::Expr(
+            "ActionResponse{} /* unreachable: respond_to not normalized */".to_string(),
+        ),
+    })
+}
+
+/// Detect `Class.find(id)` — the Assign arm synthesizes a nil-guard
+/// for these so subsequent `record.Method()` calls don't panic.
+fn model_find_shape<'a>(value: &'a Expr, known_models: &[Symbol]) -> Option<(Symbol, &'a Expr)> {
+    let ExprNode::Send { recv, method, args, .. } = &*value.node else { return None };
+    if method.as_str() != "find" || args.len() != 1 {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    let ExprNode::Const { path } = &*r.node else { return None };
+    let class = path.last()?;
+    known_models.iter().find(|m| *m == class)?;
+    Some((class.clone(), &args[0]))
+}
+
+fn emit_go_render(args: &[Expr], ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
+    if let Some(first) = args.first() {
+        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+            let view_fn = go_view_fn(ctx.model_class, sym.as_str());
+            let arg = state.last_local.clone().unwrap_or_else(|| "nil".to_string());
+            let body_part = format!("Body: {view_fn}({arg})");
+            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                Some(status) => format!("ActionResponse{{Status: {status}, {body_part}}}"),
+                None => format!("ActionResponse{{{body_part}}}"),
+            };
+        }
+        let body_s = emit_go_ctrl_expr(first, ctx, state);
+        return format!("ActionResponse{{Body: {body_s}}}");
+    }
+    "ActionResponse{}".to_string()
+}
+
+fn emit_go_redirect_to(args: &[Expr], ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
+    let Some(first) = args.first() else {
+        return "ActionResponse{Status: 303}".to_string();
+    };
+    let loc = emit_go_ctrl_expr(first, ctx, state);
+    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+    if is_bare_go_ident(&loc) {
+        let helper = pascalize_word(&loc);
+        let id_access = format!("{loc}.ID");
+        return format!("ActionResponse{{Status: {status}, Location: {helper}Path({id_access})}}");
+    }
+    format!("ActionResponse{{Status: {status}, Location: {loc}}}")
+}
+
+fn emit_go_create_expansion(
+    out: &mut String,
+    var_name: &str,
+    class: &str,
+    indent: &str,
+    ctx: &GoActionCtx<'_>,
+    state: &mut GoActionState,
+) {
+    writeln!(out, "{indent}{var_name} := &{class}{{}}").unwrap();
+    if let Some(parent) = ctx.parent {
+        let fk = go_field_name(&format!("{}_id", parent.singular));
+        writeln!(
+            out,
+            "{indent}{var_name}.{fk}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
+            parent.singular,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+    for field in ctx.permitted {
+        let go_field = go_field_name(field);
+        writeln!(
+            out,
+            "{indent}{var_name}.{go_field} = ctx.Params[\"{}[{field}]\"]",
+            ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+fn emit_go_update_field_assigns(
+    out: &mut String,
+    recv_s: &str,
+    indent: &str,
+    ctx: &GoActionCtx<'_>,
+    state: &mut GoActionState,
+) {
+    for field in ctx.permitted {
+        let go_field = go_field_name(field);
+        writeln!(
+            out,
+            "{indent}if v, ok := ctx.Params[\"{}[{field}]\"]; ok {{ {recv_s}.{go_field} = v }}",
+            ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+fn is_bare_go_ident(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return false; }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first == b'_') { return false; }
+    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 // Pass-2 routes + route helpers ---------------------------------------

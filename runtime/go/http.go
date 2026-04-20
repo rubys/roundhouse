@@ -13,7 +13,22 @@
 
 package app
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
+
+// parseInt64 is the inline-friendly form of strconv.ParseInt used
+// by generated controller actions for path params and foreign keys.
+// Unlike strconv.ParseInt (which returns (int64, error)), this
+// returns just int64 — on parse failure it returns 0, which is the
+// generated model's default ID. Matches the scaffold template's
+// prior `id, _ := strconv.ParseInt(...)` two-statement pattern but
+// as a single expression the walker can inline.
+func parseInt64(s string) int64 {
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
 
 // ActionResponse is what every generated controller action returns.
 // Fields are optional so actions pick only what they need:

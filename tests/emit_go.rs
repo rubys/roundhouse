@@ -207,9 +207,12 @@ fn index_action_returns_response_and_calls_all() {
         "expected PostsIndex free function; got:\n{}",
         ctrl.content
     );
+    // Walker path: `@posts = Post.all` → `posts := PostAll()`
+    // (natural ivar-preserving local name, not scaffold's hardcoded
+    // `records`).
     assert!(
-        ctrl.content.contains("records := PostAll()"),
-        "expected records := PostAll(); got:\n{}",
+        ctrl.content.contains("posts := PostAll()"),
+        "expected posts := PostAll(); got:\n{}",
         ctrl.content
     );
 }
@@ -229,15 +232,16 @@ fn destroy_action_looks_up_and_calls_destroy() {
         "expected PostsDestroy free function; got:\n{}",
         ctrl.content
     );
+    // Walker path: id is extracted inline via parseInt64 helper
+    // at the ModelFind call site, then nil-guarded.
     assert!(
-        ctrl.content
-            .contains("id, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)"),
-        "expected id lookup from ctx.Params; got:\n{}",
+        ctrl.content.contains("parseInt64(ctx.Params[\"id\"])"),
+        "expected inline parseInt64 for id; got:\n{}",
         ctrl.content
     );
     assert!(
-        ctrl.content.contains("record.Destroy()"),
-        "expected record.Destroy(); got:\n{}",
+        ctrl.content.contains("post.Destroy()"),
+        "expected post.Destroy(); got:\n{}",
         ctrl.content
     );
     assert!(
@@ -264,30 +268,30 @@ import \"strconv\"
 var _ = strconv.Itoa
 
 func PostsIndex(_ctx *ActionContext) ActionResponse {
-\trecords := PostAll()
-\treturn ActionResponse{Body: RenderPostsIndex(records)}
+\tposts := PostAll()
+\treturn ActionResponse{Body: RenderPostsIndex(posts)}
 }
 
 func PostsShow(ctx *ActionContext) ActionResponse {
-\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)
-\trecord := PostFind(id)
-\tif record == nil { record = &Post{} }
-\treturn ActionResponse{Body: RenderPostsShow(record)}
+\tpost := PostFind(parseInt64(ctx.Params[\"id\"]))
+\tif post == nil { post = &Post{} }
+\treturn ActionResponse{Body: RenderPostsShow(post)}
 }
 
 func PostsCreate(ctx *ActionContext) ActionResponse {
-\trecord := &Post{}
-\trecord.Title = ctx.Params[\"post[title]\"]
-\tif record.Save() {
-\t\treturn ActionResponse{Status: 303, Location: PostPath(record.ID)}
+\tpost := &Post{}
+\tpost.Title = ctx.Params[\"post[title]\"]
+\tif post.Save() {
+\t\treturn ActionResponse{Status: 303, Location: PostPath(post.ID)}
+\t} else {
+\t\treturn ActionResponse{Body: RenderPostsNew(post)}
 \t}
-\treturn ActionResponse{Status: 422, Body: RenderPostsNew(record)}
 }
 
 func PostsDestroy(ctx *ActionContext) ActionResponse {
-\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)
-\trecord := PostFind(id)
-\tif record != nil { record.Destroy() }
+\tpost := PostFind(parseInt64(ctx.Params[\"id\"]))
+\tif post == nil { post = &Post{} }
+\tpost.Destroy()
 \treturn ActionResponse{Status: 303, Location: PostsPath()}
 }
 ";
