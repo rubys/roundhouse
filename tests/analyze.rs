@@ -283,6 +283,42 @@ fn ivar_read_resolves_through_seq_tracking() {
 }
 
 #[test]
+fn custom_adapter_suppresses_db_effects() {
+    // Proves `Analyzer::with_adapter` actually threads through to
+    // effect inference: swap in an adapter that returns Unknown for
+    // every AR method, analyze the same fixture, and confirm no
+    // DbRead/DbWrite effects land anywhere. The Io effects from
+    // render/redirect_to still appear — those are Rails-dialect, not
+    // adapter territory.
+    use roundhouse::adapter::{ArMethodKind, DatabaseAdapter};
+
+    struct NoDbAdapter;
+    impl DatabaseAdapter for NoDbAdapter {
+        fn classify_ar_method(&self, _method: &str) -> ArMethodKind {
+            ArMethodKind::Unknown
+        }
+    }
+
+    let mut app = ingest_app(fixture_path()).expect("ingest");
+    Analyzer::with_adapter(&app, Box::new(NoDbAdapter)).analyze(&mut app);
+
+    for action in app.controllers[0].actions() {
+        for e in &action.effects.effects {
+            match e {
+                Effect::DbRead { .. } | Effect::DbWrite { .. } => {
+                    panic!(
+                        "NoDbAdapter should have suppressed DB effects; {} carries {:?}",
+                        action.name.as_str(),
+                        e,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
 fn action_effects_include_db_reads() {
     // `@posts = Post.all` and `@post = Post.find(...)` both read the posts table.
     let app = analyzed_app();

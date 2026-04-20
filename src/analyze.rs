@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{Action, Filter, FilterKind, RenderTarget};
 use crate::effect::{Effect, EffectSet};
@@ -26,6 +27,13 @@ use crate::ty::{Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    /// Backend-specific effect classification. The analyzer consults
+    /// this when deciding whether a Send on an AR model carries
+    /// `DbRead` or `DbWrite`. Defaults to `SqliteAdapter` via
+    /// `Analyzer::new`; `Analyzer::with_adapter` lets callers plug
+    /// in a different backend (Postgres, IndexedDB, D1, …) once
+    /// those adapters land in Phase 2.
+    adapter: Box<dyn DatabaseAdapter>,
 }
 
 /// Recursion context — what `self` is here, what locals are in scope, etc.
@@ -61,7 +69,18 @@ struct ClassInfo {
 }
 
 impl Analyzer {
+    /// Build an analyzer with the default database adapter
+    /// (`SqliteAdapter`). Matches pre-adapter-refactor behavior —
+    /// every target that shipped before Phase 2 targets sqlite, so
+    /// the default preserves the status quo.
     pub fn new(app: &App) -> Self {
+        Self::with_adapter(app, Box::new(SqliteAdapter))
+    }
+
+    /// Build an analyzer with a specific database adapter. Use this
+    /// once non-sqlite adapters exist and you want effect inference
+    /// to reflect that backend's capability profile.
+    pub fn with_adapter(app: &App, adapter: Box<dyn DatabaseAdapter>) -> Self {
         let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
 
         for model in &app.models {
@@ -255,7 +274,7 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
         classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
 
-        Self { classes }
+        Self { classes, adapter }
     }
 
     /// Walk the app, annotating every expression's `ty` field, then
@@ -537,17 +556,28 @@ impl Analyzer {
         let Ty::Class { id, .. } = recv_ty else { return };
         let Some(cls) = self.classes.get(id) else { return };
 
-        // AR methods on model classes: DbRead / DbWrite against the bound table.
+        // AR methods on model classes: DbRead / DbWrite against the
+        // bound table. The adapter owns the classification — swapping
+        // adapters changes which methods produce effects (e.g., an
+        // IndexedDB adapter can return Unknown for methods it can't
+        // implement, making them silent at the effect level and
+        // diagnostic-bearing downstream).
         if let Some(table) = &cls.table {
-            let m = method.as_str();
-            if is_db_read_method(m) {
-                out.insert(Effect::DbRead { table: table.clone() });
-            } else if is_db_write_method(m) {
-                out.insert(Effect::DbWrite { table: table.clone() });
+            match self.adapter.classify_ar_method(method.as_str()) {
+                ArMethodKind::Read => {
+                    out.insert(Effect::DbRead { table: table.clone() });
+                }
+                ArMethodKind::Write => {
+                    out.insert(Effect::DbWrite { table: table.clone() });
+                }
+                ArMethodKind::Unknown => {}
             }
         }
 
-        // Controller-side IO effects.
+        // Controller-side IO effects — Rails dialect, not adapter
+        // territory. Every backend renders views and redirects the
+        // same way at the effect level; the concrete implementation
+        // lives in each target's runtime, not here.
         if id.0.as_str() == "ApplicationController" {
             match method.as_str() {
                 "render" | "redirect_to" | "head" => {
@@ -958,63 +988,10 @@ fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
 }
 
-fn is_db_read_method(m: &str) -> bool {
-    matches!(
-        m,
-        "all"
-            | "find"
-            | "find_by"
-            | "find_by!"
-            | "first"
-            | "last"
-            | "where"
-            | "limit"
-            | "offset"
-            | "order"
-            | "group"
-            | "having"
-            | "joins"
-            | "includes"
-            | "preload"
-            | "select"
-            | "distinct"
-            | "count"
-            | "exists?"
-            | "pluck"
-            | "pick"
-            | "take"
-            | "sum"
-            | "average"
-            | "maximum"
-            | "minimum"
-    )
-}
-
-fn is_db_write_method(m: &str) -> bool {
-    matches!(
-        m,
-        "save"
-            | "save!"
-            | "create"
-            | "create!"
-            | "update"
-            | "update!"
-            | "update_all"
-            | "destroy"
-            | "destroy!"
-            | "destroy_all"
-            | "delete"
-            | "delete_all"
-            | "increment!"
-            | "decrement!"
-            | "touch"
-            | "touch_all"
-            | "insert"
-            | "insert_all"
-            | "upsert"
-            | "upsert_all"
-    )
-}
+// AR-method classification moved to `crate::adapter::SqliteAdapter`.
+// `Analyzer::contribute_send_effect` consults `self.adapter` instead
+// of free helpers; alternate backends plug in via
+// `Analyzer::with_adapter`.
 
 /// Does `filter` apply to the action named `action_name`? Rails scopes:
 /// - `only: [...]` limits to the listed actions

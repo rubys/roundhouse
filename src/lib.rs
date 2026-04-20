@@ -4,6 +4,7 @@
 //! serializable core with a Rails dialect layered on top. The IR is the
 //! deliverable; ingesters produce it, emitters consume it.
 
+pub mod adapter;
 pub mod analyze;
 pub mod app;
 pub mod dialect;
@@ -20,6 +21,7 @@ pub mod schema;
 pub mod span;
 pub mod ty;
 
+pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
 pub use app::App;
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,
