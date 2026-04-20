@@ -860,16 +860,29 @@ fn sync_adapter_omits_awaits_inside_action_bodies() {
 
 #[test]
 fn async_adapter_awaits_model_find_on_assign_rhs() {
-    // `@post = Post.find(params[:id])` → the compound RHS
-    // `Post.find(id) ?? new Post()` gets wrapped in `await (...)`
-    // under SqliteAsyncAdapter. The fallback-wrap is a TS emission
-    // detail; the suspension happens at the outer assign level.
+    // `@post = Post.find(params[:id])` — the TS ModelFind render
+    // produces a nullable-coalesce: `(Post.find(id) ?? new Post())`.
+    // Under SqliteAsyncAdapter, `await` must land on the
+    // `Post.find(id)` sub-expression, NOT the whole coalesce.
+    // Correct shape:  `(await Post.find(id) ?? new Post())`
+    // which parses as `((await Post.find(id)) ?? new Post())` by
+    // precedence (await=17, ??=3).
+    //
+    // The wrong shape `await (Post.find(id) ?? new Post())`
+    // would await a Promise-or-new-Post-coalesce: since Promise
+    // is truthy, `??` returns the Promise unchanged and the
+    // outer await resolves it — dropping the fallback path.
     let app = analyzed_app();
     let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
     let content = find(&files, "app/controllers/posts_controller.ts");
     assert!(
-        content.contains("const post = await ") && content.contains("Post.find("),
-        "expected `const post = await (...Post.find...)` shape in:\n{content}",
+        content.contains("(await Post.find("),
+        "expected `(await Post.find(...` inside the coalesce in:\n{content}",
+    );
+    // Negative: the wrong outer-await shape must not appear.
+    assert!(
+        !content.contains("await (Post.find("),
+        "`await` must land on the find, not on the whole coalesce:\n{content}",
     );
 }
 
@@ -925,6 +938,35 @@ fn async_adapter_does_not_await_non_db_sends() {
             assert!(
                 !line.contains("await "),
                 "response statement should not be awaited: `{line}`",
+            );
+        }
+    }
+}
+
+#[test]
+fn async_adapter_places_await_at_suspending_subexpression() {
+    // Stronger form of the find-coalesce test: verify every
+    // suspending Send in the generated TS has its `await`
+    // positioned correctly (before the Send, inside any compound
+    // wrapping) — not at an outer operator position where it
+    // would await the compound result instead of the Promise.
+    //
+    // Specifically: no line should contain `await (` followed by
+    // a non-await identifier that's not immediately a Send. The
+    // pattern `await (X ??` or `await (X &&` would indicate the
+    // outer-wrap bug.
+    let app = analyzed_app();
+    let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAsyncAdapter);
+    let content = find(&files, "app/controllers/posts_controller.ts");
+    for line in content.lines() {
+        // `await (<identifier><space>??` would be the outer-wrap
+        // bug. Scan for it.
+        if line.contains("await (") && line.contains(" ?? ") {
+            let outer_start = line.find("await (").unwrap();
+            let coalesce = line.find(" ?? ").unwrap();
+            assert!(
+                outer_start > coalesce,
+                "`await (X ?? Y)` pattern suggests outer-wrap bug; await should be inside:\n{line}",
             );
         }
     }

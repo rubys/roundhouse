@@ -809,7 +809,7 @@ impl<'a> crate::lower::CtrlWalker<'a> for CrEmitter<'a> {
     fn render_expr(&mut self, expr: &Expr) -> String {
         if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
             if let Some(stmt) = self.render_send_stmt(
-                recv.as_ref(), method.as_str(), args, block.as_ref(),
+                recv.as_ref(), method.as_str(), args, block.as_ref(), "",
             ) {
                 return match stmt {
                     crate::lower::Stmt::Response(r) => r,
@@ -842,6 +842,9 @@ impl<'a> crate::lower::CtrlWalker<'a> for CrEmitter<'a> {
         method: &str,
         args: &[Expr],
         block: Option<&Expr>,
+        // Crystal concurrency lives in fibers; no async syntax,
+        // prefix unused.
+        _suspending_prefix: &str,
     ) -> Option<crate::lower::Stmt> {
         use crate::lower::{SendKind, Stmt};
         let kind = crate::lower::classify_controller_send(

@@ -165,12 +165,27 @@ pub trait CtrlWalker<'a>: Sized {
     /// Render a Send through the target's SendKind render table.
     /// `None` → the target doesn't classify this Send and wants
     /// the walker to fall through to the generic expression path.
+    ///
+    /// `suspending_prefix` is the target-specific wrapping the
+    /// render should apply if the Send (or its contained Send in
+    /// compound renders like `ModelFind`'s `?? new X()` coalesce)
+    /// suspends under the active adapter. Simple-shape renders
+    /// prepend it (`"await Post.all()"`); compound-shape renders
+    /// place it at the suspending sub-expression's position
+    /// (`"((await Post.find(id)) ?? new Post())"`) so `await` is
+    /// applied to the Promise, not a non-Promise compound.
+    ///
+    /// Empty string means "no wrapping" — emitted under sync
+    /// adapters where nothing suspends. Targets without async
+    /// syntax (Go/Crystal/Elixir/Ruby) receive the empty string
+    /// regardless, via their `suspending_prefix()` override.
     fn render_send_stmt(
         &mut self,
         recv: Option<&Expr>,
         method: &str,
         args: &[Expr],
         block: Option<&Expr>,
+        suspending_prefix: &str,
     ) -> Option<Stmt>;
 
     /// Target-specific prefix string for a Send expression whose
@@ -246,27 +261,29 @@ pub trait CtrlWalker<'a>: Sized {
                 }
             }
             ExprNode::Send { recv, method, args, block, .. } => {
-                // Decide the await prefix ONCE based on the
-                // Send's effects + the adapter's suspending-
-                // effects profile. Render responses stay plain
-                // (`return { status: ... }` doesn't need await);
-                // Expr-shaped Sends get the prefix prepended.
+                // Suspending-prefix placement is now owned end-to-end
+                // by `render_send_stmt` (Some path) or `render_expr`
+                // (None / fall-through path). The walker dispatches
+                // and hands the result to `write_expr_stmt` unchanged.
                 let suspends = self.ctx().expr_suspends(expr);
                 let prefix = if suspends { self.suspending_prefix() } else { "" };
                 match self.render_send_stmt(
-                    recv.as_ref(), method.as_str(), args, block.as_ref(),
+                    recv.as_ref(), method.as_str(), args, block.as_ref(), prefix,
                 ) {
                     Some(Stmt::Response(r)) => {
                         self.write_response_stmt(&r, is_tail, &indent, out);
                     }
                     Some(Stmt::Expr(s)) => {
-                        let wrapped = if suspends { format!("{prefix}{s}") } else { s };
-                        self.write_expr_stmt(&wrapped, &indent, out);
+                        self.write_expr_stmt(&s, &indent, out);
                     }
                     None => {
+                        // `render_expr` on a Send internally applies
+                        // the suspending prefix (computed from the
+                        // same expr.effects + adapter); the walker
+                        // must NOT wrap again here or we'd emit
+                        // `await await …`.
                         let s = self.render_expr(expr);
-                        let wrapped = if suspends { format!("{prefix}{s}") } else { s };
-                        self.write_expr_stmt(&wrapped, &indent, out);
+                        self.write_expr_stmt(&s, &indent, out);
                     }
                 }
             }

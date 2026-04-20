@@ -1160,15 +1160,16 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
     fn suspending_prefix(&self) -> &'static str { "await " }
 
     fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
-        // Prepend `await` when the RHS expression has any effect
-        // the adapter flags as suspending. Under the default
-        // SqliteAdapter, nothing suspends — output is identical to
-        // the pre-consumption behavior. Under SqliteAsyncAdapter,
-        // AR Sends pick up `await`.
-        let suspends = self.ctx.expr_suspends(value);
+        // `render_expr` handles the suspending wrap internally
+        // when `value` is a Send — compound-shape renders
+        // (ModelFind's coalesce) place the `await` at the
+        // suspending sub-expression rather than the outer
+        // expression. For non-Send RHS shapes, `render_expr`
+        // emits the expression as-is; suspension can only arise
+        // from Sends in the current IR, so the walker doesn't
+        // need to wrap here.
         let rhs = self.render_expr(value);
-        let prefix = if suspends { "await " } else { "" };
-        writeln!(out, "{indent}const {name} = {prefix}{rhs};").unwrap();
+        writeln!(out, "{indent}const {name} = {rhs};").unwrap();
     }
 
     fn write_create_expansion(
@@ -1210,10 +1211,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
         is_tail: bool,
         out: &mut String,
     ) {
-        let suspends = self.ctx.expr_suspends(cond);
+        // render_expr places the suspending-wrap correctly when
+        // cond is a Send; no extra wrapping needed here.
         let cond_s = self.render_expr(cond);
-        let cond_awaited = if suspends { format!("await {cond_s}") } else { cond_s };
-        writeln!(out, "{indent}if ({cond_awaited}) {{").unwrap();
+        writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
         self.walk_stmt(then_branch, out, depth + 1, is_tail);
         if !crate::lower::is_empty_body(else_branch) {
             writeln!(out, "{indent}}} else {{").unwrap();
@@ -1268,8 +1269,18 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
 
     fn render_expr(&mut self, expr: &Expr) -> String {
         if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+            // Compute the target-specific suspending prefix from
+            // this Send's effects + the adapter's suspending set.
+            // Passed into `render_send_stmt` so each variant
+            // places the wrapping correctly (outermost for simple
+            // shapes, inside compounds for ModelFind's coalesce).
+            let prefix = if self.ctx.expr_suspends(expr) {
+                self.suspending_prefix()
+            } else {
+                ""
+            };
             if let Some(stmt) = self.render_send_stmt(
-                recv.as_ref(), method.as_str(), args, block.as_ref(),
+                recv.as_ref(), method.as_str(), args, block.as_ref(), prefix,
             ) {
                 return match stmt {
                     crate::lower::Stmt::Response(r) => r
@@ -1279,7 +1290,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                     crate::lower::Stmt::Expr(s) => s,
                 };
             }
-            return emit_send_with_parens(recv.as_ref(), method.as_str(), args, false);
+            // Generic fall-through: no SendKind matched. Simple
+            // `recv.method(args)` shape; prefix externally.
+            let base = emit_send_with_parens(recv.as_ref(), method.as_str(), args, false);
+            return if prefix.is_empty() { base } else { format!("{prefix}{base}") };
         }
         emit_expr(expr)
     }
@@ -1290,11 +1304,13 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
         method: &str,
         args: &[Expr],
         block: Option<&Expr>,
+        suspending_prefix: &str,
     ) -> Option<crate::lower::Stmt> {
         use crate::lower::{SendKind, Stmt};
         let kind = crate::lower::classify_controller_send(
             recv, method, args, block, self.ctx.known_models,
         )?;
+        let p = suspending_prefix;
         Some(match kind {
             SendKind::ParamsAccess => {
                 self.state.uses_context = true;
@@ -1316,12 +1332,32 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                 Stmt::Expr(fragment)
             }
             SendKind::ModelNew { class } => {
+                // `Model.new` is Pure in the catalog — never suspends
+                // even under async adapters. Ignore prefix.
                 Stmt::Expr(format!("new {}()", class.as_str()))
             }
             SendKind::ModelFind { class, id } => {
+                // Compound shape: the `Post.find(id)` call is the
+                // suspending piece; the `?? new Post()` fallback is
+                // a TS idiom for nullable-lookup coalescing. Under
+                // async adapters we need
+                //   (await Post.find(id) ?? new Post())
+                // which parses as
+                //   ((await Post.find(id)) ?? new Post())
+                // by precedence (await = 17, ?? = 3) — await binds
+                // to the Promise-returning call, not the whole
+                // coalesce. Wrong shape was `await (X ?? Y)`:
+                // `?? Y` is falsy-coalesce on Promise (truthy), so
+                // returns Promise unchanged; `await Promise` then
+                // resolves, dropping Y.
+                //
+                // The same single-paren shape under sync stays
+                // `(Post.find(id) ?? new Post())`; stripping
+                // `await ` from the async form recovers it
+                // exactly, preserving the byte-diff invariant.
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!(
-                    "({0}.find({id_s}) ?? new {0}())",
+                    "({p}{0}.find({id_s}) ?? new {0}())",
                     class.as_str(),
                 ))
             }
@@ -1331,7 +1367,7 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                     "find" => {
                         let id_s = args.first().map(|a| self.render_expr(a))
                             .unwrap_or_else(|| "0".to_string());
-                        Stmt::Expr(format!("{target_s}.find({id_s})"))
+                        Stmt::Expr(format!("{p}{target_s}.find({id_s})"))
                     }
                     _ => Stmt::Expr(format!(
                         "new {target_s}() /* TODO: {outer_method} */"
@@ -1339,7 +1375,7 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                 }
             }
             SendKind::QueryChain { target: Some(target) } => {
-                Stmt::Expr(format!("{}.all()", target.as_str()))
+                Stmt::Expr(format!("{p}{}.all()", target.as_str()))
             }
             SendKind::QueryChain { target: None } => {
                 Stmt::Expr("[] /* TODO: unresolved query chain */".to_string())
@@ -1351,12 +1387,12 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
             SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
                 let recv_s = self.render_expr(recv);
                 if bs_args.is_empty() {
-                    Stmt::Expr(format!("{recv_s}.{stripped_method}"))
+                    Stmt::Expr(format!("{p}{recv_s}.{stripped_method}"))
                 } else {
                     let args_s: Vec<String> =
                         bs_args.iter().map(|a| self.render_expr(a)).collect();
                     Stmt::Expr(format!(
-                        "{recv_s}.{stripped_method}({})",
+                        "{p}{recv_s}.{stripped_method}({})",
                         args_s.join(", "),
                     ))
                 }
@@ -1365,6 +1401,9 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                 Stmt::Expr("false /* TODO: instance update */".to_string())
             }
             SendKind::Render { args: r_args } => {
+                // Render/redirect/head are Io effects, not DB —
+                // under SqliteAsyncAdapter they don't suspend.
+                // Responses stay plain.
                 Stmt::Response(self.render_ts_render(r_args))
             }
             SendKind::RedirectTo { args: r_args } => {
