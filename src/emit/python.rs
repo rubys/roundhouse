@@ -32,6 +32,7 @@ use crate::dialect::{
 };
 use crate::ident::Symbol;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::lower::CtrlWalker as _;
 use crate::ty::Ty;
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
@@ -743,22 +744,22 @@ fn emit_py_action(
         return;
     }
 
-    // Normalization pipeline — identical three target-neutral passes
-    // every other emitter uses.
-    let normalized =
-        crate::lower::normalize_action_body(controller, la.name.as_str(), body);
-
-    let ctx = PyActionCtx {
-        known_models,
-        model_class: la.model_class.as_str(),
-        resource: la.resource.as_str(),
-        parent: la.parent.as_ref(),
-        permitted: &la.permitted,
+    use crate::lower::CtrlWalker;
+    let normalized = crate::lower::normalize_action_body(controller, la.name.as_str(), body);
+    let mut emitter = PyEmitter {
+        ctx: crate::lower::WalkCtx {
+            known_models,
+            model_class: la.model_class.as_str(),
+            resource: la.resource.as_str(),
+            parent: la.parent.as_ref(),
+            permitted: &la.permitted,
+        },
+        state: crate::lower::WalkState::new(),
     };
-    let mut state = PyActionState::new();
-    let body_src = emit_py_action_body_src(&normalized, &ctx, &mut state);
-
-    let ctx_param = if state.uses_context { "context" } else { "_context" };
+    let body_src = emitter.walk_action_body(&normalized);
+    let uses_context = emitter.state.uses_context
+        || body_src.contains("context.") || body_src.contains("context[");
+    let ctx_param = if uses_context { "context" } else { "_context" };
     writeln!(
         out,
         "def {name}({ctx_param}: http.ActionContext) -> http.ActionResponse:"
@@ -771,316 +772,251 @@ fn emit_py_action(
     }
 }
 
-/// Walker context for a Python action body.
-struct PyActionCtx<'a> {
-    known_models: &'a [Symbol],
-    model_class: &'a str,
-    resource: &'a str,
-    parent: Option<&'a crate::lower::NestedParent>,
-    permitted: &'a [String],
+struct PyEmitter<'a> {
+    ctx: crate::lower::WalkCtx<'a>,
+    state: crate::lower::WalkState,
 }
 
-/// Mutable walker state.
-struct PyActionState {
-    uses_context: bool,
-    last_local: Option<String>,
-}
+impl<'a> crate::lower::CtrlWalker<'a> for PyEmitter<'a> {
+    fn ctx(&self) -> &crate::lower::WalkCtx<'a> { &self.ctx }
+    fn state_mut(&mut self) -> &mut crate::lower::WalkState { &mut self.state }
+    fn indent_unit(&self) -> &'static str { "    " }
 
-impl PyActionState {
-    fn new() -> Self { Self { uses_context: false, last_local: None } }
-}
-
-/// Emit a normalized body as Python statements at base indent 4
-/// (inside the function def). Returns the newline-terminated
-/// statement sequence.
-fn emit_py_action_body_src(body: &Expr, ctx: &PyActionCtx<'_>, state: &mut PyActionState) -> String {
-    let mut out = String::new();
-    emit_py_action_stmt(body, &mut out, ctx, 1, state);
-    // Python doesn't collapse "context." substring the way TS does
-    // — the indirect `context.params.k` shape doesn't exist in
-    // Python (it's `context.params["k"]`). Post-scan catches any
-    // residual uses the render table didn't flag.
-    if out.contains("context.") || out.contains("context[") {
-        state.uses_context = true;
+    fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
+        let rhs = self.render_expr(value);
+        writeln!(out, "{indent}{name} = {rhs}").unwrap();
     }
-    out
-}
 
-fn emit_py_action_stmt(
-    expr: &Expr,
-    out: &mut String,
-    ctx: &PyActionCtx<'_>,
-    depth: usize,
-    state: &mut PyActionState,
-) {
-    let indent = "    ".repeat(depth);
-    match &*expr.node {
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                emit_py_action_stmt(e, out, ctx, depth, state);
-            }
+    fn write_create_expansion(
+        &mut self,
+        var_name: &str,
+        class: &str,
+        indent: &str,
+        out: &mut String,
+    ) {
+        writeln!(out, "{indent}{var_name} = {class}()").unwrap();
+        if let Some(parent) = self.ctx.parent {
+            writeln!(
+                out,
+                "{indent}{var_name}.{0}_id = int(context.params[\"{0}_id\"])",
+                parent.singular,
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
-        // Create-scaffold macro: `x = Model.new(<resource>_params)`
-        // → `x = Model(); x.field1 = ...; x.field2 = ...`.
-        ExprNode::Assign { target: LValue::Var { name, .. }, value }
-        | ExprNode::Assign { target: LValue::Ivar { name }, value }
-            if crate::lower::model_new_with_strong_params(
-                value, ctx.known_models, ctx.resource,
-            ).is_some() =>
-        {
-            let class = crate::lower::model_new_with_strong_params(
-                value, ctx.known_models, ctx.resource,
-            ).unwrap();
-            emit_py_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
-            state.last_local = Some(name.as_str().to_string());
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            writeln!(
+                out,
+                "{indent}{var_name}.{field} = context.params.get(\"{resource}[{field}]\", \"\")",
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
-        ExprNode::Assign { target: LValue::Var { name, .. }, value }
-        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let rhs = emit_py_action_expr(value, ctx, state);
-            writeln!(out, "{indent}{name} = {rhs}").unwrap();
-            state.last_local = Some(name.as_str().to_string());
+    }
+
+    fn write_if(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let cond_s = self.render_expr(cond);
+        writeln!(out, "{indent}if {cond_s}:").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}else:").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
         }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            // Update-scaffold macro: `if x.update(<resource>_params)
-            // then A else B end` → per-field conditional assigns
-            // then `if x.save(): A else: B`.
-            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
-                let recv_s = emit_py_action_expr(recv, ctx, state);
-                emit_py_update_field_assigns(out, &recv_s, &indent, ctx, state);
-                writeln!(out, "{indent}if {recv_s}.save():").unwrap();
-                emit_py_action_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}else:").unwrap();
-                    emit_py_action_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-            } else {
-                let cond_s = emit_py_action_expr(cond, ctx, state);
-                writeln!(out, "{indent}if {cond_s}:").unwrap();
-                emit_py_action_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}else:").unwrap();
-                    emit_py_action_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-            }
+    }
+
+    fn write_update_if(
+        &mut self,
+        recv: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let recv_s = self.render_expr(recv);
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            writeln!(
+                out,
+                "{indent}if \"{resource}[{field}]\" in context.params: {recv_s}.{field} = context.params[\"{resource}[{field}]\"]",
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
-        ExprNode::Send { recv, method, args, block, .. } => {
-            match emit_py_action_send(
-                recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state,
+        writeln!(out, "{indent}if {recv_s}.save():").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}else:").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
+        }
+    }
+
+    fn write_response_stmt(&mut self, r: &str, _is_tail: bool, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{r}").unwrap();
+    }
+
+    fn write_expr_stmt(&mut self, s: &str, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{s}").unwrap();
+    }
+
+    fn render_expr(&mut self, expr: &Expr) -> String {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+            if let Some(stmt) = self.render_send_stmt(
+                recv.as_ref(), method.as_str(), args, block.as_ref(),
             ) {
-                Some(PyCtrlStmt::Return(r)) => writeln!(out, "{indent}{r}").unwrap(),
-                Some(PyCtrlStmt::Expr(s)) => writeln!(out, "{indent}{s}").unwrap(),
-                None => {
-                    let s = emit_py_action_expr(expr, ctx, state);
-                    writeln!(out, "{indent}{s}").unwrap();
+                return match stmt {
+                    crate::lower::Stmt::Response(r) => r.trim_start_matches("return ").to_string(),
+                    crate::lower::Stmt::Expr(s) => s,
+                };
+            }
+            let args_s: Vec<String> = args.iter().map(|a| self.render_expr(a)).collect();
+            return match recv {
+                None if args.is_empty() => method.to_string(),
+                None => format!("{method}({})", args_s.join(", ")),
+                Some(r) => {
+                    let recv_s = self.render_expr(r);
+                    if args.is_empty() {
+                        format!("{recv_s}.{method}()")
+                    } else {
+                        format!("{recv_s}.{method}({})", args_s.join(", "))
+                    }
                 }
-            }
+            };
         }
-        _ => {
-            let s = emit_py_action_expr(expr, ctx, state);
-            if !s.is_empty() {
-                writeln!(out, "{indent}{s}").unwrap();
-            }
+        if let ExprNode::Ivar { name } = &*expr.node {
+            return name.to_string();
         }
+        emit_expr(expr)
+    }
+
+    fn render_send_stmt(
+        &mut self,
+        recv: Option<&Expr>,
+        method: &str,
+        args: &[Expr],
+        block: Option<&Expr>,
+    ) -> Option<crate::lower::Stmt> {
+        use crate::lower::{SendKind, Stmt};
+        let kind = crate::lower::classify_controller_send(
+            recv, method, args, block, self.ctx.known_models,
+        )?;
+        Some(match kind {
+            SendKind::ParamsAccess => {
+                self.state.uses_context = true;
+                Stmt::Expr("context.params".to_string())
+            }
+            SendKind::ParamsIndex { key } => {
+                self.state.uses_context = true;
+                let key_s = match &*key.node {
+                    ExprNode::Lit { value: Literal::Sym { value: s } } => {
+                        format!("context.params[\"{}\"]", s.as_str())
+                    }
+                    _ => {
+                        let k = self.render_expr(key);
+                        format!("context.params[{k}]")
+                    }
+                };
+                Stmt::Expr(format!("int({key_s})"))
+            }
+            SendKind::ParamsExpect { args: pe_args } => {
+                self.state.uses_context = true;
+                let s = match pe_args.first().map(|e| &*e.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value: k } }) => {
+                        format!("int(context.params[\"{}\"])", k.as_str())
+                    }
+                    _ => "context.params  # TODO: params.expect hash".to_string(),
+                };
+                Stmt::Expr(s)
+            }
+            SendKind::ModelNew { class } => Stmt::Expr(format!("{}()", class.as_str())),
+            SendKind::ModelFind { class, id } => {
+                let id_s = self.render_expr(id);
+                Stmt::Expr(format!("{0}.find({id_s}) or {0}()", class.as_str()))
+            }
+            SendKind::QueryChain { target: Some(target) } => {
+                Stmt::Expr(format!("{}.all()", target.as_str()))
+            }
+            SendKind::QueryChain { target: None } => Stmt::Expr("[]".to_string()),
+            SendKind::AssocLookup { target, outer_method } => match outer_method {
+                "find" => {
+                    let id_s = args.first().map(|a| self.render_expr(a))
+                        .unwrap_or_else(|| "0".to_string());
+                    Stmt::Expr(format!("{0}.find({id_s}) or {0}()", target.as_str()))
+                }
+                _ => Stmt::Expr(format!("{}()", target.as_str())),
+            },
+            SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+                let recv_s = self.render_expr(recv);
+                let args_s: Vec<String> =
+                    bs_args.iter().map(|a| self.render_expr(a)).collect();
+                Stmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
+            }
+            SendKind::InstanceUpdate => Stmt::Expr("False".to_string()),
+            SendKind::PathOrUrlHelper => Stmt::Expr(format!("{method}()")),
+            SendKind::Render { args: r_args } => Stmt::Response(self.render_py_render(r_args)),
+            SendKind::RedirectTo { args: r_args } => Stmt::Response(self.render_py_redirect(r_args)),
+            SendKind::Head { args: h_args } => {
+                let status = h_args.first().and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                        Some(crate::lower::status_sym_to_code(s.as_str())),
+                    ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                    _ => None,
+                }).unwrap_or(200);
+                Stmt::Response(format!("return http.ActionResponse(status={status})"))
+            }
+            SendKind::RespondToBlock { .. }
+            | SendKind::FormatHtml { .. }
+            | SendKind::FormatJson => Stmt::Expr(
+                "None  # unreachable: respond_to not normalized".to_string(),
+            ),
+        })
     }
 }
 
-fn emit_py_action_expr(expr: &Expr, ctx: &PyActionCtx<'_>, state: &mut PyActionState) -> String {
-    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
-        if let Some(stmt) = emit_py_action_send(
-            recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state,
-        ) {
-            return match stmt {
-                PyCtrlStmt::Return(r) => r.trim_start_matches("return ").to_string(),
-                PyCtrlStmt::Expr(s) => s,
-            };
-        }
-        // Generic Send fallback.
-        let args_s: Vec<String> = args.iter().map(|a| emit_py_action_expr(a, ctx, state)).collect();
-        return match recv {
-            None if args.is_empty() => method.to_string(),
-            None => format!("{method}({})", args_s.join(", ")),
-            Some(r) => {
-                let recv_s = emit_py_action_expr(r, ctx, state);
-                if args.is_empty() {
-                    format!("{recv_s}.{method}()")
-                } else {
-                    format!("{recv_s}.{method}({})", args_s.join(", "))
-                }
+impl<'a> PyEmitter<'a> {
+    fn render_py_render(&mut self, args: &[Expr]) -> String {
+        if let Some(first) = args.first() {
+            if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+                let view_fn = py_view_fn(self.ctx.model_class, sym.as_str());
+                let arg = self.state.last_local.clone().unwrap_or_else(|| "None".to_string());
+                let body_part = format!("body=views.{view_fn}({arg})");
+                return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                    Some(status) => format!("return http.ActionResponse(status={status}, {body_part})"),
+                    None => format!("return http.ActionResponse({body_part})"),
+                };
             }
+            let body_s = self.render_expr(first);
+            return format!("return http.ActionResponse(body={body_s})");
+        }
+        "return http.ActionResponse(body=\"\")".to_string()
+    }
+
+    fn render_py_redirect(&mut self, args: &[Expr]) -> String {
+        let Some(first) = args.first() else {
+            return "return http.ActionResponse(status=303)".to_string();
         };
-    }
-    if let ExprNode::Ivar { name } = &*expr.node {
-        return name.to_string();
-    }
-    emit_expr(expr)
-}
-
-enum PyCtrlStmt { Return(String), Expr(String) }
-
-fn emit_py_action_send(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-    block: Option<&Expr>,
-    ctx: &PyActionCtx<'_>,
-    state: &mut PyActionState,
-) -> Option<PyCtrlStmt> {
-    use crate::lower::SendKind;
-    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
-    Some(match kind {
-        SendKind::ParamsAccess => {
-            state.uses_context = true;
-            PyCtrlStmt::Expr("context.params".to_string())
+        let loc = self.render_expr(first);
+        let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+        if is_bare_py_ident(&loc) {
+            let id_access = format!("{loc}.id");
+            return format!(
+                "return http.ActionResponse(status={status}, location={loc}_path({id_access}))"
+            );
         }
-        SendKind::ParamsIndex { key } => {
-            state.uses_context = true;
-            // `params[:id]` — cast to int since path params arrive
-            // as strings from the router.
-            let key_s = match &*key.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } => {
-                    format!("context.params[\"{}\"]", s.as_str())
-                }
-                _ => {
-                    let k = emit_py_action_expr(key, ctx, state);
-                    format!("context.params[{k}]")
-                }
-            };
-            PyCtrlStmt::Expr(format!("int({key_s})"))
-        }
-        SendKind::ParamsExpect { args: pe_args } => {
-            state.uses_context = true;
-            let s = match pe_args.first().map(|e| &*e.node) {
-                Some(ExprNode::Lit { value: Literal::Sym { value: k } }) => {
-                    format!("int(context.params[\"{}\"])", k.as_str())
-                }
-                _ => "context.params  # TODO: params.expect hash".to_string(),
-            };
-            PyCtrlStmt::Expr(s)
-        }
-        SendKind::ModelNew { class } => PyCtrlStmt::Expr(format!("{}()", class.as_str())),
-        SendKind::ModelFind { class, id } => {
-            let id_s = emit_py_action_expr(id, ctx, state);
-            PyCtrlStmt::Expr(format!("{}.find({id_s}) or {}()", class.as_str(), class.as_str()))
-        }
-        SendKind::QueryChain { target: Some(target) } => {
-            PyCtrlStmt::Expr(format!("{}.all()", target.as_str()))
-        }
-        SendKind::QueryChain { target: None } => PyCtrlStmt::Expr("[]".to_string()),
-        SendKind::AssocLookup { target, outer_method } => match outer_method {
-            "find" => {
-                let id_s = args
-                    .first()
-                    .map(|a| emit_py_action_expr(a, ctx, state))
-                    .unwrap_or_else(|| "0".to_string());
-                PyCtrlStmt::Expr(format!("{}.find({id_s}) or {}()", target.as_str(), target.as_str()))
-            }
-            _ => PyCtrlStmt::Expr(format!("{}()", target.as_str())),
-        },
-        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
-            let recv_s = emit_py_action_expr(recv, ctx, state);
-            let args_s: Vec<String> =
-                bs_args.iter().map(|a| emit_py_action_expr(a, ctx, state)).collect();
-            PyCtrlStmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
-        }
-        SendKind::InstanceUpdate => PyCtrlStmt::Expr("False".to_string()),
-        SendKind::PathOrUrlHelper => PyCtrlStmt::Expr(format!("{method}()")),
-        SendKind::Render { args } => PyCtrlStmt::Return(emit_py_render(args, ctx, state)),
-        SendKind::RedirectTo { args } => PyCtrlStmt::Return(emit_py_redirect_to(args, ctx, state)),
-        SendKind::Head { args } => {
-            let status = args.first().and_then(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } =>
-                    Some(crate::lower::status_sym_to_code(s.as_str())),
-                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
-                _ => None,
-            }).unwrap_or(200);
-            PyCtrlStmt::Return(format!("return http.ActionResponse(status={status})"))
-        }
-        // Should not reach here post-normalization.
-        SendKind::RespondToBlock { .. }
-        | SendKind::FormatHtml { .. }
-        | SendKind::FormatJson => PyCtrlStmt::Expr(
-            "None  # unreachable: respond_to not normalized".to_string(),
-        ),
-    })
-}
-
-fn emit_py_render(args: &[Expr], ctx: &PyActionCtx<'_>, state: &mut PyActionState) -> String {
-    if let Some(first) = args.first() {
-        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
-            let view_fn = py_view_fn(ctx.model_class, sym.as_str());
-            let arg = state.last_local.clone().unwrap_or_else(|| "None".to_string());
-            let body_part = format!("body=views.{view_fn}({arg})");
-            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
-                Some(status) => format!("return http.ActionResponse(status={status}, {body_part})"),
-                None => format!("return http.ActionResponse({body_part})"),
-            };
-        }
-        let body_s = emit_py_action_expr(first, ctx, state);
-        return format!("return http.ActionResponse(body={body_s})");
-    }
-    "return http.ActionResponse(body=\"\")".to_string()
-}
-
-fn emit_py_redirect_to(args: &[Expr], ctx: &PyActionCtx<'_>, state: &mut PyActionState) -> String {
-    let Some(first) = args.first() else {
-        return "return http.ActionResponse(status=303)".to_string();
-    };
-    let loc = emit_py_action_expr(first, ctx, state);
-    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
-    if is_bare_py_ident(&loc) {
-        let helper = format!("{loc}_path");
-        let id_access = format!("{loc}.id");
-        return format!(
-            "return http.ActionResponse(status={status}, location={helper}({id_access}))"
-        );
-    }
-    format!("return http.ActionResponse(status={status}, location={loc})")
-}
-
-fn emit_py_create_expansion(
-    out: &mut String,
-    var_name: &str,
-    class: &str,
-    indent: &str,
-    ctx: &PyActionCtx<'_>,
-    state: &mut PyActionState,
-) {
-    writeln!(out, "{indent}{var_name} = {class}()").unwrap();
-    if let Some(parent) = ctx.parent {
-        writeln!(
-            out,
-            "{indent}{var_name}.{0}_id = int(context.params[\"{0}_id\"])",
-            parent.singular,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}{var_name}.{field} = context.params.get(\"{}[{field}]\", \"\")",
-            ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
-}
-
-fn emit_py_update_field_assigns(
-    out: &mut String,
-    recv_s: &str,
-    indent: &str,
-    ctx: &PyActionCtx<'_>,
-    state: &mut PyActionState,
-) {
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}if \"{0}[{field}]\" in context.params: {recv_s}.{field} = context.params[\"{0}[{field}]\"]",
-            ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
+        format!("return http.ActionResponse(status={status}, location={loc})")
     }
 }
 

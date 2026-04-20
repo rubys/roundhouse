@@ -16,6 +16,9 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{Controller, HttpMethod, MethodDef, Model, Test, TestModule};
+// Trait import for the walker — used by RsEmitter's inherent helpers
+// to call `self.render_expr(...)` via trait-method dispatch.
+use crate::lower::CtrlWalker as _;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming::snake_case;
@@ -1869,430 +1872,279 @@ fn emit_rust_action(
         return;
     }
 
-    // Normalization pipeline — same three target-neutral passes as
-    // every other emitter. After this the walker sees a body with
-    // before_action callbacks inlined, respond_to flattened, and an
-    // explicit render/redirect/head terminal.
+    use crate::lower::CtrlWalker;
     let normalized = crate::lower::normalize_action_body(controller, name, body);
-
-    let ctx = RsCtrlCtx {
-        known_models,
-        model_class: la.model_class.as_str(),
-        resource: la.resource.as_str(),
-        parent: la.parent.as_ref(),
-        permitted: &la.permitted,
+    let mut emitter = RsEmitter {
+        ctx: crate::lower::WalkCtx {
+            known_models,
+            model_class: la.model_class.as_str(),
+            resource: la.resource.as_str(),
+            parent: la.parent.as_ref(),
+            permitted: &la.permitted,
+        },
+        state: crate::lower::WalkState::new(),
     };
-    let mut state = RsCtrlState::new();
-    emit_rs_ctrl_stmt(&normalized, out, &ctx, 1, &mut state);
+    let body_src = emitter.walk_action_body(&normalized);
+    out.push_str(&body_src);
     writeln!(out, "}}").unwrap();
 }
 
-/// Controller-scope walker context, parallel to TS's `TsCtrlCtx`.
-/// Carries the target-neutral facts the Rust render table needs.
-struct RsCtrlCtx<'a> {
-    known_models: &'a [Symbol],
-    model_class: &'a str,
-    resource: &'a str,
-    parent: Option<&'a crate::lower::NestedParent>,
-    permitted: &'a [String],
+/// Rust's controller-body emitter. See `src/lower/controller_walk.rs`
+/// for the trait's shared walker dispatch.
+struct RsEmitter<'a> {
+    ctx: crate::lower::WalkCtx<'a>,
+    state: crate::lower::WalkState,
 }
 
-/// Mutable walker state. `last_local` tracks the most recently
-/// bound local — the implicit-render path passes it (by reference)
-/// as the view fn argument.
-struct RsCtrlState {
-    last_local: Option<String>,
-}
+impl<'a> crate::lower::CtrlWalker<'a> for RsEmitter<'a> {
+    fn ctx(&self) -> &crate::lower::WalkCtx<'a> { &self.ctx }
+    fn state_mut(&mut self) -> &mut crate::lower::WalkState { &mut self.state }
+    fn indent_unit(&self) -> &'static str { "    " }
 
-impl RsCtrlState {
-    fn new() -> Self { Self { last_local: None } }
-}
-
-/// Statement-level Rust emit. For scaffold-shape controllers the
-/// body's last statement is always a response-terminal (render /
-/// redirect / head) — emitted WITHOUT a trailing semicolon so it
-/// becomes the axum fn's trailing expression.
-fn emit_rs_ctrl_stmt(
-    expr: &Expr,
-    out: &mut String,
-    ctx: &RsCtrlCtx<'_>,
-    depth: usize,
-    state: &mut RsCtrlState,
-) {
-    let indent = "    ".repeat(depth);
-    match &*expr.node {
-        ExprNode::Seq { exprs } => {
-            let last_idx = exprs.len().saturating_sub(1);
-            for (i, e) in exprs.iter().enumerate() {
-                emit_rs_ctrl_stmt_at(e, out, ctx, depth, state, i == last_idx);
-            }
-        }
-        _ => emit_rs_ctrl_stmt_at(expr, out, ctx, depth, state, true),
+    fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
+        let rhs = self.render_expr(value);
+        writeln!(out, "{indent}let mut {name} = {rhs};").unwrap();
     }
-    let _ = indent;
-}
 
-/// Emit one statement. `is_tail` controls whether a response-
-/// producing Send (render/redirect/head) emits as a trailing
-/// expression (no `;`) or as a `return …;`-style early-return.
-/// Rust doesn't have an explicit `return` in our scaffold shapes
-/// — the tail expression IS the return — so non-tail response
-/// terminals emit as `return <expr>;` to break out of the
-/// enclosing fn.
-fn emit_rs_ctrl_stmt_at(
-    expr: &Expr,
-    out: &mut String,
-    ctx: &RsCtrlCtx<'_>,
-    depth: usize,
-    state: &mut RsCtrlState,
-    is_tail: bool,
-) {
-    let indent = "    ".repeat(depth);
-    match &*expr.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            // Create-scaffold macro: `x = Model.new(<resource>_params)`
-            // → `let mut x = Model { field1: ..., ..Default::default() };`
-            if let Some(class) = crate::lower::model_new_with_strong_params(
-                value,
-                ctx.known_models,
-                ctx.resource,
-            ) {
-                emit_rs_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx);
-                state.last_local = Some(name.as_str().to_string());
-            } else {
-                let rhs = emit_rs_ctrl_expr(value, ctx, state);
-                writeln!(out, "{indent}let mut {name} = {rhs};").unwrap();
-                state.last_local = Some(name.as_str().to_string());
-            }
+    fn write_create_expansion(
+        &mut self,
+        var_name: &str,
+        class: &str,
+        indent: &str,
+        out: &mut String,
+    ) {
+        writeln!(out, "{indent}let p = Params::new(form);").unwrap();
+        let keys = self.ctx.permitted.iter()
+            .map(|k| format!("{k:?}")).collect::<Vec<_>>().join(", ");
+        writeln!(out, "{indent}let fields = p.expect({:?}, &[{keys}]);", self.ctx.resource).unwrap();
+        writeln!(out, "{indent}let mut {var_name} = {class} {{").unwrap();
+        if let Some(parent) = self.ctx.parent {
+            writeln!(out, "{indent}    {}_id,", parent.singular).unwrap();
         }
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            // Mirror the Var path — rewrite_for_controller in TS
-            // does this at the IR level, but Rust keeps ivars in the
-            // IR and renames here.
-            if let Some(class) = crate::lower::model_new_with_strong_params(
-                value,
-                ctx.known_models,
-                ctx.resource,
-            ) {
-                emit_rs_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx);
-                state.last_local = Some(name.as_str().to_string());
-            } else {
-                let rhs = emit_rs_ctrl_expr(value, ctx, state);
-                writeln!(out, "{indent}let mut {name} = {rhs};").unwrap();
-                state.last_local = Some(name.as_str().to_string());
-            }
+        for field in self.ctx.permitted {
+            writeln!(
+                out,
+                "{indent}    {field}: fields.get({field:?}).cloned().unwrap_or_default(),",
+            )
+            .unwrap();
         }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            // Update-scaffold macro: `if x.update(<resource>_params)
-            // then A else B end` → hoist per-field conditional
-            // assigns, rewrite cond to `x.save()`.
-            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
-                let recv_s = emit_rs_ctrl_expr(recv, ctx, state);
-                emit_rs_update_field_assigns(out, &recv_s, &indent, ctx);
-                writeln!(out, "{indent}if {recv_s}.save() {{").unwrap();
-                emit_rs_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                writeln!(out, "{indent}}} else {{").unwrap();
-                if !crate::lower::is_empty_body(else_branch) {
-                    emit_rs_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-                writeln!(out, "{indent}}}").unwrap();
-            } else {
-                let cond_s = emit_rs_ctrl_expr(cond, ctx, state);
-                writeln!(out, "{indent}if {cond_s} {{").unwrap();
-                emit_rs_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                writeln!(out, "{indent}}} else {{").unwrap();
-                if !crate::lower::is_empty_body(else_branch) {
-                    emit_rs_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-                writeln!(out, "{indent}}}").unwrap();
-            }
+        writeln!(out, "{indent}    ..Default::default()").unwrap();
+        writeln!(out, "{indent}}};").unwrap();
+    }
+
+    fn write_if(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let cond_s = self.render_expr(cond);
+        writeln!(out, "{indent}if {cond_s} {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        writeln!(out, "{indent}}} else {{").unwrap();
+        if !crate::lower::is_empty_body(else_branch) {
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
         }
-        ExprNode::Send { recv, method, args, block, .. } => {
-            match emit_rs_controller_send(
-                recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state,
-            ) {
-                Some(CtrlStmt::Response(r)) => {
-                    if is_tail {
-                        writeln!(out, "{indent}{r}").unwrap();
-                    } else {
-                        writeln!(out, "{indent}return {r};").unwrap();
-                    }
-                }
-                Some(CtrlStmt::Expr(s)) => {
-                    writeln!(out, "{indent}{s};").unwrap();
-                }
-                None => {
-                    // Generic Send — e.g. `post.destroy` (bare
-                    // reader-style call). Rust needs parens since
-                    // destroy is a method. Use the existing emit_send
-                    // fallthrough logic by re-emitting via emit_expr.
-                    let ctx_inner = EmitCtx {
-                        known_models: ctx.known_models,
-                        ..EmitCtx::default()
-                    };
-                    let s = emit_send(
-                        recv.as_ref(),
-                        method.as_str(),
-                        args,
-                        block.as_ref(),
-                        ctx_inner,
-                    );
-                    writeln!(out, "{indent}{s};").unwrap();
-                }
-            }
+        writeln!(out, "{indent}}}").unwrap();
+    }
+
+    fn write_update_if(
+        &mut self,
+        recv: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let recv_s = self.render_expr(recv);
+        writeln!(out, "{indent}let p = Params::new(form);").unwrap();
+        let keys = self.ctx.permitted.iter()
+            .map(|k| format!("{k:?}")).collect::<Vec<_>>().join(", ");
+        writeln!(out, "{indent}let fields = p.expect({:?}, &[{keys}]);", self.ctx.resource).unwrap();
+        for field in self.ctx.permitted {
+            writeln!(
+                out,
+                "{indent}if let Some(v) = fields.get({field:?}) {{ {recv_s}.{field} = v.clone(); }}",
+            )
+            .unwrap();
         }
-        _ => {
-            let s = emit_rs_ctrl_expr(expr, ctx, state);
-            if !s.is_empty() {
-                writeln!(out, "{indent}{s};").unwrap();
-            }
+        writeln!(out, "{indent}if {recv_s}.save() {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        writeln!(out, "{indent}}} else {{").unwrap();
+        if !crate::lower::is_empty_body(else_branch) {
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
+        }
+        writeln!(out, "{indent}}}").unwrap();
+    }
+
+    fn write_response_stmt(&mut self, r: &str, is_tail: bool, indent: &str, out: &mut String) {
+        // Rust distinguishes trailing expression (no `return`/`;`)
+        // from early-return. Only the function's final tail position
+        // can use the bare-expression form; other positions need
+        // an explicit `return`.
+        if is_tail {
+            writeln!(out, "{indent}{r}").unwrap();
+        } else {
+            writeln!(out, "{indent}return {r};").unwrap();
         }
     }
-}
 
-/// Expression-level controller emit. Sends go through the Rust
-/// controller render table; other shapes defer to the plain
-/// `emit_expr` with an otherwise-empty EmitCtx.
-fn emit_rs_ctrl_expr(expr: &Expr, ctx: &RsCtrlCtx<'_>, state: &mut RsCtrlState) -> String {
-    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
-        if let Some(stmt) = emit_rs_controller_send(
-            recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state,
-        ) {
-            return match stmt {
-                CtrlStmt::Response(r) => r,
-                CtrlStmt::Expr(s) => s,
+    fn write_expr_stmt(&mut self, s: &str, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{s};").unwrap();
+    }
+
+    fn render_expr(&mut self, expr: &Expr) -> String {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+            if let Some(stmt) = self.render_send_stmt(
+                recv.as_ref(), method.as_str(), args, block.as_ref(),
+            ) {
+                return match stmt {
+                    crate::lower::Stmt::Response(r) => r,
+                    crate::lower::Stmt::Expr(s) => s,
+                };
+            }
+            let ctx_inner = EmitCtx {
+                known_models: self.ctx.known_models,
+                ..EmitCtx::default()
             };
+            return emit_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx_inner);
         }
         let ctx_inner = EmitCtx {
-            known_models: ctx.known_models,
+            known_models: self.ctx.known_models,
             ..EmitCtx::default()
         };
-        return emit_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx_inner);
+        emit_expr(expr, ctx_inner)
     }
-    let ctx_inner = EmitCtx {
-        known_models: ctx.known_models,
-        ..EmitCtx::default()
-    };
-    emit_expr(expr, ctx_inner)
-}
 
-/// A Rust-emitted controller Send fragment. `Response` means the
-/// fragment is a complete axum `Response`-producing expression
-/// (render / redirect / head). `Expr` is an ordinary expression
-/// fragment that emits as a `;`-terminated statement at stmt scope
-/// or as-is at expr scope.
-enum CtrlStmt {
-    Response(String),
-    Expr(String),
-}
+    fn render_send_stmt(
+        &mut self,
+        recv: Option<&Expr>,
+        method: &str,
+        args: &[Expr],
+        block: Option<&Expr>,
+    ) -> Option<crate::lower::Stmt> {
+        use crate::lower::{SendKind, Stmt};
+        let kind = crate::lower::classify_controller_send(
+            recv, method, args, block, self.ctx.known_models,
+        )?;
+        Some(match kind {
+            // params surface: `id` / `article_id` come in via axum's
+            // Path extractor; render the bare local name.
+            SendKind::ParamsIndex { key } => {
+                let s = match &*key.node {
+                    ExprNode::Lit { value: Literal::Sym { value: s } } => s.as_str().to_string(),
+                    _ => self.render_expr(key),
+                };
+                Stmt::Expr(s)
+            }
+            SendKind::ParamsExpect { args: pe_args } => {
+                let s = match pe_args.first().map(|e| &*e.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value: s } }) => s.as_str().to_string(),
+                    _ => "todo!(\"params.expect hash\")".to_string(),
+                };
+                Stmt::Expr(s)
+            }
+            SendKind::ParamsAccess => Stmt::Expr("todo!(\"bare params\")".to_string()),
 
-/// Rust controller-scope Send render table, driven by the shared
-/// `classify_controller_send` classifier. Produces runtime-aligned
-/// code: `http::html`, `http::redirect`, `http::unprocessable` for
-/// responses; `Model::find(id).unwrap_or_default()` etc. for data
-/// access.
-fn emit_rs_controller_send(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-    block: Option<&Expr>,
-    ctx: &RsCtrlCtx<'_>,
-    state: &mut RsCtrlState,
-) -> Option<CtrlStmt> {
-    use crate::lower::SendKind;
-    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
-    Some(match kind {
-        // params surface: `id` / `article_id` locals already come in
-        // through the axum Path extractor; the walker just emits
-        // their names.
-        SendKind::ParamsIndex { key } => {
-            let key_s = match &*key.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } => s.as_str().to_string(),
-                _ => emit_rs_ctrl_expr(key, ctx, state),
-            };
-            CtrlStmt::Expr(key_s)
-        }
-        SendKind::ParamsExpect { args: pe_args } => {
-            let s = match pe_args.first().map(|e| &*e.node) {
-                Some(ExprNode::Lit { value: Literal::Sym { value: s } }) => s.as_str().to_string(),
-                _ => "todo!(\"params.expect hash\")".to_string(),
-            };
-            CtrlStmt::Expr(s)
-        }
-        SendKind::ParamsAccess => {
-            CtrlStmt::Expr("todo!(\"bare params\")".to_string())
-        }
-
-        // Model-class calls.
-        SendKind::ModelNew { class } => {
-            CtrlStmt::Expr(format!("{}::default()", class.as_str()))
-        }
-        SendKind::ModelFind { class, id } => {
-            let id_s = emit_rs_ctrl_expr(id, ctx, state);
-            CtrlStmt::Expr(format!("{}::find({id_s}).unwrap_or_default()", class.as_str()))
-        }
-        SendKind::QueryChain { target: Some(target) } => {
-            CtrlStmt::Expr(format!("{}::all()", target.as_str()))
-        }
-        SendKind::QueryChain { target: None } => {
-            CtrlStmt::Expr("todo!(\"unresolved query chain\")".to_string())
-        }
-        SendKind::AssocLookup { target, outer_method } => {
-            match outer_method {
+            SendKind::ModelNew { class } => {
+                Stmt::Expr(format!("{}::default()", class.as_str()))
+            }
+            SendKind::ModelFind { class, id } => {
+                let id_s = self.render_expr(id);
+                Stmt::Expr(format!("{}::find({id_s}).unwrap_or_default()", class.as_str()))
+            }
+            SendKind::QueryChain { target: Some(target) } => {
+                Stmt::Expr(format!("{}::all()", target.as_str()))
+            }
+            SendKind::QueryChain { target: None } => {
+                Stmt::Expr("todo!(\"unresolved query chain\")".to_string())
+            }
+            SendKind::AssocLookup { target, outer_method } => match outer_method {
                 "find" => {
-                    let id_s = args
-                        .first()
-                        .map(|a| emit_rs_ctrl_expr(a, ctx, state))
+                    let id_s = args.first().map(|a| self.render_expr(a))
                         .unwrap_or_else(|| "0".to_string());
-                    CtrlStmt::Expr(format!(
+                    Stmt::Expr(format!(
                         "{}::find({id_s}).unwrap_or_default()", target.as_str(),
                     ))
                 }
-                _ => CtrlStmt::Expr(format!("{}::default()", target.as_str())),
+                _ => Stmt::Expr(format!("{}::default()", target.as_str())),
+            },
+            SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+                let recv_s = self.render_expr(recv);
+                let args_s: Vec<String> =
+                    bs_args.iter().map(|a| self.render_expr(a)).collect();
+                Stmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
             }
-        }
-
-        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
-            let recv_s = emit_rs_ctrl_expr(recv, ctx, state);
-            let args_s: Vec<String> =
-                bs_args.iter().map(|a| emit_rs_ctrl_expr(a, ctx, state)).collect();
-            CtrlStmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
-        }
-        SendKind::InstanceUpdate => CtrlStmt::Expr("false".to_string()),
-
-        SendKind::PathOrUrlHelper => {
-            let helper = method.strip_suffix("_url").or_else(|| method.strip_suffix("_path"))
-                .unwrap_or(method);
-            CtrlStmt::Expr(format!("route_helpers::{helper}_path()"))
-        }
-
-        // Response terminals.
-        SendKind::Render { args } => CtrlStmt::Response(emit_rs_render(args, ctx, state)),
-        SendKind::RedirectTo { args } => CtrlStmt::Response(emit_rs_redirect_to(args, ctx, state)),
-        SendKind::Head { args } => {
-            let status = args.first().and_then(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } => {
-                    Some(crate::lower::status_sym_to_code(s.as_str()))
-                }
-                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
-                _ => None,
-            }).unwrap_or(200);
-            CtrlStmt::Response(format!(
-                "(axum::http::StatusCode::from_u16({status}).unwrap(), \"\").into_response()"
-            ))
-        }
-
-        // Should never be reached — unwrap_respond_to flattens these
-        // before the walker runs. Defensive stub.
-        SendKind::RespondToBlock { .. }
-        | SendKind::FormatHtml { .. }
-        | SendKind::FormatJson => CtrlStmt::Expr(
-            "Response::default() /* unreachable: respond_to not normalized */".to_string(),
-        ),
-    })
+            SendKind::InstanceUpdate => Stmt::Expr("false".to_string()),
+            SendKind::PathOrUrlHelper => {
+                let helper = method.strip_suffix("_url").or_else(|| method.strip_suffix("_path"))
+                    .unwrap_or(method);
+                Stmt::Expr(format!("route_helpers::{helper}_path()"))
+            }
+            SendKind::Render { args: r_args } => Stmt::Response(self.render_rs_render(r_args)),
+            SendKind::RedirectTo { args: r_args } => Stmt::Response(self.render_rs_redirect(r_args)),
+            SendKind::Head { args: h_args } => {
+                let status = h_args.first().and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                        Some(crate::lower::status_sym_to_code(s.as_str())),
+                    ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                    _ => None,
+                }).unwrap_or(200);
+                Stmt::Response(format!(
+                    "(axum::http::StatusCode::from_u16({status}).unwrap(), \"\").into_response()"
+                ))
+            }
+            SendKind::RespondToBlock { .. }
+            | SendKind::FormatHtml { .. }
+            | SendKind::FormatJson => Stmt::Expr(
+                "Response::default() /* unreachable: respond_to not normalized */".to_string(),
+            ),
+        })
+    }
 }
 
-fn emit_rs_render(args: &[Expr], ctx: &RsCtrlCtx<'_>, state: &mut RsCtrlState) -> String {
-    // `render :show` → http::html(views::<plural>_show(&<local>)).into_response()
-    // Status kwarg (`render :new, status: :unprocessable_entity`) switches
-    // http::html → http::unprocessable (which already emits the 422).
-    if let Some(first) = args.first() {
-        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
-            let suffix = sym.as_str();
-            let plural = crate::naming::pluralize_snake(ctx.model_class);
-            let view_fn = format!("{plural}_{suffix}");
-            let arg = state.last_local.clone().unwrap_or_else(|| "&Default::default()".to_string());
-            let status = crate::lower::extract_status_from_kwargs(&args[1..]);
-            let wrapper = match status {
-                Some(422) => "http::unprocessable",
-                Some(_) | None => "http::html",
-            };
-            return format!("{wrapper}(views::{view_fn}(&{arg})).into_response()");
+impl<'a> RsEmitter<'a> {
+    fn render_rs_render(&mut self, args: &[Expr]) -> String {
+        if let Some(first) = args.first() {
+            if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+                let suffix = sym.as_str();
+                let plural = crate::naming::pluralize_snake(self.ctx.model_class);
+                let view_fn = format!("{plural}_{suffix}");
+                let arg = self.state.last_local.clone()
+                    .unwrap_or_else(|| "&Default::default()".to_string());
+                let wrapper = match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                    Some(422) => "http::unprocessable",
+                    _ => "http::html",
+                };
+                return format!("{wrapper}(views::{view_fn}(&{arg})).into_response()");
+            }
+            let body_s = self.render_expr(first);
+            return format!("http::html({body_s}).into_response()");
         }
-        let body_s = emit_rs_ctrl_expr(first, ctx, state);
-        return format!("http::html({body_s}).into_response()");
+        "http::html(String::new()).into_response()".to_string()
     }
-    "http::html(String::new()).into_response()".to_string()
-}
 
-fn emit_rs_redirect_to(args: &[Expr], ctx: &RsCtrlCtx<'_>, state: &mut RsCtrlState) -> String {
-    let Some(first) = args.first() else {
-        return "http::redirect(\"/\").into_response()".to_string();
-    };
-    let loc = emit_rs_ctrl_expr(first, ctx, state);
-    // Heuristic matching TS: bare local → route helper keyed off the
-    // local's name; helper call (already has `route_helpers::...`) —
-    // emit as-is.
-    if is_bare_rs_ident(&loc) {
-        let id_access = format!("{loc}.id");
-        return format!(
-            "http::redirect(&route_helpers::{loc}_path({id_access})).into_response()",
-        );
-    }
-    // Already a helper-call expression.
-    if loc.starts_with("route_helpers::") {
-        return format!("http::redirect(&{loc}).into_response()");
-    }
-    format!("http::redirect(&{loc}).into_response()")
-}
-
-/// Emit the Create-scaffold's struct-literal expansion. Nested
-/// resources pull the foreign key from the parent-id Path extractor;
-/// per-field values come from `Params::new(form).expect(...)`.
-fn emit_rs_create_expansion(
-    out: &mut String,
-    var_name: &str,
-    class: &str,
-    indent: &str,
-    ctx: &RsCtrlCtx<'_>,
-) {
-    writeln!(out, "{indent}let p = Params::new(form);").unwrap();
-    let keys = ctx
-        .permitted
-        .iter()
-        .map(|k| format!("{k:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "{indent}let fields = p.expect({:?}, &[{keys}]);", ctx.resource).unwrap();
-    writeln!(out, "{indent}let mut {var_name} = {class} {{").unwrap();
-    if let Some(parent) = ctx.parent {
-        writeln!(out, "{indent}    {}_id,", parent.singular).unwrap();
-    }
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}    {field}: fields.get({field:?}).cloned().unwrap_or_default(),",
-        )
-        .unwrap();
-    }
-    writeln!(out, "{indent}    ..Default::default()").unwrap();
-    writeln!(out, "{indent}}};").unwrap();
-}
-
-/// Emit the Update-scaffold's per-field conditional assigns. Same
-/// `Params::new(form).expect(...)` shape as Create, but each field
-/// gates on presence so partial PATCH requests don't zero out other
-/// columns.
-fn emit_rs_update_field_assigns(
-    out: &mut String,
-    recv_s: &str,
-    indent: &str,
-    ctx: &RsCtrlCtx<'_>,
-) {
-    writeln!(out, "{indent}let p = Params::new(form);").unwrap();
-    let keys = ctx
-        .permitted
-        .iter()
-        .map(|k| format!("{k:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "{indent}let fields = p.expect({:?}, &[{keys}]);", ctx.resource).unwrap();
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}if let Some(v) = fields.get({field:?}) {{ {recv_s}.{field} = v.clone(); }}",
-        )
-        .unwrap();
+    fn render_rs_redirect(&mut self, args: &[Expr]) -> String {
+        let Some(first) = args.first() else {
+            return "http::redirect(\"/\").into_response()".to_string();
+        };
+        let loc = self.render_expr(first);
+        if is_bare_rs_ident(&loc) {
+            let id_access = format!("{loc}.id");
+            return format!(
+                "http::redirect(&route_helpers::{loc}_path({id_access})).into_response()",
+            );
+        }
+        if loc.starts_with("route_helpers::") {
+            return format!("http::redirect(&{loc}).into_response()");
+        }
+        format!("http::redirect(&{loc}).into_response()")
     }
 }
 

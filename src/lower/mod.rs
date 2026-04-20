@@ -22,9 +22,12 @@ pub mod controller;
 pub mod controller_test;
 pub mod fixtures;
 pub mod persistence;
+pub mod controller_walk;
 pub mod routes;
 pub mod schema_sql;
 pub mod validations;
+
+pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{resolve_has_many, HasManyRef};
 pub use controller::{

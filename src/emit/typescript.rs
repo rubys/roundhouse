@@ -30,6 +30,10 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
+// Trait import for the controller walker. Used by TsEmitter's
+// helper methods to call `self.render_expr(...)` (the trait
+// method) from inside inherent-impl code.
+use crate::lower::CtrlWalker as _;
 use crate::dialect::{
     Association, Controller, MethodDef, Model, ModelBodyItem, RouteSpec, Test, TestModule,
 };
@@ -1070,16 +1074,10 @@ fn emit_ts_action(
     }
 }
 
-/// Run the normalization pipeline and statement walker against one
-/// action body, then write the `export async function …` wrapper.
-/// Shared by every ActionKind arm that has migrated off the
-/// hand-coded scaffold template — presently Show / Edit / Unknown,
-/// growing as more arms migrate.
-///
-/// The pipeline's four passes (resolve_before_actions → unwrap_
-/// respond_to → synthesize_implicit_render → rewrite_for_controller)
-/// all live in `src/lower/` except the last, which is TS-specific.
-/// See `src/lower/controller.rs` for the shared passes.
+/// Run the normalization pipeline + walker for one action body,
+/// then write the `export async function …` wrapper. The walker
+/// dispatch lives in `src/lower/controller_walk.rs`; this function
+/// builds a `TsEmitter` and hands it off.
 fn emit_ts_action_via_walker(
     out: &mut String,
     la: &crate::lower::LoweredAction,
@@ -1088,22 +1086,26 @@ fn emit_ts_action_via_walker(
     controller: &Controller,
     name: &str,
 ) {
-    let ctx = TsCtrlCtx {
-        known_models,
-        model_class: la.model_class.as_str(),
-        resource: la.resource.as_str(),
-        parent: la.parent.as_ref(),
-        permitted: &la.permitted,
-    };
+    use crate::lower::CtrlWalker;
     let normalized =
         crate::lower::normalize_action_body(controller, la.name.as_str(), body);
     let rewritten = rewrite_for_controller(&normalized);
-    let (body_src, uses_context) = emit_ts_action_body(&rewritten, &ctx);
+    let mut emitter = TsEmitter {
+        ctx: crate::lower::WalkCtx {
+            known_models,
+            model_class: la.model_class.as_str(),
+            resource: la.resource.as_str(),
+            parent: la.parent.as_ref(),
+            permitted: &la.permitted,
+        },
+        state: crate::lower::WalkState::new(),
+    };
+    let body_src = emitter.walk_action_body(&rewritten);
     // uses_context is set by SendKind arms that render `context.*`,
     // but rewrite_for_controller can also produce `context.params.k`
     // as a plain chained Send that falls through the generic path.
     // Post-scan the body to catch those.
-    let uses_context = uses_context || body_src.contains("context.");
+    let uses_context = emitter.state.uses_context || body_src.contains("context.");
     let ctx_param = if uses_context { "context" } else { "_context" };
     writeln!(
         out,
@@ -1114,441 +1116,262 @@ fn emit_ts_action_via_walker(
     writeln!(out, "}}").unwrap();
 }
 
-/// Immutable context for walking a controller action body — the
-/// target-neutral facts the walker needs to render SendKind variants
-/// into TS.
-struct TsCtrlCtx<'a> {
-    known_models: &'a [Symbol],
-    model_class: &'a str,
-    resource: &'a str,
-    parent: Option<&'a crate::lower::NestedParent>,
-    /// Fields extracted by the `<resource>_params` helper — used by
-    /// the strong-params macro to expand `Model.new(post_params)` and
-    /// `x.update(post_params)` into per-field assigns.
-    permitted: &'a [String],
+/// TS's controller-body emitter — implements the shared
+/// `CtrlWalker` trait with TS-specific render methods.
+struct TsEmitter<'a> {
+    ctx: crate::lower::WalkCtx<'a>,
+    state: crate::lower::WalkState,
 }
 
-/// Mutable walker state. `uses_context` tracks whether the body
-/// references `context.params` (decides `context` vs `_context` in
-/// the signature). `last_local` tracks the most recently bound local
-/// variable — the implicit-render path uses it as the positional
-/// arg to the view fn, standing in for the scaffold's hardcoded
-/// `record` convention.
-struct TsCtrlState {
-    uses_context: bool,
-    last_local: Option<String>,
-}
+impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
+    fn ctx(&self) -> &crate::lower::WalkCtx<'a> { &self.ctx }
+    fn state_mut(&mut self) -> &mut crate::lower::WalkState { &mut self.state }
+    fn indent_unit(&self) -> &'static str { "  " }
 
-impl TsCtrlState {
-    fn new() -> Self {
-        Self { uses_context: false, last_local: None }
+    fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
+        let rhs = self.render_expr(value);
+        writeln!(out, "{indent}const {name} = {rhs};").unwrap();
     }
-}
 
-/// Walk a normalized action body and emit TS statements at 2-space
-/// depth=1 (inside the function). Returns `(body_src, uses_context)` —
-/// the caller picks `context` vs `_context` to avoid a TS unused-param
-/// warning in bodies that never reference params. Caller is expected
-/// to have run `synthesize_implicit_render` beforehand, so the body
-/// always terminates in an explicit render / redirect_to / head.
-fn emit_ts_action_body(body: &Expr, ctx: &TsCtrlCtx<'_>) -> (String, bool) {
-    let mut out = String::new();
-    let mut state = TsCtrlState::new();
-    emit_ts_ctrl_stmt(body, &mut out, ctx, 1, &mut state);
-    (out, state.uses_context)
-}
-
-/// Statement-level emit. Dispatches on Expr shape: Seq flattens,
-/// Assign becomes a `const` binding (and updates `state.last_local`),
-/// If emits as an if/else block, Send dispatches through the
-/// controller render table (which may yield either an expression
-/// fragment or a full `return …;` statement). Unrecognized shapes
-/// fall through to `emit_expr` and are emitted as `;`-terminated
-/// expression-statements.
-fn emit_ts_ctrl_stmt(
-    expr: &Expr,
-    out: &mut String,
-    ctx: &TsCtrlCtx<'_>,
-    depth: usize,
-    state: &mut TsCtrlState,
-) {
-    let indent = "  ".repeat(depth);
-    match &*expr.node {
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                emit_ts_ctrl_stmt(e, out, ctx, depth, state);
-            }
+    fn write_create_expansion(
+        &mut self,
+        var_name: &str,
+        class: &str,
+        indent: &str,
+        out: &mut String,
+    ) {
+        writeln!(out, "{indent}const {var_name} = new {class}();").unwrap();
+        if let Some(parent) = self.ctx.parent {
+            writeln!(
+                out,
+                "{indent}({var_name} as any).{0}_id = Number(context.params.{0}_id);",
+                parent.singular,
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            // Strong-params macro: `x = Model.new(<resource>_params)`
-            // → `const x = new Model(); x.f1 = params[...]; ...`.
-            // Falls through to the generic Assign path when the RHS
-            // doesn't match the Create-scaffold shape.
-            if let Some(class) = crate::lower::model_new_with_strong_params(
-                value,
-                ctx.known_models,
-                ctx.resource,
-            ) {
-                emit_ts_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
-                state.last_local = Some(name.as_str().to_string());
-            } else {
-                let rhs = emit_ts_ctrl_expr(value, ctx, state);
-                writeln!(out, "{indent}const {name} = {rhs};").unwrap();
-                state.last_local = Some(name.as_str().to_string());
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            // Strong-params macro: `if x.update(<resource>_params)
-            // then A else B end` → per-field conditional assigns,
-            // then `if (x.save) { A } else { B }`. Falls through to
-            // the generic If path when the cond isn't the Update-
-            // scaffold shape.
-            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
-                let recv_s = emit_ts_ctrl_expr(recv, ctx, state);
-                emit_ts_update_field_assigns(out, &recv_s, &indent, ctx, state);
-                writeln!(out, "{indent}if ({recv_s}.save) {{").unwrap();
-                emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}}} else {{").unwrap();
-                    emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-                writeln!(out, "{indent}}}").unwrap();
-            } else {
-                let cond_s = emit_ts_ctrl_expr(cond, ctx, state);
-                writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
-                emit_ts_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}}} else {{").unwrap();
-                    emit_ts_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
-                }
-                writeln!(out, "{indent}}}").unwrap();
-            }
-        }
-        ExprNode::Send { recv, method, args, block, .. } => {
-            match emit_ts_controller_send(
-                recv.as_ref(),
-                method.as_str(),
-                args,
-                block.as_ref(),
-                ctx,
-                state,
-            ) {
-                Some(ControllerStmt::Return(r)) => {
-                    writeln!(out, "{indent}{r}").unwrap();
-                }
-                Some(ControllerStmt::Expr(s)) => {
-                    writeln!(out, "{indent}{s};").unwrap();
-                }
-                None => {
-                    let s = emit_send_with_parens(
-                        recv.as_ref(),
-                        method.as_str(),
-                        args,
-                        false,
-                    );
-                    writeln!(out, "{indent}{s};").unwrap();
-                }
-            }
-        }
-        _ => {
-            let s = emit_ts_ctrl_expr(expr, ctx, state);
-            if !s.is_empty() {
-                writeln!(out, "{indent}{s};").unwrap();
-            }
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            writeln!(
+                out,
+                "{indent}({var_name} as any).{field} = context.params[\"{resource}[{field}]\"] ?? \"\";",
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
     }
-}
 
-/// Result of rendering a controller-scope Send. A `Return` fragment
-/// is a complete `return …;` statement — the walker emits it as-is.
-/// An `Expr` fragment is an expression that the walker wraps as a
-/// `;`-terminated statement (or as an operand in an enclosing expr).
-enum ControllerStmt {
-    Return(String),
-    Expr(String),
-}
+    fn write_if(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let cond_s = self.render_expr(cond);
+        writeln!(out, "{indent}if ({cond_s}) {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}}} else {{").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
+        }
+        writeln!(out, "{indent}}}").unwrap();
+    }
 
-/// Controller-scope Send render table. Mirrors Rust's
-/// `emit_controller_send` in shape — drives off the shared
-/// `classify_controller_send` and produces TS-specific syntax for
-/// each `SendKind` variant. Returns `None` when the shape isn't a
-/// recognized controller-scope idiom; the walker falls back to
-/// `emit_send_with_parens`.
-fn emit_ts_controller_send(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-    block: Option<&Expr>,
-    ctx: &TsCtrlCtx<'_>,
-    state: &mut TsCtrlState,
-) -> Option<ControllerStmt> {
-    use crate::lower::SendKind;
-    let kind =
-        crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
-    Some(match kind {
-        SendKind::ParamsAccess => {
-            state.uses_context = true;
-            ControllerStmt::Expr("context.params".to_string())
+    fn write_update_if(
+        &mut self,
+        recv: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let recv_s = self.render_expr(recv);
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            writeln!(
+                out,
+                "{indent}if (context.params[\"{resource}[{field}]\"] !== undefined) {{ ({recv_s} as any).{field} = context.params[\"{resource}[{field}]\"]; }}",
+            )
+            .unwrap();
+            self.state.uses_context = true;
         }
-        SendKind::ParamsIndex { key } => {
-            state.uses_context = true;
-            // rewrite_for_controller normally rewrites `params[:k]`
-            // into `context.params.<k>` at the IR level, so this arm
-            // handles only the residual cases (non-symbol keys).
-            let key_s = emit_ts_ctrl_expr(key, ctx, state);
-            ControllerStmt::Expr(format!("context.params[{key_s}]"))
+        writeln!(out, "{indent}if ({recv_s}.save) {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}}} else {{").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
         }
-        SendKind::ParamsExpect { args } => {
-            state.uses_context = true;
-            // Single-symbol shape `params.expect(:id)` renders the
-            // same as `params[:id]` after rewrite — the value at
-            // that key. The strong-params hash shape
-            // `params.expect(article: [:title, :body])` is left as
-            // a TODO; it's handled per-target via `la.permitted`
-            // metadata in the scaffold Create/Update path.
-            let fragment = match args.first().map(|e| &*e.node) {
-                Some(ExprNode::Lit { value: Literal::Sym { value: key } }) => {
-                    format!("context.params.{}", key.as_str())
-                }
-                _ => "context.params /* TODO: params.expect hash */".to_string(),
-            };
-            ControllerStmt::Expr(fragment)
-        }
-        SendKind::ModelNew { class } => {
-            ControllerStmt::Expr(format!("new {}()", class.as_str()))
-        }
-        SendKind::ModelFind { class, id } => {
-            let id_s = emit_ts_ctrl_expr(id, ctx, state);
-            ControllerStmt::Expr(format!(
-                "({}.find({id_s}) ?? new {}())",
-                class.as_str(),
-                class.as_str(),
-            ))
-        }
-        SendKind::AssocLookup { target, outer_method } => {
-            // Render per outer-method:
-            //   `.find(id)` → `Target.find(id)` — same runtime as ModelFind.
-            //   `.build(...)` / `.create(...)` with strong_params arg
-            //     — handled at the Assign level; this arm fires only
-            //     if the pattern escaped the Assign catcher. Emit the
-            //     `new Target()` fallback.
-            let target_s = target.as_str();
-            match outer_method {
-                "find" => {
-                    let id_s = args
-                        .first()
-                        .map(|a| emit_ts_ctrl_expr(a, ctx, state))
-                        .unwrap_or_else(|| "0".to_string());
-                    ControllerStmt::Expr(format!("{target_s}.find({id_s})"))
-                }
-                _ => ControllerStmt::Expr(format!(
-                    "new {target_s}() /* TODO: {outer_method} */"
-                )),
+        writeln!(out, "{indent}}}").unwrap();
+    }
+
+    fn write_response_stmt(&mut self, r: &str, _is_tail: bool, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{r}").unwrap();
+    }
+
+    fn write_expr_stmt(&mut self, s: &str, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{s};").unwrap();
+    }
+
+    fn render_expr(&mut self, expr: &Expr) -> String {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+            if let Some(stmt) = self.render_send_stmt(
+                recv.as_ref(), method.as_str(), args, block.as_ref(),
+            ) {
+                return match stmt {
+                    crate::lower::Stmt::Response(r) => r
+                        .trim_start_matches("return ")
+                        .trim_end_matches(';')
+                        .to_string(),
+                    crate::lower::Stmt::Expr(s) => s,
+                };
             }
+            return emit_send_with_parens(recv.as_ref(), method.as_str(), args, false);
         }
-        SendKind::QueryChain { target: Some(target) } => {
-            // Collapse every `.all/.includes/.order/.where/...` chain
-            // to `Model.all()` — the Juntos runtime exposes `all()`
-            // on every `ApplicationRecord` subclass. More specific
-            // chain shapes (`.includes(:comments)`, `.order(...)`)
-            // aren't yet in the runtime; the scaffold template did
-            // the same collapse, so the walker matches its
-            // behavior on real-blog.
-            ControllerStmt::Expr(format!("{}.all()", target.as_str()))
-        }
-        SendKind::QueryChain { target: None } => {
-            ControllerStmt::Expr("[] /* TODO: unresolved query chain */".to_string())
-        }
-        SendKind::PathOrUrlHelper => ControllerStmt::Expr(format!(
-            "routeHelpers.{}()",
-            lower_first_char(&crate::naming::camelize(method)),
-        )),
-        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
-            // Juntos's runtime defines `get save()` and `get destroy()`
-            // as getters, not methods. For the zero-arg bang calls
-            // (`save!`, `destroy!`) emit property access (no parens);
-            // for bang-with-args (`update!(h)`) emit a method call.
-            let recv_s = emit_ts_ctrl_expr(recv, ctx, state);
-            if bs_args.is_empty() {
-                ControllerStmt::Expr(format!("{recv_s}.{stripped_method}"))
-            } else {
-                let args_s: Vec<String> =
-                    bs_args.iter().map(|a| emit_ts_ctrl_expr(a, ctx, state)).collect();
-                ControllerStmt::Expr(format!(
-                    "{recv_s}.{stripped_method}({})",
-                    args_s.join(", "),
+        emit_expr(expr)
+    }
+
+    fn render_send_stmt(
+        &mut self,
+        recv: Option<&Expr>,
+        method: &str,
+        args: &[Expr],
+        block: Option<&Expr>,
+    ) -> Option<crate::lower::Stmt> {
+        use crate::lower::{SendKind, Stmt};
+        let kind = crate::lower::classify_controller_send(
+            recv, method, args, block, self.ctx.known_models,
+        )?;
+        Some(match kind {
+            SendKind::ParamsAccess => {
+                self.state.uses_context = true;
+                Stmt::Expr("context.params".to_string())
+            }
+            SendKind::ParamsIndex { key } => {
+                self.state.uses_context = true;
+                let key_s = self.render_expr(key);
+                Stmt::Expr(format!("context.params[{key_s}]"))
+            }
+            SendKind::ParamsExpect { args: pe_args } => {
+                self.state.uses_context = true;
+                let fragment = match pe_args.first().map(|e| &*e.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value: key } }) => {
+                        format!("context.params.{}", key.as_str())
+                    }
+                    _ => "context.params /* TODO: params.expect hash */".to_string(),
+                };
+                Stmt::Expr(fragment)
+            }
+            SendKind::ModelNew { class } => {
+                Stmt::Expr(format!("new {}()", class.as_str()))
+            }
+            SendKind::ModelFind { class, id } => {
+                let id_s = self.render_expr(id);
+                Stmt::Expr(format!(
+                    "({0}.find({id_s}) ?? new {0}())",
+                    class.as_str(),
                 ))
             }
-        }
-        SendKind::InstanceUpdate => {
-            ControllerStmt::Expr("false /* TODO: instance update */".to_string())
-        }
-        SendKind::Render { args } => {
-            ControllerStmt::Return(emit_ts_render(args, ctx, state))
-        }
-        SendKind::RedirectTo { args } => {
-            ControllerStmt::Return(emit_ts_redirect_to(args, ctx, state))
-        }
-        SendKind::Head { args } => {
-            let status = args
-                .first()
-                .map(|a| emit_ts_ctrl_expr(a, ctx, state))
-                .unwrap_or_else(|| "200".to_string());
-            ControllerStmt::Return(format!("return {{ status: {status} }};"))
-        }
-        // respond_to / format.* — the `unwrap_respond_to` lowering
-        // pass flattens these before the walker runs, so they
-        // shouldn't be seen here. Kept as a defensive stub: if a
-        // shape escapes normalization the emitted marker makes it
-        // obvious in the output.
-        SendKind::RespondToBlock { .. }
-        | SendKind::FormatHtml { .. }
-        | SendKind::FormatJson => ControllerStmt::Expr(
-            "/* unreachable: respond_to not normalized */".to_string(),
-        ),
-    })
-}
-
-/// Expression-level emit in controller context. Reuses the Send
-/// render table for Send nodes; defers to the generic `emit_expr`
-/// for everything else. Return-producing SendKinds (Render /
-/// RedirectTo / Head) shouldn't appear in expression position — the
-/// walker routes them through the statement path — but we safely
-/// render them as the inner payload if they do.
-fn emit_ts_ctrl_expr(expr: &Expr, ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -> String {
-    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
-        if let Some(stmt) = emit_ts_controller_send(
-            recv.as_ref(),
-            method.as_str(),
-            args,
-            block.as_ref(),
-            ctx,
-            state,
-        ) {
-            return match stmt {
-                ControllerStmt::Return(r) => r.trim_start_matches("return ").trim_end_matches(';').to_string(),
-                ControllerStmt::Expr(s) => s,
-            };
-        }
-        return emit_send_with_parens(recv.as_ref(), method.as_str(), args, false);
-    }
-    emit_expr(expr)
-}
-
-fn emit_ts_render(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -> String {
-    // `render :show` / `render :new` → view fn lookup keyed off the
-    // symbol name. `render Article` / `render record` / `render
-    // json: ...` — fall back to emitting the first arg as the body
-    // payload. A `status:` kwarg (`render :new, status:
-    // :unprocessable_entity`) adds a `status` field to the response.
-    //
-    // The view-fn arg is `state.last_local` — the most recently
-    // bound local in the body, which for scaffold-shape actions is
-    // the record / collection the view needs. Falls back to
-    // `undefined as any` for degenerate custom-action bodies that
-    // reach render with no prior binding.
-    if let Some(first) = args.first() {
-        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
-            let suffix = capitalize_ascii(sym.as_str());
-            let view_fn = ts_view_fn(ctx.model_class, &suffix);
-            let arg = state
-                .last_local
-                .clone()
-                .unwrap_or_else(|| "undefined as any".to_string());
-            let body_part = format!("body: Views.{view_fn}({arg})");
-            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
-                Some(status) => format!("return {{ status: {status}, {body_part} }};"),
-                None => format!("return {{ {body_part} }};"),
-            };
-        }
-        let body_s = emit_ts_ctrl_expr(first, ctx, state);
-        return format!("return {{ body: {body_s} }};");
-    }
-    "return { body: \"\" };".to_string()
-}
-
-fn emit_ts_redirect_to(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -> String {
-    // `redirect_to foo_path` → PathOrUrlHelper (handled via first
-    // arg's Send rewrite — the resulting string already contains
-    // `routeHelpers.…`). `redirect_to @article` — an ivar that
-    // rewrite_for_controller has already turned into a local —
-    // resolves to a route helper keyed off the *local's name*
-    // (not `ctx.resource`, because for nested controllers the
-    // redirect target is often the parent resource, e.g. a
-    // comment's `redirect_to @article`).
-    //
-    // A `status:` kwarg (`redirect_to @article, status: :see_other`)
-    // overrides the default 303.
-    let Some(first) = args.first() else {
-        return "return { status: 303 };".to_string();
-    };
-    let loc = emit_ts_ctrl_expr(first, ctx, state);
-    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
-    let _ = ctx; // resource unused; helper stem comes from the local name
-    if is_bare_ident(&loc) {
-        let helper = lower_first_char(&crate::naming::camelize(&loc));
-        let id_access = format!("({} as any).id", loc);
-        return format!(
-            "return {{ status: {status}, location: routeHelpers.{helper}Path({id_access}) }};",
-        );
-    }
-    format!("return {{ status: {status}, location: {loc} }};")
-}
-
-/// Emit the Create-scaffold expansion: `new Class()` bind, nested-
-/// parent foreign-key assign (if any), then per-field assigns
-/// keyed off `ctx.permitted`. The scaffold `?? ""` default makes
-/// empty-string form submissions round-trip correctly through
-/// validation (which the walker doesn't yet model separately).
-fn emit_ts_create_expansion(
-    out: &mut String,
-    var_name: &str,
-    class: &str,
-    indent: &str,
-    ctx: &TsCtrlCtx<'_>,
-    state: &mut TsCtrlState,
-) {
-    writeln!(out, "{indent}const {var_name} = new {class}();").unwrap();
-    if let Some(parent) = ctx.parent {
-        writeln!(
-            out,
-            "{indent}({var_name} as any).{}_id = Number(context.params.{}_id);",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}({var_name} as any).{field} = context.params[\"{}[{field}]\"] ?? \"\";",
-            ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
+            SendKind::AssocLookup { target, outer_method } => {
+                let target_s = target.as_str();
+                match outer_method {
+                    "find" => {
+                        let id_s = args.first().map(|a| self.render_expr(a))
+                            .unwrap_or_else(|| "0".to_string());
+                        Stmt::Expr(format!("{target_s}.find({id_s})"))
+                    }
+                    _ => Stmt::Expr(format!(
+                        "new {target_s}() /* TODO: {outer_method} */"
+                    )),
+                }
+            }
+            SendKind::QueryChain { target: Some(target) } => {
+                Stmt::Expr(format!("{}.all()", target.as_str()))
+            }
+            SendKind::QueryChain { target: None } => {
+                Stmt::Expr("[] /* TODO: unresolved query chain */".to_string())
+            }
+            SendKind::PathOrUrlHelper => Stmt::Expr(format!(
+                "routeHelpers.{}()",
+                lower_first_char(&crate::naming::camelize(method)),
+            )),
+            SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+                let recv_s = self.render_expr(recv);
+                if bs_args.is_empty() {
+                    Stmt::Expr(format!("{recv_s}.{stripped_method}"))
+                } else {
+                    let args_s: Vec<String> =
+                        bs_args.iter().map(|a| self.render_expr(a)).collect();
+                    Stmt::Expr(format!(
+                        "{recv_s}.{stripped_method}({})",
+                        args_s.join(", "),
+                    ))
+                }
+            }
+            SendKind::InstanceUpdate => {
+                Stmt::Expr("false /* TODO: instance update */".to_string())
+            }
+            SendKind::Render { args: r_args } => {
+                Stmt::Response(self.render_ts_render(r_args))
+            }
+            SendKind::RedirectTo { args: r_args } => {
+                Stmt::Response(self.render_ts_redirect_to(r_args))
+            }
+            SendKind::Head { args: h_args } => {
+                let status = h_args.first().map(|a| self.render_expr(a))
+                    .unwrap_or_else(|| "200".to_string());
+                Stmt::Response(format!("return {{ status: {status} }};"))
+            }
+            SendKind::RespondToBlock { .. }
+            | SendKind::FormatHtml { .. }
+            | SendKind::FormatJson => Stmt::Expr(
+                "/* unreachable: respond_to not normalized */".to_string(),
+            ),
+        })
     }
 }
 
-/// Emit the Update-scaffold's per-field conditional assigns: only
-/// overwrite the field if the matching params key was supplied.
-/// Mirrors the scaffold template's behavior so partial updates
-/// (PATCH with a subset of fields) don't zero out unspecified
-/// columns.
-fn emit_ts_update_field_assigns(
-    out: &mut String,
-    recv_s: &str,
-    indent: &str,
-    ctx: &TsCtrlCtx<'_>,
-    state: &mut TsCtrlState,
-) {
-    for field in ctx.permitted {
-        writeln!(
-            out,
-            "{indent}if (context.params[\"{}[{field}]\"] !== undefined) {{ ({recv_s} as any).{field} = context.params[\"{}[{field}]\"]; }}",
-            ctx.resource, ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
+impl<'a> TsEmitter<'a> {
+    fn render_ts_render(&mut self, args: &[Expr]) -> String {
+        if let Some(first) = args.first() {
+            if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+                let suffix = capitalize_ascii(sym.as_str());
+                let view_fn = ts_view_fn(self.ctx.model_class, &suffix);
+                let arg = self.state.last_local.clone()
+                    .unwrap_or_else(|| "undefined as any".to_string());
+                let body_part = format!("body: Views.{view_fn}({arg})");
+                return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                    Some(status) => format!("return {{ status: {status}, {body_part} }};"),
+                    None => format!("return {{ {body_part} }};"),
+                };
+            }
+            let body_s = self.render_expr(first);
+            return format!("return {{ body: {body_s} }};");
+        }
+        "return { body: \"\" };".to_string()
+    }
+
+    fn render_ts_redirect_to(&mut self, args: &[Expr]) -> String {
+        let Some(first) = args.first() else {
+            return "return { status: 303 };".to_string();
+        };
+        let loc = self.render_expr(first);
+        let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+        if is_bare_ident(&loc) {
+            let helper = lower_first_char(&crate::naming::camelize(&loc));
+            let id_access = format!("({} as any).id", loc);
+            return format!(
+                "return {{ status: {status}, location: routeHelpers.{helper}Path({id_access}) }};",
+            );
+        }
+        format!("return {{ status: {status}, location: {loc} }};")
     }
 }
 

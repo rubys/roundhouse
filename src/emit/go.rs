@@ -24,6 +24,7 @@ use crate::App;
 use crate::dialect::{Controller, MethodDef, Model, Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
+use crate::lower::CtrlWalker as _;
 use crate::naming::snake_case;
 use crate::ty::Ty;
 
@@ -322,252 +323,297 @@ fn emit_go_action(
         return;
     }
 
+    use crate::lower::CtrlWalker;
     let normalized =
         crate::lower::normalize_action_body(controller_item, la.name.as_str(), body);
-
-    let ctx = GoActionCtx {
-        known_models,
-        model_class: la.model_class.as_str(),
-        resource: la.resource.as_str(),
-        parent: la.parent.as_ref(),
-        permitted: &la.permitted,
+    let mut emitter = GoEmitter {
+        ctx: crate::lower::WalkCtx {
+            known_models,
+            model_class: la.model_class.as_str(),
+            resource: la.resource.as_str(),
+            parent: la.parent.as_ref(),
+            permitted: &la.permitted,
+        },
+        state: crate::lower::WalkState::new(),
     };
-    let mut state = GoActionState::new();
-    let mut body_src = String::new();
-    emit_go_ctrl_stmt(&normalized, &mut body_src, &ctx, 1, &mut state);
-
-    let ctx_name = if state.uses_context { "ctx" } else { "_ctx" };
+    let body_src = emitter.walk_action_body(&normalized);
+    let ctx_name = if emitter.state.uses_context { "ctx" } else { "_ctx" };
     writeln!(out, "func {handler}({ctx_name} *ActionContext) ActionResponse {{").unwrap();
     out.push_str(&body_src);
     writeln!(out, "}}").unwrap();
 }
 
-struct GoActionCtx<'a> {
-    known_models: &'a [Symbol],
-    model_class: &'a str,
-    resource: &'a str,
-    parent: Option<&'a crate::lower::NestedParent>,
-    permitted: &'a [String],
+struct GoEmitter<'a> {
+    ctx: crate::lower::WalkCtx<'a>,
+    state: crate::lower::WalkState,
 }
 
-struct GoActionState {
-    uses_context: bool,
-    last_local: Option<String>,
-}
+impl<'a> crate::lower::CtrlWalker<'a> for GoEmitter<'a> {
+    fn ctx(&self) -> &crate::lower::WalkCtx<'a> { &self.ctx }
+    fn state_mut(&mut self) -> &mut crate::lower::WalkState { &mut self.state }
+    fn indent_unit(&self) -> &'static str { "\t" }
 
-impl GoActionState {
-    fn new() -> Self { Self { uses_context: false, last_local: None } }
-}
-
-fn emit_go_ctrl_stmt(
-    expr: &Expr,
-    out: &mut String,
-    ctx: &GoActionCtx<'_>,
-    depth: usize,
-    state: &mut GoActionState,
-) {
-    let indent = "\t".repeat(depth);
-    match &*expr.node {
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                emit_go_ctrl_stmt(e, out, ctx, depth, state);
-            }
+    fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
+        // Go's one per-target Assign nuance: when the RHS is a
+        // ModelFind on a known model, append a nil-guard so
+        // downstream `record.Method()` doesn't nil-panic.
+        if let Some((class, id_expr)) = model_find_shape(value, self.ctx.known_models) {
+            let id_s = self.render_expr(id_expr);
+            writeln!(out, "{indent}{name} := {class}Find({id_s})").unwrap();
+            writeln!(out, "{indent}if {name} == nil {{ {name} = &{class}{{}} }}").unwrap();
+            return;
         }
-        ExprNode::Assign { target: LValue::Var { name, .. }, value }
-        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            // Create-scaffold macro.
-            if let Some(class) = crate::lower::model_new_with_strong_params(
-                value, ctx.known_models, ctx.resource,
+        let rhs = self.render_expr(value);
+        writeln!(out, "{indent}{name} := {rhs}").unwrap();
+    }
+
+    fn write_create_expansion(
+        &mut self,
+        var_name: &str,
+        class: &str,
+        indent: &str,
+        out: &mut String,
+    ) {
+        writeln!(out, "{indent}{var_name} := &{class}{{}}").unwrap();
+        if let Some(parent) = self.ctx.parent {
+            let fk = go_field_name(&format!("{}_id", parent.singular));
+            writeln!(
+                out,
+                "{indent}{var_name}.{fk}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
+                parent.singular,
+            )
+            .unwrap();
+            self.state.uses_context = true;
+        }
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            let go_field = go_field_name(field);
+            writeln!(
+                out,
+                "{indent}{var_name}.{go_field} = ctx.Params[\"{resource}[{field}]\"]",
+            )
+            .unwrap();
+            self.state.uses_context = true;
+        }
+    }
+
+    fn write_if(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let cond_s = self.render_expr(cond);
+        writeln!(out, "{indent}if {cond_s} {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}}} else {{").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
+        }
+        writeln!(out, "{indent}}}").unwrap();
+    }
+
+    fn write_update_if(
+        &mut self,
+        recv: &Expr,
+        then_branch: &Expr,
+        else_branch: &Expr,
+        indent: &str,
+        depth: usize,
+        is_tail: bool,
+        out: &mut String,
+    ) {
+        let recv_s = self.render_expr(recv);
+        let permitted: Vec<String> = self.ctx.permitted.iter().cloned().collect();
+        let resource = self.ctx.resource.to_string();
+        for field in &permitted {
+            let go_field = go_field_name(field);
+            writeln!(
+                out,
+                "{indent}if v, ok := ctx.Params[\"{resource}[{field}]\"]; ok {{ {recv_s}.{go_field} = v }}",
+            )
+            .unwrap();
+            self.state.uses_context = true;
+        }
+        writeln!(out, "{indent}if {recv_s}.Save() {{").unwrap();
+        self.walk_stmt(then_branch, out, depth + 1, is_tail);
+        if !crate::lower::is_empty_body(else_branch) {
+            writeln!(out, "{indent}}} else {{").unwrap();
+            self.walk_stmt(else_branch, out, depth + 1, is_tail);
+        }
+        writeln!(out, "{indent}}}").unwrap();
+    }
+
+    fn write_response_stmt(&mut self, r: &str, _is_tail: bool, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}return {r}").unwrap();
+    }
+
+    fn write_expr_stmt(&mut self, s: &str, indent: &str, out: &mut String) {
+        writeln!(out, "{indent}{s}").unwrap();
+    }
+
+    fn render_expr(&mut self, expr: &Expr) -> String {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+            if let Some(stmt) = self.render_send_stmt(
+                recv.as_ref(), method.as_str(), args, block.as_ref(),
             ) {
-                emit_go_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
-                state.last_local = Some(name.as_str().to_string());
-                return;
+                return match stmt {
+                    crate::lower::Stmt::Response(r) => r,
+                    crate::lower::Stmt::Expr(s) => s,
+                };
             }
-            // ModelFind — nullable pointer in Go; append a nil-guard
-            // so downstream access doesn't panic on missing row.
-            if let Some((class, id_expr)) = model_find_shape(value, ctx.known_models) {
-                let id_s = emit_go_ctrl_expr(id_expr, ctx, state);
-                writeln!(out, "{indent}{name} := {class}Find({id_s})").unwrap();
-                writeln!(out, "{indent}if {name} == nil {{ {name} = &{class}{{}} }}").unwrap();
-                state.last_local = Some(name.as_str().to_string());
-                return;
-            }
-            let rhs = emit_go_ctrl_expr(value, ctx, state);
-            writeln!(out, "{indent}{name} := {rhs}").unwrap();
-            state.last_local = Some(name.as_str().to_string());
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
-                let recv_s = emit_go_ctrl_expr(recv, ctx, state);
-                emit_go_update_field_assigns(out, &recv_s, &indent, ctx, state);
-                writeln!(out, "{indent}if {recv_s}.Save() {{").unwrap();
-                emit_go_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}}} else {{").unwrap();
-                    emit_go_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+            let args_s: Vec<String> = args.iter().map(|a| self.render_expr(a)).collect();
+            return match recv {
+                None if args.is_empty() => method.to_string(),
+                None => format!("{method}({})", args_s.join(", ")),
+                Some(r) => {
+                    let recv_s = self.render_expr(r);
+                    if args.is_empty() {
+                        format!("{recv_s}.{}()", pascalize_word(method.as_str()))
+                    } else {
+                        format!("{recv_s}.{}({})", pascalize_word(method.as_str()), args_s.join(", "))
+                    }
                 }
-                writeln!(out, "{indent}}}").unwrap();
-            } else {
-                let cond_s = emit_go_ctrl_expr(cond, ctx, state);
-                writeln!(out, "{indent}if {cond_s} {{").unwrap();
-                emit_go_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
-                if !crate::lower::is_empty_body(else_branch) {
-                    writeln!(out, "{indent}}} else {{").unwrap();
-                    emit_go_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+            };
+        }
+        if let ExprNode::Ivar { name } = &*expr.node {
+            return name.to_string();
+        }
+        emit_expr(expr)
+    }
+
+    fn render_send_stmt(
+        &mut self,
+        recv: Option<&Expr>,
+        method: &str,
+        args: &[Expr],
+        block: Option<&Expr>,
+    ) -> Option<crate::lower::Stmt> {
+        use crate::lower::{SendKind, Stmt};
+        let kind = crate::lower::classify_controller_send(
+            recv, method, args, block, self.ctx.known_models,
+        )?;
+        Some(match kind {
+            SendKind::ParamsAccess => {
+                self.state.uses_context = true;
+                Stmt::Expr("ctx.Params".to_string())
+            }
+            SendKind::ParamsIndex { key } => {
+                self.state.uses_context = true;
+                match &*key.node {
+                    ExprNode::Lit { value: Literal::Sym { value: k } } => {
+                        Stmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str()))
+                    }
+                    _ => {
+                        let k = self.render_expr(key);
+                        Stmt::Expr(format!("ctx.Params[{k}]"))
+                    }
                 }
-                writeln!(out, "{indent}}}").unwrap();
             }
-        }
-        ExprNode::Send { recv, method, args, block, .. } => {
-            match emit_go_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
-                Some(GoCtrlStmt::Response(r)) => writeln!(out, "{indent}return {r}").unwrap(),
-                Some(GoCtrlStmt::Expr(s)) => writeln!(out, "{indent}{s}").unwrap(),
-                None => {
-                    let s = emit_go_ctrl_expr(expr, ctx, state);
-                    writeln!(out, "{indent}{s}").unwrap();
+            SendKind::ParamsExpect { args: pe_args } => {
+                self.state.uses_context = true;
+                match pe_args.first().map(|e| &*e.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value: k } }) =>
+                        Stmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str())),
+                    _ => Stmt::Expr("ctx.Params /* TODO: params.expect hash */".to_string()),
                 }
             }
-        }
-        _ => {
-            let s = emit_go_ctrl_expr(expr, ctx, state);
-            if !s.is_empty() {
-                writeln!(out, "{indent}{s}").unwrap();
+            SendKind::ModelNew { class } => Stmt::Expr(format!("&{}{{}}", class.as_str())),
+            SendKind::ModelFind { class, id } => {
+                let id_s = self.render_expr(id);
+                Stmt::Expr(format!("{}Find({id_s})", class.as_str()))
             }
-        }
+            SendKind::QueryChain { target: Some(target) } => {
+                Stmt::Expr(format!("{}All()", target.as_str()))
+            }
+            SendKind::QueryChain { target: None } => {
+                Stmt::Expr("nil /* TODO: unresolved query chain */".to_string())
+            }
+            SendKind::AssocLookup { target, outer_method } => match outer_method {
+                "find" => {
+                    let id_s = args.first().map(|a| self.render_expr(a))
+                        .unwrap_or_else(|| "0".to_string());
+                    Stmt::Expr(format!("{}Find({id_s})", target.as_str()))
+                }
+                _ => Stmt::Expr(format!("&{}{{}}", target.as_str())),
+            },
+            SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+                let recv_s = self.render_expr(recv);
+                let args_s: Vec<String> =
+                    bs_args.iter().map(|a| self.render_expr(a)).collect();
+                Stmt::Expr(format!(
+                    "{recv_s}.{}({})",
+                    pascalize_word(stripped_method),
+                    args_s.join(", "),
+                ))
+            }
+            SendKind::InstanceUpdate => Stmt::Expr("false".to_string()),
+            SendKind::PathOrUrlHelper => {
+                let helper = method.strip_suffix("_path").or_else(|| method.strip_suffix("_url"))
+                    .unwrap_or(method);
+                Stmt::Expr(format!("{}Path()", pascalize_word(helper)))
+            }
+            SendKind::Render { args: r_args } => Stmt::Response(self.render_go_render(r_args)),
+            SendKind::RedirectTo { args: r_args } => Stmt::Response(self.render_go_redirect(r_args)),
+            SendKind::Head { args: h_args } => {
+                let status = h_args.first().and_then(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                        Some(crate::lower::status_sym_to_code(s.as_str())),
+                    ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                    _ => None,
+                }).unwrap_or(200);
+                Stmt::Response(format!("ActionResponse{{Status: {status}}}"))
+            }
+            SendKind::RespondToBlock { .. }
+            | SendKind::FormatHtml { .. }
+            | SendKind::FormatJson => Stmt::Expr(
+                "ActionResponse{} /* unreachable: respond_to not normalized */".to_string(),
+            ),
+        })
     }
 }
 
-fn emit_go_ctrl_expr(expr: &Expr, ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
-    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
-        if let Some(stmt) = emit_go_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
-            return match stmt { GoCtrlStmt::Response(r) => r, GoCtrlStmt::Expr(s) => s };
-        }
-        let args_s: Vec<String> = args.iter().map(|a| emit_go_ctrl_expr(a, ctx, state)).collect();
-        return match recv {
-            None if args.is_empty() => method.to_string(),
-            None => format!("{method}({})", args_s.join(", ")),
-            Some(r) => {
-                let recv_s = emit_go_ctrl_expr(r, ctx, state);
-                if args.is_empty() {
-                    format!("{recv_s}.{}()", pascalize_word(method.as_str()))
-                } else {
-                    format!("{recv_s}.{}({})", pascalize_word(method.as_str()), args_s.join(", "))
-                }
+impl<'a> GoEmitter<'a> {
+    fn render_go_render(&mut self, args: &[Expr]) -> String {
+        if let Some(first) = args.first() {
+            if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+                let view_fn = go_view_fn(self.ctx.model_class, sym.as_str());
+                let arg = self.state.last_local.clone().unwrap_or_else(|| "nil".to_string());
+                let body_part = format!("Body: {view_fn}({arg})");
+                return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                    Some(status) => format!("ActionResponse{{Status: {status}, {body_part}}}"),
+                    None => format!("ActionResponse{{{body_part}}}"),
+                };
             }
+            let body_s = self.render_expr(first);
+            return format!("ActionResponse{{Body: {body_s}}}");
+        }
+        "ActionResponse{}".to_string()
+    }
+
+    fn render_go_redirect(&mut self, args: &[Expr]) -> String {
+        let Some(first) = args.first() else {
+            return "ActionResponse{Status: 303}".to_string();
         };
+        let loc = self.render_expr(first);
+        let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+        if is_bare_go_ident(&loc) {
+            let helper = pascalize_word(&loc);
+            let id_access = format!("{loc}.ID");
+            return format!("ActionResponse{{Status: {status}, Location: {helper}Path({id_access})}}");
+        }
+        format!("ActionResponse{{Status: {status}, Location: {loc}}}")
     }
-    if let ExprNode::Ivar { name } = &*expr.node {
-        return name.to_string();
-    }
-    emit_expr(expr)
 }
 
-enum GoCtrlStmt { Response(String), Expr(String) }
-
-fn emit_go_ctrl_send(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-    block: Option<&Expr>,
-    ctx: &GoActionCtx<'_>,
-    state: &mut GoActionState,
-) -> Option<GoCtrlStmt> {
-    use crate::lower::SendKind;
-    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
-    Some(match kind {
-        SendKind::ParamsAccess => {
-            state.uses_context = true;
-            GoCtrlStmt::Expr("ctx.Params".to_string())
-        }
-        SendKind::ParamsIndex { key } => {
-            state.uses_context = true;
-            // `params[:id]` → `parseInt64(ctx.Params["id"])` — use a
-            // small inline-ish form: split into a `_, := strconv.ParseInt`
-            // only at the ModelFind call site would require special
-            // handling at Assign level. For now emit the discarded-
-            // error form: Go's `mustInt64` doesn't exist yet; emit
-            // the id-extraction pattern inline as a small function-
-            // call expression using the helper `ctxInt64`.
-            match &*key.node {
-                ExprNode::Lit { value: Literal::Sym { value: k } } => {
-                    GoCtrlStmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str()))
-                }
-                _ => {
-                    let k = emit_go_ctrl_expr(key, ctx, state);
-                    GoCtrlStmt::Expr(format!("ctx.Params[{k}]"))
-                }
-            }
-        }
-        SendKind::ParamsExpect { args: pe_args } => {
-            state.uses_context = true;
-            match pe_args.first().map(|e| &*e.node) {
-                Some(ExprNode::Lit { value: Literal::Sym { value: k } }) =>
-                    GoCtrlStmt::Expr(format!("parseInt64(ctx.Params[\"{}\"])", k.as_str())),
-                _ => GoCtrlStmt::Expr("ctx.Params /* TODO: params.expect hash */".to_string()),
-            }
-        }
-        SendKind::ModelNew { class } => {
-            GoCtrlStmt::Expr(format!("&{}{{}}", class.as_str()))
-        }
-        SendKind::ModelFind { class, id } => {
-            // Bare expression form — nil-unsafe. The Assign arm
-            // detects this shape and emits a two-statement safe
-            // form. If we reach here, caller wanted an expression
-            // result; fall back to the unsafe form.
-            let id_s = emit_go_ctrl_expr(id, ctx, state);
-            GoCtrlStmt::Expr(format!("{}Find({id_s})", class.as_str()))
-        }
-        SendKind::QueryChain { target: Some(target) } => {
-            GoCtrlStmt::Expr(format!("{}All()", target.as_str()))
-        }
-        SendKind::QueryChain { target: None } => {
-            GoCtrlStmt::Expr("nil /* TODO: unresolved query chain */".to_string())
-        }
-        SendKind::AssocLookup { target, outer_method } => match outer_method {
-            "find" => {
-                let id_s = args.first().map(|a| emit_go_ctrl_expr(a, ctx, state))
-                    .unwrap_or_else(|| "0".to_string());
-                GoCtrlStmt::Expr(format!("{}Find({id_s})", target.as_str()))
-            }
-            _ => GoCtrlStmt::Expr(format!("&{}{{}}", target.as_str())),
-        },
-        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
-            let recv_s = emit_go_ctrl_expr(recv, ctx, state);
-            let args_s: Vec<String> =
-                bs_args.iter().map(|a| emit_go_ctrl_expr(a, ctx, state)).collect();
-            GoCtrlStmt::Expr(format!(
-                "{recv_s}.{}({})",
-                pascalize_word(stripped_method),
-                args_s.join(", "),
-            ))
-        }
-        SendKind::InstanceUpdate => GoCtrlStmt::Expr("false".to_string()),
-        SendKind::PathOrUrlHelper => {
-            let helper = method.strip_suffix("_path").or_else(|| method.strip_suffix("_url"))
-                .unwrap_or(method);
-            GoCtrlStmt::Expr(format!("{}Path()", pascalize_word(helper)))
-        }
-        SendKind::Render { args } => GoCtrlStmt::Response(emit_go_render(args, ctx, state)),
-        SendKind::RedirectTo { args } => GoCtrlStmt::Response(emit_go_redirect_to(args, ctx, state)),
-        SendKind::Head { args } => {
-            let status = args.first().and_then(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } =>
-                    Some(crate::lower::status_sym_to_code(s.as_str())),
-                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
-                _ => None,
-            }).unwrap_or(200);
-            GoCtrlStmt::Response(format!("ActionResponse{{Status: {status}}}"))
-        }
-        SendKind::RespondToBlock { .. }
-        | SendKind::FormatHtml { .. }
-        | SendKind::FormatJson => GoCtrlStmt::Expr(
-            "ActionResponse{} /* unreachable: respond_to not normalized */".to_string(),
-        ),
-    })
-}
-
-/// Detect `Class.find(id)` — the Assign arm synthesizes a nil-guard
-/// for these so subsequent `record.Method()` calls don't panic.
+/// Detect `Class.find(id)` — the walker's Assign arm synthesizes a
+/// nil-guard for this shape so subsequent `record.Method()` calls
+/// don't panic. Go's lone per-target Assign-level macro.
 fn model_find_shape<'a>(value: &'a Expr, known_models: &[Symbol]) -> Option<(Symbol, &'a Expr)> {
     let ExprNode::Send { recv, method, args, .. } = &*value.node else { return None };
     if method.as_str() != "find" || args.len() != 1 {
@@ -578,87 +624,6 @@ fn model_find_shape<'a>(value: &'a Expr, known_models: &[Symbol]) -> Option<(Sym
     let class = path.last()?;
     known_models.iter().find(|m| *m == class)?;
     Some((class.clone(), &args[0]))
-}
-
-fn emit_go_render(args: &[Expr], ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
-    if let Some(first) = args.first() {
-        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
-            let view_fn = go_view_fn(ctx.model_class, sym.as_str());
-            let arg = state.last_local.clone().unwrap_or_else(|| "nil".to_string());
-            let body_part = format!("Body: {view_fn}({arg})");
-            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
-                Some(status) => format!("ActionResponse{{Status: {status}, {body_part}}}"),
-                None => format!("ActionResponse{{{body_part}}}"),
-            };
-        }
-        let body_s = emit_go_ctrl_expr(first, ctx, state);
-        return format!("ActionResponse{{Body: {body_s}}}");
-    }
-    "ActionResponse{}".to_string()
-}
-
-fn emit_go_redirect_to(args: &[Expr], ctx: &GoActionCtx<'_>, state: &mut GoActionState) -> String {
-    let Some(first) = args.first() else {
-        return "ActionResponse{Status: 303}".to_string();
-    };
-    let loc = emit_go_ctrl_expr(first, ctx, state);
-    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
-    if is_bare_go_ident(&loc) {
-        let helper = pascalize_word(&loc);
-        let id_access = format!("{loc}.ID");
-        return format!("ActionResponse{{Status: {status}, Location: {helper}Path({id_access})}}");
-    }
-    format!("ActionResponse{{Status: {status}, Location: {loc}}}")
-}
-
-fn emit_go_create_expansion(
-    out: &mut String,
-    var_name: &str,
-    class: &str,
-    indent: &str,
-    ctx: &GoActionCtx<'_>,
-    state: &mut GoActionState,
-) {
-    writeln!(out, "{indent}{var_name} := &{class}{{}}").unwrap();
-    if let Some(parent) = ctx.parent {
-        let fk = go_field_name(&format!("{}_id", parent.singular));
-        writeln!(
-            out,
-            "{indent}{var_name}.{fk}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-            parent.singular,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
-    for field in ctx.permitted {
-        let go_field = go_field_name(field);
-        writeln!(
-            out,
-            "{indent}{var_name}.{go_field} = ctx.Params[\"{}[{field}]\"]",
-            ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
-}
-
-fn emit_go_update_field_assigns(
-    out: &mut String,
-    recv_s: &str,
-    indent: &str,
-    ctx: &GoActionCtx<'_>,
-    state: &mut GoActionState,
-) {
-    for field in ctx.permitted {
-        let go_field = go_field_name(field);
-        writeln!(
-            out,
-            "{indent}if v, ok := ctx.Params[\"{}[{field}]\"]; ok {{ {recv_s}.{go_field} = v }}",
-            ctx.resource,
-        )
-        .unwrap();
-        state.uses_context = true;
-    }
 }
 
 fn is_bare_go_ident(s: &str) -> bool {
