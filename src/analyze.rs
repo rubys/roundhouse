@@ -92,30 +92,35 @@ impl Analyzer {
             cls.table = Some(model.table.clone());
             cls.attributes = model.attributes.clone();
 
-            // Minimal ActiveRecord class-method signatures. Grow this table
-            // as fixtures demand (`create`, `create!`, `find_by`, etc.).
-            cls.class_methods.insert(Symbol::from("all"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("find"), self_ty.clone());
-            cls.class_methods.insert(Symbol::from("find_by"),
-                Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
-            cls.class_methods.insert(Symbol::from("first"),
-                Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
-            cls.class_methods.insert(Symbol::from("last"),
-                Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
-            cls.class_methods.insert(Symbol::from("where"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("limit"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("order"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("offset"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("includes"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("preload"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("joins"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("distinct"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("group"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("having"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("count"), Ty::Int);
-            cls.class_methods.insert(Symbol::from("exists?"), Ty::Bool);
-            cls.class_methods.insert(Symbol::from("new"), self_ty.clone());
-            cls.class_methods.insert(Symbol::from("create"), self_ty.clone());
+            // AR class-method signatures sourced from the shared
+            // catalog (`crate::catalog::AR_CATALOG`). Each entry
+            // with a declared `ReturnKind` gets instantiated
+            // against this model's Self type and inserted into
+            // `class_methods`. Entries with `return_kind = None`
+            // are skipped — they exist in the catalog for effect
+            // classification but don't (yet) declare their return
+            // types. Centralizing the data source here eliminates
+            // drift between the previous inline list and the
+            // catalog; adding an AR method to the catalog with a
+            // return_kind automatically enables it for type
+            // inference downstream.
+            use crate::catalog::{AR_CATALOG, ReceiverContext, ReturnKind};
+            for entry in AR_CATALOG {
+                if entry.receiver != ReceiverContext::Class {
+                    continue;
+                }
+                let Some(kind) = entry.return_kind else { continue };
+                let ret_ty = match kind {
+                    ReturnKind::SelfType => self_ty.clone(),
+                    ReturnKind::ArrayOfSelf => array_of_self.clone(),
+                    ReturnKind::SelfOrNil => Ty::Union {
+                        variants: vec![self_ty.clone(), Ty::Nil],
+                    },
+                    ReturnKind::Int => Ty::Int,
+                    ReturnKind::Bool => Ty::Bool,
+                };
+                cls.class_methods.insert(Symbol::from(entry.name), ret_ty);
+            }
 
             // Instance methods from schema-derived attributes.
             for (name, ty) in &model.attributes.fields {

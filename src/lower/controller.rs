@@ -161,32 +161,12 @@ fn walk(e: &Expr, out: &mut WalkedIvars) {
     }
 }
 
-/// Query-builder method names that don't have a Phase 4c runtime.
-/// Chains containing any of these collapse to an empty collection of
-/// the chain's target model type at emit time. The set is the same on
-/// every Phase-4c target — shape-shaped, not target-shaped.
-///
-/// `all` lives here too: the generated model has no `all` method, and
-/// without this collapse each controller calling `Model.all` would
-/// fail to compile on the typed targets.
-pub fn is_query_builder_method(method: &str) -> bool {
-    matches!(
-        method,
-        "all"
-            | "includes"
-            | "order"
-            | "where"
-            | "group"
-            | "limit"
-            | "offset"
-            | "joins"
-            | "distinct"
-            | "select"
-            | "pluck"
-            | "first"
-            | "last"
-    )
-}
+// `is_query_builder_method` moved to `crate::catalog`. It's a
+// runtime-capability concern (which AR methods the scaffold
+// runtime stubs implement as collapse-to-empty) that will
+// eventually become a `DatabaseAdapter` trait method. For now,
+// re-export so existing callers compile unchanged.
+pub use crate::catalog::is_query_builder_method;
 
 /// Resolve a HasMany association name to its target model class.
 /// `"comments"` → `"Comment"` iff `Comment` is in `known_models`.
