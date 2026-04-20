@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod analyze;
 pub mod app;
+pub mod catalog;
 pub mod dialect;
 pub mod effect;
 pub mod emit;

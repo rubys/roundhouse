@@ -84,66 +84,28 @@ pub struct SqliteAdapter;
 
 impl DatabaseAdapter for SqliteAdapter {
     fn classify_ar_method(&self, method: &str) -> ArMethodKind {
-        match method {
-            // Reads — selection, aggregation, existence. Terminal-vs-
-            // chainable isn't distinguished here; a future
-            // Relation<T>-aware refactor will split them, but today
-            // every read-shape method lands the same DbRead effect.
-            "all"
-            | "find"
-            | "find_by"
-            | "find_by!"
-            | "first"
-            | "last"
-            | "where"
-            | "limit"
-            | "offset"
-            | "order"
-            | "group"
-            | "having"
-            | "joins"
-            | "includes"
-            | "preload"
-            | "select"
-            | "distinct"
-            | "count"
-            | "exists?"
-            | "pluck"
-            | "pick"
-            | "take"
-            | "sum"
-            | "average"
-            | "maximum"
-            | "minimum" => ArMethodKind::Read,
-
-            // Writes — mutations, including bang variants and bulk
-            // forms. `create` appears in both reads-style (via
-            // find_or_create_by, which isn't in this list yet) and
-            // writes; the plain `Model.create(attrs)` call is a
-            // write.
-            "save"
-            | "save!"
-            | "create"
-            | "create!"
-            | "update"
-            | "update!"
-            | "update_all"
-            | "destroy"
-            | "destroy!"
-            | "destroy_all"
-            | "delete"
-            | "delete_all"
-            | "increment!"
-            | "decrement!"
-            | "touch"
-            | "touch_all"
-            | "insert"
-            | "insert_all"
-            | "upsert"
-            | "upsert_all" => ArMethodKind::Write,
-
-            _ => ArMethodKind::Unknown,
+        // Consult the shared catalog (`crate::catalog::AR_CATALOG`)
+        // — the authoritative record of AR method classification.
+        // The catalog is receiver-aware (Class vs Instance); this
+        // adapter trait isn't yet (it takes only a method name), so
+        // we search across any receiver context and return the
+        // first matching effect class. When the trait grows to
+        // carry receiver context, this lookup becomes a direct
+        // `catalog::lookup(method, receiver)` call.
+        //
+        // SqliteAdapter accepts every entry in the catalog — sqlite
+        // supports the full AR query builder. Future adapters
+        // (IndexedDB, D1) that refuse some methods will return
+        // `Unknown` for those even when the catalog has an entry,
+        // surfacing as diagnostics downstream.
+        for entry in crate::catalog::lookup_any(method) {
+            match entry.effect {
+                crate::catalog::EffectClass::DbRead => return ArMethodKind::Read,
+                crate::catalog::EffectClass::DbWrite => return ArMethodKind::Write,
+                crate::catalog::EffectClass::Pure => return ArMethodKind::Unknown,
+            }
         }
+        ArMethodKind::Unknown
     }
 }
 
