@@ -628,6 +628,96 @@ pub fn extract_permitted_from_expr(expr: &Expr) -> Option<Vec<String>> {
     None
 }
 
+/// The seven standard Rails scaffold actions plus an Unknown fallback
+/// for anything the template-per-action pipeline doesn't model.
+/// Emitters dispatch on this to pick a render template; the per-
+/// target code shrinks to "render this variant."
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionKind {
+    Index,
+    Show,
+    New,
+    Edit,
+    Create,
+    Update,
+    Destroy,
+    /// Any custom action — emitters render as a 501 stub keyed off
+    /// `LoweredAction::name`.
+    Unknown,
+}
+
+impl ActionKind {
+    fn from_name(name: &str) -> Self {
+        match name {
+            "index" => Self::Index,
+            "show" => Self::Show,
+            "new" => Self::New,
+            "edit" => Self::Edit,
+            "create" => Self::Create,
+            "update" => Self::Update,
+            "destroy" => Self::Destroy,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Target-neutral view of one action's emit-relevant inputs. Every
+/// pass-2 emitter needed the same six facts (name, resource, model
+/// class, whether the model exists, nested parent, permitted
+/// fields) — lifting them into a single struct is the forcing
+/// function for collapsing 42 near-identical per-target functions
+/// down to six render tables.
+#[derive(Clone, Debug)]
+pub struct LoweredAction {
+    pub kind: ActionKind,
+    /// The action's declared name in Ruby (`"index"`, `"create"`,
+    /// and also arbitrary custom-action names when `kind ==
+    /// Unknown`). Emitters can derive their target-specific handler
+    /// names (`PostsIndex`, `articles/index`, etc.) from this plus
+    /// the controller class.
+    pub name: String,
+    /// Singular snake-case resource name (`"article"`). Used to
+    /// key form-body params (`"article[title]"`) and to derive
+    /// route helpers.
+    pub resource: String,
+    /// PascalCase model class (`"Article"`). Empty when
+    /// `has_model` is false.
+    pub model_class: String,
+    /// Whether the resource maps to a known model in this app.
+    /// Emitters gate the DB-touching body on this; an
+    /// `ApplicationController`'s actions lower with
+    /// `has_model = false`.
+    pub has_model: bool,
+    /// The parent resource when this controller is nested under
+    /// another (`comment → article`).
+    pub parent: Option<NestedParent>,
+    /// Field names to pick out of form-body params during
+    /// create/update.
+    pub permitted: Vec<String>,
+}
+
+/// Build a `LoweredAction` from the inputs every pass-2 emitter
+/// already computed at the controller-file level. Cheap to
+/// construct — essentially just a tagged bundle.
+pub fn lower_action(
+    name: &str,
+    resource: &str,
+    model_class: &str,
+    has_model: bool,
+    parent: Option<&NestedParent>,
+    permitted: &[String],
+) -> LoweredAction {
+    LoweredAction {
+        kind: ActionKind::from_name(name),
+        name: name.to_string(),
+        resource: resource.to_string(),
+        model_class: model_class.to_string(),
+        has_model,
+        parent: parent.cloned(),
+        permitted: permitted.to_vec(),
+    }
+}
+
 /// Fallback permitted-field list when the `<resource>_params` helper
 /// isn't recognizable. Returns the model's non-id, non-timestamp,
 /// non-foreign-key attributes — a safe default that matches what

@@ -695,15 +695,15 @@ fn emit_controller_file_pass2(
 
     let (public_actions, _private) = crate::lower::split_public_private(c);
     for action in &public_actions {
-        emit_py_action_template(
-            &mut s,
-            action,
+        let la = crate::lower::lower_action(
+            action.name.as_str(),
             &resource,
             &model_class,
             has_model,
             parent.as_ref(),
             &permitted,
         );
+        emit_py_action(&mut s, &la);
         writeln!(s).unwrap();
     }
 
@@ -713,35 +713,204 @@ fn emit_controller_file_pass2(
     }
 }
 
-fn emit_py_action_template(
-    out: &mut String,
-    action: &Action,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let raw = action.name.as_str();
-    // Python reserves `new` less formally, but the Router resolves
-    // `new` actions through `new_` to avoid collisions with Python's
-    // `new` idioms in `Model.new(...)`.
-    let name = if raw == "new" { "new_" } else { raw };
-    match raw {
-        "index" => emit_py_index(out, name, model_class, has_model),
-        "show" => emit_py_show(out, name, model_class, has_model, parent),
-        "new" => emit_py_new(out, name, model_class, has_model),
-        "edit" => emit_py_edit(out, name, model_class, has_model, parent),
-        "create" => emit_py_create(
-            out, name, resource, model_class, has_model, parent, permitted,
-        ),
-        "update" => emit_py_update(
-            out, name, resource, model_class, has_model, permitted,
-        ),
-        "destroy" => {
-            emit_py_destroy(out, name, model_class, has_model, parent)
+fn py_view_fn(model_class: &str, suffix: &str) -> String {
+    let plural = crate::naming::pluralize_snake(model_class);
+    format!("render_{plural}_{}", suffix.to_lowercase())
+}
+
+/// Render one LoweredAction as a Python `def`. Mangles `new` to
+/// `new_` (matches the router's `_resolve_handler` mapping) so the
+/// action name doesn't collide with Python's `Model.new(...)`
+/// idioms.
+fn emit_py_action(out: &mut String, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
+    let name = if la.name == "new" { "new_" } else { la.name.as_str() };
+    let model_class = la.model_class.as_str();
+    let resource = la.resource.as_str();
+
+    let find_record = |out: &mut String| {
+        writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+        writeln!(
+            out,
+            "    record = {model_class}.find(record_id) or {model_class}()"
+        )
+        .unwrap();
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            let view_fn = py_view_fn(model_class, "index");
+            writeln!(
+                out,
+                "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if la.has_model {
+                writeln!(out, "    records = {model_class}.all()").unwrap();
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(body=views.{view_fn}(records))"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+            }
         }
-        _ => {
+        ActionKind::Show | ActionKind::Edit => {
+            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
+            let view_fn = py_view_fn(model_class, suffix);
+            writeln!(
+                out,
+                "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if la.has_model {
+                find_record(out);
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(body=views.{view_fn}(record))"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+            }
+        }
+        ActionKind::New => {
+            let view_fn = py_view_fn(model_class, "new");
+            writeln!(
+                out,
+                "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if la.has_model {
+                writeln!(out, "    record = {model_class}()").unwrap();
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(body=views.{view_fn}(record))"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+            }
+        }
+        ActionKind::Create => {
+            writeln!(
+                out,
+                "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+                return;
+            }
+            writeln!(out, "    record = {model_class}()").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "    record.{}_id = int(context.params[\"{}_id\"])",
+                    p.singular, p.singular
+                )
+                .unwrap();
+            }
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    record.{field} = context.params.get(\"{resource}[{field}]\", \"\")"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if record.save():").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "        return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+                    p.singular, p.singular,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
+                )
+                .unwrap();
+            }
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+                    p.singular, p.singular,
+                )
+                .unwrap();
+            } else {
+                let view_fn = py_view_fn(model_class, "new");
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(status=422, body=views.{view_fn}(record))"
+                )
+                .unwrap();
+            }
+        }
+        ActionKind::Update => {
+            writeln!(
+                out,
+                "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+                return;
+            }
+            find_record(out);
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    if \"{resource}[{field}]\" in context.params: record.{field} = context.params[\"{resource}[{field}]\"]"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if record.save():").unwrap();
+            writeln!(
+                out,
+                "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
+            )
+            .unwrap();
+            let edit_view = py_view_fn(model_class, "edit");
+            writeln!(
+                out,
+                "    return http.ActionResponse(status=422, body=views.{edit_view}(record))"
+            )
+            .unwrap();
+        }
+        ActionKind::Destroy => {
+            writeln!(
+                out,
+                "def {name}(context: http.ActionContext) -> http.ActionResponse:"
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
+                return;
+            }
+            writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
+            writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
+            writeln!(out, "    if record is not None: record.destroy()").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
+                    p.singular, p.singular,
+                )
+                .unwrap();
+            } else {
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "    return http.ActionResponse(status=303, location={plural}_path())"
+                )
+                .unwrap();
+            }
+        }
+        ActionKind::Unknown => {
             writeln!(
                 out,
                 "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
@@ -749,249 +918,6 @@ fn emit_py_action_template(
             .unwrap();
             writeln!(out, "    return http.ActionResponse(status=501)").unwrap();
         }
-    }
-}
-
-fn py_view_fn(model_class: &str, suffix: &str) -> String {
-    let plural = crate::naming::pluralize_snake(model_class);
-    format!("render_{plural}_{}", suffix.to_lowercase())
-}
-
-fn emit_py_index(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-) {
-    let view_fn = py_view_fn(model_class, "index");
-    writeln!(
-        out,
-        "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "    records = {model_class}.all()").unwrap();
-        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(records))").unwrap();
-    } else {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-    }
-}
-
-fn emit_py_show(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-    _parent: Option<&crate::lower::NestedParent>,
-) {
-    let view_fn = py_view_fn(model_class, "show");
-    writeln!(
-        out,
-        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
-        writeln!(
-            out,
-            "    record = {model_class}.find(record_id) or {model_class}()"
-        )
-        .unwrap();
-        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
-    } else {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-    }
-}
-
-fn emit_py_new(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-) {
-    let view_fn = py_view_fn(model_class, "new");
-    writeln!(
-        out,
-        "def {name}(_context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "    record = {model_class}()").unwrap();
-        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
-    } else {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-    }
-}
-
-fn emit_py_edit(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-    _parent: Option<&crate::lower::NestedParent>,
-) {
-    let view_fn = py_view_fn(model_class, "edit");
-    writeln!(
-        out,
-        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
-        writeln!(
-            out,
-            "    record = {model_class}.find(record_id) or {model_class}()"
-        )
-        .unwrap();
-        writeln!(out, "    return http.ActionResponse(body=views.{view_fn}(record))").unwrap();
-    } else {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-    }
-}
-
-fn emit_py_create(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    writeln!(
-        out,
-        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-        return;
-    }
-    writeln!(out, "    record = {model_class}()").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "    record.{}_id = int(context.params[\"{}_id\"])",
-            p.singular, p.singular
-        )
-        .unwrap();
-    }
-    for field in permitted {
-        writeln!(
-            out,
-            "    record.{field} = context.params.get(\"{resource}[{field}]\", \"\")"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    if record.save():").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "        return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
-            p.singular, p.singular,
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
-        )
-        .unwrap();
-    }
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
-            p.singular, p.singular,
-        )
-        .unwrap();
-    } else {
-        let view_fn = py_view_fn(model_class, "new");
-        writeln!(
-            out,
-            "    return http.ActionResponse(status=422, body=views.{view_fn}(record))"
-        )
-        .unwrap();
-    }
-}
-
-fn emit_py_update(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    permitted: &[String],
-) {
-    writeln!(
-        out,
-        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-        return;
-    }
-    writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
-    writeln!(
-        out,
-        "    record = {model_class}.find(record_id) or {model_class}()"
-    )
-    .unwrap();
-    for field in permitted {
-        writeln!(
-            out,
-            "    if \"{resource}[{field}]\" in context.params: record.{field} = context.params[\"{resource}[{field}]\"]"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    if record.save():").unwrap();
-    writeln!(
-        out,
-        "        return http.ActionResponse(status=303, location={resource}_path(record.id))"
-    )
-    .unwrap();
-    let edit_view = py_view_fn(model_class, "edit");
-    writeln!(
-        out,
-        "    return http.ActionResponse(status=422, body=views.{edit_view}(record))"
-    )
-    .unwrap();
-}
-
-fn emit_py_destroy(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    writeln!(
-        out,
-        "def {name}(context: http.ActionContext) -> http.ActionResponse:"
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "    return http.ActionResponse(body=\"\")").unwrap();
-        return;
-    }
-    writeln!(out, "    record_id = int(context.params[\"id\"])").unwrap();
-    writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
-    writeln!(out, "    if record is not None: record.destroy()").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "    return http.ActionResponse(status=303, location={}_path(int(context.params[\"{}_id\"])))",
-            p.singular, p.singular,
-        )
-        .unwrap();
-    } else {
-        let plural = crate::naming::pluralize_snake(model_class);
-        writeln!(
-            out,
-            "    return http.ActionResponse(status=303, location={plural}_path())"
-        )
-        .unwrap();
     }
 }
 

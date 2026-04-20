@@ -2206,282 +2206,234 @@ fn emit_controller_axum(
         if i > 0 {
             writeln!(s).unwrap();
         }
-        emit_axum_action(
-            &mut s,
-            action,
+        let la = crate::lower::lower_action(
+            action.name.as_str(),
             &resource,
             &model_class,
             has_model,
             parent.as_ref(),
             &permitted,
         );
+        emit_rust_action(&mut s, &la);
     }
 
     let filename = format!("src/controllers/{}.rs", snake_case(controller_name));
     EmittedFile { path: PathBuf::from(filename), content: s }
 }
 
-fn emit_axum_action(
-    out: &mut String,
-    action: &Action,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let action_name = action.name.as_str();
-    match action_name {
-        "index" => emit_index_action(out, resource, model_class, has_model),
-        "show" => emit_show_action(out, resource, model_class, has_model, parent),
-        "new" => emit_new_action(out, resource, model_class, has_model),
-        "edit" => emit_edit_action(out, resource, model_class, has_model, parent),
-        "create" => emit_create_action(out, resource, model_class, has_model, parent, permitted),
-        "update" => emit_update_action(out, resource, model_class, has_model, parent, permitted),
-        "destroy" => emit_destroy_action(out, resource, model_class, has_model, parent),
-        other => {
-            writeln!(out, "pub async fn {other}() -> Response {{").unwrap();
+/// Render one LoweredAction as an axum handler. Rust-specific
+/// shapes: `Path(id): Path<i64>` extractors on routes with `:id`,
+/// `Form(form): Form<HashMap<...>>` on POST/PATCH, `Response`
+/// (not `ActionResponse`) returned via `into_response()`.
+fn emit_rust_action(out: &mut String, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
+    let model_class = la.model_class.as_str();
+    let resource = la.resource.as_str();
+
+    let view_fn = |suffix: &str| {
+        format!("{}_{}", crate::naming::pluralize_snake(model_class), suffix)
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            let view = view_fn("index");
+            writeln!(out, "pub async fn index() -> Response {{").unwrap();
+            if la.has_model {
+                writeln!(
+                    out,
+                    "    let records: Vec<{model_class}> = {model_class}::all();"
+                )
+                .unwrap();
+                writeln!(out, "    http::html(views::{view}(&records)).into_response()").unwrap();
+            } else {
+                writeln!(out, "    let _ = {resource:?};").unwrap();
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Show | ActionKind::Edit => {
+            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
+            let view = view_fn(suffix);
+            writeln!(out, "pub async fn {suffix}(").unwrap();
+            emit_path_params(out, la.parent.as_ref(), true);
+            writeln!(out, ") -> Response {{").unwrap();
+            if la.has_model {
+                writeln!(
+                    out,
+                    "    let record = {model_class}::find(id).unwrap_or_default();"
+                )
+                .unwrap();
+                writeln!(out, "    http::html(views::{view}(&record)).into_response()").unwrap();
+            } else {
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::New => {
+            let view = view_fn("new");
+            writeln!(out, "pub async fn new() -> Response {{").unwrap();
+            if la.has_model {
+                writeln!(out, "    let record = {model_class}::default();").unwrap();
+                writeln!(out, "    http::html(views::{view}(&record)).into_response()").unwrap();
+            } else {
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Create => {
+            writeln!(out, "pub async fn create(").unwrap();
+            emit_path_params(out, la.parent.as_ref(), false);
+            writeln!(out, "    Form(form): Form<HashMap<String, String>>,").unwrap();
+            writeln!(out, ") -> Response {{").unwrap();
+            if !la.has_model {
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
+            writeln!(out, "    let p = Params::new(form);").unwrap();
+            let keys = la
+                .permitted
+                .iter()
+                .map(|k| format!("{k:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(out, "    let fields = p.expect({resource:?}, &[{keys}]);").unwrap();
+            writeln!(out, "    let mut record = {model_class} {{").unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(out, "        {}_id,", parent.singular).unwrap();
+            }
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "        {field}: fields.get({field:?}).cloned().unwrap_or_default(),"
+                )
+                .unwrap();
+            }
+            writeln!(out, "        ..Default::default()").unwrap();
+            writeln!(out, "    }};").unwrap();
+            writeln!(out, "    if record.save() {{").unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(
+                    out,
+                    "        http::redirect(&route_helpers::{0}_path({0}_id)).into_response()",
+                    parent.singular
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "        http::redirect(&route_helpers::{resource}_path(record.id)).into_response()"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    }} else {{").unwrap();
+            if let Some(parent) = &la.parent {
+                // Comment scaffold redirects back to parent even on
+                // failure — Rails' `redirect_to @article, alert: ...`.
+                writeln!(
+                    out,
+                    "        http::redirect(&route_helpers::{0}_path({0}_id)).into_response()",
+                    parent.singular
+                )
+                .unwrap();
+            } else {
+                let new_view = view_fn("new");
+                writeln!(
+                    out,
+                    "        http::unprocessable(views::{new_view}(&record)).into_response()"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Update => {
+            writeln!(out, "pub async fn update(").unwrap();
+            emit_path_params(out, la.parent.as_ref(), true);
+            writeln!(out, "    Form(form): Form<HashMap<String, String>>,").unwrap();
+            writeln!(out, ") -> Response {{").unwrap();
+            if !la.has_model {
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
             writeln!(
                 out,
-                "    (axum::http::StatusCode::NOT_IMPLEMENTED, \"501 Not Implemented\").into_response()",
+                "    let mut record = {model_class}::find(id).unwrap_or_default();"
+            )
+            .unwrap();
+            writeln!(out, "    let p = Params::new(form);").unwrap();
+            let keys = la
+                .permitted
+                .iter()
+                .map(|k| format!("{k:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(out, "    let fields = p.expect({resource:?}, &[{keys}]);").unwrap();
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    if let Some(v) = fields.get({field:?}) {{ record.{field} = v.clone(); }}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if record.save() {{").unwrap();
+            writeln!(
+                out,
+                "        http::redirect(&route_helpers::{resource}_path(record.id)).into_response()"
+            )
+            .unwrap();
+            writeln!(out, "    }} else {{").unwrap();
+            let edit_view = view_fn("edit");
+            writeln!(
+                out,
+                "        http::unprocessable(views::{edit_view}(&record)).into_response()"
+            )
+            .unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Destroy => {
+            writeln!(out, "pub async fn destroy(").unwrap();
+            emit_path_params(out, la.parent.as_ref(), true);
+            writeln!(out, ") -> Response {{").unwrap();
+            if !la.has_model {
+                writeln!(out, "    http::html(String::new()).into_response()").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
+            writeln!(
+                out,
+                "    if let Some(record) = {model_class}::find(id) {{ record.destroy(); }}"
+            )
+            .unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(
+                    out,
+                    "    http::redirect(&route_helpers::{0}_path({0}_id)).into_response()",
+                    parent.singular
+                )
+                .unwrap();
+            } else {
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "    http::redirect(&route_helpers::{plural}_path()).into_response()"
+                )
+                .unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Unknown => {
+            writeln!(out, "pub async fn {}() -> Response {{", la.name).unwrap();
+            writeln!(
+                out,
+                "    (axum::http::StatusCode::NOT_IMPLEMENTED, \"501 Not Implemented\").into_response()"
             )
             .unwrap();
             writeln!(out, "}}").unwrap();
         }
     }
-}
-
-fn emit_index_action(out: &mut String, resource: &str, model_class: &str, has_model: bool) {
-    let view_fn = format!("{}_index", crate::naming::pluralize_snake(model_class));
-    writeln!(out, "pub async fn index() -> Response {{").unwrap();
-    if has_model {
-        writeln!(
-            out,
-            "    let records: Vec<{model_class}> = {model_class}::all();",
-        )
-        .unwrap();
-        writeln!(out, "    http::html(views::{view_fn}(&records)).into_response()").unwrap();
-    } else {
-        writeln!(out, "    let _ = {resource:?};").unwrap();
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_show_action(
-    out: &mut String,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let view_fn = format!("{}_show", crate::naming::pluralize_snake(model_class));
-    writeln!(out, "pub async fn show(").unwrap();
-    emit_path_params(out, parent, true);
-    writeln!(out, ") -> Response {{").unwrap();
-    if has_model {
-        writeln!(out, "    let record = {model_class}::find(id).unwrap_or_default();").unwrap();
-        writeln!(out, "    http::html(views::{view_fn}(&record)).into_response()").unwrap();
-    } else {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_new_action(out: &mut String, resource: &str, model_class: &str, has_model: bool) {
-    let view_fn = format!("{}_new", crate::naming::pluralize_snake(model_class));
-    writeln!(out, "pub async fn new() -> Response {{").unwrap();
-    if has_model {
-        writeln!(out, "    let record = {model_class}::default();").unwrap();
-        writeln!(out, "    http::html(views::{view_fn}(&record)).into_response()").unwrap();
-    } else {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_edit_action(
-    out: &mut String,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let view_fn = format!("{}_edit", crate::naming::pluralize_snake(model_class));
-    writeln!(out, "pub async fn edit(").unwrap();
-    emit_path_params(out, parent, true);
-    writeln!(out, ") -> Response {{").unwrap();
-    if has_model {
-        writeln!(out, "    let record = {model_class}::find(id).unwrap_or_default();").unwrap();
-        writeln!(out, "    http::html(views::{view_fn}(&record)).into_response()").unwrap();
-    } else {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_create_action(
-    out: &mut String,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    writeln!(out, "pub async fn create(").unwrap();
-    emit_path_params(out, parent, false);
-    writeln!(out, "    Form(form): Form<HashMap<String, String>>,").unwrap();
-    writeln!(out, ") -> Response {{").unwrap();
-    if !has_model {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "    let p = Params::new(form);").unwrap();
-    let keys = permitted
-        .iter()
-        .map(|k| format!("{k:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "    let fields = p.expect({resource:?}, &[{keys}]);").unwrap();
-    writeln!(out, "    let mut record = {model_class} {{").unwrap();
-    // parent foreign key (e.g. `article_id` on a comment)
-    if let Some(parent) = parent {
-        writeln!(out, "        {}_id,", parent.singular).unwrap();
-    }
-    for field in permitted {
-        writeln!(
-            out,
-            "        {field}: fields.get({field:?}).cloned().unwrap_or_default(),",
-        )
-        .unwrap();
-    }
-    writeln!(out, "        ..Default::default()").unwrap();
-    writeln!(out, "    }};").unwrap();
-    writeln!(out, "    if record.save() {{").unwrap();
-    // For nested resources, redirect to the parent's show page after
-    // create (matches Rails' scaffold for a comment→article parent).
-    if let Some(parent) = parent {
-        writeln!(
-            out,
-            "        http::redirect(&route_helpers::{}_path({}_id)).into_response()",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "        http::redirect(&route_helpers::{resource}_path(record.id)).into_response()",
-        )
-        .unwrap();
-    }
-    writeln!(out, "    }} else {{").unwrap();
-    if let Some(parent) = parent {
-        // Comment scaffold redirects back to parent even on failure —
-        // Rails' `redirect_to @article, alert: ...` pattern.
-        writeln!(
-            out,
-            "        http::redirect(&route_helpers::{}_path({}_id)).into_response()",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    } else {
-        let new_view = format!("{}_new", crate::naming::pluralize_snake(model_class));
-        writeln!(
-            out,
-            "        http::unprocessable(views::{new_view}(&record)).into_response()",
-        )
-        .unwrap();
-    }
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_update_action(
-    out: &mut String,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    writeln!(out, "pub async fn update(").unwrap();
-    emit_path_params(out, parent, true);
-    writeln!(out, "    Form(form): Form<HashMap<String, String>>,").unwrap();
-    writeln!(out, ") -> Response {{").unwrap();
-    if !has_model {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "    let mut record = {model_class}::find(id).unwrap_or_default();").unwrap();
-    writeln!(out, "    let p = Params::new(form);").unwrap();
-    let keys = permitted
-        .iter()
-        .map(|k| format!("{k:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "    let fields = p.expect({resource:?}, &[{keys}]);").unwrap();
-    for field in permitted {
-        writeln!(
-            out,
-            "    if let Some(v) = fields.get({field:?}) {{ record.{field} = v.clone(); }}",
-        )
-        .unwrap();
-    }
-    writeln!(out, "    if record.save() {{").unwrap();
-    writeln!(
-        out,
-        "        http::redirect(&route_helpers::{resource}_path(record.id)).into_response()",
-    )
-    .unwrap();
-    writeln!(out, "    }} else {{").unwrap();
-    let edit_view = format!("{}_edit", crate::naming::pluralize_snake(model_class));
-    writeln!(
-        out,
-        "        http::unprocessable(views::{edit_view}(&record)).into_response()",
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_destroy_action(
-    out: &mut String,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    writeln!(out, "pub async fn destroy(").unwrap();
-    emit_path_params(out, parent, true);
-    writeln!(out, ") -> Response {{").unwrap();
-    if !has_model {
-        writeln!(out, "    http::html(String::new()).into_response()").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(
-        out,
-        "    if let Some(record) = {model_class}::find(id) {{ record.destroy(); }}",
-    )
-    .unwrap();
-    if let Some(parent) = parent {
-        writeln!(
-            out,
-            "    http::redirect(&route_helpers::{}_path({}_id)).into_response()",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    } else {
-        let plural = crate::naming::pluralize_snake(model_class);
-        writeln!(
-            out,
-            "    http::redirect(&route_helpers::{plural}_path()).into_response()",
-        )
-        .unwrap();
-    }
-    writeln!(out, "}}").unwrap();
 }
 
 /// Emit the axum Path extractor(s) for an action. `with_id` adds the

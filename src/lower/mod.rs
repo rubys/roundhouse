@@ -29,9 +29,10 @@ pub use associations::{resolve_has_many, HasManyRef};
 pub use controller::{
     chain_target_class, classify_controller_send, default_permitted_fields,
     extract_permitted_from_expr, find_nested_parent, is_format_binding,
-    is_params_expr, is_query_builder_method, permitted_fields_for,
+    is_params_expr, is_query_builder_method, lower_action, permitted_fields_for,
     resource_from_controller_name, singularize_to_model, split_public_private,
-    walk_controller_ivars, NestedParent, SendKind, WalkedIvars,
+    walk_controller_ivars, ActionKind, LoweredAction, NestedParent, SendKind,
+    WalkedIvars,
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,

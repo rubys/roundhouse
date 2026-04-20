@@ -1391,15 +1391,15 @@ fn emit_controller_file_pass2(
     }
 
     for action in &public_actions {
-        emit_ex_action_template(
-            &mut s,
-            action,
+        let la = crate::lower::lower_action(
+            action.name.as_str(),
             &resource,
             &model_class,
             has_model,
             parent.as_ref(),
             &permitted,
         );
+        emit_ex_action(&mut s, &la);
         writeln!(s).unwrap();
     }
     writeln!(s, "end").unwrap();
@@ -1416,260 +1416,228 @@ fn ex_view_fn(model_class: &str, suffix: &str) -> String {
     format!("render_{plural}_{}", suffix.to_lowercase())
 }
 
-fn emit_ex_action_template(
-    out: &mut String,
-    action: &Action,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let raw = action.name.as_str();
-    match raw {
-        "index" => emit_ex_index(out, raw, model_class, has_model),
-        "show" => emit_ex_show(out, raw, model_class, has_model),
-        "new" => emit_ex_new(out, raw, model_class, has_model),
-        "edit" => emit_ex_edit(out, raw, model_class, has_model),
-        "create" => emit_ex_create(
-            out, raw, resource, model_class, has_model, parent, permitted,
-        ),
-        "update" => emit_ex_update(
-            out, raw, resource, model_class, has_model, permitted,
-        ),
-        "destroy" => emit_ex_destroy(out, raw, model_class, has_model, parent),
-        _ => {
-            writeln!(out, "  def {raw}(_context) do").unwrap();
+/// Render one LoweredAction as an Elixir `def`. Mirrors the Go
+/// and Python renderers; key Elixir specifics are the `%{record |
+/// k: v}` struct-update syntax, the `String.to_integer(to_string(
+/// ...))` coercion from stringly params, and the trailing `_context`
+/// dance that --warnings-as-errors insists on.
+fn emit_ex_action(out: &mut String, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
+    let name = la.name.as_str();
+    let model_class = la.model_class.as_str();
+    let resource = la.resource.as_str();
+
+    let empty_stub = |out: &mut String, reads_ctx: bool| {
+        let arg = if reads_ctx { "context" } else { "_context" };
+        writeln!(out, "  def {name}({arg}) do").unwrap();
+        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+        writeln!(out, "  end").unwrap();
+    };
+
+    let load_record = |out: &mut String| {
+        writeln!(
+            out,
+            "    record_id = String.to_integer(to_string(context.params[\"id\"]))"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    record = {model_class}.find(record_id) || %{model_class}{{}}"
+        )
+        .unwrap();
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            let view_fn = ex_view_fn(model_class, "index");
+            writeln!(out, "  def {name}(_context) do").unwrap();
+            if la.has_model {
+                writeln!(out, "    records = {model_class}.all()").unwrap();
+                writeln!(
+                    out,
+                    "    %ActionResponse{{body: App.Views.{view_fn}(records)}}"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+            }
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::Show | ActionKind::Edit => {
+            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
+            let view_fn = ex_view_fn(model_class, suffix);
+            let arg = if la.has_model { "context" } else { "_context" };
+            writeln!(out, "  def {name}({arg}) do").unwrap();
+            if la.has_model {
+                load_record(out);
+                writeln!(
+                    out,
+                    "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+            }
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::New => {
+            let view_fn = ex_view_fn(model_class, "new");
+            writeln!(out, "  def {name}(_context) do").unwrap();
+            if la.has_model {
+                writeln!(out, "    record = %{model_class}{{}}").unwrap();
+                writeln!(
+                    out,
+                    "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
+            }
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::Create => {
+            if !la.has_model {
+                empty_stub(out, false);
+                return;
+            }
+            let uses_context = la.parent.is_some() || !la.permitted.is_empty();
+            let arg = if uses_context { "context" } else { "_context" };
+            writeln!(out, "  def {name}({arg}) do").unwrap();
+            writeln!(out, "    record = %{model_class}{{}}").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "    record = %{{record | {0}_id: String.to_integer(to_string(context.params[\"{0}_id\"]))}}",
+                    p.singular
+                )
+                .unwrap();
+            }
+            let field_assigns: Vec<String> = la
+                .permitted
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{field}: Map.get(context.params, \"{resource}[{field}]\", \"\")"
+                    )
+                })
+                .collect();
+            if !field_assigns.is_empty() {
+                writeln!(
+                    out,
+                    "    record = %{{record | {}}}",
+                    field_assigns.join(", ")
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if {model_class}.save(record) do").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+                    p.singular,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "      record = %{{record | id: Roundhouse.Db.last_insert_rowid()}}"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    else").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+                    p.singular,
+                )
+                .unwrap();
+            } else {
+                let view_fn = ex_view_fn(model_class, "new");
+                writeln!(
+                    out,
+                    "      %ActionResponse{{status: 422, body: App.Views.{view_fn}(record)}}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    end").unwrap();
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::Update => {
+            if !la.has_model {
+                empty_stub(out, false);
+                return;
+            }
+            writeln!(out, "  def {name}(context) do").unwrap();
+            load_record(out);
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    record = if Map.has_key?(context.params, \"{resource}[{field}]\"), do: %{{record | {field}: context.params[\"{resource}[{field}]\"]}}, else: record"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if {model_class}.save(record) do").unwrap();
+            writeln!(
+                out,
+                "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
+            )
+            .unwrap();
+            writeln!(out, "    else").unwrap();
+            let edit_view = ex_view_fn(model_class, "edit");
+            writeln!(
+                out,
+                "      %ActionResponse{{status: 422, body: App.Views.{edit_view}(record)}}"
+            )
+            .unwrap();
+            writeln!(out, "    end").unwrap();
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::Destroy => {
+            if !la.has_model {
+                empty_stub(out, false);
+                return;
+            }
+            writeln!(out, "  def {name}(context) do").unwrap();
+            writeln!(
+                out,
+                "    record_id = String.to_integer(to_string(context.params[\"id\"]))"
+            )
+            .unwrap();
+            writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
+            writeln!(
+                out,
+                "    if record != nil, do: {model_class}.destroy(record)"
+            )
+            .unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "    %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
+                    p.singular,
+                )
+                .unwrap();
+            } else {
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "    %ActionResponse{{status: 303, location: {plural}_path()}}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "  end").unwrap();
+        }
+        ActionKind::Unknown => {
+            writeln!(out, "  def {name}(_context) do").unwrap();
             writeln!(out, "    %ActionResponse{{status: 501}}").unwrap();
             writeln!(out, "  end").unwrap();
         }
     }
-}
-
-fn emit_ex_index(out: &mut String, name: &str, model_class: &str, has_model: bool) {
-    let view_fn = ex_view_fn(model_class, "index");
-    writeln!(out, "  def {name}(_context) do").unwrap();
-    if has_model {
-        writeln!(out, "    records = {model_class}.all()").unwrap();
-        writeln!(
-            out,
-            "    %ActionResponse{{body: App.Views.{view_fn}(records)}}"
-        )
-        .unwrap();
-    } else {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-    }
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_show(out: &mut String, name: &str, model_class: &str, has_model: bool) {
-    let view_fn = ex_view_fn(model_class, "show");
-    writeln!(out, "  def {name}(context) do").unwrap();
-    if has_model {
-        writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
-        writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
-        writeln!(
-            out,
-            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
-        )
-        .unwrap();
-    } else {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-    }
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_new(out: &mut String, name: &str, model_class: &str, has_model: bool) {
-    let view_fn = ex_view_fn(model_class, "new");
-    writeln!(out, "  def {name}(_context) do").unwrap();
-    if has_model {
-        writeln!(out, "    record = %{model_class}{{}}").unwrap();
-        writeln!(
-            out,
-            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
-        )
-        .unwrap();
-    } else {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-    }
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_edit(out: &mut String, name: &str, model_class: &str, has_model: bool) {
-    let view_fn = ex_view_fn(model_class, "edit");
-    writeln!(out, "  def {name}(context) do").unwrap();
-    if has_model {
-        writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
-        writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
-        writeln!(
-            out,
-            "    %ActionResponse{{body: App.Views.{view_fn}(record)}}"
-        )
-        .unwrap();
-    } else {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-    }
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_create(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let uses_context = has_model && (parent.is_some() || !permitted.is_empty());
-    let arg = if uses_context { "context" } else { "_context" };
-    writeln!(out, "  def {name}({arg}) do").unwrap();
-    if !has_model {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-        writeln!(out, "  end").unwrap();
-        return;
-    }
-    writeln!(out, "    record = %{model_class}{{}}").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "    record = %{{record | {0}_id: String.to_integer(to_string(context.params[\"{0}_id\"]))}}",
-            p.singular
-        )
-        .unwrap();
-    }
-    let mut field_assigns: Vec<String> = Vec::new();
-    for field in permitted {
-        field_assigns.push(format!(
-            "{field}: Map.get(context.params, \"{resource}[{field}]\", \"\")"
-        ));
-    }
-    if !field_assigns.is_empty() {
-        writeln!(
-            out,
-            "    record = %{{record | {}}}",
-            field_assigns.join(", ")
-        )
-        .unwrap();
-    }
-    writeln!(out, "    if {model_class}.save(record) do").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-            p.singular,
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "      record = %{{record | id: Roundhouse.Db.last_insert_rowid()}}"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    else").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "      %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-            p.singular,
-        )
-        .unwrap();
-    } else {
-        let view_fn = ex_view_fn(model_class, "new");
-        writeln!(
-            out,
-            "      %ActionResponse{{status: 422, body: App.Views.{view_fn}(record)}}"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    end").unwrap();
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_update(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    permitted: &[String],
-) {
-    let arg = if has_model { "context" } else { "_context" };
-    writeln!(out, "  def {name}({arg}) do").unwrap();
-    if !has_model {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-        writeln!(out, "  end").unwrap();
-        return;
-    }
-    writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
-    writeln!(out, "    record = {model_class}.find(record_id) || %{model_class}{{}}").unwrap();
-    for field in permitted {
-        writeln!(
-            out,
-            "    record = if Map.has_key?(context.params, \"{resource}[{field}]\"), do: %{{record | {field}: context.params[\"{resource}[{field}]\"]}}, else: record"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    if {model_class}.save(record) do").unwrap();
-    writeln!(
-        out,
-        "      %ActionResponse{{status: 303, location: {resource}_path(record.id)}}"
-    )
-    .unwrap();
-    writeln!(out, "    else").unwrap();
-    let edit_view = ex_view_fn(model_class, "edit");
-    writeln!(
-        out,
-        "      %ActionResponse{{status: 422, body: App.Views.{edit_view}(record)}}"
-    )
-    .unwrap();
-    writeln!(out, "    end").unwrap();
-    writeln!(out, "  end").unwrap();
-}
-
-fn emit_ex_destroy(
-    out: &mut String,
-    name: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let arg = if has_model { "context" } else { "_context" };
-    writeln!(out, "  def {name}({arg}) do").unwrap();
-    if !has_model {
-        writeln!(out, "    %ActionResponse{{body: \"\"}}").unwrap();
-        writeln!(out, "  end").unwrap();
-        return;
-    }
-    writeln!(out, "    record_id = String.to_integer(to_string(context.params[\"id\"]))").unwrap();
-    writeln!(out, "    record = {model_class}.find(record_id)").unwrap();
-    writeln!(
-        out,
-        "    if record != nil, do: {model_class}.destroy(record)"
-    )
-    .unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "    %ActionResponse{{status: 303, location: {0}_path(String.to_integer(to_string(context.params[\"{0}_id\"])))}}",
-            p.singular,
-        )
-        .unwrap();
-    } else {
-        let plural = crate::naming::pluralize_snake(model_class);
-        writeln!(
-            out,
-            "    %ActionResponse{{status: 303, location: {plural}_path()}}"
-        )
-        .unwrap();
-    }
-    writeln!(out, "  end").unwrap();
 }
 
 // Pass-2 route helpers -------------------------------------------------

@@ -729,16 +729,15 @@ fn emit_controller_pass2(c: &Controller, known_models: &[Symbol], app: &App) -> 
     let (public_actions, _private) = crate::lower::split_public_private(c);
     for action in &public_actions {
         writeln!(s).unwrap();
-        emit_go_action_template(
-            &mut s,
-            c,
-            action,
+        let la = crate::lower::lower_action(
+            action.name.as_str(),
             &resource,
             &model_class,
             has_model,
             parent.as_ref(),
             &permitted,
         );
+        emit_go_action(&mut s, c.name.0.as_str(), &la);
     }
 
     let fname = format!("app/{}.go", snake_case(name));
@@ -755,31 +754,195 @@ fn go_view_fn(model_class: &str, suffix: &str) -> String {
     format!("Render{}{}", pascalize_word(&plural), pascalize_word(suffix))
 }
 
-fn emit_go_action_template(
-    out: &mut String,
-    c: &Controller,
-    action: &Action,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let raw = action.name.as_str();
-    let handler = go_action_handler_name(c.name.0.as_str(), raw);
-    match raw {
-        "index" => emit_go_index(out, &handler, model_class, has_model),
-        "show" => emit_go_show(out, &handler, model_class, has_model),
-        "new" => emit_go_new(out, &handler, model_class, has_model),
-        "edit" => emit_go_edit(out, &handler, model_class, has_model),
-        "create" => emit_go_create(
-            out, &handler, resource, model_class, has_model, parent, permitted,
-        ),
-        "update" => emit_go_update(
-            out, &handler, resource, model_class, has_model, permitted,
-        ),
-        "destroy" => emit_go_destroy(out, &handler, model_class, has_model, parent),
-        _ => {
+/// Render one LoweredAction as a top-level Go handler function.
+/// Replaces the seven per-action helpers; matches on
+/// `LoweredAction::kind` and reaches into the struct for the data
+/// each branch needs.
+fn emit_go_action(out: &mut String, controller: &str, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
+    let handler = go_action_handler_name(controller, &la.name);
+    let model_class = la.model_class.as_str();
+    let resource = la.resource.as_str();
+
+    let emit_empty_stub = |out: &mut String, reads_ctx: bool| {
+        let ctx_name = if reads_ctx { "ctx" } else { "_ctx" };
+        writeln!(out, "func {handler}({ctx_name} *ActionContext) ActionResponse {{").unwrap();
+        if reads_ctx {
+            writeln!(out, "\t_ = ctx").unwrap();
+        }
+        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
+        writeln!(out, "}}").unwrap();
+    };
+
+    let emit_find_id = |out: &mut String| {
+        writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
+        writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
+        writeln!(out, "\tif record == nil {{ record = &{model_class}{{}} }}").unwrap();
+    };
+
+    let redirect_after_write = |out: &mut String, indent: &str| {
+        if let Some(p) = &la.parent {
+            writeln!(
+                out,
+                "{indent}parentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
+                p.singular
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "{indent}return ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
+                pascalize_word(&p.singular)
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "{indent}return ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
+                pascalize_word(resource)
+            )
+            .unwrap();
+        }
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            let view_fn = go_view_fn(model_class, "index");
+            writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
+            if la.has_model {
+                writeln!(out, "\trecords := {model_class}All()").unwrap();
+                writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(records)}}").unwrap();
+            } else {
+                writeln!(out, "\treturn ActionResponse{{}}").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Show | ActionKind::Edit => {
+            let suffix = if la.kind == ActionKind::Show { "show" } else { "edit" };
+            let view_fn = go_view_fn(model_class, suffix);
+            if !la.has_model {
+                emit_empty_stub(out, true);
+                return;
+            }
+            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
+            emit_find_id(out);
+            writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::New => {
+            let view_fn = go_view_fn(model_class, "new");
+            writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
+            if la.has_model {
+                writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
+                writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
+            } else {
+                writeln!(out, "\treturn ActionResponse{{}}").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Create => {
+            if !la.has_model {
+                emit_empty_stub(out, true);
+                return;
+            }
+            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
+            writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
+            if let Some(p) = &la.parent {
+                let fk_field = go_field_name(&format!("{}_id", p.singular));
+                writeln!(
+                    out,
+                    "\trecord.{fk_field}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
+                    p.singular
+                )
+                .unwrap();
+            }
+            for field in &la.permitted {
+                let go_field = go_field_name(field);
+                writeln!(
+                    out,
+                    "\trecord.{go_field} = ctx.Params[\"{resource}[{field}]\"]"
+                )
+                .unwrap();
+            }
+            writeln!(out, "\tif record.Save() {{").unwrap();
+            redirect_after_write(out, "\t\t");
+            writeln!(out, "\t}}").unwrap();
+            if la.parent.is_some() {
+                redirect_after_write(out, "\t");
+            } else {
+                let view_fn = go_view_fn(model_class, "new");
+                writeln!(
+                    out,
+                    "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Update => {
+            if !la.has_model {
+                emit_empty_stub(out, true);
+                return;
+            }
+            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
+            emit_find_id(out);
+            for field in &la.permitted {
+                let go_field = go_field_name(field);
+                writeln!(
+                    out,
+                    "\tif v, ok := ctx.Params[\"{resource}[{field}]\"]; ok {{ record.{go_field} = v }}"
+                )
+                .unwrap();
+            }
+            writeln!(out, "\tif record.Save() {{").unwrap();
+            writeln!(
+                out,
+                "\t\treturn ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
+                pascalize_word(resource)
+            )
+            .unwrap();
+            writeln!(out, "\t}}").unwrap();
+            let view_fn = go_view_fn(model_class, "edit");
+            writeln!(
+                out,
+                "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
+            )
+            .unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Destroy => {
+            if !la.has_model {
+                emit_empty_stub(out, true);
+                return;
+            }
+            writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
+            writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
+            writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
+            writeln!(out, "\tif record != nil {{ record.Destroy() }}").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "\tparentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
+                    p.singular
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "\treturn ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
+                    pascalize_word(&p.singular)
+                )
+                .unwrap();
+            } else {
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "\treturn ActionResponse{{Status: 303, Location: {}Path()}}",
+                    pascalize_word(&plural)
+                )
+                .unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Unknown => {
             writeln!(
                 out,
                 "func {handler}(_ctx *ActionContext) ActionResponse {{"
@@ -789,226 +952,6 @@ fn emit_go_action_template(
             writeln!(out, "}}").unwrap();
         }
     }
-}
-
-fn emit_go_index(out: &mut String, handler: &str, model_class: &str, has_model: bool) {
-    let view_fn = go_view_fn(model_class, "index");
-    writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
-    if has_model {
-        writeln!(out, "\trecords := {model_class}All()").unwrap();
-        writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(records)}}").unwrap();
-    } else {
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_show(out: &mut String, handler: &str, model_class: &str, has_model: bool) {
-    let view_fn = go_view_fn(model_class, "show");
-    writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-    if has_model {
-        writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-        writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-        writeln!(out, "\tif record == nil {{ record = &{model_class}{{}} }}").unwrap();
-        writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
-    } else {
-        writeln!(out, "\t_ = ctx").unwrap();
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_new(out: &mut String, handler: &str, model_class: &str, has_model: bool) {
-    let view_fn = go_view_fn(model_class, "new");
-    writeln!(out, "func {handler}(_ctx *ActionContext) ActionResponse {{").unwrap();
-    if has_model {
-        writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
-        writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
-    } else {
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_edit(out: &mut String, handler: &str, model_class: &str, has_model: bool) {
-    let view_fn = go_view_fn(model_class, "edit");
-    writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-    if has_model {
-        writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-        writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-        writeln!(out, "\tif record == nil {{ record = &{model_class}{{}} }}").unwrap();
-        writeln!(out, "\treturn ActionResponse{{Body: {view_fn}(record)}}").unwrap();
-    } else {
-        writeln!(out, "\t_ = ctx").unwrap();
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_create(
-    out: &mut String,
-    handler: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-    if !has_model {
-        writeln!(out, "\t_ = ctx").unwrap();
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "\trecord := &{model_class}{{}}").unwrap();
-    if let Some(p) = parent {
-        let fk_field = go_field_name(&format!("{}_id", p.singular));
-        writeln!(
-            out,
-            "\trecord.{fk_field}, _ = strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-            p.singular
-        )
-        .unwrap();
-    }
-    for field in permitted {
-        let go_field = go_field_name(field);
-        writeln!(
-            out,
-            "\trecord.{go_field} = ctx.Params[\"{resource}[{field}]\"]"
-        )
-        .unwrap();
-    }
-    writeln!(out, "\tif record.Save() {{").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "\t\tparentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-            p.singular
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "\t\treturn ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
-            pascalize_word(&p.singular)
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "\t\treturn ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
-            pascalize_word(resource)
-        )
-        .unwrap();
-    }
-    writeln!(out, "\t}}").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "\tparentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-            p.singular
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "\treturn ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
-            pascalize_word(&p.singular)
-        )
-        .unwrap();
-    } else {
-        let view_fn = go_view_fn(model_class, "new");
-        writeln!(
-            out,
-            "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
-        )
-        .unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_update(
-    out: &mut String,
-    handler: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    permitted: &[String],
-) {
-    writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-    if !has_model {
-        writeln!(out, "\t_ = ctx").unwrap();
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-    writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-    writeln!(out, "\tif record == nil {{ record = &{model_class}{{}} }}").unwrap();
-    for field in permitted {
-        let go_field = go_field_name(field);
-        writeln!(
-            out,
-            "\tif v, ok := ctx.Params[\"{resource}[{field}]\"]; ok {{ record.{go_field} = v }}"
-        )
-        .unwrap();
-    }
-    writeln!(out, "\tif record.Save() {{").unwrap();
-    writeln!(
-        out,
-        "\t\treturn ActionResponse{{Status: 303, Location: {}Path(record.ID)}}",
-        pascalize_word(resource)
-    )
-    .unwrap();
-    writeln!(out, "\t}}").unwrap();
-    let view_fn = go_view_fn(model_class, "edit");
-    writeln!(
-        out,
-        "\treturn ActionResponse{{Status: 422, Body: {view_fn}(record)}}"
-    )
-    .unwrap();
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_go_destroy(
-    out: &mut String,
-    handler: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    writeln!(out, "func {handler}(ctx *ActionContext) ActionResponse {{").unwrap();
-    if !has_model {
-        writeln!(out, "\t_ = ctx").unwrap();
-        writeln!(out, "\treturn ActionResponse{{}}").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "\tid, _ := strconv.ParseInt(ctx.Params[\"id\"], 10, 64)").unwrap();
-    writeln!(out, "\trecord := {model_class}Find(id)").unwrap();
-    writeln!(out, "\tif record != nil {{ record.Destroy() }}").unwrap();
-    if let Some(p) = parent {
-        writeln!(
-            out,
-            "\tparentID, _ := strconv.ParseInt(ctx.Params[\"{}_id\"], 10, 64)",
-            p.singular
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "\treturn ActionResponse{{Status: 303, Location: {}Path(parentID)}}",
-            pascalize_word(&p.singular)
-        )
-        .unwrap();
-    } else {
-        let plural = crate::naming::pluralize_snake(model_class);
-        writeln!(
-            out,
-            "\treturn ActionResponse{{Status: 303, Location: {}Path()}}",
-            pascalize_word(&plural)
-        )
-        .unwrap();
-    }
-    writeln!(out, "}}").unwrap();
 }
 
 // Pass-2 routes + route helpers ---------------------------------------

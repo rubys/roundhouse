@@ -1143,15 +1143,15 @@ fn emit_controller_file(c: &Controller, known_models: &[Symbol], app: &App) -> E
     let (public_actions, _private) = crate::lower::split_public_private(c);
     for action in &public_actions {
         writeln!(s).unwrap();
-        emit_ts_action_template(
-            &mut s,
-            action,
+        let la = crate::lower::lower_action(
+            action.name.as_str(),
             &resource,
             &model_class,
             has_model,
             parent.as_ref(),
             &permitted,
         );
+        emit_ts_action(&mut s, &la);
     }
 
     // Namespace object — same shape as before but only public actions.
@@ -1182,26 +1182,200 @@ fn emit_controller_file(c: &Controller, known_models: &[Symbol], app: &App) -> E
     }
 }
 
-fn emit_ts_action_template(
-    out: &mut String,
-    action: &Action,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let raw = action.name.as_str();
-    let name = if raw == "new" { "$new" } else { raw };
-    match raw {
-        "index" => emit_ts_index(out, name, resource, model_class, has_model),
-        "show" => emit_ts_show(out, name, resource, model_class, has_model, parent),
-        "new" => emit_ts_new(out, name, resource, model_class, has_model),
-        "edit" => emit_ts_edit(out, name, resource, model_class, has_model, parent),
-        "create" => emit_ts_create(out, name, resource, model_class, has_model, parent, permitted),
-        "update" => emit_ts_update(out, name, resource, model_class, has_model, parent, permitted),
-        "destroy" => emit_ts_destroy(out, name, resource, model_class, has_model, parent),
-        _ => {
+/// Render one LoweredAction as a TS `export async function`. Mangles
+/// `new` → `$new` (ruby2js convention — `new` is a JS keyword). Uses
+/// the `routeHelpers.<name>Path` import for redirect Location URLs.
+fn emit_ts_action(out: &mut String, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
+    let name = if la.name == "new" { "$new" } else { la.name.as_str() };
+    let model_class = la.model_class.as_str();
+    let resource = la.resource.as_str();
+
+    let find_record = |out: &mut String| {
+        writeln!(out, "  const id = Number(context.params.id);").unwrap();
+        writeln!(
+            out,
+            "  const record = {model_class}.find(id) ?? new {model_class}();"
+        )
+        .unwrap();
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            let view_fn = ts_view_fn(model_class, "Index");
+            writeln!(
+                out,
+                "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if la.has_model {
+                writeln!(out, "  const records = {model_class}.all();").unwrap();
+                writeln!(out, "  return {{ body: Views.{view_fn}(records) }};").unwrap();
+            } else {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Show | ActionKind::Edit => {
+            let suffix = if la.kind == ActionKind::Show { "Show" } else { "Edit" };
+            let view_fn = ts_view_fn(model_class, suffix);
+            writeln!(
+                out,
+                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if la.has_model {
+                find_record(out);
+                writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
+            } else {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::New => {
+            let view_fn = ts_view_fn(model_class, "New");
+            writeln!(
+                out,
+                "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if la.has_model {
+                writeln!(out, "  const record = new {model_class}();").unwrap();
+                writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
+            } else {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Create => {
+            writeln!(
+                out,
+                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
+            writeln!(out, "  const record = new {model_class}();").unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(
+                    out,
+                    "  (record as any).{}_id = Number(context.params.{}_id);",
+                    parent.singular, parent.singular,
+                )
+                .unwrap();
+            }
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "  (record as any).{field} = context.params[\"{resource}[{field}]\"] ?? \"\";",
+                )
+                .unwrap();
+            }
+            writeln!(out, "  if (record.save) {{").unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(
+                    out,
+                    "    return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
+                    parent.singular,
+                    parent.singular,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
+                )
+                .unwrap();
+            }
+            writeln!(out, "  }}").unwrap();
+            if let Some(parent) = &la.parent {
+                // Comment scaffold redirects back to parent even on
+                // validation failure (`redirect_to @article, alert: ...`).
+                writeln!(
+                    out,
+                    "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
+                    parent.singular, parent.singular,
+                )
+                .unwrap();
+            } else {
+                let view_fn = ts_view_fn(model_class, "New");
+                writeln!(
+                    out,
+                    "  return {{ status: 422, body: Views.{view_fn}(record) }};",
+                )
+                .unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Update => {
+            writeln!(
+                out,
+                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
+            find_record(out);
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "  if (context.params[\"{resource}[{field}]\"] !== undefined) {{ (record as any).{field} = context.params[\"{resource}[{field}]\"]; }}",
+                )
+                .unwrap();
+            }
+            writeln!(out, "  if (record.save) {{").unwrap();
+            writeln!(
+                out,
+                "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
+            )
+            .unwrap();
+            writeln!(out, "  }}").unwrap();
+            let edit_view = ts_view_fn(model_class, "Edit");
+            writeln!(
+                out,
+                "  return {{ status: 422, body: Views.{edit_view}(record) }};",
+            )
+            .unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Destroy => {
+            writeln!(
+                out,
+                "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
+            )
+            .unwrap();
+            if !la.has_model {
+                writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
+                return;
+            }
+            writeln!(out, "  const id = Number(context.params.id);").unwrap();
+            writeln!(out, "  const record = {model_class}.find(id);").unwrap();
+            writeln!(out, "  if (record) {{ record.destroy; }}").unwrap();
+            if let Some(parent) = &la.parent {
+                writeln!(
+                    out,
+                    "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
+                    parent.singular, parent.singular,
+                )
+                .unwrap();
+            } else {
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "  return {{ status: 303, location: routeHelpers.{plural}Path() }};",
+                )
+                .unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        ActionKind::Unknown => {
             writeln!(
                 out,
                 "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{ return {{ status: 501 }}; }}",
@@ -1209,264 +1383,6 @@ fn emit_ts_action_template(
             .unwrap();
         }
     }
-}
-
-fn emit_ts_index(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-) {
-    let view_fn = format!(
-        "render{}Index",
-        crate::naming::camelize(&crate::naming::pluralize_snake(model_class)),
-    );
-    let _ = resource;
-    writeln!(
-        out,
-        "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "  const records = {model_class}.all();").unwrap();
-        writeln!(out, "  return {{ body: Views.{view_fn}(records) }};").unwrap();
-    } else {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_ts_show(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let _ = parent;
-    let view_fn = ts_view_fn(model_class, "Show");
-    writeln!(
-        out,
-        "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "  const id = Number(context.params.id);").unwrap();
-        writeln!(out, "  const record = {model_class}.find(id) ?? new {model_class}();").unwrap();
-        writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
-    } else {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-    let _ = resource;
-}
-
-fn emit_ts_new(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-) {
-    let _ = resource;
-    let view_fn = ts_view_fn(model_class, "New");
-    writeln!(
-        out,
-        "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "  const record = new {model_class}();").unwrap();
-        writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
-    } else {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_ts_edit(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let _ = parent;
-    let _ = resource;
-    let view_fn = ts_view_fn(model_class, "Edit");
-    writeln!(
-        out,
-        "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if has_model {
-        writeln!(out, "  const id = Number(context.params.id);").unwrap();
-        writeln!(out, "  const record = {model_class}.find(id) ?? new {model_class}();").unwrap();
-        writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
-    } else {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_ts_create(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    writeln!(
-        out,
-        "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "  const record = new {model_class}();").unwrap();
-    if let Some(parent) = parent {
-        writeln!(
-            out,
-            "  (record as any).{}_id = Number(context.params.{}_id);",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    }
-    for field in permitted {
-        writeln!(
-            out,
-            "  (record as any).{field} = context.params[\"{resource}[{field}]\"] ?? \"\";",
-        )
-        .unwrap();
-    }
-    writeln!(out, "  if (record.save) {{").unwrap();
-    if let Some(parent) = parent {
-        writeln!(
-            out,
-            "    return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-            parent.singular,
-            parent.singular,
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
-        )
-        .unwrap();
-    }
-    writeln!(out, "  }}").unwrap();
-    if let Some(parent) = parent {
-        // Comment scaffold redirects back to parent even on
-        // validation failure (`redirect_to @article, alert: ...`).
-        writeln!(
-            out,
-            "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    } else {
-        let view_fn = ts_view_fn(model_class, "New");
-        writeln!(
-            out,
-            "  return {{ status: 422, body: Views.{view_fn}(record) }};",
-        )
-        .unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_ts_update(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-    permitted: &[String],
-) {
-    let _ = parent;
-    writeln!(
-        out,
-        "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "  const id = Number(context.params.id);").unwrap();
-    writeln!(out, "  const record = {model_class}.find(id) ?? new {model_class}();").unwrap();
-    for field in permitted {
-        writeln!(
-            out,
-            "  if (context.params[\"{resource}[{field}]\"] !== undefined) {{ (record as any).{field} = context.params[\"{resource}[{field}]\"]; }}",
-        )
-        .unwrap();
-    }
-    writeln!(out, "  if (record.save) {{").unwrap();
-    writeln!(
-        out,
-        "    return {{ status: 303, location: routeHelpers.{resource}Path((record as any).id) }};",
-    )
-    .unwrap();
-    writeln!(out, "  }}").unwrap();
-    let edit_view = ts_view_fn(model_class, "Edit");
-    writeln!(
-        out,
-        "  return {{ status: 422, body: Views.{edit_view}(record) }};",
-    )
-    .unwrap();
-    writeln!(out, "}}").unwrap();
-}
-
-fn emit_ts_destroy(
-    out: &mut String,
-    name: &str,
-    resource: &str,
-    model_class: &str,
-    has_model: bool,
-    parent: Option<&crate::lower::NestedParent>,
-) {
-    let _ = resource;
-    writeln!(
-        out,
-        "export async function {name}(context: ActionContext): Promise<ActionResponse> {{",
-    )
-    .unwrap();
-    if !has_model {
-        writeln!(out, "  return {{ body: \"\" }};").unwrap();
-        writeln!(out, "}}").unwrap();
-        return;
-    }
-    writeln!(out, "  const id = Number(context.params.id);").unwrap();
-    writeln!(out, "  const record = {model_class}.find(id);").unwrap();
-    writeln!(out, "  if (record) {{ record.destroy; }}").unwrap();
-    if let Some(parent) = parent {
-        writeln!(
-            out,
-            "  return {{ status: 303, location: routeHelpers.{}Path(Number(context.params.{}_id)) }};",
-            parent.singular, parent.singular,
-        )
-        .unwrap();
-    } else {
-        let plural = crate::naming::pluralize_snake(model_class);
-        writeln!(
-            out,
-            "  return {{ status: 303, location: routeHelpers.{plural}Path() }};",
-        )
-        .unwrap();
-    }
-    writeln!(out, "}}").unwrap();
 }
 
 /// Build a TS view fn name from a model class + action suffix.

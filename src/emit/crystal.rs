@@ -626,225 +626,225 @@ fn emit_controller_pass2(out: &mut String, c: &Controller, app: &App) {
     let permitted = crate::lower::permitted_fields_for(c, &singular)
         .unwrap_or_else(|| crate::lower::default_permitted_fields(app, &model_class));
 
-    let standard = ["index", "show", "new", "edit", "create", "update", "destroy"];
-    for action_name in standard {
-        let declared = c
-            .actions()
-            .any(|a| a.name.as_str() == action_name);
-        if !declared {
+    let _ = resource; // Plural-resource path only appears in destroy's index redirect.
+    for action in c.actions() {
+        let name = action.name.as_str();
+        if !matches!(
+            name,
+            "index" | "show" | "new" | "edit" | "create" | "update" | "destroy"
+        ) {
             continue;
         }
         writeln!(out).unwrap();
-        emit_cr_action_template(
-            out,
-            action_name,
-            &resource,
+        let la = crate::lower::lower_action(
+            name,
             &singular,
             &model_class,
             has_model,
-            parent.as_ref().map(|p| p.singular.as_str()),
+            parent.as_ref(),
             &permitted,
         );
+        emit_cr_action(out, &la);
     }
 
     writeln!(out, "end").unwrap();
 }
 
-fn emit_cr_action_template(
-    out: &mut String,
-    action: &str,
-    resource: &str,
-    singular: &str,
-    model_class: &str,
-    has_model: bool,
-    nested_parent: Option<&str>,
-    permitted: &[String],
-) {
+/// Render one LoweredAction as a Crystal `def self.*`. Crystal-
+/// specific details: `new` action renames to `new_action` (avoids
+/// Crystal's type-level `.new`), `context.params["id"].to_i64` for
+/// integer coercion, `RouteHelpers.*_path` module-level calls for
+/// redirect locations.
+fn emit_cr_action(out: &mut String, la: &crate::lower::LoweredAction) {
+    use crate::lower::ActionKind;
     let response_ty = "Roundhouse::Http::ActionResponse";
     let ctx_ty = "Roundhouse::Http::ActionContext";
-    let action_method_name = match action {
-        // Crystal doesn't reserve `new`, but we keep the module-style
-        // "standard action" keyword even though `new` on a module is
-        // unusual. Use `new_` prefix for the action to avoid Crystal's
-        // type-level `.new`.
+    let action_method_name = match la.name.as_str() {
         "new" => "new_action",
         other => other,
     };
-    writeln!(out, "  def self.{action_method_name}(context : {ctx_ty}) : {response_ty}").unwrap();
+    let model_class = la.model_class.as_str();
+    let singular = la.resource.as_str();
+    writeln!(
+        out,
+        "  def self.{action_method_name}(context : {ctx_ty}) : {response_ty}"
+    )
+    .unwrap();
 
-    let model_class = model_class.to_string();
+    let empty = |out: &mut String| {
+        writeln!(out, "    {response_ty}.new").unwrap();
+    };
 
-    match action {
-        "index" => {
-            if has_model {
+    let find_record = |out: &mut String| {
+        writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
+        writeln!(
+            out,
+            "    record = {model_class}.find(id) || {model_class}.new"
+        )
+        .unwrap();
+    };
+
+    match la.kind {
+        ActionKind::Index => {
+            if la.has_model {
                 writeln!(out, "    records = {model_class}.all").unwrap();
-                let view_fn = cr_view_fn(&model_class, "Index");
+                let view_fn = cr_view_fn(model_class, "Index");
                 writeln!(
                     out,
-                    "    {response_ty}.new(body: Views.{view_fn}(records))",
+                    "    {response_ty}.new(body: Views.{view_fn}(records))"
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
+                empty(out);
             }
         }
-        "show" => {
-            if has_model {
-                writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-                writeln!(out, "    record = {model_class}.find(id) || {model_class}.new").unwrap();
-                let view_fn = cr_view_fn(&model_class, "Show");
+        ActionKind::Show | ActionKind::Edit => {
+            if la.has_model {
+                find_record(out);
+                let suffix = if la.kind == ActionKind::Show { "Show" } else { "Edit" };
+                let view_fn = cr_view_fn(model_class, suffix);
                 writeln!(
                     out,
-                    "    {response_ty}.new(body: Views.{view_fn}(record))",
+                    "    {response_ty}.new(body: Views.{view_fn}(record))"
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
+                empty(out);
             }
         }
-        "new" => {
-            if has_model {
+        ActionKind::New => {
+            if la.has_model {
                 writeln!(out, "    record = {model_class}.new").unwrap();
-                let view_fn = cr_view_fn(&model_class, "New");
+                let view_fn = cr_view_fn(model_class, "New");
                 writeln!(
                     out,
-                    "    {response_ty}.new(body: Views.{view_fn}(record))",
+                    "    {response_ty}.new(body: Views.{view_fn}(record))"
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
+                empty(out);
             }
         }
-        "edit" => {
-            if has_model {
-                writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-                writeln!(out, "    record = {model_class}.find(id) || {model_class}.new").unwrap();
-                let view_fn = cr_view_fn(&model_class, "Edit");
+        ActionKind::Create => {
+            if !la.has_model {
+                empty(out);
+                writeln!(out, "  end").unwrap();
+                return;
+            }
+            writeln!(out, "    record = {model_class}.new").unwrap();
+            if let Some(p) = &la.parent {
                 writeln!(
                     out,
-                    "    {response_ty}.new(body: Views.{view_fn}(record))",
+                    "    record.{0}_id = context.params.fetch(\"{0}_id\", \"0\").to_i64",
+                    p.singular
+                )
+                .unwrap();
+            }
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    record.{field} = context.params.fetch(\"{singular}[{field}]\", \"\")"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    if record.save").unwrap();
+            if let Some(p) = &la.parent {
+                writeln!(
+                    out,
+                    "      return {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(record.{0}_id))",
+                    p.singular
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
+                writeln!(
+                    out,
+                    "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))"
+                )
+                .unwrap();
+            }
+            writeln!(out, "    end").unwrap();
+            if let Some(p) = &la.parent {
+                // Scaffold convention: comments failure still
+                // redirects to parent.
+                writeln!(
+                    out,
+                    "    {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(record.{0}_id))",
+                    p.singular
+                )
+                .unwrap();
+            } else {
+                let view_fn = cr_view_fn(model_class, "New");
+                writeln!(
+                    out,
+                    "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))"
+                )
+                .unwrap();
             }
         }
-        "create" => {
-            if has_model {
-                writeln!(out, "    record = {model_class}.new").unwrap();
-                if let Some(parent) = nested_parent {
-                    // `record.article_id = context.params["article_id"].to_i64`
-                    writeln!(
-                        out,
-                        "    record.{parent}_id = context.params.fetch(\"{parent}_id\", \"0\").to_i64",
-                    )
-                    .unwrap();
-                }
-                for field in permitted {
-                    writeln!(
-                        out,
-                        "    record.{field} = context.params.fetch(\"{resource_singular}[{field}]\", \"\")",
-                        resource_singular = singular,
-                    )
-                    .unwrap();
-                }
-                writeln!(out, "    if record.save").unwrap();
-                if nested_parent.is_some() {
-                    let parent_path = nested_parent.unwrap();
-                    writeln!(
-                        out,
-                        "      return {response_ty}.new(status: 303, location: RouteHelpers.{parent_path}_path(record.{parent_path}_id))",
-                    )
-                    .unwrap();
-                } else {
-                    writeln!(
-                        out,
-                        "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))",
-                    )
-                    .unwrap();
-                }
+        ActionKind::Update => {
+            if !la.has_model {
+                empty(out);
+                writeln!(out, "  end").unwrap();
+                return;
+            }
+            find_record(out);
+            for field in &la.permitted {
+                writeln!(
+                    out,
+                    "    if v = context.params[\"{singular}[{field}]\"]?"
+                )
+                .unwrap();
+                writeln!(out, "      record.{field} = v").unwrap();
                 writeln!(out, "    end").unwrap();
-                // Failure branch: render :new (or redirect to parent show for nested)
-                if let Some(parent) = nested_parent {
-                    // Scaffold convention: comments failure still redirects to parent.
-                    writeln!(
-                        out,
-                        "    {response_ty}.new(status: 303, location: RouteHelpers.{parent}_path(record.{parent}_id))",
-                    )
-                    .unwrap();
-                } else {
-                    let view_fn = cr_view_fn(&model_class, "New");
-                    writeln!(
-                        out,
-                        "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))",
-                    )
-                    .unwrap();
-                }
-            } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
             }
+            writeln!(out, "    if record.save").unwrap();
+            writeln!(
+                out,
+                "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))"
+            )
+            .unwrap();
+            writeln!(out, "    end").unwrap();
+            let view_fn = cr_view_fn(model_class, "Edit");
+            writeln!(
+                out,
+                "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))"
+            )
+            .unwrap();
         }
-        "update" => {
-            if has_model {
-                writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-                writeln!(out, "    record = {model_class}.find(id) || {model_class}.new").unwrap();
-                for field in permitted {
-                    writeln!(
-                        out,
-                        "    if v = context.params[\"{resource_singular}[{field}]\"]?",
-                        resource_singular = singular,
-                    )
-                    .unwrap();
-                    writeln!(out, "      record.{field} = v").unwrap();
-                    writeln!(out, "    end").unwrap();
-                }
-                writeln!(out, "    if record.save").unwrap();
+        ActionKind::Destroy => {
+            if !la.has_model {
+                empty(out);
+                writeln!(out, "  end").unwrap();
+                return;
+            }
+            writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
+            writeln!(out, "    if record = {model_class}.find(id)").unwrap();
+            writeln!(out, "      record.destroy").unwrap();
+            writeln!(out, "    end").unwrap();
+            if let Some(p) = &la.parent {
                 writeln!(
                     out,
-                    "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))",
+                    "    parent_id = context.params.fetch(\"{0}_id\", \"0\").to_i64",
+                    p.singular
                 )
                 .unwrap();
-                writeln!(out, "    end").unwrap();
-                let view_fn = cr_view_fn(&model_class, "Edit");
                 writeln!(
                     out,
-                    "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))",
+                    "    {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(parent_id))",
+                    p.singular
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
+                let plural = crate::naming::pluralize_snake(model_class);
+                writeln!(
+                    out,
+                    "    {response_ty}.new(status: 303, location: RouteHelpers.{plural}_path)"
+                )
+                .unwrap();
             }
         }
-        "destroy" => {
-            if has_model {
-                writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-                writeln!(out, "    if record = {model_class}.find(id)").unwrap();
-                writeln!(out, "      record.destroy").unwrap();
-                writeln!(out, "    end").unwrap();
-                if let Some(parent) = nested_parent {
-                    writeln!(
-                        out,
-                        "    parent_id = context.params.fetch(\"{parent}_id\", \"0\").to_i64",
-                    )
-                    .unwrap();
-                    writeln!(
-                        out,
-                        "    {response_ty}.new(status: 303, location: RouteHelpers.{parent}_path(parent_id))",
-                    )
-                    .unwrap();
-                } else {
-                    writeln!(
-                        out,
-                        "    {response_ty}.new(status: 303, location: RouteHelpers.{resource}_path)",
-                    )
-                    .unwrap();
-                }
-            } else {
-                writeln!(out, "    {response_ty}.new").unwrap();
-            }
-        }
-        _ => {
-            writeln!(out, "    {response_ty}.new").unwrap();
+        ActionKind::Unknown => {
+            empty(out);
         }
     }
 
