@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 
 use crate::App;
-use crate::dialect::{Action, Controller, ControllerBodyItem, RouteSpec};
+use crate::dialect::{Action, Controller, ControllerBodyItem, Filter, FilterKind, RouteSpec};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming;
@@ -725,6 +725,67 @@ pub fn lower_action(
 // These codify Rails semantics (implicit render, before_action
 // callbacks, respond_to dispatch, strong_params) once, so emitters
 // see a normalized body and stay thin.
+
+/// Prepend the body of each applicable `before_action` callback to
+/// `body`. A filter applies when its `only:` list contains
+/// `action_name` (or it has no `only:` and no `except:` match —
+/// i.e. it applies to every action). Multiple applicable filters
+/// prepend in declaration order.
+///
+/// Filters whose target isn't a private method in this controller
+/// (e.g. `authenticate_user` inherited from ApplicationController or
+/// a concern) are dropped with no inlining — matches the current
+/// emit convention of ignoring inherited callbacks, which will
+/// change when the concern-resolution pass arrives.
+///
+/// Target-neutral. Returns a new `Expr`; the input body is untouched.
+pub fn resolve_before_actions(
+    controller: &Controller,
+    action_name: &str,
+    body: &Expr,
+) -> Expr {
+    let applicable: Vec<&Filter> = controller
+        .filters()
+        .filter(|f| matches!(f.kind, FilterKind::Before))
+        .filter(|f| filter_applies(f, action_name))
+        .collect();
+    if applicable.is_empty() {
+        return body.clone();
+    }
+    // Look up each filter's target in the controller's own private
+    // methods (stored as `Action`s after the `PrivateMarker`).
+    // Targets that don't resolve (inherited callbacks) are silently
+    // dropped.
+    let mut prepend: Vec<Expr> = Vec::new();
+    for f in applicable {
+        if let Some(method) = controller.actions().find(|a| a.name == f.target) {
+            prepend.push(method.body.clone());
+        }
+    }
+    if prepend.is_empty() {
+        return body.clone();
+    }
+    match &*body.node {
+        ExprNode::Seq { exprs } => {
+            prepend.extend(exprs.iter().cloned());
+        }
+        _ => prepend.push(body.clone()),
+    }
+    Expr::new(body.span, ExprNode::Seq { exprs: prepend })
+}
+
+/// True when `filter` applies to `action_name` given its `only:` /
+/// `except:` restrictions. Mirrors Rails' semantics: `only` is a
+/// whitelist, `except` is a blacklist, neither means all actions.
+fn filter_applies(filter: &Filter, action_name: &str) -> bool {
+    if !filter.only.is_empty() {
+        return filter.only.iter().any(|s| s.as_str() == action_name);
+    }
+    if !filter.except.is_empty() {
+        return !filter.except.iter().any(|s| s.as_str() == action_name);
+    }
+    true
+}
 
 /// Flatten every `respond_to do |format| ... end` block in `expr`
 /// into just its HTML branch: each `format.html { body }` is

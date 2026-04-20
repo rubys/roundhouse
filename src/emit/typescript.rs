@@ -1011,7 +1011,7 @@ fn emit_controller_file(c: &Controller, known_models: &[Symbol], app: &App) -> E
             parent.as_ref(),
             &permitted,
         );
-        emit_ts_action(&mut s, &la, &action.body, &known_models);
+        emit_ts_action(&mut s, &la, &action.body, known_models, c);
     }
 
     // Namespace object — same shape as before but only public actions.
@@ -1050,6 +1050,7 @@ fn emit_ts_action(
     la: &crate::lower::LoweredAction,
     body: &Expr,
     known_models: &[Symbol],
+    controller: &Controller,
 ) {
     use crate::lower::ActionKind;
     let name = if la.name == "new" { "$new" } else { la.name.as_str() };
@@ -1249,17 +1250,22 @@ fn emit_ts_action(
             };
             // Pre-emit normalization pipeline — each pass is
             // target-neutral and lives in `src/lower/`:
-            //   1. unwrap_respond_to collapses `respond_to {
+            //   1. resolve_before_actions prepends each applicable
+            //      before_action callback's body to the action body,
+            //      so set_article-style ivar population is visible.
+            //   2. unwrap_respond_to collapses `respond_to {
             //      format.html { … } format.json { … } }` into just
             //      its HTML branch (JSON deferred per Phase 4c).
-            //   2. synthesize_implicit_render appends a `render
+            //   3. synthesize_implicit_render appends a `render
             //      :<action>` terminal when the body doesn't end in
             //      one — encodes the Rails implicit-render convention.
-            //   3. rewrite_for_controller lifts ivars to locals and
+            //   4. rewrite_for_controller lifts ivars to locals and
             //      rewrites params[:k] to context.params.k.
             // After this the walker sees a flat, terminal-bearing
             // body with no Rails idioms left.
-            let flattened = crate::lower::unwrap_respond_to(body);
+            let with_callbacks =
+                crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
+            let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
             let normalized =
                 crate::lower::synthesize_implicit_render(&flattened, la.name.as_str());
             let rewritten = rewrite_for_controller(&normalized);

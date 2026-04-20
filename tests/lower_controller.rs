@@ -8,7 +8,10 @@
 
 use roundhouse::expr::{Expr, ExprNode, Literal};
 use roundhouse::ident::Symbol;
-use roundhouse::lower::{has_toplevel_terminal, synthesize_implicit_render, unwrap_respond_to};
+use roundhouse::lower::{
+    has_toplevel_terminal, resolve_before_actions, synthesize_implicit_render,
+    unwrap_respond_to,
+};
 use roundhouse::span::Span;
 
 fn lit_int(n: i64) -> Expr {
@@ -265,6 +268,173 @@ fn unwrap_respond_to_is_noop_without_respond_to_call() {
     ]);
     let out = unwrap_respond_to(&body);
     assert!(matches!(&*out.node, ExprNode::Seq { .. }));
+}
+
+// -- resolve_before_actions -----------------------------------------
+
+fn action(name: &str, body: Expr) -> roundhouse::dialect::Action {
+    use roundhouse::{EffectSet, RenderTarget, Row};
+    roundhouse::dialect::Action {
+        name: Symbol::from(name),
+        params: Row::closed(),
+        body,
+        renders: RenderTarget::Inferred,
+        effects: EffectSet::pure(),
+    }
+}
+
+fn action_item(a: roundhouse::dialect::Action) -> roundhouse::dialect::ControllerBodyItem {
+    roundhouse::dialect::ControllerBodyItem::Action {
+        action: a,
+        leading_comments: vec![],
+        leading_blank_line: false,
+    }
+}
+
+fn filter_item(
+    target: &str,
+    only: &[&str],
+) -> roundhouse::dialect::ControllerBodyItem {
+    use roundhouse::dialect::{Filter, FilterKind};
+    roundhouse::dialect::ControllerBodyItem::Filter {
+        filter: Filter {
+            kind: FilterKind::Before,
+            target: Symbol::from(target),
+            only: only.iter().map(|s| Symbol::from(*s)).collect(),
+            except: vec![],
+            only_style: roundhouse::expr::ArrayStyle::default(),
+            except_style: roundhouse::expr::ArrayStyle::default(),
+        },
+        leading_comments: vec![],
+        leading_blank_line: false,
+    }
+}
+
+fn controller(
+    items: Vec<roundhouse::dialect::ControllerBodyItem>,
+) -> roundhouse::dialect::Controller {
+    use roundhouse::ClassId;
+    roundhouse::dialect::Controller {
+        name: ClassId(Symbol::from("ArticlesController")),
+        parent: None,
+        body: items,
+    }
+}
+
+#[test]
+fn resolve_before_actions_prepends_callback_body() {
+    // `before_action :set_article, only: [:show]` plus a private
+    // `def set_article; @a = 1; end` → show's body gets the
+    // callback body prepended.
+    let ctrl = controller(vec![
+        filter_item("set_article", &["show"]),
+        action_item(action("set_article", lit_int(1))),
+        action_item(action("show", lit_int(2))),
+    ]);
+    let original_show = lit_int(2);
+    let out = resolve_before_actions(&ctrl, "show", &original_show);
+    // Result is a Seq: [callback_body, original_body].
+    let ExprNode::Seq { exprs } = &*out.node else {
+        panic!("expected Seq, got {:?}", out.node);
+    };
+    assert_eq!(exprs.len(), 2);
+    // First statement is the callback body (lit 1).
+    let ExprNode::Lit { value: Literal::Int { value } } = &*exprs[0].node else {
+        panic!("expected int lit, got {:?}", exprs[0].node);
+    };
+    assert_eq!(*value, 1);
+    // Second is the original (lit 2).
+    let ExprNode::Lit { value: Literal::Int { value } } = &*exprs[1].node else {
+        panic!("expected int lit, got {:?}", exprs[1].node);
+    };
+    assert_eq!(*value, 2);
+}
+
+#[test]
+fn resolve_before_actions_skips_non_matching_actions() {
+    // `before_action :set_article, only: [:show]` — create is not
+    // in the only list, so its body is untouched.
+    let ctrl = controller(vec![
+        filter_item("set_article", &["show"]),
+        action_item(action("set_article", lit_int(1))),
+        action_item(action("create", lit_int(99))),
+    ]);
+    let create_body = lit_int(99);
+    let out = resolve_before_actions(&ctrl, "create", &create_body);
+    // No change — still the single lit.
+    assert!(matches!(&*out.node, ExprNode::Lit { .. }));
+}
+
+#[test]
+fn resolve_before_actions_drops_unresolvable_callback() {
+    // `before_action :authenticate_user` with no matching private
+    // method (it's inherited from ApplicationController) — drop
+    // silently; the action body is returned unchanged.
+    let ctrl = controller(vec![
+        filter_item("authenticate_user", &[]),
+        action_item(action("index", lit_int(7))),
+    ]);
+    let index_body = lit_int(7);
+    let out = resolve_before_actions(&ctrl, "index", &index_body);
+    assert!(matches!(&*out.node, ExprNode::Lit { .. }));
+}
+
+#[test]
+fn resolve_before_actions_respects_except_list() {
+    // `before_action :set_x, except: [:index]` — applies to show
+    // but not to index.
+    use roundhouse::dialect::{ControllerBodyItem, Filter, FilterKind};
+    let filter_with_except = ControllerBodyItem::Filter {
+        filter: Filter {
+            kind: FilterKind::Before,
+            target: Symbol::from("set_x"),
+            only: vec![],
+            except: vec![Symbol::from("index")],
+            only_style: roundhouse::expr::ArrayStyle::default(),
+            except_style: roundhouse::expr::ArrayStyle::default(),
+        },
+        leading_comments: vec![],
+        leading_blank_line: false,
+    };
+    let ctrl = controller(vec![
+        filter_with_except,
+        action_item(action("set_x", lit_int(1))),
+        action_item(action("index", lit_int(2))),
+        action_item(action("show", lit_int(3))),
+    ]);
+    // index: except-list excludes it → untouched.
+    let out_index = resolve_before_actions(&ctrl, "index", &lit_int(2));
+    assert!(matches!(&*out_index.node, ExprNode::Lit { .. }));
+    // show: not excluded → prepended.
+    let out_show = resolve_before_actions(&ctrl, "show", &lit_int(3));
+    assert!(matches!(&*out_show.node, ExprNode::Seq { .. }));
+}
+
+#[test]
+fn resolve_before_actions_prepends_in_declaration_order() {
+    // Two applicable before_actions — both prepend, first-declared
+    // ends up at the front.
+    let ctrl = controller(vec![
+        filter_item("cb_a", &["show"]),
+        filter_item("cb_b", &["show"]),
+        action_item(action("cb_a", lit_int(10))),
+        action_item(action("cb_b", lit_int(20))),
+        action_item(action("show", lit_int(30))),
+    ]);
+    let out = resolve_before_actions(&ctrl, "show", &lit_int(30));
+    let ExprNode::Seq { exprs } = &*out.node else {
+        panic!("expected Seq, got {:?}", out.node);
+    };
+    assert_eq!(exprs.len(), 3);
+    // Order: cb_a (10), cb_b (20), original (30).
+    let values: Vec<i64> = exprs
+        .iter()
+        .map(|e| match &*e.node {
+            ExprNode::Lit { value: Literal::Int { value } } => *value,
+            other => panic!("expected int lit, got {:?}", other),
+        })
+        .collect();
+    assert_eq!(values, vec![10, 20, 30]);
 }
 
 #[test]
