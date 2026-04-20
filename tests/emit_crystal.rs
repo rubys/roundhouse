@@ -103,12 +103,17 @@ fn controller_params_coerce_to_int64() {
     let app = analyzed_app();
     let files = crystal::emit(&app);
     let content = find(&files, "src/controllers.cr");
-    // Pass-2: path ids come through `context.params["id"]` as a
-    // String and coerce to Int64 at the top of show/edit/update/
-    // destroy. Downstream model calls (`Post.find(id)`) use the
-    // typed local.
+    // Walker path: `params[:id]` renders inline as
+    // `context.params["id"].to_i64` at the ModelFind call site.
+    // The prior scaffold template introduced an intermediate
+    // `id = ...` binding; the walker doesn't, but the runtime
+    // behavior matches.
     assert!(
-        content.contains("id = context.params[\"id\"].to_i64"),
+        content.contains("context.params[\"id\"].to_i64"),
+        "got:\n{content}"
+    );
+    assert!(
+        content.contains("Post.find(context.params[\"id\"].to_i64)"),
         "got:\n{content}"
     );
 }

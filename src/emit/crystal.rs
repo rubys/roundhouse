@@ -644,211 +644,355 @@ fn emit_controller_pass2(out: &mut String, c: &Controller, app: &App) {
             parent.as_ref(),
             &permitted,
         );
-        emit_cr_action(out, &la);
+        emit_cr_action(out, &la, &action.body, &known_models, c);
     }
 
     writeln!(out, "end").unwrap();
 }
 
-/// Render one LoweredAction as a Crystal `def self.*`. Crystal-
-/// specific details: `new` action renames to `new_action` (avoids
-/// Crystal's type-level `.new`), `context.params["id"].to_i64` for
-/// integer coercion, `RouteHelpers.*_path` module-level calls for
-/// redirect locations.
-fn emit_cr_action(out: &mut String, la: &crate::lower::LoweredAction) {
-    use crate::lower::ActionKind;
+/// Render one LoweredAction as a Crystal `def self.*`. Crystal's
+/// `new` action renames to `new_action` (avoids collision with
+/// Crystal's type-level `.new`). Body emission delegates to the
+/// walker; the ActionKind dispatch is gone (TS/Rust/Python precedent).
+fn emit_cr_action(
+    out: &mut String,
+    la: &crate::lower::LoweredAction,
+    body: &Expr,
+    known_models: &[Symbol],
+    controller: &Controller,
+) {
     let response_ty = "Roundhouse::Http::ActionResponse";
     let ctx_ty = "Roundhouse::Http::ActionContext";
     let action_method_name = match la.name.as_str() {
         "new" => "new_action",
         other => other,
     };
-    let model_class = la.model_class.as_str();
-    let singular = la.resource.as_str();
-    writeln!(
-        out,
-        "  def self.{action_method_name}(context : {ctx_ty}) : {response_ty}"
-    )
-    .unwrap();
 
-    let empty = |out: &mut String| {
-        writeln!(out, "    {response_ty}.new").unwrap();
-    };
-
-    let find_record = |out: &mut String| {
-        writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-        writeln!(
-            out,
-            "    record = {model_class}.find(id) || {model_class}.new"
-        )
-        .unwrap();
-    };
-
-    match la.kind {
-        ActionKind::Index => {
-            if la.has_model {
-                writeln!(out, "    records = {model_class}.all").unwrap();
-                let view_fn = cr_view_fn(model_class, "Index");
-                writeln!(
-                    out,
-                    "    {response_ty}.new(body: Views.{view_fn}(records))"
-                )
-                .unwrap();
-            } else {
-                empty(out);
-            }
-        }
-        ActionKind::Show | ActionKind::Edit => {
-            if la.has_model {
-                find_record(out);
-                let suffix = if la.kind == ActionKind::Show { "Show" } else { "Edit" };
-                let view_fn = cr_view_fn(model_class, suffix);
-                writeln!(
-                    out,
-                    "    {response_ty}.new(body: Views.{view_fn}(record))"
-                )
-                .unwrap();
-            } else {
-                empty(out);
-            }
-        }
-        ActionKind::New => {
-            if la.has_model {
-                writeln!(out, "    record = {model_class}.new").unwrap();
-                let view_fn = cr_view_fn(model_class, "New");
-                writeln!(
-                    out,
-                    "    {response_ty}.new(body: Views.{view_fn}(record))"
-                )
-                .unwrap();
-            } else {
-                empty(out);
-            }
-        }
-        ActionKind::Create => {
-            if !la.has_model {
-                empty(out);
-                writeln!(out, "  end").unwrap();
-                return;
-            }
-            writeln!(out, "    record = {model_class}.new").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "    record.{0}_id = context.params.fetch(\"{0}_id\", \"0\").to_i64",
-                    p.singular
-                )
-                .unwrap();
-            }
-            for field in &la.permitted {
-                writeln!(
-                    out,
-                    "    record.{field} = context.params.fetch(\"{singular}[{field}]\", \"\")"
-                )
-                .unwrap();
-            }
-            writeln!(out, "    if record.save").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "      return {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(record.{0}_id))",
-                    p.singular
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    out,
-                    "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))"
-                )
-                .unwrap();
-            }
-            writeln!(out, "    end").unwrap();
-            if let Some(p) = &la.parent {
-                // Scaffold convention: comments failure still
-                // redirects to parent.
-                writeln!(
-                    out,
-                    "    {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(record.{0}_id))",
-                    p.singular
-                )
-                .unwrap();
-            } else {
-                let view_fn = cr_view_fn(model_class, "New");
-                writeln!(
-                    out,
-                    "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))"
-                )
-                .unwrap();
-            }
-        }
-        ActionKind::Update => {
-            if !la.has_model {
-                empty(out);
-                writeln!(out, "  end").unwrap();
-                return;
-            }
-            find_record(out);
-            for field in &la.permitted {
-                writeln!(
-                    out,
-                    "    if v = context.params[\"{singular}[{field}]\"]?"
-                )
-                .unwrap();
-                writeln!(out, "      record.{field} = v").unwrap();
-                writeln!(out, "    end").unwrap();
-            }
-            writeln!(out, "    if record.save").unwrap();
-            writeln!(
-                out,
-                "      return {response_ty}.new(status: 303, location: RouteHelpers.{singular}_path(record.id))"
-            )
-            .unwrap();
-            writeln!(out, "    end").unwrap();
-            let view_fn = cr_view_fn(model_class, "Edit");
-            writeln!(
-                out,
-                "    {response_ty}.new(status: 422, body: Views.{view_fn}(record))"
-            )
-            .unwrap();
-        }
-        ActionKind::Destroy => {
-            if !la.has_model {
-                empty(out);
-                writeln!(out, "  end").unwrap();
-                return;
-            }
-            writeln!(out, "    id = context.params[\"id\"].to_i64").unwrap();
-            writeln!(out, "    if record = {model_class}.find(id)").unwrap();
-            writeln!(out, "      record.destroy").unwrap();
-            writeln!(out, "    end").unwrap();
-            if let Some(p) = &la.parent {
-                writeln!(
-                    out,
-                    "    parent_id = context.params.fetch(\"{0}_id\", \"0\").to_i64",
-                    p.singular
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "    {response_ty}.new(status: 303, location: RouteHelpers.{0}_path(parent_id))",
-                    p.singular
-                )
-                .unwrap();
-            } else {
-                let plural = crate::naming::pluralize_snake(model_class);
-                writeln!(
-                    out,
-                    "    {response_ty}.new(status: 303, location: RouteHelpers.{plural}_path)"
-                )
-                .unwrap();
-            }
-        }
-        ActionKind::Unknown => {
-            empty(out);
-        }
+    let mut body_src = String::new();
+    let mut uses_context = false;
+    if la.has_model {
+        let normalized =
+            crate::lower::normalize_action_body(controller, la.name.as_str(), body);
+        let ctx = CrActionCtx {
+            known_models,
+            model_class: la.model_class.as_str(),
+            resource: la.resource.as_str(),
+            parent: la.parent.as_ref(),
+            permitted: &la.permitted,
+        };
+        let mut state = CrActionState::new();
+        emit_cr_ctrl_stmt(&normalized, &mut body_src, &ctx, 1, &mut state);
+        uses_context = state.uses_context;
+    } else {
+        writeln!(body_src, "  {response_ty}.new").unwrap();
     }
 
+    let ctx_param = if uses_context || body_src.contains("context") {
+        "context"
+    } else {
+        "_context"
+    };
+    writeln!(
+        out,
+        "  def self.{action_method_name}({ctx_param} : {ctx_ty}) : {response_ty}"
+    )
+    .unwrap();
+    out.push_str(&body_src);
     writeln!(out, "  end").unwrap();
+}
+
+struct CrActionCtx<'a> {
+    known_models: &'a [Symbol],
+    model_class: &'a str,
+    resource: &'a str,
+    parent: Option<&'a crate::lower::NestedParent>,
+    permitted: &'a [String],
+}
+
+struct CrActionState {
+    uses_context: bool,
+    last_local: Option<String>,
+}
+
+impl CrActionState {
+    fn new() -> Self { Self { uses_context: false, last_local: None } }
+}
+
+fn emit_cr_ctrl_stmt(
+    expr: &Expr,
+    out: &mut String,
+    ctx: &CrActionCtx<'_>,
+    depth: usize,
+    state: &mut CrActionState,
+) {
+    let indent = "  ".repeat(depth);
+    match &*expr.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                emit_cr_ctrl_stmt(e, out, ctx, depth, state);
+            }
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if let Some(class) = crate::lower::model_new_with_strong_params(
+                value, ctx.known_models, ctx.resource,
+            ) {
+                emit_cr_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
+            } else {
+                let rhs = emit_cr_ctrl_expr(value, ctx, state);
+                writeln!(out, "{indent}{name} = {rhs}").unwrap();
+            }
+            state.last_local = Some(name.as_str().to_string());
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
+                let recv_s = emit_cr_ctrl_expr(recv, ctx, state);
+                emit_cr_update_field_assigns(out, &recv_s, &indent, ctx, state);
+                writeln!(out, "{indent}if {recv_s}.save").unwrap();
+                emit_cr_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !crate::lower::is_empty_body(else_branch) {
+                    writeln!(out, "{indent}else").unwrap();
+                    emit_cr_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}end").unwrap();
+            } else {
+                let cond_s = emit_cr_ctrl_expr(cond, ctx, state);
+                writeln!(out, "{indent}if {cond_s}").unwrap();
+                emit_cr_ctrl_stmt(then_branch, out, ctx, depth + 1, state);
+                if !crate::lower::is_empty_body(else_branch) {
+                    writeln!(out, "{indent}else").unwrap();
+                    emit_cr_ctrl_stmt(else_branch, out, ctx, depth + 1, state);
+                }
+                writeln!(out, "{indent}end").unwrap();
+            }
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
+            match emit_cr_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+                Some(CrCtrlStmt::Response(r)) => writeln!(out, "{indent}{r}").unwrap(),
+                Some(CrCtrlStmt::Expr(s)) => writeln!(out, "{indent}{s}").unwrap(),
+                None => {
+                    let s = emit_cr_ctrl_expr(expr, ctx, state);
+                    writeln!(out, "{indent}{s}").unwrap();
+                }
+            }
+        }
+        _ => {
+            let s = emit_cr_ctrl_expr(expr, ctx, state);
+            if !s.is_empty() {
+                writeln!(out, "{indent}{s}").unwrap();
+            }
+        }
+    }
+}
+
+fn emit_cr_ctrl_expr(expr: &Expr, ctx: &CrActionCtx<'_>, state: &mut CrActionState) -> String {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+        if let Some(stmt) = emit_cr_ctrl_send(recv.as_ref(), method.as_str(), args, block.as_ref(), ctx, state) {
+            return match stmt { CrCtrlStmt::Response(r) => r, CrCtrlStmt::Expr(s) => s };
+        }
+        let args_s: Vec<String> = args.iter().map(|a| emit_cr_ctrl_expr(a, ctx, state)).collect();
+        return match recv {
+            None if args.is_empty() => method.to_string(),
+            None => format!("{method}({})", args_s.join(", ")),
+            Some(r) => {
+                let recv_s = emit_cr_ctrl_expr(r, ctx, state);
+                if args.is_empty() {
+                    format!("{recv_s}.{method}")
+                } else {
+                    format!("{recv_s}.{method}({})", args_s.join(", "))
+                }
+            }
+        };
+    }
+    if let ExprNode::Ivar { name } = &*expr.node {
+        return name.to_string();
+    }
+    emit_expr(expr)
+}
+
+enum CrCtrlStmt { Response(String), Expr(String) }
+
+fn emit_cr_ctrl_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    ctx: &CrActionCtx<'_>,
+    state: &mut CrActionState,
+) -> Option<CrCtrlStmt> {
+    use crate::lower::SendKind;
+    let kind = crate::lower::classify_controller_send(recv, method, args, block, ctx.known_models)?;
+    Some(match kind {
+        SendKind::ParamsAccess => {
+            state.uses_context = true;
+            CrCtrlStmt::Expr("context.params".to_string())
+        }
+        SendKind::ParamsIndex { key } => {
+            state.uses_context = true;
+            let s = match &*key.node {
+                ExprNode::Lit { value: Literal::Sym { value: k } } => {
+                    format!("context.params[\"{}\"].to_i64", k.as_str())
+                }
+                _ => {
+                    let k = emit_cr_ctrl_expr(key, ctx, state);
+                    format!("context.params[{k}]")
+                }
+            };
+            CrCtrlStmt::Expr(s)
+        }
+        SendKind::ParamsExpect { args: pe_args } => {
+            state.uses_context = true;
+            let s = match pe_args.first().map(|e| &*e.node) {
+                Some(ExprNode::Lit { value: Literal::Sym { value: k } }) => {
+                    format!("context.params[\"{}\"].to_i64", k.as_str())
+                }
+                _ => "context.params # TODO: params.expect hash".to_string(),
+            };
+            CrCtrlStmt::Expr(s)
+        }
+        SendKind::ModelNew { class } => CrCtrlStmt::Expr(format!("{}.new", class.as_str())),
+        SendKind::ModelFind { class, id } => {
+            let id_s = emit_cr_ctrl_expr(id, ctx, state);
+            CrCtrlStmt::Expr(format!("{}.find({id_s}) || {}.new", class.as_str(), class.as_str()))
+        }
+        SendKind::QueryChain { target: Some(target) } => {
+            CrCtrlStmt::Expr(format!("{}.all", target.as_str()))
+        }
+        SendKind::QueryChain { target: None } => CrCtrlStmt::Expr("[] of String".to_string()),
+        SendKind::AssocLookup { target, outer_method } => match outer_method {
+            "find" => {
+                let id_s = args.first().map(|a| emit_cr_ctrl_expr(a, ctx, state))
+                    .unwrap_or_else(|| "0_i64".to_string());
+                CrCtrlStmt::Expr(format!("{}.find({id_s}) || {}.new", target.as_str(), target.as_str()))
+            }
+            _ => CrCtrlStmt::Expr(format!("{}.new", target.as_str())),
+        },
+        // Crystal accepts the bang — SendKind::BangStrip docs note
+        // Crystal bypasses this variant. If we hit it (shouldn't,
+        // per the classifier's own documentation), emit without
+        // parens to match Crystal's reader-call convention.
+        SendKind::BangStrip { recv, stripped_method, args: bs_args } => {
+            let recv_s = emit_cr_ctrl_expr(recv, ctx, state);
+            if bs_args.is_empty() {
+                CrCtrlStmt::Expr(format!("{recv_s}.{stripped_method}"))
+            } else {
+                let args_s: Vec<String> =
+                    bs_args.iter().map(|a| emit_cr_ctrl_expr(a, ctx, state)).collect();
+                CrCtrlStmt::Expr(format!("{recv_s}.{stripped_method}({})", args_s.join(", ")))
+            }
+        }
+        SendKind::InstanceUpdate => CrCtrlStmt::Expr("false".to_string()),
+        SendKind::PathOrUrlHelper => {
+            let helper = method.strip_suffix("_path").or_else(|| method.strip_suffix("_url"))
+                .unwrap_or(method);
+            CrCtrlStmt::Expr(format!("RouteHelpers.{helper}_path"))
+        }
+        SendKind::Render { args } => CrCtrlStmt::Response(emit_cr_render(args, ctx, state)),
+        SendKind::RedirectTo { args } => CrCtrlStmt::Response(emit_cr_redirect_to(args, ctx, state)),
+        SendKind::Head { args } => {
+            let status = args.first().and_then(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value: s } } =>
+                    Some(crate::lower::status_sym_to_code(s.as_str())),
+                ExprNode::Lit { value: Literal::Int { value: n } } => Some(*n as u16),
+                _ => None,
+            }).unwrap_or(200);
+            CrCtrlStmt::Response(format!(
+                "Roundhouse::Http::ActionResponse.new(status: {status})"
+            ))
+        }
+        SendKind::RespondToBlock { .. }
+        | SendKind::FormatHtml { .. }
+        | SendKind::FormatJson => CrCtrlStmt::Expr(
+            "Roundhouse::Http::ActionResponse.new # unreachable: respond_to not normalized".to_string(),
+        ),
+    })
+}
+
+fn emit_cr_render(args: &[Expr], ctx: &CrActionCtx<'_>, state: &mut CrActionState) -> String {
+    let response_ty = "Roundhouse::Http::ActionResponse";
+    if let Some(first) = args.first() {
+        if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
+            // cr_view_fn lowercases the suffix via `suffix.to_lowercase()`,
+            // so the casing here doesn't matter — pass the raw symbol.
+            let view_fn = cr_view_fn(ctx.model_class, sym.as_str());
+            let arg = state.last_local.clone().unwrap_or_else(|| "nil".to_string());
+            let body_part = format!("body: Views.{view_fn}({arg})");
+            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
+                Some(status) => format!("{response_ty}.new(status: {status}, {body_part})"),
+                None => format!("{response_ty}.new({body_part})"),
+            };
+        }
+        let body_s = emit_cr_ctrl_expr(first, ctx, state);
+        return format!("{response_ty}.new(body: {body_s})");
+    }
+    format!("{response_ty}.new")
+}
+
+fn emit_cr_redirect_to(args: &[Expr], ctx: &CrActionCtx<'_>, state: &mut CrActionState) -> String {
+    let response_ty = "Roundhouse::Http::ActionResponse";
+    let Some(first) = args.first() else {
+        return format!("{response_ty}.new(status: 303)");
+    };
+    let loc = emit_cr_ctrl_expr(first, ctx, state);
+    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+    if is_bare_cr_ident(&loc) {
+        let helper = format!("RouteHelpers.{loc}_path");
+        let id_access = format!("{loc}.id");
+        return format!("{response_ty}.new(status: {status}, location: {helper}({id_access}))");
+    }
+    format!("{response_ty}.new(status: {status}, location: {loc})")
+}
+
+fn emit_cr_create_expansion(
+    out: &mut String,
+    var_name: &str,
+    class: &str,
+    indent: &str,
+    ctx: &CrActionCtx<'_>,
+    state: &mut CrActionState,
+) {
+    writeln!(out, "{indent}{var_name} = {class}.new").unwrap();
+    if let Some(parent) = ctx.parent {
+        writeln!(
+            out,
+            "{indent}{var_name}.{0}_id = context.params.fetch(\"{0}_id\", \"0\").to_i64",
+            parent.singular,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+    for field in ctx.permitted {
+        writeln!(
+            out,
+            "{indent}{var_name}.{field} = context.params.fetch(\"{}[{field}]\", \"\")",
+            ctx.resource,
+        )
+        .unwrap();
+        state.uses_context = true;
+    }
+}
+
+fn emit_cr_update_field_assigns(
+    out: &mut String,
+    recv_s: &str,
+    indent: &str,
+    ctx: &CrActionCtx<'_>,
+    state: &mut CrActionState,
+) {
+    for field in ctx.permitted {
+        writeln!(out, "{indent}if v = context.params[\"{}[{field}]\"]?", ctx.resource).unwrap();
+        writeln!(out, "{indent}  {recv_s}.{field} = v").unwrap();
+        writeln!(out, "{indent}end").unwrap();
+        state.uses_context = true;
+    }
+}
+
+fn is_bare_cr_ident(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return false; }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first == b'_') { return false; }
+    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 
