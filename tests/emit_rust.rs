@@ -329,15 +329,15 @@ use crate::route_helpers;
 use crate::views;
 
 pub async fn index() -> Response {
-    let records: Vec<Post> = Post::all();
-    http::html(views::posts_index(&records)).into_response()
+    let mut posts = Post::all();
+    http::html(views::posts_index(&posts)).into_response()
 }
 
 pub async fn show(
     Path(id): Path<i64>,
 ) -> Response {
-    let record = Post::find(id).unwrap_or_default();
-    http::html(views::posts_show(&record)).into_response()
+    let mut post = Post::find(id).unwrap_or_default();
+    http::html(views::posts_show(&post)).into_response()
 }
 
 pub async fn create(
@@ -345,21 +345,22 @@ pub async fn create(
 ) -> Response {
     let p = Params::new(form);
     let fields = p.expect(\"post\", &[\"title\"]);
-    let mut record = Post {
+    let mut post = Post {
         title: fields.get(\"title\").cloned().unwrap_or_default(),
         ..Default::default()
     };
-    if record.save() {
-        http::redirect(&route_helpers::post_path(record.id)).into_response()
+    if post.save() {
+        http::redirect(&route_helpers::post_path(post.id)).into_response()
     } else {
-        http::unprocessable(views::posts_new(&record)).into_response()
+        http::html(views::posts_new(&post)).into_response()
     }
 }
 
 pub async fn destroy(
     Path(id): Path<i64>,
 ) -> Response {
-    if let Some(record) = Post::find(id) { record.destroy(); }
+    let mut post = Post::find(id).unwrap_or_default();
+    post.destroy();
     http::redirect(&route_helpers::posts_path()).into_response()
 }
 ";
