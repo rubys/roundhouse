@@ -476,8 +476,13 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/articles_controller.ts");
     // `render :show` → typed view fn lookup against the model class.
+    // The body has no prior Assign, so the walker passes the
+    // undefined-as-any fallback for the view fn's positional arg —
+    // a degenerate shape that tsc accepts and that real controllers
+    // (which bind a record via before_action or explicit assign)
+    // never hit.
     assert!(
-        content.contains("return { body: Views.renderArticlesShow(record) };"),
+        content.contains("return { body: Views.renderArticlesShow(undefined as any) };"),
         "preview body should render via Views.renderArticlesShow, got:\n{content}"
     );
     // `redirect_to articles_path` → PathOrUrlHelper → routeHelpers
@@ -491,6 +496,102 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
     assert!(
         !content.contains("return { status: 501 }"),
         "Unknown path should walk body, not emit 501 stub, got:\n{content}"
+    );
+}
+
+#[test]
+fn walker_passes_last_bound_local_to_view_fn() {
+    // A custom action whose body binds a local before rendering
+    // — the walker should pass *that* local to the view fn, not
+    // the legacy hardcoded `record`. Proves the last-local state
+    // threading works end-to-end; required before the scaffold
+    // Show / New / Edit / Index arms can cut over to the walker.
+    use roundhouse::{
+        Action, ClassId, Controller, ControllerBodyItem, EffectSet, Expr, ExprNode, LValue,
+        Literal, RenderTarget, Row, Symbol,
+    };
+    use roundhouse::ident::{TableRef, VarId};
+    use roundhouse::span::Span;
+    use roundhouse::Model;
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+    // Body: `article = Article.find(1); render :show` — the first
+    // statement binds `article`, the second terminals on `render`.
+    let article_assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("article") },
+            value: send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Article")] },
+                )),
+                "find",
+                vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Int { value: 1 } },
+                )],
+            ),
+        },
+    );
+    let render_call = send(
+        None,
+        "render",
+        vec![Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("show") } },
+        )],
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq { exprs: vec![article_assign, render_call] },
+    );
+
+    let mut app = roundhouse::App::new();
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![],
+    });
+    app.controllers.push(Controller {
+        name: ClassId(Symbol::from("ArticlesController")),
+        parent: None,
+        body: vec![ControllerBodyItem::Action {
+            action: Action {
+                name: Symbol::from("pinned"),
+                params: Row::closed(),
+                body,
+                renders: RenderTarget::Inferred,
+                effects: EffectSet::pure(),
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/articles_controller.ts");
+    // Walker threads `article` (the locally-bound name) into the
+    // view fn call — *not* the scaffold's legacy `record`.
+    assert!(
+        content.contains("Views.renderArticlesShow(article)"),
+        "walker should pass last-bound local `article`, got:\n{content}"
+    );
+    // And sanity: the Assign emitted as a `const` binding.
+    assert!(
+        content.contains("const article = (Article.find(1) ?? new Article());"),
+        "expected const binding for `article`, got:\n{content}"
     );
 }
 
@@ -649,8 +750,10 @@ fn custom_action_without_terminal_gets_implicit_render() {
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/articles_controller.ts");
     // Synthesized terminal becomes the view fn keyed by action name.
+    // No prior Assign → `undefined as any` fallback (same rationale
+    // as custom_action_body_walks_through_sendkind_dispatch).
     assert!(
-        content.contains("return { body: Views.renderArticlesHeadline(record) };"),
+        content.contains("return { body: Views.renderArticlesHeadline(undefined as any) };"),
         "implicit render should synthesize Views.renderArticlesHeadline, got:\n{content}"
     );
     // No empty-body fallback — the lowering pass makes it unnecessary.
