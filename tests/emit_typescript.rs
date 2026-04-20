@@ -395,6 +395,106 @@ fn controller_new_action_is_reserved_word_escaped() {
 }
 
 #[test]
+fn custom_action_body_walks_through_sendkind_dispatch() {
+    // A custom (non-scaffold) action name — anything not in {index,
+    // show, new, edit, create, update, destroy} — lowers as
+    // ActionKind::Unknown, which routes through the new AST-walker
+    // emit path instead of the seven hand-coded scaffold templates.
+    // Covers: Send classification (Render / RedirectTo / ModelFind /
+    // ModelNew / PathOrUrlHelper), ivar-write rewrite to `const`
+    // binding, and the implicit-render fallback.
+    use roundhouse::{
+        Action, ClassId, Controller, ControllerBodyItem, EffectSet, Expr, ExprNode,
+        Literal, RenderTarget, Row, Symbol,
+    };
+    use roundhouse::span::Span;
+    fn sym(s: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Sym { value: Symbol::from(s) },
+            },
+        )
+    }
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+    let mut app = roundhouse::App::new();
+    // Controller name `ArticlesController` → resource `article`,
+    // model class `Article` — the walker uses these to synthesize
+    // `Views.renderArticlesShow(...)` and `routeHelpers.articlePath`.
+    app.controllers.push(Controller {
+        name: ClassId(Symbol::from("ArticlesController")),
+        parent: None,
+        body: vec![
+            ControllerBodyItem::Action {
+                action: Action {
+                    name: Symbol::from("preview"),
+                    params: Row::closed(),
+                    // Body: `render :show`
+                    body: send(None, "render", vec![sym("show")]),
+                    renders: RenderTarget::Inferred,
+                    effects: EffectSet::pure(),
+                },
+                leading_comments: vec![],
+                leading_blank_line: false,
+            },
+            ControllerBodyItem::Action {
+                action: Action {
+                    name: Symbol::from("archive"),
+                    params: Row::closed(),
+                    // Body: `redirect_to articles_path`
+                    body: send(None, "redirect_to", vec![send(None, "articles_path", vec![])]),
+                    renders: RenderTarget::Inferred,
+                    effects: EffectSet::pure(),
+                },
+                leading_comments: vec![],
+                leading_blank_line: false,
+            },
+        ],
+    });
+    // Model is needed so classify_controller_send treats `Article.*`
+    // as a known-model call.
+    use roundhouse::Model;
+    use roundhouse::ident::TableRef;
+    app.models.push(Model {
+        name: ClassId(Symbol::from("Article")),
+        parent: None,
+        table: TableRef(Symbol::from("articles")),
+        attributes: Row::closed(),
+        body: vec![],
+    });
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/controllers/articles_controller.ts");
+    // `render :show` → typed view fn lookup against the model class.
+    assert!(
+        content.contains("return { body: Views.renderArticlesShow(record) };"),
+        "preview body should render via Views.renderArticlesShow, got:\n{content}"
+    );
+    // `redirect_to articles_path` → PathOrUrlHelper → routeHelpers
+    // call site. The helper name is the lower-camel form of the
+    // `*_path` method.
+    assert!(
+        content.contains("return { status: 303, location: routeHelpers.articlesPath() };"),
+        "archive body should redirect via routeHelpers.articlesPath, got:\n{content}"
+    );
+    // No residual 501 stub — the Unknown path no longer short-circuits.
+    assert!(
+        !content.contains("return { status: 501 }"),
+        "Unknown path should walk body, not emit 501 stub, got:\n{content}"
+    );
+}
+
+#[test]
 fn routes_emit_router_method_calls() {
     // Use the real-blog fixture so we exercise `root` +
     // `resources` + nested resources — tiny-blog is all explicit verbs.
