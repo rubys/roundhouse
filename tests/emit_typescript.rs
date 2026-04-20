@@ -331,12 +331,14 @@ fn controller_ivar_writes_become_let_rebinds() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/posts_controller.ts");
-    // Pass-2: `index` uses the template-per-action shape.
-    // `@posts = Post.all` becomes `const records = Post.all();`
-    // — ivars bind as locals; the query chain hits the real
-    // Juntos runtime (ApplicationRecord.all()).
+    // Walker path: `@posts = Post.all` becomes `const posts =
+    // Post.all();` — ivar-to-local rewrite preserves the ivar's
+    // name, and the query chain collapses to `.all()` against the
+    // Juntos runtime. (The prior scaffold template hardcoded a
+    // `records` local; the walker tracks the real name so the
+    // implicit-render path can thread it into the view fn.)
     assert!(
-        content.contains("const records = Post.all();"),
+        content.contains("const posts = Post.all();"),
         "got:\n{content}"
     );
     assert!(!content.contains("@posts"), "should drop @:\n{content}");

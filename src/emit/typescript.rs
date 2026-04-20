@@ -1068,19 +1068,17 @@ fn emit_ts_action(
 
     match la.kind {
         ActionKind::Index => {
-            let view_fn = ts_view_fn(model_class, "Index");
-            writeln!(
-                out,
-                "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
             if la.has_model {
-                writeln!(out, "  const records = {model_class}.all();").unwrap();
-                writeln!(out, "  return {{ body: Views.{view_fn}(records) }};").unwrap();
+                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
             } else {
+                writeln!(
+                    out,
+                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
+                )
+                .unwrap();
                 writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
             }
-            writeln!(out, "}}").unwrap();
         }
         ActionKind::Show | ActionKind::Edit => {
             // Migrated to the walker path — the normalization
@@ -1102,19 +1100,17 @@ fn emit_ts_action(
             }
         }
         ActionKind::New => {
-            let view_fn = ts_view_fn(model_class, "New");
-            writeln!(
-                out,
-                "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
-            )
-            .unwrap();
             if la.has_model {
-                writeln!(out, "  const record = new {model_class}();").unwrap();
-                writeln!(out, "  return {{ body: Views.{view_fn}(record) }};").unwrap();
+                emit_ts_action_via_walker(out, la, body, known_models, controller, name);
             } else {
+                writeln!(
+                    out,
+                    "export async function {name}(_context: ActionContext): Promise<ActionResponse> {{",
+                )
+                .unwrap();
                 writeln!(out, "  return {{ body: \"\" }};").unwrap();
+                writeln!(out, "}}").unwrap();
             }
-            writeln!(out, "}}").unwrap();
         }
         ActionKind::Create => {
             writeln!(
@@ -1478,10 +1474,17 @@ fn emit_ts_controller_send(
             target.as_str()
         )),
         SendKind::QueryChain { target: Some(target) } => {
-            ControllerStmt::Expr(format!("[] as {}[]", target.as_str()))
+            // Collapse every `.all/.includes/.order/.where/...` chain
+            // to `Model.all()` — the Juntos runtime exposes `all()`
+            // on every `ApplicationRecord` subclass. More specific
+            // chain shapes (`.includes(:comments)`, `.order(...)`)
+            // aren't yet in the runtime; the scaffold template did
+            // the same collapse, so the walker matches its
+            // behavior on real-blog.
+            ControllerStmt::Expr(format!("{}.all()", target.as_str()))
         }
         SendKind::QueryChain { target: None } => {
-            ControllerStmt::Expr("[] /* TODO: query chain */".to_string())
+            ControllerStmt::Expr("[] /* TODO: unresolved query chain */".to_string())
         }
         SendKind::PathOrUrlHelper => ControllerStmt::Expr(format!(
             "routeHelpers.{}()",
