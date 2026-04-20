@@ -49,6 +49,20 @@ export interface DependentChild {
   targetName: string;
 }
 
+/** Signature for the server-side broadcaster. The server installs
+ *  one via `setBroadcaster` when it's ready to forward fragments to
+ *  subscribed Action Cable clients. Test mode leaves it null so
+ *  broadcasts become no-ops. */
+export type Broadcaster = (stream: string, html: string) => void;
+
+let broadcaster: Broadcaster | null = null;
+
+/** Install the broadcaster. Called by the HTTP server's cable
+ *  handler once the WebSocket is ready to forward fragments. */
+export function setBroadcaster(fn: Broadcaster | null): void {
+  broadcaster = fn;
+}
+
 export class ApplicationRecord {
   // Metadata subclasses populate. Defaults keep the base class usable
   // on its own in tests that only exercise validation.
@@ -56,14 +70,20 @@ export class ApplicationRecord {
   static columns: string[] = [];
   static belongsToChecks: BelongsToCheck[] = [];
   static dependentChildren: DependentChild[] = [];
+  /** Renders this record as a partial HTML fragment. Set by the
+   *  emitter after loading the model's `_record.html.ts` partial:
+   *  `Model.renderPartial = render`. Broadcasts use this to produce
+   *  the `<template>` contents for append/prepend/replace actions. */
+  static renderPartial: ((record: any) => string) | null = null;
 
   id: number = 0;
   errors: ErrorCollection = new ErrorCollection();
 
   /** Rails-semantics `save`: runs validations (and belongs_to
    *  existence checks) first; on success, INSERTs when `id === 0`
-   *  otherwise UPDATEs. Exposed as a getter to match Juntos's
-   *  property-style API. */
+   *  otherwise UPDATEs. Fires afterCreate (for new records) or
+   *  afterUpdate (for existing), then afterSave + afterCommit.
+   *  Exposed as a getter to match Juntos's property-style API. */
   get save(): boolean {
     this.errors = new ErrorCollection();
     this.validate();
@@ -84,7 +104,8 @@ export class ApplicationRecord {
     const placeholders = cols.map(() => "?").join(", ");
     const values = cols.map((c) => (this as any)[c]);
 
-    if (this.id === 0) {
+    const isNewRecord = this.id === 0;
+    if (isNewRecord) {
       const sql = `INSERT INTO ${cls.table_name} (${cols.join(", ")}) VALUES (${placeholders})`;
       const info = db.prepare(sql).run(...values);
       this.id = Number(info.lastInsertRowid);
@@ -93,11 +114,19 @@ export class ApplicationRecord {
       const sql = `UPDATE ${cls.table_name} SET ${sets} WHERE id = ?`;
       db.prepare(sql).run(...values, this.id);
     }
+    if (isNewRecord) {
+      this._fireCallbacks("_afterCreateCallbacks");
+    } else {
+      this._fireCallbacks("_afterUpdateCallbacks");
+    }
+    this._fireCallbacks("_afterSaveCallbacks");
+    this._fireCallbacks("_afterCommitCallbacks");
     return true;
   }
 
   /** Cascade `dependent: :destroy` children first (so each child's
-   *  own destroy logic runs), then remove this row. */
+   *  own destroy logic runs), then remove this row. Fires
+   *  afterDestroy + afterCommit on the destroyed record. */
   get destroy(): this {
     const cls = this.constructor as typeof ApplicationRecord;
     const db = conn();
@@ -116,6 +145,8 @@ export class ApplicationRecord {
     }
 
     db.prepare(`DELETE FROM ${cls.table_name} WHERE id = ?`).run(this.id);
+    this._fireCallbacks("_afterDestroyCallbacks");
+    this._fireCallbacks("_afterCommitCallbacks");
     return this;
   }
 
@@ -161,14 +192,59 @@ export class ApplicationRecord {
     if (fresh) Object.assign(this, fresh);
   }
 
-  // Broadcast callback registration — emitter renders `broadcasts_to`
-  // declarations as post-class-body calls to these. Stub dispatches
-  // nothing; real Juntos pushes to Turbo Stream channels.
-  static afterSave(_fn: (record: any) => any): void {}
-  static afterDestroy(_fn: (record: any) => any): void {}
-  static afterCreate(_fn: (record: any) => any): void {}
-  static afterUpdate(_fn: (record: any) => any): void {}
-  static afterCommit(_fn: (record: any) => any): void {}
+  // Callback registration. Each subclass gets its own array via the
+  // `_ensureOwnCallbacks` check — without that, subclasses would share
+  // the base class's array and callbacks registered for `Article` would
+  // fire on `Comment` too. Pattern mirrors railcar's TS runtime.
+  static _afterSaveCallbacks: Array<(record: any) => any> = [];
+  static _afterDestroyCallbacks: Array<(record: any) => any> = [];
+  static _afterCreateCallbacks: Array<(record: any) => any> = [];
+  static _afterUpdateCallbacks: Array<(record: any) => any> = [];
+  static _afterCommitCallbacks: Array<(record: any) => any> = [];
+
+  private static _ensureOwnCallbacks(listName: string): void {
+    if (!Object.prototype.hasOwnProperty.call(this, listName)) {
+      (this as any)[listName] = [];
+    }
+  }
+
+  static afterSave(fn: (record: any) => any): void {
+    this._ensureOwnCallbacks("_afterSaveCallbacks");
+    (this as any)._afterSaveCallbacks.push(fn);
+  }
+  static afterDestroy(fn: (record: any) => any): void {
+    this._ensureOwnCallbacks("_afterDestroyCallbacks");
+    (this as any)._afterDestroyCallbacks.push(fn);
+  }
+  static afterCreate(fn: (record: any) => any): void {
+    this._ensureOwnCallbacks("_afterCreateCallbacks");
+    (this as any)._afterCreateCallbacks.push(fn);
+  }
+  static afterUpdate(fn: (record: any) => any): void {
+    this._ensureOwnCallbacks("_afterUpdateCallbacks");
+    (this as any)._afterUpdateCallbacks.push(fn);
+  }
+  static afterCommit(fn: (record: any) => any): void {
+    this._ensureOwnCallbacks("_afterCommitCallbacks");
+    (this as any)._afterCommitCallbacks.push(fn);
+  }
+
+  /** Fire a callback list on this record. Walks the prototype chain
+   *  so a subclass inherits its ancestors' registrations. */
+  private _fireCallbacks(listName: string): void {
+    let cls: any = this.constructor;
+    const seen = new Set<Array<(record: any) => any>>();
+    while (cls && cls !== Object) {
+      if (Object.prototype.hasOwnProperty.call(cls, listName)) {
+        const list = cls[listName] as Array<(record: any) => any>;
+        if (!seen.has(list)) {
+          seen.add(list);
+          for (const cb of list) cb(this);
+        }
+      }
+      cls = Object.getPrototypeOf(cls);
+    }
+  }
 
   validate(): void {}
 
@@ -199,13 +275,56 @@ export class ApplicationRecord {
     }
   }
 
-  // Turbo-stream broadcasts on the record. Real implementations push
-  // HTML to subscribed WebSocket channels; the stub is a no-op.
-  broadcastPrependTo(_stream: string): void {}
-  broadcastAppendTo(_stream: string): void {}
-  broadcastReplaceTo(_stream: string): void {}
-  broadcastRemoveTo(_stream: string): void {}
-  broadcastUpdateTo(_stream: string): void {}
+  // Turbo-stream broadcasts on the record. Each call composes a
+  // `<turbo-stream action="..." target="...">` fragment and hands it
+  // to the module-level `broadcaster`. When no broadcaster is
+  // installed (test mode, no HTTP server), the call is a silent
+  // no-op. Production server installs one via `setBroadcaster`.
+  //
+  // The target defaults to the record's DOM id (`article_42`);
+  // overridable for collection-scoped appends (e.g., prepend a new
+  // `article` fragment onto the `articles` list container — in that
+  // case the stream name IS the target).
+  broadcastPrependTo(stream: string, target?: string): void {
+    this._broadcast("prepend", stream, target ?? stream);
+  }
+  broadcastAppendTo(stream: string, target?: string): void {
+    this._broadcast("append", stream, target ?? stream);
+  }
+  broadcastReplaceTo(stream: string, target?: string): void {
+    this._broadcast("replace", stream, target ?? this._domId());
+  }
+  broadcastRemoveTo(stream: string, target?: string): void {
+    this._broadcast("remove", stream, target ?? this._domId());
+  }
+  broadcastUpdateTo(stream: string, target?: string): void {
+    this._broadcast("update", stream, target ?? this._domId());
+  }
+
+  private _domId(): string {
+    const cls = this.constructor as typeof ApplicationRecord;
+    const base = cls.table_name.replace(/s$/, "");
+    return `${base}_${this.id}`;
+  }
+
+  private _broadcast(action: string, stream: string, target: string): void {
+    if (!broadcaster) return;
+    let html = "";
+    if (action !== "remove") {
+      const cls = this.constructor as typeof ApplicationRecord;
+      if (cls.renderPartial) {
+        try {
+          html = cls.renderPartial(this);
+        } catch (_) {
+          html = "";
+        }
+      }
+    }
+    const body = action === "remove"
+      ? `<turbo-stream action="remove" target="${target}"></turbo-stream>`
+      : `<turbo-stream action="${action}" target="${target}"><template>${html}</template></turbo-stream>`;
+    broadcaster(stream, body);
+  }
 
   // Escape hatch for runtime-materialized column accessors.
   [key: string]: any;
@@ -238,25 +357,95 @@ export class Reference<T = any> {
   }
 }
 
-export class CollectionProxy<T = any> {
-  constructor(_owner: any, _config: any, _target: any) {}
+/** Metadata describing an association, produced by the emitter
+ *  from `has_many` / `has_one` declarations. `foreignKey` is the
+ *  column in the target model's table that stores the owner's id;
+ *  `name` is the Ruby-side association name (used in diagnostics).
+ */
+export interface AssocConfig {
+  name: string;
+  type: "has_many" | "has_one" | "belongs_to";
+  foreignKey: string;
+}
+
+/** Runtime proxy for `has_many` associations. Lazy — each property
+ *  access issues a `SELECT ... WHERE fk = ?` against the target
+ *  table. Doesn't cache; callers who iterate multiple times pay
+ *  multiple queries. That's fine for simple scaffolds; production-
+ *  scale callers would materialize `.all` once into a local.
+ */
+export class CollectionProxy<T extends ApplicationRecord = ApplicationRecord> {
+  private owner: ApplicationRecord;
+  private config: AssocConfig;
+  private target: typeof ApplicationRecord;
+
+  constructor(owner: ApplicationRecord, config: AssocConfig, target: typeof ApplicationRecord) {
+    this.owner = owner;
+    this.config = config;
+    this.target = target;
+  }
+
+  /** All rows where `foreignKey = owner.id`. Materializes on each
+   *  call — use `const list = proxy.all;` and iterate the local. */
   get all(): T[] {
-    return [];
+    const rows = conn()
+      .prepare(
+        `SELECT * FROM ${this.target.table_name} WHERE ${this.config.foreignKey} = ?`,
+      )
+      .all(this.owner.id) as Record<string, any>[];
+    return rows.map((row) => Object.assign(new (this.target as any)(), row)) as T[];
   }
+
   get size(): number {
-    return 0;
+    const row = conn()
+      .prepare(
+        `SELECT COUNT(*) AS c FROM ${this.target.table_name} WHERE ${this.config.foreignKey} = ?`,
+      )
+      .get(this.owner.id) as { c: number };
+    return row.c;
   }
-  get any(): boolean {
-    return false;
-  }
+
   get length(): number {
-    return 0;
+    return this.size;
   }
-  each(_fn: (item: T) => void): void {}
-  map<U>(_fn: (item: T) => U): U[] {
-    return [];
+
+  get any(): boolean {
+    return this.size > 0;
   }
-  forEach(_fn: (item: T) => void): void {}
+
+  /** `collection.build(attrs)` — construct a new child with the
+   *  FK pre-set, unsaved. Used by scaffolded create paths and by
+   *  emitted association-fill patterns. */
+  build(attrs: Record<string, any> = {}): T {
+    const child = new (this.target as any)() as any;
+    Object.assign(child, attrs);
+    child[this.config.foreignKey] = this.owner.id;
+    return child;
+  }
+
+  /** `collection.create(attrs)` — build + save. Caller inspects
+   *  `record.errors.any` for validation-failure detection. */
+  create(attrs: Record<string, any> = {}): T {
+    const child = this.build(attrs);
+    (child as any).save;
+    return child;
+  }
+
+  each(fn: (item: T) => void): void {
+    for (const item of this.all) fn(item);
+  }
+
+  map<U>(fn: (item: T) => U): U[] {
+    return this.all.map(fn);
+  }
+
+  forEach(fn: (item: T) => void): void {
+    this.each(fn);
+  }
+
+  [Symbol.iterator](): Iterator<T> {
+    return this.all[Symbol.iterator]();
+  }
 }
 
 export const modelRegistry: Record<string, any> = {};
