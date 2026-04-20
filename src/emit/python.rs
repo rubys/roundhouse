@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{
-    Action, Association, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
+    Action, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
 };
 use crate::ident::Symbol;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -1232,7 +1232,7 @@ fn emit_routes(app: &App) -> EmittedFile {
 }
 
 fn collect_controller_refs_py(spec: &RouteSpec, out: &mut Vec<String>) {
-    let mut push = |name: String, out: &mut Vec<String>| {
+    let push = |name: String, out: &mut Vec<String>| {
         if !out.iter().any(|c| c == &name) {
             out.push(name);
         }
@@ -2042,79 +2042,6 @@ fn py_collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
-fn collect_flat_routes(
-    spec: &RouteSpec,
-    out: &mut Vec<(String, String, String, String)>,
-    scope_prefix: Option<(&str, &str)>,
-) {
-    match spec {
-        RouteSpec::Explicit { method, path, controller, action, .. } => {
-            let verb = match method {
-                crate::dialect::HttpMethod::Get => "GET",
-                crate::dialect::HttpMethod::Post => "POST",
-                crate::dialect::HttpMethod::Put => "PUT",
-                crate::dialect::HttpMethod::Patch => "PATCH",
-                crate::dialect::HttpMethod::Delete => "DELETE",
-                crate::dialect::HttpMethod::Head => "HEAD",
-                crate::dialect::HttpMethod::Options => "OPTIONS",
-                crate::dialect::HttpMethod::Any => "ANY",
-            };
-            let full_path = match scope_prefix {
-                Some((parent, _)) => format!("/{parent}/:{parent}_id{path}"),
-                None => path.clone(),
-            };
-            out.push((
-                verb.to_string(),
-                full_path,
-                controller.0.to_string(),
-                action.to_string(),
-            ));
-        }
-        RouteSpec::Root { target } => {
-            if let Some((c, a)) = target.split_once('#') {
-                out.push(("GET".into(), "/".into(), controller_class_name(c), a.into()));
-            }
-        }
-        RouteSpec::Resources { name, only, except, nested } => {
-            let resource_path = format!("/{name}");
-            let controller = controller_class_name(name.as_str());
-            for (action, verb, suffix) in standard_resource_actions() {
-                let action = *action;
-                let verb = *verb;
-                let suffix = *suffix;
-                if !only.is_empty() && !only.iter().any(|s| s.as_str() == action) {
-                    continue;
-                }
-                if except.iter().any(|s| s.as_str() == action) {
-                    continue;
-                }
-                let path = format!("{resource_path}{suffix}");
-                let full_path = match scope_prefix {
-                    Some((parent, _)) => format!("/{parent}/:{parent}_id{path}"),
-                    None => path,
-                };
-                out.push((verb.into(), full_path, controller.clone(), action.into()));
-            }
-            let singular =
-                crate::naming::singularize_camelize(name.as_str()).to_lowercase();
-            for child in nested {
-                collect_flat_routes(child, out, Some((&singular, name.as_str())));
-            }
-        }
-    }
-}
-
-fn standard_resource_actions() -> &'static [(&'static str, &'static str, &'static str)] {
-    &[
-        ("index", "GET", ""),
-        ("new", "GET", "/new"),
-        ("create", "POST", ""),
-        ("show", "GET", "/:id"),
-        ("edit", "GET", "/:id/edit"),
-        ("update", "PATCH", "/:id"),
-        ("destroy", "DELETE", "/:id"),
-    ]
-}
 
 fn controller_class_name(short: &str) -> String {
     let mut s = crate::naming::camelize(short);
@@ -2653,7 +2580,7 @@ fn emit_py_ctrl_test_send(
     app: &App,
     ctx: &PyTestCtx,
 ) -> String {
-    use crate::lower::{AssertSelectKind, ControllerTestSend};
+    use crate::lower::ControllerTestSend;
     match crate::lower::classify_controller_test_send(method, args, block) {
         Some(ControllerTestSend::HttpGet { url }) => {
             let u = emit_py_url_expr(url, app, ctx);
@@ -3177,98 +3104,3 @@ fn try_emit_assoc_create_py(
     }
 }
 
-fn test_body_uses_unsupported_py(e: &Expr) -> bool {
-    use crate::expr::InterpPart;
-    let self_hit = match &*e.node {
-        ExprNode::Send { recv, method, .. } => {
-            let m = method.as_str();
-            matches!(
-                m,
-                "assert_difference"
-                    | "destroy"
-                    | "destroy!"
-                    | "build"
-                    | "create"
-                    | "create!"
-            ) || (m == "count"
-                && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })))
-        }
-        _ => false,
-    };
-    if self_hit {
-        return true;
-    }
-    match &*e.node {
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                if test_body_uses_unsupported_py(r) {
-                    return true;
-                }
-            }
-            for a in args {
-                if test_body_uses_unsupported_py(a) {
-                    return true;
-                }
-            }
-            if let Some(b) = block {
-                if test_body_uses_unsupported_py(b) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
-            for e in exprs {
-                if test_body_uses_unsupported_py(e) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                if test_body_uses_unsupported_py(k) || test_body_uses_unsupported_py(v) {
-                    return true;
-                }
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    if test_body_uses_unsupported_py(expr) {
-                        return true;
-                    }
-                }
-            }
-        }
-        ExprNode::BoolOp { left, right, .. }
-        | ExprNode::RescueModifier { expr: left, fallback: right } => {
-            if test_body_uses_unsupported_py(left) || test_body_uses_unsupported_py(right) {
-                return true;
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            if test_body_uses_unsupported_py(cond)
-                || test_body_uses_unsupported_py(then_branch)
-                || test_body_uses_unsupported_py(else_branch)
-            {
-                return true;
-            }
-        }
-        ExprNode::Let { value, body, .. } => {
-            if test_body_uses_unsupported_py(value) || test_body_uses_unsupported_py(body) {
-                return true;
-            }
-        }
-        ExprNode::Lambda { body, .. } => {
-            if test_body_uses_unsupported_py(body) {
-                return true;
-            }
-        }
-        ExprNode::Assign { value, .. } => {
-            if test_body_uses_unsupported_py(value) {
-                return true;
-            }
-        }
-        _ => {}
-    }
-    false
-}
