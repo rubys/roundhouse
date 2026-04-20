@@ -1016,6 +1016,156 @@ fn append_statement(body: &Expr, tail: Expr) -> Expr {
     Expr::new(body.span, ExprNode::Seq { exprs })
 }
 
+// -- Pattern detection helpers (target-neutral) -------------------
+//
+// Every emitter's controller walker needs to recognize the same
+// Rails scaffold shapes: `Model.new(post_params)`, `x.update(
+// post_params)`, render / redirect_to with a `status:` kwarg.
+// The matching is pure IR structure; the per-target rendering
+// (how to express a field assign, how to emit a status code)
+// stays in the emitter.
+
+/// True when `expr` is a zero-arg, zero-block, no-receiver call to
+/// the resource's strong-params helper — e.g. `post_params` when
+/// the resource is `post`, `article_params` when it's `article`.
+/// Rails convention: every scaffold controller defines a
+/// `<resource>_params` private method that returns the permitted
+/// form fields.
+pub fn is_resource_params_call(expr: &Expr, resource: &str) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if !args.is_empty() || block.is_some() {
+        return false;
+    }
+    let expected = format!("{resource}_params");
+    method.as_str() == expected
+}
+
+/// Recognize a Create-scaffold instantiation: either
+///   `Model.new(<resource>_params)`                (top-level)
+/// or
+///   `@parent.<assoc>.build(<resource>_params)`    (nested resource)
+/// where the target class resolves to one of the app's known
+/// models. Returns the target class symbol so the walker can emit
+/// `new Class()` plus per-target per-field assigns. Used by every
+/// emitter's Assign handler — the strong-params expansion shape
+/// differs per target but the recognition is target-neutral.
+pub fn model_new_with_strong_params(
+    value: &Expr,
+    known_models: &[Symbol],
+    resource: &str,
+) -> Option<Symbol> {
+    let ExprNode::Send { recv, method, args, .. } = &*value.node else {
+        return None;
+    };
+    if args.len() != 1 || !is_resource_params_call(&args[0], resource) {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    // Top-level: `Model.new(...)` on a Const receiver resolving to
+    // a known model.
+    if method.as_str() == "new" {
+        if let ExprNode::Const { path } = &*r.node {
+            let class = path.last()?;
+            known_models.iter().find(|m| *m == class)?;
+            return Some(class.clone());
+        }
+    }
+    // Nested: `<parent>.<assoc>.build(...)` — the inner Send's
+    // method (a plural association like `comments`) singularizes
+    // to a known model (`Comment`).
+    if method.as_str() == "build" {
+        if let ExprNode::Send {
+            recv: Some(_),
+            method: assoc_method,
+            args: inner_args,
+            ..
+        } = &*r.node
+        {
+            if inner_args.is_empty() {
+                if let Some(target) =
+                    singularize_to_model(assoc_method.as_str(), known_models)
+                {
+                    return Some(target);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recognize the Update-scaffold pattern: `<recv>.update(
+/// <resource>_params)` on a non-Const receiver (a local, not a
+/// class method). Returns the receiver `Expr` so the walker can
+/// emit `<recv>.save` plus hoisted per-field conditional assigns.
+pub fn update_with_strong_params<'a>(
+    cond: &'a Expr,
+    resource: &str,
+) -> Option<&'a Expr> {
+    let ExprNode::Send { recv, method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "update" || args.len() != 1 {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    if matches!(&*r.node, ExprNode::Const { .. }) {
+        return None;
+    }
+    if !is_resource_params_call(&args[0], resource) {
+        return None;
+    }
+    Some(r)
+}
+
+/// Map a Rails status symbol (`:see_other`, `:unprocessable_entity`)
+/// to its HTTP numeric code. Covers the codes the scaffold blog
+/// templates use; unknown symbols fall back to 500.
+pub fn status_sym_to_code(sym: &str) -> u16 {
+    match sym {
+        "ok" => 200,
+        "created" => 201,
+        "no_content" => 204,
+        "see_other" => 303,
+        "not_modified" => 304,
+        "bad_request" => 400,
+        "unauthorized" => 401,
+        "not_found" => 404,
+        "unprocessable_entity" => 422,
+        _ => 500,
+    }
+}
+
+/// Walk `render` / `redirect_to` keyword args for a `status:` key
+/// and return its numeric string. Accepts symbol values
+/// (`status: :see_other`) and integer literals (`status: 303`).
+/// Returns `None` when no status is supplied, so callers can pick
+/// their own default.
+pub fn extract_status_from_kwargs(args: &[Expr]) -> Option<u16> {
+    for arg in args {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                continue;
+            };
+            if key.as_str() != "status" {
+                continue;
+            }
+            match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value: s } } => {
+                    return Some(status_sym_to_code(s.as_str()));
+                }
+                ExprNode::Lit { value: Literal::Int { value: n } } => {
+                    return Some(*n as u16);
+                }
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
 /// Fallback permitted-field list when the `<resource>_params` helper
 /// isn't recognizable. Returns the model's non-id, non-timestamp,
 /// non-foreign-key attributes — a safe default that matches what

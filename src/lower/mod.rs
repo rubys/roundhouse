@@ -29,12 +29,14 @@ pub mod validations;
 pub use associations::{resolve_has_many, HasManyRef};
 pub use controller::{
     chain_target_class, classify_controller_send, default_permitted_fields,
-    extract_permitted_from_expr, find_nested_parent, has_toplevel_terminal,
-    is_format_binding, is_params_expr, is_query_builder_method, lower_action,
-    permitted_fields_for, resource_from_controller_name, singularize_to_model,
-    resolve_before_actions, split_public_private, synthesize_implicit_render,
-    unwrap_respond_to, walk_controller_ivars, ActionKind, LoweredAction,
-    NestedParent, SendKind, WalkedIvars,
+    extract_permitted_from_expr, extract_status_from_kwargs, find_nested_parent,
+    has_toplevel_terminal, is_format_binding, is_params_expr,
+    is_query_builder_method, is_resource_params_call, lower_action,
+    model_new_with_strong_params, permitted_fields_for,
+    resolve_before_actions, resource_from_controller_name, singularize_to_model,
+    split_public_private, status_sym_to_code, synthesize_implicit_render,
+    unwrap_respond_to, update_with_strong_params, walk_controller_ivars,
+    ActionKind, LoweredAction, NestedParent, SendKind, WalkedIvars,
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,

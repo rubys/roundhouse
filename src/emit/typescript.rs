@@ -1187,7 +1187,11 @@ fn emit_ts_ctrl_stmt(
             // → `const x = new Model(); x.f1 = params[...]; ...`.
             // Falls through to the generic Assign path when the RHS
             // doesn't match the Create-scaffold shape.
-            if let Some(class) = model_new_with_strong_params(value, ctx) {
+            if let Some(class) = crate::lower::model_new_with_strong_params(
+                value,
+                ctx.known_models,
+                ctx.resource,
+            ) {
                 emit_ts_create_expansion(out, name.as_str(), class.as_str(), &indent, ctx, state);
                 state.last_local = Some(name.as_str().to_string());
             } else {
@@ -1202,7 +1206,7 @@ fn emit_ts_ctrl_stmt(
             // then `if (x.save) { A } else { B }`. Falls through to
             // the generic If path when the cond isn't the Update-
             // scaffold shape.
-            if let Some(recv) = update_with_strong_params(cond, ctx) {
+            if let Some(recv) = crate::lower::update_with_strong_params(cond, ctx.resource) {
                 let recv_s = emit_ts_ctrl_expr(recv, ctx, state);
                 emit_ts_update_field_assigns(out, &recv_s, &indent, ctx, state);
                 writeln!(out, "{indent}if ({recv_s}.save) {{").unwrap();
@@ -1455,7 +1459,7 @@ fn emit_ts_render(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlState) -
                 .clone()
                 .unwrap_or_else(|| "undefined as any".to_string());
             let body_part = format!("body: Views.{view_fn}({arg})");
-            return match extract_status_from_kwargs(&args[1..]) {
+            return match crate::lower::extract_status_from_kwargs(&args[1..]) {
                 Some(status) => format!("return {{ status: {status}, {body_part} }};"),
                 None => format!("return {{ {body_part} }};"),
             };
@@ -1482,7 +1486,7 @@ fn emit_ts_redirect_to(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlSta
         return "return { status: 303 };".to_string();
     };
     let loc = emit_ts_ctrl_expr(first, ctx, state);
-    let status = extract_status_from_kwargs(&args[1..]).unwrap_or_else(|| "303".to_string());
+    let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
     let _ = ctx; // resource unused; helper stem comes from the local name
     if is_bare_ident(&loc) {
         let helper = lower_first_char(&crate::naming::camelize(&loc));
@@ -1492,89 +1496,6 @@ fn emit_ts_redirect_to(args: &[Expr], ctx: &TsCtrlCtx<'_>, state: &mut TsCtrlSta
         );
     }
     format!("return {{ status: {status}, location: {loc} }};")
-}
-
-/// Recognize a Create-scaffold instantiation: either
-///   `Model.new(<resource>_params)`                (top-level resource)
-/// or
-///   `@parent.<assoc>.build(<resource>_params)`    (nested resource)
-/// where the target class resolves to one of the app's known
-/// models. Returns the target class symbol so the walker can emit
-/// `new Class()` plus per-field assigns.
-fn model_new_with_strong_params(value: &Expr, ctx: &TsCtrlCtx<'_>) -> Option<Symbol> {
-    let ExprNode::Send { recv, method, args, .. } = &*value.node else {
-        return None;
-    };
-    if args.len() != 1 || !is_resource_params_call(&args[0], ctx.resource) {
-        return None;
-    }
-    let r = recv.as_ref()?;
-    // Top-level: `Model.new(...)`.
-    if method.as_str() == "new" {
-        if let ExprNode::Const { path } = &*r.node {
-            let class = path.last()?;
-            ctx.known_models.iter().find(|m| *m == class)?;
-            return Some(class.clone());
-        }
-    }
-    // Nested: `<parent>.<assoc>.build(...)` — the inner Send's
-    // method (a plural association like `comments`) singularizes
-    // to a known model (`Comment`).
-    if method.as_str() == "build" {
-        if let ExprNode::Send {
-            recv: Some(_),
-            method: assoc_method,
-            args: inner_args,
-            ..
-        } = &*r.node
-        {
-            if inner_args.is_empty() {
-                if let Some(target) =
-                    crate::lower::singularize_to_model(assoc_method.as_str(), ctx.known_models)
-                {
-                    return Some(target);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Recognize the Update-scaffold pattern: `<recv>.update(<resource>_params)`
-/// on a non-Const receiver (a local, not a class method). Returns
-/// the receiver Expr so the walker can emit `<recv>.save`.
-fn update_with_strong_params<'a>(
-    cond: &'a Expr,
-    ctx: &TsCtrlCtx<'_>,
-) -> Option<&'a Expr> {
-    let ExprNode::Send { recv, method, args, .. } = &*cond.node else {
-        return None;
-    };
-    if method.as_str() != "update" || args.len() != 1 {
-        return None;
-    }
-    let r = recv.as_ref()?;
-    if matches!(&*r.node, ExprNode::Const { .. }) {
-        return None;
-    }
-    if !is_resource_params_call(&args[0], ctx.resource) {
-        return None;
-    }
-    Some(r)
-}
-
-/// True when `expr` is a zero-arg, zero-block, no-receiver call to
-/// the resource's strong-params helper — e.g. `post_params` when
-/// the resource is `post`, `article_params` when it's `article`.
-fn is_resource_params_call(expr: &Expr, resource: &str) -> bool {
-    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
-        return false;
-    };
-    if !args.is_empty() || block.is_some() {
-        return false;
-    }
-    let expected = format!("{resource}_params");
-    method.as_str() == expected
 }
 
 /// Emit the Create-scaffold expansion: `new Class()` bind, nested-
@@ -1632,52 +1553,6 @@ fn emit_ts_update_field_assigns(
         .unwrap();
         state.uses_context = true;
     }
-}
-
-/// Map a Rails status symbol (`:see_other`, `:unprocessable_entity`)
-/// to its HTTP numeric code. Covers the codes the scaffold blog
-/// templates use; unknown symbols fall back to 500.
-fn status_sym_to_code(sym: &str) -> u16 {
-    match sym {
-        "ok" => 200,
-        "created" => 201,
-        "no_content" => 204,
-        "see_other" => 303,
-        "not_modified" => 304,
-        "bad_request" => 400,
-        "unauthorized" => 401,
-        "not_found" => 404,
-        "unprocessable_entity" => 422,
-        _ => 500,
-    }
-}
-
-/// Walk `render` / `redirect_to` keyword args for a `status:` key
-/// and return its numeric string. Accepts symbol values
-/// (`status: :see_other`) and integer literals (`status: 303`).
-/// Returns None when no status: is supplied.
-fn extract_status_from_kwargs(args: &[Expr]) -> Option<String> {
-    for arg in args {
-        let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
-        for (k, v) in entries {
-            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-                continue;
-            };
-            if key.as_str() != "status" {
-                continue;
-            }
-            match &*v.node {
-                ExprNode::Lit { value: Literal::Sym { value: s } } => {
-                    return Some(status_sym_to_code(s.as_str()).to_string());
-                }
-                ExprNode::Lit { value: Literal::Int { value: n } } => {
-                    return Some(n.to_string());
-                }
-                _ => return None,
-            }
-        }
-    }
-    None
 }
 
 fn is_bare_ident(s: &str) -> bool {

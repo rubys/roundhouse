@@ -9,8 +9,9 @@
 use roundhouse::expr::{Expr, ExprNode, Literal};
 use roundhouse::ident::Symbol;
 use roundhouse::lower::{
-    has_toplevel_terminal, resolve_before_actions, synthesize_implicit_render,
-    unwrap_respond_to,
+    extract_status_from_kwargs, has_toplevel_terminal, is_resource_params_call,
+    model_new_with_strong_params, resolve_before_actions, status_sym_to_code,
+    synthesize_implicit_render, unwrap_respond_to, update_with_strong_params,
 };
 use roundhouse::span::Span;
 
@@ -471,4 +472,144 @@ fn synthesize_implicit_render_uses_action_name_as_view_symbol() {
         panic!("expected symbol arg, got {:?}", args[0].node);
     };
     assert_eq!(value.as_str(), "headline");
+}
+
+// -- Pattern detection helpers --------------------------------------
+
+fn sym_lit(s: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } },
+    )
+}
+
+fn const_expr(name: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: vec![Symbol::from(name)] },
+    )
+}
+
+fn var_expr(name: &str) -> Expr {
+    use roundhouse::ident::VarId;
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+    )
+}
+
+#[test]
+fn is_resource_params_call_matches_exact_helper_name() {
+    // `post_params` with resource "post" matches; `post_params`
+    // with resource "article" does not.
+    let call = send(None, "post_params", vec![]);
+    assert!(is_resource_params_call(&call, "post"));
+    assert!(!is_resource_params_call(&call, "article"));
+}
+
+#[test]
+fn is_resource_params_call_rejects_calls_with_args() {
+    let call = send(None, "post_params", vec![lit_int(1)]);
+    assert!(!is_resource_params_call(&call, "post"));
+}
+
+#[test]
+fn model_new_with_strong_params_recognizes_top_level_shape() {
+    // `Post.new(post_params)` with Post in known_models → Some(Post).
+    let value = send(Some(const_expr("Post")), "new", vec![send(None, "post_params", vec![])]);
+    let known = vec![Symbol::from("Post")];
+    assert_eq!(
+        model_new_with_strong_params(&value, &known, "post"),
+        Some(Symbol::from("Post")),
+    );
+    // Unknown model → None.
+    let unknown_value = send(Some(const_expr("Gadget")), "new", vec![send(None, "post_params", vec![])]);
+    assert_eq!(model_new_with_strong_params(&unknown_value, &known, "post"), None);
+}
+
+#[test]
+fn model_new_with_strong_params_recognizes_nested_build_shape() {
+    // `@article.comments.build(comment_params)` — plural assoc
+    // singularizes to a known model.
+    let comments_chain = send(Some(var_expr("article")), "comments", vec![]);
+    let build_call = send(
+        Some(comments_chain),
+        "build",
+        vec![send(None, "comment_params", vec![])],
+    );
+    let known = vec![Symbol::from("Article"), Symbol::from("Comment")];
+    assert_eq!(
+        model_new_with_strong_params(&build_call, &known, "comment"),
+        Some(Symbol::from("Comment")),
+    );
+}
+
+#[test]
+fn update_with_strong_params_matches_local_receiver() {
+    // `article.update(article_params)` on a local → Some(recv).
+    let cond = send(
+        Some(var_expr("article")),
+        "update",
+        vec![send(None, "article_params", vec![])],
+    );
+    let recv = update_with_strong_params(&cond, "article");
+    assert!(recv.is_some());
+}
+
+#[test]
+fn update_with_strong_params_rejects_class_method_call() {
+    // `Article.update(...)` on a Const is a class method, not the
+    // instance Update pattern.
+    let cond = send(
+        Some(const_expr("Article")),
+        "update",
+        vec![send(None, "article_params", vec![])],
+    );
+    assert!(update_with_strong_params(&cond, "article").is_none());
+}
+
+#[test]
+fn status_sym_to_code_maps_rails_symbols() {
+    assert_eq!(status_sym_to_code("ok"), 200);
+    assert_eq!(status_sym_to_code("see_other"), 303);
+    assert_eq!(status_sym_to_code("unprocessable_entity"), 422);
+    assert_eq!(status_sym_to_code("made_up_code"), 500);
+}
+
+#[test]
+fn extract_status_from_kwargs_finds_symbol_value() {
+    // A trailing hash `{ status: :see_other }` → Some(303).
+    let hash = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash {
+            entries: vec![(sym_lit("status"), sym_lit("see_other"))],
+            braced: false,
+        },
+    );
+    assert_eq!(extract_status_from_kwargs(&[hash]), Some(303));
+}
+
+#[test]
+fn extract_status_from_kwargs_finds_integer_value() {
+    let hash = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash {
+            entries: vec![(sym_lit("status"), lit_int(418))],
+            braced: false,
+        },
+    );
+    assert_eq!(extract_status_from_kwargs(&[hash]), Some(418));
+}
+
+#[test]
+fn extract_status_from_kwargs_returns_none_without_status_key() {
+    let hash = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash {
+            entries: vec![(sym_lit("notice"), lit_int(1))],
+            braced: false,
+        },
+    );
+    assert_eq!(extract_status_from_kwargs(&[hash]), None);
+    assert_eq!(extract_status_from_kwargs(&[]), None);
 }
