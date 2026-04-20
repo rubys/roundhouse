@@ -105,12 +105,8 @@ impl Analyzer {
             // return_kind automatically enables it for type
             // inference downstream.
             use crate::catalog::{AR_CATALOG, ReceiverContext, ReturnKind};
-            for entry in AR_CATALOG {
-                if entry.receiver != ReceiverContext::Class {
-                    continue;
-                }
-                let Some(kind) = entry.return_kind else { continue };
-                let ret_ty = match kind {
+            let instantiate = |kind: ReturnKind| -> Ty {
+                match kind {
                     ReturnKind::SelfType => self_ty.clone(),
                     ReturnKind::ArrayOfSelf => array_of_self.clone(),
                     ReturnKind::SelfOrNil => Ty::Union {
@@ -118,45 +114,44 @@ impl Analyzer {
                     },
                     ReturnKind::Int => Ty::Int,
                     ReturnKind::Bool => Ty::Bool,
-                };
-                cls.class_methods.insert(Symbol::from(entry.name), ret_ty);
+                    ReturnKind::HashSymStr => Ty::Hash {
+                        key: Box::new(Ty::Sym),
+                        value: Box::new(Ty::Str),
+                    },
+                    ReturnKind::ClassRef(path) => Ty::Class {
+                        id: ClassId(Symbol::from(path)),
+                        args: vec![],
+                    },
+                }
+            };
+            for entry in AR_CATALOG {
+                if entry.receiver != ReceiverContext::Class {
+                    continue;
+                }
+                let Some(kind) = entry.return_kind else { continue };
+                cls.class_methods.insert(Symbol::from(entry.name), instantiate(kind));
             }
 
             // Instance methods from schema-derived attributes.
+            // These are per-model (column names differ across
+            // models), so they stay outside the catalog — the
+            // catalog is for per-receiver-kind AR methods, not
+            // per-model schema projections.
             for (name, ty) in &model.attributes.fields {
                 cls.instance_methods.insert(name.clone(), ty.clone());
             }
-            // Core AR instance methods every model gets. Return types match
-            // Rails: mutation methods return Bool (non-bang) or Self (bang +
-            // lifecycle). Predicates return Bool. Shape-only surface —
-            // `errors` lands with the rest of the ErrorCollection dialect
-            // in the wider registry expansion (#44).
-            cls.instance_methods.insert(Symbol::from("save"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("save!"), self_ty.clone());
-            cls.instance_methods.insert(Symbol::from("update"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("update!"), self_ty.clone());
-            cls.instance_methods.insert(Symbol::from("destroy"), self_ty.clone());
-            cls.instance_methods.insert(Symbol::from("destroy!"), self_ty.clone());
-            cls.instance_methods.insert(Symbol::from("delete"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("touch"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("reload"), self_ty.clone());
-            cls.instance_methods.insert(Symbol::from("valid?"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("invalid?"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("persisted?"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("new_record?"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("destroyed?"), Ty::Bool);
-            cls.instance_methods.insert(Symbol::from("changed?"), Ty::Bool);
-            cls.instance_methods.insert(
-                Symbol::from("attributes"),
-                Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) },
-            );
-            cls.instance_methods.insert(
-                Symbol::from("errors"),
-                Ty::Class {
-                    id: ClassId(Symbol::from("ActiveModel::Errors")),
-                    args: vec![],
-                },
-            );
+            // Core AR instance methods every model gets. Sourced
+            // from the shared catalog — same mechanism as class
+            // methods above. Covers mutation (save/update/destroy),
+            // state reload, validity predicates, attributes, and
+            // errors.
+            for entry in AR_CATALOG {
+                if entry.receiver != ReceiverContext::Instance {
+                    continue;
+                }
+                let Some(kind) = entry.return_kind else { continue };
+                cls.instance_methods.insert(Symbol::from(entry.name), instantiate(kind));
+            }
             // Associations as instance methods (return types derived from cardinality).
             for assoc in model.associations() {
                 use crate::dialect::Association;

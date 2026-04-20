@@ -140,8 +140,22 @@ pub enum ReturnKind {
     SelfOrNil,
     /// Returns `Int`. Example: `Model.count`.
     Int,
-    /// Returns `Bool`. Example: `Model.exists?`.
+    /// Returns `Bool`. Example: `Model.exists?`, `#save`,
+    /// `#valid?`, `#persisted?`.
     Bool,
+    /// Returns `Hash<Sym, Str>`. Example: `#attributes` on an
+    /// ActiveRecord instance — the canonical schema-derived
+    /// attribute dictionary. Specific rather than generic because
+    /// this one shape is what the Rails dialect emits; if/when
+    /// another Hash shape enters the catalog, generalize to a
+    /// `HashOf(PrimKind, PrimKind)` variant.
+    HashSymStr,
+    /// Reference to a concrete class by dotted-name path
+    /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
+    /// `Ty::Class { id: ClassId(<path>), args: vec![] }`.
+    /// Used by `#errors` to reference the ActiveModel::Errors
+    /// class without needing it to be a user-defined model.
+    ClassRef(&'static str),
 }
 
 /// Chain semantics for a Relation-builder method.
@@ -459,58 +473,57 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: None,
     },
     // ---- Instance-method writes ----
-    // Mutations on a loaded record. Return types aren't currently
-    // declared in the catalog — Analyzer::new still populates
-    // instance_methods with hardcoded signatures (next migration
-    // bite).
+    // Mutations on a loaded record. Rails bangs-vs-non-bangs
+    // convention: non-bang returns Bool (success/failure);
+    // bang returns Self or raises on failure.
     CatalogedMethod {
         name: "save",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Bool),
     },
     CatalogedMethod {
         name: "save!",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "update",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Bool),
     },
     CatalogedMethod {
         name: "update!",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "destroy",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "destroy!",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "delete",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Bool),
     },
     CatalogedMethod {
         name: "increment!",
@@ -531,7 +544,85 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Instance,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    // ---- Instance-method reads ----
+    // `#reload` refreshes from the DB — writes-vs-reads-wise it's
+    // a read, but carries the DbRead effect because it issues a
+    // SELECT.
+    CatalogedMethod {
+        name: "reload",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    // ---- Instance-method state predicates ----
+    // Pure — query in-memory flags the record already carries.
+    // `#persisted?` / `#new_record?` check loaded state;
+    // `#valid?` / `#invalid?` run validations (arguably pure
+    // against the catalog's effect classification since they
+    // don't hit the DB, though they may trigger user code).
+    CatalogedMethod {
+        name: "valid?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "invalid?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "persisted?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "new_record?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "destroyed?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "changed?",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    // ---- Instance-method accessors (state / metadata) ----
+    // `#attributes` returns Hash<Sym, Str>; `#errors` returns the
+    // per-instance ActiveModel::Errors collection. Both pure
+    // (no DB hit); both structural rather than expression-
+    // dispatchable.
+    CatalogedMethod {
+        name: "attributes",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashSymStr),
+    },
+    CatalogedMethod {
+        name: "errors",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveModel::Errors")),
     },
 ];
 
