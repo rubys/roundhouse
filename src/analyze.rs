@@ -562,15 +562,32 @@ impl Analyzer {
         // IndexedDB adapter can return Unknown for methods it can't
         // implement, making them silent at the effect level and
         // diagnostic-bearing downstream).
+        //
+        // Terminal-vs-builder gating: Relation-builder methods
+        // (`where`, `limit`, `order`, `includes`, `joins`, `group`,
+        // `having`, `preload`, `distinct`) return a lazy Relation
+        // that hasn't executed SQL. Under an async backend, awaiting
+        // each builder link would emit one round-trip per chain
+        // step instead of the single round-trip the terminal call
+        // actually triggers. Skipping the effect attachment here
+        // means those builder Sends carry no effect in the IR — the
+        // await machinery walks past them to the terminal step that
+        // does. ChainKind::Terminal / NotApplicable / missing entry
+        // all keep the effect; only explicit Builder skips.
         if let Some(table) = &cls.table {
-            match self.adapter.classify_ar_method(method.as_str()) {
-                ArMethodKind::Read => {
-                    out.insert(Effect::DbRead { table: table.clone() });
+            let kind = self.adapter.classify_ar_method(method.as_str());
+            let is_builder_read =
+                matches!(kind, ArMethodKind::Read) && self.is_builder_chain(method.as_str());
+            if !is_builder_read {
+                match kind {
+                    ArMethodKind::Read => {
+                        out.insert(Effect::DbRead { table: table.clone() });
+                    }
+                    ArMethodKind::Write => {
+                        out.insert(Effect::DbWrite { table: table.clone() });
+                    }
+                    ArMethodKind::Unknown => {}
                 }
-                ArMethodKind::Write => {
-                    out.insert(Effect::DbWrite { table: table.clone() });
-                }
-                ArMethodKind::Unknown => {}
             }
         }
 
@@ -586,6 +603,21 @@ impl Analyzer {
                 _ => {}
             }
         }
+    }
+
+    /// Does the catalog classify `method` as a Relation-builder
+    /// chain step (e.g., `where`, `limit`, `order`)? True only for
+    /// methods with `ChainKind::Builder` in the catalog; falls to
+    /// false for Terminal / NotApplicable / unclassified.
+    ///
+    /// Used by `contribute_send_effect` to skip effect attachment
+    /// on Builder Sends — the Relation is lazy, no SQL executes,
+    /// and emitting `await` would produce one spurious round-trip
+    /// per chain link under async backends.
+    fn is_builder_chain(&self, method: &str) -> bool {
+        crate::catalog::lookup_any(method).any(|entry| {
+            matches!(entry.chain, crate::catalog::ChainKind::Builder)
+        })
     }
 
     fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {

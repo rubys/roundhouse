@@ -217,6 +217,65 @@ fn hash_literal_in_where_call_types_as_hash() {
 }
 
 #[test]
+fn builder_chain_sends_do_not_carry_db_effects() {
+    // `scope :published, -> { where(published: true) }` — the
+    // top-level Send is `where(published: true)`, a Relation-
+    // builder call on implicit self. Under the catalog's
+    // `ChainKind::Builder` gating, this Send should carry NO
+    // DbRead effect — the Relation is lazy; only a Terminal call
+    // (`.all`, `.first`, `.to_a`) actually executes the query
+    // and attaches the effect.
+    //
+    // Consequence for async emission: async-capable emitters
+    // don't emit `await` at Builder sites, avoiding spurious
+    // round-trips per chain link. Only the terminal step awaits.
+    let app = analyzed_app();
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    let published = post
+        .scopes()
+        .find(|s| s.name.as_str() == "published")
+        .expect("published scope");
+    // Body: `where(published: true)` — Send. Local effects must
+    // be empty.
+    assert!(
+        published.body.effects.is_pure(),
+        "Builder Send `where(...)` should carry no effects; got {:?}",
+        published.body.effects.effects,
+    );
+}
+
+#[test]
+fn terminal_sends_still_carry_db_effects() {
+    // `scope :recent, -> { limit(10) }` — `limit` is catalog-
+    // classified as Builder, so its local effect is empty (new
+    // behavior). Contrast with `Post.all` in an action body,
+    // which is Terminal and retains DbRead(posts).
+    let app = analyzed_app();
+    let posts_read = Effect::DbRead {
+        table: TableRef(Symbol::from("posts")),
+    };
+    let index = app.controllers[0]
+        .actions()
+        .find(|a| a.name.as_str() == "index")
+        .unwrap();
+    // Body: `@posts = Post.all`
+    let ExprNode::Assign { value, .. } = &*index.body.node else {
+        panic!("expected Assign at index top");
+    };
+    // `value` is the `Post.all` Send — Terminal, should carry
+    // DbRead(posts) as before.
+    assert!(
+        value.effects.effects.contains(&posts_read),
+        "Terminal Send `Post.all` should carry DbRead(posts); got {:?}",
+        value.effects.effects,
+    );
+}
+
+#[test]
 fn if_branches_union_merge() {
     // create body ends with:
     //   if @post.save
