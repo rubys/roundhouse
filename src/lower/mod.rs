@@ -19,6 +19,7 @@
 
 pub mod associations;
 pub mod broadcasts;
+pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod erb_trim;
@@ -33,6 +34,7 @@ pub mod view;
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{resolve_has_many, HasManyRef};
+pub use chain::{collect_chain_modifiers, ChainModifier};
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
 };

@@ -292,39 +292,15 @@ fn emit_rust_importmap(app: &App) -> EmittedFile {
     }
 }
 
-/// One layer of an AR chain, analogous to TS's ChainModifier.
-struct RustChainModifier<'a> {
-    method: &'a str,
-    args: &'a [Expr],
-}
-
-fn collect_rust_chain_modifiers<'a>(
-    method: &'a str,
-    args: &'a [Expr],
-    recv: Option<&'a Expr>,
-) -> Vec<RustChainModifier<'a>> {
-    let mut out = Vec::new();
-    if let Some(r) = recv {
-        if let ExprNode::Send { recv: inner_recv, method: inner_method, args: inner_args, .. } = &*r.node {
-            if crate::catalog::is_query_builder_method(inner_method.as_str()) {
-                out.extend(collect_rust_chain_modifiers(
-                    inner_method.as_str(),
-                    inner_args,
-                    inner_recv.as_ref(),
-                ));
-            }
-        }
-    }
-    out.push(RustChainModifier { method, args });
-    out
-}
-
 /// Compose one AR modifier onto the running rust expression.
 /// `all`/`includes`/`preload`/`joins`/`distinct`/`select` are
 /// no-ops for our in-memory Vec. `order({field: :dir})` lowers to
 /// a `.sort_by` with a direction-aware comparator. `limit(N)`
 /// truncates via `.into_iter().take(N).collect()`.
-fn apply_rust_chain_modifier(prev: String, m: RustChainModifier<'_>) -> String {
+///
+/// Chain-walk lives in `src/lower/chain.rs`; this fn just renders
+/// one already-classified layer.
+fn apply_rust_chain_modifier(prev: String, m: crate::lower::ChainModifier<'_>) -> String {
     match m.method {
         "all" | "includes" | "preload" | "joins" | "distinct" | "select" => prev,
         "order" => {
@@ -3391,7 +3367,7 @@ impl<'a> crate::lower::CtrlWalker<'a> for RsEmitter<'a> {
                 // onto `{Target}::all()`. `order`/`limit` produce
                 // observable output; `includes`/`preload`/etc are
                 // no-ops for sqlite.
-                let modifiers = collect_rust_chain_modifiers(method, args, recv.as_deref());
+                let modifiers = crate::lower::collect_chain_modifiers(method, args, recv.as_deref());
                 let mut s = format!("{}::all()", target.as_str());
                 for m in modifiers {
                     s = apply_rust_chain_modifier(s, m);

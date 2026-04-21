@@ -1187,7 +1187,7 @@ impl<'a> crate::lower::CtrlWalker<'a> for PyEmitter<'a> {
             }
             SendKind::QueryChain { target: Some(target), method: chain_method, args: chain_args, recv: chain_recv } => {
                 let mut out = format!("{}.all()", target.as_str());
-                let mods = collect_py_chain_modifiers(chain_method, chain_args, chain_recv.as_deref());
+                let mods = crate::lower::collect_chain_modifiers(chain_method, chain_args, chain_recv.as_deref());
                 for m in mods {
                     out = apply_py_chain_modifier(out, m);
                 }
@@ -1273,37 +1273,14 @@ fn is_bare_py_ident(s: &str) -> bool {
 }
 
 
-struct PyChainModifier<'a> {
-    method: &'a str,
-    args: &'a [Expr],
-}
-
-fn collect_py_chain_modifiers<'a>(
-    method: &'a str,
-    args: &'a [Expr],
-    recv: Option<&'a Expr>,
-) -> Vec<PyChainModifier<'a>> {
-    let mut out = Vec::new();
-    if let Some(r) = recv {
-        if let ExprNode::Send { recv: inner_recv, method: inner_method, args: inner_args, .. } = &*r.node {
-            if crate::catalog::is_query_builder_method(inner_method.as_str()) {
-                out.extend(collect_py_chain_modifiers(
-                    inner_method.as_str(),
-                    inner_args,
-                    inner_recv.as_ref(),
-                ));
-            }
-        }
-    }
-    out.push(PyChainModifier { method, args });
-    out
-}
-
 /// Compose one AR chain modifier onto a running python list
 /// expression. `all`/`includes`/etc. are no-ops. `order({field:
 /// :dir})` lowers to a `sorted(..., key=..., reverse=...)` wrapper.
 /// `limit(N)` slices `[:N]`.
-fn apply_py_chain_modifier(prev: String, m: PyChainModifier<'_>) -> String {
+///
+/// Chain-walk lives in `src/lower/chain.rs`; this fn just renders
+/// one already-classified layer.
+fn apply_py_chain_modifier(prev: String, m: crate::lower::ChainModifier<'_>) -> String {
     match m.method {
         "all" | "includes" | "preload" | "joins" | "distinct" | "select" => prev,
         "order" => {
