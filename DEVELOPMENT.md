@@ -4,6 +4,8 @@ Day-to-day reference for working on roundhouse itself — build commands,
 the `roundhouse-ast` debugging tool, how the pipeline stages compose, and
 the pattern for adding a new IR variant.
 
+For deeper architecture and per-stage internals, see [`docs/`](docs/).
+
 ## Build & test
 
 ```bash
@@ -11,15 +13,56 @@ cargo build                        # debug build
 cargo build --release              # release build
 cargo build --bin roundhouse-ast   # just the CLI debug tool
 
-cargo test                         # full suite (unit + integration)
+cargo test                         # full default suite (unit + integration)
 cargo test --test ingest           # one integration test file
 cargo test --test real_blog        # the real-blog forcing functions
 cargo test --lib erb::             # the ERB compiler unit tests
+
+cargo test --test rust_toolchain -- --ignored       # real Rust build
+cargo test --test typescript_toolchain -- --ignored # real TS build
+# ...plus crystal_toolchain, go_toolchain, elixir_toolchain, python_toolchain
 ```
 
-The test suite is the forcing function; it runs fast (sub-second) and
-must pass before any commit. New IR or recognizer work lands with a
-paired test — see [Adding a new IR variant](#adding-a-new-ir-variant).
+The default test suite is the forcing function; it runs fast
+(sub-second) and must pass before any commit. Toolchain tests are
+`#[ignore]`-gated so a local `cargo test` doesn't require every target
+runtime installed — CI runs each one in its own job.
+
+New IR or recognizer work lands with a paired test — see [Adding a new
+IR variant](#adding-a-new-ir-variant).
+
+## Fixtures
+
+### tiny-blog
+
+`fixtures/tiny-blog/` is the minimal always-works fixture. Its tests
+(source-equivalence + round-trip-identity) gate every commit. Checked
+into the repo — safe to edit directly when extending coverage.
+
+### real-blog
+
+`fixtures/real-blog/` is the Phase-1 target — a modernized Rails 8
+blog. It is **not checked in**; it's derived on demand from
+`scripts/create-blog` (a frozen snapshot of the ruby2js upstream
+generator, reproducible without an external git checkout).
+
+```bash
+make real-blog          # regenerate into fixtures/real-blog/
+make clean-real-blog    # remove it
+```
+
+CI regenerates the fixture once per run in the `generate-fixture` job
+and shares the artifact across the unit job and every per-target
+toolchain job — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+Three tests in `tests/real_blog.rs` pair against the generated tree:
+
+1. `ingests_without_errors` — loud regression guard.
+2. `expected_files_round_trip_byte_for_byte` — inclusion list; promote
+   files as remaining gaps close. Current list in
+   `tests/real_blog.rs:EXPECTED_RUBY_FILES`.
+3. `ir_is_fixed_under_emit_ingest` — structural round-trip across the
+   whole app (what `roundhouse-ast --round-trip` does for one file).
 
 ## Debugging tools
 
@@ -73,6 +116,14 @@ The JSON output for IR stages uses `serde_json::to_string_pretty` on the
 `Expr` type — one field per line, deterministic key ordering — which is
 also why structural diffs fall out naturally when two IRs disagree.
 
+### `roundhouse-compare`
+
+Cross-runtime HTML equivalence check. Boot Rails on one port, boot a
+roundhouse-emitted runtime on another, hand `roundhouse-compare` a URL
+list, and it walks the canonicalized DOM trees side-by-side looking for
+the first structural divergence. Lives in `tools/compare/`. See
+[`docs/pipeline/verification.md`](docs/pipeline/verification.md).
+
 ### Round-trip debugging recipe
 
 When `ir_is_fixed_under_emit_ingest` (or tiny-blog's equivalent) fails,
@@ -81,8 +132,8 @@ usable. Instead:
 
 1. Narrow to one file if possible (`--round-trip PATH.erb`).
 2. If the divergence is in the full-app path, use the scratch dir the
-   test wrote (`target/tmp/roundhouse/real_blog_round_trip/`) and diff
-   that tree against `fixtures/real-blog/`.
+   test wrote (under `CARGO_TARGET_TMPDIR/roundhouse/real_blog_round_trip/`)
+   and diff that tree against `fixtures/real-blog/`.
 3. For structural (not textual) divergence, dump both `App` JSONs and
    `diff` them — the tool does this automatically for the single-file
    path.
@@ -91,7 +142,7 @@ The unified-diff output highlights exactly which IR fields flipped, and
 a one-line change in the source is almost always a one-hunk change in
 the JSON.
 
-## Pipeline
+## Pipeline at a glance
 
 ```
    Ruby source  ─────────► Prism Node
@@ -104,9 +155,13 @@ the JSON.
                                   ▼
                               Expr (+ types + effects)
                                   │
-                                  │  emit::{ruby, rust, go}  (src/emit/)
+                                  │  lower::{controller,validations,...}  (src/lower/)
                                   ▼
-                              emitted source code
+                              LoweredAction / LoweredValidation / FlatRoute / ...
+                                  │
+                                  │  emit::{ruby, rust, typescript, ...}  (src/emit/)
+                                  ▼
+                              emitted source code  +  runtime/<target>/ glue
 ```
 
 Key files:
@@ -120,29 +175,21 @@ Key files:
 - **`src/erb.rs`** — ERB → Ruby source string. Output is the input to
   the regular Ruby ingest path.
 - **`src/analyze.rs`** — type inference + effect inference. Two walks
-  (`compute` for types, `visit_effects` for effects).
+  (`compute` for types, `visit_effects` for effects). See
+  [`docs/pipeline/analyze.md`](docs/pipeline/analyze.md).
+- **`src/catalog/`** — method catalog; single source of truth for the
+  AR method surface. See [`docs/data/catalog.md`](docs/data/catalog.md).
+- **`src/adapter.rs`** — `DatabaseAdapter` trait. See
+  [`docs/data/adapter.md`](docs/data/adapter.md).
+- **`src/lower/`** — target-neutral lowerings. Controller walker,
+  validation evaluator shape, route flattening, schema DDL, persistence
+  SQL, fixture plan. See [`docs/pipeline/lower.md`](docs/pipeline/lower.md).
 - **`src/emit/`** — one file per target. Ruby emit pairs with ingest as
-  the round-trip identity forcing function. Targets today:
-  `ruby` (full), `rust` / `go` / `typescript` / `elixir` / `python` / `crystal`
-  (scaffolds — Phase 2 complete).
-
-## Fixtures
-
-`fixtures/tiny-blog` is the minimal always-works fixture. Its tests
-(source-equivalence + round-trip-identity) gate every commit.
-
-`fixtures/real-blog` is the Phase 1 target — a modernized Rails 8 blog
-from ruby2js's `demo-blog.tar.gz`, checked in verbatim (including
-`test/`). Three tests in `tests/real_blog.rs` pair against it:
-
-1. `ingests_without_errors` — loud regression guard.
-2. `expected_files_round_trip_byte_for_byte` — inclusion list; promote
-   files as their remaining gaps close.
-3. `ir_is_fixed_under_emit_ingest` — structural round-trip across the
-   whole app (what `roundhouse-ast --round-trip` does for one file).
-
-Known gaps are in `fixtures/real-blog/README.md`, in priority order.
-The priority is set by "what breaks next as the probe advances."
+  the round-trip identity forcing function. See
+  [`docs/pipeline/emit.md`](docs/pipeline/emit.md).
+- **`runtime/<target>/`** — hand-written per-target glue copied
+  verbatim into emitted projects. See
+  [`docs/pipeline/runtime.md`](docs/pipeline/runtime.md).
 
 ## Adding a new IR variant
 
@@ -161,9 +208,10 @@ The pattern today (example: adding `ExprNode::Array`):
    your peril — missing effect propagation is a silent bug.
 
 4. **Emit.** Add a match arm in each of `src/emit/ruby.rs`,
-   `src/emit/rust.rs`, `src/emit/go.rs`. Ruby's arm must be the exact
-   inverse of the ingest (that's the round-trip forcing function);
-   Rust/Go can be approximations until a target fixture sharpens them.
+   `src/emit/rust.rs`, `src/emit/typescript.rs`, … Ruby's arm must be
+   the exact inverse of the ingest (that's the round-trip forcing
+   function); other targets can be approximations until a fixture
+   sharpens them.
 
 5. **Test.** Add a unit test to `tests/ingest.rs` (one `parse_one`
    helper call per surface form you claim to preserve). Run
@@ -189,9 +237,10 @@ The pattern today (example: adding `ExprNode::Array`):
 
 ## See also
 
-- **`fixtures/real-blog/README.md`** — remaining ingest gaps with
-  priority order.
-- **`fixtures/tiny-blog/`** — the minimal working fixture.
+- [`docs/data/`](docs/data/) — the compiler's inputs (Ruby + ERB,
+  schema/routes/seeds, method catalog, database adapter).
+- [`docs/pipeline/`](docs/pipeline/) — analyze, lower, emit, runtime
+  integration, verification.
 - **Auto-memory** (`~/.claude/projects/-Users-rubys-git-railcar/memory/`)
   — strategy notes, target roadmap, ERB fidelity plan, comment
   preservation plan.
