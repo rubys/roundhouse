@@ -27,6 +27,7 @@ pub mod controller_walk;
 pub mod routes;
 pub mod schema_sql;
 pub mod validations;
+pub mod view;
 
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
@@ -55,3 +56,7 @@ pub use persistence::{lower_persistence, BelongsToCheck, DependentChild, Lowered
 pub use routes::{flatten_routes, standard_resource_actions, FlatRoute};
 pub use schema_sql::{lower_schema, sqlite_type};
 pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};
+pub use view::{
+    classify_form_builder_method, classify_view_helper, classify_view_url_arg,
+    FormBuilderMethod, ViewHelperKind, ViewUrlArg,
+};

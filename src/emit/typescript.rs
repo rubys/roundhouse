@@ -2203,32 +2203,26 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
             out.push("}".to_string());
             out
         }
-        // `<% content_for :slot, "value" %>` — statement form.
-        // Side-effect: stashes value into the slot for the layout
-        // to read later. Emits a call but no `_buf +=`.
+        // `<% content_for :slot, "value" %>` — statement-form
+        // setter. Classifier recognizes the shape; render the
+        // side-effect call without a `_buf +=` (nothing goes
+        // into the view output — the slot is read later by the
+        // layout's `<%= yield :slot %>`).
         ExprNode::Send { recv: None, method, args, block: None, .. }
-            if method.as_str() == "content_for" && args.len() == 2 =>
+            if matches!(
+                crate::lower::classify_view_helper(method.as_str(), args),
+                Some(crate::lower::ViewHelperKind::ContentForSetter { .. })
+            ) =>
         {
-            let slot = match &*args[0].node {
-                ExprNode::Lit { value: Literal::Sym { value } } => {
-                    Some(format!("{:?}", value.as_str()))
+            if let Some(crate::lower::ViewHelperKind::ContentForSetter { slot, body }) =
+                crate::lower::classify_view_helper(method.as_str(), args)
+            {
+                if is_ts_simple_expr(body, ctx) {
+                    let body_s = emit_ts_view_expr_raw(body, ctx);
+                    return vec![format!("Helpers.contentFor({slot:?}, {body_s});")];
                 }
-                ExprNode::Lit { value: Literal::Str { value } } => {
-                    Some(format!("{value:?}"))
-                }
-                _ => None,
-            };
-            let body = if is_ts_simple_expr(&args[1], ctx) {
-                Some(emit_ts_view_expr_raw(&args[1], ctx))
-            } else {
-                None
-            };
-            match (slot, body) {
-                (Some(s), Some(b)) => {
-                    vec![format!("Helpers.contentFor({s}, {b});")]
-                }
-                _ => vec!["/* TODO ERB: content_for with complex args */".to_string()],
             }
+            vec!["/* TODO ERB: content_for with complex body */".to_string()]
         }
         // `coll.each do |x| ... end` — only if coll is simple.
         ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. }
@@ -2317,225 +2311,54 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
     }
 
-    // `turbo_stream_from "articles"` — bare helper call with a
-    // string arg. Runtime helper produces the
-    // `<turbo-cable-stream-source signed-stream-name="...">` tag
-    // the Turbo client reads to subscribe via Action Cable.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "turbo_stream_from" && args.len() == 1 {
-            if is_ts_simple_expr(&args[0], ctx) {
-                let arg = emit_ts_view_expr_raw(&args[0], ctx);
-                return format!("_buf += Helpers.turboStreamFrom({arg});");
-            }
-        }
-    }
-
-    // `link_to "text", url_or_record [, opts]` — Rails nav helper.
-    // The URL can be a literal, a path-helper call, or a model
-    // reference. Opts hash becomes a plain object.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "link_to" && !args.is_empty() && args.len() <= 3 {
-            if let Some(call) = try_emit_link_or_button(method.as_str(), args, ctx) {
-                return format!("_buf += {call};");
-            }
-        }
-    }
-
-    // `button_to "text", target [, opts]` — wraps a one-button
-    // form. `method: :delete` becomes the `_method` hidden input.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "button_to" && !args.is_empty() && args.len() <= 3 {
-            if let Some(call) = try_emit_link_or_button(method.as_str(), args, ctx) {
-                return format!("_buf += {call};");
-            }
-        }
-    }
-
-    // `<%= yield %>` — `ExprNode::Yield`, not a Send. Zero-arg
-    // form yields the main body (controller view output); one-arg
-    // form `yield :slot` reads a named slot. Both map to runtime
-    // getters populated by the request dispatcher / content_for.
+    // `<%= yield %>` / `<%= yield :slot %>` — ExprNode::Yield,
+    // not a Send. Maps to the runtime's yield-body / named-slot
+    // getters populated by the request dispatcher + content_for
+    // setters.
     if let ExprNode::Yield { args } = &*inner.node {
         if args.is_empty() {
             return "_buf += Helpers.getYield();".to_string();
         }
         if args.len() == 1 {
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
-                return format!(
-                    "_buf += Helpers.getSlot({:?});",
-                    value.as_str(),
-                );
+                return format!("_buf += Helpers.getSlot({:?});", value.as_str());
             }
         }
     }
 
-    // Layout / head helpers — bare no-arg calls that lower to
-    // fixed runtime functions. `javascript_importmap_tags` passes
-    // the ingested pin list so the generated output reflects the
-    // app's real importmap.
+    // Bare view-helper call — single classifier-backed dispatch
+    // for every Rails helper we recognize (csrf_meta_tags,
+    // dom_id, link_to, etc). The classifier in `lower::view`
+    // enforces the method-name + arity match once; this function
+    // owns the TS-specific rendering per variant.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if args.is_empty() {
-            match method.as_str() {
-                "csrf_meta_tags" => {
-                    return "_buf += Helpers.csrfMetaTags();".to_string();
-                }
-                "csp_meta_tag" => {
-                    return "_buf += Helpers.cspMetaTag();".to_string();
-                }
-                "javascript_importmap_tags" => {
-                    return "_buf += Helpers.javascriptImportmapTags(Importmap.PINS);".to_string();
-                }
-                _ => {}
+        if let Some(kind) =
+            crate::lower::classify_view_helper(method.as_str(), args)
+        {
+            if let Some(out) = emit_ts_view_helper(&kind, ctx) {
+                return out;
             }
         }
     }
 
-    // `dom_id(record [, prefix])` → `Helpers.domId(record, prefix?)`.
-    // Rails uses the 2-arg form for prefixed ids like
-    // `comments_count_article_1`.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "dom_id" && !args.is_empty() && args.len() <= 2 {
-            if is_ts_simple_expr(&args[0], ctx) {
-                let record = emit_ts_view_expr_raw(&args[0], ctx);
-                if args.len() == 1 {
-                    return format!("_buf += Helpers.domId({record});");
-                }
-                // Second arg is usually a symbol: `:comments_count`.
-                let prefix = match &*args[1].node {
-                    ExprNode::Lit { value: Literal::Sym { value } } => {
-                        format!("{:?}", value.as_str())
-                    }
-                    ExprNode::Lit { value: Literal::Str { value } } => {
-                        format!("{value:?}")
-                    }
-                    _ if is_ts_simple_expr(&args[1], ctx) => {
-                        emit_ts_view_expr_raw(&args[1], ctx)
-                    }
-                    _ => return format!("_buf += Helpers.domId({record});"),
-                };
-                return format!("_buf += Helpers.domId({record}, {prefix});");
-            }
-        }
-    }
-
-    // `pluralize(count, "word")` → `Helpers.pluralize(count,
-    // "word")`. Scaffold idiom in the article partial for the
-    // comments count — "1 comment" vs "N comments".
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "pluralize" && args.len() == 2 {
-            if is_ts_simple_expr(&args[0], ctx) && is_ts_simple_expr(&args[1], ctx) {
-                let count = emit_ts_view_expr_raw(&args[0], ctx);
-                let word = emit_ts_view_expr_raw(&args[1], ctx);
-                return format!("_buf += Helpers.pluralize({count}, {word});");
-            }
-        }
-    }
-
-    // `truncate(text, length: N)` → `Helpers.truncate(text,
-    // opts)`. Used in the article partial to shorten body text.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "truncate" && !args.is_empty() {
-            if is_ts_simple_expr(&args[0], ctx) {
-                let text = emit_ts_view_expr_raw(&args[0], ctx);
-                let opts = args.iter().skip(1).find_map(|a| match &*a.node {
-                    ExprNode::Hash { entries, .. } => {
-                        Some(ts_hash_to_object_literal(entries, ctx))
-                    }
-                    _ => None,
-                }).unwrap_or_else(|| "{}".to_string());
-                return format!("_buf += Helpers.truncate({text}, {opts});");
-            }
-        }
-    }
-
-    // `stylesheet_link_tag :name, "data-turbo-track": "reload"` —
-    // Sym first arg + opts hash. The first-arg sym is usually the
-    // literal stylesheet name (`:application`), but `:app` is a
-    // special shorthand that Rails expands to ALL stylesheets in
-    // `app/assets/stylesheets/` + `app/assets/builds/`. We mirror
-    // that expansion at emit time using `ctx.stylesheets` so the
-    // rendered head structurally matches Rails' output.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "stylesheet_link_tag" && !args.is_empty() {
-            let opts_arg = args.iter().skip(1).find_map(|a| match &*a.node {
-                ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
-                _ => None,
-            });
-            let opts = opts_arg.unwrap_or_else(|| "{}".to_string());
-
-            // `:app` → one link per discovered stylesheet.
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
-                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
-                    let calls: Vec<String> = ctx
-                        .stylesheets
-                        .iter()
-                        .map(|name| {
-                            format!("_buf += Helpers.stylesheetLinkTag({name:?}, {opts});")
-                        })
-                        .collect();
-                    // Rails inserts a newline between the two `<link>` tags
-                    // when the helper emits multiple. Match by appending a
-                    // `\n` text node between our calls.
-                    return calls.join("\n_buf += \"\\n\";\n");
-                }
-            }
-
-            let name_arg = match &*args[0].node {
-                ExprNode::Lit { value: Literal::Sym { value } } => {
-                    Some(format!("{:?}", value.as_str()))
-                }
-                ExprNode::Lit { value: Literal::Str { value } } => {
-                    Some(format!("{value:?}"))
-                }
-                _ => None,
-            };
-            if let Some(name) = name_arg {
-                return format!("_buf += Helpers.stylesheetLinkTag({name}, {opts});");
-            }
-        }
-    }
-
-    // `content_for(:slot)` getter form, with optional `|| "fallback"`
-    // OR-chain. Rails pattern in layouts: `<%= content_for(:title)
-    // || "Default" %>`. The OR lowers naturally to JS's `||`
-    // since the helper returns `""` when unset (JS falsy) and a
-    // string when set (truthy).
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "content_for" && args.len() == 1 {
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
-                return format!(
-                    "_buf += Helpers.contentFor({:?});",
-                    value.as_str(),
-                );
-            }
-        }
-    }
-    // `content_for(:title) || "Real Blog"` — ingested as a
-    // BoolOp (Or) with `content_for(:title)` on the left and
-    // the fallback literal on the right. Map to JS `||` which
-    // has matching empty-string / truthy-string semantics since
-    // our `contentFor` getter returns "" for unset slots.
+    // `content_for(:title) || "Real Blog"` — ingested as a BoolOp
+    // (Or) not a Send, so the classifier doesn't see it. Match
+    // here; lower to JS `||` which has matching empty-string
+    // falsy semantics since `contentFor` returns "" for unset
+    // slots.
     if let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*inner.node
     {
         if let ExprNode::Send {
-            recv: None,
-            method: inner_method,
-            args: inner_args,
-            block: None,
-            ..
+            recv: None, method, args, block: None, ..
         } = &*left.node
         {
-            if inner_method.as_str() == "content_for"
-                && inner_args.len() == 1
-                && is_ts_simple_expr(right, ctx)
+            if let Some(crate::lower::ViewHelperKind::ContentForGetter { slot }) =
+                crate::lower::classify_view_helper(method.as_str(), args)
             {
-                if let ExprNode::Lit { value: Literal::Sym { value } } =
-                    &*inner_args[0].node
-                {
+                if is_ts_simple_expr(right, ctx) {
                     let fallback = emit_ts_view_expr_raw(right, ctx);
                     return format!(
-                        "_buf += (Helpers.contentFor({:?}) || {fallback});",
-                        value.as_str(),
+                        "_buf += (Helpers.contentFor({slot:?}) || {fallback});",
                     );
                 }
             }
@@ -2552,16 +2375,19 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
     if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*inner.node {
         if let ExprNode::Var { name: recv_name, .. } = &*r.node {
             if ctx.is_local(recv_name.as_str()) {
-                // Common form builder methods. text_area vs textArea —
-                // emit both as textArea call (TS idiomatic camelCase).
-                let ts_method = match method.as_str() {
-                    "label" => Some("label"),
-                    "text_field" => Some("textField"),
-                    "text_area" | "textarea" => Some("textArea"),
-                    "submit" => Some("submit"),
-                    _ => None,
-                };
-                if let Some(js_method) = ts_method {
+                if let Some(fb_method) =
+                    crate::lower::classify_form_builder_method(method.as_str())
+                {
+                    // Translate the shared kind into TS's camelCased
+                    // FormBuilder API. Other targets pick the
+                    // language-appropriate mapping (snake_case in
+                    // rust/python, etc.) from the same classifier.
+                    let js_method = match fb_method {
+                        crate::lower::FormBuilderMethod::Label => "label",
+                        crate::lower::FormBuilderMethod::TextField => "textField",
+                        crate::lower::FormBuilderMethod::TextArea => "textArea",
+                        crate::lower::FormBuilderMethod::Submit => "submit",
+                    };
                     return emit_ts_form_builder_call(
                         recv_name.as_str(),
                         js_method,
@@ -2681,6 +2507,138 @@ fn split_form_builder_args(args: &[Expr], ctx: &TsViewCtx) -> (Option<String>, O
 /// `Helpers.linkTo(text, url, opts)`. Returns None when the args
 /// can't be lowered (non-simple text, unsupported URL shape, etc.)
 /// so the caller can fall through to the TODO placeholder.
+/// Render a classified `ViewHelperKind` as a TS statement.
+/// Returns `Some(line)` on success; `None` when the variant's
+/// arg shape isn't renderable here (e.g. the text/URL isn't
+/// simple — the caller's fallthrough then emits the degraded
+/// placeholder). Covers everything `<%= helper %>`-side; the
+/// statement-form `<% content_for :t, "b" %>` is handled by
+/// `emit_ts_view_stmt_pass2`.
+fn emit_ts_view_helper(
+    kind: &crate::lower::ViewHelperKind<'_>,
+    ctx: &TsViewCtx,
+) -> Option<String> {
+    use crate::lower::ViewHelperKind::*;
+    match kind {
+        CsrfMetaTags => Some("_buf += Helpers.csrfMetaTags();".to_string()),
+        CspMetaTag => Some("_buf += Helpers.cspMetaTag();".to_string()),
+        JavascriptImportmapTags => {
+            Some("_buf += Helpers.javascriptImportmapTags(Importmap.PINS);".to_string())
+        }
+        TurboStreamFrom { channel } => {
+            if !is_ts_simple_expr(channel, ctx) {
+                return None;
+            }
+            let arg = emit_ts_view_expr_raw(channel, ctx);
+            Some(format!("_buf += Helpers.turboStreamFrom({arg});"))
+        }
+        DomId { record, prefix } => {
+            if !is_ts_simple_expr(record, ctx) {
+                return None;
+            }
+            let rec = emit_ts_view_expr_raw(record, ctx);
+            match prefix {
+                None => Some(format!("_buf += Helpers.domId({rec});")),
+                Some(p) => {
+                    let prefix_expr = match &*p.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            format!("{:?}", value.as_str())
+                        }
+                        ExprNode::Lit { value: Literal::Str { value } } => {
+                            format!("{value:?}")
+                        }
+                        _ if is_ts_simple_expr(p, ctx) => emit_ts_view_expr_raw(p, ctx),
+                        _ => return Some(format!("_buf += Helpers.domId({rec});")),
+                    };
+                    Some(format!("_buf += Helpers.domId({rec}, {prefix_expr});"))
+                }
+            }
+        }
+        Pluralize { count, word } => {
+            if !is_ts_simple_expr(count, ctx) || !is_ts_simple_expr(word, ctx) {
+                return None;
+            }
+            let c = emit_ts_view_expr_raw(count, ctx);
+            let w = emit_ts_view_expr_raw(word, ctx);
+            Some(format!("_buf += Helpers.pluralize({c}, {w});"))
+        }
+        Truncate { text, opts } => {
+            if !is_ts_simple_expr(text, ctx) {
+                return None;
+            }
+            let t = emit_ts_view_expr_raw(text, ctx);
+            let opts_s = match opts {
+                Some(e) => match &*e.node {
+                    ExprNode::Hash { entries, .. } => ts_hash_to_object_literal(entries, ctx),
+                    _ => "{}".to_string(),
+                },
+                None => "{}".to_string(),
+            };
+            Some(format!("_buf += Helpers.truncate({t}, {opts_s});"))
+        }
+        StylesheetLinkTag { name, opts } => {
+            let opts_s = match opts {
+                Some(e) => match &*e.node {
+                    ExprNode::Hash { entries, .. } => ts_hash_to_object_literal(entries, ctx),
+                    _ => "{}".to_string(),
+                },
+                None => "{}".to_string(),
+            };
+            // `:app` is the scaffold shorthand Rails expands to
+            // every stylesheet in the asset path; mirror by
+            // emitting one link per ingested stylesheet name.
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*name.node {
+                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
+                    let calls: Vec<String> = ctx
+                        .stylesheets
+                        .iter()
+                        .map(|n| format!("_buf += Helpers.stylesheetLinkTag({n:?}, {opts_s});"))
+                        .collect();
+                    return Some(calls.join("\n_buf += \"\\n\";\n"));
+                }
+            }
+            let name_expr = match &*name.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+                ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+                _ => return None,
+            };
+            Some(format!("_buf += Helpers.stylesheetLinkTag({name_expr}, {opts_s});"))
+        }
+        ContentForGetter { slot } => {
+            Some(format!("_buf += Helpers.contentFor({slot:?});"))
+        }
+        // Statement-form setter is handled by
+        // `emit_ts_view_stmt_pass2`; the append-level dispatcher
+        // never sees it through `<%= ... %>`.
+        ContentForSetter { .. } => None,
+        LinkTo { text, url, opts } => {
+            let args = build_link_like_args(text, url, *opts);
+            try_emit_link_or_button("link_to", &args, ctx).map(|call| format!("_buf += {call};"))
+        }
+        ButtonTo { text, target, opts } => {
+            let args = build_link_like_args(text, target, *opts);
+            try_emit_link_or_button("button_to", &args, ctx).map(|call| format!("_buf += {call};"))
+        }
+    }
+}
+
+/// Rebuild the positional-arg slice for link_to / button_to from
+/// the classifier's separated fields. The existing
+/// `try_emit_link_or_button` takes `&[Expr]` so this is a thin
+/// adapter; refactoring it to take structured args is a separate
+/// pass.
+fn build_link_like_args<'a>(
+    text: &'a Expr,
+    url: &'a Expr,
+    opts: Option<&'a Expr>,
+) -> Vec<Expr> {
+    let mut out = vec![text.clone(), url.clone()];
+    if let Some(o) = opts {
+        out.push(o.clone());
+    }
+    out
+}
+
 fn try_emit_link_or_button(
     method: &str,
     args: &[Expr],
