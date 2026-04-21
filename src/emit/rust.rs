@@ -15,7 +15,9 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{Controller, HttpMethod, MethodDef, Model, ModelBodyItem, Test, TestModule};
+use crate::dialect::{
+    Association, Controller, HttpMethod, MethodDef, Model, ModelBodyItem, Test, TestModule,
+};
 // Trait import for the walker — used by RsEmitter's inherent helpers
 // to call `self.render_expr(...)` via trait-method dispatch.
 use crate::lower::CtrlWalker as _;
@@ -660,18 +662,38 @@ impl RustBroadcastDecls {
 /// One broadcast call to emit. `channel_expr` and `target_expr` are
 /// already-rendered Rust `&str` expressions — the former might be a
 /// string literal like `"articles"` or a `&format!(...)` over
-/// interpolated parts.
+/// interpolated parts. When `on_association` is set, the broadcast
+/// fires on a parent record (looked up via `<Target>::find(self.<fk>)`)
+/// instead of self.
 struct RustBroadcast {
     action: &'static str,
     channel_expr: String,
     target_expr: Option<String>,
+    on_association: Option<AssocRef>,
 }
 
-/// Walk the model body for `broadcasts_to` calls. Stored as
-/// `ModelBodyItem::Unknown` (not a typed dialect node), so we
-/// pattern-match them out of the raw `Send` shape.
+/// Resolved belongs_to reference captured at emit time so the
+/// generated code can do `<Target>::find(self.<foreign_key>)`.
+struct AssocRef {
+    var_name: String,     // "article" — used as the let-binding name
+    target_class: String, // "Article"
+    target_table: String, // "articles"
+    foreign_key: String,  // "article_id"
+}
+
+/// Walk the model body for broadcast declarations. Handles two
+/// shapes, both stored as `ModelBodyItem::Unknown`:
+///
+///   1. `broadcasts_to ->(record) { "stream" }, inserts_by: :prepend`
+///      — generates matched after_save + after_destroy calls on self.
+///   2. `after_create_commit { assoc.broadcast_replace_to("stream") }`
+///      / `after_destroy_commit { ... }` — generates one call each
+///      on a parent association (resolved via the model's belongs_to
+///      declarations).
 fn collect_rust_broadcast_decls(model: &Model) -> RustBroadcastDecls {
     let mut decls = RustBroadcastDecls::default();
+    let belongs_tos = collect_belongs_to(model);
+
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else {
             continue;
@@ -680,64 +702,180 @@ fn collect_rust_broadcast_decls(model: &Model) -> RustBroadcastDecls {
             recv: None,
             method,
             args,
+            block,
             ..
         } = &*expr.node
         else {
             continue;
         };
-        if method.as_str() != "broadcasts_to" {
-            continue;
+        match method.as_str() {
+            "broadcasts_to" => collect_broadcasts_to(&mut decls, args),
+            // `after_create_commit { … }` fires on inserts; we treat
+            // it as a save-time hook (identical to railcar's filter).
+            // Rails' stricter semantics (only on create, not update)
+            // aren't worth the extra codegen for the blog demo —
+            // broadcasting on update is idempotent.
+            "after_create_commit" | "after_save_commit" => {
+                if let Some(b) = block {
+                    collect_commit_block(&mut decls.save, b, &belongs_tos);
+                }
+            }
+            "after_destroy_commit" => {
+                if let Some(b) = block {
+                    collect_commit_block(&mut decls.destroy, b, &belongs_tos);
+                }
+            }
+            _ => {}
         }
+    }
+    decls
+}
 
-        let Some(stream_arg) = args.first() else {
+/// Pick belongs_to associations off the model body. Keyed by the
+/// association name as it appears in source (`article` →
+/// { target: Article, fk: article_id }).
+fn collect_belongs_to(model: &Model) -> Vec<AssocRef> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let ModelBodyItem::Association { assoc, .. } = item else {
             continue;
         };
-        let Some(channel_expr) = rust_broadcast_stream_expr(stream_arg) else {
-            continue;
-        };
+        if let Association::BelongsTo {
+            name,
+            target,
+            foreign_key,
+            ..
+        } = assoc
+        {
+            let target_class = target.0.as_str().to_string();
+            out.push(AssocRef {
+                var_name: name.as_str().to_string(),
+                target_table: crate::naming::pluralize_snake(&target_class),
+                target_class,
+                foreign_key: foreign_key.as_str().to_string(),
+            });
+        }
+    }
+    out
+}
 
-        // Parse optional `inserts_by:` + `target:` from the second
-        // arg hash. `inserts_by` defaults to `:replace` per Rails.
-        let mut action: &'static str = "replace";
-        let mut target_expr: Option<String> = None;
-        if let Some(opts) = args.get(1) {
-            if let ExprNode::Hash { entries, .. } = &*opts.node {
-                for (k, v) in entries {
-                    let Some(key) = hash_sym_key(k) else { continue };
-                    match key.as_str() {
-                        "inserts_by" => {
-                            if let ExprNode::Lit {
-                                value: Literal::Sym { value },
-                            } = &*v.node
-                            {
-                                action = match value.as_str() {
-                                    "prepend" => "prepend",
-                                    "append" => "append",
-                                    _ => "replace",
-                                };
-                            }
+fn collect_broadcasts_to(decls: &mut RustBroadcastDecls, args: &[Expr]) {
+    let Some(stream_arg) = args.first() else {
+        return;
+    };
+    let Some(channel_expr) = rust_broadcast_stream_expr(stream_arg) else {
+        return;
+    };
+
+    // Parse optional `inserts_by:` + `target:` from the second arg
+    // hash. `inserts_by` defaults to `:replace` per Rails.
+    let mut action: &'static str = "replace";
+    let mut target_expr: Option<String> = None;
+    if let Some(opts) = args.get(1) {
+        if let ExprNode::Hash { entries, .. } = &*opts.node {
+            for (k, v) in entries {
+                let Some(key) = hash_sym_key(k) else { continue };
+                match key.as_str() {
+                    "inserts_by" => {
+                        if let ExprNode::Lit {
+                            value: Literal::Sym { value },
+                        } = &*v.node
+                        {
+                            action = match value.as_str() {
+                                "prepend" => "prepend",
+                                "append" => "append",
+                                _ => "replace",
+                            };
                         }
-                        "target" => {
-                            target_expr = Some(rust_broadcast_expr(v, None));
-                        }
-                        _ => {}
                     }
+                    "target" => {
+                        target_expr = Some(rust_broadcast_expr(v, None));
+                    }
+                    _ => {}
                 }
             }
         }
-
-        decls.save.push(RustBroadcast {
-            action,
-            channel_expr: channel_expr.clone(),
-            target_expr: target_expr.clone(),
-        });
-        decls.destroy.push(RustBroadcast {
-            action: "remove",
-            channel_expr,
-            target_expr,
-        });
     }
-    decls
+
+    decls.save.push(RustBroadcast {
+        action,
+        channel_expr: channel_expr.clone(),
+        target_expr: target_expr.clone(),
+        on_association: None,
+    });
+    decls.destroy.push(RustBroadcast {
+        action: "remove",
+        channel_expr,
+        target_expr,
+        on_association: None,
+    });
+}
+
+/// Parse an `after_{create,destroy}_commit { … }` block body, looking
+/// for `assoc.broadcast_{replace,prepend,append,remove}_to(channel,
+/// [target])` calls. Unwraps trailing `rescue nil` (the blog fixture
+/// uses it to swallow URL-helper errors during seeding).
+fn collect_commit_block(out: &mut Vec<RustBroadcast>, block: &Expr, assocs: &[AssocRef]) {
+    // Block is a Lambda; peel to its body.
+    let body = match &*block.node {
+        ExprNode::Lambda { body, .. } => body,
+        _ => return,
+    };
+    // Unwrap `expr rescue fallback` — ignore the fallback.
+    let inner = match &*body.node {
+        ExprNode::RescueModifier { expr, .. } => expr,
+        _ => body,
+    };
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        ..
+    } = &*inner.node
+    else {
+        return;
+    };
+    let action = match method.as_str() {
+        "broadcast_replace_to" => "replace",
+        "broadcast_prepend_to" => "prepend",
+        "broadcast_append_to" => "append",
+        "broadcast_remove_to" => "remove",
+        _ => return,
+    };
+    // Receiver is the association name. Prism parses bare
+    // `article.broadcast_replace_to(...)` inside a block as a
+    // `Send { recv: Send { method: "article", args: [] }, ... }`
+    // (implicit-self method call) — not a Var. Accept either shape:
+    // Var covers explicit locals, bare-Send covers the common case.
+    let assoc_name = match &*recv.node {
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } if args.is_empty() => method.as_str().to_string(),
+        _ => return,
+    };
+    let Some(assoc) = assocs.iter().find(|a| a.var_name == assoc_name) else {
+        return;
+    };
+
+    let Some(channel_expr) = args.first().map(|a| rust_broadcast_expr(a, None)) else {
+        return;
+    };
+    let target_expr = args.get(1).map(|a| rust_broadcast_expr(a, None));
+    out.push(RustBroadcast {
+        action,
+        channel_expr,
+        target_expr,
+        on_association: Some(AssocRef {
+            var_name: assoc.var_name.clone(),
+            target_class: assoc.target_class.clone(),
+            target_table: assoc.target_table.clone(),
+            foreign_key: assoc.foreign_key.clone(),
+        }),
+    });
 }
 
 /// Convert a `broadcasts_to` first arg to a Rust &str expression.
@@ -874,6 +1012,46 @@ fn emit_one_broadcast_call(
     b: &RustBroadcast,
 ) {
     let target = b.target_expr.as_deref().unwrap_or("\"\"");
+    if let Some(assoc) = &b.on_association {
+        // `<parent>.broadcast_*_to(channel)` — look the parent up by
+        // foreign key and fire the broadcast on it. `if let Some`
+        // swallows the missing-parent case (the common one during
+        // orphaned-record cleanup and the seeding `rescue nil`).
+        let var = &assoc.var_name;
+        let target_class = &assoc.target_class;
+        let target_table = &assoc.target_table;
+        let fk = &assoc.foreign_key;
+        writeln!(
+            out,
+            "        if let Some({var}) = {target_class}::find(self.{fk}) {{"
+        )
+        .unwrap();
+        match b.action {
+            "remove" => {
+                writeln!(
+                    out,
+                    "            crate::cable::broadcast_remove_to({target_table:?}, {var}.id, {ch}, {target});",
+                    ch = b.channel_expr,
+                )
+                .unwrap();
+            }
+            action => {
+                let func = match action {
+                    "prepend" => "broadcast_prepend_to",
+                    "append" => "broadcast_append_to",
+                    _ => "broadcast_replace_to",
+                };
+                writeln!(
+                    out,
+                    "            crate::cable::{func}({target_table:?}, {var}.id, {target_class:?}, {ch}, {target});",
+                    ch = b.channel_expr,
+                )
+                .unwrap();
+            }
+        }
+        writeln!(out, "        }}").unwrap();
+        return;
+    }
     match b.action {
         "remove" => {
             // remove doesn't re-render the partial, so no type_name.
