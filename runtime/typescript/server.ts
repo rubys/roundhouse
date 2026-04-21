@@ -195,17 +195,9 @@ function renderLayout(body: string): string {
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="action-cable-url" content="/cable">
+    <link rel="icon" href="data:,">
     <script src="https://cdn.tailwindcss.com"></script>
-    <script type="importmap">
-    {
-      "imports": {
-        "@hotwired/turbo-rails": "https://ga.jspm.io/npm:@hotwired/turbo-rails@8.0.0/app/javascript/turbo/index.js",
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js",
-        "@rails/actioncable": "https://ga.jspm.io/npm:@rails/actioncable@7.1.0/app/assets/javascripts/actioncable.esm.js"
-      }
-    }
-    </script>
-    <script type="module">import "@hotwired/turbo-rails";</script>
+    <script type="module" src="https://esm.sh/@hotwired/turbo-rails@8.0.0?bundle-deps"></script>
   </head>
   <body>
     <main class="container mx-auto mt-8 px-5 flex flex-col">
