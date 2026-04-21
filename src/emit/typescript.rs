@@ -2043,11 +2043,204 @@ fn emit_ts_view_body(body: &Expr, ctx: &TsViewCtx) -> Vec<String> {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
+    // Rails' erubi renders `<% %>` non-output tags with its default
+    // trim mode, which strips the single trailing newline after
+    // `%>`. Our ingest preserves the source verbatim (so Ruby emit
+    // can round-trip byte-for-byte). To match Rails at render, we
+    // apply the trim here during emit: for every non-output
+    // statement whose successor is a text append, strip the
+    // leading `\n` of that text. Doesn't recurse into nested
+    // bodies — `if`/`each` handle their own scope via
+    // emit_ts_view_stmt_pass2.
+    let trimmed = erubi_trim_body(&stmts);
     let mut out = Vec::new();
-    for stmt in &stmts {
-        out.extend(emit_ts_view_stmt_pass2(stmt, ctx));
+    for stmt in &trimmed {
+        out.extend(emit_ts_view_stmt_pass2(stmt.as_ref(), ctx));
     }
     out
+}
+
+/// Produce a new statement list where text-chunks adjacent to
+/// non-output ERB statements have their whitespace trimmed to
+/// mirror erubi's default render behavior:
+///   - Text after a `<% %>` tag: leading `\n` stripped (the tag's
+///     trailing newline is consumed).
+///   - Text before a `<% %>` tag: trailing horizontal whitespace
+///     on the tag's own line is stripped, when that whitespace
+///     sits directly after the preceding `\n`. This makes a line
+///     that contains only `    <% tag %>` disappear entirely.
+///
+/// Scope: only the direct `Seq` statements passed in. Nested
+/// branches (if/each bodies) are handled when their emitters
+/// recurse through `emit_ts_view_body`.
+fn erubi_trim_body<'a>(stmts: &[&'a Expr]) -> Vec<std::borrow::Cow<'a, Expr>> {
+    use std::borrow::Cow;
+    // Build a mutable copy so we can edit both the "before" and
+    // "after" text chunks around each non-output tag.
+    let mut out: Vec<Cow<'a, Expr>> = stmts.iter().map(|s| Cow::Borrowed(*s)).collect();
+    for i in 0..out.len() {
+        if !is_non_output_erb_stmt(out[i].as_ref()) {
+            continue;
+        }
+        // Trailing `\n` of preceding text chunk → strip the
+        // horizontal-whitespace run that sits between that `\n`
+        // and the `<% %>` tag.
+        if i > 0 {
+            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(out[i - 1].as_ref()) {
+                out[i - 1] = Cow::Owned(trimmed);
+            }
+        }
+        // Leading `\n` of following text chunk → strip.
+        if i + 1 < out.len() {
+            if let Some(trimmed) = trim_leading_newline_of_text_append(out[i + 1].as_ref()) {
+                out[i + 1] = Cow::Owned(trimmed);
+            }
+        }
+    }
+    out
+}
+
+/// If `stmt` is `_buf = _buf + "<text>"` where the text ends with
+/// `\n<whitespace>`, strip the trailing whitespace (back to the
+/// `\n`, inclusive of neither). Used to match erubi's leading-
+/// whitespace strip on `<% %>`-tag lines.
+fn trim_trailing_line_indent_of_text_append(stmt: &Expr) -> Option<Expr> {
+    let (name, recv, method, args, value_span, stmt_span) = extract_text_append(stmt)?;
+    let ExprNode::Lit {
+        value: Literal::Str { value: text },
+    } = &*args[0].node
+    else {
+        return None;
+    };
+    // Find the last newline; everything after it must be only
+    // horizontal whitespace to qualify for trim.
+    let last_nl = text.rfind('\n')?;
+    let tail = &text[last_nl + 1..];
+    if tail.is_empty() || !tail.bytes().all(|b| b == b' ' || b == b'\t') {
+        return None;
+    }
+    let new_text = text[..=last_nl].to_string();
+    Some(rebuild_text_append(
+        &name, recv, method, &args[0], &new_text, value_span, stmt_span,
+    ))
+}
+
+/// Common shape-check for `_buf = _buf + "<text literal>"`. Returns
+/// the component refs the rebuilder needs.
+type TextAppendRefs<'a> = (
+    crate::Symbol,
+    &'a Expr,
+    &'a crate::Symbol,
+    &'a Vec<Expr>,
+    &'a crate::span::Span,
+    &'a crate::span::Span,
+);
+
+fn extract_text_append(stmt: &Expr) -> Option<TextAppendRefs<'_>> {
+    let ExprNode::Assign {
+        target: LValue::Var { name, .. },
+        value,
+    } = &*stmt.node
+    else {
+        return None;
+    };
+    if name.as_str() != "_buf" {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*value.node else {
+        return None;
+    };
+    if method.as_str() != "+" || args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Var { name: rn, .. } = &*recv.node else {
+        return None;
+    };
+    if rn.as_str() != "_buf" {
+        return None;
+    }
+    if !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+        return None;
+    }
+    Some((name.clone(), recv, method, args, &value.span, &stmt.span))
+}
+
+fn rebuild_text_append(
+    name: &crate::Symbol,
+    recv: &Expr,
+    method: &crate::Symbol,
+    old_text_arg: &Expr,
+    new_text: &str,
+    value_span: &crate::span::Span,
+    stmt_span: &crate::span::Span,
+) -> Expr {
+    let new_text_arg = Expr::new(
+        old_text_arg.span.clone(),
+        ExprNode::Lit {
+            value: Literal::Str {
+                value: new_text.to_string(),
+            },
+        },
+    );
+    let new_rhs = Expr::new(
+        value_span.clone(),
+        ExprNode::Send {
+            recv: Some(recv.clone()),
+            method: method.clone(),
+            args: vec![new_text_arg],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        stmt_span.clone(),
+        ExprNode::Assign {
+            target: LValue::Var {
+                id: crate::ident::VarId(0),
+                name: name.clone(),
+            },
+            value: new_rhs,
+        },
+    )
+}
+
+/// True when `stmt` is an ERB `<% %>` non-output tag — in our IR,
+/// a bare Send with no receiver (implicit self) that isn't an
+/// assignment to `_buf`. Control-flow (if/each) lowers into
+/// `ExprNode::If`/Send-with-block and also counts.
+fn is_non_output_erb_stmt(stmt: &Expr) -> bool {
+    match &*stmt.node {
+        // `_buf = _buf + X` is an output statement — not a
+        // non-output tag.
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            if name.as_str() == "_buf" =>
+        {
+            false
+        }
+        // `if cond ... end` lowers from `<% if ... %>` — non-output.
+        ExprNode::If { .. } => true,
+        // Bare Send like `content_for(...)` from `<% ... %>`.
+        ExprNode::Send { recv: None, block: None, .. } => true,
+        ExprNode::Send { recv: None, block: Some(_), .. } => true,
+        _ => false,
+    }
+}
+
+/// If `stmt` is `_buf = _buf + "\n..."`, return a clone with the
+/// leading `\n` stripped. Used to match erubi's trailing-newline
+/// consume on `<% %>` tag lines.
+fn trim_leading_newline_of_text_append(stmt: &Expr) -> Option<Expr> {
+    let (name, recv, method, args, value_span, stmt_span) = extract_text_append(stmt)?;
+    let ExprNode::Lit {
+        value: Literal::Str { value: text },
+    } = &*args[0].node
+    else {
+        return None;
+    };
+    let stripped = text.strip_prefix('\n')?;
+    Some(rebuild_text_append(
+        &name, recv, method, &args[0], stripped, value_span, stmt_span,
+    ))
 }
 
 fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
@@ -2222,6 +2415,27 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
             if is_ts_simple_expr(&args[0], ctx) {
                 let arg = emit_ts_view_expr_raw(&args[0], ctx);
                 return format!("_buf += Helpers.turboStreamFrom({arg});");
+            }
+        }
+    }
+
+    // `link_to "text", url_or_record [, opts]` — Rails nav helper.
+    // The URL can be a literal, a path-helper call, or a model
+    // reference. Opts hash becomes a plain object.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "link_to" && !args.is_empty() && args.len() <= 3 {
+            if let Some(call) = try_emit_link_or_button(method.as_str(), args, ctx) {
+                return format!("_buf += {call};");
+            }
+        }
+    }
+
+    // `button_to "text", target [, opts]` — wraps a one-button
+    // form. `method: :delete` becomes the `_method` hidden input.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "button_to" && !args.is_empty() && args.len() <= 3 {
+            if let Some(call) = try_emit_link_or_button(method.as_str(), args, ctx) {
+                return format!("_buf += {call};");
             }
         }
     }
@@ -2465,6 +2679,201 @@ fn split_form_builder_args(args: &[Expr], ctx: &TsViewCtx) -> (Option<String>, O
 /// with conditional-class hashes) fall back to empty string;
 /// simple literals and locals emit verbatim. Good enough for
 /// the scaffold form's `class:`/`rows:` kwargs.
+/// Lower `link_to "text", url_or_record [, opts]` or the same
+/// shape for `button_to`. Returns a TS expression like
+/// `Helpers.linkTo(text, url, opts)`. Returns None when the args
+/// can't be lowered (non-simple text, unsupported URL shape, etc.)
+/// so the caller can fall through to the TODO placeholder.
+fn try_emit_link_or_button(
+    method: &str,
+    args: &[Expr],
+    ctx: &TsViewCtx,
+) -> Option<String> {
+    let js_helper = match method {
+        "link_to" => "linkTo",
+        "button_to" => "buttonTo",
+        _ => return None,
+    };
+
+    // Text arg — first positional. Must be simple (literal or local
+    // attribute access) so we can embed it.
+    if !is_ts_simple_expr(&args[0], ctx) {
+        return None;
+    }
+    let text = emit_ts_view_expr_raw(&args[0], ctx);
+
+    // URL arg — second positional. Shapes:
+    //   - literal string: use as-is
+    //   - path helper call like `new_article_path` / `articles_path`
+    //   - path helper with args: `article_path(@article)` → need to
+    //     pass `.id` if the arg is a model
+    //   - bare model reference: `@article` → resolve to the model's
+    //     show path (`articlePath(article.id)`). Implemented by
+    //     recognizing the local as a known model and mapping to the
+    //     singular path helper.
+    let url = if args.len() >= 2 {
+        ts_emit_url_arg(&args[1], ctx)?
+    } else {
+        return None;
+    };
+
+    // Opts — last Hash arg (positional 2 for link_to with opts,
+    // positional 2 for button_to with opts). Lower to a plain JS
+    // object literal with data: subhash flattened into
+    // `"data-key": value` entries (matching Rails' data-*
+    // attribute convention).
+    let opts = args.iter().skip(2).find_map(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => Some(ts_link_opts_literal(entries, ctx)),
+        _ => None,
+    });
+    // Rails allows opts to be passed without the positional URL
+    // (link_to/button_to with model shorthand): `button_to "Text",
+    // @article, method: :delete` — three positional args, third
+    // being the opts hash in Ruby surface form that Prism ingests
+    // as a KeywordHashNode or HashNode. Our split already handles
+    // that above via iter.skip(2).
+    let opts_s = opts.unwrap_or_else(|| "{}".to_string());
+
+    Some(format!("Helpers.{js_helper}({text}, {url}, {opts_s})"))
+}
+
+/// Lower a single URL-position argument to a TS expression that
+/// produces the URL string at render time.
+fn ts_emit_url_arg(arg: &Expr, ctx: &TsViewCtx) -> Option<String> {
+    match &*arg.node {
+        // Bare path helper: `articles_path`, `new_article_path`.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str().ends_with("_path") && args.is_empty() =>
+        {
+            let js = format!(
+                "routeHelpers.{}()",
+                lower_first_char(&crate::naming::camelize(method.as_str())),
+            );
+            Some(js)
+        }
+        // Path helper with args: `article_path(@article)`,
+        // `edit_article_path(@article)` — args can be model
+        // references (need `.id`) or ints.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str().ends_with("_path") && !args.is_empty() =>
+        {
+            let fn_js = lower_first_char(&crate::naming::camelize(method.as_str()));
+            let emitted_args: Vec<String> = args
+                .iter()
+                .map(|a| ts_emit_path_arg(a, ctx))
+                .collect();
+            Some(format!("routeHelpers.{fn_js}({})", emitted_args.join(", ")))
+        }
+        // Bare model reference — `@article` / `article`. Resolve
+        // to the model's show path via its singular path helper.
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            let local = name.as_str();
+            if !ctx.is_local(local) {
+                return None;
+            }
+            // Infer the path helper from the local's name. For
+            // `article` this is `articlePath(article.id)`. We
+            // trust the view-arg naming convention; a type-driven
+            // check would be cleaner once typed IR is wired through
+            // view emit.
+            Some(format!("routeHelpers.{local}Path({local}.id)"))
+        }
+        // Same as above, but for partial-scope locals ingested as
+        // bare `Send { recv: None, method: <local>, args: [] }`.
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => {
+            let local = method.as_str();
+            Some(format!("routeHelpers.{local}Path({local}.id)"))
+        }
+        // String literal — just pass through.
+        ExprNode::Lit { value: Literal::Str { .. } } => {
+            Some(emit_ts_view_expr_raw(arg, ctx))
+        }
+        _ => None,
+    }
+}
+
+/// Lower a positional argument inside a `*_path(...)` call. Model-
+/// typed locals get `.id` appended; int-like args pass through.
+fn ts_emit_path_arg(arg: &Expr, ctx: &TsViewCtx) -> String {
+    match &*arg.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            if ctx.is_local(name.as_str()) {
+                format!("{local}.id", local = name.as_str())
+            } else {
+                name.as_str().to_string()
+            }
+        }
+        // Partial-bound locals are parsed as bare `Send { recv:
+        // None, method: <name>, args: [] }` because the compiled
+        // ERB wrapper doesn't formally introduce them as Ruby
+        // locals before use. Treat them as local-reads when the
+        // name matches a ctx local.
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => {
+            format!("{local}.id", local = method.as_str())
+        }
+        _ => emit_ts_view_expr_raw(arg, ctx),
+    }
+}
+
+/// Emit a link_to/button_to opts hash as a TS object literal.
+/// `data:` subhash flattens to `data-*` keys (Rails convention);
+/// `method:` stays as-is (Helpers.buttonTo handles it).
+fn ts_link_opts_literal(entries: &[(Expr, Expr)], ctx: &TsViewCtx) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => continue,
+        };
+        // `data: { turbo_confirm: "..." }` → flatten to
+        // `"data-turbo-confirm": "..."`.
+        if key == "data" {
+            if let ExprNode::Hash { entries: data_entries, .. } = &*v.node {
+                for (dk, dv) in data_entries {
+                    let dk_str = match &*dk.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            value.as_str().replace('_', "-")
+                        }
+                        ExprNode::Lit { value: Literal::Str { value } } => {
+                            value.replace('_', "-")
+                        }
+                        _ => continue,
+                    };
+                    let dv_s = if is_ts_simple_expr(dv, ctx) {
+                        emit_ts_view_expr_raw(dv, ctx)
+                    } else {
+                        continue;
+                    };
+                    parts.push(format!("\"data-{dk_str}\": {dv_s}"));
+                }
+                continue;
+            }
+        }
+        // `method: :delete` or `method: "delete"` — normalize to
+        // a string (the buttonTo helper compares string).
+        let val = match &*v.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+            _ if is_ts_simple_expr(v, ctx) => emit_ts_view_expr_raw(v, ctx),
+            _ => continue,
+        };
+        parts.push(format!("{key:?}: {val}"));
+    }
+    format!("{{ {} }}", parts.join(", "))
+}
+
 fn ts_hash_to_object_literal(
     entries: &[(Expr, Expr)],
     ctx: &TsViewCtx,
@@ -2476,11 +2885,16 @@ fn ts_hash_to_object_literal(
             ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
             _ => continue,
         };
-        let val = if is_ts_simple_expr(v, ctx) {
+        // Special-case `class:` value lowering — the scaffold uses
+        // `class: [base_string, {cond_class: cond_expr, ...}]`
+        // where cond_expr is one of `.errors[:field].none?` /
+        // `.any?`. Fold the hash into a conditional JS expression
+        // so the final class attribute matches Rails.
+        let val = if key == "class" {
+            ts_class_value(v, ctx)
+        } else if is_ts_simple_expr(v, ctx) {
             emit_ts_view_expr_raw(v, ctx)
         } else if let ExprNode::Array { elements, .. } = &*v.node {
-            // Scaffold pattern: `class: [str, {cond: class}]` —
-            // pick the first string element for simplicity.
             match elements.first() {
                 Some(first) if is_ts_simple_expr(first, ctx) => emit_ts_view_expr_raw(first, ctx),
                 _ => "\"\"".to_string(),
@@ -2491,6 +2905,103 @@ fn ts_hash_to_object_literal(
         parts.push(format!("{key:?}: {val}"));
     }
     format!("{{ {} }}", parts.join(", "))
+}
+
+/// Lower a `class:` option value. Handles three shapes:
+///   - Simple (literal/interp): emit as-is
+///   - `[base_string, {cond_class: cond_expr, ...}]`: emit a JS
+///     conditional-string expression
+///   - Anything else: `""` placeholder
+fn ts_class_value(v: &Expr, ctx: &TsViewCtx) -> String {
+    if is_ts_simple_expr(v, ctx) {
+        return emit_ts_view_expr_raw(v, ctx);
+    }
+    let ExprNode::Array { elements, .. } = &*v.node else {
+        return "\"\"".to_string();
+    };
+    let base = match elements.first() {
+        Some(first) if is_ts_simple_expr(first, ctx) => emit_ts_view_expr_raw(first, ctx),
+        _ => return "\"\"".to_string(),
+    };
+    // Second element, if present, is usually a Hash of
+    // cond_class → cond_expr pairs. Build a chain of conditionals.
+    let mut extras: Vec<String> = Vec::new();
+    for el in elements.iter().skip(1) {
+        let ExprNode::Hash { entries, .. } = &*el.node else {
+            continue;
+        };
+        for (hk, hv) in entries {
+            let cls_text = match &*hk.node {
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                _ => continue,
+            };
+            let Some(cond_js) = ts_emit_errors_field_predicate(hv, ctx) else {
+                continue;
+            };
+            // Prepend a space so the combined class list stays
+            // well-formed (base + " " + cond_class).
+            extras.push(format!(" + ({cond_js} ? \" {cls_text}\" : \"\")"));
+        }
+    }
+    if extras.is_empty() {
+        base
+    } else {
+        format!("({base}{})", extras.join(""))
+    }
+}
+
+/// Recognize `.errors[:field].none?` / `.any?` shapes and lower
+/// to a JS boolean expression via `Helpers.fieldHasError(errors,
+/// "field")`. Returns None for shapes we don't recognize.
+fn ts_emit_errors_field_predicate(expr: &Expr, ctx: &TsViewCtx) -> Option<String> {
+    let ExprNode::Send { recv: Some(outer), method: outer_method, args: outer_args, .. } = &*expr.node else {
+        return None;
+    };
+    if !outer_args.is_empty() {
+        return None;
+    }
+    let predicate = match outer_method.as_str() {
+        "none?" | "empty?" => false,
+        "any?" | "present?" => true,
+        _ => return None,
+    };
+    // `outer.recv` should be `<record>.errors[:field]`. Match the
+    // `[]` send with a single symbol arg and recv of `.errors`.
+    let ExprNode::Send { recv: Some(errs_recv), method: brackets, args: idx_args, .. } = &*outer.node else {
+        return None;
+    };
+    if brackets.as_str() != "[]" || idx_args.len() != 1 {
+        return None;
+    }
+    let field = match &*idx_args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+        _ => return None,
+    };
+    // `errs_recv` should be `<record>.errors`. The record is a
+    // view-scope local (partial arg or form_with-bound record).
+    let ExprNode::Send { recv: Some(rec), method: errs_method, args: ra, .. } = &*errs_recv.node else {
+        return None;
+    };
+    if errs_method.as_str() != "errors" || !ra.is_empty() {
+        return None;
+    }
+    let record_name = match &*rec.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
+        // Partial-scope local via bare-Send — same pattern as
+        // ts_emit_url_arg's recognition.
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => method.as_str().to_string(),
+        _ => return None,
+    };
+    let call = format!("Helpers.fieldHasError({record_name}.errors, {field:?})");
+    Some(if predicate { call } else { format!("!{call}") })
 }
 
 fn emit_ts_captured_helper(
@@ -2677,6 +3188,17 @@ fn is_ts_simple_expr(expr: &Expr, ctx: &TsViewCtx) -> bool {
     match &*expr.node {
         ExprNode::Lit { .. } => true,
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => ctx.is_local(name.as_str()),
+        // Partial-scope locals land as `Send { recv: None, method:
+        // <name>, args: [] }` because the ERB wrapper doesn't
+        // formally declare them before use. Treat them as simple
+        // local-reads when the method name matches a ctx local.
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => true,
         ExprNode::Send { recv: Some(r), method, args, block, .. } => {
             if !args.is_empty() || block.is_some() {
                 return false;
@@ -2685,12 +3207,22 @@ fn is_ts_simple_expr(expr: &Expr, ctx: &TsViewCtx) -> bool {
             if clean.is_empty() {
                 return false;
             }
-            if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
-                if ctx.arg_has_attr(name.as_str(), clean) {
+            let recv_local = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+                ExprNode::Send {
+                    recv: None,
+                    method: m,
+                    args: ra,
+                    block: None,
+                    ..
+                } if ra.is_empty() && ctx.is_local(m.as_str()) => Some(m.as_str()),
+                _ => None,
+            };
+            if let Some(local_name) = recv_local {
+                if ctx.arg_has_attr(local_name, clean) {
                     return true;
                 }
-                // Collection predicates on slice locals.
-                if ctx.is_local(name.as_str())
+                if ctx.is_local(local_name)
                     && matches!(method.as_str(), "any?" | "none?" | "present?" | "empty?")
                 {
                     return true;
@@ -2710,6 +3242,15 @@ fn emit_ts_view_expr_raw(expr: &Expr, ctx: &TsViewCtx) -> String {
     match &*expr.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
+        // Partial-scope locals parsed as bare-Send — emit as the
+        // bare name. See the matching case in is_ts_simple_expr.
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => method.to_string(),
         ExprNode::Send { recv: Some(r), method, args, .. } => {
             let method_s = method.as_str();
             // Collection predicates.

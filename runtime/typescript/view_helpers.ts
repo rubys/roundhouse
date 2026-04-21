@@ -195,7 +195,10 @@ export function formWrap(
     : "";
   const csrfInput = `<input type="hidden" name="authenticity_token" value="">`;
   const classAttr = cls ? ` class="${escapeHtml(cls)}"` : "";
-  return `<form method="post" action="${escapeHtml(action)}"${classAttr}>${methodInput}${csrfInput}${inner}</form>`;
+  // Rails' form_with always emits `accept-charset="UTF-8"` on the
+  // generated `<form>` tag. Matches Rails' `UTF8_ENFORCER_TAG`
+  // injection in UTF-8-safe form submission handling.
+  return `<form${classAttr} action="${escapeHtml(action)}" accept-charset="UTF-8" method="post">${methodInput}${csrfInput}${inner}</form>`;
 }
 
 /** Humanize a snake_case field name for a label: `"first_name"`
@@ -241,13 +244,26 @@ export class FormBuilder {
 
   textField(field: string, opts: Record<string, any> = {}): string {
     const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
-    return `<input type="text" name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}" value="${escapeHtml(this._value(field))}"${cls}>`;
+    // Rails omits `value=""` on empty text-fields — the attribute
+    // only appears when there's something to render. Matching
+    // that conserves the attribute set for byte-equal compare.
+    const v = this._value(field);
+    const valueAttr = v ? ` value="${escapeHtml(v)}"` : "";
+    return `<input type="text"${cls} name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}"${valueAttr}>`;
   }
 
   textArea(field: string, opts: Record<string, any> = {}): string {
     const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
     const rows = opts.rows != null ? ` rows="${escapeHtml(String(opts.rows))}"` : "";
-    return `<textarea name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}"${cls}${rows}>${escapeHtml(this._value(field))}</textarea>`;
+    // Rails' `text_area` always wraps the value in newlines —
+    // `<textarea>\n<value>\n</textarea>` even when the value is
+    // empty. That shape is part of the HTML5 "textarea element
+    // with default-value-preserved" idiom: the opening-tag
+    // newline is stripped by parsers, so the visible content
+    // matches the value exactly. Matching this byte-for-byte is
+    // required for cross-rendering compare equivalence.
+    const value = this._value(field);
+    return `<textarea${rows}${cls} name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}">\n${escapeHtml(value)}</textarea>`;
   }
 
   // Rails' Ruby form helper is `textarea` in newer versions,
@@ -258,10 +274,20 @@ export class FormBuilder {
 
   submit(opts: Record<string, any> = {}): string {
     const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
+    // Rails capitalizes the resource name: `Update Article`,
+    // `Create Article`. Our prefix is the lowercase singular
+    // (`"article"`); capitalize the first letter to match.
+    const humanPrefix = this.prefix.charAt(0).toUpperCase() + this.prefix.slice(1);
     const label = typeof opts.label === "string"
       ? opts.label
-      : (this.record && this.record.id ? `Update ${this.prefix}` : `Create ${this.prefix}`);
-    return `<input type="submit" value="${escapeHtml(label)}"${cls}>`;
+      : (this.record && this.record.id ? `Update ${humanPrefix}` : `Create ${humanPrefix}`);
+    // Rails' scaffold form.submit emits `name="commit"` and
+    // `data-disable-with="<label>"` — both part of Rails UJS's
+    // double-submit protection. Matching the attribute set is
+    // what the compare tool checks; the data-* value stays in
+    // sync with the label.
+    const esc = escapeHtml(label);
+    return `<input type="submit" name="commit" value="${esc}"${cls} data-disable-with="${esc}">`;
   }
 }
 
@@ -323,6 +349,30 @@ export function pluralize(count: number, word: string): string {
 
 // `contentFor` defined above (supports both getter and setter
 // forms; persists to the module-level slot map).
+
+/** True if any ValidationError in `errors` targets the named
+ *  field. Feeds the scaffold's conditional form-field classes
+ *  (`class: [..., {"red-class": article.errors[:body].any?}]`)
+ *  lowered by the emitter. Accepts both plain arrays (rust-style)
+ *  and the `ErrorCollection` wrapper that TS models expose (which
+ *  keeps its backing array on `_errors`). Missing/empty → false. */
+export function fieldHasError(
+  errors: any,
+  field: string,
+): boolean {
+  if (!errors) return false;
+  // TS's ErrorCollection holds the array on a private-ish slot;
+  // reach in rather than expose a new API. Production would add
+  // a `forField(name): boolean` method and make this a thin call.
+  const list: Array<{ field: string }> | undefined = Array.isArray(errors)
+    ? errors
+    : errors._errors;
+  if (!list) return false;
+  for (const e of list) {
+    if (e.field === field) return true;
+  }
+  return false;
+}
 
 /** Conservative HTML escaping. Enough for scaffold blog output. */
 function escapeHtml(s: string): string {
