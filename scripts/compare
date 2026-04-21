@@ -9,7 +9,7 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs | python | py }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py | go }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
 #
@@ -98,8 +98,9 @@ case "$TARGET" in
     typescript|ts) TARGET=typescript ;;
     rust|rs)       TARGET=rust ;;
     python|py)     TARGET=python ;;
+    go)            TARGET=go ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, or python)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, or go)" >&2
         exit 2
         ;;
 esac
@@ -129,6 +130,10 @@ case "$TARGET" in
         ;;
     python)
         BUILD_DIR="/tmp/rh-py-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    go)
+        BUILD_DIR="/tmp/rh-go-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
 esac
@@ -249,6 +254,10 @@ case "$TARGET" in
         step "refreshing python pycache + syncing uv venv"
         (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes")
         ;;
+    go)
+        step "building go target"
+        (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server .)
+        ;;
 esac
 ok "target built"
 
@@ -281,6 +290,10 @@ step "starting $TARGET on :$TARGET_PORT"
 case "$TARGET" in
     python)
         (cd "$BUILD_DIR" && PORT="$TARGET_PORT" uv run python3 -m app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    go)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
     typescript)

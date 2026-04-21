@@ -57,3 +57,39 @@ func Conn() *sql.DB {
 	}
 	return testDB
 }
+
+// OpenProductionDB opens a file-backed SQLite connection and
+// applies the schema DDL when the target DB has no tables yet.
+// Skipping the schema apply on a populated DB preserves a
+// compare-tool-staged seed without clobbering it.
+func OpenProductionDB(path, schemaSQL string) {
+	if testDB != nil {
+		testDB.Close()
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		panic("open sqlite: " + err.Error())
+	}
+	// Probe for existing tables before running schema. `sqlite_`-
+	// prefixed names are sqlite-internal; the fixture DB always
+	// has some user tables when pre-seeded.
+	var count int
+	row := db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+	)
+	if err := row.Scan(&count); err != nil {
+		panic("probe schema: " + err.Error())
+	}
+	if count == 0 {
+		for _, stmt := range strings.Split(schemaSQL, ";\n") {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if _, err := db.Exec(stmt); err != nil {
+				panic("schema: " + err.Error())
+			}
+		}
+	}
+	testDB = db
+}

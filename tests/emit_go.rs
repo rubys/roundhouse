@@ -42,6 +42,7 @@ type Comment struct {
 \tID int64
 \tBody string
 \tPostID int64
+\tErrors []ValidationError
 }
 
 func (c *Comment) Save() bool {
@@ -105,6 +106,7 @@ func (c *Comment) Reload() {
 type Post struct {
 \tID int64
 \tTitle string
+\tErrors []ValidationError
 }
 
 func (p *Post) NormalizeTitle() string {
@@ -120,7 +122,8 @@ func (p *Post) Validate() []ValidationError {
 }
 
 func (p *Post) Save() bool {
-\tif len(p.Validate()) > 0 { return false }
+\tif errs := p.Validate(); len(errs) > 0 { p.Errors = errs; return false }
+\tp.Errors = nil
 \tdb := Conn()
 \tif p.ID == 0 {
 \t\tres, err := db.Exec(\"INSERT INTO posts (title) VALUES (?)\", p.Title)
