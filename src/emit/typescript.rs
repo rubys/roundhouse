@@ -35,10 +35,11 @@ use crate::App;
 // method) from inside inherent-impl code.
 use crate::lower::CtrlWalker as _;
 use crate::dialect::{
-    Association, Controller, MethodDef, Model, ModelBodyItem, RouteSpec, Test, TestModule,
+    Association, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
 };
 use crate::ident::Symbol;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::lower::{BroadcastAction, LoweredBroadcast, LoweredBroadcasts};
 use crate::ty::Ty;
 
 /// Hand-written Juntos-shape stub, copied into every generated project
@@ -439,10 +440,10 @@ fn emit_model_file(model: &Model) -> EmittedFile {
     // Broadcast callbacks land after the class body. Juntos's
     // Turbo-Streams integration registers them as `Model.afterSave`
     // / `Model.afterDestroy` hooks so they fire on every persist.
-    // Pattern-matched out of `Unknown` body items — `broadcasts_to`
-    // isn't a typed dialect node yet, so we look for the raw Send
-    // and translate it here.
-    let broadcast_lines = collect_broadcast_registrations(model);
+    // Parsing is shared with the Rust emitter via
+    // `lower::lower_broadcasts` — this file only renders the
+    // lowered form as JS registrations.
+    let broadcast_lines = render_broadcast_registrations(model);
     if !broadcast_lines.is_empty() {
         writeln!(s).unwrap();
         for line in broadcast_lines {
@@ -463,107 +464,110 @@ fn emit_model_file(model: &Model) -> EmittedFile {
     }
 }
 
-/// Walk the model body for `broadcasts_to ...` calls (stored as
-/// `Unknown` since they're not a typed dialect node yet) and return
-/// one-line callback registrations per broadcast. Emits an afterSave
-/// and an afterDestroy for each `broadcasts_to`.
-fn collect_broadcast_registrations(model: &Model) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
+/// Render a model's lowered broadcast declarations as Juntos
+/// `Model.afterSave` / `Model.afterDestroy` registration lines. The
+/// parsing (broadcasts_to, after_{create,destroy}_commit, rescue nil
+/// unwrapping, belongs_to resolution) lives in
+/// `lower::lower_broadcasts`; this function is purely target
+/// rendering.
+fn render_broadcast_registrations(model: &Model) -> Vec<String> {
+    let lowered = crate::lower::lower_broadcasts(model);
+    if lowered.is_empty() {
+        return Vec::new();
+    }
     let model_name = model.name.0.as_str();
-    for item in &model.body {
-        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "broadcasts_to" {
-            continue;
-        }
-        let Some(registration) = translate_broadcasts_to(model_name, args) else {
-            continue;
-        };
-        lines.extend(registration);
+    let mut lines = Vec::new();
+    for b in &lowered.save {
+        lines.push(render_broadcast_registration(
+            model_name,
+            "afterSave",
+            b,
+            &lowered,
+        ));
+    }
+    for b in &lowered.destroy {
+        lines.push(render_broadcast_registration(
+            model_name,
+            "afterDestroy",
+            b,
+            &lowered,
+        ));
     }
     lines
 }
 
-/// Translate one `broadcasts_to ..., opts` call into the two callback
-/// registrations Juntos expects. Returns `None` when the shape is too
-/// far from what we can map today (e.g., a stream-name expression that
-/// isn't a lambda-with-string body).
-fn translate_broadcasts_to(model_name: &str, args: &[Expr]) -> Option<Vec<String>> {
-    // Arg 0: stream identifier. Usually `-> { "stream" }` or
-    // `->(record) { "stream_#{record.foo}" }`. Fall back to emitting
-    // the raw expression when it's a bare string / symbol / other.
-    let stream_arg = args.first()?;
-    let stream_js = broadcast_stream_expr(stream_arg)?;
+/// Render one lowered broadcast as a `Model.afterX((record) =>
+/// record.broadcastYTo(...))` line. Association-form broadcasts
+/// (after_*_commit on a parent) resolve the parent via
+/// `modelRegistry` and fire on the reference, matching
+/// juntos.ts's Reference shape.
+fn render_broadcast_registration(
+    model_name: &str,
+    hook: &str,
+    b: &LoweredBroadcast,
+    _all: &LoweredBroadcasts,
+) -> String {
+    let channel_js = render_broadcast_channel(&b.channel, b.self_param.as_ref());
+    let target_js = b
+        .target
+        .as_ref()
+        .map(|t| render_broadcast_channel(t, b.self_param.as_ref()));
+    let method = ts_broadcast_method(b.action);
 
-    // Options hash (second arg, optional). We only care about
-    // `inserts_by:` (append vs prepend) and `target:` today.
-    let mut inserts_by: Option<&str> = None;
-    let mut target_js: Option<String> = None;
-    if let Some(opts) = args.get(1) {
-        if let ExprNode::Hash { entries, .. } = &*opts.node {
-            for (k, v) in entries {
-                let Some(key) = hash_sym_key(k) else { continue };
-                match key.as_str() {
-                    "inserts_by" => {
-                        if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
-                            inserts_by = match value.as_str() {
-                                "prepend" => Some("Prepend"),
-                                "append" => Some("Append"),
-                                _ => None,
-                            };
-                        }
-                    }
-                    "target" => {
-                        // Target override: emit the raw expression as
-                        // the first positional argument; Juntos's
-                        // `broadcastXTo(stream, { target: ... })` is
-                        // the richer form but both shapes appear.
-                        target_js = Some(emit_expr(v));
-                    }
-                    _ => {}
-                }
-            }
-        }
+    if let Some(assoc) = &b.on_association {
+        // `record.<fk>` is our way of reaching the foreign-key attr;
+        // `modelRegistry.<Target>` resolves the target class at call
+        // time (avoids a file-level import cycle between models).
+        let var = assoc.name.as_str();
+        let target_class = assoc.target_class.as_str();
+        let fk = assoc.foreign_key.as_str();
+        let call = render_broadcast_call(method, &channel_js, target_js.as_deref(), var);
+        return format!(
+            "{model_name}.{hook}((record) => {{ const {var} = modelRegistry.{target_class}?.find(record.{fk}); if ({var}) {call}; }});"
+        );
     }
-    let insert_method = match inserts_by {
-        Some("Prepend") => "broadcastPrependTo",
-        _ => "broadcastAppendTo",
-    };
-    let mut save_args = vec![stream_js.clone()];
-    if let Some(t) = &target_js {
-        save_args.push(format!("{{ target: {t} }}"));
-    }
-    let destroy_args = vec![stream_js];
-    Some(vec![
-        format!(
-            "{model_name}.afterSave((record) => record.{insert_method}({}));",
-            save_args.join(", ")
-        ),
-        format!(
-            "{model_name}.afterDestroy((record) => record.broadcastRemoveTo({}));",
-            destroy_args.join(", ")
-        ),
-    ])
+
+    let call = render_broadcast_call(method, &channel_js, target_js.as_deref(), "record");
+    format!("{model_name}.{hook}((record) => {call});")
 }
 
-/// Pull the JS expression for a broadcasts_to stream argument. Handles
-/// the common shapes: `-> { "name" }` (literal), `-> { "x_#{...}" }`
-/// (interpolated — `#{expr}` becomes `${expr}` in the emit), or a
-/// bare string / ident (pass-through).
-fn broadcast_stream_expr(arg: &Expr) -> Option<String> {
-    match &*arg.node {
-        ExprNode::Lambda { body, params, .. } => {
-            // Lambda param (if present) is conceptually `record` inside
-            // the template body. Replace bare references to that param
-            // with `record` in the emitted JS. For simple bodies we
-            // handle literals and interpolation; complex bodies fall
-            // through to the generic emit.
-            let param_name = params.first().map(|s| s.to_string());
-            Some(rewrite_record_refs(&emit_expr(body), param_name.as_deref()))
+/// Render the broadcast method call as an expression (no trailing
+/// semicolon) — callers insert `;` when they need a statement.
+fn render_broadcast_call(
+    method: &str,
+    channel_js: &str,
+    target_js: Option<&str>,
+    receiver: &str,
+) -> String {
+    match (method, target_js) {
+        ("broadcastRemoveTo", _) => {
+            format!("{receiver}.broadcastRemoveTo({channel_js})")
         }
-        ExprNode::Lit { value: Literal::Str { value } } => Some(format!("{value:?}")),
-        _ => Some(emit_expr(arg)),
+        (m, Some(t)) => format!("{receiver}.{m}({channel_js}, {{ target: {t} }})"),
+        (m, None) => format!("{receiver}.{m}({channel_js})"),
     }
+}
+
+fn ts_broadcast_method(action: BroadcastAction) -> &'static str {
+    match action {
+        BroadcastAction::Prepend => "broadcastPrependTo",
+        BroadcastAction::Append => "broadcastAppendTo",
+        BroadcastAction::Replace => "broadcastReplaceTo",
+        BroadcastAction::Remove => "broadcastRemoveTo",
+    }
+}
+
+/// Render a broadcast channel/target expression as a JS string (or
+/// string-producing expression). Applies the `broadcasts_to` lambda
+/// param rewrite — `comment.article_id` becomes `record.article_id`
+/// — so the enclosing callback's `record` parameter is the receiver.
+fn render_broadcast_channel(expr: &Expr, self_param: Option<&Symbol>) -> String {
+    let raw = match &*expr.node {
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        _ => emit_expr(expr),
+    };
+    let Some(p) = self_param else { return raw };
+    rewrite_record_refs(&raw, Some(p.as_str()))
 }
 
 /// If the lambda param is `_article` or similar, the Juntos callback's
@@ -616,13 +620,6 @@ fn replace_word(haystack: &str, needle: &str, replacement: &str) -> String {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
-}
-
-fn hash_sym_key(k: &Expr) -> Option<crate::ident::Symbol> {
-    match &*k.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
-        _ => None,
-    }
 }
 
 /// Emit a Juntos-shaped association getter. Each kind produces a

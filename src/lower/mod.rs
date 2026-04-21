@@ -18,6 +18,7 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod associations;
+pub mod broadcasts;
 pub mod controller;
 pub mod controller_test;
 pub mod erb_trim;
@@ -32,6 +33,9 @@ pub mod view;
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{resolve_has_many, HasManyRef};
+pub use broadcasts::{
+    lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
+};
 pub use controller::{
     chain_target_class, classify_controller_send, default_permitted_fields,
     extract_permitted_from_expr, extract_status_from_kwargs, find_nested_parent,
