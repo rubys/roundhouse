@@ -1,90 +1,222 @@
 # Roundhouse Crystal view helpers.
 #
 # Hand-written, shipped alongside generated code (copied in by the
-# Crystal emitter as `src/view_helpers.cr`). Emitted view functions
-# accumulate into `_buf : String` and call into these helpers for
-# the Rails-shaped surface (link_to, form_with, turbo_stream_from,
-# content_for).
-#
-# Degrade-gracefully stance: helpers return enough HTML that
-# substring-matching controller tests pass (`<form`, `<a`, `<h1>`);
-# real styling + attributes come in a later phase.
+# Crystal emitter as `src/view_helpers.cr`). Ports the rust/TS/
+# python/go helper surface: link_to, button_to, FormBuilder,
+# turbo_stream_from, dom_id, pluralize, truncate, layout-slot
+# storage for `yield` / `content_for`.
+
+require "base64"
+require "html"
+require "json"
 
 module Roundhouse
   module ViewHelpers
-    # `<a href="...">label</a>` — minimal anchor tag. Extra options
-    # land as HTML attributes (class, data-*).
-    def self.link_to(label : String, url : String = "", opts : Hash(String, String) = {} of String => String) : String
-      attrs = opts.map { |k, v| %( #{k}="#{v}") }.join
-      %(<a href="#{url}"#{attrs}>#{label}</a>)
+    # ── Render state (yield + content_for slots) ───────────────
+
+    @@yield_body : String = ""
+    @@slots : Hash(String, String) = {} of String => String
+
+    def self.reset_render_state : Nil
+      @@yield_body = ""
+      @@slots = {} of String => String
     end
 
-    # `<button_to "Label", path, method: :delete>` — emits a form
-    # wrapping a submit button so non-GET verbs work without JS.
-    def self.button_to(label : String, url : String = "", opts : Hash(String, String) = {} of String => String) : String
-      verb = opts["method"]? || "post"
-      %(<form action="#{url}" method="#{verb}"><button type="submit">#{label}</button></form>)
+    def self.set_yield(body : String) : Nil
+      @@yield_body = body
     end
 
-    # `turbo_stream_from "articles"` — the stream subscription tag.
-    # Rendered as a bare `<turbo-cable-stream-source>` element.
-    def self.turbo_stream_from(name : String) : String
-      %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{name}"></turbo-cable-stream-source>)
+    def self.get_yield : String
+      @@yield_body
     end
 
-    # `dom_id @article` → `"article_1"`. Uses the record's class
-    # name (lowercased) and id.
-    def self.dom_id(record) : String
-      "#{record.class.name.downcase}_#{record.id}"
+    def self.get_slot(name : String) : String
+      @@slots[name]? || ""
     end
 
-    # `pluralize(n, "comment")` → `"1 comment"` / `"2 comments"`.
-    def self.pluralize(count : Int, word : String) : String
-      "#{count} #{count == 1 ? word : "#{word}s"}"
+    def self.content_for_set(slot : String, body : String) : Nil
+      @@slots[slot] = body
     end
 
-    # `content_for(:title, "Articles")` — no-op in the compile-only
-    # path; views with `<% content_for %>` blocks emit a call to this
-    # and ignore the return value.
-    def self.content_for(slot : Symbol | String, value : String = "") : String
+    def self.content_for_get(slot : String) : String
+      @@slots[slot]? || ""
+    end
+
+    # ── Layout-meta helpers ────────────────────────────────────
+
+    def self.csrf_meta_tags : String
+      %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />)
+    end
+
+    def self.csp_meta_tag : String
       ""
     end
 
-    # `form_with model: @article do |form| ... end` — wrap an inner
-    # buffer in a `<form>` tag. The block is expected to return a
-    # String built up from FormBuilder calls.
-    def self.form_wrap(action : String?, css_class : String, inner : String) : String
-      action_attr = action ? %( action="#{action}") : ""
-      class_attr = css_class.empty? ? "" : %( class="#{css_class}")
-      %(<form#{action_attr}#{class_attr}>#{inner}</form>)
+    def self.stylesheet_link_tag(name : String, opts : Hash(String, String) = {} of String => String) : String
+      href = "/assets/#{name}.css"
+      attrs = sorted_attrs(opts)
+      %(<link rel="stylesheet" href="#{HTML.escape(href)}"#{attrs} />)
     end
 
-    # Minimal FormBuilder — enough methods to cover the scaffold
-    # blog's _form partial (label, text_field, textarea, submit).
+    def self.javascript_importmap_tags(pins : Array(Tuple(String, String)), main_entry : String = "application") : String
+      String.build do |io|
+        io << %(<script type="importmap" data-turbo-track="reload">{\n)
+        io << %(  "imports": {\n)
+        pins.each_with_index do |(name, path), i|
+          sep = i + 1 < pins.size ? "," : ""
+          io << "    #{name.to_json}: #{path.to_json}#{sep}\n"
+        end
+        io << "  }\n"
+        io << "}</script>"
+        pins.each do |(_, path)|
+          io << "\n"
+          io << %(<link rel="modulepreload" href="#{HTML.escape(path)}">)
+        end
+        io << "\n"
+        io << %(<script type="module">import "#{HTML.escape(main_entry)}"</script>)
+      end
+    end
+
+    # ── link_to / button_to ────────────────────────────────────
+
+    def self.link_to(text : String, url : String, opts : Hash(String, String) = {} of String => String) : String
+      %(<a href="#{HTML.escape(url)}"#{sorted_attrs(opts)}>#{HTML.escape(text)}</a>)
+    end
+
+    def self.button_to(text : String, target : String, opts : Hash(String, String) = {} of String => String) : String
+      method = opts["method"]? || "post"
+      button_class = opts["class"]? || ""
+      form_class = opts["form_class"]? || "button_to"
+      method_lower = method.downcase
+      method_input = ""
+      if method_lower != "post" && method_lower != "get"
+        method_input = %(<input type="hidden" name="_method" value="#{HTML.escape(method)}" />)
+      end
+      button_attrs = String.build do |io|
+        opts.keys.sort.each do |k|
+          next unless k.starts_with?("data-")
+          io << %( #{HTML.escape(k)}="#{HTML.escape(opts[k])}")
+        end
+      end
+      button_cls_attr = button_class.empty? ? "" : %( class="#{HTML.escape(button_class)}")
+      csrf_input = %(<input type="hidden" name="authenticity_token" value="">)
+      %(<form class="#{HTML.escape(form_class)}" method="post" action="#{HTML.escape(target)}">#{method_input}<button#{button_cls_attr}#{button_attrs} type="submit">#{HTML.escape(text)}</button>#{csrf_input}</form>)
+    end
+
+    # ── form_with wrapper ──────────────────────────────────────
+
+    def self.form_wrap(action : String, is_persisted : Bool, html_class : String, inner : String) : String
+      class_attr = html_class.empty? ? "" : %( class="#{HTML.escape(html_class)}")
+      method_input = is_persisted ? %(<input type="hidden" name="_method" value="patch">) : ""
+      csrf_input = %(<input type="hidden" name="authenticity_token" value="">)
+      %(<form#{class_attr} action="#{HTML.escape(action)}" accept-charset="UTF-8" method="post">#{method_input}#{csrf_input}#{inner}</form>)
+    end
+
+    # ── FormBuilder ────────────────────────────────────────────
+
     class FormBuilder
-      @record : String?
+      property prefix : String
+      property css_class : String
+      property is_persisted : Bool
 
-      def initialize(@record : String? = nil)
+      def initialize(@prefix : String = "", @css_class : String = "", @is_persisted : Bool = false)
       end
 
-      def label(field : Symbol | String, text : String = "") : String
-        text = field.to_s.gsub('_', ' ').capitalize if text.empty?
-        %(<label for="#{field}">#{text}</label>)
+      def name_for(field : String) : String
+        prefix.empty? ? field : "#{prefix}[#{field}]"
       end
 
-      def text_field(field : Symbol | String, opts : Hash(String, String) = {} of String => String) : String
-        attrs = opts.map { |k, v| %( #{k}="#{v}") }.join
-        %(<input type="text" name="#{field}"#{attrs}>)
+      def id_for(field : String) : String
+        prefix.empty? ? field : "#{prefix}_#{field}"
       end
 
-      def textarea(field : Symbol | String, opts : Hash(String, String) = {} of String => String) : String
-        attrs = opts.map { |k, v| %( #{k}="#{v}") }.join
-        %(<textarea name="#{field}"#{attrs}></textarea>)
+      def label(field : String, opts : Hash(String, String) = {} of String => String) : String
+        cls = opts["class"]?
+        class_attr = (cls && !cls.empty?) ? %( class="#{HTML.escape(cls)}") : ""
+        text = field.empty? ? field : (field[0].upcase.to_s + field[1..])
+        %(<label for="#{HTML.escape(id_for(field))}"#{class_attr}>#{HTML.escape(text)}</label>)
       end
 
-      def submit(label : String = "Submit", opts : Hash(String, String) = {} of String => String) : String
-        attrs = opts.map { |k, v| %( #{k}="#{v}") }.join
-        %(<button type="submit"#{attrs}>#{label}</button>)
+      def text_field(field : String, value : String = "", opts : Hash(String, String) = {} of String => String) : String
+        cls = opts["class"]?
+        class_attr = (cls && !cls.empty?) ? %( class="#{HTML.escape(cls)}") : ""
+        value_attr = value.empty? ? "" : %( value="#{HTML.escape(value)}")
+        %(<input type="text" name="#{HTML.escape(name_for(field))}" id="#{HTML.escape(id_for(field))}"#{value_attr}#{class_attr} />)
+      end
+
+      def textarea(field : String, value : String = "", opts : Hash(String, String) = {} of String => String) : String
+        cls = opts["class"]?
+        class_attr = (cls && !cls.empty?) ? %( class="#{HTML.escape(cls)}") : ""
+        rows = opts["rows"]?
+        rows_attr = (rows && !rows.empty?) ? %( rows="#{HTML.escape(rows)}") : ""
+        body = value.empty? ? "" : HTML.escape(value)
+        %(<textarea#{rows_attr}#{class_attr} name="#{HTML.escape(name_for(field))}" id="#{HTML.escape(id_for(field))}">\n#{body}</textarea>)
+      end
+
+      def submit(opts : Hash(String, String) = {} of String => String) : String
+        cls = opts["class"]?
+        class_attr = (cls && !cls.empty?) ? %( class="#{HTML.escape(cls)}") : ""
+        label = opts["label"]?
+        if label.nil? || label.empty?
+          prefix_human = prefix.empty? ? "" : prefix[0].upcase.to_s + prefix[1..]
+          label = is_persisted ? "Update #{prefix_human}" : "Create #{prefix_human}"
+        end
+        esc = HTML.escape(label)
+        %(<input type="submit" name="commit" value="#{esc}"#{class_attr} data-disable-with="#{esc}" />)
+      end
+    end
+
+    # ── Turbo / misc ───────────────────────────────────────────
+
+    def self.turbo_stream_from(channel : String) : String
+      encoded = Base64.strict_encode(channel.to_json)
+      %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
+    end
+
+    def self.dom_id(singular : String, id : Int, prefix : String = "") : String
+      base = "#{singular}_#{id}"
+      prefix.empty? ? base : "#{prefix}_#{base}"
+    end
+
+    def self.pluralize(count : Int, word : String) : String
+      count == 1 ? "1 #{word}" : "#{count} #{word}s"
+    end
+
+    def self.truncate(text : String, opts : Hash(String, String) = {} of String => String) : String
+      length = (opts["length"]? || "30").to_i
+      omission = opts["omission"]? || "..."
+      return text if text.size <= length
+      cut = [length - omission.size, 0].max
+      text[0, cut] + omission
+    end
+
+    def self.field_has_error(errors, field : String) : Bool
+      errors.any? { |e| e.field == field }
+    end
+
+    def self.error_messages_for(errors, noun : String) : String
+      _ = noun
+      ""
+    end
+
+    def self.content_for(slot, body = nil)
+      case body
+      when String
+        content_for_set(slot.to_s, body)
+        ""
+      else
+        content_for_get(slot.to_s)
+      end
+    end
+
+    # ── helpers ────────────────────────────────────────────────
+
+    private def self.sorted_attrs(opts : Hash(String, String)) : String
+      return "" if opts.empty?
+      String.build do |io|
+        opts.keys.sort.each do |k|
+          io << %( #{HTML.escape(k)}="#{HTML.escape(opts[k])}")
+        end
       end
     end
   end

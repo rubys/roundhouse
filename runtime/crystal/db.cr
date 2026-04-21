@@ -43,5 +43,29 @@ module Roundhouse
     def self.conn : DB::Database
       @@db.not_nil!
     end
+
+    # Open a file-backed SQLite connection and apply the schema DDL
+    # when the target DB has no tables yet. Skipping the schema on
+    # a populated DB preserves a compare-tool-staged seed.
+    def self.open_production_db(path : String, schema_sql : String) : Nil
+      if old = @@db
+        old.close
+      end
+      dir = File.dirname(path)
+      Dir.mkdir_p(dir) unless Dir.exists?(dir)
+      db = DB.open("sqlite3://#{path}")
+      count = db.query_one(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        as: Int64,
+      )
+      if count == 0
+        schema_sql.split(";\n").each do |chunk|
+          stmt = chunk.strip
+          next if stmt.empty?
+          db.exec(stmt)
+        end
+      end
+      @@db = db
+    end
   end
 end

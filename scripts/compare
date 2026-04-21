@@ -9,7 +9,7 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs | python | py | go }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
 #
@@ -99,8 +99,9 @@ case "$TARGET" in
     rust|rs)       TARGET=rust ;;
     python|py)     TARGET=python ;;
     go)            TARGET=go ;;
+    crystal|cr)    TARGET=crystal ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, or go)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, or crystal)" >&2
         exit 2
         ;;
 esac
@@ -134,6 +135,10 @@ case "$TARGET" in
         ;;
     go)
         BUILD_DIR="/tmp/rh-go-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    crystal)
+        BUILD_DIR="/tmp/rh-cr-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
 esac
@@ -258,6 +263,10 @@ case "$TARGET" in
         step "building go target"
         (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server .)
         ;;
+    crystal)
+        step "building crystal target (release)"
+        (cd "$BUILD_DIR" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server)
+        ;;
 esac
 ok "target built"
 
@@ -293,6 +302,10 @@ case "$TARGET" in
         TARGET_PID=$!
         ;;
     go)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    crystal)
         (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
