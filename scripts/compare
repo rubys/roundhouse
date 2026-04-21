@@ -240,11 +240,14 @@ case "$TARGET" in
         (cd "$BUILD_DIR" && cargo build --release --quiet)
         ;;
     python)
-        # Pure stdlib — nothing to build. Verify the interpreter
-        # can import the emitted package so the server startup
-        # isn't the first thing that surfaces syntax errors.
-        step "validating python target imports"
-        (cd "$BUILD_DIR" && python3 -c "import app, app.server, app.routes" )
+        # Pure stdlib — nothing to build. Wipe pycache so the
+        # emitter-side view_helpers / views changes don't get
+        # masked by stale bytecode from a previous run. Then
+        # verify the interpreter can import the emitted package
+        # so the server startup isn't the first thing that
+        # surfaces syntax errors.
+        step "refreshing python pycache + validating imports"
+        (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; python3 -c "import app, app.server, app.routes")
         ;;
 esac
 ok "target built"

@@ -87,10 +87,13 @@ def content_for(slot: str, body: str | None = None) -> str:
 
 
 def csrf_meta_tags() -> str:
-    # Scaffold layout emits these; we stub with empty tokens so the
-    # DOM shape still matches (attribute set + element count).
+    # Rails emits the two meta tags separated by a newline (second
+    # starts at column 0 without indent) — matches the byte-output
+    # of ActionView's csrf_meta_tags helper. Compare-tool
+    # structural diff counts the newline as a text node, so the
+    # whitespace matters.
     return (
-        '<meta name="csrf-param" content="authenticity_token" />'
+        '<meta name="csrf-param" content="authenticity_token" />\n'
         '<meta name="csrf-token" content="" />'
     )
 
@@ -108,16 +111,30 @@ def stylesheet_link_tag(name: str, **opts: Any) -> str:
 
 
 def javascript_importmap_tags(pins: list[tuple[str, str]], main_entry: str = "application") -> str:
-    import json
-
-    imports = {name: path for (name, path) in pins}
-    return (
-        '<script type="importmap">'
-        + json.dumps({"imports": imports}, separators=(",", ":"))
+    """<%= javascript_importmap_tags %> — importmap JSON + module-
+    preload links + bootstrap `<script type="module">`. Mirrors
+    the rust/TS runtime byte-output: hand-formatted JSON so the
+    pin order stays stable, each modulepreload on its own line."""
+    lines: list[str] = []
+    # Importmap JSON. Hand-formatted so key order matches the pin
+    # list — Rails emits pins in declaration order, which matters
+    # for DOM-structural compare.
+    json_lines: list[str] = ["{"]
+    json_lines.append('  "imports": {')
+    for i, (name, path) in enumerate(pins):
+        sep = "," if i + 1 < len(pins) else ""
+        json_lines.append(f'    {name!r}: {path!r}{sep}'.replace("'", '"'))
+    json_lines.append("  }")
+    json_lines.append("}")
+    lines.append(
+        '<script type="importmap" data-turbo-track="reload">'
+        + "\n".join(json_lines)
         + "</script>"
-        + f'<link rel="modulepreload" href="/assets/{main_entry}.js" />'
-        + f'<script type="module" src="/assets/{main_entry}.js"></script>'
     )
+    for _, path in pins:
+        lines.append(f'<link rel="modulepreload" href="{path}">')
+    lines.append(f'<script type="module">import "{_escape(main_entry)}"</script>')
+    return "\n".join(lines)
 
 
 # ── link_to / button_to ────────────────────────────────────────
@@ -159,13 +176,18 @@ def button_to(text: str, target: str, opts: dict[str, Any] | None = None, **kwar
     button_attrs = "".join(
         f' {_attr_key(k)}="{_escape(str(v))}"' for k, v in merged.items()
     )
-    form_cls_attr = f' class="{_escape(form_class)}"' if form_class else ""
+    # Rails defaults the wrapper form's class to "button_to" when
+    # the caller didn't pass `form_class:`.
+    if not form_class:
+        form_class = "button_to"
+    form_cls_attr = f' class="{_escape(form_class)}"'
     btn_cls_attr = f' class="{_escape(button_class)}"' if button_class else ""
+    csrf_input = '<input type="hidden" name="authenticity_token" value="">'
     return (
-        f'<form method="post" action="{_escape(target)}"{form_cls_attr}>'
+        f'<form{form_cls_attr} method="post" action="{_escape(target)}">'
         f"{method_input}"
         f"<button{btn_cls_attr}{button_attrs} type=\"submit\">"
-        f"{_escape(str(text))}</button></form>"
+        f"{_escape(str(text))}</button>{csrf_input}</form>"
     )
 
 
@@ -176,11 +198,14 @@ def form_wrap(action: str | None, is_persisted: bool, cls: str, inner: str) -> s
     action_attr = f' action="{_escape(action)}"' if action is not None else ""
     cls_attr = f' class="{_escape(cls)}"' if cls else ""
     method_input = (
-        '<input type="hidden" name="_method" value="patch"/>' if is_persisted else ""
+        '<input type="hidden" name="_method" value="patch">' if is_persisted else ""
     )
+    # Rails emits a hidden CSRF input in every form; compare-tool
+    # masks the value so the empty token here is fine.
+    csrf_input = '<input type="hidden" name="authenticity_token" value="">'
     return (
-        f'<form method="post"{action_attr} accept-charset="UTF-8"{cls_attr}>'
-        f"{method_input}{inner}</form>"
+        f'<form{cls_attr}{action_attr} accept-charset="UTF-8" method="post">'
+        f"{method_input}{csrf_input}{inner}</form>"
     )
 
 
@@ -223,16 +248,20 @@ class FormBuilder:
     def textarea(
         self, field: str, value: str | None = None, opts: dict[str, Any] | None = None
     ) -> str:
+        # Rails wraps textarea content in a leading newline even
+        # when empty (`<textarea>\n{value}</textarea>`) — part of
+        # the HTML5 spec-compliant shape. No trailing newline.
         opts = opts or {}
         cls = str(opts.get("class", ""))
         rows = opts.get("rows")
         cls_attr = f' class="{_escape(cls)}"' if cls else ""
         rows_attr = f' rows="{_escape(str(rows))}"' if rows is not None else ""
-        body = f"\n{_escape(value)}\n" if value else ""
+        body = _escape(value) if value else ""
         return (
-            f'<textarea name="{_escape(self._name(field))}"'
-            f' id="{_escape(self._input_id(field))}"{rows_attr}{cls_attr}>'
-            f"{body}</textarea>"
+            f"<textarea{rows_attr}{cls_attr}"
+            f' name="{_escape(self._name(field))}"'
+            f' id="{_escape(self._input_id(field))}">'
+            f"\n{body}</textarea>"
         )
 
     def submit(self, opts: dict[str, Any] | None = None) -> str:
@@ -256,7 +285,24 @@ class FormBuilder:
 
 
 def turbo_stream_from(channel: str) -> str:
-    return f'<turbo-cable-stream-source channel="{_escape(channel)}"/>'
+    # Matches Rails' `turbo_stream_from` byte-output: the channel
+    # attribute is always `Turbo::StreamsChannel`; the actual
+    # channel name travels base64-encoded through
+    # `signed-stream-name` so the Action Cable client can decode
+    # it server-side. Roundhouse's cable handler doesn't verify
+    # the HMAC today — an "unsigned" suffix is fine for the
+    # acceptance scenario.
+    # Also: custom elements can't self-close in HTML5 (`<foo/>`
+    # leaves subsequent siblings as children of <foo>), so we emit
+    # an explicit `</turbo-cable-stream-source>`.
+    import base64
+    import json as _json
+    encoded = base64.b64encode(_json.dumps(channel).encode("utf-8")).decode("ascii")
+    return (
+        '<turbo-cable-stream-source channel="Turbo::StreamsChannel"'
+        f' signed-stream-name="{encoded}--unsigned">'
+        "</turbo-cable-stream-source>"
+    )
 
 
 def dom_id(singular: str, id: int, prefix: str | None = None) -> str:
@@ -269,11 +315,16 @@ def pluralize(count: int, word: str) -> str:
 
 
 def truncate(text: str, opts: dict[str, Any] | None = None) -> str:
+    """`truncate(text, length=N, omission="...")` — Rails default
+    length is 30, default omission is "...". Omission length is
+    subtracted from the cut so the total output is `length` chars."""
     opts = opts or {}
     length = int(opts.get("length", 30))
+    omission = str(opts.get("omission", "..."))
     if len(text) <= length:
         return text
-    return text[:length].rstrip() + "..."
+    cut = max(0, length - len(omission))
+    return text[:cut] + omission
 
 
 def field_has_error(errors: list[Any], field: str) -> bool:
