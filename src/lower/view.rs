@@ -239,6 +239,277 @@ where
     }
 }
 
+// ── Nested URL/form element classifier ────────────────────────
+
+/// One element of a `[parent, child]` array used in link_to /
+/// button_to / form_with's `model:` kwarg. Emitters compose these
+/// into a nested path-helper call and its positional id arguments.
+///
+/// The variants drop the distinction between Var/Ivar/partial-scope
+/// bare Send — all three are "local reference" from the emitter's
+/// perspective; the binding-kind differences matter to Ruby's
+/// parser but not to code generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NestedUrlElement<'a> {
+    /// Bare local record — `article`, `comment`, etc. The singular
+    /// name is the local's identifier; the id source is `{name}.id`.
+    DirectLocal { name: &'a str },
+    /// `owner.assoc` belongs-to read — `comment.article`. The
+    /// singular name is `assoc`; the id source is `{owner}.{assoc}_id`
+    /// (the foreign-key column on the owner).
+    Association { owner: &'a str, assoc: &'a str },
+}
+
+/// Classify one element of a nested-URL array. Returns None for
+/// element shapes we don't recognize (literals, complex chains).
+pub fn classify_nested_url_element<'a, F>(
+    el: &'a Expr,
+    is_local: &F,
+) -> Option<NestedUrlElement<'a>>
+where
+    F: Fn(&str) -> bool,
+{
+    match &*el.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } if is_local(name.as_str()) => {
+            Some(NestedUrlElement::DirectLocal { name: name.as_str() })
+        }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && is_local(method.as_str()) => {
+            Some(NestedUrlElement::DirectLocal { name: method.as_str() })
+        }
+        // `owner.assoc` — belongs_to read. `owner` is a local;
+        // `assoc` is the association name (singular).
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() =>
+        {
+            let owner = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+                    if is_local(name.as_str()) =>
+                {
+                    Some(name.as_str())
+                }
+                ExprNode::Send {
+                    recv: None,
+                    method: m,
+                    args: ra,
+                    block: None,
+                    ..
+                } if ra.is_empty() && is_local(m.as_str()) => Some(m.as_str()),
+                _ => None,
+            }?;
+            Some(NestedUrlElement::Association {
+                owner,
+                assoc: method.as_str(),
+            })
+        }
+        _ => None,
+    }
+}
+
+// ── Errors-field predicate classifier ──────────────────────────
+
+/// `.errors[:field].none?` / `.errors[:field].any?` (and their
+/// aliases `.empty?` / `.present?`). The scaffold's class-array-hash
+/// pattern uses this shape to toggle validation-error styling on
+/// form inputs. Each emitter lowers to its target's equivalent of
+/// `fieldHasError(record.errors, "field")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorsFieldPredicate<'a> {
+    /// Local record holding the `errors` collection.
+    pub record: &'a str,
+    /// Field name the predicate is checking (snake_case).
+    pub field: String,
+    /// True when the predicate asserts "there IS an error"
+    /// (`.any?` / `.present?`); false for absence (`.none?` /
+    /// `.empty?`).
+    pub expect_present: bool,
+}
+
+/// Classify an expression as an errors-field predicate. Returns
+/// None for unrecognized shapes.
+pub fn classify_errors_field_predicate<'a, F>(
+    expr: &'a Expr,
+    is_local: &F,
+) -> Option<ErrorsFieldPredicate<'a>>
+where
+    F: Fn(&str) -> bool,
+{
+    let ExprNode::Send { recv: Some(outer), method: outer_method, args: outer_args, .. } = &*expr.node else {
+        return None;
+    };
+    if !outer_args.is_empty() {
+        return None;
+    }
+    let expect_present = match outer_method.as_str() {
+        "none?" | "empty?" => false,
+        "any?" | "present?" => true,
+        _ => return None,
+    };
+    // `outer.recv` should be `<record>.errors[:field]`. Match the
+    // `[]` send with a single symbol arg and recv of `.errors`.
+    let ExprNode::Send { recv: Some(errs_recv), method: brackets, args: idx_args, .. } = &*outer.node else {
+        return None;
+    };
+    if brackets.as_str() != "[]" || idx_args.len() != 1 {
+        return None;
+    }
+    let field = match &*idx_args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+        _ => return None,
+    };
+    let ExprNode::Send { recv: Some(rec), method: errs_method, args: ra, .. } = &*errs_recv.node else {
+        return None;
+    };
+    if errs_method.as_str() != "errors" || !ra.is_empty() {
+        return None;
+    }
+    let record = match &*rec.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } if is_local(name.as_str()) => {
+            name.as_str()
+        }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && is_local(method.as_str()) => method.as_str(),
+        _ => return None,
+    };
+    Some(ErrorsFieldPredicate {
+        record,
+        field,
+        expect_present,
+    })
+}
+
+// ── class: value classifier ────────────────────────────────────
+
+/// The shape of a `class:` option value on link_to / button_to /
+/// form-field calls. Rails scaffolds use three common shapes:
+///   - A plain string (literal or interp).
+///   - `[base_string, {cond_class: cond_expr, …}]` where each
+///     `cond_expr` is a recognized errors-field predicate.
+///   - Anything else (dynamic), which emitters typically render as
+///     an empty class.
+///
+/// Emitters consume the structured form and produce their target's
+/// conditional-concatenation idiom.
+#[derive(Debug)]
+pub enum ClassValueShape<'a> {
+    /// Simple expression (literal string, interp, or other
+    /// simple-classifier-accepted shape). Emitters render via the
+    /// target's usual expr emitter.
+    Simple { expr: &'a Expr },
+    /// `[base, {cls: pred, …}]` — conditional-class decorations on
+    /// a base string. Order preserved from the source hash.
+    Conditional {
+        base: &'a Expr,
+        clauses: Vec<(String, ErrorsFieldPredicate<'a>)>,
+    },
+    /// Shape not recognized — emitters fall back to empty class.
+    Unknown,
+}
+
+/// Classify a `class:` value. `is_local` is threaded to the errors-
+/// field predicate classifier for each clause.
+pub fn classify_class_value<'a, F>(v: &'a Expr, is_local: &F) -> ClassValueShape<'a>
+where
+    F: Fn(&str) -> bool,
+{
+    // Array form: `[base_string, {cond_class: cond_expr, ...}]`.
+    if let ExprNode::Array { elements, .. } = &*v.node {
+        let Some(base) = elements.first() else {
+            return ClassValueShape::Unknown;
+        };
+        let mut clauses: Vec<(String, ErrorsFieldPredicate<'a>)> = Vec::new();
+        for el in elements.iter().skip(1) {
+            let ExprNode::Hash { entries, .. } = &*el.node else {
+                continue;
+            };
+            for (hk, hv) in entries {
+                let cls_text = match &*hk.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                    _ => continue,
+                };
+                if let Some(pred) = classify_errors_field_predicate(hv, is_local) {
+                    clauses.push((cls_text, pred));
+                }
+            }
+        }
+        return ClassValueShape::Conditional { base, clauses };
+    }
+    // Anything else → delegate the simple-check to the emitter.
+    // The classifier can't know what "simple" means for each target
+    // (the simple-expr gate differs), so we just hand back the expr
+    // and let the emitter decide.
+    ClassValueShape::Simple { expr: v }
+}
+
+// ── Nested form_with child classifier ──────────────────────────
+
+/// The child element of a nested `form_with model: [parent, child]`.
+/// Determines both the record expression and the field-name prefix
+/// (`"comment"` → `comment[body]` for field names).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NestedFormChild<'a> {
+    /// `Class.new` — construct a fresh instance. Prefix is the
+    /// snake_case form of the class name.
+    ClassNew { class: &'a str },
+    /// Bare local or partial-scope Send — an existing record.
+    /// Prefix is the local's name (conventionally the singular
+    /// snake_case).
+    Local { name: &'a str },
+}
+
+impl NestedFormChild<'_> {
+    /// The field-name prefix Rails uses in the form's `name="…"`
+    /// attributes: `"comment"` for both `Comment.new` and a bare
+    /// `comment` local.
+    pub fn prefix(&self) -> String {
+        match self {
+            NestedFormChild::ClassNew { class } => crate::naming::snake_case(class),
+            NestedFormChild::Local { name } => (*name).to_string(),
+        }
+    }
+}
+
+/// Classify the child element of a nested form_with's `model:`
+/// array. Returns None for shapes we don't recognize.
+pub fn classify_nested_form_child(el: &Expr) -> Option<NestedFormChild<'_>> {
+    match &*el.node {
+        // `Class.new`.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "new" && args.is_empty() =>
+        {
+            if let ExprNode::Const { path } = &*r.node {
+                if let Some(class) = path.last() {
+                    return Some(NestedFormChild::ClassNew { class: class.as_str() });
+                }
+            }
+            None
+        }
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            Some(NestedFormChild::Local { name: name.as_str() })
+        }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() => Some(NestedFormChild::Local { name: method.as_str() }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +647,92 @@ mod tests {
         );
         assert!(classify_view_url_arg(&arg, &|n: &str| n == "article").is_some());
         assert!(classify_view_url_arg(&arg, &|_: &str| false).is_none());
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from(name),
+            },
+        )
+    }
+
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn nested_element_direct_local() {
+        let el = var("comment");
+        let k = classify_nested_url_element(&el, &|n: &str| n == "comment").unwrap();
+        assert_eq!(k, NestedUrlElement::DirectLocal { name: "comment" });
+    }
+
+    #[test]
+    fn nested_element_association() {
+        // `comment.article` — owner is a local, method is assoc.
+        let el = send(Some(var("comment")), "article", vec![]);
+        let k = classify_nested_url_element(&el, &|n: &str| n == "comment").unwrap();
+        assert_eq!(
+            k,
+            NestedUrlElement::Association {
+                owner: "comment",
+                assoc: "article",
+            }
+        );
+    }
+
+    #[test]
+    fn errors_field_predicate_none() {
+        // `article.errors[:title].none?`
+        let errors = send(Some(var("article")), "errors", vec![]);
+        let indexed = send(Some(errors), "[]", vec![sym("title")]);
+        let pred_expr = send(Some(indexed), "none?", vec![]);
+        let pred = classify_errors_field_predicate(&pred_expr, &|n: &str| n == "article").unwrap();
+        assert_eq!(pred.record, "article");
+        assert_eq!(pred.field, "title");
+        assert!(!pred.expect_present);
+    }
+
+    #[test]
+    fn errors_field_predicate_any() {
+        let errors = send(Some(var("article")), "errors", vec![]);
+        let indexed = send(Some(errors), "[]", vec![sym("body")]);
+        let pred_expr = send(Some(indexed), "any?", vec![]);
+        let pred = classify_errors_field_predicate(&pred_expr, &|n: &str| n == "article").unwrap();
+        assert!(pred.expect_present);
+    }
+
+    #[test]
+    fn nested_form_child_class_new() {
+        let comment_class = Expr::new(
+            Span::synthetic(),
+            ExprNode::Const {
+                path: vec![Symbol::from("Comment")],
+            },
+        );
+        let el = send(Some(comment_class), "new", vec![]);
+        let k = classify_nested_form_child(&el).unwrap();
+        assert_eq!(k, NestedFormChild::ClassNew { class: "Comment" });
+        assert_eq!(k.prefix(), "comment");
+    }
+
+    #[test]
+    fn nested_form_child_bare_local() {
+        let el = var("comment");
+        let k = classify_nested_form_child(&el).unwrap();
+        assert_eq!(k, NestedFormChild::Local { name: "comment" });
+        assert_eq!(k.prefix(), "comment");
     }
 }

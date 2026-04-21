@@ -2791,53 +2791,21 @@ fn ts_emit_nested_path(elements: &[Expr], ctx: &TsViewCtx) -> Option<String> {
     Some(format!("routeHelpers.{name}({})", args.join(", ")))
 }
 
-/// Classify one element of the nested-URL array. Returns the
-/// singular model name and the TS expression for its id. Handles:
-///   - `record` (partial-scope local or Var) → (type-name, "record.id")
-///   - `record.assoc` (belongs_to read) → (assoc-name, "record.<assoc>_id")
+/// Classify one element of the nested-URL array. Thin adapter
+/// around the shared `classify_nested_url_element` classifier —
+/// renders the IR-level variant to `(singular, js_id_expr)` in TS
+/// conventions.
 fn ts_classify_nested_element(el: &Expr, ctx: &TsViewCtx) -> Option<(String, String)> {
-    match &*el.node {
-        // Bare local: `article` or `comment`.
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
-            if !ctx.is_local(name.as_str()) {
-                return None;
-            }
-            Some((name.as_str().to_string(), format!("{local}.id", local = name.as_str())))
+    let is_local = |n: &str| ctx.is_local(n);
+    let kind = crate::lower::classify_nested_url_element(el, &is_local)?;
+    Some(match kind {
+        crate::lower::NestedUrlElement::DirectLocal { name } => {
+            (name.to_string(), format!("{name}.id"))
         }
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() && ctx.is_local(method.as_str()) => {
-            Some((method.as_str().to_string(), format!("{local}.id", local = method.as_str())))
+        crate::lower::NestedUrlElement::Association { owner, assoc } => {
+            (assoc.to_string(), format!("{owner}.{assoc}_id"))
         }
-        // `record.assoc` — belongs_to association. Singular name
-        // is `assoc`; id source is `record.<assoc>_id` (FK).
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if args.is_empty() =>
-        {
-            let owner = match &*r.node {
-                ExprNode::Var { name, .. } | ExprNode::Ivar { name }
-                    if ctx.is_local(name.as_str()) =>
-                {
-                    Some(name.as_str().to_string())
-                }
-                ExprNode::Send {
-                    recv: None,
-                    method: m,
-                    args: ra,
-                    block: None,
-                    ..
-                } if ra.is_empty() && ctx.is_local(m.as_str()) => Some(m.as_str().to_string()),
-                _ => None,
-            }?;
-            let assoc = method.as_str();
-            Some((assoc.to_string(), format!("{owner}.{assoc}_id")))
-        }
-        _ => None,
-    }
+    })
 }
 
 /// Lower a positional argument inside a `*_path(...)` call. Model-
@@ -2955,95 +2923,52 @@ fn ts_hash_to_object_literal(
 ///     conditional-string expression
 ///   - Anything else: `""` placeholder
 fn ts_class_value(v: &Expr, ctx: &TsViewCtx) -> String {
-    if is_ts_simple_expr(v, ctx) {
-        return emit_ts_view_expr_raw(v, ctx);
-    }
-    let ExprNode::Array { elements, .. } = &*v.node else {
-        return "\"\"".to_string();
+    let is_local = |n: &str| ctx.is_local(n);
+    let simple_as_js = |e: &Expr| -> Option<String> {
+        if is_ts_simple_expr(e, ctx) {
+            Some(emit_ts_view_expr_raw(e, ctx))
+        } else {
+            None
+        }
     };
-    let base = match elements.first() {
-        Some(first) if is_ts_simple_expr(first, ctx) => emit_ts_view_expr_raw(first, ctx),
-        _ => return "\"\"".to_string(),
-    };
-    // Second element, if present, is usually a Hash of
-    // cond_class → cond_expr pairs. Build a chain of conditionals.
-    let mut extras: Vec<String> = Vec::new();
-    for el in elements.iter().skip(1) {
-        let ExprNode::Hash { entries, .. } = &*el.node else {
-            continue;
-        };
-        for (hk, hv) in entries {
-            let cls_text = match &*hk.node {
-                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-                _ => continue,
+    match crate::lower::classify_class_value(v, &is_local) {
+        crate::lower::ClassValueShape::Simple { expr } => {
+            simple_as_js(expr).unwrap_or_else(|| "\"\"".to_string())
+        }
+        crate::lower::ClassValueShape::Conditional { base, clauses } => {
+            let Some(base_js) = simple_as_js(base) else {
+                return "\"\"".to_string();
             };
-            let Some(cond_js) = ts_emit_errors_field_predicate(hv, ctx) else {
-                continue;
-            };
+            if clauses.is_empty() {
+                return base_js;
+            }
             // Prepend a space so the combined class list stays
             // well-formed (base + " " + cond_class).
-            extras.push(format!(" + ({cond_js} ? \" {cls_text}\" : \"\")"));
+            let extras: Vec<String> = clauses
+                .iter()
+                .map(|(cls_text, pred)| {
+                    let cond_js = ts_render_errors_field_predicate(pred);
+                    format!(" + ({cond_js} ? \" {cls_text}\" : \"\")")
+                })
+                .collect();
+            format!("({base_js}{})", extras.join(""))
         }
-    }
-    if extras.is_empty() {
-        base
-    } else {
-        format!("({base}{})", extras.join(""))
+        crate::lower::ClassValueShape::Unknown => "\"\"".to_string(),
     }
 }
 
-/// Recognize `.errors[:field].none?` / `.any?` shapes and lower
-/// to a JS boolean expression via `Helpers.fieldHasError(errors,
-/// "field")`. Returns None for shapes we don't recognize.
-fn ts_emit_errors_field_predicate(expr: &Expr, ctx: &TsViewCtx) -> Option<String> {
-    let ExprNode::Send { recv: Some(outer), method: outer_method, args: outer_args, .. } = &*expr.node else {
-        return None;
-    };
-    if !outer_args.is_empty() {
-        return None;
+/// Render a classified errors-field predicate to a TS boolean
+/// expression via `Helpers.fieldHasError`.
+fn ts_render_errors_field_predicate(pred: &crate::lower::ErrorsFieldPredicate<'_>) -> String {
+    let call = format!(
+        "Helpers.fieldHasError({}.errors, {:?})",
+        pred.record, pred.field,
+    );
+    if pred.expect_present {
+        call
+    } else {
+        format!("!{call}")
     }
-    let predicate = match outer_method.as_str() {
-        "none?" | "empty?" => false,
-        "any?" | "present?" => true,
-        _ => return None,
-    };
-    // `outer.recv` should be `<record>.errors[:field]`. Match the
-    // `[]` send with a single symbol arg and recv of `.errors`.
-    let ExprNode::Send { recv: Some(errs_recv), method: brackets, args: idx_args, .. } = &*outer.node else {
-        return None;
-    };
-    if brackets.as_str() != "[]" || idx_args.len() != 1 {
-        return None;
-    }
-    let field = match &*idx_args[0].node {
-        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-        _ => return None,
-    };
-    // `errs_recv` should be `<record>.errors`. The record is a
-    // view-scope local (partial arg or form_with-bound record).
-    let ExprNode::Send { recv: Some(rec), method: errs_method, args: ra, .. } = &*errs_recv.node else {
-        return None;
-    };
-    if errs_method.as_str() != "errors" || !ra.is_empty() {
-        return None;
-    }
-    let record_name = match &*rec.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
-        // Partial-scope local via bare-Send — same pattern as
-        // ts_emit_url_arg's recognition.
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() && ctx.is_local(method.as_str()) => method.as_str().to_string(),
-        _ => return None,
-    };
-    let call = format!("Helpers.fieldHasError({record_name}.errors, {field:?})");
-    Some(if predicate { call } else { format!("!{call}") })
 }
 
 fn emit_ts_captured_helper(
@@ -3231,29 +3156,12 @@ fn emit_ts_render_call(arg: &Expr, ctx: &TsViewCtx) -> String {
 
 /// Emit the record expression for the CHILD element of a nested
 /// form_with's `model:` array (`[parent, Child.new]` or similar).
-/// Recognizes `Class.new` constructor calls and bare locals.
+/// Dispatches on the shared `NestedFormChild` classifier.
 fn emit_ts_nested_form_record(el: &Expr) -> String {
-    match &*el.node {
-        // `Class.new` — construct a fresh instance.
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if method.as_str() == "new" && args.is_empty() =>
-        {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    return format!("new {}()", class.as_str());
-                }
-            }
-            "null".to_string()
-        }
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() => method.as_str().to_string(),
-        _ => "null".to_string(),
+    match crate::lower::classify_nested_form_child(el) {
+        Some(crate::lower::NestedFormChild::ClassNew { class }) => format!("new {class}()"),
+        Some(crate::lower::NestedFormChild::Local { name }) => name.to_string(),
+        None => "null".to_string(),
     }
 }
 
@@ -3261,25 +3169,7 @@ fn emit_ts_nested_form_record(el: &Expr) -> String {
 /// element — `Comment.new` → `"comment"`, bare `comment` local →
 /// `"comment"`.
 fn ts_nested_form_child_prefix(el: &Expr) -> Option<String> {
-    match &*el.node {
-        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
-            if let ExprNode::Const { path } = &*r.node {
-                path.last()
-                    .map(|c| crate::naming::snake_case(c.as_str()))
-            } else {
-                None
-            }
-        }
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() => Some(method.as_str().to_string()),
-        _ => None,
-    }
+    crate::lower::classify_nested_form_child(el).map(|k| k.prefix())
 }
 
 /// Build the form action URL for a nested-resource form_with.

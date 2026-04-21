@@ -1961,28 +1961,12 @@ fn emit_captured_block_helper(
 
 /// Emit the record expression for the CHILD element of a nested
 /// form_with's `model:` array (`[parent, Child.new]` or similar).
-/// Recognizes `Class.new` constructor calls and bare locals.
+/// Dispatches on the shared `NestedFormChild` classifier.
 fn emit_rust_nested_form_record(el: &Expr) -> String {
-    match &*el.node {
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if method.as_str() == "new" && args.is_empty() =>
-        {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    return format!("{}::default()", class.as_str());
-                }
-            }
-            "Default::default()".to_string()
-        }
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() => method.as_str().to_string(),
-        _ => "Default::default()".to_string(),
+    match crate::lower::classify_nested_form_child(el) {
+        Some(crate::lower::NestedFormChild::ClassNew { class }) => format!("{class}::default()"),
+        Some(crate::lower::NestedFormChild::Local { name }) => name.to_string(),
+        None => "Default::default()".to_string(),
     }
 }
 
@@ -1990,25 +1974,7 @@ fn emit_rust_nested_form_record(el: &Expr) -> String {
 /// element — `Comment.new` → `"comment"`, bare `comment` local →
 /// `"comment"`.
 fn rust_nested_form_child_prefix(el: &Expr) -> Option<String> {
-    match &*el.node {
-        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
-            if let ExprNode::Const { path } = &*r.node {
-                path.last()
-                    .map(|c| crate::naming::snake_case(c.as_str()))
-            } else {
-                None
-            }
-        }
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() => Some(method.as_str().to_string()),
-        _ => None,
-    }
+    crate::lower::classify_nested_form_child(el).map(|k| k.prefix())
 }
 
 /// Build the form action URL for a nested-resource form_with.
@@ -2022,12 +1988,14 @@ fn rust_nested_form_path_expr(
     record_ref: &str,
     child_prefix: &str,
 ) -> String {
+    let is_local = |n: &str| ctx.is_local(n);
     let mut parent_ids: Vec<String> = Vec::new();
     let mut parent_singulars: Vec<String> = Vec::new();
     for parent in &elems[..elems.len() - 1] {
-        let Some((singular, id_expr)) = rust_classify_nested_element(parent, ctx) else {
+        let Some(kind) = crate::lower::classify_nested_url_element(parent, &is_local) else {
             return "String::new()".to_string();
         };
+        let (singular, id_expr) = rust_nested_element_parts(&kind);
         parent_singulars.push(singular);
         parent_ids.push(id_expr);
     }
@@ -2251,62 +2219,30 @@ fn emit_rust_link_or_button(
 /// form to a nested-resource path-helper call. Returns None when
 /// the element shapes aren't recognized.
 fn rust_emit_nested_path(elements: &[Expr], ctx: &ViewEmitCtx) -> Option<String> {
+    let is_local = |n: &str| ctx.is_local(n);
     let mut singulars: Vec<String> = Vec::new();
     let mut args: Vec<String> = Vec::new();
     for el in elements {
-        let (singular, id_expr) = rust_classify_nested_element(el, ctx)?;
+        let kind = crate::lower::classify_nested_url_element(el, &is_local)?;
+        let (singular, id_expr) = rust_nested_element_parts(&kind);
         singulars.push(singular);
         args.push(id_expr);
     }
-    // Compose the Rails-style nested path helper name:
-    //   [article, comment] → article_comment_path
     let name = format!("{}_path", singulars.join("_"));
     Some(format!("route_helpers::{name}({})", args.join(", ")))
 }
 
-/// Classify one element of the nested-URL array. Returns the
-/// singular model name and the Rust expression for its id. Handles:
-///   - `record` (partial-scope local or Var) → (type-name, "record.id")
-///   - `record.assoc` (belongs_to read) → (assoc-name, "record.<assoc>_id")
-fn rust_classify_nested_element(el: &Expr, ctx: &ViewEmitCtx) -> Option<(String, String)> {
-    match &*el.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
-            if !ctx.is_local(name.as_str()) {
-                return None;
-            }
-            Some((name.as_str().to_string(), format!("{}.id", name.as_str())))
+/// Render a classified `NestedUrlElement` to `(singular, id_expr)`
+/// Rust source pair. Direct locals use `{name}.id`; belongs_to
+/// reads use the owner's foreign-key column.
+fn rust_nested_element_parts(kind: &crate::lower::NestedUrlElement<'_>) -> (String, String) {
+    match kind {
+        crate::lower::NestedUrlElement::DirectLocal { name } => {
+            ((*name).to_string(), format!("{name}.id"))
         }
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() && ctx.is_local(method.as_str()) => {
-            Some((method.as_str().to_string(), format!("{}.id", method.as_str())))
+        crate::lower::NestedUrlElement::Association { owner, assoc } => {
+            ((*assoc).to_string(), format!("{owner}.{assoc}_id"))
         }
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if args.is_empty() =>
-        {
-            let owner = match &*r.node {
-                ExprNode::Var { name, .. } | ExprNode::Ivar { name }
-                    if ctx.is_local(name.as_str()) =>
-                {
-                    Some(name.as_str().to_string())
-                }
-                ExprNode::Send {
-                    recv: None,
-                    method: m,
-                    args: ra,
-                    block: None,
-                    ..
-                } if ra.is_empty() && ctx.is_local(m.as_str()) => Some(m.as_str().to_string()),
-                _ => None,
-            }?;
-            let assoc = method.as_str();
-            Some((assoc.to_string(), format!("{owner}.{assoc}_id")))
-        }
-        _ => None,
     }
 }
 
@@ -2499,103 +2435,59 @@ fn rust_hash_to_hashmap_literal(
 /// Lower a `class:` option value. Handles three shapes:
 ///   - Simple (literal/interp): emit as-is
 ///   - `[base_string, {cond_class: cond_expr, ...}]`: emit a Rust
-///     conditional-string expression
+///     conditional-string expression via the shared class-value
+///     classifier
 ///   - Anything else: `String::new()` placeholder
 fn rust_class_value(v: &Expr, ctx: &ViewEmitCtx) -> String {
-    if is_simple_view_expr(v, ctx) {
-        return match &*v.node {
-            ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}.to_string()"),
-            _ => format!("{}.to_string()", emit_view_expr_raw(v, ctx)),
-        };
-    }
-    let ExprNode::Array { elements, .. } = &*v.node else {
-        return "String::new()".to_string();
-    };
-    let base = match elements.first() {
-        Some(first) => match &*first.node {
-            ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}.to_string()"),
-            _ if is_simple_view_expr(first, ctx) => {
-                format!("{}.to_string()", emit_view_expr_raw(first, ctx))
-            }
-            _ => return "String::new()".to_string(),
-        },
-        None => return "String::new()".to_string(),
-    };
-    // Second element, if present, is usually a Hash of
-    // cond_class → cond_expr pairs. Build a chain of conditional
-    // concatenations.
-    let mut extras: Vec<String> = Vec::new();
-    for el in elements.iter().skip(1) {
-        let ExprNode::Hash { entries, .. } = &*el.node else {
-            continue;
-        };
-        for (hk, hv) in entries {
-            let cls_text = match &*hk.node {
-                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-                _ => continue,
-            };
-            let Some(cond_rs) = rust_emit_errors_field_predicate(hv, ctx) else {
-                continue;
-            };
-            extras.push(format!(
-                " + if {cond_rs} {{ \" {cls_text}\" }} else {{ \"\" }}"
-            ));
+    let is_local = |n: &str| ctx.is_local(n);
+    let simple_as_string = |e: &Expr| -> Option<String> {
+        if is_simple_view_expr(e, ctx) {
+            Some(match &*e.node {
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    format!("{value:?}.to_string()")
+                }
+                _ => format!("{}.to_string()", emit_view_expr_raw(e, ctx)),
+            })
+        } else {
+            None
         }
-    }
-    if extras.is_empty() {
-        base
-    } else {
-        format!("({base}{})", extras.join(""))
+    };
+    match crate::lower::classify_class_value(v, &is_local) {
+        crate::lower::ClassValueShape::Simple { expr } => {
+            simple_as_string(expr).unwrap_or_else(|| "String::new()".to_string())
+        }
+        crate::lower::ClassValueShape::Conditional { base, clauses } => {
+            let Some(base_s) = simple_as_string(base) else {
+                return "String::new()".to_string();
+            };
+            if clauses.is_empty() {
+                return base_s;
+            }
+            let extras: Vec<String> = clauses
+                .iter()
+                .map(|(cls_text, pred)| {
+                    let cond_rs = rust_render_errors_field_predicate(pred);
+                    format!(" + if {cond_rs} {{ \" {cls_text}\" }} else {{ \"\" }}")
+                })
+                .collect();
+            format!("({base_s}{})", extras.join(""))
+        }
+        crate::lower::ClassValueShape::Unknown => "String::new()".to_string(),
     }
 }
 
-/// Recognize `.errors[:field].none?` / `.any?` shapes and lower to a
-/// Rust boolean expression via
-/// `view_helpers::field_has_error(&record.errors, "field")`.
-/// Returns None for shapes we don't recognize.
-fn rust_emit_errors_field_predicate(expr: &Expr, ctx: &ViewEmitCtx) -> Option<String> {
-    let ExprNode::Send { recv: Some(outer), method: outer_method, args: outer_args, .. } = &*expr.node else {
-        return None;
-    };
-    if !outer_args.is_empty() {
-        return None;
+/// Render a classified errors-field predicate to a Rust boolean
+/// expression via `view_helpers::field_has_error`.
+fn rust_render_errors_field_predicate(pred: &crate::lower::ErrorsFieldPredicate<'_>) -> String {
+    let call = format!(
+        "view_helpers::field_has_error(&{}.errors, {:?})",
+        pred.record, pred.field,
+    );
+    if pred.expect_present {
+        call
+    } else {
+        format!("!{call}")
     }
-    let predicate = match outer_method.as_str() {
-        "none?" | "empty?" => false,
-        "any?" | "present?" => true,
-        _ => return None,
-    };
-    let ExprNode::Send { recv: Some(errs_recv), method: brackets, args: idx_args, .. } = &*outer.node else {
-        return None;
-    };
-    if brackets.as_str() != "[]" || idx_args.len() != 1 {
-        return None;
-    }
-    let field = match &*idx_args[0].node {
-        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
-        _ => return None,
-    };
-    let ExprNode::Send { recv: Some(rec), method: errs_method, args: ra, .. } = &*errs_recv.node else {
-        return None;
-    };
-    if errs_method.as_str() != "errors" || !ra.is_empty() {
-        return None;
-    }
-    let record_name = match &*rec.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
-        ExprNode::Send {
-            recv: None,
-            method,
-            args,
-            block: None,
-            ..
-        } if args.is_empty() && ctx.is_local(method.as_str()) => method.as_str().to_string(),
-        _ => return None,
-    };
-    let call = format!("view_helpers::field_has_error(&{record_name}.errors, {field:?})");
-    Some(if predicate { call } else { format!("!{call}") })
 }
 
 /// Emit a single string-typed arg. Returns None if the arg isn't a

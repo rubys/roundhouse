@@ -360,6 +360,27 @@ export class ErrorCollection {
   add(field: string, message: string): void {
     this._errors.push({ field, message });
   }
+
+  // `<% article.errors.each do |e| %>` lowers to `for (const e of
+  // article.errors)`, which needs an iterator. Yielding `{ field,
+  // message, full_message }` entries matches the Rails
+  // ActiveModel::Errors iteration shape scaffolds rely on.
+  *[Symbol.iterator](): Iterator<{ field: string; message: string; full_message: string }> {
+    for (const e of this._errors) {
+      yield {
+        field: e.field,
+        message: e.message,
+        full_message: humanizeErrorFullMessage(e.field, e.message),
+      };
+    }
+  }
+}
+
+function humanizeErrorFullMessage(field: string, message: string): string {
+  const humanized = field
+    .replace(/_/g, " ")
+    .replace(/^./, (c) => c.toUpperCase());
+  return `${humanized} ${message}`;
 }
 
 export class Reference<T = any> {
