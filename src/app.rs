@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::{Controller, Fixture, Model, RouteTable, TestModule, View};
+use crate::expr::Expr;
 use crate::schema::Schema;
 
 /// The top-level IR: a Rails application as data. This is the serializable
@@ -17,6 +18,13 @@ pub struct App {
     pub test_modules: Vec<TestModule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixtures: Vec<Fixture>,
+    /// Body of `db/seeds.rb` as a typed expression (usually a
+    /// `Seq` of AR-create calls with an early-return guard). The
+    /// TS emitter wraps it in `async function run()` and the
+    /// generated `main.ts` invokes it at startup when the DB is
+    /// fresh. None when the app has no seeds file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<Expr>,
 }
 
 impl App {
@@ -32,6 +40,7 @@ impl App {
             views: Vec::new(),
             test_modules: Vec::new(),
             fixtures: Vec::new(),
+            seeds: None,
         }
     }
 }

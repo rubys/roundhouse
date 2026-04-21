@@ -103,6 +103,7 @@ fn tiny_blog() -> App {
         views: vec![],
         test_modules: vec![],
         fixtures: vec![],
+        seeds: None,
     }
 }
 

@@ -145,6 +145,19 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         }
     }
 
+    // `db/seeds.rb` — sample data loaded at startup. Ingested as a
+    // top-level Ruby program (Seq of AR-create statements, usually
+    // with an early-return guard). Analyzer types the body against
+    // the model registry; TS emitter wraps it in
+    // `async function run()` and main.ts invokes it if the DB is
+    // fresh.
+    let seeds_path = dir.join("db/seeds.rb");
+    if seeds_path.exists() {
+        let source = std::fs::read_to_string(&seeds_path)?;
+        let expr = ingest_ruby_program(&source, &seeds_path.display().to_string())?;
+        app.seeds = Some(expr);
+    }
+
     Ok(app)
 }
 

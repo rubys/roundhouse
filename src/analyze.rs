@@ -418,6 +418,18 @@ impl Analyzer {
             }
             self.analyze_expr(&mut view.body, &view_ctx);
         }
+
+        // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
+        // ivars, no before-action scaffolding. Just an expression
+        // that references model classes. Types so that Send effects
+        // flow (DbWrite on `Article.create!`, DbRead on
+        // `Article.count`), which the emitter uses for await
+        // placement under async adapters.
+        if let Some(expr) = app.seeds.as_mut() {
+            let ctx = Ctx::default();
+            self.analyze_expr(expr, &ctx);
+            let _ = self.collect_effects(expr, &ctx);
+        }
     }
 
     fn collect_effects(&self, expr: &mut Expr, ctx: &Ctx) -> EffectSet {
