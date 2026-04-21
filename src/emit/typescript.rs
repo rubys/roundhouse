@@ -2067,6 +2067,32 @@ fn emit_ts_view_body(body: &Expr, ctx: &TsViewCtx) -> Vec<String> {
     out
 }
 
+/// If `body`'s first statement is `_buf = _buf + "\n..."`,
+/// return a new body with that leading `\n` stripped. Used by
+/// the If emitter to consume the `\n` that follows the opening
+/// `<% if %>` / `<% else %>` / `<% end %>` tags (matching erubi's
+/// trim). Handles both Seq and single-stmt bodies.
+fn trim_leading_newline_of_first_text(body: &Expr) -> Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            if let Some(trimmed) = trim_leading_newline_of_text_append(&exprs[0]) {
+                let mut new_exprs = exprs.clone();
+                new_exprs[0] = trimmed;
+                Expr::new(body.span.clone(), ExprNode::Seq { exprs: new_exprs })
+            } else {
+                body.clone()
+            }
+        }
+        _ => {
+            if let Some(trimmed) = trim_leading_newline_of_text_append(body) {
+                trimmed
+            } else {
+                body.clone()
+            }
+        }
+    }
+}
+
 /// If `body` is a `Seq` whose last-non-epilogue statement is
 /// `_buf = _buf + "<whitespace only>"`, return a new body with
 /// that statement dropped. The compiled ERB always ends with
@@ -2348,7 +2374,12 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
                 "false /* TODO ERB cond */".to_string()
             };
             let mut out = vec![format!("if ({cond_js}) {{")];
-            for line in emit_ts_view_body(then_branch, ctx) {
+            // erubi trim consumes the `\n` after the opening `<% if
+            // %>` tag. The first statement of the then-branch is a
+            // text append starting with that `\n`; strip it so the
+            // if-body renders the way Rails does.
+            let then_body = trim_leading_newline_of_first_text(then_branch);
+            for line in emit_ts_view_body(&then_body, ctx) {
                 out.push(format!("  {line}"));
             }
             let has_else = !matches!(
@@ -2357,7 +2388,9 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
             );
             if has_else {
                 out.push("} else {".to_string());
-                for line in emit_ts_view_body(else_branch, ctx) {
+                // Same trim on the `<% else %>` tag.
+                let else_body = trim_leading_newline_of_first_text(else_branch);
+                for line in emit_ts_view_body(&else_body, ctx) {
                     out.push(format!("  {line}"));
                 }
             }
