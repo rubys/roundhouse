@@ -155,7 +155,63 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   res.statusCode = response.status ?? 200;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(response.body ?? "");
+  res.end(renderLayout(response.body ?? ""));
+}
+
+// ── Layout wrapping ────────────────────────────────────────────
+
+/** Wrap a controller's returned HTML body in the full HTML
+ *  document shell. Emitter-provided layouts (from ERB
+ *  application.html.erb) aren't yet wired up — the transpiled
+ *  file is emitted but ERB helpers like `<%= yield %>` and
+ *  `<%= stylesheet_link_tag %>` still stub as TODO comments.
+ *  Until view-helper emission catches up, the server synthesizes
+ *  a working layout inline:
+ *
+ *   - Tailwind Play CDN (`cdn.tailwindcss.com`): compiles utility
+ *     classes in the browser. Good for dev / this acceptance
+ *     test; production would swap for a real tailwind-cli build.
+ *   - `turbo-rails` via importmap shim: provides Turbo's form
+ *     submission + Stream subscription. `turbo-rails`
+ *     specifically (not just `@hotwired/turbo`) so Turbo auto-
+ *     wires to Action Cable when it sees the `action-cable-url`
+ *     meta tag.
+ *   - `<meta name="action-cable-url" content="/cable">`: tells
+ *     Turbo where the cable endpoint lives.
+ *
+ *  Scaffold action bodies include their own Tailwind utility
+ *  classes (carried through from the Rails source — no
+ *  translation needed, they're just string literals in the ERB
+ *  templates). This layout provides the shell that makes them
+ *  render.
+ */
+function renderLayout(body: string): string {
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Roundhouse App</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="action-cable-url" content="/cable">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@hotwired/turbo-rails": "https://ga.jspm.io/npm:@hotwired/turbo-rails@8.0.0/app/javascript/turbo/index.js",
+        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js",
+        "@rails/actioncable": "https://ga.jspm.io/npm:@rails/actioncable@7.1.0/app/assets/javascripts/actioncable.esm.js"
+      }
+    }
+    </script>
+    <script type="module">import "@hotwired/turbo-rails";</script>
+  </head>
+  <body>
+    <main class="container mx-auto mt-8 px-5 flex flex-col">
+      ${body}
+    </main>
+  </body>
+</html>
+`;
 }
 
 // ── Action Cable upgrade handling ──────────────────────────────
