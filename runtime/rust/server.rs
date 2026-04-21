@@ -14,12 +14,11 @@
 //!     method, and re-inject the body so downstream `axum::Form`
 //!     extractors still work.
 //!
-//! Action Cable / WebSocket support stubs today — the
-//! `turbo_stream_from` helper emits a valid subscription tag, but
-//! the server doesn't open the `/cable` endpoint or broadcast
-//! updates. Turbo will attempt to connect and fail quietly;
-//! navigation + form-submit flows still work. A later task
-//! wires axum's `ws` extractor to the CableServer shape.
+//! `start` also mounts `GET /cable` onto the axum router, handing
+//! the upgrade off to `crate::cable::cable_handler`. The route is
+//! always registered — apps that don't use Turbo Streams simply
+//! never receive a client connection, and the handler is cheap
+//! (one OnceLock hashmap check on subscribe).
 
 use std::net::SocketAddr;
 
@@ -29,9 +28,11 @@ use axum::{
     http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::Response,
+    routing::get,
     Router,
 };
 
+use crate::cable;
 use crate::db;
 use crate::view_helpers;
 
@@ -81,6 +82,7 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
     db::open_production_db(&db_path, opts.schema_sql);
 
     let app = router
+        .route("/cable", get(cable::cable_handler))
         .layer(middleware::from_fn(layout_wrap))
         .layer(middleware::from_fn(method_override));
 

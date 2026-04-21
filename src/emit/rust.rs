@@ -65,6 +65,12 @@ const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/rust/view_helpers.
 /// as `src/server.rs` so `main.rs` can `use app::server::start`.
 const SERVER_SOURCE: &str = include_str!("../../runtime/rust/server.rs");
 
+/// Source of the Action Cable runtime. Hand-written WebSocket
+/// handler + Turbo Streams broadcaster. Shipped alongside the
+/// server so `server::start` can mount `/cable` without a separate
+/// compile-time feature flag.
+const CABLE_SOURCE: &str = include_str!("../../runtime/rust/cable.rs");
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
@@ -108,6 +114,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("src/server.rs"),
             content: SERVER_SOURCE.to_string(),
+        });
+        // Action Cable runtime — `/cable` WebSocket handler + Turbo
+        // Streams broadcaster. Always shipped with controllers;
+        // `server::start` mounts the route unconditionally so apps
+        // using `<turbo-cable-stream-source>` subscribe cleanly.
+        files.push(EmittedFile {
+            path: PathBuf::from("src/cable.rs"),
+            content: CABLE_SOURCE.to_string(),
         });
         files.push(emit_main_rs(app));
         files.push(emit_rust_importmap(app));
@@ -168,10 +182,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files
 }
 
-/// Cargo.toml for the generated crate. Includes axum for the HTTP
-/// runtime, serde for typed form decoding, tokio for the async
-/// runtime axum depends on, rusqlite for persistence, and axum-test
-/// (dev-only) for the controller test client.
+/// Cargo.toml for the generated crate. Includes axum (with ws for
+/// Action Cable) for the HTTP runtime, serde + serde_json for typed
+/// form decoding and JSON frame encoding, tokio for the async
+/// runtime axum depends on, rusqlite for persistence, futures-util
+/// for the WebSocket stream combinators, and axum-test (dev-only)
+/// for the controller test client.
 fn emit_cargo_toml() -> EmittedFile {
     let content = "\
 [package]
@@ -187,11 +203,13 @@ name = \"app\"
 path = \"src/main.rs\"
 
 [dependencies]
-axum = \"0.8\"
+axum = { version = \"0.8\", features = [\"ws\"] }
 base64 = \"0.22\"
+futures-util = \"0.3\"
 rusqlite = { version = \"0.33\", features = [\"bundled\"] }
 serde = { version = \"1\", features = [\"derive\"] }
-tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\"] }
+serde_json = \"1\"
+tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"net\", \"sync\", \"time\"] }
 
 [dev-dependencies]
 axum-test = \"18\"
@@ -222,6 +240,7 @@ fn emit_lib_rs(app: &App) -> EmittedFile {
         writeln!(s, "pub mod view_helpers;").unwrap();
         writeln!(s, "pub mod views;").unwrap();
         writeln!(s, "pub mod server;").unwrap();
+        writeln!(s, "pub mod cable;").unwrap();
         writeln!(s).unwrap();
         writeln!(s, "#[cfg(test)]").unwrap();
         writeln!(s, "pub mod test_support;").unwrap();
