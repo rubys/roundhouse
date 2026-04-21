@@ -31,8 +31,8 @@ use crate::dialect::{
     Action, Controller, MethodDef, Model, RouteSpec, Test, TestModule,
 };
 use crate::ident::Symbol;
-use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::lower::CtrlWalker as _;
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::lower::{BroadcastAction, CtrlWalker as _, LoweredBroadcast, LoweredBroadcasts};
 use crate::ty::Ty;
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
@@ -205,18 +205,218 @@ fn emit_model(out: &mut String, model: &Model, app: &App) {
         .keys()
         .any(|k| k.as_str() != "id");
     if has_table {
-        emit_persistence_methods_py(out, model, !lowered.is_empty(), app);
+        let broadcasts = crate::lower::lower_broadcasts(model);
+        emit_persistence_methods_py(
+            out,
+            model,
+            !lowered.is_empty(),
+            app,
+            !broadcasts.is_empty(),
+        );
+        if !broadcasts.is_empty() {
+            let lp = crate::lower::lower_persistence(model, app);
+            emit_py_broadcaster_methods(
+                out,
+                lp.class.0.as_str(),
+                lp.table.as_str(),
+                &broadcasts,
+            );
+        }
+    }
+}
+
+// ── Broadcaster emission ───────────────────────────────────────
+//
+// Broadcast declarations are parsed in `lower::broadcasts`; this
+// section renders them as Python. The generated model gets two
+// helper methods — `_broadcast_after_save` and
+// `_broadcast_after_delete` — invoked from save/destroy. Each
+// broadcast call targets `app.cable.broadcast_*_to` (the hand-
+// written runtime). `broadcasts_to` with a channel-lambda that
+// references the record's fields (e.g. `"article_#{c.article_id}
+// _comments"`) lowers to an f-string whose bare param references
+// become `self.field` access.
+
+/// Emit the two `_broadcast_after_save` / `_broadcast_after_delete`
+/// helper methods into the class body. Assumes the model is
+/// non-empty (caller checks `broadcasts.is_empty()`).
+fn emit_py_broadcaster_methods(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    decls: &LoweredBroadcasts,
+) {
+    writeln!(out).unwrap();
+    writeln!(out, "    def _broadcast_after_save(self) -> None:").unwrap();
+    writeln!(out, "        from app import cable").unwrap();
+    if decls.save.is_empty() {
+        writeln!(out, "        pass").unwrap();
+    } else {
+        for b in &decls.save {
+            emit_py_one_broadcast_call(out, class, table, b);
+        }
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out, "    def _broadcast_after_delete(self) -> None:").unwrap();
+    writeln!(out, "        from app import cable").unwrap();
+    if decls.destroy.is_empty() {
+        writeln!(out, "        pass").unwrap();
+    } else {
+        for b in &decls.destroy {
+            emit_py_one_broadcast_call(out, class, table, b);
+        }
+    }
+}
+
+fn emit_py_one_broadcast_call(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    b: &LoweredBroadcast,
+) {
+    let channel = py_render_broadcast_expr(&b.channel, b.self_param.as_ref());
+    let target = b
+        .target
+        .as_ref()
+        .map(|t| py_render_broadcast_expr(t, b.self_param.as_ref()))
+        .unwrap_or_else(|| "\"\"".to_string());
+    if let Some(assoc) = &b.on_association {
+        // `<parent>.broadcast_*_to(channel)` — resolve parent via
+        // belongs_to foreign key, fire on it. `if parent is not None`
+        // swallows orphans and missing-record cases (matches the
+        // seeding `rescue nil` intent).
+        let var = assoc.name.as_str();
+        let target_class = assoc.target_class.as_str();
+        let target_table = assoc.target_table.as_str();
+        let fk = assoc.foreign_key.as_str();
+        writeln!(
+            out,
+            "        {var} = {target_class}.find(self.{fk})"
+        )
+        .unwrap();
+        writeln!(out, "        if {var} is not None:").unwrap();
+        if b.action == BroadcastAction::Remove {
+            writeln!(
+                out,
+                "            cable.broadcast_remove_to({target_table:?}, {var}.id, {channel}, {target})",
+            )
+            .unwrap();
+        } else {
+            let func = py_action_fn(b.action);
+            writeln!(
+                out,
+                "            cable.{func}({target_table:?}, {var}.id, {target_class:?}, {channel}, {target})",
+            )
+            .unwrap();
+        }
+        return;
+    }
+    if b.action == BroadcastAction::Remove {
+        writeln!(
+            out,
+            "        cable.broadcast_remove_to({table:?}, self.id, {channel}, {target})",
+        )
+        .unwrap();
+    } else {
+        let func = py_action_fn(b.action);
+        writeln!(
+            out,
+            "        cable.{func}({table:?}, self.id, {class:?}, {channel}, {target})",
+        )
+        .unwrap();
+    }
+}
+
+fn py_action_fn(action: BroadcastAction) -> &'static str {
+    match action {
+        BroadcastAction::Prepend => "broadcast_prepend_to",
+        BroadcastAction::Append => "broadcast_append_to",
+        BroadcastAction::Replace => "broadcast_replace_to",
+        BroadcastAction::Remove => "broadcast_remove_to",
+    }
+}
+
+/// Render a broadcast channel/target expression as a Python
+/// expression. Bare string literals → `"str"`, interpolated
+/// strings → f-strings, `<self_param>.field` references rewritten
+/// to `self.field`. Falls through to `None` for shapes we haven't
+/// taught the emitter — the resulting `cable.broadcast_*_to(...,
+/// None, ...)` would crash at runtime, making the miss visible
+/// rather than silently producing wrong output.
+fn py_render_broadcast_expr(expr: &Expr, self_param: Option<&Symbol>) -> String {
+    let p = self_param.map(|s| s.as_str());
+    match &*expr.node {
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => format!("{value:?}"),
+        ExprNode::Lit {
+            value: Literal::Int { value },
+        } => format!("{value}"),
+        ExprNode::Var { name, .. } => {
+            if let Some(pname) = p {
+                let stripped = pname.strip_prefix('_').unwrap_or(pname);
+                if name.as_str() == pname || name.as_str() == stripped {
+                    return "self".to_string();
+                }
+            }
+            name.as_str().to_string()
+        }
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            ..
+        } => {
+            let recv_s = py_render_broadcast_expr(r, self_param);
+            format!("{recv_s}.{}", method.as_str())
+        }
+        ExprNode::StringInterp { parts } => {
+            // Build a Python f-string. Text runs are embedded
+            // verbatim (with `{` / `}` escaped as `{{` / `}}`),
+            // Expr parts become `{<rendered>}`.
+            let mut out = String::from("f\"");
+            for part in parts {
+                match part {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            match c {
+                                '{' => out.push_str("{{"),
+                                '}' => out.push_str("}}"),
+                                '\\' => out.push_str("\\\\"),
+                                '"' => out.push_str("\\\""),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                _ => out.push(c),
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        out.push('{');
+                        out.push_str(&py_render_broadcast_expr(expr, self_param));
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
+            out
+        }
+        _ => "None".to_string(),
     }
 }
 
 /// Render save/destroy/count/find for a model against the stdlib
 /// `sqlite3`-backed test connection. Save/destroy are instance
-/// methods; count/find are classmethods.
+/// methods; count/find are classmethods. When `has_broadcasts` is
+/// true, the generated save/destroy call the class's
+/// `_broadcast_after_save` / `_broadcast_after_delete` helpers
+/// (emitted separately by `emit_py_broadcaster_methods`).
 fn emit_persistence_methods_py(
     out: &mut String,
     model: &Model,
     has_validate: bool,
     app: &App,
+    has_broadcasts: bool,
 ) {
     let lp = crate::lower::lower_persistence(model, app);
     let class = lp.class.0.as_str();
@@ -267,6 +467,9 @@ fn emit_persistence_methods_py(
         non_id_args.join(", "),
     )
     .unwrap();
+    if has_broadcasts {
+        writeln!(out, "        self._broadcast_after_save()").unwrap();
+    }
     writeln!(out, "        return True").unwrap();
 
     // ----- destroy -----
@@ -297,6 +500,9 @@ fn emit_persistence_methods_py(
         "        db.execute({delete_sql:?}, [self.id])",
     )
     .unwrap();
+    if has_broadcasts {
+        writeln!(out, "        self._broadcast_after_delete()").unwrap();
+    }
 
     // ----- count -----
     writeln!(out).unwrap();
@@ -1656,8 +1862,10 @@ asyncio_mode = \"auto\"
 
 /// Emit `app/__main__.py` — the `python -m app` entry point that
 /// the compare driver invokes. Opens the DB, imports routes (which
-/// registers them with the Router), and calls `server.start` with
-/// the emitted layout renderer when one exists.
+/// registers them with the Router), registers a partial renderer
+/// for each model that broadcasts (so `cable.broadcast_*_to` can
+/// reach the emitted view), and calls `server.start` with the
+/// emitted layout renderer when one exists.
 fn emit_py_main(app: &App) -> EmittedFile {
     let mut s = String::new();
     writeln!(s, "# Generated by Roundhouse.").unwrap();
@@ -1675,8 +1883,37 @@ fn emit_py_main(app: &App) -> EmittedFile {
     if !app.views.is_empty() {
         writeln!(s, "from app import views").unwrap();
     }
+
+    // Models that broadcast need a partial renderer registered so
+    // `cable.broadcast_{prepend,append,replace}_to` can reach the
+    // emitted view. Partial fn names follow Python view emission:
+    // `render_<plural>_<singular>` (e.g. `render_articles_article`).
+    let broadcasting_models: Vec<&Model> = app
+        .models
+        .iter()
+        .filter(|m| !crate::lower::lower_broadcasts(m).is_empty())
+        .collect();
+    if !broadcasting_models.is_empty() {
+        writeln!(s, "from app import cable").unwrap();
+        writeln!(s, "from app import models as _models").unwrap();
+    }
+
     writeln!(s).unwrap();
     writeln!(s, "def main() -> None:").unwrap();
+    for model in &broadcasting_models {
+        let class = model.name.0.as_str();
+        let singular = crate::naming::snake_case(class);
+        let plural = crate::naming::pluralize_snake(class);
+        // Register a closure that finds the record and renders its
+        // partial. The closure is a `def` (not lambda) so the
+        // interpreter reports a real frame if rendering raises.
+        writeln!(s, "    def _render_{singular}_partial(id: int) -> str:").unwrap();
+        writeln!(s, "        record = _models.{class}.find(id)").unwrap();
+        writeln!(s, "        if record is None:").unwrap();
+        writeln!(s, "            return \"\"").unwrap();
+        writeln!(s, "        return views.render_{plural}_{singular}(record)").unwrap();
+        writeln!(s, "    cable.register_partial({class:?}, _render_{singular}_partial)").unwrap();
+    }
     if has_layout {
         writeln!(
             s,

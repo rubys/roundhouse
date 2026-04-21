@@ -17,7 +17,12 @@ import json
 import time
 from typing import Any, Callable
 
-from aiohttp import WSMsgType, web
+# aiohttp is imported only inside `cable_handler` — the rest of
+# this module is duck-typed (calls `ws.send_str` / reads
+# `ws.closed`) so model-only unit tests can import through
+# `from app import cable` without having aiohttp installed. The
+# broadcast dispatch path short-circuits when no subscribers are
+# registered, which is the test-context state.
 
 # ── Partial-renderer registry ──────────────────────────────────
 #
@@ -106,8 +111,11 @@ def broadcast_remove_to(table: str, id: int, channel: str, target: str) -> None:
 # channel name → list of (ws, identifier) pairs. Identifier is the
 # raw subscribe-message `identifier` field echoed back on every
 # broadcast so Turbo can route the frame to the matching
-# <turbo-cable-stream-source> element.
-_SUBSCRIBERS: dict[str, list[tuple[web.WebSocketResponse, str]]] = {}
+# <turbo-cable-stream-source> element. Typed as `Any` rather than
+# `web.WebSocketResponse` so the module imports without aiohttp
+# installed — the handler populates these at runtime and the
+# broadcast path only calls `send_str` / `closed` (duck-typed).
+_SUBSCRIBERS: dict[str, list[tuple[Any, str]]] = {}
 
 
 def _dispatch(channel: str, html: str) -> None:
@@ -131,7 +139,7 @@ def _dispatch(channel: str, html: str) -> None:
         asyncio.ensure_future(_safe_send(ws, msg))
 
 
-async def _safe_send(ws: web.WebSocketResponse, msg: str) -> None:
+async def _safe_send(ws: Any, msg: str) -> None:
     if ws.closed:
         return
     try:
@@ -143,11 +151,18 @@ async def _safe_send(ws: web.WebSocketResponse, msg: str) -> None:
 # ── WebSocket handler ──────────────────────────────────────────
 
 
-async def cable_handler(request: web.Request) -> web.WebSocketResponse:
+async def cable_handler(request: Any) -> Any:
     """aiohttp handler for ``GET /cable``. Negotiates the
     ``actioncable-v1-json`` subprotocol (Turbo's client requires it),
     sends the welcome frame, pings every 3s, and routes subscribe
-    commands into ``_SUBSCRIBERS``. Cleans up on close."""
+    commands into ``_SUBSCRIBERS``. Cleans up on close.
+
+    aiohttp is imported here rather than at module level so models
+    can transitively import this module under the system Python
+    (unit tests) without aiohttp installed — those tests never
+    reach this handler."""
+    from aiohttp import WSMsgType, web
+
     ws = web.WebSocketResponse(protocols=["actioncable-v1-json"])
     await ws.prepare(request)
     await ws.send_str(json.dumps({"type": "welcome"}))
@@ -165,7 +180,7 @@ async def cable_handler(request: web.Request) -> web.WebSocketResponse:
             pass
 
     ping_task = asyncio.create_task(_ping())
-    sub_entries: list[tuple[str, tuple[web.WebSocketResponse, str]]] = []
+    sub_entries: list[tuple[str, tuple[Any, str]]] = []
 
     try:
         async for msg in ws:
