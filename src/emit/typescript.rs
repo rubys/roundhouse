@@ -1909,6 +1909,25 @@ fn emit_view_file_pass2(
     stylesheets: &[String],
 ) -> EmittedFile {
     let rewritten_body = rewrite_for_controller(&view.body);
+    // Partials (files starting with `_`) have their trailing
+    // whitespace-only text appends stripped to match Rails'
+    // render behavior — the file's trailing `\n` after `<% end %>`
+    // ends up as a final `_buf = _buf + "\n"` in the IR, but
+    // Rails' erubi trim consumes it. The trim can't happen in the
+    // ERB compiler without breaking source round-trip, so do it
+    // here per-view.
+    let is_partial = view
+        .name
+        .as_str()
+        .rsplit('/')
+        .next()
+        .map(|s| s.starts_with('_'))
+        .unwrap_or(false);
+    let rewritten_body = if is_partial {
+        strip_trailing_newline_text_append(&rewritten_body)
+    } else {
+        rewritten_body
+    };
     let ivar_names = collect_ivar_names(&view.body);
     let fn_name = view_function_name(view.name.as_str());
 
@@ -2058,6 +2077,71 @@ fn emit_ts_view_body(body: &Expr, ctx: &TsViewCtx) -> Vec<String> {
         out.extend(emit_ts_view_stmt_pass2(stmt.as_ref(), ctx));
     }
     out
+}
+
+/// If `body` is a `Seq` whose last-non-epilogue statement is
+/// `_buf = _buf + "<whitespace only>"`, return a new body with
+/// that statement dropped. The compiled ERB always ends with
+/// a bare `_buf` read (the return value of the enclosing
+/// expression), so we look at the second-to-last element when
+/// the last is that epilogue. Used to trim the partial file's
+/// trailing newline at emit time.
+fn strip_trailing_newline_text_append(body: &Expr) -> Expr {
+    let ExprNode::Seq { exprs } = &*body.node else {
+        return body.clone();
+    };
+    if exprs.is_empty() {
+        return body.clone();
+    }
+    // Identify the epilogue (bare `_buf` Var) at the tail, and
+    // the target stmt immediately before it.
+    let last_idx = exprs.len() - 1;
+    let epilogue_idx = if matches!(
+        &*exprs[last_idx].node,
+        ExprNode::Var { name, .. } if name.as_str() == "_buf"
+    ) {
+        Some(last_idx)
+    } else {
+        None
+    };
+    let target_idx = match epilogue_idx {
+        Some(0) => return body.clone(),
+        Some(i) => i - 1,
+        None => last_idx,
+    };
+    let target = &exprs[target_idx];
+    let is_trailing_ws = match &*target.node {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } if name.as_str() == "_buf" => match &*value.node {
+            ExprNode::Send { recv: Some(r), method, args, .. }
+                if method.as_str() == "+" && args.len() == 1 =>
+            {
+                let recv_buf = matches!(
+                    &*r.node,
+                    ExprNode::Var { name, .. } if name.as_str() == "_buf"
+                );
+                let text_ws = matches!(
+                    &*args[0].node,
+                    ExprNode::Lit { value: Literal::Str { value: s } }
+                        if s.bytes().all(|b| b == b'\n' || b == b' ' || b == b'\t'),
+                );
+                recv_buf && text_ws
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !is_trailing_ws {
+        return body.clone();
+    }
+    let mut new_exprs = exprs.clone();
+    new_exprs.remove(target_idx);
+    Expr::new(
+        body.span.clone(),
+        ExprNode::Seq { exprs: new_exprs },
+    )
 }
 
 /// Produce a new statement list where text-chunks adjacent to

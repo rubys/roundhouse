@@ -119,11 +119,11 @@ pub fn compile_erb(source: &str) -> String {
                 // visible, and leaving the newline behind would
                 // produce a stray blank where the comment was. Non-
                 // comment tags (`<% code %>`, `<%= expr %>`) don't
-                // trim — their newlines are significant whitespace
-                // between the surrounding text chunks. Limiting the
-                // trim to comments preserves source-level round-
-                // trip fidelity for passthrough-code tags while
-                // matching Rails' rendered output where it matters.
+                // trim here — their newlines are significant
+                // whitespace between the surrounding text chunks.
+                // Matching erubi's behavior for `<% %>` tags
+                // happens at target-emit time (`erubi_trim_body`)
+                // so the Ruby round-trip preserves source fidelity.
                 if is_comment && bytes.get(cursor) == Some(&b'\n') {
                     cursor += 1;
                 }
