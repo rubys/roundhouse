@@ -1909,25 +1909,13 @@ fn emit_view_file_pass2(
     stylesheets: &[String],
 ) -> EmittedFile {
     let rewritten_body = rewrite_for_controller(&view.body);
-    // Partials (files starting with `_`) have their trailing
-    // whitespace-only text appends stripped to match Rails'
-    // render behavior — the file's trailing `\n` after `<% end %>`
-    // ends up as a final `_buf = _buf + "\n"` in the IR, but
-    // Rails' erubi trim consumes it. The trim can't happen in the
-    // ERB compiler without breaking source round-trip, so do it
-    // here per-view.
-    let is_partial = view
-        .name
-        .as_str()
-        .rsplit('/')
-        .next()
-        .map(|s| s.starts_with('_'))
-        .unwrap_or(false);
-    let rewritten_body = if is_partial {
-        strip_trailing_newline_text_append(&rewritten_body)
-    } else {
-        rewritten_body
-    };
+    // Strip the trailing whitespace-only text append. In compiled
+    // ERB this is the `\n` that follows the final `<% end %>` (or
+    // the file's trailing newline). Rails' erubi trim consumes it
+    // at render; we preserve it in the IR for source round-trip
+    // fidelity and strip at target-emit instead. Applies to all
+    // views — partials and top-level templates alike.
+    let rewritten_body = strip_trailing_newline_text_append(&rewritten_body);
     let ivar_names = collect_ivar_names(&view.body);
     let fn_name = view_function_name(view.name.as_str());
 
@@ -2563,6 +2551,47 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
     }
 
+    // `dom_id(record)` → `Helpers.domId(record)`. Rails produces
+    // `"<singular>_<id>"` — our runtime helper matches that shape.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "dom_id" && args.len() == 1 {
+            if is_ts_simple_expr(&args[0], ctx) {
+                let arg = emit_ts_view_expr_raw(&args[0], ctx);
+                return format!("_buf += Helpers.domId({arg});");
+            }
+        }
+    }
+
+    // `pluralize(count, "word")` → `Helpers.pluralize(count,
+    // "word")`. Scaffold idiom in the article partial for the
+    // comments count — "1 comment" vs "N comments".
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "pluralize" && args.len() == 2 {
+            if is_ts_simple_expr(&args[0], ctx) && is_ts_simple_expr(&args[1], ctx) {
+                let count = emit_ts_view_expr_raw(&args[0], ctx);
+                let word = emit_ts_view_expr_raw(&args[1], ctx);
+                return format!("_buf += Helpers.pluralize({count}, {word});");
+            }
+        }
+    }
+
+    // `truncate(text, length: N)` → `Helpers.truncate(text,
+    // opts)`. Used in the article partial to shorten body text.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "truncate" && !args.is_empty() {
+            if is_ts_simple_expr(&args[0], ctx) {
+                let text = emit_ts_view_expr_raw(&args[0], ctx);
+                let opts = args.iter().skip(1).find_map(|a| match &*a.node {
+                    ExprNode::Hash { entries, .. } => {
+                        Some(ts_hash_to_object_literal(entries, ctx))
+                    }
+                    _ => None,
+                }).unwrap_or_else(|| "{}".to_string());
+                return format!("_buf += Helpers.truncate({text}, {opts});");
+            }
+        }
+    }
+
     // `stylesheet_link_tag :name, "data-turbo-track": "reload"` —
     // Sym first arg + opts hash. The first-arg sym is usually the
     // literal stylesheet name (`:application`), but `:app` is a
@@ -2718,9 +2747,37 @@ fn emit_ts_form_builder_call(
     args: &[Expr],
     ctx: &TsViewCtx,
 ) -> String {
-    // First arg (if any) is the field name — emit as string.
-    // Options hash (if present, usually last arg) becomes a JS
-    // object literal. `submit` is special: it takes only options.
+    // `submit` takes a positional String label (not a Sym field),
+    // plus optional opts. Merge the label into opts as `label:` so
+    // the runtime helper picks it up via its existing API.
+    if js_method == "submit" {
+        let label_str = args.iter().find_map(|a| match &*a.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        });
+        let opts_hash: Option<String> = args.iter().find_map(|a| match &*a.node {
+            ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
+            _ => None,
+        });
+        let opts_with_label = match (label_str, opts_hash) {
+            (Some(lbl), Some(opts)) => {
+                // Splice `label: "<lbl>"` into the existing hash
+                // literal by stripping its closing brace and re-
+                // appending. Keeps the other entries intact.
+                let trimmed = opts.trim_end_matches(" }").trim_end_matches('}');
+                if trimmed.ends_with('{') {
+                    format!("{{ \"label\": {lbl:?} }}")
+                } else {
+                    format!("{trimmed}, \"label\": {lbl:?} }}")
+                }
+            }
+            (Some(lbl), None) => format!("{{ \"label\": {lbl:?} }}"),
+            (None, Some(opts)) => opts,
+            (None, None) => String::new(),
+        };
+        return format!("_buf += {recv}.submit({opts_with_label});");
+    }
+
     let (field_arg, opts_arg) = split_form_builder_args(args, ctx);
     let call_args = match (field_arg, opts_arg) {
         (Some(field), Some(opts)) => format!("{field}, {opts}"),
@@ -2877,6 +2934,93 @@ fn ts_emit_url_arg(arg: &Expr, ctx: &TsViewCtx) -> Option<String> {
         // String literal — just pass through.
         ExprNode::Lit { value: Literal::Str { .. } } => {
             Some(emit_ts_view_expr_raw(arg, ctx))
+        }
+        // Array form for nested resources: `[comment.article,
+        // comment]` → `articleCommentPath(article_id, comment_id)`.
+        // The path-helper name composes the singular of each
+        // element's model; the positional args are each element's
+        // id. For parent-model access (first element is `comment.
+        // article`), use the FK on the owner (`comment.article_id`)
+        // since the association may not be loaded.
+        ExprNode::Array { elements, .. } if elements.len() >= 2 => {
+            ts_emit_nested_path(elements, ctx)
+        }
+        _ => None,
+    }
+}
+
+/// Lower a `[parent, child]` or `[parent.assoc, child]` array-URL
+/// form to a nested-resource path-helper call. Returns None when
+/// the element shapes aren't recognized.
+fn ts_emit_nested_path(elements: &[Expr], ctx: &TsViewCtx) -> Option<String> {
+    let mut singulars: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    for el in elements {
+        let (singular, id_expr) = ts_classify_nested_element(el, ctx)?;
+        singulars.push(singular);
+        args.push(id_expr);
+    }
+    // Compose the Rails-style nested path helper name:
+    //   [article, comment] → articleCommentPath
+    // The last segment stays singular; intermediate segments also
+    // stay singular for the typical one-to-one-per-level nesting
+    // (scaffold generator outputs this shape).
+    let mut name = String::new();
+    for (i, s) in singulars.iter().enumerate() {
+        if i == 0 {
+            name.push_str(s);
+        } else {
+            name.push_str(&crate::naming::camelize(s));
+        }
+    }
+    name.push_str("Path");
+    Some(format!("routeHelpers.{name}({})", args.join(", ")))
+}
+
+/// Classify one element of the nested-URL array. Returns the
+/// singular model name and the TS expression for its id. Handles:
+///   - `record` (partial-scope local or Var) → (type-name, "record.id")
+///   - `record.assoc` (belongs_to read) → (assoc-name, "record.<assoc>_id")
+fn ts_classify_nested_element(el: &Expr, ctx: &TsViewCtx) -> Option<(String, String)> {
+    match &*el.node {
+        // Bare local: `article` or `comment`.
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            if !ctx.is_local(name.as_str()) {
+                return None;
+            }
+            Some((name.as_str().to_string(), format!("{local}.id", local = name.as_str())))
+        }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => {
+            Some((method.as_str().to_string(), format!("{local}.id", local = method.as_str())))
+        }
+        // `record.assoc` — belongs_to association. Singular name
+        // is `assoc`; id source is `record.<assoc>_id` (FK).
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() =>
+        {
+            let owner = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+                    if ctx.is_local(name.as_str()) =>
+                {
+                    Some(name.as_str().to_string())
+                }
+                ExprNode::Send {
+                    recv: None,
+                    method: m,
+                    args: ra,
+                    block: None,
+                    ..
+                } if ra.is_empty() && ctx.is_local(m.as_str()) => Some(m.as_str().to_string()),
+                _ => None,
+            }?;
+            let assoc = method.as_str();
+            Some((assoc.to_string(), format!("{owner}.{assoc}_id")))
         }
         _ => None,
     }
@@ -3114,28 +3258,50 @@ fn emit_ts_captured_helper(
     // erb(article)` / `_form.html.erb(comment)`), so using
     // arg_name gives us correct values + persisted state for
     // every scaffold.
-    let model_expr = args
+    // Model extraction — three shapes handled:
+    //  1. Simple local / ivar: `model: @article` or `model:
+    //     article` (partial convention)
+    //  2. Array form for nested resources: `model: [@article,
+    //     Comment.new]` — the LAST element is the form's record;
+    //     the preceding elements are parent records that scope
+    //     the action URL through a nested path helper
+    //  3. No `model:` kwarg: fall back to the view's primary arg
+    //     (Rails partial convention).
+    let model_kwarg = args
         .iter()
-        .find_map(|a| ts_extract_kwarg(a, "model"))
-        .filter(|e| is_ts_simple_expr(e, ctx))
-        .map(|e| emit_ts_view_expr_raw(e, ctx))
-        .or_else(|| {
-            if !ctx.arg_name.is_empty() && ctx.is_local(&ctx.arg_name) {
-                Some(ctx.arg_name.clone())
-            } else {
-                None
-            }
-        });
+        .find_map(|a| ts_extract_kwarg(a, "model"));
+    let model_nested = model_kwarg.and_then(|e| match &*e.node {
+        ExprNode::Array { elements, .. } if elements.len() >= 2 => Some(elements.clone()),
+        _ => None,
+    });
+    let model_expr = if model_nested.is_some() {
+        // Last element is the form's record; emit it directly.
+        let elems = model_nested.as_ref().unwrap();
+        Some(emit_ts_nested_form_record(&elems[elems.len() - 1]))
+    } else {
+        model_kwarg
+            .filter(|e| is_ts_simple_expr(e, ctx))
+            .map(|e| emit_ts_view_expr_raw(e, ctx))
+            .or_else(|| {
+                if !ctx.arg_name.is_empty() && ctx.is_local(&ctx.arg_name) {
+                    Some(ctx.arg_name.clone())
+                } else {
+                    None
+                }
+            })
+    };
     let inner_body = match method {
         "form_with" => {
             let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
             let record_arg = model_expr.clone().unwrap_or_else(|| "null".to_string());
-            // Prefix is the resource's singular name. The view
-            // ctx gives us the view path like "articles/new";
-            // we singularize the directory segment. Fall back to
-            // the arg_name (set by view-signature derivation)
-            // when context doesn't hint at a resource.
-            let prefix = if !ctx.resource_dir.is_empty() {
+            // Prefix is the resource's singular name. For nested
+            // array-form models, the prefix is the CHILD class
+            // (last element of the array); otherwise it's the
+            // view's resource-dir singularized.
+            let prefix = if let Some(elems) = &model_nested {
+                ts_nested_form_child_prefix(&elems[elems.len() - 1])
+                    .unwrap_or_else(|| ctx.arg_name.clone())
+            } else if !ctx.resource_dir.is_empty() {
                 crate::naming::singularize(&ctx.resource_dir)
             } else {
                 ctx.arg_name.clone()
@@ -3183,9 +3349,17 @@ fn emit_ts_captured_helper(
             let plural_camel = lower_first_char(&crate::naming::camelize(&plural));
             let singular_camel = lower_first_char(&crate::naming::camelize(&prefix));
             let record_ref = model_expr.clone().unwrap_or_else(|| "null".to_string());
-            let path_expr = format!(
-                "(({record_ref} as any)?.id ? routeHelpers.{singular_camel}Path(({record_ref} as any).id) : routeHelpers.{plural_camel}Path())",
-            );
+            let path_expr = if let Some(elems) = &model_nested {
+                // Nested: `[parent, child]` → compose a nested
+                // path helper like `articleCommentsPath(article.id)`
+                // for a new child, or `articleCommentPath(
+                // article.id, comment.id)` for an existing child.
+                ts_nested_form_path_expr(elems, ctx, &record_ref, &prefix)
+            } else {
+                format!(
+                    "(({record_ref} as any)?.id ? routeHelpers.{singular_camel}Path(({record_ref} as any).id) : routeHelpers.{plural_camel}Path())",
+                )
+            };
             lines.push(format!(
                 "  return Helpers.formWrap({record_arg} as any, {path_expr}, {cls_expr}, _buf);",
             ));
@@ -3239,6 +3413,110 @@ fn emit_ts_render_call(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
         _ => "_buf += \"\"; /* TODO ERB: render */".to_string(),
     }
+}
+
+/// Emit the record expression for the CHILD element of a nested
+/// form_with's `model:` array (`[parent, Child.new]` or similar).
+/// Recognizes `Class.new` constructor calls and bare locals.
+fn emit_ts_nested_form_record(el: &Expr) -> String {
+    match &*el.node {
+        // `Class.new` — construct a fresh instance.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "new" && args.is_empty() =>
+        {
+            if let ExprNode::Const { path } = &*r.node {
+                if let Some(class) = path.last() {
+                    return format!("new {}()", class.as_str());
+                }
+            }
+            "null".to_string()
+        }
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() => method.as_str().to_string(),
+        _ => "null".to_string(),
+    }
+}
+
+/// Extract the singular prefix for a nested form_with's child
+/// element — `Comment.new` → `"comment"`, bare `comment` local →
+/// `"comment"`.
+fn ts_nested_form_child_prefix(el: &Expr) -> Option<String> {
+    match &*el.node {
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
+            if let ExprNode::Const { path } = &*r.node {
+                path.last()
+                    .map(|c| crate::naming::snake_case(c.as_str()))
+            } else {
+                None
+            }
+        }
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() => Some(method.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Build the form action URL for a nested-resource form_with.
+/// `elems` is the `[parent, child]` (or deeper-nested) array;
+/// `record_ref` is the JS expression for the child. When the
+/// child has an `id` (persisted), emit the member path; otherwise
+/// the collection path.
+fn ts_nested_form_path_expr(
+    elems: &[Expr],
+    ctx: &TsViewCtx,
+    record_ref: &str,
+    child_prefix: &str,
+) -> String {
+    // Parent ids — everything except the last element.
+    let mut parent_ids: Vec<String> = Vec::new();
+    let mut parent_singulars: Vec<String> = Vec::new();
+    for parent in &elems[..elems.len() - 1] {
+        let (singular, id_expr) = match ts_classify_nested_element(parent, ctx) {
+            Some(x) => x,
+            None => return format!("\"\" /* TODO: nested form parent */"),
+        };
+        parent_singulars.push(singular);
+        parent_ids.push(id_expr);
+    }
+    // Compose two helper names: member (for persisted child) and
+    // collection (for new child).
+    let mut member_name = String::new();
+    for (i, s) in parent_singulars.iter().enumerate() {
+        if i == 0 {
+            member_name.push_str(s);
+        } else {
+            member_name.push_str(&crate::naming::camelize(s));
+        }
+    }
+    member_name.push_str(&crate::naming::camelize(child_prefix));
+    member_name.push_str("Path");
+    let mut collection_name = String::new();
+    for (i, s) in parent_singulars.iter().enumerate() {
+        if i == 0 {
+            collection_name.push_str(s);
+        } else {
+            collection_name.push_str(&crate::naming::camelize(s));
+        }
+    }
+    let child_plural = crate::naming::pluralize_snake(child_prefix);
+    collection_name.push_str(&crate::naming::camelize(&child_plural));
+    collection_name.push_str("Path");
+    let parent_args = parent_ids.join(", ");
+    format!(
+        "(({record_ref} as any)?.id ? routeHelpers.{member_name}({parent_args}, ({record_ref} as any).id) : routeHelpers.{collection_name}({parent_args}))",
+    )
 }
 
 fn ts_extract_kwarg<'a>(arg: &'a Expr, key: &str) -> Option<&'a Expr> {

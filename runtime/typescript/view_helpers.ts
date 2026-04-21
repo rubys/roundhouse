@@ -150,18 +150,47 @@ export function linkTo(text: string, url: string, opts: Record<string, string> =
 }
 
 /** `<form method="post" action="..."><button>text</button></form>`.
- *  Mirrors Rails' `button_to` shape; `method: :delete` becomes a
- *  hidden `_method` input. */
-export function buttonTo(text: string, target: string, opts: Record<string, string | Record<string, string>> = {}): string {
-  const methodRaw = opts.method;
-  const method = typeof methodRaw === "string" ? methodRaw : "post";
-  const classRaw = opts.class;
-  const cls = typeof classRaw === "string" ? classRaw : "";
+ *  Mirrors Rails' `button_to` shape. Option keys:
+ *   - `method: "delete" | "patch" | "put"` — emitted as a hidden
+ *     `_method` input; the server's method-override middleware
+ *     rewrites the request.
+ *   - `class:` — goes on the `<button>`. Historical versions used
+ *     this for the form; Rails switched to `form_class:` when it
+ *     needed to style both independently.
+ *   - `form_class:` — goes on the `<form>`. Defaults to Rails'
+ *     `"button_to"` class when omitted.
+ *   - `data: { ... }` — flattened to `data-*` attrs on the button.
+ *  Attribute order and presence match Rails' scaffold output so
+ *  the compare tool's DOM diff passes. */
+export function buttonTo(text: string, target: string, opts: Record<string, any> = {}): string {
+  const method = typeof opts.method === "string" ? opts.method : "post";
+  const buttonCls = typeof opts.class === "string" ? opts.class : "";
+  const formCls = typeof opts.form_class === "string" ? opts.form_class : "button_to";
+  const methodLower = method.toLowerCase();
   const methodInput =
-    method.toLowerCase() !== "post" && method.toLowerCase() !== "get"
-      ? `<input type="hidden" name="_method" value="${escapeHtml(method)}"/>`
+    methodLower !== "post" && methodLower !== "get"
+      ? `<input type="hidden" name="_method" value="${escapeHtml(method)}" />`
       : "";
-  return `<form method="post" action="${escapeHtml(target)}" class="${escapeHtml(cls)}">${methodInput}<button>${escapeHtml(text)}</button></form>`;
+  // Data attributes: accept two shapes — a `data:` subhash
+  // (Rails surface form) OR pre-flattened `"data-key": val`
+  // entries (emitter lowering convention, since it flattens
+  // during lowering for attribute-order stability). Iterating
+  // once handles both without double-counting.
+  let dataAttrs = "";
+  if (opts.data && typeof opts.data === "object") {
+    for (const [k, v] of Object.entries(opts.data)) {
+      const key = String(k).replace(/_/g, "-");
+      dataAttrs += ` data-${escapeHtml(key)}="${escapeHtml(String(v))}"`;
+    }
+  }
+  for (const [k, v] of Object.entries(opts)) {
+    if (k.startsWith("data-")) {
+      dataAttrs += ` ${escapeHtml(k)}="${escapeHtml(String(v))}"`;
+    }
+  }
+  const buttonClsAttr = buttonCls ? ` class="${escapeHtml(buttonCls)}"` : "";
+  const csrfInput = `<input type="hidden" name="authenticity_token" value="">`;
+  return `<form class="${escapeHtml(formCls)}" method="post" action="${escapeHtml(target)}">${methodInput}<button${buttonClsAttr}${dataAttrs} type="submit">${escapeHtml(text)}</button>${csrfInput}</form>`;
 }
 
 /** Form-tag wrapper. Rails' `form_with(model: record)` computes
@@ -335,16 +364,39 @@ export function turboStreamFrom(channel: string): string {
   return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
 }
 
-/** `dom_id(record)` → `"<singular>_<id>"`. Takes `any`; expects
- *  `.id`. Models that override can implement their own `.dom_id`
- *  method and generated code can prefer that. */
+/** `dom_id(record)` → `"<singular>_<id>"` matching Rails'
+ *  convention. The singular is derived from the record's
+ *  constructor.name (lowercased + underscored), which matches
+ *  the model class name emitted by the TS target. Records
+ *  without an `id` return the empty string so the attribute
+ *  stays visible but unidentified. */
 export function domId(record: any): string {
-  return record?.id != null ? `record_${record.id}` : "";
+  if (!record) return "";
+  const singular = String(record.constructor?.name ?? "record")
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .toLowerCase();
+  return record.id != null ? `${singular}_${record.id}` : singular + "_new";
 }
 
 /** Naive pluralization — append `s` when count != 1. */
 export function pluralize(count: number, word: string): string {
   return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+}
+
+/** `truncate(text, length: N, omission: "…")` — shorten a string
+ *  to at most `length` chars (default 30), appending `omission`
+ *  (default `"..."`) when truncation actually happened. Rails'
+ *  helper splits on character boundaries — fine for scaffold
+ *  body text; production may want grapheme-aware splitting. */
+export function truncate(
+  text: string,
+  opts: { length?: number; omission?: string } = {},
+): string {
+  const length = opts.length ?? 30;
+  const omission = opts.omission ?? "...";
+  if (text.length <= length) return text;
+  const cut = Math.max(0, length - omission.length);
+  return text.slice(0, cut) + omission;
 }
 
 // `contentFor` defined above (supports both getter and setter
