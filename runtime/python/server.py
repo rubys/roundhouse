@@ -1,25 +1,29 @@
 # Roundhouse Python server runtime.
 #
 # Hand-written, shipped alongside generated code (copied in by the
-# Python emitter as `app/server.py`). Starts a stdlib wsgiref server,
-# dispatches through `http.Router.match`, and wraps HTML responses in
-# the emitted layout (when provided).
+# Python emitter as `app/server.py`). Runs aiohttp for HTTP + WebSocket
+# support on one event loop — same shape as railcar's proven Python
+# target. Dispatches HTTP via `http.Router.match`, upgrades
+# WebSocket requests on `/cable` through `app.cable.cable_handler`,
+# and wraps HTML responses in the emitted layout when one is provided.
 #
-# Mirrors runtime/rust/server.rs and runtime/typescript/server.ts in
-# intent: the caller-supplied `layout` closure is invoked per-request
-# with the inner view body stashed via `view_helpers.set_yield`, so
-# `<%= yield %>` in the layout template resolves to the action's
-# rendered HTML.
+# aiohttp is a pip dep; users run `uv run python3 -m app` (see the
+# emitted `pyproject.toml`). The compile + unit-test paths never
+# import this module, so missing aiohttp doesn't break those tests.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import sys
 import traceback
 from typing import Any, Callable
 from urllib.parse import parse_qs
-from wsgiref.simple_server import make_server
 
+from aiohttp import web
+
+from . import cable as _cable
 from . import db as _db
 from . import http as _http
 from . import view_helpers as _view_helpers
@@ -32,8 +36,9 @@ def start(
     db_path: str | None = None,
     port: int | None = None,
 ) -> None:
-    """Open DB, apply schema, start the wsgiref server. Blocks until
-    the process exits."""
+    """Open DB, apply schema, start an aiohttp server. Blocks until
+    the process exits. Mirrors runtime/rust/server.rs's `start` and
+    runtime/typescript/server.ts's `startServer`."""
     if db_path is None:
         db_path = "storage/development.sqlite3"
     if port is None:
@@ -45,33 +50,61 @@ def start(
 
     _db.open_production_db(db_path, schema_sql)
 
-    app = _wrap_layout(_method_override(_wsgi_dispatch), layout)
+    application = _build_app(layout)
     host = "127.0.0.1"
-    with make_server(host, port, app) as httpd:
-        print(f"Roundhouse Python server listening on http://{host}:{port}")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
+    print(f"Roundhouse Python server listening on http://{host}:{port}")
+    # aiohttp.web.run_app prints its own startup banner; suppress it
+    # to keep the compare-tool log clean (stdout gets parsed).
+    web.run_app(application, host=host, port=port, print=lambda _msg: None)
 
 
-def _wsgi_dispatch(environ: dict[str, Any], start_response: Callable) -> list[bytes]:
-    """Core dispatcher: Router.match → handler(ActionContext) →
-    ActionResponse → WSGI tuple."""
-    method = environ.get("REQUEST_METHOD", "GET").upper()
-    path = environ.get("PATH_INFO", "/") or "/"
+def _build_app(layout: Callable[[], str] | None) -> web.Application:
+    """Assemble the aiohttp Application. One catch-all route fans out
+    to `http.Router.match` for HTTP, plus an explicit `/cable` route
+    for WebSocket upgrades. No aiohttp middleware — method override
+    and layout wrap happen inline in the dispatch handler so we can
+    share the single request-body read and preserve the order used by
+    the rust/typescript runtimes."""
+    application = web.Application()
+    application["roundhouse.layout"] = layout
+    application.router.add_get("/cable", _cable.cable_handler)
+    application.router.add_route("*", "/{path:.*}", _dispatch_request)
+    return application
 
-    # Wipe yield/slot state before each request so the layout doesn't
-    # see stale body from a prior dispatch.
+
+async def _dispatch_request(request: web.Request) -> web.StreamResponse:
+    """Core dispatcher: parse body (with `_method` override), look up
+    the matched handler via `http.Router.match`, await the result,
+    then wrap HTML responses in the layout. Exceptions surface as
+    500s with the traceback on stderr so the compare tool sees the
+    same message it would from wsgiref."""
     _view_helpers.reset_render_state()
+
+    method = request.method.upper()
+    path = request.rel_url.path
+
+    body_text, body_params = await _read_form_body(request)
+
+    # Rails scaffold forms submit POST with `_method=patch|put|delete`
+    # when the real verb isn't supported in browsers. Rewrite before
+    # the route lookup so the downstream handler sees the true verb.
+    if method == "POST":
+        override = body_params.get("_method", "")
+        if isinstance(override, str):
+            override = override.upper()
+            if override in ("PATCH", "PUT", "DELETE"):
+                method = override
 
     matched = _http.Router.match(method, path)
     if matched is None:
-        start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
-        return [b"Not Found"]
+        return web.Response(
+            status=404,
+            text="Not Found",
+            content_type="text/plain",
+            charset="utf-8",
+        )
 
     handler, path_params = matched
-    body_params = _parse_body(environ)
     params: dict[str, Any] = {}
     params.update(path_params)
     params.update(body_params)
@@ -79,164 +112,105 @@ def _wsgi_dispatch(environ: dict[str, Any], start_response: Callable) -> list[by
     ctx = _http.ActionContext(params=params)
     try:
         result = handler(ctx)
-        import inspect, asyncio
         if inspect.isawaitable(result):
-            result = asyncio.new_event_loop().run_until_complete(result)
+            result = await result
     except Exception:
         traceback.print_exc()
-        start_response(
-            "500 Internal Server Error",
-            [("Content-Type", "text/plain; charset=utf-8")],
+        return web.Response(
+            status=500,
+            text="Internal Server Error",
+            content_type="text/plain",
+            charset="utf-8",
         )
-        return [b"Internal Server Error"]
 
     if not isinstance(result, _http.ActionResponse):
         result = _http.ActionResponse()
 
     status = result.status or 200
     body = result.body or ""
-    headers: list[tuple[str, str]] = []
+    layout = request.app["roundhouse.layout"]
+    is_redirect = 300 <= status < 400 and bool(result.location)
 
-    if 300 <= status < 400 and result.location:
-        headers.append(("Location", result.location))
-        headers.append(("Content-Type", "text/html; charset=utf-8"))
-        payload = body.encode("utf-8")
+    if is_redirect:
+        return web.Response(
+            status=status,
+            text=body,
+            headers={"Location": result.location or ""},
+            content_type="text/html",
+            charset="utf-8",
+        )
+
+    # Wrap the view body in the emitted layout (when present). The
+    # fallback when no layout is provided matches the rust/typescript
+    # runtimes' minimal shell — Tailwind CDN + plain Turbo importmap.
+    if layout is not None:
+        _view_helpers.set_yield(body)
+        wrapped = layout()
     else:
-        headers.append(("Content-Type", "text/html; charset=utf-8"))
-        payload = body.encode("utf-8")
+        wrapped = _fallback_layout(body)
 
-    start_response(f"{status} {_status_phrase(status)}", headers)
-    return [payload]
-
-
-def _method_override(inner: Callable) -> Callable:
-    """Rails scaffold forms submit POST with hidden `_method=patch|
-    put|delete` when the real verb isn't supported in browsers. Parse
-    the body, rewrite REQUEST_METHOD, and pass the buffered body
-    through so the downstream parser still sees it."""
-
-    def wrapped(environ: dict[str, Any], start_response: Callable):
-        if environ.get("REQUEST_METHOD", "").upper() != "POST":
-            return inner(environ, start_response)
-        content_type = environ.get("CONTENT_TYPE", "")
-        if not content_type.startswith("application/x-www-form-urlencoded"):
-            return inner(environ, start_response)
-        length = int(environ.get("CONTENT_LENGTH") or 0)
-        if length <= 0:
-            return inner(environ, start_response)
-        raw = environ["wsgi.input"].read(length)
-        text = raw.decode("utf-8", errors="replace")
-        parsed = parse_qs(text, keep_blank_values=True)
-        override = parsed.get("_method", [""])[0].upper()
-        if override in ("PATCH", "PUT", "DELETE"):
-            environ["REQUEST_METHOD"] = override
-        # Re-inject the body for the dispatcher's parser.
-        import io as _io
-        environ["wsgi.input"] = _io.BytesIO(raw)
-        environ["CONTENT_LENGTH"] = str(length)
-        return inner(environ, start_response)
-
-    return wrapped
+    return web.Response(
+        status=status,
+        text=wrapped,
+        content_type="text/html",
+        charset="utf-8",
+    )
 
 
-def _wrap_layout(inner: Callable, layout: Callable[[], str] | None) -> Callable:
-    """Wrap HTML 2xx / 422 responses in the emitted layout. Redirects
-    and non-HTML responses pass through. Mirrors the TS/rust layout-
-    wrap middleware."""
-
-    def wrapped(environ: dict[str, Any], start_response: Callable):
-        captured: dict[str, Any] = {}
-
-        def capture(status: str, headers: list[tuple[str, str]], exc_info=None):
-            captured["status"] = status
-            captured["headers"] = headers
-            return lambda b: None  # WSGI write() — unused
-
-        body_chunks = inner(environ, capture)
-        body_bytes = b"".join(body_chunks)
-
-        status = captured.get("status", "200 OK")
-        headers = captured.get("headers", [])
-        code_s = status.split(" ", 1)[0]
-        try:
-            code = int(code_s)
-        except ValueError:
-            code = 200
-
-        ct = ""
-        for k, v in headers:
-            if k.lower() == "content-type":
-                ct = v
-                break
-        is_html = ct.startswith("text/html")
-        is_redirect = 300 <= code < 400
-
-        if not is_html or is_redirect or layout is None:
-            # Replace Content-Length if present — we may have buffered.
-            headers = [(k, v) for (k, v) in headers if k.lower() != "content-length"]
-            headers.append(("Content-Length", str(len(body_bytes))))
-            start_response(status, headers)
-            return [body_bytes]
-
-        inner_text = body_bytes.decode("utf-8", errors="replace")
-        _view_helpers.set_yield(inner_text)
-        wrapped_text = layout()
-        payload = wrapped_text.encode("utf-8")
-        headers = [(k, v) for (k, v) in headers if k.lower() != "content-length"]
-        headers.append(("Content-Length", str(len(payload))))
-        start_response(status, headers)
-        return [payload]
-
-    return wrapped
-
-
-def _parse_body(environ: dict[str, Any]) -> dict[str, Any]:
-    """Parse a form-urlencoded body into a params dict. Handles the
-    Rails convention of `article[title]=foo` bracket-notation so
-    nested keys land at `params["article"]["title"]`."""
-    ct = environ.get("CONTENT_TYPE", "")
+async def _read_form_body(request: web.Request) -> tuple[str, dict[str, Any]]:
+    """Read + parse an urlencoded form body. Returns the raw text
+    (unused today; kept for parity with the rust/typescript shape)
+    and a Rails-flattened params dict — `article[title]=foo` lands
+    as `params["article[title]"] = "foo"` rather than a nested
+    dict, matching the emitted controllers' lookup shape."""
+    ct = request.content_type or ""
     if not ct.startswith("application/x-www-form-urlencoded"):
-        return {}
-    length = int(environ.get("CONTENT_LENGTH") or 0)
-    if length <= 0:
-        return {}
-    raw = environ["wsgi.input"].read(length)
+        return "", {}
+    raw = await request.read()
+    if not raw:
+        return "", {}
     text = raw.decode("utf-8", errors="replace")
     parsed = parse_qs(text, keep_blank_values=True)
     out: dict[str, Any] = {}
     for k, vs in parsed.items():
-        v = vs[-1] if vs else ""
-        # `article[title]` → out["article"]["title"] = v
-        if "[" in k and k.endswith("]"):
-            outer, rest = k.split("[", 1)
-            inner = rest[:-1]
-            bucket = out.setdefault(outer, {})
-            if isinstance(bucket, dict):
-                bucket[inner] = v
-                continue
-        out[k] = v
-    return out
+        out[k] = vs[-1] if vs else ""
+    return text, out
 
 
-def _status_phrase(code: int) -> str:
-    return {
-        200: "OK",
-        201: "Created",
-        204: "No Content",
-        301: "Moved Permanently",
-        302: "Found",
-        303: "See Other",
-        400: "Bad Request",
-        404: "Not Found",
-        422: "Unprocessable Entity",
-        500: "Internal Server Error",
-    }.get(code, "")
+def _fallback_layout(body: str) -> str:
+    """Last-resort document shell for fixtures without a
+    `layouts/application` ERB. Matches runtime/rust/server.rs's
+    `render_layout` — Tailwind Play CDN + plain `@hotwired/turbo`
+    via importmap. Never emits `<meta name="action-cable-url">`; the
+    `@rails/actioncable` default `/cable` is what `cable_handler`
+    listens on."""
+    return f"""<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Roundhouse App</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="icon" href="data:,">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+    {{
+      "imports": {{
+        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+      }}
+    }}
+    </script>
+    <script type="module">import "@hotwired/turbo";</script>
+  </head>
+  <body>
+    <main class="container mx-auto mt-8 px-5 flex flex-col">
+      {body}
+    </main>
+  </body>
+</html>
+"""
 
 
 if __name__ == "__main__":
-    # Running `python -m app.server` isn't the emitted entry point —
-    # that's `app.main`. Keep this short stub so `python -m app.server`
-    # yields a helpful error instead of a silent exit.
     sys.stderr.write(
         "run the emitted `python -m app` entry point instead of app.server directly\n"
     )

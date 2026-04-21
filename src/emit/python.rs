@@ -50,10 +50,17 @@ const TEST_SUPPORT_SOURCE: &str =
 /// Ships as `app/view_helpers.py` when views emit.
 const VIEW_HELPERS_SOURCE: &str =
     include_str!("../../runtime/python/view_helpers.py");
-/// wsgiref-based HTTP server + method-override + layout-wrap
-/// middleware. Ships as `app/server.py` when controllers emit so
-/// `python -m app` (via the emitted `__main__.py`) can serve.
+/// aiohttp-based HTTP server + /cable route + method-override +
+/// layout-wrap. Ships as `app/server.py` when controllers emit so
+/// `uv run python3 -m app` (via the emitted `__main__.py` +
+/// `pyproject.toml`) can serve both HTTP and WebSocket on one
+/// event loop.
 const SERVER_SOURCE: &str = include_str!("../../runtime/python/server.py");
+/// Action Cable runtime — WebSocket handler + Turbo Streams
+/// broadcaster. Always shipped alongside the server; models with
+/// `broadcasts_to` call `crate::cable::broadcast_*_to` from their
+/// save/destroy methods.
+const CABLE_SOURCE: &str = include_str!("../../runtime/python/cable.py");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
@@ -90,6 +97,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/server.py"),
             content: SERVER_SOURCE.to_string(),
         });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/cable.py"),
+            content: CABLE_SOURCE.to_string(),
+        });
+        files.push(emit_py_pyproject());
         files.push(emit_py_route_helpers(app));
         files.push(emit_py_importmap(app));
         files.push(emit_py_main(app));
@@ -1612,6 +1624,33 @@ fn emit_py_importmap(app: &App) -> EmittedFile {
     EmittedFile {
         path: PathBuf::from("app/importmap.py"),
         content: s,
+    }
+}
+
+/// Emit `pyproject.toml` at the project root. Declares `aiohttp`
+/// as the runtime dep so `uv run python3 -m app` (the invocation
+/// pattern railcar adopted) resolves and installs it on first run.
+/// Test extras pull in pytest tooling; roundhouse's generated
+/// tests use stdlib `unittest`, so the test extras are forward-
+/// looking (align with railcar) and not required by the current
+/// python_toolchain suite.
+fn emit_py_pyproject() -> EmittedFile {
+    let content = "\
+[project]
+name = \"app\"
+version = \"0.1.0\"
+requires-python = \">=3.11\"
+dependencies = [\"aiohttp\"]
+
+[project.optional-dependencies]
+test = [\"pytest\", \"pytest-aiohttp\", \"pytest-asyncio\"]
+
+[tool.pytest.ini_options]
+asyncio_mode = \"auto\"
+";
+    EmittedFile {
+        path: PathBuf::from("pyproject.toml"),
+        content: content.to_string(),
     }
 }
 
