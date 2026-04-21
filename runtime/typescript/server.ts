@@ -18,6 +18,8 @@
 // emitted Router / ActionContext / ActionResponse shapes.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { URL } from "node:url";
 import Database from "better-sqlite3";
 
@@ -295,10 +297,23 @@ async function attachCable(
 // ── Database + schema bootstrap ────────────────────────────────
 
 function openDatabase(dbPath: string, schemaSql: string): void {
-  // better-sqlite3 creates the file if it doesn't exist. We open
-  // with WAL + foreign keys, apply the schema idempotently, and
-  // hand the connection to the juntos runtime via installDb.
-  // All subsequent AR queries run against this connection.
+  // better-sqlite3 creates the file if it doesn't exist, but
+  // NOT the parent directory — if we're opening `./db/
+  // development.sqlite3` and `./db/` doesn't exist, the
+  // constructor throws. Create intermediate dirs so first-run
+  // startup works without the user having to mkdir manually.
+  // In-memory DBs (`:memory:`) don't have a parent dir; skip.
+  if (dbPath !== ":memory:") {
+    const parent = dirname(dbPath);
+    if (parent && parent !== "." && !existsSync(parent)) {
+      mkdirSync(parent, { recursive: true });
+    }
+  }
+
+  // We open with WAL + foreign keys, apply the schema
+  // idempotently, and hand the connection to the juntos
+  // runtime via installDb. All subsequent AR queries run
+  // against this connection.
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");

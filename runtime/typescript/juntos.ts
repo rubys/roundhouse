@@ -521,10 +521,16 @@ export class Router {
   ): void {
     const [path, controller, action]: [string, any, string] =
       typeof a === "string" ? [a, b, c ?? "index"] : ["/", a, b];
-    const handler_name = action === "new" ? "$new" : action;
-    const handler = controller[handler_name];
+    const handler = Router.resolveHandler(controller, action);
     if (!handler) return;
     Router.routes.push({ method: "GET", path, handler });
+  }
+
+  /** Look up an action on a controller. The emitter may export the
+   *  `new` action either as `new` (scaffold convention) or `$new`
+   *  (reserved-word-escape convention). Accept either. */
+  private static resolveHandler(controller: any, action: string): Route["handler"] | undefined {
+    return controller[action] ?? (action === "new" ? controller["$new"] : undefined);
   }
 
   /** Mount a resource's seven standard actions. Options:
@@ -571,31 +577,30 @@ export class Router {
         ? `/${scope.parent_plural}/:${scope.parent_singular}_id/${name}`
         : `/${name}`;
       const path = `${base}${suffix}`;
-      const handler_name = action === "new" ? "$new" : action;
-      const handler = controller[handler_name];
+      const handler = Router.resolveHandler(controller, action);
       if (!handler) continue;
       Router.routes.push({ method, path, handler });
     }
   }
 
   static get(path: string, controller: any, action: string): void {
-    const handler = controller[action === "new" ? "$new" : action];
+    const handler = Router.resolveHandler(controller, action);
     if (handler) Router.routes.push({ method: "GET", path, handler });
   }
   static post(path: string, controller: any, action: string): void {
-    const handler = controller[action === "new" ? "$new" : action];
+    const handler = Router.resolveHandler(controller, action);
     if (handler) Router.routes.push({ method: "POST", path, handler });
   }
   static put(path: string, controller: any, action: string): void {
-    const handler = controller[action === "new" ? "$new" : action];
+    const handler = Router.resolveHandler(controller, action);
     if (handler) Router.routes.push({ method: "PUT", path, handler });
   }
   static patch(path: string, controller: any, action: string): void {
-    const handler = controller[action === "new" ? "$new" : action];
+    const handler = Router.resolveHandler(controller, action);
     if (handler) Router.routes.push({ method: "PATCH", path, handler });
   }
   static delete(path: string, controller: any, action: string): void {
-    const handler = controller[action === "new" ? "$new" : action];
+    const handler = Router.resolveHandler(controller, action);
     if (handler) Router.routes.push({ method: "DELETE", path, handler });
   }
 
