@@ -32,6 +32,28 @@ def setup_test_db(schema_sql: str) -> None:
     _conn.executescript(schema_sql)
 
 
+def open_production_db(path: str, schema_sql: str) -> None:
+    """Open a file-backed SQLite connection, apply the schema DDL,
+    and install the connection in the module-level slot. Used by
+    `server.start` at process boot so each request can query
+    through `conn()`. Skips the schema run when the target table(s)
+    already exist, so an externally seeded DB isn't clobbered."""
+    import os
+    global _conn
+    if _conn is not None:
+        _conn.close()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _conn = sqlite3.connect(path, check_same_thread=False)
+    _conn.row_factory = sqlite3.Row
+    cur = _conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    tables = cur.fetchone()[0]
+    cur.close()
+    if tables == 0:
+        _conn.executescript(schema_sql)
+
+
 def conn() -> sqlite3.Connection:
     """Borrow the current test's connection. Raises if unset."""
     if _conn is None:

@@ -9,7 +9,7 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
 #
@@ -97,8 +97,9 @@ fi
 case "$TARGET" in
     typescript|ts) TARGET=typescript ;;
     rust|rs)       TARGET=rust ;;
+    python|py)     TARGET=python ;;
     *)
-        echo "unsupported target: $TARGET (want typescript or rust)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, or python)" >&2
         exit 2
         ;;
 esac
@@ -124,6 +125,10 @@ case "$TARGET" in
         ;;
     rust)
         BUILD_DIR="/tmp/rh-rs-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    python)
+        BUILD_DIR="/tmp/rh-py-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
 esac
@@ -234,6 +239,13 @@ case "$TARGET" in
         step "building rust target (release)"
         (cd "$BUILD_DIR" && cargo build --release --quiet)
         ;;
+    python)
+        # Pure stdlib — nothing to build. Verify the interpreter
+        # can import the emitted package so the server startup
+        # isn't the first thing that surfaces syntax errors.
+        step "validating python target imports"
+        (cd "$BUILD_DIR" && python3 -c "import app, app.server, app.routes" )
+        ;;
 esac
 ok "target built"
 
@@ -264,6 +276,10 @@ ok "rails up"
 
 step "starting $TARGET on :$TARGET_PORT"
 case "$TARGET" in
+    python)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" python3 -m app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
     typescript)
         (cd "$BUILD_DIR" && PORT="$TARGET_PORT" npm start >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
