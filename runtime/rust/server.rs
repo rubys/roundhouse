@@ -33,6 +33,7 @@ use axum::{
 };
 
 use crate::db;
+use crate::view_helpers;
 
 pub struct StartOptions<'a> {
     /// File path for the sqlite DB. Defaults to
@@ -43,7 +44,21 @@ pub struct StartOptions<'a> {
     /// Schema SQL to apply on startup — typically
     /// `crate::schema_sql::CREATE_TABLES`.
     pub schema_sql: &'a str,
+    /// Layout renderer — the emitted `render_layouts_application`
+    /// (or equivalent). Called after each non-redirect response
+    /// with the inner view body already stashed via
+    /// `view_helpers::set_yield`. When `None`, the layout-wrap
+    /// middleware falls back to the minimal synthesized shell
+    /// below. Applies to apps that don't emit a layouts/
+    /// application ERB template (e.g. tiny-blog).
+    pub layout: Option<fn() -> String>,
 }
+
+/// Process-wide layout renderer, set by `start`. Read by the
+/// `layout_wrap` middleware. Axum middleware fns can't capture
+/// runtime state cleanly without boxing + extensions, so we use
+/// a static slot — the server runs one app per process.
+static LAYOUT_FN: std::sync::OnceLock<fn() -> String> = std::sync::OnceLock::new();
 
 /// Start the server. Opens DB, applies schema, layers middleware
 /// on top of the caller-supplied router, and runs axum until the
@@ -58,6 +73,10 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
             .and_then(|s| s.parse().ok())
             .unwrap_or(3000)
     });
+
+    if let Some(layout) = opts.layout {
+        let _ = LAYOUT_FN.set(layout);
+    }
 
     db::open_production_db(&db_path, opts.schema_sql);
 
@@ -142,6 +161,11 @@ async fn method_override(req: Request, next: Next) -> Response {
 /// redirects pass through untouched, as do non-HTML responses (the
 /// WebSocket upgrade, any JSON endpoints).
 async fn layout_wrap(req: Request, next: Next) -> Response {
+    // Wipe any stale yield/slot state before the handler runs.
+    // Axum's multi-thread runtime means each worker thread has
+    // its own thread-local; reset covers the current worker.
+    view_helpers::reset_render_state();
+
     let res = next.run(req).await;
 
     let status = res.status();
@@ -173,7 +197,17 @@ async fn layout_wrap(req: Request, next: Next) -> Response {
     let inner = std::str::from_utf8(&bytes)
         .map(str::to_string)
         .unwrap_or_default();
-    let wrapped = render_layout(&inner);
+
+    // If the app has an emitted layout (`opts.layout` was set in
+    // `start`), stash the inner body for `<%= yield %>` and invoke
+    // the layout. Otherwise fall back to the minimal synthesized
+    // shell so apps without an ERB layout still render.
+    let wrapped = if let Some(layout) = LAYOUT_FN.get() {
+        view_helpers::set_yield(&inner);
+        layout()
+    } else {
+        render_layout(&inner)
+    };
 
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(

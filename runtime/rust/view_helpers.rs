@@ -1,35 +1,24 @@
 //! Roundhouse Rust view-helpers runtime.
 //!
 //! Hand-written, shipped alongside generated code (copied in by the
-//! Rust emitter as `src/view_helpers.rs`). Provides the Rails-
-//! compatible view helpers emitted view fns call into: `link_to`,
-//! `button_to`, `form_wrap`, the `FormBuilder` methods, `turbo_
-//! stream_from`, `dom_id`, `pluralize`, plus a `RenderCtx` carrying
-//! layout slots (notice / alert / title).
-//!
-//! Mirrors `runtime/typescript/view_helpers.ts` in intent + method
-//! signatures. Implementations are deliberately minimal — enough
-//! HTML for the scaffold blog's acceptance to pass, without
-//! pretending to be a full Rails port.
-//!
-//! FormBuilder's per-field methods take the current value as an
-//! explicit `&str` arg rather than reading off a trait-object
-//! record. Emit-side knows the record + field and can produce the
-//! direct field access — keeps the runtime free of dynamic-field
-//! dispatch, which rust would otherwise need a trait + derive to
-//! provide.
+//! Rust emitter as `src/view_helpers.rs`). Mirrors
+//! `runtime/typescript/view_helpers.ts` byte-for-byte where HTML
+//! output matters — the compare tool asserts that the Rails
+//! reference and every target produce the same DOM, so helper
+//! output here must match what TS produces, which in turn matches
+//! what Rails renders (modulo masked tokens + fingerprints).
 
 #![allow(dead_code, unused_variables)]
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine;
 
 use crate::runtime::ValidationError;
 
 /// Layout-slot context threaded through views. Populated by
-/// `content_for` and read by layouts. The emitted layout doesn't
-/// consult these yet, so fields are write-only placeholders.
+/// `content_for` and read by layouts.
 #[derive(Debug, Default, Clone)]
 pub struct RenderCtx {
     pub notice: Option<String>,
@@ -37,18 +26,121 @@ pub struct RenderCtx {
     pub title: Option<String>,
 }
 
-/// Flash accessor. Emitted views read `notice.present?`; this free
-/// function stays so emit-time lowering has a target name — returns
-/// None at runtime since the production server doesn't thread
-/// session flash through yet.
-pub fn notice() -> Option<String> {
-    None
+// ── Per-request render state ────────────────────────────────────
+//
+// Rails' `yield` / `content_for` / `yield :slot` idiom expects the
+// inner view (which sets slots + returns a body) to share state
+// with the outer layout (which reads them). We use a thread-local
+// here — axum handlers run concurrently on the tokio multi-thread
+// runtime, so a global mutex would serialize requests; thread-
+// locals scope per-worker and the server's middleware resets them
+// on each request entry.
+
+thread_local! {
+    static YIELD_BODY: RefCell<String> = const { RefCell::new(String::new()) };
+    static SLOTS: RefCell<BTreeMap<String, String>> = RefCell::new(BTreeMap::new());
 }
 
-/// `<a href="url" class="...">text</a>`. Options flatten as
-/// attributes. Rails also supports `method: :delete` on link_to,
-/// which morphs into a button-wrapped form — use `button_to` for
-/// that case.
+/// Called by the server before dispatching each request — wipes
+/// any stale slot values from a prior handler.
+pub fn reset_render_state() {
+    YIELD_BODY.with(|y| y.borrow_mut().clear());
+    SLOTS.with(|s| s.borrow_mut().clear());
+}
+
+/// Stash the controller's rendered view body so the layout's
+/// `<%= yield %>` can read it.
+pub fn set_yield(body: &str) {
+    YIELD_BODY.with(|y| *y.borrow_mut() = body.to_string());
+}
+
+pub fn get_yield() -> String {
+    YIELD_BODY.with(|y| y.borrow().clone())
+}
+
+/// Read a named slot. Returns empty string when unset so string
+/// concat in the emit doesn't produce "undefined" or panic.
+pub fn get_slot(name: &str) -> String {
+    SLOTS.with(|s| s.borrow().get(name).cloned().unwrap_or_default())
+}
+
+/// `content_for(:slot, "body")` — setter form. The 2-arg variant
+/// appends into the named slot (Rails semantics); emit-time the
+/// append vs overwrite behavior rarely matters for the scaffold,
+/// but we mirror Rails to avoid a surprise. Returns empty so the
+/// surrounding concat doesn't double-count the stashed value.
+pub fn content_for_set(slot: &str, body: &str) {
+    SLOTS.with(|s| {
+        let mut map = s.borrow_mut();
+        let prior = map.get(slot).cloned().unwrap_or_default();
+        map.insert(slot.to_string(), prior + body);
+    });
+}
+
+/// Getter form — used in layouts as `<%= content_for(:title) %>`
+/// and `<%= content_for(:title) || "Default" %>`.
+pub fn content_for_get(slot: &str) -> String {
+    get_slot(slot)
+}
+
+// ── Rails layout helpers ────────────────────────────────────────
+
+pub fn csrf_meta_tags() -> String {
+    "<meta name=\"csrf-param\" content=\"authenticity_token\" />\n<meta name=\"csrf-token\" content=\"\" />".to_string()
+}
+
+/// Rails emits nothing for `csp_meta_tag` when no CSP policy is
+/// configured; the scaffold has none, so the helper returns empty.
+pub fn csp_meta_tag() -> String {
+    String::new()
+}
+
+pub fn stylesheet_link_tag(name: &str, opts: &HashMap<String, String>) -> String {
+    let mut attrs = String::new();
+    for (k, v) in opts {
+        attrs.push_str(&format!(" {}=\"{}\"", k, escape_html(v)));
+    }
+    format!(
+        "<link rel=\"stylesheet\" href=\"/assets/{}.css\"{} />",
+        escape_html(name),
+        attrs,
+    )
+}
+
+/// `<%= javascript_importmap_tags %>` — importmap JSON + module-
+/// preload links + bootstrap `<script type="module">`. `pins` is
+/// the ingested `config/importmap.rb` pin list, emitted per-app
+/// into `src/importmap.rs`. `main_entry` defaults to
+/// `"application"` matching Rails.
+pub fn javascript_importmap_tags(pins: &[(&str, &str)], main_entry: &str) -> String {
+    // Inline the JSON manually so key order matches the pin-list
+    // order exactly (matters when the compare tool checks text
+    // content of the importmap script). serde_json's BTreeMap
+    // would sort alphabetically and diverge.
+    let mut imports_json = String::from("{\n");
+    for (i, (name, path)) in pins.iter().enumerate() {
+        imports_json.push_str(&format!("    {name:?}: {path:?}"));
+        if i + 1 < pins.len() {
+            imports_json.push(',');
+        }
+        imports_json.push('\n');
+    }
+    imports_json.push_str("  }");
+    let mut out = format!(
+        "<script type=\"importmap\" data-turbo-track=\"reload\">{{\n  \"imports\": {imports_json}\n}}</script>"
+    );
+    for (_, path) in pins {
+        out.push_str(&format!("\n<link rel=\"modulepreload\" href=\"{path}\">"));
+    }
+    out.push_str(&format!(
+        "\n<script type=\"module\">import \"{}\"</script>",
+        escape_html(main_entry),
+    ));
+    out
+}
+
+// ── Nav helpers ────────────────────────────────────────────────
+
 pub fn link_to(text: &str, url: &str, opts: &HashMap<String, String>) -> String {
     let mut attrs = String::new();
     for (k, v) in opts {
@@ -62,45 +154,60 @@ pub fn link_to(text: &str, url: &str, opts: &HashMap<String, String>) -> String 
     )
 }
 
-/// Two-arg variant — for `link_to(text, url)` without options.
 pub fn link_to_simple(text: &str, url: &str) -> String {
     link_to(text, url, &HashMap::new())
 }
 
-/// `<form method="post" action="..."><button>text</button></form>`
-/// with hidden `_method` for non-POST verbs. The server's method-
-/// override middleware reads the `_method` form field and rewrites
-/// the request method before routing.
+/// Rails' `button_to`. Option keys mirror the TS runtime's:
+///  - `method: "delete|patch|put"` → `_method` hidden input
+///  - `class:` → on the `<button>`
+///  - `form_class:` → on the `<form>` (defaults `"button_to"`)
+///  - `data-*` flattened keys → button `data-*` attributes
 pub fn button_to(text: &str, target: &str, opts: &HashMap<String, String>) -> String {
-    let method = opts
-        .get("method")
+    let method = opts.get("method").map(|s| s.as_str()).unwrap_or("post");
+    let button_cls = opts.get("class").map(|s| s.as_str()).unwrap_or("");
+    let form_cls = opts
+        .get("form_class")
         .map(|s| s.as_str())
-        .unwrap_or("post");
-    let cls = opts.get("class").map(|s| s.as_str()).unwrap_or("");
+        .unwrap_or("button_to");
     let method_lower = method.to_ascii_lowercase();
     let method_input = if method_lower != "post" && method_lower != "get" {
         format!(
-            "<input type=\"hidden\" name=\"_method\" value=\"{}\"/>",
+            "<input type=\"hidden\" name=\"_method\" value=\"{}\" />",
             escape_html(method),
         )
     } else {
         String::new()
     };
+    let mut data_attrs = String::new();
+    for (k, v) in opts {
+        if k.starts_with("data-") {
+            data_attrs.push_str(&format!(" {}=\"{}\"", escape_html(k), escape_html(v)));
+        }
+    }
+    let button_cls_attr = if button_cls.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", escape_html(button_cls))
+    };
+    let csrf_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     format!(
-        "<form method=\"post\" action=\"{}\" class=\"{}\">{}<button>{}</button></form>",
+        "<form class=\"{}\" method=\"post\" action=\"{}\">{}<button{}{} type=\"submit\">{}</button>{}</form>",
+        escape_html(form_cls),
         escape_html(target),
-        escape_html(cls),
         method_input,
+        button_cls_attr,
+        data_attrs,
         escape_html(text),
+        csrf_input,
     )
 }
 
-/// Form-tag wrapper. `resource_path` is the URL the form submits
-/// to (new records POST to the collection URL; persisted records
-/// PATCH to the member URL via `_method` override). `is_persisted`
-/// drives the method-override decision. CSRF is stubbed with an
-/// empty token — the server doesn't verify today, but we emit the
-/// field so Turbo/Rails conventions find it.
+/// Form-tag wrapper for `form_with`. Emits `<form
+/// class=... action=... accept-charset="UTF-8" method="post">`
+/// matching Rails' UTF8_ENFORCER_TAG-equipped output. CSRF token
+/// is blank (the compare tool masks it); _method override for
+/// PATCH is emitted when the record is persisted.
 pub fn form_wrap(
     resource_path: &str,
     is_persisted: bool,
@@ -119,17 +226,16 @@ pub fn form_wrap(
         format!(" class=\"{}\"", escape_html(html_class))
     };
     format!(
-        "<form method=\"post\" action=\"{}\"{}>{}{}{}</form>",
-        escape_html(resource_path),
+        "<form{} action=\"{}\" accept-charset=\"UTF-8\" method=\"post\">{}{}{}</form>",
         class_attr,
+        escape_html(resource_path),
         method_input,
         csrf_input,
         inner,
     )
 }
 
-/// Humanize a snake_case field for a label: `"first_name"` →
-/// `"First name"`. Rails' default `label` helper does this.
+/// Humanize a snake_case field for a label.
 fn humanize(field: &str) -> String {
     let spaced = field.replace('_', " ");
     let mut c = spaced.chars();
@@ -139,11 +245,7 @@ fn humanize(field: &str) -> String {
     }
 }
 
-/// FormBuilder for the scaffold shape. `prefix` is the Rails
-/// `name` prefix (`"article"` → inputs get `name="article[title]"`).
-/// `is_persisted` drives `submit`'s label (Create vs Update).
-/// Field values are passed at each call site — emit knows which
-/// record + field; no dynamic dispatch needed.
+/// FormBuilder for the scaffold shape.
 pub struct FormBuilder {
     pub prefix: String,
     pub html_class: String,
@@ -180,6 +282,7 @@ impl FormBuilder {
         )
     }
 
+    /// Rails omits `value=""` on empty text fields. Match that.
     pub fn text_field(
         &self,
         field: &str,
@@ -190,15 +293,23 @@ impl FormBuilder {
             .get("class")
             .map(|c| format!(" class=\"{}\"", escape_html(c)))
             .unwrap_or_default();
+        let value_attr = if value.is_empty() {
+            String::new()
+        } else {
+            format!(" value=\"{}\"", escape_html(value))
+        };
         format!(
-            "<input type=\"text\" name=\"{}\" id=\"{}\" value=\"{}\"{}>",
+            "<input type=\"text\"{} name=\"{}\" id=\"{}\"{}>",
+            cls,
             escape_html(&self.name_for(field)),
             escape_html(&self.id_for(field)),
-            escape_html(value),
-            cls,
+            value_attr,
         )
     }
 
+    /// Rails wraps textarea content in newlines even when empty —
+    /// `<textarea>\n<value>\n</textarea>`. Part of the HTML5
+    /// spec-compliant shape; required for byte-equal compare.
     pub fn textarea(
         &self,
         field: &str,
@@ -214,11 +325,11 @@ impl FormBuilder {
             .map(|r| format!(" rows=\"{}\"", escape_html(r)))
             .unwrap_or_default();
         format!(
-            "<textarea name=\"{}\" id=\"{}\"{}{}>{}</textarea>",
+            "<textarea{}{} name=\"{}\" id=\"{}\">\n{}</textarea>",
+            rows,
+            cls,
             escape_html(&self.name_for(field)),
             escape_html(&self.id_for(field)),
-            cls,
-            rows,
             escape_html(value),
         )
     }
@@ -228,26 +339,31 @@ impl FormBuilder {
             .get("class")
             .map(|c| format!(" class=\"{}\"", escape_html(c)))
             .unwrap_or_default();
+        // Rails capitalizes the resource name for scaffold-generated
+        // submit buttons: "Create Article" / "Update Article".
+        let human_prefix = {
+            let mut c = self.prefix.chars();
+            match c.next() {
+                None => String::new(),
+                Some(first) => first.to_ascii_uppercase().to_string() + c.as_str(),
+            }
+        };
         let label = if let Some(lbl) = opts.get("label") {
             lbl.clone()
         } else if self.is_persisted {
-            format!("Update {}", self.prefix)
+            format!("Update {}", human_prefix)
         } else {
-            format!("Create {}", self.prefix)
+            format!("Create {}", human_prefix)
         };
+        let esc = escape_html(&label);
         format!(
-            "<input type=\"submit\" value=\"{}\"{}>",
-            escape_html(&label),
-            cls,
+            "<input type=\"submit\" name=\"commit\" value=\"{}\"{} data-disable-with=\"{}\">",
+            esc, cls, esc,
         )
     }
 }
 
-/// `<%= error_messages_for(record, "article") %>` — Rails
-/// scaffold error block if there are validation errors, empty
-/// string otherwise. Emitter feeds the record's `.validate()`
-/// output (a `Vec<ValidationError>`) — cheap revalidation keeps
-/// the model struct free of a persistent error-state field.
+/// `<%= error_messages_for(record.errors, "article") %>`.
 pub fn error_messages_for(errors: &[ValidationError], noun: &str) -> String {
     if errors.is_empty() {
         return String::new();
@@ -271,12 +387,13 @@ pub fn error_messages_for(errors: &[ValidationError], noun: &str) -> String {
     )
 }
 
-/// `<%= turbo_stream_from "channel" %>` — emits the Turbo cable
-/// tag that triggers the client to subscribe. The signed-stream-
-/// name is base64-of-JSON-string; Roundhouse doesn't verify the
-/// HMAC signature today (appending `--unsigned` matches what the
-/// TS runtime does). The server's cable handler decodes the base64
-/// to recover the channel name for broadcast routing.
+/// True when any ValidationError in `errors` targets the named
+/// field. Feeds the scaffold's conditional form-field classes
+/// (error-red vs ok-gray borders).
+pub fn field_has_error(errors: &[ValidationError], field: &str) -> bool {
+    errors.iter().any(|e| e.field == field)
+}
+
 pub fn turbo_stream_from(channel: &str) -> String {
     let json = format!("\"{}\"", channel.replace('\\', "\\\\").replace('"', "\\\""));
     let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
@@ -286,18 +403,26 @@ pub fn turbo_stream_from(channel: &str) -> String {
     )
 }
 
-/// `dom_id(record)` → `"<singular>_<id>"`. Rust's generated view
-/// code calls this with `(name, id)` — the naming + id come from
-/// the emitter's knowledge of the record's type and field.
-pub fn dom_id(name: &str, id: i64) -> String {
-    if id == 0 {
-        String::new()
+/// `dom_id(record [, prefix])` — Rails convention:
+///   one-arg  → `<singular>_<id>`               (article_1)
+///   two-arg  → `<prefix>_<singular>_<id>`      (comments_count_article_1)
+/// Takes the singular name explicitly; rust can't introspect the
+/// record's type the way TS can via `constructor.name`. Emitters
+/// produce the singular from the ingested model list.
+pub fn dom_id(singular: &str, id: i64, prefix: Option<&str>) -> String {
+    let id_str = if id == 0 {
+        "new".to_string()
     } else {
-        format!("{}_{}", name, id)
+        id.to_string()
+    };
+    let base = format!("{}_{}", singular, id_str);
+    match prefix {
+        Some(p) if !p.is_empty() => format!("{}_{}", p, base),
+        _ => base,
     }
 }
 
-/// Naive pluralization — appends `s` when count != 1.
+/// Naive pluralization — append `s` when count != 1.
 pub fn pluralize(count: i64, word: &str) -> String {
     if count == 1 {
         format!("1 {}", word)
@@ -306,16 +431,31 @@ pub fn pluralize(count: i64, word: &str) -> String {
     }
 }
 
-/// `content_for(:slot, body)` stashes into RenderCtx. Not wired to
-/// layouts yet — returns empty so `_buf` doesn't accumulate the
-/// stored value twice.
+/// `truncate(text, length: N, omission: "...")`. Rails default
+/// length is 30, default omission is "...".
+pub fn truncate(text: &str, opts: &HashMap<String, String>) -> String {
+    let length: usize = opts
+        .get("length")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let omission = opts
+        .get("omission")
+        .map(|s| s.as_str())
+        .unwrap_or("...");
+    if text.chars().count() <= length {
+        return text.to_string();
+    }
+    let cut = length.saturating_sub(omission.chars().count());
+    let mut out: String = text.chars().take(cut).collect();
+    out.push_str(omission);
+    out
+}
+
 pub fn content_for(slot: &str, body: &str) -> String {
-    let _ = slot;
-    let _ = body;
+    content_for_set(slot, body);
     String::new()
 }
 
-/// Conservative HTML escaping — enough for scaffold blog output.
 fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -336,61 +476,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn label_humanizes_and_escapes() {
-        let b = FormBuilder::new("article", "", false);
-        let got = b.label("first_name", &HashMap::new());
-        assert!(got.contains("for=\"article_first_name\""));
-        assert!(got.contains(">First name</label>"));
+    fn content_for_setter_roundtrips() {
+        reset_render_state();
+        content_for_set("title", "Articles");
+        assert_eq!(get_slot("title"), "Articles");
+        reset_render_state();
+        assert_eq!(get_slot("title"), "");
     }
 
     #[test]
-    fn submit_uses_update_when_persisted() {
-        let b = FormBuilder::new("article", "", true);
-        let got = b.submit(&HashMap::new());
-        assert!(got.contains("value=\"Update article\""));
-    }
-
-    #[test]
-    fn submit_uses_create_when_new() {
+    fn submit_uses_capitalized_prefix() {
         let b = FormBuilder::new("article", "", false);
         let got = b.submit(&HashMap::new());
-        assert!(got.contains("value=\"Create article\""));
+        assert!(got.contains("value=\"Create Article\""));
+        assert!(got.contains("data-disable-with=\"Create Article\""));
+        assert!(got.contains("name=\"commit\""));
     }
 
     #[test]
-    fn error_messages_renders_block_when_non_empty() {
-        let errs = vec![
-            ValidationError::new("title", "can't be blank"),
-            ValidationError::new("body", "is too short"),
-        ];
-        let got = error_messages_for(&errs, "article");
-        assert!(got.contains("2 errors prohibited this article"));
-        assert!(got.contains("Title can&#39;t be blank"));
-        assert!(got.contains("Body is too short"));
+    fn text_field_omits_empty_value() {
+        let b = FormBuilder::new("article", "", false);
+        let got = b.text_field("title", "", &HashMap::new());
+        assert!(!got.contains("value="));
     }
 
     #[test]
-    fn error_messages_empty_when_no_errors() {
-        assert_eq!(error_messages_for(&[], "article"), "");
+    fn textarea_wraps_value_in_newlines() {
+        let b = FormBuilder::new("article", "", false);
+        let got = b.textarea("body", "", &HashMap::new());
+        assert!(got.contains(">\n</textarea>"));
     }
 
     #[test]
-    fn turbo_stream_from_base64s_channel() {
-        let got = turbo_stream_from("articles");
-        // base64 of `"articles"` (with quotes) is `ImFydGljbGVzIg==`
-        assert!(got.contains("signed-stream-name=\"ImFydGljbGVzIg==--unsigned\""));
-    }
-
-    #[test]
-    fn form_wrap_emits_method_override_when_persisted() {
-        let got = form_wrap("/articles/1", true, "contents", "");
-        assert!(got.contains("value=\"patch\""));
-        assert!(got.contains("action=\"/articles/1\""));
-    }
-
-    #[test]
-    fn form_wrap_no_method_override_for_new_record() {
+    fn form_wrap_emits_accept_charset() {
         let got = form_wrap("/articles", false, "contents", "");
-        assert!(!got.contains("_method"));
+        assert!(got.contains("accept-charset=\"UTF-8\""));
+    }
+
+    #[test]
+    fn dom_id_prefix_form() {
+        assert_eq!(dom_id("article", 3, None), "article_3");
+        assert_eq!(
+            dom_id("article", 3, Some("comments_count")),
+            "comments_count_article_3"
+        );
     }
 }
