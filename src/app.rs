@@ -32,6 +32,14 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    /// Logical stylesheet names discovered in `app/assets/stylesheets/`
+    /// + `app/assets/builds/` (file stems without `.css`). When the
+    /// ERB uses `stylesheet_link_tag :app, ...`, Rails with Propshaft
+    /// + tailwindcss-rails expands to one `<link>` per stylesheet in
+    /// these dirs; our emitter mirrors the expansion so the rendered
+    /// head matches structurally.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stylesheets: Vec<String>,
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
@@ -68,6 +76,7 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             importmap: None,
+            stylesheets: Vec::new(),
         }
     }
 }

@@ -63,6 +63,20 @@ pub fn compile_erb(source: &str) -> String {
                 if is_comment {
                     // Comment tag — intentionally drop without flushing, so
                     // surrounding text chunks merge into one string literal.
+                    //
+                    // Rails' erubi trim mode also strips the leading
+                    // horizontal whitespace on the comment's line (the
+                    // `    ` indent before `<%# ... %>`). Strip the tail
+                    // of pending_text back to the last newline when the
+                    // intervening bytes are only spaces/tabs — effectively
+                    // making the whole comment line disappear from output.
+                    let trim_start = pending_text.rfind('\n').map(|p| p + 1).unwrap_or(0);
+                    if pending_text[trim_start..]
+                        .bytes()
+                        .all(|b| b == b' ' || b == b'\t')
+                    {
+                        pending_text.truncate(trim_start);
+                    }
                 } else if is_output {
                     flush_text(&mut pending_text, &mut out);
                     if is_block_expr(ruby) {
@@ -99,6 +113,20 @@ pub fn compile_erb(source: &str) -> String {
                     }
                 }
                 cursor = close + 2;
+                // ERB comment tags (`<%# ... %>`) consume their
+                // trailing newline when rendered by Rails' erubi.
+                // The rationale: a comment line contributes nothing
+                // visible, and leaving the newline behind would
+                // produce a stray blank where the comment was. Non-
+                // comment tags (`<% code %>`, `<%= expr %>`) don't
+                // trim — their newlines are significant whitespace
+                // between the surrounding text chunks. Limiting the
+                // trim to comments preserves source-level round-
+                // trip fidelity for passthrough-code tags while
+                // matching Rails' rendered output where it matters.
+                if is_comment && bytes.get(cursor) == Some(&b'\n') {
+                    cursor += 1;
+                }
             }
         }
     }

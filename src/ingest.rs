@@ -172,6 +172,32 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         }
     }
 
+    // Logical stylesheets — file stems of `.css` files found in
+    // `app/assets/stylesheets/` and `app/assets/builds/`. Rails'
+    // `stylesheet_link_tag :app` with Propshaft + tailwindcss-rails
+    // emits one `<link>` per stylesheet in these dirs; we mirror
+    // by emitting the name list here.
+    let mut stylesheets: Vec<String> = Vec::new();
+    for subdir in ["app/assets/stylesheets", "app/assets/builds"] {
+        let css_dir = dir.join(subdir);
+        if !css_dir.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&css_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("css"))
+            .collect();
+        entries.sort();
+        for entry in entries {
+            if let Some(stem) = entry.file_stem().and_then(|s| s.to_str()) {
+                if !stylesheets.iter().any(|s| s == stem) {
+                    stylesheets.push(stem.to_string());
+                }
+            }
+        }
+    }
+    app.stylesheets = stylesheets;
+
     Ok(app)
 }
 
@@ -270,9 +296,15 @@ fn ingest_importmap(
                     if stem.is_empty() {
                         continue;
                     }
-                    let name = match &under {
-                        Some(ns) => format!("{ns}/{stem}"),
-                        None => stem.to_string(),
+                    // Rails' importmap-rails pins `index.js` as the
+                    // namespace itself (`"controllers"` not
+                    // `"controllers/index"`) — matches JS module
+                    // resolution where `import "controllers"`
+                    // resolves to the directory's index.
+                    let name = match (&under, stem) {
+                        (Some(ns), "index") => ns.clone(),
+                        (Some(ns), _) => format!("{ns}/{stem}"),
+                        (None, _) => stem.to_string(),
                     };
                     let path = match &under {
                         Some(ns) => format!("/assets/{ns}/{stem}.js"),

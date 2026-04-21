@@ -105,6 +105,7 @@ fn tiny_blog() -> App {
         fixtures: vec![],
         seeds: None,
         importmap: None,
+        stylesheets: vec![],
     }
 }
 

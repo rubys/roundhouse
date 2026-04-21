@@ -135,7 +135,30 @@ fn convert(handle: &Handle, config: &CompiledConfig) -> Node {
                 }
             }
 
-            let children = convert_children(handle, config);
+            let mut children = convert_children(handle, config);
+
+            // Text-content rewrite rules — apply regex
+            // substitutions to any direct-child Text node when the
+            // containing element matches a rule's selector. Scoped
+            // to immediate children so nested elements aren't
+            // accidentally affected. Used for things like the
+            // fingerprint-bearing importmap JSON inside `<script
+            // type="importmap">`.
+            for rule in &config.texts {
+                if !element_matches_simple(&tag, &attr_map, &rule.rule.tag, &rule.rule.attrs)
+                {
+                    continue;
+                }
+                for child in children.iter_mut() {
+                    if let Node::Text { value } = child {
+                        *value = rule
+                            .regex
+                            .replace_all(value, rule.rule.replace.as_str())
+                            .to_string();
+                    }
+                }
+            }
+
             Node::Element {
                 tag,
                 attrs: attr_map,

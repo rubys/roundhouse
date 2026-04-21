@@ -45,6 +45,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if let Some(importmap) = &app.importmap {
         files.push(emit_importmap(importmap));
     }
+    // Preserve the discovered stylesheet list for round-trip by
+    // emitting placeholder `.css` files. The content is empty on
+    // purpose — the files act as a manifest that re-ingest
+    // rediscovers, nothing more. A production Ruby emit would
+    // copy real stylesheet content; we're aiming at IR fidelity
+    // here, not asset pipeline reproduction.
+    for name in &app.stylesheets {
+        files.push(EmittedFile {
+            path: PathBuf::from(format!("app/assets/stylesheets/{name}.css")),
+            content: String::new(),
+        });
+    }
     files
 }
 

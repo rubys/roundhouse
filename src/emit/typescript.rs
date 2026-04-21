@@ -955,8 +955,16 @@ fn emit_main_ts(app: &App) -> EmittedFile {
     // Import the emitted layout + view barrel so `main.ts` can
     // hand the dispatcher a real layout renderer. The layout reads
     // from view_helpers' module-level yield/slots state — no args
-    // needed at the call site.
-    writeln!(s, "import {{ renderLayoutsApplication }} from \"./app/views/layouts/application.html.js\";").unwrap();
+    // needed at the call site. Only wired when the app actually
+    // has a `layouts/application` view (skipped for tiny-blog and
+    // similar minimal fixtures without a layout ERB).
+    let has_app_layout = app
+        .views
+        .iter()
+        .any(|v| v.name.as_str() == "layouts/application");
+    if has_app_layout {
+        writeln!(s, "import {{ renderLayoutsApplication }} from \"./app/views/layouts/application.html.js\";").unwrap();
+    }
     writeln!(s, "import \"./src/routes.js\";").unwrap();
     // Import each model so its class-body side effects (registry
     // self-registration, broadcast callback registrations) run.
@@ -976,7 +984,9 @@ fn emit_main_ts(app: &App) -> EmittedFile {
     } else {
         writeln!(s, "    schemaSql: \"\",").unwrap();
     }
-    writeln!(s, "    layout: () => renderLayoutsApplication(undefined as any),").unwrap();
+    if has_app_layout {
+        writeln!(s, "    layout: () => renderLayoutsApplication(undefined as any),").unwrap();
+    }
     // seeds wiring deferred — App::seeds is ingested but TS
     // emission of top-level Ruby scripts needs operator + bang +
     // statement-structure improvements first.
@@ -1809,7 +1819,7 @@ fn emit_views(app: &App) -> Vec<EmittedFile> {
     let mut files: Vec<EmittedFile> = app
         .views
         .iter()
-        .map(|v| emit_view_file_pass2(v, &known_models, &attrs_by_class))
+        .map(|v| emit_view_file_pass2(v, &known_models, &attrs_by_class, &app.stylesheets))
         .collect();
 
     // Stubs for missing standard CRUD views (same posture as Rust).
@@ -1896,6 +1906,7 @@ fn emit_view_file_pass2(
     view: &crate::dialect::View,
     known_models: &[Symbol],
     attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
+    stylesheets: &[String],
 ) -> EmittedFile {
     let rewritten_body = rewrite_for_controller(&view.body);
     let ivar_names = collect_ivar_names(&view.body);
@@ -1956,6 +1967,7 @@ fn emit_view_file_pass2(
         arg_name: arg_name.clone(),
         arg_attrs: attrs,
         resource_dir,
+        stylesheets: stylesheets.to_vec(),
     };
 
     let body_lines = emit_ts_view_body(&rewritten_body, &ctx);
@@ -1974,6 +1986,9 @@ struct TsViewCtx {
     arg_name: String,
     arg_attrs: Vec<String>,
     resource_dir: String,
+    /// Discovered stylesheet names (stems). Feeds the
+    /// `stylesheet_link_tag :app` expansion in the layout.
+    stylesheets: Vec<String>,
 }
 
 impl TsViewCtx {
@@ -2134,6 +2149,7 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
                 arg_name: ctx.arg_name.clone(),
                 arg_attrs: ctx.arg_attrs.clone(),
                 resource_dir: ctx.resource_dir.clone(),
+                stylesheets: ctx.stylesheets.clone(),
             };
             let mut out = vec![format!("for (const {var} of {coll_s}) {{")];
             for line in emit_ts_view_body(body, &inner_ctx) {
@@ -2250,10 +2266,37 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
     }
 
     // `stylesheet_link_tag :name, "data-turbo-track": "reload"` —
-    // Sym first arg + opts hash. Map the sym to the runtime helper's
-    // string name arg and lower the hash to a plain object.
+    // Sym first arg + opts hash. The first-arg sym is usually the
+    // literal stylesheet name (`:application`), but `:app` is a
+    // special shorthand that Rails expands to ALL stylesheets in
+    // `app/assets/stylesheets/` + `app/assets/builds/`. We mirror
+    // that expansion at emit time using `ctx.stylesheets` so the
+    // rendered head structurally matches Rails' output.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
         if method.as_str() == "stylesheet_link_tag" && !args.is_empty() {
+            let opts_arg = args.iter().skip(1).find_map(|a| match &*a.node {
+                ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
+                _ => None,
+            });
+            let opts = opts_arg.unwrap_or_else(|| "{}".to_string());
+
+            // `:app` → one link per discovered stylesheet.
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
+                    let calls: Vec<String> = ctx
+                        .stylesheets
+                        .iter()
+                        .map(|name| {
+                            format!("_buf += Helpers.stylesheetLinkTag({name:?}, {opts});")
+                        })
+                        .collect();
+                    // Rails inserts a newline between the two `<link>` tags
+                    // when the helper emits multiple. Match by appending a
+                    // `\n` text node between our calls.
+                    return calls.join("\n_buf += \"\\n\";\n");
+                }
+            }
+
             let name_arg = match &*args[0].node {
                 ExprNode::Lit { value: Literal::Sym { value } } => {
                     Some(format!("{:?}", value.as_str()))
@@ -2263,12 +2306,7 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
                 }
                 _ => None,
             };
-            let opts_arg = args.iter().skip(1).find_map(|a| match &*a.node {
-                ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
-                _ => None,
-            });
             if let Some(name) = name_arg {
-                let opts = opts_arg.unwrap_or_else(|| "{}".to_string());
                 return format!("_buf += Helpers.stylesheetLinkTag({name}, {opts});");
             }
         }
@@ -2534,6 +2572,7 @@ fn emit_ts_captured_helper(
                 arg_name: ctx.arg_name.clone(),
                 arg_attrs: ctx.arg_attrs.clone(),
                 resource_dir: ctx.resource_dir.clone(),
+                stylesheets: ctx.stylesheets.clone(),
             };
             for line in emit_ts_view_body(body, &inner_ctx) {
                 lines.push(format!("  {line}"));

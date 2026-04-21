@@ -95,10 +95,12 @@ export function csrfMetaTags(): string {
   return `<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />`;
 }
 
-/** `<%= csp_meta_tag %>` — CSP nonce meta tag. Nonce is per-
- *  request; compare-tool config masks it. */
+/** `<%= csp_meta_tag %>` — CSP nonce meta tag. Rails only emits
+ *  this when a Content-Security-Policy is configured; a fresh
+ *  scaffold has none, so the helper returns empty. Matching that
+ *  default keeps the rendered head structurally identical. */
 export function cspMetaTag(): string {
-  return `<meta name="csp-nonce" content="" />`;
+  return "";
 }
 
 /** `<%= stylesheet_link_tag name, opts %>` — `<link rel="stylesheet">`.

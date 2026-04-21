@@ -40,12 +40,31 @@ pub struct IgnoreRules {
     pub elements: Vec<ElementRule>,
     #[serde(default)]
     pub attributes: Vec<AttributeRule>,
+    /// Regex substitutions applied to the text content of elements
+    /// matching a tag+attr selector. Used for things like stripping
+    /// asset fingerprints from the JSON inside an `<script type=
+    /// "importmap">` where the fingerprinted URLs live as text,
+    /// not attributes.
+    #[serde(default)]
+    pub texts: Vec<TextRule>,
     /// Drop HTML comments before diffing. Default true — comments
     /// aren't DOM-inspectable via most JS idioms and Rails emits
     /// IE-conditional comments that the target would need to
     /// mirror exactly for no behavioral benefit.
     #[serde(default = "default_true")]
     pub drop_comments: bool,
+}
+
+/// Apply a regex substitution to text nodes under elements
+/// matching a tag+attr selector. Multiple rules can target the
+/// same element; they apply in declaration order.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TextRule {
+    pub tag: String,
+    #[serde(default)]
+    pub attrs: BTreeMap<String, String>,
+    pub value_regex: String,
+    pub replace: String,
 }
 
 fn default_true() -> bool {
@@ -140,8 +159,18 @@ impl Config {
                         replace: Some(String::new()),
                     },
                     // Stylesheet fingerprints: Rails appends
-                    // `?v=...` (Propshaft) or `-<digest>.css`
-                    // (Sprockets). Strip to the path.
+                    // `?v=...` (Propshaft dev) or embeds
+                    // `-<digest>.css` in the path (Propshaft/
+                    // Sprockets prod). Strip both shapes so the
+                    // asset name compares equivalently regardless
+                    // of build mode.
+                    AttributeRule {
+                        tag: "link".into(),
+                        attrs: kv("rel", "stylesheet"),
+                        attribute: "href".into(),
+                        value_regex: Some(r"-[a-f0-9]{8,}\.css(\?.*)?$".into()),
+                        replace: Some(".css".into()),
+                    },
                     AttributeRule {
                         tag: "link".into(),
                         attrs: kv("rel", "stylesheet"),
@@ -149,7 +178,24 @@ impl Config {
                         value_regex: Some(r"\?.*$".into()),
                         replace: Some(String::new()),
                     },
-                    // Script src — same logic.
+                    // modulepreload fingerprints — same as scripts.
+                    AttributeRule {
+                        tag: "link".into(),
+                        attrs: kv("rel", "modulepreload"),
+                        attribute: "href".into(),
+                        value_regex: Some(r"-[a-f0-9]{8,}\.js(\?.*)?$".into()),
+                        replace: Some(".js".into()),
+                    },
+                    // Script src fingerprints — path-digest +
+                    // query-string variants both get stripped to
+                    // the canonical `.js` name.
+                    AttributeRule {
+                        tag: "script".into(),
+                        attrs: BTreeMap::new(),
+                        attribute: "src".into(),
+                        value_regex: Some(r"-[a-f0-9]{8,}\.js(\?.*)?$".into()),
+                        replace: Some(".js".into()),
+                    },
                     AttributeRule {
                         tag: "script".into(),
                         attrs: BTreeMap::new(),
@@ -170,6 +216,17 @@ impl Config {
                         replace: Some(String::new()),
                     },
                 ],
+                texts: vec![
+                    // Importmap JSON contains fingerprinted `.js`
+                    // URLs as text content (not attributes). Strip
+                    // the digest so keys → paths compare by name.
+                    TextRule {
+                        tag: "script".into(),
+                        attrs: kv("type", "importmap"),
+                        value_regex: r"-[a-f0-9]{8,}\.js".into(),
+                        replace: ".js".into(),
+                    },
+                ],
                 drop_comments: true,
             },
         }
@@ -187,12 +244,18 @@ fn kv(k: &str, v: &str) -> BTreeMap<String, String> {
 pub struct CompiledConfig {
     pub elements: Vec<ElementRule>,
     pub attributes: Vec<CompiledAttributeRule>,
+    pub texts: Vec<CompiledTextRule>,
     pub drop_comments: bool,
 }
 
 pub struct CompiledAttributeRule {
     pub rule: AttributeRule,
     pub regex: Option<Regex>,
+}
+
+pub struct CompiledTextRule {
+    pub rule: TextRule,
+    pub regex: Regex,
 }
 
 impl Config {
@@ -216,9 +279,24 @@ impl Config {
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let texts = self
+            .ignore
+            .texts
+            .iter()
+            .map(|r| {
+                let regex = Regex::new(&r.value_regex).map_err(|e| {
+                    anyhow::anyhow!("compile text regex {:?}: {e}", r.value_regex)
+                })?;
+                Ok(CompiledTextRule {
+                    rule: r.clone(),
+                    regex,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(CompiledConfig {
             elements: self.ignore.elements.clone(),
             attributes,
+            texts,
             drop_comments: self.ignore.drop_comments,
         })
     }
