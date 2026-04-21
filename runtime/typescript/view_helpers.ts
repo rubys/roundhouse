@@ -83,11 +83,24 @@ export class FormBuilder {
   }
 }
 
-/** `<turbo-cable-stream-source>` tag. Visible in the rendered
- *  output without a live websocket; full Turbo integration is a
- *  later phase. */
+/** `<%= turbo_stream_from "articles" %>` — subscribes the page
+ *  to a Turbo Stream channel. The Turbo client reads the
+ *  `signed-stream-name` attribute, sends it over Action Cable
+ *  as a `subscribe` command's identifier, and the server's
+ *  cable handler decodes the base64 prefix to recover the
+ *  channel name for broadcast routing.
+ *
+ *  Rails signs the stream name with an HMAC so the server can
+ *  trust the decoded value. Roundhouse's cable handler doesn't
+ *  verify the signature today — it just parses the base64 part
+ *  and routes. An "unsigned" suffix is fine for the acceptance
+ *  scenario; production deployments that care about authenticity
+ *  would upgrade both sides to HMAC-sign-and-verify.
+ *  `escapeHtml` isn't needed on the encoded value — base64 is
+ *  URL- and HTML-safe by construction. */
 export function turboStreamFrom(channel: string): string {
-  return `<turbo-cable-stream-source channel="${escapeHtml(channel)}"/>`;
+  const encoded = Buffer.from(JSON.stringify(channel), "utf-8").toString("base64");
+  return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
 }
 
 /** `dom_id(record)` → `"<singular>_<id>"`. Takes `any`; expects

@@ -2128,6 +2128,19 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
     }
 
+    // `turbo_stream_from "articles"` — bare helper call with a
+    // string arg. Runtime helper produces the
+    // `<turbo-cable-stream-source signed-stream-name="...">` tag
+    // the Turbo client reads to subscribe via Action Cable.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "turbo_stream_from" && args.len() == 1 {
+            if is_ts_simple_expr(&args[0], ctx) {
+                let arg = emit_ts_view_expr_raw(&args[0], ctx);
+                return format!("_buf += Helpers.turboStreamFrom({arg});");
+            }
+        }
+    }
+
     // Simple interpolation.
     if is_ts_simple_expr(inner, ctx) {
         return format!(
