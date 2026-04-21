@@ -182,29 +182,21 @@ let layoutRenderer: (() => string) | null = null;
 // ── Layout wrapping ────────────────────────────────────────────
 
 /** Wrap a controller's returned HTML body in the full HTML
- *  document shell. Emitter-provided layouts (from ERB
- *  application.html.erb) aren't yet wired up — the transpiled
- *  file is emitted but ERB helpers like `<%= yield %>` and
- *  `<%= stylesheet_link_tag %>` still stub as TODO comments.
- *  Until view-helper emission catches up, the server synthesizes
- *  a working layout inline:
+ *  document shell. Only used for fixtures without a
+ *  `layouts/application` ERB template (e.g. tiny-blog); apps with
+ *  a layout reach this file's `renderLayouts_application` instead
+ *  via the emitter-supplied `opts.layout` callback.
  *
  *   - Tailwind Play CDN (`cdn.tailwindcss.com`): compiles utility
- *     classes in the browser. Good for dev / this acceptance
- *     test; production would swap for a real tailwind-cli build.
- *   - `turbo-rails` via importmap shim: provides Turbo's form
- *     submission + Stream subscription. `turbo-rails`
- *     specifically (not just `@hotwired/turbo`) so Turbo auto-
- *     wires to Action Cable when it sees the `action-cable-url`
- *     meta tag.
- *   - `<meta name="action-cable-url" content="/cable">`: tells
- *     Turbo where the cable endpoint lives.
- *
- *  Scaffold action bodies include their own Tailwind utility
- *  classes (carried through from the Rails source — no
- *  translation needed, they're just string literals in the ERB
- *  templates). This layout provides the shell that makes them
- *  render.
+ *     classes in the browser. Fine for dev; production swaps in
+ *     a real tailwind-cli build.
+ *   - `@hotwired/turbo` via importmap: provides Turbo's form
+ *     submission + Stream subscription. Matches the Rust
+ *     runtime's fallback shape — no `action-cable-url` meta
+ *     (the `@rails/actioncable` default `/cable` is what our
+ *     cable handler listens on) and plain turbo (not
+ *     turbo-rails) since we don't need the Rails-specific
+ *     helpers here.
  */
 function renderLayout(body: string): string {
   return `<!DOCTYPE html>
@@ -213,10 +205,16 @@ function renderLayout(body: string): string {
     <meta charset="utf-8">
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="action-cable-url" content="/cable">
     <link rel="icon" href="data:,">
     <script src="https://cdn.tailwindcss.com"></script>
-    <script type="module" src="https://esm.sh/@hotwired/turbo-rails@8.0.0?bundle-deps"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+      }
+    }
+    </script>
+    <script type="module">import "@hotwired/turbo";</script>
   </head>
   <body>
     <main class="container mx-auto mt-8 px-5 flex flex-col">
