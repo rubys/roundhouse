@@ -1,0 +1,21 @@
+[package]
+name = "roundhouse-compare"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Cross-runtime HTML rendering comparator for roundhouse targets"
+
+[[bin]]
+name = "roundhouse-compare"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+html5ever = "0.38"
+markup5ever_rcdom = "0.38"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+similar = "2"

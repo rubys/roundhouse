@@ -1,0 +1,56 @@
+# Example ignore-rules config for roundhouse-compare. Pass to the
+# tool with `--config config.example.yaml`. The built-in defaults
+# (see src/config.rs `Config::default`) cover the same cases — this
+# file exists so you can extend or override them per-project.
+#
+# Two rule kinds:
+#   - `elements` : drop an entire subtree matching a selector, or
+#     replace it with a placeholder text node
+#   - `attributes` : keep the element, but blank or replace one
+#     specific attribute value
+#
+# Selectors are deliberately narrow: tag name + required attribute
+# equalities. No CSS combinators. If you need more, add a new rule
+# rather than extending the selector grammar.
+
+ignore:
+  drop_comments: true
+  elements:
+    - tag: meta
+      attrs:
+        name: csrf-token
+    - tag: meta
+      attrs:
+        name: csrf-param
+    - tag: meta
+      attrs:
+        name: csp-nonce
+  attributes:
+    # Rails hidden CSRF form field — keep the input element but
+    # blank its per-request value.
+    - tag: input
+      attrs:
+        name: authenticity_token
+      attribute: value
+      replace: ""
+    # Stylesheet fingerprints (Propshaft `?v=...` / Sprockets
+    # `-<digest>.css`). Strip the query string.
+    - tag: link
+      attrs:
+        rel: stylesheet
+      attribute: href
+      value_regex: '\?.*$'
+      replace: ""
+    # Script src fingerprints — same logic.
+    - tag: script
+      attribute: src
+      value_regex: '\?.*$'
+      replace: ""
+    # Turbo stream signature suffix. Both sides emit a signed-
+    # stream-name; the base64'd channel name before `--` matches,
+    # the signature after it differs (HMAC in Rails, `unsigned` in
+    # roundhouse).
+    - tag: turbo-cable-stream-source
+      attribute: signed-stream-name
+      value_regex: '--.*$'
+      replace: ""
