@@ -1998,13 +1998,14 @@ fn emit_view_file_pass2(
     stylesheets: &[String],
 ) -> EmittedFile {
     let rewritten_body = rewrite_for_controller(&view.body);
-    // Strip the trailing whitespace-only text append. In compiled
-    // ERB this is the `\n` that follows the final `<% end %>` (or
-    // the file's trailing newline). Rails' erubi trim consumes it
-    // at render; we preserve it in the IR for source round-trip
-    // fidelity and strip at target-emit instead. Applies to all
-    // views — partials and top-level templates alike.
-    let rewritten_body = strip_trailing_newline_text_append(&rewritten_body);
+    // Apply the shared erubi-trim lowering. Produces a body
+    // where every `<% %>` tag's leading indent and trailing
+    // newline are already consumed (matching Rails' erubi render
+    // behavior), plus the view's trailing whitespace-only text
+    // append is dropped. After this, emit can walk the IR
+    // straight through without re-applying trim rules per-
+    // statement.
+    let rewritten_body = crate::lower::erb_trim::trim_view(&rewritten_body);
     let ivar_names = collect_ivar_names(&view.body);
     let fn_name = view_function_name(view.name.as_str());
 
@@ -2135,330 +2136,19 @@ fn ts_view_signature(
 }
 
 fn emit_ts_view_body(body: &Expr, ctx: &TsViewCtx) -> Vec<String> {
+    // The view body arrives pre-trimmed via
+    // `lower::erb_trim::trim_view` (applied once per view at the
+    // top of `emit_view_file_pass2`). Nested Seqs/If branches are
+    // trimmed in that same pass, so here we just iterate stmts.
     let stmts: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
-    // Rails' erubi renders `<% %>` non-output tags with its default
-    // trim mode, which strips the single trailing newline after
-    // `%>`. Our ingest preserves the source verbatim (so Ruby emit
-    // can round-trip byte-for-byte). To match Rails at render, we
-    // apply the trim here during emit: for every non-output
-    // statement whose successor is a text append, strip the
-    // leading `\n` of that text. Doesn't recurse into nested
-    // bodies — `if`/`each` handle their own scope via
-    // emit_ts_view_stmt_pass2.
-    let trimmed = erubi_trim_body(&stmts);
     let mut out = Vec::new();
-    for stmt in &trimmed {
-        out.extend(emit_ts_view_stmt_pass2(stmt.as_ref(), ctx));
+    for stmt in &stmts {
+        out.extend(emit_ts_view_stmt_pass2(stmt, ctx));
     }
     out
-}
-
-/// Trim the edge whitespace of an if/else branch to match Rails'
-/// erubi trim: the first text chunk loses its leading `\n` (eaten
-/// by the opening `<% if/else %>`), and the last text chunk loses
-/// its trailing line-indent (eaten by the closing `<% else/end %>`).
-fn trim_branch_edges(body: &Expr) -> Expr {
-    let body = trim_leading_newline_of_first_text(body);
-    trim_trailing_line_indent_of_last_text(&body)
-}
-
-/// If `body`'s first statement is `_buf = _buf + "\n..."`,
-/// return a new body with that leading `\n` stripped.
-fn trim_leading_newline_of_first_text(body: &Expr) -> Expr {
-    match &*body.node {
-        ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            if let Some(trimmed) = trim_leading_newline_of_text_append(&exprs[0]) {
-                let mut new_exprs = exprs.clone();
-                new_exprs[0] = trimmed;
-                Expr::new(body.span.clone(), ExprNode::Seq { exprs: new_exprs })
-            } else {
-                body.clone()
-            }
-        }
-        _ => {
-            if let Some(trimmed) = trim_leading_newline_of_text_append(body) {
-                trimmed
-            } else {
-                body.clone()
-            }
-        }
-    }
-}
-
-/// If `body`'s last text-append ends with `\n<horizontal-ws>`,
-/// strip that trailing line-indent. Handles both Seq and single-
-/// stmt bodies.
-fn trim_trailing_line_indent_of_last_text(body: &Expr) -> Expr {
-    match &*body.node {
-        ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            let last_idx = exprs.len() - 1;
-            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(&exprs[last_idx]) {
-                let mut new_exprs = exprs.clone();
-                new_exprs[last_idx] = trimmed;
-                Expr::new(body.span.clone(), ExprNode::Seq { exprs: new_exprs })
-            } else {
-                body.clone()
-            }
-        }
-        _ => {
-            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(body) {
-                trimmed
-            } else {
-                body.clone()
-            }
-        }
-    }
-}
-
-/// If `body` is a `Seq` whose last-non-epilogue statement is
-/// `_buf = _buf + "<whitespace only>"`, return a new body with
-/// that statement dropped. The compiled ERB always ends with
-/// a bare `_buf` read (the return value of the enclosing
-/// expression), so we look at the second-to-last element when
-/// the last is that epilogue. Used to trim the partial file's
-/// trailing newline at emit time.
-fn strip_trailing_newline_text_append(body: &Expr) -> Expr {
-    let ExprNode::Seq { exprs } = &*body.node else {
-        return body.clone();
-    };
-    if exprs.is_empty() {
-        return body.clone();
-    }
-    // Identify the epilogue (bare `_buf` Var) at the tail, and
-    // the target stmt immediately before it.
-    let last_idx = exprs.len() - 1;
-    let epilogue_idx = if matches!(
-        &*exprs[last_idx].node,
-        ExprNode::Var { name, .. } if name.as_str() == "_buf"
-    ) {
-        Some(last_idx)
-    } else {
-        None
-    };
-    let target_idx = match epilogue_idx {
-        Some(0) => return body.clone(),
-        Some(i) => i - 1,
-        None => last_idx,
-    };
-    let target = &exprs[target_idx];
-    let is_trailing_ws = match &*target.node {
-        ExprNode::Assign {
-            target: LValue::Var { name, .. },
-            value,
-        } if name.as_str() == "_buf" => match &*value.node {
-            ExprNode::Send { recv: Some(r), method, args, .. }
-                if method.as_str() == "+" && args.len() == 1 =>
-            {
-                let recv_buf = matches!(
-                    &*r.node,
-                    ExprNode::Var { name, .. } if name.as_str() == "_buf"
-                );
-                let text_ws = matches!(
-                    &*args[0].node,
-                    ExprNode::Lit { value: Literal::Str { value: s } }
-                        if s.bytes().all(|b| b == b'\n' || b == b' ' || b == b'\t'),
-                );
-                recv_buf && text_ws
-            }
-            _ => false,
-        },
-        _ => false,
-    };
-    if !is_trailing_ws {
-        return body.clone();
-    }
-    let mut new_exprs = exprs.clone();
-    new_exprs.remove(target_idx);
-    Expr::new(
-        body.span.clone(),
-        ExprNode::Seq { exprs: new_exprs },
-    )
-}
-
-/// Produce a new statement list where text-chunks adjacent to
-/// non-output ERB statements have their whitespace trimmed to
-/// mirror erubi's default render behavior:
-///   - Text after a `<% %>` tag: leading `\n` stripped (the tag's
-///     trailing newline is consumed).
-///   - Text before a `<% %>` tag: trailing horizontal whitespace
-///     on the tag's own line is stripped, when that whitespace
-///     sits directly after the preceding `\n`. This makes a line
-///     that contains only `    <% tag %>` disappear entirely.
-///
-/// Scope: only the direct `Seq` statements passed in. Nested
-/// branches (if/each bodies) are handled when their emitters
-/// recurse through `emit_ts_view_body`.
-fn erubi_trim_body<'a>(stmts: &[&'a Expr]) -> Vec<std::borrow::Cow<'a, Expr>> {
-    use std::borrow::Cow;
-    // Build a mutable copy so we can edit both the "before" and
-    // "after" text chunks around each non-output tag.
-    let mut out: Vec<Cow<'a, Expr>> = stmts.iter().map(|s| Cow::Borrowed(*s)).collect();
-    for i in 0..out.len() {
-        if !is_non_output_erb_stmt(out[i].as_ref()) {
-            continue;
-        }
-        // Trailing `\n` of preceding text chunk → strip the
-        // horizontal-whitespace run that sits between that `\n`
-        // and the `<% %>` tag.
-        if i > 0 {
-            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(out[i - 1].as_ref()) {
-                out[i - 1] = Cow::Owned(trimmed);
-            }
-        }
-        // Leading `\n` of following text chunk → strip.
-        if i + 1 < out.len() {
-            if let Some(trimmed) = trim_leading_newline_of_text_append(out[i + 1].as_ref()) {
-                out[i + 1] = Cow::Owned(trimmed);
-            }
-        }
-    }
-    out
-}
-
-/// If `stmt` is `_buf = _buf + "<text>"` where the text ends with
-/// `\n<whitespace>`, strip the trailing whitespace (back to the
-/// `\n`, inclusive of neither). Used to match erubi's leading-
-/// whitespace strip on `<% %>`-tag lines.
-fn trim_trailing_line_indent_of_text_append(stmt: &Expr) -> Option<Expr> {
-    let (name, recv, method, args, value_span, stmt_span) = extract_text_append(stmt)?;
-    let ExprNode::Lit {
-        value: Literal::Str { value: text },
-    } = &*args[0].node
-    else {
-        return None;
-    };
-    // Find the last newline; everything after it must be only
-    // horizontal whitespace to qualify for trim.
-    let last_nl = text.rfind('\n')?;
-    let tail = &text[last_nl + 1..];
-    if tail.is_empty() || !tail.bytes().all(|b| b == b' ' || b == b'\t') {
-        return None;
-    }
-    let new_text = text[..=last_nl].to_string();
-    Some(rebuild_text_append(
-        &name, recv, method, &args[0], &new_text, value_span, stmt_span,
-    ))
-}
-
-/// Common shape-check for `_buf = _buf + "<text literal>"`. Returns
-/// the component refs the rebuilder needs.
-type TextAppendRefs<'a> = (
-    crate::Symbol,
-    &'a Expr,
-    &'a crate::Symbol,
-    &'a Vec<Expr>,
-    &'a crate::span::Span,
-    &'a crate::span::Span,
-);
-
-fn extract_text_append(stmt: &Expr) -> Option<TextAppendRefs<'_>> {
-    let ExprNode::Assign {
-        target: LValue::Var { name, .. },
-        value,
-    } = &*stmt.node
-    else {
-        return None;
-    };
-    if name.as_str() != "_buf" {
-        return None;
-    }
-    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*value.node else {
-        return None;
-    };
-    if method.as_str() != "+" || args.len() != 1 {
-        return None;
-    }
-    let ExprNode::Var { name: rn, .. } = &*recv.node else {
-        return None;
-    };
-    if rn.as_str() != "_buf" {
-        return None;
-    }
-    if !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
-        return None;
-    }
-    Some((name.clone(), recv, method, args, &value.span, &stmt.span))
-}
-
-fn rebuild_text_append(
-    name: &crate::Symbol,
-    recv: &Expr,
-    method: &crate::Symbol,
-    old_text_arg: &Expr,
-    new_text: &str,
-    value_span: &crate::span::Span,
-    stmt_span: &crate::span::Span,
-) -> Expr {
-    let new_text_arg = Expr::new(
-        old_text_arg.span.clone(),
-        ExprNode::Lit {
-            value: Literal::Str {
-                value: new_text.to_string(),
-            },
-        },
-    );
-    let new_rhs = Expr::new(
-        value_span.clone(),
-        ExprNode::Send {
-            recv: Some(recv.clone()),
-            method: method.clone(),
-            args: vec![new_text_arg],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    Expr::new(
-        stmt_span.clone(),
-        ExprNode::Assign {
-            target: LValue::Var {
-                id: crate::ident::VarId(0),
-                name: name.clone(),
-            },
-            value: new_rhs,
-        },
-    )
-}
-
-/// True when `stmt` is an ERB `<% %>` non-output tag — in our IR,
-/// a bare Send with no receiver (implicit self) that isn't an
-/// assignment to `_buf`. Control-flow (if/each) lowers into
-/// `ExprNode::If`/Send-with-block and also counts.
-fn is_non_output_erb_stmt(stmt: &Expr) -> bool {
-    match &*stmt.node {
-        // `_buf = _buf + X` is an output statement — not a
-        // non-output tag.
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-            if name.as_str() == "_buf" =>
-        {
-            false
-        }
-        // `if cond ... end` lowers from `<% if ... %>` — non-output.
-        ExprNode::If { .. } => true,
-        // Bare Send like `content_for(...)` from `<% ... %>`.
-        ExprNode::Send { recv: None, block: None, .. } => true,
-        ExprNode::Send { recv: None, block: Some(_), .. } => true,
-        _ => false,
-    }
-}
-
-/// If `stmt` is `_buf = _buf + "\n..."`, return a clone with the
-/// leading `\n` stripped. Used to match erubi's trailing-newline
-/// consume on `<% %>` tag lines.
-fn trim_leading_newline_of_text_append(stmt: &Expr) -> Option<Expr> {
-    let (name, recv, method, args, value_span, stmt_span) = extract_text_append(stmt)?;
-    let ExprNode::Lit {
-        value: Literal::Str { value: text },
-    } = &*args[0].node
-    else {
-        return None;
-    };
-    let stripped = text.strip_prefix('\n')?;
-    Some(rebuild_text_append(
-        &name, recv, method, &args[0], stripped, value_span, stmt_span,
-    ))
 }
 
 fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
@@ -2487,6 +2177,9 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
         // Epilogue: bare `_buf` — dropped; we emit `return _buf;` elsewhere.
         ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
         // `if cond ... else ... end` — degrade cond if complex.
+        // Branch-edge trim happens upstream in
+        // `lower::erb_trim::trim_view`; the branches arrive with
+        // their first/last text stmts already adjusted.
         ExprNode::If { cond, then_branch, else_branch } => {
             let cond_js = if is_ts_simple_expr(cond, ctx) {
                 emit_ts_view_expr_raw(cond, ctx)
@@ -2494,16 +2187,7 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
                 "false /* TODO ERB cond */".to_string()
             };
             let mut out = vec![format!("if ({cond_js}) {{")];
-            // erubi trim consumes the `\n` after the opening `<% if
-            // %>` tag + the leading indent of the following `<%
-            // else %>` or `<% end %>` tag. That means:
-            //  - The FIRST text of the then-branch loses its `\n`.
-            //  - The LAST text of the then-branch loses its trailing
-            //    line-indent.
-            //  - Same rules for the else-branch against its `<% end
-            //    %>`.
-            let then_body = trim_branch_edges(then_branch);
-            for line in emit_ts_view_body(&then_body, ctx) {
+            for line in emit_ts_view_body(then_branch, ctx) {
                 out.push(format!("  {line}"));
             }
             let has_else = !matches!(
@@ -2512,8 +2196,7 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
             );
             if has_else {
                 out.push("} else {".to_string());
-                let else_body = trim_branch_edges(else_branch);
-                for line in emit_ts_view_body(&else_body, ctx) {
+                for line in emit_ts_view_body(else_branch, ctx) {
                     out.push(format!("  {line}"));
                 }
             }
