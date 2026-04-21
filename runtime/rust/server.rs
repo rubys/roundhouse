@@ -183,13 +183,15 @@ async fn layout_wrap(req: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(wrapped))
 }
 
-/// The document shell. Tailwind Play CDN + an importmap for
-/// `@hotwired/turbo-rails` + an `action-cable-url` meta tag. This
-/// is the same layout the TS runtime emits — the emitted ERB-
-/// lowered layout file exists but its `<%= yield %>` /
-/// `<%= stylesheet_link_tag %>` / `<%= javascript_importmap_tags %>`
-/// calls still stub as TODOs, so we synthesize a working layout
-/// here until view-helper emission catches up.
+/// The document shell. Tailwind Play CDN + plain `@hotwired/turbo`
+/// (not `@hotwired/turbo-rails` — that variant auto-wires Action
+/// Cable on import and we don't run `/cable`, so its transitive
+/// `@rails/actioncable/src` lookup fails in the browser). Inline
+/// data-URI favicon suppresses the no-icon 404 on each page load.
+/// Matches the emitted scaffold layout file structurally even
+/// though that file's ERB helpers still stub as TODOs — we
+/// synthesize the working shell here until view-helper emission
+/// catches up.
 fn render_layout(body: &str) -> String {
     format!(
         r##"<!DOCTYPE html>
@@ -198,18 +200,16 @@ fn render_layout(body: &str) -> String {
     <meta charset="utf-8">
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="action-cable-url" content="/cable">
+    <link rel="icon" href="data:,">
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="importmap">
     {{
       "imports": {{
-        "@hotwired/turbo-rails": "https://ga.jspm.io/npm:@hotwired/turbo-rails@8.0.0/app/javascript/turbo/index.js",
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js",
-        "@rails/actioncable": "https://ga.jspm.io/npm:@rails/actioncable@7.1.0/app/assets/javascripts/actioncable.esm.js"
+        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
       }}
     }}
     </script>
-    <script type="module">import "@hotwired/turbo-rails";</script>
+    <script type="module">import "@hotwired/turbo";</script>
   </head>
   <body>
     <main class="container mx-auto mt-8 px-5 flex flex-col">
