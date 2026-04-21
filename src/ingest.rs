@@ -189,7 +189,14 @@ fn walk_erb(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> IngestResult<()> {
         if path.is_dir() {
             walk_erb(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("erb") {
-            out.push(path);
+            // Only HTML templates — `.html.erb`. Mailer plain-text
+            // templates (`.text.erb`) aren't part of the scaffold
+            // render path and would collide on emit (their stems
+            // strip to the same name as the HTML template).
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with(".html.erb") {
+                out.push(path);
+            }
         }
     }
     Ok(())
@@ -369,6 +376,35 @@ fn yaml_scalar_as_string(v: &serde_yaml_ng::Value) -> Option<String> {
         serde_yaml_ng::Value::Mapping(_) | serde_yaml_ng::Value::Sequence(_) => None,
         serde_yaml_ng::Value::Tagged(t) => yaml_scalar_as_string(&t.value),
     }
+}
+
+/// Guard-clause detector: returns the condition node if `node` is a
+/// bare-return guard (`if COND; return; end` with no else, where the
+/// then-branch is exactly a valueless `return`). Used by the
+/// StatementsNode ingester to rewrite guards into their logical
+/// equivalent — `if COND then nil else rest end` — without needing a
+/// first-class `Return` IR node. Rails seeds scripts use this idiom
+/// (`return if Article.count > 0`) to make seed loading idempotent.
+fn detect_leading_guard<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let if_node = node.as_if_node()?;
+    // Must have no else branch — otherwise it isn't a guard, it's a
+    // regular conditional and the return is one branch's control flow.
+    if if_node.subsequent().is_some() {
+        return None;
+    }
+    // Then-branch must be a single bare `return` (no value). Multi-
+    // statement then-branches, or returns with values, aren't the
+    // guard idiom we're rewriting.
+    let then_stmts = if_node.statements()?;
+    let then_body: Vec<Node<'_>> = then_stmts.body().iter().collect();
+    if then_body.len() != 1 {
+        return None;
+    }
+    let ret = then_body[0].as_return_node()?;
+    if ret.arguments().is_some() {
+        return None;
+    }
+    Some(if_node.predicate())
 }
 
 /// Parse a Ruby source program (possibly multiple top-level statements)
@@ -1572,6 +1608,56 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let block_bytes = block_loc.as_slice();
 
             let body_nodes: Vec<Node<'_>> = stmts.body().iter().collect();
+
+            // Guard-clause rewrite: if the first child is
+            // `if COND; return; end` followed by more statements,
+            // rewrite the whole block as:
+            //   if COND then nil else <rest> end
+            // Semantically equivalent to the guard (skip rest when
+            // COND is true), and keeps the IR free of a bare
+            // `return` node which not every target can lower.
+            // Triggered by the `return if Article.count > 0`
+            // idiom in `db/seeds.rb` (Rails convention for
+            // idempotent seed scripts).
+            if body_nodes.len() >= 2 {
+                if let Some(guard_cond_node) = detect_leading_guard(&body_nodes[0]) {
+                    let cond = ingest_expr(&guard_cond_node, file)?;
+                    let rest_nodes = &body_nodes[1..];
+                    let mut rest_exprs: Vec<Expr> = Vec::with_capacity(rest_nodes.len());
+                    let mut prev_end: Option<usize> = None;
+                    for child in rest_nodes {
+                        let child_start = child.location().start_offset();
+                        let mut expr = ingest_expr(child, file)?;
+                        if let Some(pe) = prev_end {
+                            let from = pe - block_start;
+                            let to = child_start - block_start;
+                            if slice_has_blank_line(block_bytes, from, to) {
+                                expr.leading_blank_line = true;
+                            }
+                        }
+                        rest_exprs.push(expr);
+                        prev_end = Some(child.location().end_offset());
+                    }
+                    let else_branch = if rest_exprs.len() == 1 {
+                        rest_exprs.into_iter().next().unwrap()
+                    } else {
+                        Expr::new(Span::synthetic(), ExprNode::Seq { exprs: rest_exprs })
+                    };
+                    let nil_expr = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Nil },
+                    );
+                    return Ok(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If {
+                            cond,
+                            then_branch: nil_expr,
+                            else_branch,
+                        },
+                    ));
+                }
+            }
+
             let mut exprs: Vec<Expr> = Vec::with_capacity(body_nodes.len());
             let mut prev_end: Option<usize> = None;
             for child in &body_nodes {

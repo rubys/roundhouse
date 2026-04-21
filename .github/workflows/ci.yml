@@ -21,15 +21,50 @@ env:
 
 jobs:
   # -------------------------------------------------------------------
+  # Generate the real-blog fixture once, upload as artifact. Every
+  # downstream test job downloads + extracts it — pay the Ruby/Rails
+  # install cost once per CI run instead of in each of seven jobs.
+  # -------------------------------------------------------------------
+  generate-fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Install Rails
+        run: gem install rails
+      - name: Generate fixtures/real-blog
+        run: make real-blog
+      - name: Pack fixture
+        run: |
+          tar --exclude='./fixtures/real-blog/tmp' \
+              --exclude='./fixtures/real-blog/log' \
+              -czf real-blog.tar.gz fixtures/real-blog
+      - name: Upload fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-blog-fixture
+          path: real-blog.tar.gz
+          retention-days: 1
+
+  # -------------------------------------------------------------------
   # Library correctness. Runs the default (non-ignored) test suite:
   # ingest / analyze / IR round-trip / per-target emit snapshot tests.
   # -------------------------------------------------------------------
   unit:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: cargo test
         run: cargo test --all-targets
 
@@ -38,20 +73,32 @@ jobs:
   # fixtures in-process and runs the target's real toolchain over it.
   # -------------------------------------------------------------------
   toolchain-rust:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: cargo test --test rust_toolchain -- --ignored
         run: cargo test --test rust_toolchain -- --ignored --nocapture
 
   toolchain-crystal:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
         with:
@@ -60,11 +107,17 @@ jobs:
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
   toolchain-typescript:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Node
         uses: actions/setup-node@v4
         with:
@@ -73,11 +126,17 @@ jobs:
         run: cargo test --test typescript_toolchain -- --ignored --nocapture
 
   toolchain-go:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Go
         uses: actions/setup-go@v5
         with:
@@ -86,11 +145,17 @@ jobs:
         run: cargo test --test go_toolchain -- --ignored --nocapture
 
   toolchain-elixir:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Elixir
         uses: erlef/setup-beam@v1
         with:
@@ -100,11 +165,17 @@ jobs:
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
 
   toolchain-python:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -132,6 +203,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: cargo run --bin build-site
         run: cargo run --release --bin build-site
       - name: Upload Pages artifact

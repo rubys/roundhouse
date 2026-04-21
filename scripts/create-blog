@@ -1,0 +1,561 @@
+#!/usr/bin/env bash
+# Create a Ruby2JS blog demo with nested routes and real-time updates
+# Usage: create-blog [app-name]
+#
+# Creates a Rails app with Article and Comment models featuring:
+# - Nested routes for articles and comments
+# - Real-time updates via Turbo Streams broadcasting
+# - broadcasts_to for automatic create/update/destroy broadcasts
+
+set -e
+
+APP_NAME="${1:-blog}"
+
+echo "Creating Ruby2JS blog: $APP_NAME"
+echo ""
+
+# Create Rails app (minimal, with Tailwind for nice styling)
+rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
+cd "$APP_NAME"
+
+# Generate Article scaffold
+rails generate scaffold Article title:string body:text
+
+# Generate Comment scaffold (will be nested under articles)
+rails generate scaffold Comment article:references commenter:string body:text
+
+# Remove unused scaffold-generated comment views (only _comment partial is needed)
+rm -f app/views/comments/index.html.erb app/views/comments/show.html.erb
+rm -f app/views/comments/new.html.erb app/views/comments/edit.html.erb
+rm -f app/views/comments/_form.html.erb app/views/comments/_comment.json.jbuilder
+rm -f app/views/comments/index.json.jbuilder app/views/comments/show.json.jbuilder
+
+# Create database (migration and seeding done separately)
+rails db:create
+
+# Update Article model with associations, validations, and broadcasting
+cat > app/models/article.rb << 'MODEL'
+class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  # Broadcast article changes to index page subscribers
+  # Lambda receives the record being broadcast
+  broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend
+
+  validates :title, presence: true
+  validates :body, presence: true, length: { minimum: 10 }
+end
+MODEL
+
+# Update Comment model with validations and broadcasting
+cat > app/models/comment.rb << 'MODEL'
+class Comment < ApplicationRecord
+  belongs_to :article
+
+  validates :commenter, presence: true
+  validates :body, presence: true
+
+  # Broadcast comment changes to article show page subscribers
+  # Lambda receives the record being broadcast
+  broadcasts_to ->(comment) { "article_#{comment.article_id}_comments" }, target: "comments"
+
+  # Also update article on index when comments change (for comment count)
+  # rescue nil: during seeding, URL helpers aren't available but no one is listening anyway
+  after_create_commit { article.broadcast_replace_to("articles") rescue nil }
+  after_destroy_commit { article.broadcast_replace_to("articles") rescue nil }
+end
+MODEL
+
+# Set up nested routes
+cat > config/routes.rb << 'ROUTES'
+Rails.application.routes.draw do
+  root "articles#index"
+
+  resources :articles do
+    resources :comments, only: [:create, :destroy]
+  end
+end
+ROUTES
+
+# Update ArticlesController to use eager loading and newest-first order
+sed -i.bak 's/@articles = Article.all/@articles = Article.includes(:comments).order(created_at: :desc)/' app/controllers/articles_controller.rb
+rm -f app/controllers/articles_controller.rb.bak
+
+# Replace articles index with simplified version that uses the partial for everything
+# This ensures broadcast renders match the index display (partial includes buttons)
+cat > app/views/articles/index.html.erb << 'VIEW'
+<%= turbo_stream_from "articles" %>
+
+<% content_for :title, "Articles" %>
+
+<div class="w-full">
+  <% if notice.present? %>
+    <p class="py-2 px-3 bg-green-50 mb-5 text-green-500 font-medium rounded-md inline-block" id="notice"><%= notice %></p>
+  <% end %>
+
+  <div class="flex justify-between items-center">
+    <h1 class="font-bold text-4xl">Articles</h1>
+    <%= link_to "New article", new_article_path, class: "rounded-md px-3.5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white block font-medium" %>
+  </div>
+
+  <div id="articles" class="min-w-full divide-y divide-gray-200 space-y-5">
+    <% if @articles.any? %>
+      <%= render @articles %>
+    <% else %>
+      <p class="text-center my-10">No articles found.</p>
+    <% end %>
+  </div>
+</div>
+VIEW
+
+# Update article partial with ID for targeting, comment count, and action buttons
+# The ID allows turbo streams to target individual articles for updates/removal
+# Including buttons here ensures broadcast renders match the index display
+cat > app/views/articles/_article.html.erb << 'PARTIAL'
+<div id="<%= dom_id(article) %>" class="flex flex-col sm:flex-row justify-between items-center pb-5 sm:pb-0">
+  <div class="p-4 border rounded mb-4 flex-grow">
+    <h2 class="text-xl font-bold">
+      <%= link_to article.title, article, class: "text-blue-600 hover:underline" %>
+      <span id="<%= dom_id(article, :comments_count) %>" class="text-gray-500 text-sm font-normal ml-2">
+        (<%= pluralize(article.comments.size, "comment") %>)
+      </span>
+    </h2>
+    <p class="text-gray-700 mt-2"><%= truncate(article.body, length: 100) %></p>
+  </div>
+  <div class="w-full sm:w-auto flex flex-col sm:flex-row space-x-2 space-y-2">
+    <%= link_to "Show", article, class: "w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium" %>
+    <%= link_to "Edit", edit_article_path(article), class: "w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium" %>
+    <%= button_to "Destroy", article, method: :delete, class: "w-full sm:w-auto rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer", data: { turbo_confirm: "Are you sure?" } %>
+  </div>
+</div>
+PARTIAL
+
+# Update CommentsController for nested routes
+# Note: broadcasts_to handles real-time updates automatically, so we just use simple redirects
+cat > app/controllers/comments_controller.rb << 'CONTROLLER'
+class CommentsController < ApplicationController
+  before_action :set_article
+
+  def create
+    @comment = @article.comments.build(comment_params)
+    if @comment.save
+      redirect_to @article, notice: "Comment was successfully created."
+    else
+      redirect_to @article, alert: "Could not create comment."
+    end
+  end
+
+  def destroy
+    @comment = @article.comments.find(params.expect(:id))
+    @comment.destroy
+    redirect_to @article, notice: "Comment was successfully deleted."
+  end
+
+  private
+
+    def set_article
+      @article = Article.find(params.expect(:article_id))
+    end
+
+    def comment_params
+      params.expect(comment: [ :commenter, :body ])
+    end
+end
+CONTROLLER
+
+# Create comment partial for rendering individual comments
+cat > app/views/comments/_comment.html.erb << 'PARTIAL'
+<div id="<%= dom_id(comment) %>" class="p-4 bg-gray-50 rounded">
+  <p class="font-semibold"><%= comment.commenter %></p>
+  <p class="text-gray-700"><%= comment.body %></p>
+  <%= button_to "Delete", [comment.article, comment], method: :delete,
+      class: "text-red-600 text-sm mt-2",
+      data: { turbo_confirm: "Are you sure?" } %>
+</div>
+PARTIAL
+
+# Replace article show view with comments section and real-time updates
+# Don't use the partial here since it includes index-style buttons
+cat > app/views/articles/show.html.erb << 'VIEW'
+<% content_for :title, "Showing article" %>
+
+<div class="md:w-2/3 w-full">
+  <% if notice.present? %>
+    <p class="py-2 px-3 bg-green-50 mb-5 text-green-500 font-medium rounded-md inline-block" id="notice"><%= notice %></p>
+  <% end %>
+
+  <h1 class="font-bold text-4xl"><%= @article.title %></h1>
+
+  <div class="my-4">
+    <p class="text-gray-700"><%= @article.body %></p>
+  </div>
+
+  <%= link_to "Edit this article", edit_article_path(@article), class: "w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium" %>
+  <%= link_to "Back to articles", articles_path, class: "w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium" %>
+  <%= button_to "Destroy this article", @article, method: :delete, form_class: "sm:inline-block mt-2 sm:mt-0 sm:ml-2", class: "w-full rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer", data: { turbo_confirm: "Are you sure?" } %>
+</div>
+
+<hr class="my-8">
+
+<h2 class="text-xl font-bold mb-4">Comments</h2>
+
+<%# Subscribe to real-time comment updates for this article %>
+<%= turbo_stream_from "article_#{@article.id}_comments" %>
+
+<div id="comments" class="space-y-4 mb-8">
+  <%= render @article.comments %>
+</div>
+
+<h3 class="text-lg font-semibold mb-2">Add a Comment</h3>
+
+<%= form_with model: [@article, Comment.new], class: "space-y-4" do |form| %>
+  <div>
+    <%= form.label :commenter, class: "block font-medium" %>
+    <%= form.text_field :commenter, class: "block w-full border rounded p-2" %>
+  </div>
+  <div>
+    <%= form.label :body, class: "block font-medium" %>
+    <%= form.text_area :body, rows: 3, class: "block w-full border rounded p-2" %>
+  </div>
+  <%= form.submit "Add Comment", class: "bg-blue-600 text-white px-4 py-2 rounded" %>
+<% end %>
+VIEW
+
+# Fix layout to use single column (flex-col) instead of row (flex)
+sed -i.bak 's/class="container mx-auto mt-28 px-5 flex"/class="container mx-auto mt-28 px-5 flex flex-col"/' app/views/layouts/application.html.erb
+rm -f app/views/layouts/application.html.erb.bak
+
+# Create seeds with sample articles and comments
+cat > db/seeds.rb << 'SEEDS'
+# Sample articles and comments for the blog demo
+# Seeds are idempotent - only run if database is empty
+return if Article.count > 0
+
+article1 = Article.create!(
+  title: "Getting Started with Rails",
+  body: "Rails is a web application framework running on the Ruby programming language. It makes building web apps faster and easier with conventions over configuration."
+)
+
+article1.comments.create!(
+  commenter: "Alice",
+  body: "Great introduction! Rails really does make development faster."
+)
+
+article1.comments.create!(
+  commenter: "Bob",
+  body: "I love how Rails handles database migrations automatically."
+)
+
+article2 = Article.create!(
+  title: "Understanding MVC Architecture",
+  body: "MVC stands for Model-View-Controller. Models handle data and business logic, Views display information to users, and Controllers coordinate between them."
+)
+
+article2.comments.create!(
+  commenter: "Carol",
+  body: "This pattern really helps keep code organized!"
+)
+
+article3 = Article.create!(
+  title: "Ruby2JS: Rails Everywhere",
+  body: "Ruby2JS transpiles Ruby to JavaScript, enabling Rails applications to run in browsers, on Node.js, and at the edge. Same code, different runtimes."
+)
+
+puts "Created #{Article.count} articles and #{Comment.count} comments"
+SEEDS
+
+# Update fixtures with valid data (body must be >= 10 chars per validation)
+cat > test/fixtures/articles.yml << 'FIXTURES'
+one:
+  title: Getting Started with Rails
+  body: Rails is a web application framework running on the Ruby programming language.
+
+two:
+  title: Understanding MVC Architecture
+  body: MVC stands for Model-View-Controller. Models handle data and business logic.
+FIXTURES
+
+cat > test/fixtures/comments.yml << 'FIXTURES'
+one:
+  article: one
+  commenter: Alice
+  body: Great introduction! Rails really does make development faster.
+
+two:
+  article: two
+  commenter: Bob
+  body: This pattern really helps keep code organized!
+FIXTURES
+
+# Replace scaffold-generated model test stubs with real tests
+cat > test/models/article_test.rb << 'TEST'
+require "test_helper"
+
+class ArticleTest < ActiveSupport::TestCase
+  test "creates an article with valid attributes" do
+    article = articles(:one)
+    assert_not_nil article.id
+    assert_equal "Getting Started with Rails", article.title
+  end
+
+  test "validates title presence" do
+    article = Article.new(title: "", body: "Valid body content here.")
+    assert_not article.save
+  end
+
+  test "validates body minimum length" do
+    article = Article.new(title: "Valid Title", body: "Short")
+    assert_not article.save
+  end
+
+  test "destroys comments when article is destroyed" do
+    article = articles(:one)
+    assert_difference("Comment.count", -1) do
+      article.destroy
+    end
+  end
+end
+TEST
+
+cat > test/models/comment_test.rb << 'TEST'
+require "test_helper"
+
+class CommentTest < ActiveSupport::TestCase
+  test "creates a comment on an article" do
+    comment = comments(:one)
+    assert_not_nil comment.id
+    assert_equal articles(:one).id, comment.article_id
+  end
+
+  test "belongs to article association" do
+    article = articles(:one)
+    comment = article.comments.create(commenter: "Commenter", body: "Comment body text.")
+    assert_equal article.id, comment.article_id
+  end
+
+  test "requires commenter" do
+    article = articles(:one)
+    comment = article.comments.build(body: "Comment without commenter")
+    assert_not comment.save
+  end
+
+  test "requires body" do
+    article = articles(:one)
+    comment = article.comments.build(commenter: "Someone")
+    assert_not comment.save
+  end
+
+  test "requires valid article" do
+    comment = Comment.new(commenter: "Test", body: "A test comment.", article_id: 999999)
+    assert_not comment.save
+  end
+end
+TEST
+
+# Add validation failure test to scaffold-generated articles controller test
+cat > test/controllers/articles_controller_test.rb << 'TEST'
+require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+  end
+
+  test "should get index" do
+    get articles_url
+    assert_response :success
+    assert_select "h1", "Articles"
+    assert_select "#articles" do
+      assert_select "h2", minimum: 1
+    end
+  end
+
+  test "should get new" do
+    get new_article_url
+    assert_response :success
+    assert_select "form"
+  end
+
+  test "should create article" do
+    assert_difference("Article.count") do
+      post articles_url, params: { article: { body: "A sufficiently long body for validation.", title: "New Title" } }
+    end
+
+    assert_redirected_to article_url(Article.last)
+    assert_equal "New Title", Article.last.title
+  end
+
+  test "should not create article with invalid params" do
+    assert_no_difference("Article.count") do
+      post articles_url, params: { article: { title: "", body: "" } }
+    end
+
+    assert_response :unprocessable_entity
+  end
+
+  test "should show article" do
+    get article_url(@article)
+    assert_response :success
+    assert_select "h1", @article.title
+    assert_select "h2", "Comments"
+    assert_select "#comments .p-4", minimum: 1
+  end
+
+  test "should get edit" do
+    get edit_article_url(@article)
+    assert_response :success
+    assert_select "form"
+  end
+
+  test "should update article" do
+    patch article_url(@article), params: { article: { body: @article.body, title: "Updated Title" } }
+    assert_redirected_to article_url(@article)
+    @article.reload
+    assert_equal "Updated Title", @article.title
+  end
+
+  test "should not update article with invalid params" do
+    patch article_url(@article), params: { article: { title: "", body: "" } }
+    assert_response :unprocessable_entity
+  end
+
+  test "should destroy article" do
+    assert_difference("Article.count", -1) do
+      delete article_url(@article)
+    end
+
+    assert_redirected_to articles_url
+  end
+end
+TEST
+
+# Fix scaffold-generated comments controller test for nested routes
+# (comments are nested under articles, only create and destroy actions exist)
+cat > test/controllers/comments_controller_test.rb << 'TEST'
+require "test_helper"
+
+class CommentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @comment = comments(:one)
+  end
+
+  test "should create comment" do
+    assert_difference("Comment.count") do
+      post article_comments_url(@article), params: { comment: { commenter: "Test", body: "A test comment." } }
+    end
+    assert_redirected_to article_url(@article)
+  end
+
+  test "should not create comment with invalid params" do
+    assert_no_difference("Comment.count") do
+      post article_comments_url(@article), params: { comment: { commenter: "", body: "" } }
+    end
+    assert_redirected_to article_url(@article)
+  end
+
+  test "should destroy comment" do
+    assert_difference("Comment.count", -1) do
+      delete article_comment_url(@article, @comment)
+    end
+    assert_redirected_to article_url(@article)
+  end
+end
+TEST
+
+# Generate system test infrastructure (creates application_system_test_case.rb)
+rails generate system_test articles
+
+# System tests (Capybara-style, transpiled to Playwright by Juntos)
+cat > test/system/articles_system_test.rb << 'TEST'
+require "application_system_test_case"
+
+class ArticlesSystemTest < ApplicationSystemTestCase
+  test "full article lifecycle" do
+    visit articles_url
+
+    # Try to create with invalid data
+    click_on "New article"
+    click_button "Create Article"
+    assert_text "prohibited this article from being saved"
+    assert_text "can't be blank"
+
+    # Fill in valid data and create
+    fill_in "Title", with: "My First Article"
+    fill_in "Body", with: "This is the body of my first article, long enough to pass validation."
+    click_button "Create Article"
+    assert_text "Article was successfully created"
+
+    # Verify it appears on the index
+    click_on "Back to articles"
+    assert_text "My First Article"
+
+    # View the article, then edit it
+    click_on "My First Article"
+    click_on "Edit this article"
+    fill_in "Title", with: "My Updated Article"
+    click_button "Update Article"
+    assert_text "Article was successfully updated"
+    assert_text "My Updated Article"
+
+    # Delete the article
+    accept_confirm do
+      click_on "Destroy this article"
+    end
+    assert_text "Article was successfully destroyed"
+    assert_no_text "My Updated Article"
+  end
+
+  test "article with comments" do
+    visit articles_url
+
+    # Create an article
+    click_on "New article"
+    fill_in "Title", with: "Article for Comments"
+    fill_in "Body", with: "This article will have comments added and removed."
+    click_button "Create Article"
+    assert_text "Article was successfully created"
+
+    # Add a comment
+    fill_in "Commenter", with: "Alice"
+    fill_in "Body", with: "Great article!"
+    click_button "Add Comment"
+    assert_text "Comment was successfully created"
+    assert_text "Alice"
+    assert_text "Great article!"
+
+    # Delete the comment
+    accept_confirm do
+      click_button "Delete"
+    end
+    assert_text "Comment was successfully deleted"
+    assert_no_text "Great article!"
+  end
+end
+TEST
+
+echo ""
+echo "Blog created: $APP_NAME/"
+echo ""
+echo "Features:"
+echo "  - Real-time updates via Turbo Streams broadcasting"
+echo "  - Index page updates when articles are added/removed"
+echo "  - Article page updates when comments are added/removed"
+echo ""
+echo "To run with Juntos (transpiled to JavaScript):"
+echo "  cd $APP_NAME"
+echo "  bin/juntos dev -d dexie      # Browser with IndexedDB"
+echo "  bin/juntos dev -d sqljs      # Browser with sql.js (SQLite in WASM)"
+echo ""
+echo "To deploy to Cloudflare:"
+echo "  cd $APP_NAME"
+echo "  bin/juntos db:prepare -d d1  # Create D1 database, migrate, seed"
+echo "  bin/juntos deploy -d d1      # Deploy to Cloudflare Workers"
+echo ""
+echo "To run with Rails:"
+echo "  cd $APP_NAME"
+echo "  bin/rails db:prepare"
+echo "  bin/rails server"
+echo ""
+echo "Open multiple browser tabs to see real-time updates!"
+echo ""
