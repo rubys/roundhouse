@@ -1135,10 +1135,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for ExEmitter<'a> {
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!("{0}.find({id_s}) || %{0}{{}}", class.as_str()))
             }
-            SendKind::QueryChain { target: Some(target) } => {
+            SendKind::QueryChain { target: Some(target), .. } => {
                 Stmt::Expr(format!("{}.all()", target.as_str()))
             }
-            SendKind::QueryChain { target: None } => Stmt::Expr("[]".to_string()),
+            SendKind::QueryChain { target: None, .. } => Stmt::Expr("[]".to_string()),
             SendKind::AssocLookup { target, outer_method } => match outer_method {
                 "find" => {
                     let id_s = args.first().map(|a| self.render_expr(a))

@@ -531,10 +531,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for GoEmitter<'a> {
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!("{}Find({id_s})", class.as_str()))
             }
-            SendKind::QueryChain { target: Some(target) } => {
+            SendKind::QueryChain { target: Some(target), .. } => {
                 Stmt::Expr(format!("{}All()", target.as_str()))
             }
-            SendKind::QueryChain { target: None } => {
+            SendKind::QueryChain { target: None, .. } => {
                 Stmt::Expr("nil /* TODO: unresolved query chain */".to_string())
             }
             SendKind::AssocLookup { target, outer_method } => match outer_method {

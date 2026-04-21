@@ -949,10 +949,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for PyEmitter<'a> {
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!("{0}.find({id_s}) or {0}()", class.as_str()))
             }
-            SendKind::QueryChain { target: Some(target) } => {
+            SendKind::QueryChain { target: Some(target), .. } => {
                 Stmt::Expr(format!("{}.all()", target.as_str()))
             }
-            SendKind::QueryChain { target: None } => Stmt::Expr("[]".to_string()),
+            SendKind::QueryChain { target: None, .. } => Stmt::Expr("[]".to_string()),
             SendKind::AssocLookup { target, outer_method } => match outer_method {
                 "find" => {
                     let id_s = args.first().map(|a| self.render_expr(a))
@@ -1271,13 +1271,13 @@ fn emit_py_controller_send(
 
         SendKind::AssocLookup { target, .. } => format!("{}()", target.as_str()),
 
-        SendKind::QueryChain { target: Some(target) } => {
+        SendKind::QueryChain { target: Some(target), .. } => {
             // List comprehension would be idiomatic later; for 4c a
             // bare empty list with a comment preserves the target
             // hint. Same rationale discussed for TS's `[] as Post[]`.
             format!("[]  # {}[] placeholder", target.as_str())
         }
-        SendKind::QueryChain { target: None } => "[]".to_string(),
+        SendKind::QueryChain { target: None, .. } => "[]".to_string(),
 
         SendKind::PathOrUrlHelper => "\"\"".to_string(),
 

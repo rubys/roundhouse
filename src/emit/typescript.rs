@@ -1099,6 +1099,84 @@ fn emit_ts_route_helpers(app: &App) -> EmittedFile {
     }
 }
 
+/// One layer of an ingested AR chain — the method name + its args.
+/// `collect_chain_modifiers` flattens a chained Send tree into a
+/// Vec of these (bottom-up), and `apply_ts_chain_modifier` composes
+/// them onto the `Target.all()` starting point.
+struct ChainModifier<'a> {
+    method: &'a str,
+    args: &'a [Expr],
+}
+
+/// Walk the chain bottom-up, returning modifier layers in their
+/// natural application order. Stops at the chain's head (a Const
+/// or any non-query-builder Send).
+fn collect_chain_modifiers<'a>(
+    method: &'a str,
+    args: &'a [Expr],
+    recv: Option<&'a Expr>,
+) -> Vec<ChainModifier<'a>> {
+    let mut out = Vec::new();
+    if let Some(r) = recv {
+        if let ExprNode::Send { recv: inner_recv, method: inner_method, args: inner_args, .. } = &*r.node {
+            if crate::catalog::is_query_builder_method(inner_method.as_str()) {
+                out.extend(collect_chain_modifiers(
+                    inner_method.as_str(),
+                    inner_args,
+                    inner_recv.as_ref(),
+                ));
+            }
+        }
+    }
+    out.push(ChainModifier { method, args });
+    out
+}
+
+/// Compose one modifier onto the running TS expression. `all` +
+/// no-op modifiers (includes, preload, joins, distinct, select)
+/// pass through. `order` appends a `.sort(...)` with a comparator
+/// derived from the modifier's `{field: :dir}` hash. Unknown
+/// modifiers drop (returning prev unchanged) so the output still
+/// compiles — a compare-tool divergence will signal the gap.
+fn apply_ts_chain_modifier(prev: String, m: ChainModifier<'_>) -> String {
+    match m.method {
+        "all" | "includes" | "preload" | "joins" | "distinct" | "select" => prev,
+        "order" => {
+            let Some(hash) = m.args.first() else { return prev };
+            let ExprNode::Hash { entries, .. } = &*hash.node else { return prev };
+            let Some((k, v)) = entries.first() else { return prev };
+            let field = match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => return prev,
+            };
+            let dir = match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => "asc".to_string(),
+            };
+            let cmp = if dir == "desc" {
+                format!(
+                    "(a: any, b: any) => (a.{field} < b.{field} ? 1 : a.{field} > b.{field} ? -1 : 0)"
+                )
+            } else {
+                format!(
+                    "(a: any, b: any) => (a.{field} < b.{field} ? -1 : a.{field} > b.{field} ? 1 : 0)"
+                )
+            };
+            format!("{prev}.sort({cmp})")
+        }
+        "limit" => {
+            let Some(n) = m.args.first() else { return prev };
+            if let ExprNode::Lit { value: Literal::Int { value } } = &*n.node {
+                return format!("{prev}.slice(0, {value})");
+            }
+            prev
+        }
+        _ => prev,
+    }
+}
+
 fn lower_first_char(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1504,10 +1582,21 @@ impl<'a> crate::lower::CtrlWalker<'a> for TsEmitter<'a> {
                     )),
                 }
             }
-            SendKind::QueryChain { target: Some(target) } => {
-                Stmt::Expr(format!("{p}{}.all()", target.as_str()))
+            SendKind::QueryChain { target: Some(target), method, args, recv } => {
+                // Walk the full chain to collect modifiers, then
+                // emit `{target}.all()` + modifier calls. For the
+                // scaffold, `order` is the only modifier that
+                // changes observable output — the rest (includes,
+                // preload, joins, distinct) are no-ops for our
+                // sqlite runtime.
+                let modifiers = collect_chain_modifiers(method, args, recv);
+                let mut s = format!("{}.all()", target.as_str());
+                for m in modifiers {
+                    s = apply_ts_chain_modifier(s, m);
+                }
+                Stmt::Expr(format!("{p}{s}"))
             }
-            SendKind::QueryChain { target: None } => {
+            SendKind::QueryChain { target: None, .. } => {
                 Stmt::Expr("[] /* TODO: unresolved query chain */".to_string())
             }
             SendKind::PathOrUrlHelper => Stmt::Expr(format!(
@@ -2067,11 +2156,17 @@ fn emit_ts_view_body(body: &Expr, ctx: &TsViewCtx) -> Vec<String> {
     out
 }
 
+/// Trim the edge whitespace of an if/else branch to match Rails'
+/// erubi trim: the first text chunk loses its leading `\n` (eaten
+/// by the opening `<% if/else %>`), and the last text chunk loses
+/// its trailing line-indent (eaten by the closing `<% else/end %>`).
+fn trim_branch_edges(body: &Expr) -> Expr {
+    let body = trim_leading_newline_of_first_text(body);
+    trim_trailing_line_indent_of_last_text(&body)
+}
+
 /// If `body`'s first statement is `_buf = _buf + "\n..."`,
-/// return a new body with that leading `\n` stripped. Used by
-/// the If emitter to consume the `\n` that follows the opening
-/// `<% if %>` / `<% else %>` / `<% end %>` tags (matching erubi's
-/// trim). Handles both Seq and single-stmt bodies.
+/// return a new body with that leading `\n` stripped.
 fn trim_leading_newline_of_first_text(body: &Expr) -> Expr {
     match &*body.node {
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
@@ -2085,6 +2180,31 @@ fn trim_leading_newline_of_first_text(body: &Expr) -> Expr {
         }
         _ => {
             if let Some(trimmed) = trim_leading_newline_of_text_append(body) {
+                trimmed
+            } else {
+                body.clone()
+            }
+        }
+    }
+}
+
+/// If `body`'s last text-append ends with `\n<horizontal-ws>`,
+/// strip that trailing line-indent. Handles both Seq and single-
+/// stmt bodies.
+fn trim_trailing_line_indent_of_last_text(body: &Expr) -> Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let last_idx = exprs.len() - 1;
+            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(&exprs[last_idx]) {
+                let mut new_exprs = exprs.clone();
+                new_exprs[last_idx] = trimmed;
+                Expr::new(body.span.clone(), ExprNode::Seq { exprs: new_exprs })
+            } else {
+                body.clone()
+            }
+        }
+        _ => {
+            if let Some(trimmed) = trim_trailing_line_indent_of_text_append(body) {
                 trimmed
             } else {
                 body.clone()
@@ -2375,10 +2495,14 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
             };
             let mut out = vec![format!("if ({cond_js}) {{")];
             // erubi trim consumes the `\n` after the opening `<% if
-            // %>` tag. The first statement of the then-branch is a
-            // text append starting with that `\n`; strip it so the
-            // if-body renders the way Rails does.
-            let then_body = trim_leading_newline_of_first_text(then_branch);
+            // %>` tag + the leading indent of the following `<%
+            // else %>` or `<% end %>` tag. That means:
+            //  - The FIRST text of the then-branch loses its `\n`.
+            //  - The LAST text of the then-branch loses its trailing
+            //    line-indent.
+            //  - Same rules for the else-branch against its `<% end
+            //    %>`.
+            let then_body = trim_branch_edges(then_branch);
             for line in emit_ts_view_body(&then_body, ctx) {
                 out.push(format!("  {line}"));
             }
@@ -2388,8 +2512,7 @@ fn emit_ts_view_stmt_pass2(stmt: &Expr, ctx: &TsViewCtx) -> Vec<String> {
             );
             if has_else {
                 out.push("} else {".to_string());
-                // Same trim on the `<% else %>` tag.
-                let else_body = trim_leading_newline_of_first_text(else_branch);
+                let else_body = trim_branch_edges(else_branch);
                 for line in emit_ts_view_body(&else_body, ctx) {
                     out.push(format!("  {line}"));
                 }
@@ -2584,13 +2707,30 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
     }
 
-    // `dom_id(record)` → `Helpers.domId(record)`. Rails produces
-    // `"<singular>_<id>"` — our runtime helper matches that shape.
+    // `dom_id(record [, prefix])` → `Helpers.domId(record, prefix?)`.
+    // Rails uses the 2-arg form for prefixed ids like
+    // `comments_count_article_1`.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "dom_id" && args.len() == 1 {
+        if method.as_str() == "dom_id" && !args.is_empty() && args.len() <= 2 {
             if is_ts_simple_expr(&args[0], ctx) {
-                let arg = emit_ts_view_expr_raw(&args[0], ctx);
-                return format!("_buf += Helpers.domId({arg});");
+                let record = emit_ts_view_expr_raw(&args[0], ctx);
+                if args.len() == 1 {
+                    return format!("_buf += Helpers.domId({record});");
+                }
+                // Second arg is usually a symbol: `:comments_count`.
+                let prefix = match &*args[1].node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                        format!("{:?}", value.as_str())
+                    }
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        format!("{value:?}")
+                    }
+                    _ if is_ts_simple_expr(&args[1], ctx) => {
+                        emit_ts_view_expr_raw(&args[1], ctx)
+                    }
+                    _ => return format!("_buf += Helpers.domId({record});"),
+                };
+                return format!("_buf += Helpers.domId({record}, {prefix});");
             }
         }
     }
@@ -3622,6 +3762,22 @@ fn is_ts_simple_expr(expr: &Expr, ctx: &TsViewCtx) -> bool {
                 {
                     return true;
                 }
+                // Allow association / computed reads on a known
+                // local (`article.comments`). Can't know the exact
+                // attribute set for associations without runtime
+                // introspection, so accept any no-arg method as a
+                // simple read. The emit produces `local.method`
+                // which either resolves at runtime or errors
+                // loudly — compare-tool divergence makes the gap
+                // visible.
+                if ctx.is_local(local_name) {
+                    return true;
+                }
+            }
+            // Chained simple Sends — `article.comments.size`. The
+            // outer recv is itself a simple Send; recurse.
+            if is_ts_simple_expr(r, ctx) {
+                return true;
             }
             false
         }

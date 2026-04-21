@@ -2418,10 +2418,10 @@ impl<'a> crate::lower::CtrlWalker<'a> for RsEmitter<'a> {
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!("{}::find({id_s}).unwrap_or_default()", class.as_str()))
             }
-            SendKind::QueryChain { target: Some(target) } => {
+            SendKind::QueryChain { target: Some(target), .. } => {
                 Stmt::Expr(format!("{}::all()", target.as_str()))
             }
-            SendKind::QueryChain { target: None } => {
+            SendKind::QueryChain { target: None, .. } => {
                 Stmt::Expr("todo!(\"unresolved query chain\")".to_string())
             }
             SendKind::AssocLookup { target, outer_method } => match outer_method {
@@ -3021,10 +3021,10 @@ fn emit_controller_send(
 
         SendKind::AssocLookup { target, .. } => format!("{}::default()", target.as_str()),
 
-        SendKind::QueryChain { target: Some(target) } => {
+        SendKind::QueryChain { target: Some(target), .. } => {
             format!("Vec::<{}>::new()", target.as_str())
         }
-        SendKind::QueryChain { target: None } => "todo!(\"query chain\")".to_string(),
+        SendKind::QueryChain { target: None, .. } => "todo!(\"query chain\")".to_string(),
 
         SendKind::PathOrUrlHelper => "todo!(\"route helper\")".to_string(),
 

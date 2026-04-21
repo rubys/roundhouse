@@ -364,18 +364,20 @@ export function turboStreamFrom(channel: string): string {
   return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
 }
 
-/** `dom_id(record)` → `"<singular>_<id>"` matching Rails'
- *  convention. The singular is derived from the record's
- *  constructor.name (lowercased + underscored), which matches
- *  the model class name emitted by the TS target. Records
- *  without an `id` return the empty string so the attribute
- *  stays visible but unidentified. */
-export function domId(record: any): string {
+/** `dom_id(record, prefix?)` → Rails convention:
+ *    one-arg  → `"<singular>_<id>"`                    (article_1)
+ *    two-arg  → `"<prefix>_<singular>_<id>"`           (comments_count_article_1)
+ *  Singular derives from the record's constructor.name
+ *  (CamelCase → snake_case). Prefix is a symbol or string and
+ *  comes through as-is (no transformation). */
+export function domId(record: any, prefix?: string): string {
   if (!record) return "";
   const singular = String(record.constructor?.name ?? "record")
     .replace(/([a-z])([A-Z])/g, "$1_$2")
     .toLowerCase();
-  return record.id != null ? `${singular}_${record.id}` : singular + "_new";
+  const id = record.id != null ? String(record.id) : "new";
+  const base = `${singular}_${id}`;
+  return prefix ? `${prefix}_${base}` : base;
 }
 
 /** Naive pluralization — append `s` when count != 1. */

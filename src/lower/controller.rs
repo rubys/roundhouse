@@ -287,10 +287,23 @@ pub enum SendKind<'a> {
     /// Send whose method name singularizes to a known model).
     /// Every emitter renders this as a zero-value of `target`.
     AssocLookup { target: Symbol, outer_method: &'a str },
-    /// Unsupported query-builder chain (`.all`/`.order`/`.where`/…).
-    /// Target class from chain walk; `None` when the chain's head
-    /// isn't a known model.
-    QueryChain { target: Option<Symbol> },
+    /// Query-builder chain — `.all`/`.order`/`.where`/`.includes`/...
+    /// on a model class. Emitters render the chain by composing
+    /// the outer `method` over the (recursively rendered) `recv`.
+    /// `target` is the chain's head class when known.
+    ///
+    /// - `method`: the outermost call (e.g. "order").
+    /// - `args`: args to that outer call (e.g. `[{created_at:
+    ///   :desc}]` for `order(created_at: :desc)`).
+    /// - `recv`: the chain's receiver — either the head class
+    ///   (Const) or an inner query-builder Send. Emitters render
+    ///   this first, then apply the outer method.
+    QueryChain {
+        target: Option<Symbol>,
+        method: &'a str,
+        args: &'a [Expr],
+        recv: Option<&'a Expr>,
+    },
 
     /// Bare `*_path` / `*_url` — Rails URL helpers. No runtime.
     PathOrUrlHelper,
@@ -415,7 +428,12 @@ pub fn classify_controller_send<'a>(
     // anything. Target model is the chain's Const head.
     if is_query_builder_method(method) {
         let target = recv.and_then(|r| chain_target_class(r, known_models));
-        return Some(SendKind::QueryChain { target });
+        return Some(SendKind::QueryChain {
+            target,
+            method,
+            args,
+            recv,
+        });
     }
 
     // `<assoc>.find(x)` / `.build(h)` / `.create(h)` on a Send recv
