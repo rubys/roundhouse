@@ -149,13 +149,33 @@ fn convert(handle: &Handle, config: &CompiledConfig) -> Node {
 }
 
 fn convert_children(handle: &Handle, config: &CompiledConfig) -> Vec<Node> {
-    let mut out = Vec::new();
+    let mut out: Vec<Node> = Vec::new();
     for child in handle.children.borrow().iter() {
         let node = convert(child, config);
         // Post-filter comments if configured to drop them.
         if config.drop_comments
             && matches!(node, Node::Comment { .. })
         {
+            continue;
+        }
+        // Element-level ignore rules collapse the element to a
+        // Text node (see `convert`). When such a replacement
+        // produces an empty string — the common case, because we
+        // mask elements like `<meta csrf-token>` entirely — drop
+        // it so it doesn't show up as a stray empty text sibling.
+        if let Node::Text { value } = &node {
+            if value.is_empty() {
+                continue;
+            }
+        }
+        // Merge adjacent text nodes. Dropping comments (and
+        // masked elements, per the rule above) can leave two text
+        // siblings that were separated by the dropped node; for
+        // structural equivalence we want them to compare as one.
+        if let (Some(Node::Text { value: tail }), Node::Text { value: add }) =
+            (out.last_mut(), &node)
+        {
+            tail.push_str(add);
             continue;
         }
         out.push(node);
