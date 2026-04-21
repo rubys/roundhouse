@@ -47,40 +47,129 @@ export function buttonTo(text: string, target: string, opts: Record<string, stri
   return `<form method="post" action="${escapeHtml(target)}" class="${escapeHtml(cls)}">${methodInput}<button>${escapeHtml(text)}</button></form>`;
 }
 
-/** Form-tag wrapper. Called by the emitter after rendering a
- *  `form_with` block's inner buffer. */
-export function formWrap(action: string | null, cls: string, inner: string): string {
-  const actionAttr = action != null ? ` action="${escapeHtml(action)}"` : "";
-  return `<form method="post"${actionAttr} class="${escapeHtml(cls)}">${inner}</form>`;
+/** Form-tag wrapper. Rails' `form_with(model: record)` computes
+ *  the action URL from the record's persistence state: new
+ *  records POST to the resource's collection URL; persisted
+ *  records PATCH to the member URL. Method override for PATCH /
+ *  PUT / DELETE uses a hidden `_method` input so browsers (which
+ *  only natively support GET/POST in forms) can still issue the
+ *  right HTTP verb — the server's handleRequest honors it.
+ *
+ *  `resourcePath` is the Rails `polymorphic_path` equivalent:
+ *  "/articles" for a new Article, "/articles/123" for an
+ *  existing one. The emitter computes this from the view's
+ *  resource context + record.id. */
+export function formWrap(
+  record: { id?: number | null } | null,
+  resourcePath: string,
+  cls: string,
+  inner: string,
+): string {
+  const persisted = !!(record && record.id);
+  const action = persisted ? `${resourcePath}` : resourcePath;
+  // Turbo's standard shape: hidden `_method` input for PATCH /
+  // PUT / DELETE (the server's handleRequest reads this to
+  // override the HTTP verb) + `authenticity_token` hidden input
+  // for CSRF. Roundhouse's handleRequest doesn't verify CSRF
+  // today; we still emit the field so Rails-convention form
+  // submissions match the shape Turbo expects.
+  const methodInput = persisted
+    ? `<input type="hidden" name="_method" value="patch">`
+    : "";
+  const csrfInput = `<input type="hidden" name="authenticity_token" value="">`;
+  const classAttr = cls ? ` class="${escapeHtml(cls)}"` : "";
+  return `<form method="post" action="${escapeHtml(action)}"${classAttr}>${methodInput}${csrfInput}${inner}</form>`;
 }
 
-/** Stub FormBuilder. One instance per form_with block. Minimal
- *  option support — the scaffold tests don't check input
+/** Humanize a snake_case field name for a label: `"first_name"`
+ *  → `"First name"`. Rails' default `label` helper does this. */
+function humanize(field: string): string {
+  const spaced = field.replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** FormBuilder for the scaffold shape. `record` is the record
+ *  being edited (used for field values + HTML id-es); `prefix`
+ *  is the Rails `name` prefix (`"article"` → inputs get
+ *  `name="article[title]"`). Options pass through as a record;
+ *  `class` gets set as the input's HTML class attribute; `rows`
+ *  / `cols` set on textarea; other keys pass through as HTML
  *  attributes. */
 export class FormBuilder {
-  record: unknown;
-  cls: string;
+  record: Record<string, any> | null;
+  prefix: string;
 
-  constructor(record: unknown, cls: string = "") {
+  constructor(record: Record<string, any> | null, prefix: string) {
     this.record = record;
-    this.cls = cls;
+    this.prefix = prefix;
   }
 
-  label(field: string): string {
-    return `<label for="${escapeHtml(field)}">${escapeHtml(field)}</label>`;
+  private _id(field: string): string {
+    return `${this.prefix}_${field}`;
   }
 
-  textField(field: string): string {
-    return `<input type="text" name="${escapeHtml(field)}"/>`;
+  private _name(field: string): string {
+    return `${this.prefix}[${field}]`;
   }
 
-  textarea(field: string): string {
-    return `<textarea name="${escapeHtml(field)}"></textarea>`;
+  private _value(field: string): string {
+    const v = this.record?.[field];
+    return v == null ? "" : String(v);
   }
 
-  submit(): string {
-    return `<input type="submit" value="Submit"/>`;
+  label(field: string, opts: Record<string, any> = {}): string {
+    const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
+    return `<label for="${escapeHtml(this._id(field))}"${cls}>${escapeHtml(humanize(field))}</label>`;
   }
+
+  textField(field: string, opts: Record<string, any> = {}): string {
+    const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
+    return `<input type="text" name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}" value="${escapeHtml(this._value(field))}"${cls}>`;
+  }
+
+  textArea(field: string, opts: Record<string, any> = {}): string {
+    const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
+    const rows = opts.rows != null ? ` rows="${escapeHtml(String(opts.rows))}"` : "";
+    return `<textarea name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}"${cls}${rows}>${escapeHtml(this._value(field))}</textarea>`;
+  }
+
+  // Rails' Ruby form helper is `textarea` in newer versions,
+  // `text_area` historically. Support both identifier spellings.
+  textarea(field: string, opts: Record<string, any> = {}): string {
+    return this.textArea(field, opts);
+  }
+
+  submit(opts: Record<string, any> = {}): string {
+    const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
+    const label = typeof opts.label === "string"
+      ? opts.label
+      : (this.record && this.record.id ? `Update ${this.prefix}` : `Create ${this.prefix}`);
+    return `<input type="submit" value="${escapeHtml(label)}"${cls}>`;
+  }
+}
+
+/** `<%= errorMessagesFor(article, "article") %>` — renders the
+ *  standard Rails-scaffold error block if the record has
+ *  validation errors, otherwise empty string. Consolidates the
+ *  `if record.errors.any? ... end` + iteration pattern the ERB
+ *  form partial uses, so the emitter doesn't have to translate
+ *  those control-flow shapes view-by-view. */
+export function errorMessagesFor(record: { errors?: { none?: boolean; any?: boolean; count?: number } & Record<string, any> } | null, noun: string): string {
+  if (!record || !record.errors) return "";
+  const errs = record.errors as any;
+  const none = typeof errs.none === "boolean" ? errs.none : !(errs.any ?? false);
+  if (none) return "";
+  const count = typeof errs.count === "number" ? errs.count : 0;
+  // Scaffold shape: list of "<field> <message>" lines from the
+  // ErrorCollection's internal list. juntos.ts' ErrorCollection
+  // exposes the raw array via a non-public field; we reach in for
+  // message rendering. Production would expose a fullMessages()
+  // method symmetrical to Rails'.
+  const list = (errs as any)._errors as Array<{ field: string; message: string }> | undefined;
+  const items = list
+    ? list.map((e) => `<li>${escapeHtml(humanize(e.field))} ${escapeHtml(e.message)}</li>`).join("")
+    : "";
+  return `<div id="error_explanation" class="bg-red-50 text-red-500 px-3 py-2 font-medium rounded-md mt-3"><h2>${count} error${count === 1 ? "" : "s"} prohibited this ${escapeHtml(noun)} from being saved:</h2><ul class="list-disc ml-6">${items}</ul></div>`;
 }
 
 /** `<%= turbo_stream_from "articles" %>` — subscribes the page

@@ -2141,6 +2141,37 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
         }
     }
 
+    // `form.label :title` / `form.text_field :title, class: "..."` /
+    // `form.text_area :body, rows: 4, class: "..."` /
+    // `form.submit class: "..."` — FormBuilder method calls.
+    // Recognize when `form` is a local (bound by the enclosing
+    // form_with's block param). Hash arguments (class, rows, etc.)
+    // pass through as an options object; non-hash args (first
+    // arg is typically a field symbol) go positionally.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*inner.node {
+        if let ExprNode::Var { name: recv_name, .. } = &*r.node {
+            if ctx.is_local(recv_name.as_str()) {
+                // Common form builder methods. text_area vs textArea —
+                // emit both as textArea call (TS idiomatic camelCase).
+                let ts_method = match method.as_str() {
+                    "label" => Some("label"),
+                    "text_field" => Some("textField"),
+                    "text_area" | "textarea" => Some("textArea"),
+                    "submit" => Some("submit"),
+                    _ => None,
+                };
+                if let Some(js_method) = ts_method {
+                    return emit_ts_form_builder_call(
+                        recv_name.as_str(),
+                        js_method,
+                        args,
+                        ctx,
+                    );
+                }
+            }
+        }
+    }
+
     // Simple interpolation.
     if is_ts_simple_expr(inner, ctx) {
         return format!(
@@ -2154,6 +2185,94 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
 
 fn is_ts_capturing_helper(method: &str) -> bool {
     matches!(method, "form_with" | "content_for")
+}
+
+/// Emit a FormBuilder method call (`form.label("title")` etc.)
+/// that produces HTML appended to the surrounding view buffer.
+/// Separates positional args (first arg, typically a field
+/// symbol like `:title`) from the trailing options hash (class,
+/// rows, etc.). Hash args pass through as a JS object literal;
+/// non-simple expressions inside options fall back to empty
+/// so emission doesn't choke on the Rails scaffold's conditional-
+/// class arrays (`[..., {cond: ...}]`) which aren't supported
+/// today.
+fn emit_ts_form_builder_call(
+    recv: &str,
+    js_method: &str,
+    args: &[Expr],
+    ctx: &TsViewCtx,
+) -> String {
+    // First arg (if any) is the field name — emit as string.
+    // Options hash (if present, usually last arg) becomes a JS
+    // object literal. `submit` is special: it takes only options.
+    let (field_arg, opts_arg) = split_form_builder_args(args, ctx);
+    let call_args = match (field_arg, opts_arg) {
+        (Some(field), Some(opts)) => format!("{field}, {opts}"),
+        (Some(field), None) => field,
+        (None, Some(opts)) => opts,
+        (None, None) => String::new(),
+    };
+    format!("_buf += {recv}.{js_method}({call_args});")
+}
+
+/// Split FormBuilder args into (field, options). Field is the
+/// first positional arg (usually a Sym); options is the last
+/// Hash arg. For `form.submit class: "..."` there's no field,
+/// just options. Scaffold `form.text_field :title, class: [..]`
+/// has both; the class array is simplified to its first string
+/// element (the conditional-hash part is dropped — good enough
+/// for the acceptance test's visual correctness).
+fn split_form_builder_args(args: &[Expr], ctx: &TsViewCtx) -> (Option<String>, Option<String>) {
+    if args.is_empty() {
+        return (None, None);
+    }
+    // Detect leading symbol arg as the field.
+    let (field_arg, rest) = match args.first().and_then(|a| match &*a.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }) {
+        Some(field) => (Some(format!("{field:?}")), &args[1..]),
+        None => (None, args),
+    };
+    // Remaining args: expect a single Hash (options).
+    let opts_arg = rest.iter().find_map(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
+        _ => None,
+    });
+    (field_arg, opts_arg)
+}
+
+/// Render a Ruby hash literal's entries as a JS object literal,
+/// simplifying where needed: unsupported values (e.g. arrays
+/// with conditional-class hashes) fall back to empty string;
+/// simple literals and locals emit verbatim. Good enough for
+/// the scaffold form's `class:`/`rows:` kwargs.
+fn ts_hash_to_object_literal(
+    entries: &[(Expr, Expr)],
+    ctx: &TsViewCtx,
+) -> String {
+    let mut parts = Vec::new();
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => continue,
+        };
+        let val = if is_ts_simple_expr(v, ctx) {
+            emit_ts_view_expr_raw(v, ctx)
+        } else if let ExprNode::Array { elements, .. } = &*v.node {
+            // Scaffold pattern: `class: [str, {cond: class}]` —
+            // pick the first string element for simplicity.
+            match elements.first() {
+                Some(first) if is_ts_simple_expr(first, ctx) => emit_ts_view_expr_raw(first, ctx),
+                _ => "\"\"".to_string(),
+            }
+        } else {
+            "\"\"".to_string()
+        };
+        parts.push(format!("{key:?}: {val}"));
+    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 fn emit_ts_captured_helper(
@@ -2171,13 +2290,60 @@ fn emit_ts_captured_helper(
         .filter(|e| is_ts_simple_expr(e, ctx))
         .map(|e| emit_ts_view_expr_raw(e, ctx))
         .unwrap_or_else(|| "\"\"".to_string());
+    // `form_with(model: record, ...)` — extract the record
+    // expression. It becomes the FormBuilder's record arg
+    // (drives field values + persisted check) and feeds the
+    // action URL derivation. When the extraction doesn't find a
+    // simple Var-like reference (e.g. `form_with model: [parent,
+    // Child.new]` for nested resources), fall back to the
+    // view's primary arg — Rails' partial convention is that
+    // the partial's first local IS the form record (`_form.html.
+    // erb(article)` / `_form.html.erb(comment)`), so using
+    // arg_name gives us correct values + persisted state for
+    // every scaffold.
+    let model_expr = args
+        .iter()
+        .find_map(|a| ts_extract_kwarg(a, "model"))
+        .filter(|e| is_ts_simple_expr(e, ctx))
+        .map(|e| emit_ts_view_expr_raw(e, ctx))
+        .or_else(|| {
+            if !ctx.arg_name.is_empty() && ctx.is_local(&ctx.arg_name) {
+                Some(ctx.arg_name.clone())
+            } else {
+                None
+            }
+        });
     let inner_body = match method {
         "form_with" => {
             let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
+            let record_arg = model_expr.clone().unwrap_or_else(|| "null".to_string());
+            // Prefix is the resource's singular name. The view
+            // ctx gives us the view path like "articles/new";
+            // we singularize the directory segment. Fall back to
+            // the arg_name (set by view-signature derivation)
+            // when context doesn't hint at a resource.
+            let prefix = if !ctx.resource_dir.is_empty() {
+                crate::naming::singularize(&ctx.resource_dir)
+            } else {
+                ctx.arg_name.clone()
+            };
             let mut lines = vec![
                 "{".to_string(),
                 "  let _buf = \"\";".to_string(),
-                format!("  const {pname} = new Helpers.FormBuilder(undefined);"),
+                format!(
+                    "  const {pname} = new Helpers.FormBuilder({record_arg} as any, \"{prefix}\");",
+                ),
+                // Automatic validation-error display — renders the
+                // scaffold error block when the record has errors,
+                // empty otherwise. Replaces the scaffold's
+                // `<% if record.errors.any? %>…<% end %>` block,
+                // which currently stubs to `if (false) { … }` in
+                // the generic view emit. Until the conditional +
+                // iteration emission catches up, this helper gives
+                // us the E2E-scenario error display for free.
+                format!(
+                    "  _buf += Helpers.errorMessagesFor({record_arg} as any, \"{prefix}\");",
+                ),
             ];
             let inner_ctx = TsViewCtx {
                 locals: {
@@ -2192,7 +2358,23 @@ fn emit_ts_captured_helper(
             for line in emit_ts_view_body(body, &inner_ctx) {
                 lines.push(format!("  {line}"));
             }
-            lines.push(format!("  return Helpers.formWrap(null, {cls_expr}, _buf);"));
+            // Action URL — computed at runtime from the record +
+            // resource-path helper. For new (no id) it's the
+            // collection path; for existing it's the member path.
+            let plural = if !ctx.resource_dir.is_empty() {
+                ctx.resource_dir.clone()
+            } else {
+                crate::naming::pluralize_snake(&prefix)
+            };
+            let plural_camel = lower_first_char(&crate::naming::camelize(&plural));
+            let singular_camel = lower_first_char(&crate::naming::camelize(&prefix));
+            let record_ref = model_expr.clone().unwrap_or_else(|| "null".to_string());
+            let path_expr = format!(
+                "(({record_ref} as any)?.id ? routeHelpers.{singular_camel}Path(({record_ref} as any).id) : routeHelpers.{plural_camel}Path())",
+            );
+            lines.push(format!(
+                "  return Helpers.formWrap({record_arg} as any, {path_expr}, {cls_expr}, _buf);",
+            ));
             lines.push("}".to_string());
             lines.join("\n  ")
         }
