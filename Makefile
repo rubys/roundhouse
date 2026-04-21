@@ -16,3 +16,18 @@ real-blog:
 .PHONY: clean-real-blog
 clean-real-blog:
 	rm -rf fixtures/real-blog
+
+# Run the end-to-end cross-rendering compare for a target. Drives
+# regenerate → build → seed → start Rails + target → diff. See
+# `scripts/compare --help` for flags. Default target is typescript.
+.PHONY: compare
+compare:
+	scripts/compare $(or $(TARGET),typescript)
+
+.PHONY: compare-rust
+compare-rust:
+	scripts/compare rust
+
+.PHONY: compare-ts
+compare-ts:
+	scripts/compare typescript

@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# scripts/compare — end-to-end cross-rendering compare.
+#
+# One command drives the whole loop: regenerate the target,
+# prepare the DB, boot Rails + the target server, run
+# roundhouse-compare, and clean up on exit (even on failure or
+# SIGINT). Exit code matches the compare tool's — 0 on all-match,
+# non-zero on any divergence.
+#
+# Usage:  scripts/compare [options] TARGET
+#
+#   TARGET ∈ { typescript | ts | rust | rs }
+#     (others are emitted but no live server runtime yet; extend
+#     as targets grow.)
+#
+# Options:
+#   --path PATH           URL path to compare (repeatable). Default:
+#                         / /articles /articles/1 /articles/new
+#                         /articles/1/edit
+#   --rails-port N        Port for Rails (default 4000)
+#   --target-port N       Port for target (default 3000)
+#   --keep                Don't tear down servers or wipe the
+#                         target build dir (debug inspection)
+#   --verbose             Pass --verbose through to compare tool
+#                         (full body diff on failure)
+#   --skip-emit           Reuse existing target build (faster
+#                         re-runs on the same target)
+#
+# Environment: Rails gems must be installed (handled by
+# `make real-blog`); Ruby/Node/Rust toolchains must be available
+# per target.
+
+set -euo pipefail
+
+# -------- arg parsing --------
+
+TARGET=""
+PATHS=()
+RAILS_PORT=4000
+TARGET_PORT=3000
+KEEP=0
+VERBOSE=0
+SKIP_EMIT=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --path)
+            PATHS+=("$2")
+            shift 2
+            ;;
+        --rails-port)
+            RAILS_PORT="$2"
+            shift 2
+            ;;
+        --target-port)
+            TARGET_PORT="$2"
+            shift 2
+            ;;
+        --keep)
+            KEEP=1
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --skip-emit)
+            SKIP_EMIT=1
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        -*)
+            echo "unknown flag: $1" >&2
+            exit 2
+            ;;
+        *)
+            if [[ -z "$TARGET" ]]; then
+                TARGET="$1"
+            else
+                echo "unexpected positional arg: $1" >&2
+                exit 2
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$TARGET" ]]; then
+    echo "usage: scripts/compare [options] TARGET" >&2
+    exit 2
+fi
+
+# Normalize + validate target.
+case "$TARGET" in
+    typescript|ts) TARGET=typescript ;;
+    rust|rs)       TARGET=rust ;;
+    *)
+        echo "unsupported target: $TARGET (want typescript or rust)" >&2
+        exit 2
+        ;;
+esac
+
+if [[ ${#PATHS[@]} -eq 0 ]]; then
+    PATHS=(/ /articles /articles/1 /articles/new /articles/1/edit)
+fi
+
+# -------- paths --------
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FIXTURE="$REPO_ROOT/fixtures/real-blog"
+COMPARE_BIN="$REPO_ROOT/tools/compare/target/release/roundhouse-compare"
+LOG_DIR="$(mktemp -d -t roundhouse-compare-logs.XXXXXX)"
+RAILS_LOG="$LOG_DIR/rails.log"
+TARGET_LOG="$LOG_DIR/target.log"
+
+# Target-specific paths.
+case "$TARGET" in
+    typescript)
+        BUILD_DIR="/tmp/rh-ts-pass2"
+        DB_DEST="$BUILD_DIR/db/development.sqlite3"
+        ;;
+    rust)
+        BUILD_DIR="/tmp/rh-rs-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+esac
+
+# -------- helpers --------
+
+step() {
+    printf '\033[36m→\033[0m %s\n' "$*"
+}
+
+ok() {
+    printf '\033[32m✓\033[0m %s\n' "$*"
+}
+
+fail() {
+    printf '\033[31m✗\033[0m %s\n' "$*" >&2
+}
+
+wait_for_port() {
+    local url="$1"
+    local label="$2"
+    local deadline=$(( $(date +%s) + 30 ))
+    while (( $(date +%s) < deadline )); do
+        if curl --silent --fail --output /dev/null "$url" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.3
+    done
+    fail "$label did not come up within 30s ($url)"
+    return 1
+}
+
+RAILS_PID=""
+TARGET_PID=""
+
+# Kill the entire process tree under a given PID. Bash's `&`
+# reports the subshell PID but `rails server` / `npm start` fork
+# children (Puma workers, tsx loader) that don't receive signals
+# sent to the subshell. `pkill -P` targets direct children; we
+# recurse so Rails' Puma grandchildren get hit too.
+kill_tree() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return
+    # Collect children before we kill the root — they'd be
+    # reparented to init otherwise.
+    local children
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    kill "$pid" 2>/dev/null || true
+    for child in $children; do
+        kill_tree "$child"
+    done
+}
+
+cleanup() {
+    local code=$?
+    if (( KEEP == 0 )); then
+        kill_tree "$RAILS_PID"
+        kill_tree "$TARGET_PID"
+        # Give the OS a beat to release listener sockets so back-to-
+        # back runs don't trip EADDRINUSE.
+        sleep 0.3
+        wait 2>/dev/null || true
+    else
+        echo
+        step "--keep: servers still running"
+        [[ -n "$RAILS_PID"  ]] && echo "  rails  PID=$RAILS_PID  port=$RAILS_PORT"
+        [[ -n "$TARGET_PID" ]] && echo "  target PID=$TARGET_PID port=$TARGET_PORT"
+        echo "  logs $LOG_DIR"
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+# -------- 1. fixture --------
+
+if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
+    step "regenerating fixtures/real-blog (make real-blog)"
+    (cd "$REPO_ROOT" && make real-blog >/dev/null)
+fi
+ok "fixture ready ($FIXTURE)"
+
+# -------- 2. compare tool --------
+
+if [[ ! -x "$COMPARE_BIN" ]]; then
+    step "building roundhouse-compare"
+    (cd "$REPO_ROOT/tools/compare" && cargo build --release --quiet)
+fi
+ok "compare tool ready"
+
+# -------- 3. regenerate target --------
+
+if (( SKIP_EMIT == 0 )); then
+    step "regenerating target ($TARGET) → $BUILD_DIR"
+    (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
+fi
+ok "target emit at $BUILD_DIR"
+
+# -------- 4. build target --------
+
+case "$TARGET" in
+    typescript)
+        if [[ ! -d "$BUILD_DIR/node_modules" ]] || (( SKIP_EMIT == 0 )); then
+            step "installing npm deps"
+            (cd "$BUILD_DIR" && npm install --silent --no-audit --no-fund)
+        fi
+        ;;
+    rust)
+        step "building rust target (release)"
+        (cd "$BUILD_DIR" && cargo build --release --quiet)
+        ;;
+esac
+ok "target built"
+
+# -------- 5. stage DB --------
+
+step "staging seeded DB → $DB_DEST"
+mkdir -p "$(dirname "$DB_DEST")"
+rm -f "$DB_DEST" "$DB_DEST-wal" "$DB_DEST-shm"
+# `.backup` is a quiescent copy — reads through Rails' WAL so the
+# target starts from the same snapshot a query against the live
+# Rails DB would see.
+sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $DB_DEST"
+ok "DB staged ($(sqlite3 "$DB_DEST" 'SELECT COUNT(*) FROM articles') articles)"
+
+# -------- 6. start Rails --------
+
+step "starting Rails on :$RAILS_PORT"
+(cd "$FIXTURE" && bin/rails server -p "$RAILS_PORT" -e development >"$RAILS_LOG" 2>&1) &
+RAILS_PID=$!
+wait_for_port "http://localhost:$RAILS_PORT/articles" "rails" || {
+    echo "--- rails log ---" >&2
+    tail -20 "$RAILS_LOG" >&2
+    exit 1
+}
+ok "rails up"
+
+# -------- 7. start target --------
+
+step "starting $TARGET on :$TARGET_PORT"
+case "$TARGET" in
+    typescript)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" npm start >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    rust)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./target/release/app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+esac
+wait_for_port "http://localhost:$TARGET_PORT/articles" "$TARGET" || {
+    echo "--- $TARGET log ---" >&2
+    tail -20 "$TARGET_LOG" >&2
+    exit 1
+}
+ok "$TARGET up"
+
+# -------- 8. run compare --------
+
+echo
+step "compare (reference=http://localhost:$RAILS_PORT target=http://localhost:$TARGET_PORT)"
+echo
+
+compare_args=(
+    --reference "http://localhost:$RAILS_PORT"
+    --target "http://localhost:$TARGET_PORT"
+)
+for p in "${PATHS[@]}"; do
+    compare_args+=(--path "$p")
+done
+if (( VERBOSE == 1 )); then
+    compare_args+=(--verbose)
+fi
+
+set +e
+"$COMPARE_BIN" "${compare_args[@]}"
+compare_exit=$?
+set -e
+
+exit "$compare_exit"
