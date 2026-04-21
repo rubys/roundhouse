@@ -25,6 +25,32 @@ pub struct App {
     /// fresh. None when the app has no seeds file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeds: Option<Expr>,
+    /// Pins from `config/importmap.rb`, expanded (each
+    /// `pin_all_from` has been resolved into explicit per-file
+    /// pins via `app/javascript/**` walking). Consumed by the
+    /// `<%= javascript_importmap_tags %>` view-helper lowering.
+    /// None when the app has no importmap.rb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub importmap: Option<Importmap>,
+}
+
+/// A Rails-style importmap: one `<name>` → `<path>` entry per
+/// pin, in declaration order (Rails preserves order for
+/// modulepreload link emission).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct Importmap {
+    pub pins: Vec<ImportmapPin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportmapPin {
+    /// Module specifier the page imports (`"application"`,
+    /// `"@hotwired/turbo-rails"`, `"controllers/hello_controller"`).
+    pub name: String,
+    /// Served asset path (`/assets/application.js`,
+    /// `/assets/turbo.min.js`, …). Canonical (no fingerprint);
+    /// real deployments sprinkle digests in here.
+    pub path: String,
 }
 
 impl App {
@@ -41,6 +67,7 @@ impl App {
             test_modules: Vec::new(),
             fixtures: Vec::new(),
             seeds: None,
+            importmap: None,
         }
     }
 }

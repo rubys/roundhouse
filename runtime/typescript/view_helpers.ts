@@ -23,6 +23,121 @@ export class RenderCtx {
   title?: string;
 }
 
+// ── Per-request render state ────────────────────────────────────
+//
+// Rails' `yield` / `content_for` / `yield :slot` idiom assumes a
+// shared render context between the inner view (which sets slots
+// + returns a body) and the outer layout (which reads them). Our
+// runtime threads this via a module-level slot map, reset per
+// request by the server before dispatching. Node is single-
+// threaded per-event-loop so there's no need for AsyncLocalStorage
+// — the `handleRequest` function runs start-to-finish without
+// interleaving.
+
+const slots: Map<string, string> = new Map();
+let yieldBody: string = "";
+
+/** Called by the server at the start of each request to wipe any
+ *  stale slot values left over from a prior render. */
+export function resetRenderState(): void {
+  slots.clear();
+  yieldBody = "";
+}
+
+/** Set the main (unnamed) yield body — the controller's view
+ *  output that the layout's `<%= yield %>` will emit. */
+export function setYield(body: string): void {
+  yieldBody = body;
+}
+
+/** Read the main yield body. Called by the layout's `<%= yield %>`. */
+export function getYield(): string {
+  return yieldBody;
+}
+
+/** Read a named slot. Called by the layout's `<%= yield :slot %>`
+ *  and by `<%= content_for(:slot) %>` (getter form). Returns the
+ *  empty string when unset so string concat in the emit doesn't
+ *  produce "undefined". */
+export function getSlot(name: string): string {
+  return slots.get(name) ?? "";
+}
+
+/** `content_for(:slot, "body")` — setter form. The 2-arg variant
+ *  stashes into a named slot; layouts read via `getSlot` (or
+ *  emitted `<%= yield :slot %>`). Returns empty string so the
+ *  surrounding concat doesn't inject the stashed value twice. */
+export function contentFor(slot: string, body?: string): string {
+  if (body !== undefined) {
+    // Rails semantics: content_for appends on repeated calls. We
+    // mirror that so a view can build up a slot across multiple
+    // fragments.
+    const prior = slots.get(slot) ?? "";
+    slots.set(slot, prior + body);
+    return "";
+  }
+  return slots.get(slot) ?? "";
+}
+
+// ── Rails layout helpers ────────────────────────────────────────
+//
+// Produce HTML shaped like Rails' output of the same-named
+// helpers so the compare tool's structural diff passes when the
+// normalizer strips per-request / per-build values. Fingerprint
+// masking happens in the compare tool's default config; here we
+// emit the canonical structural shape.
+
+/** `<%= csrf_meta_tags %>` — emits csrf-param + csrf-token meta
+ *  tags. The token value is empty; the compare tool's default
+ *  config drops the whole `<meta name="csrf-token">` element for
+ *  equivalence purposes. */
+export function csrfMetaTags(): string {
+  return `<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />`;
+}
+
+/** `<%= csp_meta_tag %>` — CSP nonce meta tag. Nonce is per-
+ *  request; compare-tool config masks it. */
+export function cspMetaTag(): string {
+  return `<meta name="csp-nonce" content="" />`;
+}
+
+/** `<%= stylesheet_link_tag name, opts %>` — `<link rel="stylesheet">`.
+ *  Emits the canonical `/assets/<name>.css` path; Rails' real
+ *  output appends a fingerprint digest that compare-tool config
+ *  strips. Option keys pass through as HTML attributes. */
+export function stylesheetLinkTag(name: string, opts: Record<string, string> = {}): string {
+  let attrs = "";
+  for (const [k, v] of Object.entries(opts)) {
+    attrs += ` ${k}="${escapeHtml(v)}"`;
+  }
+  return `<link rel="stylesheet" href="/assets/${escapeHtml(name)}.css"${attrs} />`;
+}
+
+/** `<%= javascript_importmap_tags %>` — the full importmap + its
+ *  modulepreload hints + the bootstrap `<script type="module">`.
+ *  Per-app pin list is emitted into `src/importmap.ts` by the
+ *  ingester (parsing `config/importmap.rb` + walking
+ *  `app/javascript/controllers/` for `pin_all_from`); this helper
+ *  just shapes it into the Rails-compatible HTML. `main_entry` is
+ *  the module imported by the bootstrap script (usually
+ *  `application`; overridable per the importmap config). */
+export function javascriptImportmapTags(
+  pins: Array<[string, string]>,
+  main_entry: string = "application",
+): string {
+  const imports: Record<string, string> = {};
+  for (const [name, path] of pins) {
+    imports[name] = path;
+  }
+  const mapJson = JSON.stringify({ imports }, null, 2);
+  let out = `<script type="importmap" data-turbo-track="reload">${mapJson}</script>`;
+  for (const href of Object.values(imports)) {
+    out += `\n<link rel="modulepreload" href="${href}">`;
+  }
+  out += `\n<script type="module">import "${escapeHtml(main_entry)}"</script>`;
+  return out;
+}
+
 /** `<a href="url" ...attrs>text</a>`. `opts` is an attribute map. */
 export function linkTo(text: string, url: string, opts: Record<string, string> = {}): string {
   let attrs = "";

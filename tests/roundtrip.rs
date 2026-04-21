@@ -111,6 +111,7 @@ fn tiny_blog_round_trips() {
         test_modules: vec![],
         fixtures: vec![],
         seeds: None,
+        importmap: None,
     };
 
     let json = serde_json::to_string_pretty(&app).expect("serialize");

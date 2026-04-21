@@ -104,6 +104,7 @@ fn tiny_blog() -> App {
         test_modules: vec![],
         fixtures: vec![],
         seeds: None,
+        importmap: None,
     }
 }
 

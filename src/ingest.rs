@@ -158,7 +158,155 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
         app.seeds = Some(expr);
     }
 
+    // `config/importmap.rb` — tiny DSL of `pin` + `pin_all_from`
+    // calls. Evaluated at ingest time to build an explicit
+    // name→path list; `pin_all_from` expands by walking the
+    // referenced directory. Feeds the emitted
+    // `javascript_importmap_tags` helper.
+    let importmap_path = dir.join("config/importmap.rb");
+    if importmap_path.exists() {
+        let source = std::fs::read_to_string(&importmap_path)?;
+        let importmap = ingest_importmap(&source, dir, &importmap_path.display().to_string())?;
+        if !importmap.pins.is_empty() {
+            app.importmap = Some(importmap);
+        }
+    }
+
     Ok(app)
+}
+
+/// Ingest `config/importmap.rb`. The DSL has three common shapes:
+///
+/// ```ruby
+/// pin "name"                    # → name → /assets/<name>.js
+/// pin "name", to: "path.js"     # → name → /assets/path.js
+/// pin_all_from "app/javascript/controllers", under: "controllers"
+/// # → walks the dir, for each `foo_controller.js` pins
+/// #    "controllers/foo_controller" → /assets/controllers/foo_controller.js
+/// ```
+///
+/// We parse the AST directly rather than evaluating the Ruby so
+/// ingest stays deterministic across environments. `preload:` /
+/// `ignore:` kwargs are accepted-and-skipped; they don't affect
+/// the rendered importmap tags' name→path entries for our
+/// current needs.
+fn ingest_importmap(
+    source: &str,
+    app_dir: &Path,
+    file: &str,
+) -> IngestResult<crate::app::Importmap> {
+    use crate::app::{Importmap, ImportmapPin};
+    let result = parse(source.as_bytes());
+    let root = result.node();
+    let program = root.as_program_node().ok_or_else(|| IngestError::Parse {
+        file: file.into(),
+        message: "importmap.rb is not a program".into(),
+    })?;
+    let stmts = program.statements();
+    let mut pins: Vec<ImportmapPin> = Vec::new();
+    for stmt in stmts.body().iter() {
+        let Some(call) = stmt.as_call_node() else {
+            continue;
+        };
+        // Skip receiver-qualified calls; we only recognize top-
+        // level `pin` / `pin_all_from`.
+        if call.receiver().is_some() {
+            continue;
+        }
+        let name = call.name();
+        let name_str = name.as_slice();
+        let Ok(method) = std::str::from_utf8(name_str) else {
+            continue;
+        };
+        let args: Vec<Node<'_>> = call
+            .arguments()
+            .map(|a| a.arguments().iter().collect())
+            .unwrap_or_default();
+
+        match method {
+            "pin" => {
+                // First positional arg is the name (Str literal);
+                // optional `to:` kwarg overrides the derived path.
+                let Some(name_arg) = args.first() else { continue };
+                let Some(name) = string_literal_value(name_arg) else {
+                    continue;
+                };
+                let to = args
+                    .iter()
+                    .skip(1)
+                    .find_map(|a| extract_kwarg_str(a, "to"));
+                let path = match to {
+                    Some(filename) => format!("/assets/{filename}"),
+                    None => format!("/assets/{name}.js"),
+                };
+                pins.push(ImportmapPin { name, path });
+            }
+            "pin_all_from" => {
+                // `pin_all_from "dir", under: "ns"` — walk dir and
+                // add a pin per *.js file. Name is `ns/basename`;
+                // path is `/assets/ns/basename.js`.
+                let Some(dir_arg) = args.first() else { continue };
+                let Some(dir_str) = string_literal_value(dir_arg) else {
+                    continue;
+                };
+                let under = args
+                    .iter()
+                    .skip(1)
+                    .find_map(|a| extract_kwarg_str(a, "under"));
+                let walk_dir = app_dir.join(&dir_str);
+                if !walk_dir.is_dir() {
+                    continue;
+                }
+                let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&walk_dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("js"))
+                    .collect();
+                entries.sort();
+                for entry in entries {
+                    let stem = entry
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if stem.is_empty() {
+                        continue;
+                    }
+                    let name = match &under {
+                        Some(ns) => format!("{ns}/{stem}"),
+                        None => stem.to_string(),
+                    };
+                    let path = match &under {
+                        Some(ns) => format!("/assets/{ns}/{stem}.js"),
+                        None => format!("/assets/{stem}.js"),
+                    };
+                    pins.push(ImportmapPin { name, path });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Importmap { pins })
+}
+
+fn string_literal_value(node: &Node<'_>) -> Option<String> {
+    let s = node.as_string_node()?;
+    Some(String::from_utf8_lossy(s.unescaped()).into_owned())
+}
+
+fn extract_kwarg_str(arg: &Node<'_>, key: &str) -> Option<String> {
+    let hash = arg.as_keyword_hash_node()?;
+    for element in hash.elements().iter() {
+        let Some(pair) = element.as_assoc_node() else {
+            continue;
+        };
+        let k = pair.key();
+        let k_node = k.as_symbol_node()?;
+        let k_str = String::from_utf8_lossy(k_node.unescaped()).into_owned();
+        if k_str != key {
+            continue;
+        }
+        return string_literal_value(&pair.value());
+    }
+    None
 }
 
 fn read_yml_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
