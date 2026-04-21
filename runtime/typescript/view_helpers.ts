@@ -122,7 +122,7 @@ export function stylesheetLinkTag(name: string, opts: Record<string, string> = {
  *  the module imported by the bootstrap script (usually
  *  `application`; overridable per the importmap config). */
 export function javascriptImportmapTags(
-  pins: Array<[string, string]>,
+  pins: ReadonlyArray<readonly [string, string]>,
   main_entry: string = "application",
 ): string {
   const imports: Record<string, string> = {};
@@ -319,12 +319,8 @@ export function pluralize(count: number, word: string): string {
   return count === 1 ? `1 ${word}` : `${count} ${word}s`;
 }
 
-/** `content_for(slot, body)` stashes for layout consumption.
- *  Phase 4d's emitted views don't route through a layout, so this
- *  returns an empty string. */
-export function contentFor(_slot: string, _body: string): string {
-  return "";
-}
+// `contentFor` defined above (supports both getter and setter
+// forms; persists to the module-level slot map).
 
 /** Conservative HTML escaping. Enough for scaffold blog output. */
 function escapeHtml(s: string): string {

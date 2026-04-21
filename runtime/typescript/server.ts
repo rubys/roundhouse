@@ -24,6 +24,7 @@ import { URL } from "node:url";
 import Database from "better-sqlite3";
 
 import { Router, setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
+import * as Helpers from "./view_helpers.js";
 
 // ── Action Cable server ────────────────────────────────────────
 
@@ -134,6 +135,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   for (const [k, v] of url.searchParams) merged[k] = v;
   Object.assign(merged, params);
 
+  // Reset per-request render state (yield body, content_for
+  // slots) so nothing leaks across requests.
+  Helpers.resetRenderState();
+
   let response: ActionResponse;
   try {
     response = await match.handler({
@@ -157,8 +162,22 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   res.statusCode = response.status ?? 200;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(renderLayout(response.body ?? ""));
+  if (layoutRenderer) {
+    Helpers.setYield(response.body ?? "");
+    res.end(layoutRenderer());
+  } else {
+    res.end(renderLayout(response.body ?? ""));
+  }
 }
+
+/** Per-process layout renderer. Set by `startServer` via
+ *  `opts.layout`; the emitted `main.ts` passes the transpiled
+ *  `renderLayoutsApplication` here so the dispatcher wraps each
+ *  view in the real Rails layout (reading the yield body and any
+ *  `content_for` slots via the module-level state in
+ *  view_helpers). When unset, `renderLayout` below provides a
+ *  minimal fallback so the server still renders in isolation. */
+let layoutRenderer: (() => string) | null = null;
 
 // ── Layout wrapping ────────────────────────────────────────────
 
@@ -334,6 +353,12 @@ export interface StartOptions {
    *  the database's first AR table is empty. Emitter can override
    *  with model-specific logic. */
   shouldSeed?: () => boolean;
+  /** Layout renderer — the emitted `renderLayoutsApplication`
+   *  (or equivalent). Called after each non-redirect response
+   *  with the inner view body already stashed via
+   *  `Helpers.setYield`. When omitted, the server falls back to
+   *  the minimal `renderLayout` shell below. */
+  layout?: () => string;
 }
 
 /** Start the server. Returns a promise that resolves once the
@@ -341,6 +366,8 @@ export interface StartOptions {
 export async function startServer(opts: StartOptions): Promise<void> {
   const dbPath = opts.dbPath ?? "./db/development.sqlite3";
   const port = opts.port ?? Number(process.env.PORT ?? 3000);
+
+  layoutRenderer = opts.layout ?? null;
 
   openDatabase(dbPath, opts.schemaSql);
 
