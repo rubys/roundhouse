@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::HttpMethod;
-use crate::expr::{ExprNode, Literal};
+use crate::dialect::{HttpMethod, MethodDef};
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
 use crate::naming::snake_case;
 use crate::ty::Ty;
@@ -73,6 +73,166 @@ const SERVER_SOURCE: &str = include_str!("../../runtime/rust/server.rs");
 /// server so `server::start` can mount `/cable` without a separate
 /// compile-time feature flag.
 const CABLE_SOURCE: &str = include_str!("../../runtime/rust/cable.rs");
+
+/// Emit a typed `MethodDef` as a standalone `pub fn` Rust function
+/// for the runtime-extraction pipeline. Self-contained walker for a
+/// narrow Ruby subset (Lit / Var / Send with binary operators /
+/// StringInterp / If). Runtime-authored code broader than this will
+/// surface as a TODO in the emitted source and a test failure.
+pub fn emit_method(m: &MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(
+        sig_params.len(),
+        m.params.len(),
+        "method `{}`: signature/param arity mismatch",
+        m.name
+    );
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(name, p)| format!("{}: {}", name, rust_param_ty(&p.ty)))
+        .collect();
+
+    let ret_s = rust_return_ty(ret);
+    let body = rt_emit_expr(&m.body);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "pub fn {}({}) -> {} {{",
+        m.name,
+        param_list.join(", "),
+        ret_s
+    )
+    .unwrap();
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "    {line}").unwrap();
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Parameter-position type: strings borrowed (`&str`) by idiom.
+fn rust_param_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Str => "&str".to_string(),
+        _ => rust_ty(ty),
+    }
+}
+
+/// Return-position type: strings owned (`String`), nil → `()`.
+fn rust_return_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Nil => "()".to_string(),
+        _ => rust_ty(ty),
+    }
+}
+
+fn rt_emit_expr(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value } => rt_emit_literal(value),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            // Rust's if-as-expression is native; braces required.
+            let c = rt_emit_expr(cond);
+            let t = rt_emit_expr(then_branch);
+            let e = rt_emit_expr(else_branch);
+            format!("if {c} {{\n    {t}\n}} else {{\n    {e}\n}}")
+        }
+        ExprNode::Send { recv, method, args, .. } => {
+            rt_emit_send(recv.as_ref(), method.as_str(), args)
+        }
+        ExprNode::StringInterp { parts } => rt_emit_string_interp(parts),
+        ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0]),
+        other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
+    }
+}
+
+fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    if let (Some(r), [arg]) = (recv, args) {
+        if is_rust_binop(method) {
+            return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
+        }
+    }
+    format!("/* TODO: send {method} */")
+}
+
+fn is_rust_binop(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "<<"
+            | ">>"
+            | "|"
+            | "&"
+            | "^"
+    )
+}
+
+fn rt_emit_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Nil => "()".to_string(),
+        Literal::Bool { value } => value.to_string(),
+        Literal::Int { value } => value.to_string(),
+        Literal::Float { value } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        Literal::Str { value } => format!("{value:?}"),
+        Literal::Sym { value } => format!("{:?}", value.as_str()),
+    }
+}
+
+fn rt_emit_string_interp(parts: &[InterpPart]) -> String {
+    // Ruby `"x #{e} y"` → Rust `format!("x {} y", e)`. `{` and `}` in
+    // literal text escape as `{{` / `}}`.
+    let mut fmt = String::new();
+    let mut args: Vec<String> = Vec::new();
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => {
+                for c in value.chars() {
+                    if c == '{' || c == '}' {
+                        fmt.push(c);
+                        fmt.push(c);
+                    } else {
+                        fmt.push(c);
+                    }
+                }
+            }
+            InterpPart::Expr { expr } => {
+                fmt.push_str("{}");
+                args.push(rt_emit_expr(expr));
+            }
+        }
+    }
+    if args.is_empty() {
+        format!("{fmt:?}.to_string()")
+    } else {
+        format!("format!({fmt:?}, {})", args.join(", "))
+    }
+}
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
