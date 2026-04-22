@@ -164,7 +164,8 @@ defmodule App.MixProject do
     [
       {:exqlite, \"~> 0.30\"},
       {:plug_cowboy, \"~> 2.7\"},
-      {:jason, \"~> 1.4\"}
+      {:jason, \"~> 1.4\"},
+      {:websock_adapter, \"~> 0.5\"}
     ]
   end
 
@@ -266,7 +267,24 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
         .any(|k| k.as_str() != "id");
     if has_table {
         writeln!(s).unwrap();
-        emit_persistence_methods_ex(&mut s, module, model, !lowered.is_empty(), app);
+        let broadcasts = crate::lower::lower_broadcasts(model);
+        emit_persistence_methods_ex(
+            &mut s,
+            module,
+            model,
+            !lowered.is_empty(),
+            app,
+            !broadcasts.is_empty(),
+        );
+        if !broadcasts.is_empty() {
+            let lp = crate::lower::lower_persistence(model, app);
+            emit_ex_broadcaster_methods(
+                &mut s,
+                lp.class.0.as_str(),
+                lp.table.as_str(),
+                &broadcasts,
+            );
+        }
     }
 
     writeln!(s, "end").unwrap();
@@ -278,12 +296,159 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
 /// Naming: `save/1` and `destroy/1` take the record; `count/0` and
 /// `find/1` are module functions. Matches Elixir's functional shape
 /// (no implicit receiver) and what our spec emit expects.
+// ── Broadcaster emission ────────────────────────────────────────
+
+fn emit_ex_broadcaster_methods(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    decls: &crate::lower::LoweredBroadcasts,
+) {
+    writeln!(out).unwrap();
+    writeln!(out, "  def _broadcast_after_save(record) do").unwrap();
+    if decls.save.is_empty() {
+        writeln!(out, "    _ = record").unwrap();
+        writeln!(out, "    :ok").unwrap();
+    } else {
+        writeln!(out, "    _ = record").unwrap();
+        for b in &decls.save {
+            emit_ex_one_broadcast_call(out, class, table, b);
+        }
+        writeln!(out, "    :ok").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(out, "  def _broadcast_after_delete(record) do").unwrap();
+    if decls.destroy.is_empty() {
+        writeln!(out, "    _ = record").unwrap();
+        writeln!(out, "    :ok").unwrap();
+    } else {
+        writeln!(out, "    _ = record").unwrap();
+        for b in &decls.destroy {
+            emit_ex_one_broadcast_call(out, class, table, b);
+        }
+        writeln!(out, "    :ok").unwrap();
+    }
+    writeln!(out, "  end").unwrap();
+}
+
+fn emit_ex_one_broadcast_call(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    b: &crate::lower::LoweredBroadcast,
+) {
+    let channel = ex_render_broadcast_expr(&b.channel, b.self_param.as_ref());
+    let target = b
+        .target
+        .as_ref()
+        .map(|t| ex_render_broadcast_expr(t, b.self_param.as_ref()))
+        .unwrap_or_else(|| "\"\"".to_string());
+    if let Some(assoc) = &b.on_association {
+        let var = assoc.name.as_str();
+        let target_class = assoc.target_class.as_str();
+        let target_table = assoc.target_table.as_str();
+        let fk = assoc.foreign_key.as_str();
+        writeln!(out, "    {var} = {target_class}.find(record.{fk})").unwrap();
+        writeln!(out, "    if {var} != nil do").unwrap();
+        if b.action == crate::lower::BroadcastAction::Remove {
+            writeln!(
+                out,
+                "      Roundhouse.Cable.broadcast_remove_to({target_table:?}, {var}.id, {channel}, {target})",
+            )
+            .unwrap();
+        } else {
+            let func = ex_action_fn(b.action);
+            writeln!(
+                out,
+                "      Roundhouse.Cable.{func}({target_table:?}, {var}.id, {target_class:?}, {channel}, {target})",
+            )
+            .unwrap();
+        }
+        writeln!(out, "    end").unwrap();
+        return;
+    }
+    if b.action == crate::lower::BroadcastAction::Remove {
+        writeln!(
+            out,
+            "    Roundhouse.Cable.broadcast_remove_to({table:?}, record.id, {channel}, {target})",
+        )
+        .unwrap();
+    } else {
+        let func = ex_action_fn(b.action);
+        writeln!(
+            out,
+            "    Roundhouse.Cable.{func}({table:?}, record.id, {class:?}, {channel}, {target})",
+        )
+        .unwrap();
+    }
+}
+
+fn ex_action_fn(action: crate::lower::BroadcastAction) -> &'static str {
+    match action {
+        crate::lower::BroadcastAction::Prepend => "broadcast_prepend_to",
+        crate::lower::BroadcastAction::Append => "broadcast_append_to",
+        crate::lower::BroadcastAction::Replace => "broadcast_replace_to",
+        crate::lower::BroadcastAction::Remove => "broadcast_remove_to",
+    }
+}
+
+fn ex_render_broadcast_expr(expr: &Expr, self_param: Option<&Symbol>) -> String {
+    let p = self_param.map(|s| s.as_str());
+    match &*expr.node {
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        ExprNode::Lit { value: Literal::Int { value } } => format!("{value}"),
+        ExprNode::Var { name, .. } => {
+            if let Some(pname) = p {
+                let stripped = pname.strip_prefix('_').unwrap_or(pname);
+                if name.as_str() == pname || name.as_str() == stripped {
+                    return "record".to_string();
+                }
+            }
+            name.as_str().to_string()
+        }
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            let recv_s = ex_render_broadcast_expr(r, self_param);
+            format!("{recv_s}.{}", method.as_str())
+        }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut out = String::from("\"");
+            for part in parts {
+                match part {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            match c {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '#' => out.push_str("\\#"),
+                                _ => out.push(c),
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        out.push_str("#{");
+                        out.push_str(&ex_render_broadcast_expr(expr, self_param));
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
+            out
+        }
+        _ => "nil".to_string(),
+    }
+}
+
 fn emit_persistence_methods_ex(
     out: &mut String,
     module: &str,
     model: &Model,
     has_validate: bool,
     app: &App,
+    has_broadcasts: bool,
 ) {
     let lp = crate::lower::lower_persistence(model, app);
     let recv = module_receiver_name(module);
@@ -342,6 +507,9 @@ fn emit_persistence_methods_ex(
     )
     .unwrap();
     writeln!(out, "    end").unwrap();
+    if has_broadcasts {
+        writeln!(out, "    _broadcast_after_save({recv})").unwrap();
+    }
     writeln!(out, "    true").unwrap();
     writeln!(out, "  end").unwrap();
 
@@ -383,6 +551,9 @@ fn emit_persistence_methods_ex(
         "    _ = Roundhouse.Db.execute({delete_sql:?}, [{recv}.id])",
     )
     .unwrap();
+    if has_broadcasts {
+        writeln!(out, "    _broadcast_after_delete({recv})").unwrap();
+    }
     writeln!(out, "    :ok").unwrap();
     writeln!(out, "  end").unwrap();
 
@@ -1326,7 +1497,46 @@ fn emit_ex_main(app: &App) -> EmittedFile {
     writeln!(s).unwrap();
     writeln!(s, "  def run do").unwrap();
     writeln!(s, "    App.Routes.register()").unwrap();
+    writeln!(s, "    register_partials()").unwrap();
     writeln!(s, "    Server.start(SchemaSQL.create_tables(), {layout_opt}port: resolve_port())").unwrap();
+    writeln!(s, "  end").unwrap();
+    // Register partial renderers for every model whose plural
+    // resource has a `_<singular>.html.erb` partial. Cable's
+    // broadcast_*_to resolves the partial by model class name.
+    writeln!(s).unwrap();
+    writeln!(s, "  defp register_partials do").unwrap();
+    writeln!(s, "    Roundhouse.Cable.ensure_started()").unwrap();
+    let known_model_names: std::collections::BTreeSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .collect();
+    let mut registered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for v in &app.views {
+        let name = v.name.as_str();
+        if let Some((dir, base)) = name.rsplit_once('/') {
+            if let Some(singular) = base.strip_prefix('_') {
+                let class = crate::naming::camelize(singular);
+                if !known_model_names.contains(&class) {
+                    continue;
+                }
+                if registered.insert(class.clone()) {
+                    let fn_name = format!("render_{}_{singular}", dir);
+                    writeln!(
+                        s,
+                        "    Roundhouse.Cable.register_partial({class:?}, fn id ->"
+                    )
+                    .unwrap();
+                    writeln!(s, "      case {class}.find(id) do").unwrap();
+                    writeln!(s, "        nil -> \"\"").unwrap();
+                    writeln!(s, "        record -> App.Views.{fn_name}(record)").unwrap();
+                    writeln!(s, "      end").unwrap();
+                    writeln!(s, "    end)").unwrap();
+                }
+            }
+        }
+    }
+    writeln!(s, "    :ok").unwrap();
     writeln!(s, "  end").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "  defp resolve_port do").unwrap();

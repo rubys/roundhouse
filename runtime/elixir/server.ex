@@ -28,6 +28,7 @@ defmodule Roundhouse.Server do
     layout = Keyword.get(opts, :layout, nil)
 
     Db.open_production_db(db_path, schema_sql)
+    Cable.ensure_started()
     :persistent_term.put({__MODULE__, :layout}, layout)
 
     {:ok, _} = Plug.Cowboy.http(__MODULE__.Endpoint, [], port: port, ip: {127, 0, 0, 1})
