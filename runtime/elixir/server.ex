@@ -116,9 +116,14 @@ defmodule Roundhouse.Server do
     ct = Plug.Conn.get_req_header(conn, "content-type") |> List.first() || ""
 
     if String.starts_with?(ct, "application/x-www-form-urlencoded") do
-      opts = Plug.Parsers.init(parsers: [:urlencoded], pass: ["*/*"])
-      conn = Plug.Parsers.call(conn, opts)
-      {conn, conn.body_params || %{}}
+      # Read + decode by hand rather than via Plug.Parsers — Plug
+      # expands `article[title]=foo` into a nested
+      # `%{"article" => %{"title" => "foo"}}` map, but the emitted
+      # controllers (parallel to Rust/Python) read literal flat
+      # keys like `"article[title]"`. URI.decode_query gives us
+      # the flat shape directly.
+      {:ok, body, conn} = Plug.Conn.read_body(conn, length: 8_000_000)
+      {conn, URI.decode_query(body)}
     else
       {conn, %{}}
     end
