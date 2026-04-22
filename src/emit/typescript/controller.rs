@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::super::EmittedFile;
-use super::{emit_expr, emit_send_with_parens};
+use super::expr::{emit_expr, emit_send_with_parens};
 use crate::App;
 use crate::dialect::Controller;
 use crate::expr::{Expr, ExprNode, LValue, Literal};

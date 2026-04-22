@@ -9,7 +9,7 @@ use crate::ident::Symbol;
 
 use super::super::EmittedFile;
 use super::controller::{lower_first_char, rewrite_for_controller};
-use super::emit_literal;
+use super::expr::emit_literal;
 
 /// Emit each view as a TypeScript function that takes a `locals`
 /// object and returns the rendered HTML string. Walks the compiled-

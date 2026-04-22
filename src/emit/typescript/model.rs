@@ -11,8 +11,10 @@ use crate::lower::{BroadcastAction, LoweredBroadcast, LoweredBroadcasts};
 use crate::ty::Ty;
 
 use super::super::EmittedFile;
+use super::expr::{emit_body, emit_expr};
 use super::fixture::ts_field_type_and_default;
-use super::{emit_body, emit_expr, ts_method_name, ts_ty};
+use super::naming::ts_method_name;
+use super::ty::ts_ty;
 
 /// Emit one `app/models/<snake>.ts` per model.
 pub(super) fn emit_models(app: &App) -> Vec<EmittedFile> {

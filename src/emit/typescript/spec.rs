@@ -7,7 +7,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::super::EmittedFile;
-use super::emit_literal;
+use super::expr::emit_literal;
 use crate::App;
 use crate::dialect::{Test, TestModule};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
