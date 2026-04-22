@@ -11,7 +11,8 @@ use crate::lower::{BroadcastAction, LoweredBroadcast, LoweredBroadcasts};
 use crate::ty::Ty;
 
 use super::super::EmittedFile;
-use super::{emit_expr, rust_ty, EmitCtx};
+use super::controller::{emit_expr, EmitCtx};
+use super::rust_ty;
 
 // ── Broadcaster emission ───────────────────────────────────────
 
