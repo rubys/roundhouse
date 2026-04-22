@@ -228,12 +228,18 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
     // rather than nil. SQLite rejects NULL → NOT NULL at INSERT
     // time, and the fixture harness calls save before every
     // non-id field is explicitly set.
-    let fields: Vec<String> = model
+    let mut fields: Vec<String> = model
         .attributes
         .fields
         .iter()
         .map(|(k, ty)| format!("{}: {}", k.as_str(), ex_default_for(ty)))
         .collect();
+    if !model.attributes.fields.is_empty() {
+        // Validation-error state — views read `article.errors.any?`
+        // + `error_messages_for(article.errors, ...)`. Default
+        // empty list; populated by failed saves.
+        fields.push("errors: []".to_string());
+    }
     if !fields.is_empty() {
         writeln!(s, "  defstruct [{}]", fields.join(", ")).unwrap();
     } else {
@@ -523,7 +529,11 @@ fn emit_persistence_methods_ex(
 fn ex_default_for(ty: &crate::ty::Ty) -> &'static str {
     use crate::ty::Ty;
     match ty {
-        Ty::Int => "nil",
+        // Int defaults to 0 (not nil) so `has_many` filter
+        // comparisons `child.parent_id == parent.id` type-check
+        // uniformly — Elixir's struct-field type inference reads
+        // the default and warns on `int == nil`.
+        Ty::Int => "0",
         Ty::Float => "0.0",
         Ty::Bool => "false",
         Ty::Str | Ty::Sym => "\"\"",
@@ -1152,8 +1162,13 @@ impl<'a> crate::lower::CtrlWalker<'a> for ExEmitter<'a> {
                 let id_s = self.render_expr(id);
                 Stmt::Expr(format!("{0}.find({id_s}) || %{0}{{}}", class.as_str()))
             }
-            SendKind::QueryChain { target: Some(target), .. } => {
-                Stmt::Expr(format!("{}.all()", target.as_str()))
+            SendKind::QueryChain { target: Some(target), method: cm, args: ca, recv: cr } => {
+                let mut out = format!("{}.all()", target.as_str());
+                let mods = crate::lower::collect_chain_modifiers(cm, ca, cr.as_deref());
+                for m in mods {
+                    out = apply_ex_chain_modifier(out, m);
+                }
+                Stmt::Expr(out)
             }
             SendKind::QueryChain { target: None, .. } => Stmt::Expr("[]".to_string()),
             SendKind::AssocLookup { target, outer_method } => match outer_method {
@@ -1511,6 +1526,8 @@ fn emit_ex_views(app: &App) -> EmittedFile {
             )
         })
         .collect();
+    let has_manys = crate::lower::build_has_many_table(app);
+    let stylesheets = app.stylesheets.clone();
 
     let mut body = String::new();
 
@@ -1522,7 +1539,7 @@ fn emit_ex_views(app: &App) -> EmittedFile {
         if !emitted_names.insert(fn_name.clone()) {
             continue;
         }
-        emit_view_file_pass2_ex(&mut body, v, &known_models, &attrs_by_class);
+        emit_view_file_pass2_ex(&mut body, v, &known_models, &attrs_by_class, &has_manys, &stylesheets);
         writeln!(body).unwrap();
     }
 
@@ -1558,6 +1575,12 @@ fn emit_ex_views(app: &App) -> EmittedFile {
     if ex_text_references(&body, "FormBuilder") {
         writeln!(s, "  alias Roundhouse.FormBuilder").unwrap();
     }
+    if ex_text_references(&body, "RouteHelpers") {
+        writeln!(s, "  alias Roundhouse.RouteHelpers").unwrap();
+    }
+    if ex_text_references(&body, "Importmap") {
+        writeln!(s, "  alias Roundhouse.Importmap").unwrap();
+    }
     writeln!(s).unwrap();
     s.push_str(&body);
     writeln!(s, "end").unwrap();
@@ -1581,6 +1604,8 @@ fn emit_view_file_pass2_ex(
     view: &crate::dialect::View,
     known_models: &[Symbol],
     attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
+    has_manys: &[crate::lower::HasManyRow],
+    stylesheets: &[String],
 ) {
     let fn_name = ex_view_function_name(view.name.as_str());
     let (arg_name, arg_model) = ex_view_signature(view.name.as_str(), known_models);
@@ -1611,9 +1636,17 @@ fn emit_view_file_pass2_ex(
         arg_name: arg_name.clone(),
         arg_attrs: attrs,
         resource_dir,
+        has_manys: has_manys.to_vec(),
+        stylesheets: stylesheets.to_vec(),
+        form_records: Vec::new(),
+        attrs_by_class: attrs_by_class.clone(),
     };
 
-    let body_lines = emit_ex_view_body(&view.body, &ctx);
+    // Apply the shared erubi-trim pass — same as rust/ts/python/
+    // go/crystal. Drops the trailing newline + leading indent of
+    // `<% %>` statement tags.
+    let trimmed = crate::lower::erb_trim::trim_view(&view.body);
+    let body_lines = emit_ex_view_body(&trimmed, &ctx);
     for line in body_lines {
         writeln!(out, "    {line}").unwrap();
     }
@@ -1621,11 +1654,16 @@ fn emit_view_file_pass2_ex(
     writeln!(out, "  end").unwrap();
 }
 
+#[derive(Clone)]
 struct ExViewCtx {
     locals: Vec<String>,
     arg_name: String,
     arg_attrs: Vec<String>,
     resource_dir: String,
+    has_manys: Vec<crate::lower::HasManyRow>,
+    stylesheets: Vec<String>,
+    form_records: Vec<(String, String)>,
+    attrs_by_class: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl ExViewCtx {
@@ -1634,6 +1672,31 @@ impl ExViewCtx {
     }
     fn arg_has_attr(&self, name: &str, attr: &str) -> bool {
         name == self.arg_name && self.arg_attrs.iter().any(|a| a == attr)
+    }
+    fn local_has_attr(&self, local: &str, attr: &str) -> bool {
+        if self.arg_has_attr(local, attr) {
+            return true;
+        }
+        let class = crate::naming::singularize_camelize(local);
+        self.attrs_by_class
+            .get(&class)
+            .map(|attrs| attrs.iter().any(|a| a == attr))
+            .unwrap_or(false)
+    }
+    fn with_locals(&self, more: impl IntoIterator<Item = String>) -> Self {
+        let mut next = self.clone();
+        for n in more {
+            if !next.locals.iter().any(|x| x == &n) {
+                next.locals.push(n);
+            }
+        }
+        next
+    }
+    fn resolve_has_many_on_local(&self, local: &str, assoc: &str) -> Option<(String, String)> {
+        if !self.is_local(local) {
+            return None;
+        }
+        crate::lower::resolve_has_many_on_local(&self.has_manys, local, assoc)
     }
 }
 
@@ -1741,18 +1804,7 @@ fn emit_ex_view_stmt_pass2(stmt: &Expr, ctx: &ExViewCtx) -> Vec<String> {
                 .first()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_else(|| "item".into());
-            let inner_ctx = ExViewCtx {
-                locals: {
-                    let mut l = ctx.locals.clone();
-                    if !l.iter().any(|x| x == &var) {
-                        l.push(var.clone());
-                    }
-                    l
-                },
-                arg_name: ctx.arg_name.clone(),
-                arg_attrs: ctx.arg_attrs.clone(),
-                resource_dir: ctx.resource_dir.clone(),
-            };
+            let inner_ctx = ctx.with_locals([var.clone()]);
             let inner_lines = emit_ex_view_body(body, &inner_ctx);
             let inner_text = inner_lines.join("\n");
             let emitted_var = if ex_text_references(&inner_text, &var) {
@@ -1770,6 +1822,20 @@ fn emit_ex_view_stmt_pass2(stmt: &Expr, ctx: &ExViewCtx) -> Vec<String> {
             out.push("end)".to_string());
             out
         }
+        // Statement-form `<% content_for :title, "Articles" %>`.
+        ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            if let Some(crate::lower::ViewHelperKind::ContentForSetter { slot, body }) =
+                crate::lower::classify_view_helper(method.as_str(), args)
+            {
+                if is_ex_simple_expr(body, ctx) {
+                    let body_ex = emit_ex_view_expr_raw(body, ctx);
+                    return vec![format!(
+                        "ViewHelpers.content_for_set({slot:?}, to_string({body_ex}))"
+                    )];
+                }
+            }
+            vec!["# TODO ERB: unknown stmt".to_string()]
+        }
         _ => vec!["# TODO ERB: unknown stmt".to_string()],
     }
 }
@@ -1779,6 +1845,34 @@ fn emit_ex_view_append_pass2(arg: &Expr, ctx: &ExViewCtx) -> String {
         return format!("buf = buf <> {}", ex_string_literal(s));
     }
     let inner = unwrap_to_s_ex(arg);
+
+    // `<%= yield %>` / `<%= yield :head %>`.
+    if let ExprNode::Yield { args } = &*inner.node {
+        if let Some(first) = args.first() {
+            if let Some(slot) = ex_extract_slot_name(first) {
+                return format!("buf = buf <> ViewHelpers.get_slot({slot:?})");
+            }
+        }
+        return "buf = buf <> ViewHelpers.get_yield()".to_string();
+    }
+
+    // `<%= content_for(:slot) || "default" %>` — BoolOp fallback.
+    if let ExprNode::BoolOp { op, left, right, .. } = &*inner.node {
+        if matches!(op, crate::expr::BoolOpKind::Or) {
+            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*left.node {
+                if method.as_str() == "content_for" && args.len() == 1 {
+                    if let Some(slot) = ex_extract_slot_name(&args[0]) {
+                        if is_ex_simple_expr(right, ctx) {
+                            let fb = emit_ex_view_expr_raw(right, ctx);
+                            return format!(
+                                "buf = buf <> (case ViewHelpers.content_for_get({slot:?}) do\n  \"\" -> to_string({fb})\n  s -> s\nend)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
         if method.as_str() == "render" {
@@ -1821,6 +1915,29 @@ fn emit_ex_view_append_pass2(arg: &Expr, ctx: &ExViewCtx) -> String {
         }
     }
 
+    // View-helper classifier dispatch.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if let Some(kind) = crate::lower::classify_view_helper(method.as_str(), args) {
+            if let Some(line) = emit_ex_view_helper(&kind, ctx) {
+                return line;
+            }
+        }
+    }
+
+    // FormBuilder method calls (`form.label :title`, etc.).
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*inner.node {
+        if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
+            if ctx.form_records.iter().any(|(n, _)| n == name.as_str()) {
+                if let Some(fb) = crate::lower::classify_form_builder_method(method.as_str()) {
+                    if let Some(call) = emit_ex_form_builder_call(name.as_str(), fb, args, ctx)
+                    {
+                        return format!("buf = buf <> {call}");
+                    }
+                }
+            }
+        }
+    }
+
     if is_ex_simple_expr(inner, ctx) {
         return format!(
             "buf = buf <> to_string({})",
@@ -1829,6 +1946,14 @@ fn emit_ex_view_append_pass2(arg: &Expr, ctx: &ExViewCtx) -> String {
     }
 
     "buf = buf <> \"\" # TODO ERB: complex interpolation".to_string()
+}
+
+fn ex_extract_slot_name(arg: &Expr) -> Option<&str> {
+    match &*arg.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),
+        _ => None,
+    }
 }
 
 fn is_ex_capturing_helper(method: &str) -> bool {
@@ -1852,40 +1977,567 @@ fn emit_ex_captured_helper(
         .unwrap_or_else(|| "\"\"".to_string());
     match method {
         "form_with" => {
-            let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
-            let inner_ctx = ExViewCtx {
-                locals: {
-                    let mut l = ctx.locals.clone();
-                    l.push(pname.to_string());
-                    l.push("form_begin".to_string());
-                    l
-                },
-                arg_name: ctx.arg_name.clone(),
-                arg_attrs: ctx.arg_attrs.clone(),
-                resource_dir: ctx.resource_dir.clone(),
-            };
-            let body_lines = emit_ex_view_body(body, &inner_ctx);
-            let body_text = body_lines.join("\n");
-            let form_binding = if ex_text_references(&body_text, pname) {
-                format!("{pname} = %FormBuilder{{record: nil}}")
+            let model_expr = args.iter().find_map(|a| ex_extract_kwarg(a, "model"));
+            let model_nested: Option<Vec<Expr>> = model_expr.and_then(|e| match &*e.node {
+                ExprNode::Array { elements, .. } if elements.len() >= 2 => {
+                    Some(elements.clone())
+                }
+                _ => None,
+            });
+            let record_ref: Option<String> = if let Some(elems) = &model_nested {
+                Some(emit_ex_nested_form_record(&elems[elems.len() - 1]))
             } else {
-                format!("_{pname} = %FormBuilder{{record: nil}}")
+                model_expr
+                    .filter(|e| is_ex_simple_expr(e, ctx))
+                    .map(|e| emit_ex_view_expr_raw(e, ctx))
+                    .or_else(|| {
+                        if !ctx.arg_name.is_empty() && ctx.is_local(&ctx.arg_name) {
+                            Some(ctx.arg_name.clone())
+                        } else {
+                            None
+                        }
+                    })
             };
-            let mut lines = vec![
-                "form_begin = byte_size(buf)".to_string(),
-                form_binding,
-            ];
+            let prefix = if let Some(elems) = &model_nested {
+                ex_nested_form_child_prefix(&elems[elems.len() - 1])
+                    .unwrap_or_else(|| ctx.arg_name.clone())
+            } else if !ctx.resource_dir.is_empty() {
+                crate::naming::singularize(&ctx.resource_dir)
+            } else {
+                ctx.arg_name.clone()
+            };
+
+            let pname = params.first().map(|p| p.as_str()).unwrap_or("form");
+            let plural = if !ctx.resource_dir.is_empty() {
+                ctx.resource_dir.clone()
+            } else {
+                crate::naming::pluralize_snake(&prefix)
+            };
+            let is_persisted_expr = record_ref
+                .as_deref()
+                .map(|r| format!("({r}.id != 0)"))
+                .unwrap_or_else(|| "false".to_string());
+            let action_expr = match (&record_ref, &model_nested) {
+                (Some(record), Some(elems)) => {
+                    ex_nested_form_path_expr(elems, ctx, record, &prefix)
+                }
+                (Some(record), None) => format!(
+                    "(if {record}.id != 0, do: RouteHelpers.{prefix}_path({record}.id), else: RouteHelpers.{plural}_path())",
+                ),
+                (None, _) => format!("RouteHelpers.{plural}_path()"),
+            };
+            let mut inner_ctx = ctx.with_locals([pname.to_string(), "form_begin".to_string()]);
+            if let Some(record) = &record_ref {
+                inner_ctx.form_records.push((pname.to_string(), record.clone()));
+            }
+            let body_lines = emit_ex_view_body(body, &inner_ctx);
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("form_begin = byte_size(buf)".to_string());
+            lines.push(format!(
+                "{pname} = ViewHelpers.form_builder({prefix:?}, {cls_expr}, {is_persisted_expr})"
+            ));
+            lines.push(format!("_ = {pname}"));
+            if let Some(record) = &record_ref {
+                lines.push(format!(
+                    "buf = buf <> ViewHelpers.error_messages_for({record}.errors, {prefix:?})"
+                ));
+            }
             for line in body_lines {
                 lines.push(line);
             }
             lines.push(format!(
-                "buf = binary_part(buf, 0, form_begin) <> ViewHelpers.form_wrap(\"\", false, {cls_expr}, binary_part(buf, form_begin, byte_size(buf) - form_begin))"
+                "buf = binary_part(buf, 0, form_begin) <> ViewHelpers.form_wrap({action_expr}, {is_persisted_expr}, {cls_expr}, binary_part(buf, form_begin, byte_size(buf) - form_begin))"
             ));
+            lines.join("\n")
+        }
+        "content_for" => {
+            let slot = args.first().and_then(ex_extract_slot_name);
+            let Some(slot) = slot else {
+                let _ = cls_expr;
+                return "buf = buf <> \"\"".to_string();
+            };
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("cf_begin = byte_size(buf)".to_string());
+            for line in emit_ex_view_body(body, ctx) {
+                lines.push(line);
+            }
+            lines.push(format!(
+                "ViewHelpers.content_for_set({slot:?}, binary_part(buf, cf_begin, byte_size(buf) - cf_begin))"
+            ));
+            lines.push("buf = binary_part(buf, 0, cf_begin)".to_string());
             lines.join("\n")
         }
         _ => {
             let _ = cls_expr;
             "buf = buf <> \"\"".to_string()
+        }
+    }
+}
+
+fn emit_ex_nested_form_record(el: &Expr) -> String {
+    match crate::lower::classify_nested_form_child(el) {
+        Some(crate::lower::NestedFormChild::ClassNew { class }) => {
+            format!("%{class}{{}}")
+        }
+        Some(crate::lower::NestedFormChild::Local { name }) => name.to_string(),
+        None => "nil".to_string(),
+    }
+}
+
+fn ex_nested_form_child_prefix(el: &Expr) -> Option<String> {
+    crate::lower::classify_nested_form_child(el).map(|k| k.prefix())
+}
+
+fn ex_nested_element_parts(kind: &crate::lower::NestedUrlElement<'_>) -> (String, String) {
+    match kind {
+        crate::lower::NestedUrlElement::DirectLocal { name } => {
+            ((*name).to_string(), format!("{name}.id"))
+        }
+        crate::lower::NestedUrlElement::Association { owner, assoc } => {
+            ((*assoc).to_string(), format!("{owner}.{assoc}_id"))
+        }
+    }
+}
+
+fn ex_nested_form_path_expr(
+    elems: &[Expr],
+    ctx: &ExViewCtx,
+    record_ref: &str,
+    child_prefix: &str,
+) -> String {
+    let is_local = |n: &str| ctx.is_local(n);
+    let mut parent_ids: Vec<String> = Vec::new();
+    let mut parent_singulars: Vec<String> = Vec::new();
+    for parent in &elems[..elems.len() - 1] {
+        let Some(kind) = crate::lower::classify_nested_url_element(parent, &is_local) else {
+            return "\"\"".to_string();
+        };
+        let (singular, id_expr) = ex_nested_element_parts(&kind);
+        parent_singulars.push(singular);
+        parent_ids.push(id_expr);
+    }
+    let member_name = format!(
+        "{}_{}_path",
+        parent_singulars.join("_"),
+        child_prefix,
+    );
+    let child_plural = crate::naming::pluralize_snake(child_prefix);
+    let collection_name = format!(
+        "{}_{}_path",
+        parent_singulars.join("_"),
+        child_plural,
+    );
+    let parent_args = parent_ids.join(", ");
+    let member_args = if parent_args.is_empty() {
+        format!("{record_ref}.id")
+    } else {
+        format!("{parent_args}, {record_ref}.id")
+    };
+    let collection_call = if parent_args.is_empty() {
+        format!("RouteHelpers.{collection_name}()")
+    } else {
+        format!("RouteHelpers.{collection_name}({parent_args})")
+    };
+    format!(
+        "(if {record_ref}.id != 0, do: RouteHelpers.{member_name}({member_args}), else: {collection_call})",
+    )
+}
+
+/// Compose one AR chain modifier onto a running Elixir list
+/// expression. Mirrors rust/ts/python/go/crystal — `all`/
+/// `includes`/etc. pass through; `order({field: :dir})` uses
+/// `Enum.sort_by/2`; `limit(N)` slices via `Enum.take/2`.
+fn apply_ex_chain_modifier(prev: String, m: crate::lower::ChainModifier<'_>) -> String {
+    match m.method {
+        "all" | "includes" | "preload" | "joins" | "distinct" | "select" => prev,
+        "order" => {
+            let Some(hash) = m.args.first() else { return prev };
+            let ExprNode::Hash { entries, .. } = &*hash.node else { return prev };
+            let Some((k, v)) = entries.first() else { return prev };
+            let field = match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => return prev,
+            };
+            let dir = match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => "asc".to_string(),
+            };
+            if dir == "desc" {
+                format!("Enum.sort_by({prev}, & &1.{field}, :desc)")
+            } else {
+                format!("Enum.sort_by({prev}, & &1.{field})")
+            }
+        }
+        "limit" => {
+            let Some(n) = m.args.first() else { return prev };
+            if let ExprNode::Lit { value: Literal::Int { value, .. } } = &*n.node {
+                return format!("Enum.take({prev}, {value})");
+            }
+            prev
+        }
+        _ => prev,
+    }
+}
+
+/// Render a classified `ViewHelperKind` to an Elixir
+/// `buf = buf <> ...` line.
+fn emit_ex_view_helper(
+    kind: &crate::lower::ViewHelperKind<'_>,
+    ctx: &ExViewCtx,
+) -> Option<String> {
+    use crate::lower::ViewHelperKind::*;
+    match kind {
+        CsrfMetaTags => Some("buf = buf <> ViewHelpers.csrf_meta_tags()".to_string()),
+        CspMetaTag => Some("buf = buf <> ViewHelpers.csp_meta_tag()".to_string()),
+        JavascriptImportmapTags => Some(
+            "buf = buf <> ViewHelpers.javascript_importmap_tags(Importmap.pins(), \"application\")"
+                .to_string(),
+        ),
+        TurboStreamFrom { channel } => {
+            if !is_ex_simple_expr(channel, ctx) {
+                return None;
+            }
+            let arg = emit_ex_view_expr_raw(channel, ctx);
+            Some(format!("buf = buf <> ViewHelpers.turbo_stream_from({arg})"))
+        }
+        DomId { record, prefix } => {
+            let (singular, id_expr) = ex_resolve_dom_id_record(record, ctx)?;
+            match prefix {
+                None => Some(format!(
+                    "buf = buf <> ViewHelpers.dom_id({singular:?}, {id_expr})"
+                )),
+                Some(p) => {
+                    let prefix_str = match &*p.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            format!("{:?}", value.as_str())
+                        }
+                        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+                        _ if is_ex_simple_expr(p, ctx) => emit_ex_view_expr_raw(p, ctx),
+                        _ => return None,
+                    };
+                    Some(format!(
+                        "buf = buf <> ViewHelpers.dom_id({singular:?}, {id_expr}, {prefix_str})"
+                    ))
+                }
+            }
+        }
+        Pluralize { count, word } => {
+            if !is_ex_simple_expr(count, ctx) || !is_ex_simple_expr(word, ctx) {
+                return None;
+            }
+            let c = emit_ex_view_expr_raw(count, ctx);
+            let w = emit_ex_view_expr_raw(word, ctx);
+            Some(format!("buf = buf <> ViewHelpers.pluralize({c}, {w})"))
+        }
+        Truncate { text, opts } => {
+            if !is_ex_simple_expr(text, ctx) {
+                return None;
+            }
+            let t = emit_ex_view_expr_raw(text, ctx);
+            let opts_code = ex_opts_from_expr(opts.as_deref(), ctx);
+            Some(format!("buf = buf <> ViewHelpers.truncate({t}, {opts_code})"))
+        }
+        StylesheetLinkTag { name, opts } => {
+            let opts_code = ex_opts_from_expr(opts.as_deref(), ctx);
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*name.node {
+                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
+                    let lines: Vec<String> = ctx
+                        .stylesheets
+                        .iter()
+                        .map(|n| {
+                            format!("buf = buf <> ViewHelpers.stylesheet_link_tag({n:?}, {opts_code})")
+                        })
+                        .collect();
+                    return Some(lines.join("\nbuf = buf <> \"\\n\"\n"));
+                }
+            }
+            let name_expr = match &*name.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+                ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+                _ => return None,
+            };
+            Some(format!(
+                "buf = buf <> ViewHelpers.stylesheet_link_tag({name_expr}, {opts_code})"
+            ))
+        }
+        ContentForGetter { slot } => Some(format!(
+            "buf = buf <> ViewHelpers.content_for_get({slot:?})"
+        )),
+        ContentForSetter { .. } => None,
+        LinkTo { text, url, opts } => {
+            emit_ex_link_or_button("link_to", text, url, *opts, ctx)
+                .map(|call| format!("buf = buf <> {call}"))
+        }
+        ButtonTo { text, target, opts } => {
+            emit_ex_link_or_button("button_to", text, target, *opts, ctx)
+                .map(|call| format!("buf = buf <> {call}"))
+        }
+    }
+}
+
+fn ex_resolve_dom_id_record(record: &Expr, ctx: &ExViewCtx) -> Option<(String, String)> {
+    let name = match &*record.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } if ctx.is_local(name.as_str()) => {
+            name.as_str().to_string()
+        }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } if args.is_empty() && ctx.is_local(method.as_str()) => method.as_str().to_string(),
+        _ => return None,
+    };
+    let singular = crate::naming::singularize(&name);
+    Some((singular, format!("{name}.id")))
+}
+
+fn emit_ex_link_or_button(
+    helper: &str,
+    text: &Expr,
+    url: &Expr,
+    opts: Option<&Expr>,
+    ctx: &ExViewCtx,
+) -> Option<String> {
+    if !is_ex_simple_expr(text, ctx) {
+        return None;
+    }
+    let text_raw = emit_ex_view_expr_raw(text, ctx);
+    let text_expr = match &*text.node {
+        ExprNode::Lit { value: Literal::Str { .. } } => text_raw,
+        _ => format!("to_string({text_raw})"),
+    };
+    let is_local = |n: &str| ctx.is_local(n);
+    let url_kind = crate::lower::classify_view_url_arg(url, &is_local)?;
+    let url_expr = match url_kind {
+        crate::lower::ViewUrlArg::Literal { value } => format!("{value:?}"),
+        crate::lower::ViewUrlArg::PathHelper { name, args } => {
+            let args_s: Vec<String> = args.iter().map(|a| ex_path_arg(a, ctx)).collect();
+            if args_s.is_empty() {
+                format!("RouteHelpers.{name}()")
+            } else {
+                format!("RouteHelpers.{name}({})", args_s.join(", "))
+            }
+        }
+        crate::lower::ViewUrlArg::RecordRef { name } => {
+            format!(
+                "RouteHelpers.{}_path({name}.id)",
+                crate::naming::singularize(name),
+            )
+        }
+        crate::lower::ViewUrlArg::NestedArray { elements } => ex_emit_nested_path(elements, ctx)?,
+    };
+    let opts_code = ex_opts_from_expr(opts, ctx);
+    Some(format!("ViewHelpers.{helper}({text_expr}, {url_expr}, {opts_code})"))
+}
+
+fn ex_path_arg(arg: &Expr, ctx: &ExViewCtx) -> String {
+    match &*arg.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } if ctx.is_local(name.as_str()) => {
+            format!("{}.id", name.as_str())
+        }
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && ctx.is_local(method.as_str()) =>
+        {
+            format!("{}.id", method.as_str())
+        }
+        _ => emit_ex_view_expr_raw(arg, ctx),
+    }
+}
+
+fn ex_emit_nested_path(elements: &[Expr], ctx: &ExViewCtx) -> Option<String> {
+    let is_local = |n: &str| ctx.is_local(n);
+    let mut singulars: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    for el in elements {
+        let kind = crate::lower::classify_nested_url_element(el, &is_local)?;
+        let (singular, id_expr) = ex_nested_element_parts(&kind);
+        singulars.push(singular);
+        args.push(id_expr);
+    }
+    let name = format!("{}_path", singulars.join("_"));
+    Some(format!("RouteHelpers.{name}({})", args.join(", ")))
+}
+
+fn ex_opts_from_expr(opts: Option<&Expr>, ctx: &ExViewCtx) -> String {
+    match opts.map(|e| &*e.node) {
+        Some(ExprNode::Hash { entries, .. }) => ex_hash_to_map(entries, ctx),
+        _ => "%{}".to_string(),
+    }
+}
+
+fn ex_hash_to_map(entries: &[(Expr, Expr)], ctx: &ExViewCtx) -> String {
+    let mut items: Vec<(String, String)> = Vec::new();
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => continue,
+        };
+        if key == "data" {
+            if let ExprNode::Hash { entries: de, .. } = &*v.node {
+                for (dk, dv) in de {
+                    let dk_str = match &*dk.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            value.as_str().replace('_', "-")
+                        }
+                        ExprNode::Lit { value: Literal::Str { value } } => {
+                            value.replace('_', "-")
+                        }
+                        _ => continue,
+                    };
+                    let dv_s = ex_opt_value(dv, ctx);
+                    items.push((format!("data-{dk_str}"), dv_s));
+                }
+                continue;
+            }
+        }
+        let val = if key == "class" {
+            ex_class_value(v, ctx)
+        } else {
+            ex_opt_value(v, ctx)
+        };
+        items.push((key, val));
+    }
+    if items.is_empty() {
+        return "%{}".to_string();
+    }
+    let parts: Vec<String> = items
+        .into_iter()
+        .map(|(k, v)| format!("{k:?} => {v}"))
+        .collect();
+    format!("%{{{}}}", parts.join(", "))
+}
+
+fn ex_opt_value(v: &Expr, ctx: &ExViewCtx) -> String {
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        ExprNode::Lit { value: Literal::Int { value, .. } } => format!("\"{value}\""),
+        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        ExprNode::Array { elements, .. } => match elements.first() {
+            Some(first) => match &*first.node {
+                ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+                _ => "\"\"".to_string(),
+            },
+            None => "\"\"".to_string(),
+        },
+        _ if is_ex_simple_expr(v, ctx) => {
+            let raw = emit_ex_view_expr_raw(v, ctx);
+            match &*v.node {
+                ExprNode::Lit { .. } => raw,
+                _ => format!("to_string({raw})"),
+            }
+        }
+        _ => "\"\"".to_string(),
+    }
+}
+
+fn ex_class_value(v: &Expr, ctx: &ExViewCtx) -> String {
+    let is_local = |n: &str| ctx.is_local(n);
+    let simple_as_ex = |e: &Expr| -> Option<String> {
+        if is_ex_simple_expr(e, ctx) {
+            Some(match &*e.node {
+                ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+                _ => {
+                    let raw = emit_ex_view_expr_raw(e, ctx);
+                    match &*e.node {
+                        ExprNode::Lit { .. } => raw,
+                        _ => format!("to_string({raw})"),
+                    }
+                }
+            })
+        } else {
+            None
+        }
+    };
+    match crate::lower::classify_class_value(v, &is_local) {
+        crate::lower::ClassValueShape::Simple { expr } => {
+            simple_as_ex(expr).unwrap_or_else(|| "\"\"".to_string())
+        }
+        crate::lower::ClassValueShape::Conditional { base, clauses } => {
+            let Some(base_ex) = simple_as_ex(base) else {
+                return "\"\"".to_string();
+            };
+            if clauses.is_empty() {
+                return base_ex;
+            }
+            let extras: Vec<String> = clauses
+                .iter()
+                .map(|(cls_text, pred)| {
+                    let cond = ex_render_errors_field_predicate(pred);
+                    format!(
+                        " <> (if {cond}, do: \" {cls_text}\", else: \"\")"
+                    )
+                })
+                .collect();
+            format!("({base_ex}{})", extras.join(""))
+        }
+        crate::lower::ClassValueShape::Unknown => "\"\"".to_string(),
+    }
+}
+
+fn ex_render_errors_field_predicate(pred: &crate::lower::ErrorsFieldPredicate<'_>) -> String {
+    let call = format!(
+        "ViewHelpers.field_has_error({}.errors, {:?})",
+        pred.record, pred.field,
+    );
+    if pred.expect_present {
+        call
+    } else {
+        format!("not {call}")
+    }
+}
+
+fn emit_ex_form_builder_call(
+    recv: &str,
+    kind: crate::lower::FormBuilderMethod,
+    args: &[Expr],
+    ctx: &ExViewCtx,
+) -> Option<String> {
+    use crate::lower::FormBuilderMethod::*;
+    let (field, opts_entries) = crate::lower::classify_form_builder_args(args);
+    let opts = opts_entries
+        .map(|entries| ex_hash_to_map(entries, ctx))
+        .unwrap_or_else(|| "%{}".to_string());
+    match kind {
+        Label => {
+            let field = field?;
+            Some(format!("ViewHelpers.fb_label({recv}, {field:?}, {opts})"))
+        }
+        TextField | TextArea => {
+            let ex_method = if matches!(kind, TextField) { "fb_text_field" } else { "fb_textarea" };
+            let field = field?;
+            let field_s = field.to_string();
+            let value_expr = ctx
+                .form_records
+                .iter()
+                .find(|(name, _)| name == recv)
+                .and_then(|(_, record)| {
+                    if ctx.local_has_attr(record, &field_s) {
+                        Some(format!("{record}.{field_s}"))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "\"\"".to_string());
+            Some(format!(
+                "ViewHelpers.{ex_method}({recv}, {field:?}, {value_expr}, {opts})"
+            ))
+        }
+        Submit => {
+            let label_str = args.iter().find_map(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                _ => None,
+            });
+            let opts_expr = if let Some(lbl) = label_str {
+                format!("Map.put({opts}, \"label\", {lbl:?})")
+            } else {
+                opts
+            };
+            Some(format!("ViewHelpers.fb_submit({recv}, {opts_expr})"))
         }
     }
 }
@@ -1975,6 +2627,12 @@ fn is_ex_simple_expr(expr: &Expr, ctx: &ExViewCtx) -> bool {
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
             ctx.is_local(name.as_str())
         }
+        // Partial-scope local parsed as bare Send.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && ctx.is_local(method.as_str()) =>
+        {
+            true
+        }
         ExprNode::Send { recv: Some(r), method, args, block, .. } => {
             if !args.is_empty() || block.is_some() {
                 return false;
@@ -1983,11 +2641,22 @@ fn is_ex_simple_expr(expr: &Expr, ctx: &ExViewCtx) -> bool {
             if clean.is_empty() {
                 return false;
             }
-            if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
-                if ctx.arg_has_attr(name.as_str(), clean) {
+            let recv_local = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+                ExprNode::Send {
+                    recv: None,
+                    method: m,
+                    args: ra,
+                    block: None,
+                    ..
+                } if ra.is_empty() && ctx.is_local(m.as_str()) => Some(m.as_str()),
+                _ => None,
+            };
+            if let Some(local_name) = recv_local {
+                if ctx.local_has_attr(local_name, clean) {
                     return true;
                 }
-                if ctx.is_local(name.as_str())
+                if ctx.is_local(local_name)
                     && matches!(
                         method.as_str(),
                         "any?" | "none?" | "present?" | "empty?"
@@ -1995,6 +2664,15 @@ fn is_ex_simple_expr(expr: &Expr, ctx: &ExViewCtx) -> bool {
                 {
                     return true;
                 }
+                if ctx
+                    .resolve_has_many_on_local(local_name, method.as_str())
+                    .is_some()
+                {
+                    return true;
+                }
+            }
+            if is_ex_simple_expr(r, ctx) {
+                return true;
             }
             false
         }
@@ -2010,29 +2688,81 @@ fn emit_ex_view_expr_raw(expr: &Expr, ctx: &ExViewCtx) -> String {
     match &*expr.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
-        ExprNode::Send { recv: Some(r), method, args, .. } => {
+        ExprNode::Send { recv, method, args, .. } => {
             let method_s = method.as_str();
-            if args.is_empty() {
-                if let ExprNode::Var { name, .. } | ExprNode::Ivar { name } = &*r.node {
-                    if ctx.is_local(name.as_str()) {
-                        match method_s {
-                            "any?" | "present?" => return format!("(length({name}) > 0)"),
-                            "none?" | "empty?" => return format!("(length({name}) == 0)"),
-                            _ => {}
+            // Bare local ref (partial scope).
+            if recv.is_none() && args.is_empty() && ctx.is_local(method_s) {
+                return method_s.to_string();
+            }
+            if let Some(r) = recv {
+                if args.is_empty() {
+                    // has_many association read → inline filter.
+                    // `Enum.filter(Comment.all(), fn c -> c.article_id == article.id end)`.
+                    let owner_local = match &*r.node {
+                        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+                            if ctx.is_local(name.as_str()) =>
+                        {
+                            Some(name.as_str().to_string())
+                        }
+                        ExprNode::Send {
+                            recv: None,
+                            method: m,
+                            args: ra,
+                            block: None,
+                            ..
+                        } if ra.is_empty() && ctx.is_local(m.as_str()) => {
+                            Some(m.as_str().to_string())
+                        }
+                        _ => None,
+                    };
+                    if let Some(owner) = &owner_local {
+                        if let Some((target_class, fk)) =
+                            ctx.resolve_has_many_on_local(owner, method_s)
+                        {
+                            return format!(
+                                "Enum.filter({target_class}.all(), fn r -> r.{fk} == {owner}.id end)"
+                            );
                         }
                     }
+                    // Collection predicates / size on any recv.
+                    match method_s {
+                        "any?" | "present?" => {
+                            let recv_s = emit_ex_view_expr_raw(r, ctx);
+                            return format!("(length({recv_s}) > 0)");
+                        }
+                        "none?" | "empty?" => {
+                            let recv_s = emit_ex_view_expr_raw(r, ctx);
+                            return format!("(length({recv_s}) == 0)");
+                        }
+                        "size" | "count" | "length" => {
+                            let recv_s = emit_ex_view_expr_raw(r, ctx);
+                            return format!("length({recv_s})");
+                        }
+                        "full_message" => {
+                            let recv_s = emit_ex_view_expr_raw(r, ctx);
+                            return format!("{recv_s}.full_message");
+                        }
+                        _ => {}
+                    }
                 }
-            }
-            let recv_s = emit_ex_view_expr_raw(r, ctx);
-            let clean = method_s.trim_end_matches('?').trim_end_matches('!');
-            if args.is_empty() {
-                format!("{recv_s}.{clean}")
-            } else {
+                let recv_s = emit_ex_view_expr_raw(r, ctx);
+                let clean = method_s.trim_end_matches('?').trim_end_matches('!');
+                if args.is_empty() {
+                    return format!("{recv_s}.{clean}");
+                }
                 let args_s: Vec<String> = args
                     .iter()
                     .map(|a| emit_ex_view_expr_raw(a, ctx))
                     .collect();
-                format!("{recv_s}.{clean}({})", args_s.join(", "))
+                return format!("{recv_s}.{clean}({})", args_s.join(", "));
+            }
+            // Bare fn call (no recv) — assume helper.
+            let args_s: Vec<String> =
+                args.iter().map(|a| emit_ex_view_expr_raw(a, ctx)).collect();
+            if args.is_empty() {
+                format!("ViewHelpers.{method_s}()")
+            } else {
+                format!("ViewHelpers.{method_s}({})", args_s.join(", "))
             }
         }
         ExprNode::StringInterp { parts } => {

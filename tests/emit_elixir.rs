@@ -52,7 +52,7 @@ fn models_define_struct_and_module_functions() {
     // columns get concrete values before save runs (SQLite rejects
     // nil → NOT NULL).
     assert!(
-        content.contains("defstruct [id: nil, title: \"\"]"),
+        content.contains("defstruct [id: 0, title: \"\", errors: []]"),
         "got:\n{content}"
     );
     // Instance methods become module functions taking the record as
