@@ -33,7 +33,9 @@ pub mod view;
 
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
-pub use associations::{resolve_has_many, HasManyRef};
+pub use associations::{
+    build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
+};
 pub use chain::{collect_chain_modifiers, ChainModifier};
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
@@ -63,8 +65,8 @@ pub use routes::{flatten_routes, standard_resource_actions, FlatRoute};
 pub use schema_sql::{lower_schema, sqlite_type};
 pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};
 pub use view::{
-    classify_class_value, classify_errors_field_predicate, classify_form_builder_method,
-    classify_nested_form_child, classify_nested_url_element, classify_view_helper,
-    classify_view_url_arg, ClassValueShape, ErrorsFieldPredicate, FormBuilderMethod,
-    NestedFormChild, NestedUrlElement, ViewHelperKind, ViewUrlArg,
+    classify_class_value, classify_errors_field_predicate, classify_form_builder_args,
+    classify_form_builder_method, classify_nested_form_child, classify_nested_url_element,
+    classify_view_helper, classify_view_url_arg, ClassValueShape, ErrorsFieldPredicate,
+    FormBuilderMethod, NestedFormChild, NestedUrlElement, ViewHelperKind, ViewUrlArg,
 };

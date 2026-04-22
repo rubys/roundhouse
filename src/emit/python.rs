@@ -1938,25 +1938,7 @@ fn emit_py_views(app: &App) -> Vec<EmittedFile> {
             )
         })
         .collect();
-    let mut has_manys: Vec<(String, String, String, String)> = Vec::new();
-    for model in &app.models {
-        for a in model.associations() {
-            if let crate::dialect::Association::HasMany {
-                name,
-                target,
-                foreign_key,
-                ..
-            } = a
-            {
-                has_manys.push((
-                    model.name.0.as_str().to_string(),
-                    name.as_str().to_string(),
-                    target.0.as_str().to_string(),
-                    foreign_key.as_str().to_string(),
-                ));
-            }
-        }
-    }
+    let has_manys = crate::lower::build_has_many_table(app);
     let stylesheets = app.stylesheets.clone();
 
     let mut s = String::new();
@@ -2037,7 +2019,7 @@ fn emit_view_file_pass2_py(
     view: &crate::dialect::View,
     known_models: &[Symbol],
     attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
-    has_manys: &[(String, String, String, String)],
+    has_manys: &[crate::lower::HasManyRow],
     stylesheets: &[String],
 ) {
     // Python doesn't rewrite ivars → locals in the AST; instead,
@@ -2099,10 +2081,9 @@ struct PyViewCtx {
     arg_attrs: Vec<String>,
     resource_dir: String,
     known_models: Vec<String>,
-    /// `(owner_class, assoc_name, target_class, foreign_key)` rows
-    /// for every has_many in the app. Used by `article.comments`
-    /// lowering.
-    has_manys: Vec<(String, String, String, String)>,
+    /// Has-many rows, shared via `crate::lower`. Used by
+    /// `article.comments` lowering.
+    has_manys: Vec<crate::lower::HasManyRow>,
     stylesheets: Vec<String>,
     /// `(builder_local_name, record_python_expr)` pairs active in
     /// the current scope. Populated on entry to a `form_with`
@@ -2144,11 +2125,7 @@ impl PyViewCtx {
         if !self.is_local(local) {
             return None;
         }
-        let owner_class = crate::naming::singularize_camelize(local);
-        self.has_manys
-            .iter()
-            .find(|(oc, an, _, _)| oc == &owner_class && an == assoc)
-            .map(|(_, _, tc, fk)| (tc.clone(), fk.clone()))
+        crate::lower::resolve_has_many_on_local(&self.has_manys, local, assoc)
     }
 }
 
@@ -2885,8 +2862,11 @@ fn emit_py_form_builder_call(
     ctx: &PyViewCtx,
 ) -> Option<String> {
     use crate::lower::FormBuilderMethod::*;
-    let (field, opts_expr) = split_py_form_builder_args(args, ctx);
-    let opts = opts_expr.unwrap_or_else(|| "{}".to_string());
+    let (field, opts_entries) = crate::lower::classify_form_builder_args(args);
+    let field = field.map(str::to_string);
+    let opts = opts_entries
+        .map(|entries| py_hash_to_dict(entries, ctx))
+        .unwrap_or_else(|| "{}".to_string());
     match kind {
         Label => {
             let field = field?;
@@ -2927,26 +2907,6 @@ fn emit_py_form_builder_call(
     }
 }
 
-fn split_py_form_builder_args(
-    args: &[Expr],
-    ctx: &PyViewCtx,
-) -> (Option<String>, Option<String>) {
-    if args.is_empty() {
-        return (None, None);
-    }
-    let (field, rest) = match args.first().and_then(|a| match &*a.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        _ => None,
-    }) {
-        Some(field) => (Some(field), &args[1..]),
-        None => (None, args),
-    };
-    let opts = rest.iter().find_map(|a| match &*a.node {
-        ExprNode::Hash { entries, .. } => Some(py_hash_to_dict(entries, ctx)),
-        _ => None,
-    });
-    (field, opts)
-}
 
 fn py_nested_form_path_expr(
     elems: &[Expr],

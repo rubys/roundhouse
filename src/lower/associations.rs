@@ -83,3 +83,62 @@ pub fn resolve_has_many(
     }
     None
 }
+
+/// Flat has_many row — `(owner_class, assoc_name, target_class,
+/// foreign_key)`. Shape view emitters reach for when they need to
+/// resolve `owner.<assoc>` reads into a target-typed query (rust
+/// + python + go + crystal all do this; TS uses a different
+/// CollectionProxy model and stays on `resolve_has_many` directly).
+#[derive(Clone, Debug)]
+pub struct HasManyRow {
+    pub owner_class: String,
+    pub assoc_name: String,
+    pub target_class: String,
+    pub foreign_key: String,
+}
+
+/// Flatten every `has_many` declaration in the app into a lookup
+/// table. Views use this to lower `article.comments` reads into
+/// `Comment.all.filter(c => c.article_id == article.id)` shapes
+/// without re-walking `app.models.associations()` per target.
+pub fn build_has_many_table(app: &App) -> Vec<HasManyRow> {
+    let mut rows = Vec::new();
+    for model in &app.models {
+        for a in model.associations() {
+            if let crate::dialect::Association::HasMany {
+                name,
+                target,
+                foreign_key,
+                ..
+            } = a
+            {
+                rows.push(HasManyRow {
+                    owner_class: model.name.0.as_str().to_string(),
+                    assoc_name: name.as_str().to_string(),
+                    target_class: target.0.as_str().to_string(),
+                    foreign_key: foreign_key.as_str().to_string(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// Look up a has_many row by a local name + association name,
+/// using the scaffold naming convention: the local's singular-
+/// camelized form matches the owner class. `article` + `comments`
+/// → resolves against the `Article` has_many :comments row.
+///
+/// Returns `(target_class, foreign_key)` when matched — the two
+/// pieces view emit needs for its inline filter.
+pub fn resolve_has_many_on_local(
+    table: &[HasManyRow],
+    local: &str,
+    assoc: &str,
+) -> Option<(String, String)> {
+    let owner_class = crate::naming::singularize_camelize(local);
+    table
+        .iter()
+        .find(|row| row.owner_class == owner_class && row.assoc_name == assoc)
+        .map(|row| (row.target_class.clone(), row.foreign_key.clone()))
+}

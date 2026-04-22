@@ -877,27 +877,7 @@ fn emit_go_views(app: &App, known_models: &[Symbol]) -> EmittedFile {
             )
         })
         .collect();
-    // Flatten has_many for view emit — matches the rust/python
-    // (owner_class, assoc_name, target_class, fk) tuple list.
-    let mut has_manys: Vec<(String, String, String, String)> = Vec::new();
-    for model in &app.models {
-        for a in model.associations() {
-            if let crate::dialect::Association::HasMany {
-                name,
-                target,
-                foreign_key,
-                ..
-            } = a
-            {
-                has_manys.push((
-                    model.name.0.as_str().to_string(),
-                    name.as_str().to_string(),
-                    target.0.as_str().to_string(),
-                    foreign_key.as_str().to_string(),
-                ));
-            }
-        }
-    }
+    let has_manys = crate::lower::build_has_many_table(app);
     let stylesheets = app.stylesheets.clone();
 
     let mut s = String::new();
@@ -965,7 +945,7 @@ fn emit_go_view_file(
     view: &crate::dialect::View,
     known_models: &[Symbol],
     attrs_by_class: &std::collections::BTreeMap<String, Vec<String>>,
-    has_manys: &[(String, String, String, String)],
+    has_manys: &[crate::lower::HasManyRow],
     stylesheets: &[String],
 ) {
     let fn_name = go_view_function_name(view.name.as_str());
@@ -1018,7 +998,7 @@ struct GoViewCtx {
     arg_name: String,
     arg_attrs: Vec<String>,
     resource_dir: String,
-    has_manys: Vec<(String, String, String, String)>,
+    has_manys: Vec<crate::lower::HasManyRow>,
     stylesheets: Vec<String>,
     /// Active FormBuilder bindings: `(builder_local_name,
     /// record_go_expr)` pairs. Populated on `form_with` block entry;
@@ -1058,11 +1038,7 @@ impl GoViewCtx {
         if !self.is_local(local) {
             return None;
         }
-        let owner_class = crate::naming::singularize_camelize(local);
-        self.has_manys
-            .iter()
-            .find(|(oc, an, _, _)| oc == &owner_class && an == assoc)
-            .map(|(_, _, tc, fk)| (tc.clone(), fk.clone()))
+        crate::lower::resolve_has_many_on_local(&self.has_manys, local, assoc)
     }
 }
 
@@ -1707,8 +1683,11 @@ fn emit_go_form_builder_call(
     ctx: &GoViewCtx,
 ) -> Option<String> {
     use crate::lower::FormBuilderMethod::*;
-    let (field, opts_expr) = split_go_form_builder_args(args, ctx);
-    let opts = opts_expr.unwrap_or_else(|| "map[string]string{}".to_string());
+    let (field, opts_entries) = crate::lower::classify_form_builder_args(args);
+    let field = field.map(str::to_string);
+    let opts = opts_entries
+        .map(|entries| go_hash_to_map(entries, ctx))
+        .unwrap_or_else(|| "map[string]string{}".to_string());
     match kind {
         Label => {
             let field = field?;
@@ -1753,26 +1732,6 @@ fn emit_go_form_builder_call(
     }
 }
 
-fn split_go_form_builder_args(
-    args: &[Expr],
-    ctx: &GoViewCtx,
-) -> (Option<String>, Option<String>) {
-    if args.is_empty() {
-        return (None, None);
-    }
-    let (field, rest) = match args.first().and_then(|a| match &*a.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        _ => None,
-    }) {
-        Some(field) => (Some(field), &args[1..]),
-        None => (None, args),
-    };
-    let opts = rest.iter().find_map(|a| match &*a.node {
-        ExprNode::Hash { entries, .. } => Some(go_hash_to_map(entries, ctx)),
-        _ => None,
-    });
-    (field, opts)
-}
 
 /// Emit a `render @coll` / `render parent.assoc` call by expanding
 /// into a Go `for` loop that concatenates the partial's rendering.

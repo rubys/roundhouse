@@ -1301,30 +1301,10 @@ fn emit_views(app: &App) -> EmittedFile {
     writeln!(s, "use crate::view_helpers::{{self, FormBuilder, RenderCtx}};").unwrap();
     writeln!(s).unwrap();
 
-    // Flatten has_many associations into a lookup table:
-    // (owner_class, assoc_name) → (target_class, foreign_key).
-    // Used by view emit to lower `article.comments` shapes into
-    // inline filter queries without needing `&App` at every call
-    // site.
-    let mut has_manys: Vec<(String, String, String, String)> = Vec::new();
-    for model in &app.models {
-        for a in model.associations() {
-            if let crate::dialect::Association::HasMany {
-                name,
-                target,
-                foreign_key,
-                ..
-            } = a
-            {
-                has_manys.push((
-                    model.name.0.as_str().to_string(),
-                    name.as_str().to_string(),
-                    target.0.as_str().to_string(),
-                    foreign_key.as_str().to_string(),
-                ));
-            }
-        }
-    }
+    // has_many lookup table — shared across view emitters via
+    // `src/lower/associations`. Used by view emit to lower
+    // `article.comments` shapes into inline filter queries.
+    let has_manys = crate::lower::build_has_many_table(app);
 
     let view_ctx = ViewEmitCtx {
         known_models: app.models.iter().map(|m| m.name.0.clone()).collect(),
@@ -1407,11 +1387,11 @@ struct ViewEmitCtx {
     /// Discovered stylesheet names (stems). Feeds the
     /// `stylesheet_link_tag :app` expansion in the layout.
     stylesheets: Vec<String>,
-    /// Has-many associations flattened from `App`:
-    /// `(owner_class, assoc_name, target_class, foreign_key)`.
-    /// Lets view emit lower `owner.assoc` reads into inline filter
-    /// queries without needing `&App` threaded through ViewEmitCtx.
-    has_manys: Vec<(String, String, String, String)>,
+    /// Has-many associations flattened via
+    /// `crate::lower::build_has_many_table`. Lets view emit lower
+    /// `owner.assoc` reads into inline filter queries without
+    /// needing `&App` threaded through ViewEmitCtx.
+    has_manys: Vec<crate::lower::HasManyRow>,
 }
 
 impl ViewEmitCtx {
@@ -1457,11 +1437,7 @@ impl ViewEmitCtx {
         if !self.is_local(local) {
             return None;
         }
-        let owner_class = crate::naming::singularize_camelize(local);
-        self.has_manys
-            .iter()
-            .find(|(oc, an, _, _)| oc == &owner_class && an == assoc)
-            .map(|(_, _, tc, fk)| (tc.clone(), fk.clone()))
+        crate::lower::resolve_has_many_on_local(&self.has_manys, local, assoc)
     }
 }
 
@@ -2496,8 +2472,11 @@ fn emit_rust_form_builder_call(
     args: &[Expr],
     ctx: &ViewEmitCtx,
 ) -> Option<String> {
-    let (field, opts_expr) = split_rust_form_builder_args(args, ctx);
-    let opts = opts_expr.unwrap_or_else(|| "std::collections::HashMap::new()".to_string());
+    let (field, opts_entries) = crate::lower::classify_form_builder_args(args);
+    let field = field.map(str::to_string);
+    let opts = opts_entries
+        .map(|entries| rust_hash_to_hashmap_literal(entries, ctx))
+        .unwrap_or_else(|| "std::collections::HashMap::new()".to_string());
     match rs_method {
         "label" => {
             let field = field?;
@@ -2552,30 +2531,6 @@ fn emit_rust_form_builder_call(
         }
         _ => None,
     }
-}
-
-/// Split FormBuilder args into (field_name, options_expr). Field
-/// is the first Sym positional arg; options is the last Hash arg,
-/// lowered to a `HashMap<String, String>` literal.
-fn split_rust_form_builder_args(
-    args: &[Expr],
-    ctx: &ViewEmitCtx,
-) -> (Option<String>, Option<String>) {
-    if args.is_empty() {
-        return (None, None);
-    }
-    let (field, rest) = match args.first().and_then(|a| match &*a.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        _ => None,
-    }) {
-        Some(field) => (Some(field), &args[1..]),
-        None => (None, args),
-    };
-    let opts = rest.iter().find_map(|a| match &*a.node {
-        ExprNode::Hash { entries, .. } => Some(rust_hash_to_hashmap_literal(entries, ctx)),
-        _ => None,
-    });
-    (field, opts)
 }
 
 /// Lower a Ruby hash literal to a Rust `HashMap<String, String>`

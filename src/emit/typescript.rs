@@ -2427,7 +2427,9 @@ fn emit_ts_form_builder_call(
         return format!("_buf += {recv}.submit({opts_with_label});");
     }
 
-    let (field_arg, opts_arg) = split_form_builder_args(args, ctx);
+    let (field_raw, opts_entries) = crate::lower::classify_form_builder_args(args);
+    let field_arg = field_raw.map(|f| format!("{f:?}"));
+    let opts_arg = opts_entries.map(|entries| ts_hash_to_object_literal(entries, ctx));
     let call_args = match (field_arg, opts_arg) {
         (Some(field), Some(opts)) => format!("{field}, {opts}"),
         (Some(field), None) => field,
@@ -2435,33 +2437,6 @@ fn emit_ts_form_builder_call(
         (None, None) => String::new(),
     };
     format!("_buf += {recv}.{js_method}({call_args});")
-}
-
-/// Split FormBuilder args into (field, options). Field is the
-/// first positional arg (usually a Sym); options is the last
-/// Hash arg. For `form.submit class: "..."` there's no field,
-/// just options. Scaffold `form.text_field :title, class: [..]`
-/// has both; the class array is simplified to its first string
-/// element (the conditional-hash part is dropped — good enough
-/// for the acceptance test's visual correctness).
-fn split_form_builder_args(args: &[Expr], ctx: &TsViewCtx) -> (Option<String>, Option<String>) {
-    if args.is_empty() {
-        return (None, None);
-    }
-    // Detect leading symbol arg as the field.
-    let (field_arg, rest) = match args.first().and_then(|a| match &*a.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-        _ => None,
-    }) {
-        Some(field) => (Some(format!("{field:?}")), &args[1..]),
-        None => (None, args),
-    };
-    // Remaining args: expect a single Hash (options).
-    let opts_arg = rest.iter().find_map(|a| match &*a.node {
-        ExprNode::Hash { entries, .. } => Some(ts_hash_to_object_literal(entries, ctx)),
-        _ => None,
-    });
-    (field_arg, opts_arg)
 }
 
 /// Render a Ruby hash literal's entries as a JS object literal,

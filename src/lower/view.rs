@@ -172,6 +172,29 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
     }
 }
 
+/// Split a FormBuilder method's positional args into its two
+/// Rails-shaped halves: the field-name symbol and the trailing
+/// options hash. `form.text_field :title, class: "..."` yields
+/// `(Some("title"), Some(&[(class, "...")]))`; `form.submit` with
+/// no args yields `(None, None)`. Emitters format the opts pairs
+/// themselves — the IR walk is target-neutral.
+pub fn classify_form_builder_args(
+    args: &[Expr],
+) -> (Option<&str>, Option<&[(Expr, Expr)]>) {
+    if args.is_empty() {
+        return (None, None);
+    }
+    let (field, rest): (Option<&str>, &[Expr]) = match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => (Some(value.as_str()), &args[1..]),
+        _ => (None, args),
+    };
+    let opts = rest.iter().find_map(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => Some(entries.as_slice()),
+        _ => None,
+    });
+    (field, opts)
+}
+
 // ── URL-arg classifier ─────────────────────────────────────────
 
 /// The URL position of `link_to` / `button_to` / `form_with(model:
