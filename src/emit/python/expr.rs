@@ -72,14 +72,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            // Python `if … : \n body \n else: \n body`. No braces,
-            // no trailing `end`. The inner emitter produces the
-            // branch expression as a single line — the scaffold
-            // doesn't try to reformat multi-line if bodies.
+            // Python ternary `a if cond else b`. `emit_expr` is always
+            // called in an expression position (non-expression If flow
+            // lives in the controller/view emitters with their own
+            // statement-form handlers).
             let cond_s = emit_expr(cond);
             let then_s = emit_expr(then_branch);
             let else_s = emit_expr(else_branch);
-            format!("if {cond_s}:\n    {then_s}\nelse:\n    {else_s}")
+            format!("{then_s} if {cond_s} else {else_s}")
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
@@ -149,6 +149,14 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
+    // Ruby's binary operators ride the Send channel (`a == b` is
+    // `a.==(b)`). Python needs infix; emit as `recv op arg` for the
+    // ones whose syntax matches 1:1.
+    if let (Some(r), [arg]) = (recv, args) {
+        if is_py_binop(method) {
+            return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
+        }
+    }
     match recv {
         None => {
             if args_s.is_empty() {
@@ -170,6 +178,28 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
         }
     }
+}
+
+fn is_py_binop(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "**"
+            | "<<"
+            | ">>"
+            | "|"
+            | "&"
+            | "^"
+    )
 }
 
 pub(super) fn emit_literal(lit: &Literal) -> String {

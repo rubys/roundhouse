@@ -28,10 +28,13 @@
 //! rendering lives in `ty` (with `python_ty` re-exported here for the
 //! external surface that `bin/build-site` uses).
 
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
+use crate::dialect::MethodDef;
+use crate::ty::Ty;
 
 mod controller;
 mod controller_test;
@@ -50,6 +53,46 @@ mod view;
 
 // External API: kept for anything that keys off `python_ty` directly.
 pub use ty::python_ty;
+
+/// Emit a typed `MethodDef` as a standalone Python function
+/// (trailing newline included). Requires `signature` to be populated
+/// — `parse_methods_with_rbs` does this.
+pub fn emit_method(m: &MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(
+        sig_params.len(),
+        m.params.len(),
+        "method `{}`: signature/param arity mismatch",
+        m.name
+    );
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(name, p)| format!("{}: {}", name, python_ty(&p.ty)))
+        .collect();
+
+    let ret_s = python_ty(ret);
+    let body = expr::emit_body(&m.body, ret);
+
+    let mut out = String::new();
+    writeln!(out, "def {}({}) -> {}:", m.name, param_list.join(", "), ret_s).unwrap();
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "    {line}").unwrap();
+        }
+    }
+    out
+}
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
 const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
