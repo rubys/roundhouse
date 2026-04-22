@@ -377,24 +377,121 @@ fn emitted_program_roundtrips_through_serde() {
     assert_eq!(vm.run().unwrap(), Some(Value::Int(100)));
 }
 
-// ── Deferred nodes / operations fail cleanly ─────────────────────
+// ── BoolOp short-circuit (M3b) ───────────────────────────────────
+
+fn bool_and(left: Expr, right: Expr) -> Expr {
+    use roundhouse::expr::{BoolOpKind, BoolOpSurface};
+    typed(
+        ExprNode::BoolOp {
+            op: BoolOpKind::And,
+            surface: BoolOpSurface::Symbol,
+            left,
+            right,
+        },
+        Ty::Bool,
+    )
+}
+
+fn bool_or(left: Expr, right: Expr) -> Expr {
+    use roundhouse::expr::{BoolOpKind, BoolOpSurface};
+    typed(
+        ExprNode::BoolOp {
+            op: BoolOpKind::Or,
+            surface: BoolOpSurface::Symbol,
+            left,
+            right,
+        },
+        Ty::Bool,
+    )
+}
 
 #[test]
-fn bool_op_not_yet_supported() {
-    use roundhouse::expr::{BoolOpKind, BoolOpSurface};
-    let node = ExprNode::BoolOp {
-        op: BoolOpKind::And,
-        surface: BoolOpSurface::Symbol,
-        left: lit_bool(true),
-        right: lit_bool(false),
-    };
-    let expr = untyped(node);
+fn and_true_true_is_true() {
+    assert_eq!(
+        run(&bool_and(lit_bool(true), lit_bool(true))).unwrap(),
+        Some(Value::Bool(true))
+    );
+}
+
+#[test]
+fn and_true_false_is_false() {
+    assert_eq!(
+        run(&bool_and(lit_bool(true), lit_bool(false))).unwrap(),
+        Some(Value::Bool(false))
+    );
+}
+
+#[test]
+fn and_short_circuits_on_false_left() {
+    // `false && (10 / 0 > 0)` — if the right side were evaluated we'd
+    // get DivisionByZero from the VM. If short-circuit works, we
+    // return false without touching the right side.
+    let divide_by_zero = send_i64(lit_int(10), "/", lit_int(0), Ty::Int);
+    let right = send_i64(divide_by_zero, ">", lit_int(0), Ty::Bool);
+    let expr = bool_and(lit_bool(false), right);
+    assert_eq!(run(&expr).unwrap(), Some(Value::Bool(false)));
+}
+
+#[test]
+fn or_false_false_is_false() {
+    assert_eq!(
+        run(&bool_or(lit_bool(false), lit_bool(false))).unwrap(),
+        Some(Value::Bool(false))
+    );
+}
+
+#[test]
+fn or_true_false_is_true() {
+    assert_eq!(
+        run(&bool_or(lit_bool(true), lit_bool(false))).unwrap(),
+        Some(Value::Bool(true))
+    );
+}
+
+#[test]
+fn or_short_circuits_on_true_left() {
+    // `true || (10 / 0 > 0)` — right side would DivisionByZero if
+    // evaluated. Short-circuit returns true.
+    let divide_by_zero = send_i64(lit_int(10), "/", lit_int(0), Ty::Int);
+    let right = send_i64(divide_by_zero, ">", lit_int(0), Ty::Bool);
+    let expr = bool_or(lit_bool(true), right);
+    assert_eq!(run(&expr).unwrap(), Some(Value::Bool(true)));
+}
+
+#[test]
+fn and_chains_correctly() {
+    // true && (true && false) => false
+    let inner = bool_and(lit_bool(true), lit_bool(false));
+    let outer = bool_and(lit_bool(true), inner);
+    assert_eq!(run(&outer).unwrap(), Some(Value::Bool(false)));
+}
+
+#[test]
+fn bool_op_mixes_with_comparisons() {
+    // (5 > 3) && (2 < 4) => true
+    let left = send_i64(lit_int(5), ">", lit_int(3), Ty::Bool);
+    let right = send_i64(lit_int(2), "<", lit_int(4), Ty::Bool);
+    let expr = bool_and(left, right);
+    assert_eq!(run(&expr).unwrap(), Some(Value::Bool(true)));
+}
+
+#[test]
+fn bool_op_non_bool_operand_not_yet_supported() {
+    // `true && 5` — right side isn't Bool-typed. This is the
+    // "lift opportunity" signal — Ruby's truthy `&&` over mixed
+    // types needs either a Truthy opcode or analyzer-produced
+    // explicit casts, neither of which is M3b's job.
+    let expr = bool_and(lit_bool(true), lit_int(5));
     let mut w = Walker::new();
     match w.walk(&expr) {
-        Err(WalkError::NotYetSupported(msg)) => assert!(msg.contains("BoolOp")),
-        other => panic!("expected NotYetSupported(BoolOp), got {:?}", other),
+        Err(WalkError::NotYetSupported(msg)) => {
+            assert!(msg.contains("non-Bool"), "message was: {}", msg)
+        }
+        other => panic!("expected NotYetSupported(non-Bool), got {:?}", other),
     }
 }
+
+// ── Deferred nodes / operations fail cleanly ─────────────────────
 
 #[test]
 fn send_on_non_int_receiver_not_yet_supported() {

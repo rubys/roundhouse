@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use crate::bytecode::format::{Op, Program, StrId, SymId};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{BoolOpKind, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::ty::Ty;
 
@@ -108,8 +108,11 @@ impl Walker {
                 args,
                 ..
             } => self.walk_send(recv.as_ref(), method, args),
+            ExprNode::BoolOp {
+                op, left, right, ..
+            } => self.walk_bool_op(*op, left, right),
 
-            // Everything below waits for M3b+.
+            // Everything below waits for M3c+.
             other => Err(WalkError::NotYetSupported(format!(
                 "ExprNode variant: {}",
                 node_kind(other)
@@ -231,6 +234,70 @@ impl Walker {
             LValue::Ivar { .. } => Err(WalkError::NotYetSupported("assign to ivar".into())),
             LValue::Attr { .. } => Err(WalkError::NotYetSupported("assign to attr".into())),
             LValue::Index { .. } => Err(WalkError::NotYetSupported("assign to index[]".into())),
+        }
+    }
+
+    /// Short-circuit `&&` / `||` via the `Dup` + conditional-jump +
+    /// `Pop` idiom. The VM's `JumpIfFalse` / `JumpIfTrue` pop their
+    /// operand, so we `Dup` first to keep a copy of the left-hand
+    /// value around as the result when short-circuit fires.
+    ///
+    /// For M3b we require both operands to be `Bool`-typed (the VM's
+    /// conditional jumps `pop_bool()`, so a non-`Bool` left-hand side
+    /// would produce `TypeMismatch` at runtime). Ruby's truthy-aware
+    /// `&&`/`||` over mixed-type operands waits for a `Truthy`
+    /// opcode or a lifted comparison form — lifting opportunity, not
+    /// a walker responsibility.
+    ///
+    /// Stack trace for `a && b`:
+    ///
+    /// ```text
+    ///   <a>                    stack: [a]
+    ///   Dup                    stack: [a, a]
+    ///   JumpIfFalse end        pops top; if !a, jump — stack: [a]
+    ///   Pop                    (only runs when a is true) — stack: []
+    ///   <b>                    stack: [b]
+    ///   end:                   result is a (if short-circuit) or b
+    /// ```
+    ///
+    /// `||` is the dual via `JumpIfTrue`.
+    fn walk_bool_op(
+        &mut self,
+        op: BoolOpKind,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(), WalkError> {
+        self.require_bool(left, "BoolOp left")?;
+        self.require_bool(right, "BoolOp right")?;
+
+        self.walk(left)?;
+        self.emit(Op::Dup);
+        let branch_pos = self.code.len();
+        self.emit(match op {
+            BoolOpKind::And => Op::JumpIfFalse { offset: 0 },
+            BoolOpKind::Or => Op::JumpIfTrue { offset: 0 },
+        });
+        self.emit(Op::Pop);
+        self.walk(right)?;
+        let end = self.code.len();
+        self.patch_branch(branch_pos, end);
+        Ok(())
+    }
+
+    /// Assert an expression's type is `Bool`. Used by `walk_bool_op`
+    /// to surface missing lifts (e.g., Ruby-truthy `1 && 2` shapes)
+    /// rather than fail at runtime with a VM `TypeMismatch`.
+    fn require_bool(&self, e: &Expr, context: &str) -> Result<(), WalkError> {
+        match e.ty.as_ref() {
+            Some(Ty::Bool) => Ok(()),
+            Some(other) => Err(WalkError::NotYetSupported(format!(
+                "{}: non-Bool operand (got {:?}) — needs truthy-aware lift",
+                context, other
+            ))),
+            None => Err(WalkError::NotYetSupported(format!(
+                "{}: operand has no type (analyzer didn't type it)",
+                context
+            ))),
         }
     }
 
