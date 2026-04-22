@@ -70,16 +70,25 @@ pub(super) fn emit_expr(e: &Expr, receiver_arg: Option<&str>) -> String {
             .join("; "),
         ExprNode::If { cond, then_branch, else_branch } => {
             let cond_s = emit_expr(cond, receiver_arg);
-            let then_s = emit_block(then_branch, receiver_arg);
-            let else_s = emit_block(else_branch, receiver_arg);
-            // Elixir's `if / else / end` form. `case` would be more
-            // idiomatic for `{:ok, _} / {:error, _}` shapes but that's
-            // a Phase-3 semantic transform.
-            format!(
-                "if {cond_s} do\n{}\nelse\n{}\nend",
-                indent(&then_s, 1),
-                indent(&else_s, 1),
-            )
+            let is_multi = |e: &Expr| {
+                matches!(&*e.node, ExprNode::Seq { exprs } if exprs.len() > 1)
+            };
+            // Single-expression branches use Elixir's one-line
+            // `if c, do: a, else: b`; multi-statement branches fall
+            // back to the block form.
+            if is_multi(then_branch) || is_multi(else_branch) {
+                let then_s = emit_block(then_branch, receiver_arg);
+                let else_s = emit_block(else_branch, receiver_arg);
+                format!(
+                    "if {cond_s} do\n{}\nelse\n{}\nend",
+                    indent(&then_s, 1),
+                    indent(&else_s, 1),
+                )
+            } else {
+                let then_s = emit_expr(then_branch, receiver_arg);
+                let else_s = emit_expr(else_branch, receiver_arg);
+                format!("if {cond_s}, do: {then_s}, else: {else_s}")
+            }
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
@@ -171,6 +180,18 @@ fn emit_send(
         return format!("{}[{}]", emit_expr(recv.unwrap(), receiver_arg), args_s.join(", "));
     }
 
+    // Ruby's binary operators ride the Send channel. Elixir's surface
+    // matches for these, so emit infix directly.
+    if let (Some(r), [_arg]) = (recv, args) {
+        if is_ex_binop(method) {
+            return format!(
+                "{} {method} {}",
+                emit_expr(r, receiver_arg),
+                args_s[0],
+            );
+        }
+    }
+
     match recv {
         None => {
             // Bareword call. In Elixir this is a function in the
@@ -232,4 +253,26 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         // Ruby symbols map cleanly to Elixir atoms.
         Literal::Sym { value } => format!(":{}", value.as_str()),
     }
+}
+
+fn is_ex_binop(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "**"
+            | "<<"
+            | ">>"
+            | "|"
+            | "&"
+            | "^"
+    )
 }
