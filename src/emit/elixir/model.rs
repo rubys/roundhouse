@@ -10,7 +10,7 @@ use crate::ident::Symbol;
 use crate::naming::snake_case;
 
 use super::super::EmittedFile;
-use super::emit_block;
+use super::expr::emit_block;
 
 pub(super) fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
     let module = model.name.0.as_str();

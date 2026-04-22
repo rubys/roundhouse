@@ -10,7 +10,7 @@ use crate::ident::Symbol;
 use crate::naming::snake_case;
 
 use super::super::EmittedFile;
-use super::emit_expr;
+use super::expr::emit_expr;
 use super::view;
 // Trait import — used by ExEmitter's inherent-impl helpers to call
 // `self.render_expr(...)` (the trait method) from inside.
