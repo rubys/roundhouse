@@ -7,10 +7,12 @@
 //! in `shared`; expression emission lives in `expr` and is reused by all the
 //! per-form modules.
 
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
+use crate::dialect::{MethodDef, MethodReceiver};
 
 mod controller;
 mod expr;
@@ -27,6 +29,35 @@ mod view;
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
 pub use view::reconstruct_erb;
+
+/// Emit a single `MethodDef` as Ruby source (trailing newline included).
+/// The signature and effects are not emitted — they belong to the RBS
+/// sidecar, not to Ruby itself. Used by the runtime-extraction pipeline
+/// to round-trip a typed standalone function back to Ruby source.
+pub fn emit_method(m: &MethodDef) -> String {
+    let prefix = match m.receiver {
+        MethodReceiver::Instance => "",
+        MethodReceiver::Class => "self.",
+    };
+    let params = if m.params.is_empty() {
+        String::new()
+    } else {
+        let ps: Vec<&str> = m.params.iter().map(|p| p.as_str()).collect();
+        format!("({})", ps.join(", "))
+    };
+    let mut out = String::new();
+    writeln!(out, "def {prefix}{}{}", m.name, params).unwrap();
+    let body_text = emit_expr(&m.body);
+    for line in body_text.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    out.push_str("end\n");
+    out
+}
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
