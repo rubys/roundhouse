@@ -17,7 +17,9 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 use crate::ingest::ingest_expr;
+use crate::rbs::parse_signatures;
 use crate::span::Span;
+use crate::ty::Ty;
 
 const VIRTUAL_FILE: &str = "<runtime>";
 
@@ -38,6 +40,57 @@ pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
     let mut out = Vec::new();
     walk_scope(&root, &mut out)?;
     Ok(out)
+}
+
+/// Parse Ruby source and its RBS sidecar, returning `MethodDef`s with
+/// the RBS-derived `Ty::Fn` attached to `signature`. Every Ruby method
+/// must have a matching RBS signature and vice versa; arities must match.
+/// Method-body expressions are left with `ty: None` — sub-expression
+/// typing is a separate step.
+pub fn parse_methods_with_rbs(
+    ruby_src: &str,
+    rbs_src: &str,
+) -> Result<Vec<MethodDef>, String> {
+    let mut methods = parse_methods(ruby_src)?;
+    let sigs = parse_signatures(rbs_src)?;
+
+    let mut sig_map: std::collections::HashMap<String, Ty> = sigs
+        .methods
+        .into_iter()
+        .map(|(n, ty)| (n.as_str().to_string(), ty))
+        .collect();
+
+    for m in &mut methods {
+        let ty = sig_map.remove(m.name.as_str()).ok_or_else(|| {
+            format!("method `{}` has no matching RBS signature", m.name)
+        })?;
+
+        if let Ty::Fn { params, .. } = &ty {
+            if params.len() != m.params.len() {
+                return Err(format!(
+                    "method `{}`: Ruby has {} positional param(s), RBS has {}",
+                    m.name,
+                    m.params.len(),
+                    params.len()
+                ));
+            }
+        } else {
+            return Err(format!("method `{}`: signature is not Ty::Fn", m.name));
+        }
+
+        m.signature = Some(ty);
+    }
+
+    if !sig_map.is_empty() {
+        let mut orphaned: Vec<String> = sig_map.keys().cloned().collect();
+        orphaned.sort();
+        return Err(format!(
+            "RBS signature(s) with no matching Ruby method: {}",
+            orphaned.join(", ")
+        ));
+    }
+
+    Ok(methods)
 }
 
 fn walk_scope(node: &Node<'_>, out: &mut Vec<MethodDef>) -> Result<(), String> {
@@ -333,5 +386,113 @@ mod tests {
         let m = parse_one(src);
         assert!(m.params.is_empty());
         assert!(matches!(&*m.body.node, ExprNode::Seq { exprs } if exprs.is_empty()));
+    }
+
+    // ── parse_methods_with_rbs ──────────────────────────────────────
+
+    use crate::ty::{Param, ParamKind};
+
+    const PLURALIZE_RB: &str =
+        "module Inflector\n  def pluralize(count, word)\n    count == 1 ? \"1 #{word}\" : \"#{count} #{word}s\"\n  end\nend\n";
+    const PLURALIZE_RBS: &str =
+        "module Inflector\n  def pluralize: (Integer, String) -> String\nend\n";
+
+    #[test]
+    fn marrying_attaches_signature() {
+        let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("types");
+        assert_eq!(methods.len(), 1);
+        let m = &methods[0];
+        assert_eq!(m.name.as_str(), "pluralize");
+
+        let sig = m.signature.as_ref().expect("signature attached");
+        let Ty::Fn { params, ret, .. } = sig else {
+            panic!("expected Ty::Fn, got {sig:?}");
+        };
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].ty, Ty::Int);
+        assert_eq!(params[1].ty, Ty::Str);
+        assert_eq!(**ret, Ty::Str);
+
+        // Param kinds come from RBS (Required in this case).
+        assert!(params.iter().all(|p: &Param| p.kind == ParamKind::Required));
+    }
+
+    #[test]
+    fn ruby_param_names_coexist_with_rbs_types() {
+        // RBS has anonymous positionals; Ruby param names should survive.
+        let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("types");
+        let m = &methods[0];
+        assert_eq!(
+            m.params.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["count", "word"]
+        );
+    }
+
+    #[test]
+    fn ruby_method_missing_signature_errors() {
+        let ruby = "def foo\n  1\nend\n";
+        let rbs = "module M\nend\n";
+        let err = parse_methods_with_rbs(ruby, rbs).unwrap_err();
+        assert!(
+            err.contains("foo") && err.contains("no matching RBS"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn orphan_rbs_signature_errors() {
+        let ruby = "def foo\n  1\nend\n";
+        let rbs = "module M\n  def foo: () -> Integer\n  def bar: () -> String\nend\n";
+        let err = parse_methods_with_rbs(ruby, rbs).unwrap_err();
+        assert!(
+            err.contains("no matching Ruby method") && err.contains("bar"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn arity_mismatch_errors() {
+        let ruby = "def f(a, b)\n  1\nend\n";
+        let rbs = "module M\n  def f: (Integer) -> Integer\nend\n";
+        let err = parse_methods_with_rbs(ruby, rbs).unwrap_err();
+        assert!(
+            err.contains("2 positional param") && err.contains("RBS has 1"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn multi_method_marrying_preserves_ruby_order() {
+        let ruby = "module M\n  def b\n    1\n  end\n  def a\n    \"x\"\n  end\nend\n";
+        let rbs = "module M\n  def a: () -> String\n  def b: () -> Integer\nend\n";
+        let methods = parse_methods_with_rbs(ruby, rbs).expect("types");
+        // Ruby order: b, a
+        assert_eq!(
+            methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+        // And each has its own signature.
+        let b_sig = methods[0].signature.as_ref().unwrap();
+        let a_sig = methods[1].signature.as_ref().unwrap();
+        assert!(matches!(b_sig, Ty::Fn { ret, .. } if **ret == Ty::Int));
+        assert!(matches!(a_sig, Ty::Fn { ret, .. } if **ret == Ty::Str));
+    }
+
+    #[test]
+    fn empty_ruby_and_empty_rbs_yields_empty() {
+        let methods = parse_methods_with_rbs("", "").expect("types");
+        assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn ruby_parse_error_surfaces_through_marrying() {
+        let err = parse_methods_with_rbs("def f(", "module M\nend\n").unwrap_err();
+        assert!(err.contains("parse error"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn rbs_parse_error_surfaces_through_marrying() {
+        let err = parse_methods_with_rbs("", "class { end").unwrap_err();
+        assert!(!err.is_empty());
     }
 }
