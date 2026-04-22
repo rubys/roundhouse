@@ -1,0 +1,3 @@
+module Inflector
+  def pluralize: (Integer, String) -> String
+end
