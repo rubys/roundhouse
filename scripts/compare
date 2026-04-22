@@ -9,7 +9,7 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr | elixir | ex }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
 #
@@ -100,8 +100,9 @@ case "$TARGET" in
     python|py)     TARGET=python ;;
     go)            TARGET=go ;;
     crystal|cr)    TARGET=crystal ;;
+    elixir|ex)     TARGET=elixir ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, or crystal)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, or elixir)" >&2
         exit 2
         ;;
 esac
@@ -139,6 +140,10 @@ case "$TARGET" in
         ;;
     crystal)
         BUILD_DIR="/tmp/rh-cr-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    elixir)
+        BUILD_DIR="/tmp/rh-ex-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
 esac
@@ -267,6 +272,10 @@ case "$TARGET" in
         step "building crystal target (release)"
         (cd "$BUILD_DIR" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server)
         ;;
+    elixir)
+        step "building elixir target"
+        (cd "$BUILD_DIR" && mix deps.get && MIX_ENV=prod mix compile)
+        ;;
 esac
 ok "target built"
 
@@ -307,6 +316,10 @@ case "$TARGET" in
         ;;
     crystal)
         (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    elixir)
+        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e 'App.Main.run' >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
     typescript)

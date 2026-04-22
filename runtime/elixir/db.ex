@@ -40,11 +40,25 @@ defmodule Roundhouse.Db do
     :ok
   end
 
-  @doc "Borrow the current test's connection. Raises if unset."
+  @doc """
+  Borrow the current connection. Test mode stores per-process via
+  `Process.put`; server mode stores globally via `:persistent_term`
+  so each Cowboy request worker can read the same sqlite handle.
+  Tests take precedence (an async spec shouldn't see a leaked prod
+  handle).
+  """
   @spec conn() :: Exqlite.Sqlite3.db()
   def conn do
-    Process.get(:roundhouse_conn) ||
-      raise "test db not initialized; call Roundhouse.Db.setup_test_db/1 first"
+    case Process.get(:roundhouse_conn) do
+      nil ->
+        case :persistent_term.get({__MODULE__, :conn}, nil) do
+          nil -> raise "db not initialized; call setup_test_db/1 or open_production_db/2 first"
+          c -> c
+        end
+
+      c ->
+        c
+    end
   end
 
   @doc """
@@ -117,4 +131,49 @@ defmodule Roundhouse.Db do
     val
   end
 
+  @doc """
+  Open a file-backed SQLite connection, apply the schema DDL when
+  the target DB has no tables yet, and install it in the process
+  dict. Used by `Roundhouse.Server.start/2` at process boot; skips
+  schema on a populated DB so a compare-staged seed isn't
+  clobbered. Mirrors the rust/python/go/crystal open_production_db
+  siblings.
+  """
+  @spec open_production_db(String.t(), String.t()) :: :ok
+  def open_production_db(path, schema_sql) do
+    if prev = Process.get(:roundhouse_conn) do
+      Exqlite.Sqlite3.close(prev)
+    end
+
+    File.mkdir_p!(Path.dirname(path))
+    {:ok, conn} = Exqlite.Sqlite3.open(path)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+      )
+
+    count =
+      case Exqlite.Sqlite3.step(conn, stmt) do
+        {:row, [n]} -> n
+        _ -> 0
+      end
+
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+
+    if count == 0 do
+      schema_sql
+      |> String.split(";\n")
+      |> Enum.each(fn s ->
+        s = String.trim(s)
+        unless s == "" do
+          :ok = Exqlite.Sqlite3.execute(conn, s)
+        end
+      end)
+    end
+
+    :persistent_term.put({__MODULE__, :conn}, conn)
+    :ok
+  end
 end
