@@ -66,6 +66,13 @@ pub enum VmError {
     InvalidLocalSlot(u16),
     InvalidStringId(u32),
     InvalidSymbolId(u32),
+    /// `CallUser` referenced a `UserFnId` outside `Program::user_fns`.
+    InvalidUserFnId(u16),
+    /// `CallUser` argc didn't match the target function's arity.
+    ArityMismatch {
+        expected: u8,
+        got: u8,
+    },
     DivisionByZero,
     PcOutOfBounds(i64),
     /// Opcode recognized by the format but not yet implemented by this
@@ -73,12 +80,30 @@ pub enum VmError {
     NotYetSupported(&'static str),
 }
 
+/// One activation record on the VM's call stack. Each user function
+/// call pushes a `Frame` holding its own locals and the return address.
+/// The operand stack is shared across frames — arguments flow in via
+/// it, return values flow out the same way.
+#[derive(Clone, Debug)]
+struct Frame {
+    /// Locals for this call. Parameters occupy the first `arity`
+    /// slots; additional slots are initialized to `Nil`.
+    locals: Vec<Value>,
+    /// Where to resume execution in the caller after `Return`. Always
+    /// points at the instruction *after* the caller's `CallUser`
+    /// (matches the convention `pc` has already been advanced by the
+    /// dispatch loop before the opcode body runs).
+    return_pc: usize,
+}
+
 /// Minimal stack-based VM. Holds a borrow of the program and its own
-/// mutable dispatch state (stack, locals, pc).
+/// mutable dispatch state (operand stack, call-frame stack, pc).
 pub struct Vm<'p> {
     program: &'p Program,
     stack: Vec<Value>,
-    locals: Vec<Value>,
+    /// Call-frame stack. The last entry is the current frame. Always
+    /// contains at least one frame — the entry frame — after `new`.
+    frames: Vec<Frame>,
     pc: usize,
 }
 
@@ -87,17 +112,23 @@ impl<'p> Vm<'p> {
         Self {
             program,
             stack: Vec::new(),
-            locals: Vec::new(),
+            // Start with an empty entry frame. `with_locals` can replace
+            // its `locals` vector if the top-level code needs slots.
+            frames: vec![Frame {
+                locals: Vec::new(),
+                return_pc: 0,
+            }],
             pc: 0,
         }
     }
 
-    /// Pre-allocate `count` local slots initialized to `Nil`. M2 has
-    /// no function-call machinery, so locals for a whole program are
-    /// set up at construction time; M3+ will maintain a call frame
-    /// stack and push locals per frame.
+    /// Pre-allocate `count` local slots in the entry frame, initialized
+    /// to `Nil`. For the M3c+ call-frame world, this sizes the slots
+    /// used by top-level (pre-`CallUser`) code; subsequent calls get
+    /// their own frame with its own locals sized from the target
+    /// `UserFn::locals_count`.
     pub fn with_locals(mut self, count: usize) -> Self {
-        self.locals = vec![Value::Nil; count];
+        self.frames[0].locals = vec![Value::Nil; count];
         self
     }
 
@@ -142,9 +173,10 @@ impl<'p> Vm<'p> {
                     self.stack.push(Value::Str(s.clone()));
                 }
 
-                // ── Locals ────────────────────────────────────────
+                // ── Locals (always in the current frame) ──────────
                 Op::LoadLocal { slot } => {
-                    let v = self
+                    let frame = self.current_frame()?;
+                    let v = frame
                         .locals
                         .get(slot as usize)
                         .ok_or(VmError::InvalidLocalSlot(slot))?
@@ -153,10 +185,11 @@ impl<'p> Vm<'p> {
                 }
                 Op::StoreLocal { slot } => {
                     let v = self.pop()?;
-                    if (slot as usize) >= self.locals.len() {
+                    let frame = self.current_frame_mut()?;
+                    if (slot as usize) >= frame.locals.len() {
                         return Err(VmError::InvalidLocalSlot(slot));
                     }
-                    self.locals[slot as usize] = v;
+                    frame.locals[slot as usize] = v;
                 }
 
                 // ── Integer arithmetic ────────────────────────────
@@ -229,11 +262,55 @@ impl<'p> Vm<'p> {
                 }
 
                 Op::Return => {
-                    return Ok(self.stack.pop());
+                    // At the bottom frame this is the program's final
+                    // return: yield the top of the operand stack as
+                    // the run result. Otherwise pop the current frame
+                    // and resume at the caller's `return_pc`.
+                    if self.frames.len() <= 1 {
+                        return Ok(self.stack.pop());
+                    }
+                    let popped = self.frames.pop().expect("frames nonempty");
+                    self.pc = popped.return_pc;
+                }
+
+                // ── User-defined function calls ───────────────────
+                Op::CallUser { fn_id, argc } => {
+                    let user_fn = self
+                        .program
+                        .user_fns
+                        .get(fn_id.0 as usize)
+                        .ok_or(VmError::InvalidUserFnId(fn_id.0))?;
+                    if user_fn.arity != argc {
+                        return Err(VmError::ArityMismatch {
+                            expected: user_fn.arity,
+                            got: argc,
+                        });
+                    }
+                    // Pop arguments off the operand stack in reverse
+                    // push order, so `arg[0]` lands in local slot 0.
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse();
+
+                    // Build the callee's frame: locals sized from the
+                    // function's declaration, arguments written into
+                    // slots 0..argc, remainder `Nil`.
+                    let locals_count = user_fn.locals_count as usize;
+                    let mut locals = vec![Value::Nil; locals_count.max(argc as usize)];
+                    for (i, v) in args.into_iter().enumerate() {
+                        locals[i] = v;
+                    }
+
+                    self.frames.push(Frame {
+                        locals,
+                        return_pc: self.pc, // already advanced past CallUser
+                    });
+                    self.pc = user_fn.code_offset as usize;
                 }
 
                 // ── Deferred to later milestones ──────────────────
-                Op::CallUser { .. } => return Err(VmError::NotYetSupported("call_user")),
                 Op::CallRt { .. } => return Err(VmError::NotYetSupported("call_rt")),
                 Op::ConcatStr => return Err(VmError::NotYetSupported("concat_str")),
                 Op::NewArray { .. } => return Err(VmError::NotYetSupported("new_array")),
@@ -243,6 +320,14 @@ impl<'p> Vm<'p> {
                 Op::InterpStr { .. } => return Err(VmError::NotYetSupported("interp_str")),
             }
         }
+    }
+
+    fn current_frame(&self) -> Result<&Frame, VmError> {
+        self.frames.last().ok_or(VmError::StackUnderflow)
+    }
+
+    fn current_frame_mut(&mut self) -> Result<&mut Frame, VmError> {
+        self.frames.last_mut().ok_or(VmError::StackUnderflow)
     }
 
     fn pop(&mut self) -> Result<Value, VmError> {

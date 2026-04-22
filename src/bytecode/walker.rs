@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use crate::bytecode::format::{Op, Program, StrId, SymId};
+use crate::bytecode::format::{Op, Program, StrId, SymId, UserFn, UserFnId};
 use crate::expr::{BoolOpKind, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::ty::Ty;
@@ -47,13 +47,20 @@ pub enum WalkError {
 }
 
 /// Walker state — constant pools accumulated during emission, local
-/// variable scope (`VarId → slot`), and the growing code buffer.
+/// variable scope (`VarId → slot`), the growing code buffer, and the
+/// user-function table being assembled as `declare_user_fn` /
+/// `begin_user_fn_body` / `end_user_fn_body` are called.
 pub struct Walker {
     string_pool: Vec<String>,
     symbol_pool: Vec<String>,
     code: Vec<Op>,
     locals: HashMap<VarId, u16>,
     next_slot: u16,
+    user_fns: Vec<UserFn>,
+    /// Saved (locals, next_slot) pairs for nested `begin_user_fn_body`
+    /// calls. Pushed on enter, popped on exit; restores the caller's
+    /// scope cleanly without assuming top-level-only emission.
+    saved_states: Vec<(HashMap<VarId, u16>, u16)>,
 }
 
 impl Walker {
@@ -64,7 +71,69 @@ impl Walker {
             code: Vec::new(),
             locals: HashMap::new(),
             next_slot: 0,
+            user_fns: Vec::new(),
+            saved_states: Vec::new(),
         }
+    }
+
+    /// Emit a raw opcode. Exposed so callers (tests, higher-level
+    /// emitters) can splice in control flow or calls that don't
+    /// correspond to a single `Expr` node.
+    pub fn emit(&mut self, op: Op) {
+        self.code.push(op);
+    }
+
+    /// Reserve a slot in the user-function table and return its id.
+    /// `code_offset` and `locals_count` are filled in later by the
+    /// matching `begin_user_fn_body` / `end_user_fn_body` pair. This
+    /// split lets top-level code emit `CallUser` against a function
+    /// whose body hasn't been emitted yet — the common pattern when
+    /// the entry point calls functions that are defined further down
+    /// in the code section.
+    pub fn declare_user_fn(&mut self, name: String, arity: u8) -> UserFnId {
+        let id = self.user_fns.len() as u16;
+        self.user_fns.push(UserFn {
+            name,
+            code_offset: 0,
+            arity,
+            locals_count: 0,
+        });
+        UserFnId(id)
+    }
+
+    /// Begin emitting a function body. Records the current code
+    /// position as the function's `code_offset`, saves the caller's
+    /// local scope, and binds each `param_id` to a fresh slot
+    /// (0..arity). Pair every call with `end_user_fn_body`.
+    pub fn begin_user_fn_body(&mut self, id: UserFnId, param_ids: &[VarId]) {
+        let idx = id.0 as usize;
+        self.user_fns[idx].code_offset = self.code.len() as u32;
+
+        // Save caller's scope, reset to empty for the function body.
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_next_slot = std::mem::replace(&mut self.next_slot, 0);
+        self.saved_states.push((saved_locals, saved_next_slot));
+
+        // Bind params to slots 0..arity.
+        for (i, vid) in param_ids.iter().enumerate() {
+            self.locals.insert(*vid, i as u16);
+        }
+        self.next_slot = param_ids.len() as u16;
+    }
+
+    /// Finalize a function body. Records the `locals_count` (the
+    /// number of slots allocated during body emission) and restores
+    /// the caller's local scope.
+    pub fn end_user_fn_body(&mut self, id: UserFnId) {
+        let idx = id.0 as usize;
+        self.user_fns[idx].locals_count = self.next_slot;
+
+        let (prev_locals, prev_next_slot) = self
+            .saved_states
+            .pop()
+            .expect("end_user_fn_body without matching begin_user_fn_body");
+        self.locals = prev_locals;
+        self.next_slot = prev_next_slot;
     }
 
     /// Total locals allocated during this walk — the count a VM frame
@@ -74,15 +143,13 @@ impl Walker {
     }
 
     /// Consume the walker and produce a `Program` holding the
-    /// accumulated code and pools. No `UserFn` entries are produced at
-    /// M3a — that's M3c's job when emitting a whole app. M3a's output
-    /// is a single flat instruction stream the caller can execute via
-    /// the M2 VM after running `with_locals(walker.locals_count())`.
+    /// accumulated code, pools, and user-function table.
     pub fn into_program(self) -> Program {
         let mut p = Program::new();
         p.string_pool = self.string_pool;
         p.symbol_pool = self.symbol_pool;
         p.code = self.code;
+        p.user_fns = self.user_fns;
         p
     }
 
@@ -346,10 +413,6 @@ impl Walker {
     }
 
     // ── Helpers ──────────────────────────────────────────────────
-
-    fn emit(&mut self, op: Op) {
-        self.code.push(op);
-    }
 
     fn alloc_slot(&mut self) -> u16 {
         let slot = self.next_slot;

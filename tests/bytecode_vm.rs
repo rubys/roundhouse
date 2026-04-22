@@ -358,13 +358,16 @@ fn type_mismatch_int_in_conditional() {
 // ── Opcodes deferred to later milestones ──────────────────────────
 
 #[test]
-fn call_user_not_yet_supported() {
+fn call_user_with_invalid_fn_id_errors() {
+    // CallUser is supported post-M3c, but an empty user_fns table
+    // means fn_id 0 is out of range — the VM must surface that
+    // cleanly rather than panicking on the index lookup.
     use roundhouse::bytecode::UserFnId;
     let p = program_with_code(vec![Op::CallUser {
         fn_id: UserFnId(0),
         argc: 0,
     }]);
-    assert_eq!(run(p, 0), Err(VmError::NotYetSupported("call_user")));
+    assert_eq!(run(p, 0), Err(VmError::InvalidUserFnId(0)));
 }
 
 #[test]
@@ -395,6 +398,186 @@ fn collection_opcodes_not_yet_supported() {
         let p = program_with_code(vec![op]);
         assert_eq!(run(p, 0), Err(VmError::NotYetSupported(name)));
     }
+}
+
+// ── User-defined function calls (M3c) ────────────────────────────
+
+use roundhouse::bytecode::{RtFnId, UserFn, UserFnId};
+
+fn program_with_main_and_user_fn(
+    main_code: Vec<Op>,
+    fn_name: &str,
+    fn_arity: u8,
+    fn_locals: u16,
+    fn_body: Vec<Op>,
+) -> Program {
+    let mut p = Program::new();
+    let code_offset = main_code.len() as u32;
+    p.user_fns.push(UserFn {
+        name: fn_name.into(),
+        code_offset,
+        arity: fn_arity,
+        locals_count: fn_locals,
+    });
+    p.code = main_code;
+    p.code.extend(fn_body);
+    p
+}
+
+#[test]
+fn call_user_with_zero_args_returns_value() {
+    // main: CallUser 0 argc=0; Return
+    // fn "answer": LoadI64 42; Return
+    let main = vec![
+        Op::CallUser {
+            fn_id: UserFnId(0),
+            argc: 0,
+        },
+        Op::Return,
+    ];
+    let body = vec![Op::LoadI64 { value: 42 }, Op::Return];
+    let p = program_with_main_and_user_fn(main, "answer", 0, 0, body);
+    assert_eq!(run(p, 0).unwrap(), Some(Value::Int(42)));
+}
+
+#[test]
+fn call_user_passes_args_into_local_slots() {
+    // main: LoadI64 10; LoadI64 20; CallUser 0 argc=2; Return
+    // fn "add": LoadLocal 0; LoadLocal 1; AddI64; Return
+    let main = vec![
+        Op::LoadI64 { value: 10 },
+        Op::LoadI64 { value: 20 },
+        Op::CallUser {
+            fn_id: UserFnId(0),
+            argc: 2,
+        },
+        Op::Return,
+    ];
+    let body = vec![
+        Op::LoadLocal { slot: 0 },
+        Op::LoadLocal { slot: 1 },
+        Op::AddI64,
+        Op::Return,
+    ];
+    let p = program_with_main_and_user_fn(main, "add", 2, 2, body);
+    assert_eq!(run(p, 0).unwrap(), Some(Value::Int(30)));
+}
+
+#[test]
+fn nested_call_stacks_frames_correctly() {
+    // main: CallUser outer (argc=0); Return
+    // outer: LoadI64 7; CallUser inner (argc=1); Return     // expects: inner(7) on top of stack
+    // inner: LoadLocal 0; LoadI64 1; AddI64; Return         // returns n+1
+    //
+    // Expected program result: 8.
+    let mut p = Program::new();
+    let outer_id = UserFnId(0);
+    let inner_id = UserFnId(1);
+    // We reserve both user_fns up-front; code_offset will be set below.
+    p.user_fns.push(UserFn {
+        name: "outer".into(),
+        code_offset: 0,
+        arity: 0,
+        locals_count: 0,
+    });
+    p.user_fns.push(UserFn {
+        name: "inner".into(),
+        code_offset: 0,
+        arity: 1,
+        locals_count: 1,
+    });
+
+    // main
+    p.code.push(Op::CallUser {
+        fn_id: outer_id,
+        argc: 0,
+    });
+    p.code.push(Op::Return);
+
+    // outer body
+    p.user_fns[0].code_offset = p.code.len() as u32;
+    p.code.push(Op::LoadI64 { value: 7 });
+    p.code.push(Op::CallUser {
+        fn_id: inner_id,
+        argc: 1,
+    });
+    p.code.push(Op::Return);
+
+    // inner body
+    p.user_fns[1].code_offset = p.code.len() as u32;
+    p.code.push(Op::LoadLocal { slot: 0 });
+    p.code.push(Op::LoadI64 { value: 1 });
+    p.code.push(Op::AddI64);
+    p.code.push(Op::Return);
+
+    assert_eq!(run(p, 0).unwrap(), Some(Value::Int(8)));
+}
+
+#[test]
+fn call_user_arity_mismatch_errors() {
+    // fn expects 1 arg, main passes 0.
+    let main = vec![Op::CallUser {
+        fn_id: UserFnId(0),
+        argc: 0,
+    }];
+    let body = vec![Op::LoadLocal { slot: 0 }, Op::Return];
+    let p = program_with_main_and_user_fn(main, "takes_one", 1, 1, body);
+    assert_eq!(
+        run(p, 0),
+        Err(VmError::ArityMismatch {
+            expected: 1,
+            got: 0,
+        })
+    );
+}
+
+#[test]
+fn call_rt_still_not_yet_supported() {
+    // CallRt stays deferred; make sure we didn't accidentally enable
+    // it while adding CallUser.
+    let p = program_with_code(vec![Op::CallRt {
+        rt_id: RtFnId(0),
+        argc: 0,
+    }]);
+    assert_eq!(run(p, 0), Err(VmError::NotYetSupported("call_rt")));
+}
+
+#[test]
+fn sequential_calls_to_same_function_each_get_fresh_locals() {
+    // fn "double": LoadLocal 0; LoadLocal 0; AddI64; Return
+    // main: push 3, call, store local 0 (in caller's frame); push 5, call;
+    //       pop current; read local 0 (should be 6, not mutated by the 2nd call)
+    //
+    // Actually simpler: just verify second call's locals aren't polluted
+    // by the first call's locals.
+    // main:
+    //   LoadI64 3; CallUser 0 (1); StoreLocal 0  -> caller's local[0] = 6
+    //   LoadI64 5; CallUser 0 (1)                -> pushes 10
+    //   LoadLocal 0; AddI64; Return              -> 6 + 10 = 16
+    let main = vec![
+        Op::LoadI64 { value: 3 },
+        Op::CallUser {
+            fn_id: UserFnId(0),
+            argc: 1,
+        },
+        Op::StoreLocal { slot: 0 },
+        Op::LoadI64 { value: 5 },
+        Op::CallUser {
+            fn_id: UserFnId(0),
+            argc: 1,
+        },
+        Op::LoadLocal { slot: 0 },
+        Op::AddI64,
+        Op::Return,
+    ];
+    let body = vec![
+        Op::LoadLocal { slot: 0 },
+        Op::LoadLocal { slot: 0 },
+        Op::AddI64,
+        Op::Return,
+    ];
+    let p = program_with_main_and_user_fn(main, "double", 1, 1, body);
+    assert_eq!(run(p, 1).unwrap(), Some(Value::Int(16)));
 }
 
 // ── End-of-code semantics ────────────────────────────────────────

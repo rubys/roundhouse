@@ -491,6 +491,133 @@ fn bool_op_non_bool_operand_not_yet_supported() {
     }
 }
 
+// ── Walker user-function machinery (M3c) ─────────────────────────
+
+use roundhouse::bytecode::UserFnId;
+
+#[test]
+fn declare_user_fn_returns_incremental_ids() {
+    let mut w = Walker::new();
+    assert_eq!(w.declare_user_fn("a".into(), 0), UserFnId(0));
+    assert_eq!(w.declare_user_fn("b".into(), 1), UserFnId(1));
+    assert_eq!(w.declare_user_fn("c".into(), 2), UserFnId(2));
+    let p = w.into_program();
+    assert_eq!(p.user_fns.len(), 3);
+    assert_eq!(p.user_fns[0].name, "a");
+    assert_eq!(p.user_fns[1].arity, 1);
+    assert_eq!(p.user_fns[2].arity, 2);
+}
+
+#[test]
+fn begin_user_fn_body_records_code_offset() {
+    let mut w = Walker::new();
+    // Emit a couple of top-level instructions so the fn body lands at
+    // a non-zero offset.
+    w.emit(roundhouse::bytecode::Op::LoadNil);
+    w.emit(roundhouse::bytecode::Op::Return);
+    let id = w.declare_user_fn("answer".into(), 0);
+    w.begin_user_fn_body(id, &[]);
+    w.walk(&lit_int(42)).unwrap();
+    w.emit(roundhouse::bytecode::Op::Return);
+    w.end_user_fn_body(id);
+
+    let p = w.into_program();
+    assert_eq!(p.user_fns[0].code_offset, 2);
+    assert_eq!(p.user_fns[0].locals_count, 0);
+}
+
+#[test]
+fn end_user_fn_body_records_locals_count() {
+    let mut w = Walker::new();
+    let id = w.declare_user_fn("local_heavy".into(), 0);
+    w.begin_user_fn_body(id, &[]);
+    // Allocate three locals via nested lets.
+    let body = let_in(
+        10,
+        "a",
+        lit_int(1),
+        let_in(
+            11,
+            "b",
+            lit_int(2),
+            let_in(12, "c", lit_int(3), var(10, "a", Ty::Int)),
+        ),
+    );
+    w.walk(&body).unwrap();
+    w.emit(roundhouse::bytecode::Op::Return);
+    w.end_user_fn_body(id);
+
+    let p = w.into_program();
+    assert_eq!(p.user_fns[0].locals_count, 3);
+}
+
+#[test]
+fn user_fn_body_has_isolated_scope() {
+    // Regression: top-level reuses VarId(1) for `x`, and the fn body
+    // also uses VarId(1) for its param. Without scope save/restore,
+    // walking var(1) after end_user_fn_body would mis-resolve (or
+    // the fn's StoreLocal would clobber the top-level binding).
+    //
+    // Structure: main stores 100 into x, calls double(x), returns
+    // the call's result. Value 200 means:
+    //   - top-level VarId(1) resolved to top-level slot 0 (via assign)
+    //   - fn-body VarId(1) resolved to fn-frame slot 0 (via param)
+    //   - Vm's per-frame locals isolate the two at runtime
+    let mut w = Walker::new();
+    let id = w.declare_user_fn("double".into(), 1);
+
+    // Top-level: x = 100; double(x)
+    w.walk(&assign_var(1, "x", lit_int(100))).unwrap();
+    w.emit(roundhouse::bytecode::Op::Pop); // discard the assign's pushed value
+    w.walk(&var(1, "x", Ty::Int)).unwrap(); // push x for the call
+    w.emit(roundhouse::bytecode::Op::CallUser { fn_id: id, argc: 1 });
+    w.emit(roundhouse::bytecode::Op::Return);
+
+    // Function body (same VarId reused intentionally).
+    w.begin_user_fn_body(id, &[VarId(1)]);
+    let fn_body = send_i64(var(1, "x", Ty::Int), "*", lit_int(2), Ty::Int);
+    w.walk(&fn_body).unwrap();
+    w.emit(roundhouse::bytecode::Op::Return);
+    w.end_user_fn_body(id);
+
+    let p = w.into_program();
+    let mut vm = Vm::new(&p).with_locals(1);
+    assert_eq!(vm.run().unwrap(), Some(Value::Int(200)));
+}
+
+#[test]
+fn end_to_end_walker_builds_runnable_multi_fn_program() {
+    // Top-level: push 10, 20; call "add"; return.
+    // "add": load local 0, load local 1, AddI64, return.
+    let mut w = Walker::new();
+    let add_id = w.declare_user_fn("add".into(), 2);
+
+    // Top-level
+    w.walk(&lit_int(10)).unwrap();
+    w.walk(&lit_int(20)).unwrap();
+    w.emit(roundhouse::bytecode::Op::CallUser {
+        fn_id: add_id,
+        argc: 2,
+    });
+    w.emit(roundhouse::bytecode::Op::Return);
+
+    // Function body
+    w.begin_user_fn_body(add_id, &[VarId(1), VarId(2)]);
+    let body = send_i64(
+        var(1, "a", Ty::Int),
+        "+",
+        var(2, "b", Ty::Int),
+        Ty::Int,
+    );
+    w.walk(&body).unwrap();
+    w.emit(roundhouse::bytecode::Op::Return);
+    w.end_user_fn_body(add_id);
+
+    let p = w.into_program();
+    let mut vm = Vm::new(&p);
+    assert_eq!(vm.run().unwrap(), Some(Value::Int(30)));
+}
+
 // ── Deferred nodes / operations fail cleanly ─────────────────────
 
 #[test]
