@@ -22,11 +22,16 @@
 //! rendering lives in `ty` (with `go_ty` re-exported here for any
 //! external surface that may key off it).
 
+use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
+use crate::dialect::MethodDef;
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 mod controller;
 mod controller_test;
@@ -74,6 +79,237 @@ const SERVER_SOURCE: &str = include_str!("../../runtime/go/server.go");
 /// per-channel subscriber map, partial-renderer registry. Copied
 /// as `app/cable.go`.
 const CABLE_SOURCE: &str = include_str!("../../runtime/go/cable.go");
+
+/// Emit a typed `MethodDef` as a standalone Go function for the
+/// runtime-extraction pipeline. Uses Go's idiomatic early-return form
+/// for tail-position `If`; embedded `If` (anywhere other than tail or
+/// RHS-of-assign) is rejected with a clear error instead of silently
+/// producing an IIFE.
+pub fn emit_method(m: &MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(
+        sig_params.len(),
+        m.params.len(),
+        "method `{}`: signature/param arity mismatch",
+        m.name
+    );
+
+    // Build a name → Ty map for format-specifier resolution inside
+    // StringInterp. Local bindings (Let / Assign) would extend this
+    // too; runtime code doesn't use them yet.
+    let mut type_env: HashMap<String, Ty> = HashMap::new();
+    for (name, p) in m.params.iter().zip(sig_params.iter()) {
+        type_env.insert(name.as_str().to_string(), p.ty.clone());
+    }
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(name, p)| format!("{} {}", name, go_ty(&p.ty)))
+        .collect();
+
+    let ret_s = go_ty(ret);
+    let body = rt_emit_body(&m.body, &type_env);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "func {}({}) {} {{",
+        go_export_name(m.name.as_str()),
+        param_list.join(", "),
+        ret_s
+    )
+    .unwrap();
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "\t{line}").unwrap();
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn go_export_name(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Body emission runs in *return context*: whatever value the body
+/// expression produces must be returned. Tail-position `If` is
+/// rewritten to Go's early-return form (no `else` branch after the
+/// `if` — Go's idiom). Nested tail `If`s cascade into else-if chains
+/// via recursion.
+fn rt_emit_body(body: &Expr, env: &HashMap<String, Ty>) -> String {
+    match &*body.node {
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = rt_emit_expr(cond, env);
+            let then_s = rt_emit_body(then_branch, env);
+            let else_s = rt_emit_body(else_branch, env);
+            let mut out = String::new();
+            writeln!(out, "if {cond_s} {{").unwrap();
+            for line in then_s.lines() {
+                writeln!(out, "\t{line}").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+            // Bare statements for the else side — Go's early-return idiom.
+            out.push_str(&else_s);
+            out
+        }
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            // Non-last stmts as statements; last stmt in return context.
+            let mut out = String::new();
+            let last = exprs.len() - 1;
+            for (i, e) in exprs.iter().enumerate() {
+                if i == last {
+                    out.push_str(&rt_emit_body(e, env));
+                } else {
+                    // Other stmt shapes (Assign, etc.) arrive when runtime
+                    // code actually uses them — for now, reject.
+                    panic!("non-tail statement in method body not yet supported");
+                }
+            }
+            out
+        }
+        _ => format!("return {}\n", rt_emit_expr(body, env)),
+    }
+}
+
+fn rt_emit_expr(e: &Expr, env: &HashMap<String, Ty>) -> String {
+    match &*e.node {
+        ExprNode::Lit { value } => rt_emit_literal(value),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Send { recv, method, args, .. } => {
+            rt_emit_send(recv.as_ref(), method.as_str(), args, env)
+        }
+        ExprNode::StringInterp { parts } => rt_emit_string_interp(parts, env),
+        ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0], env),
+        ExprNode::If { .. } => {
+            // Go has no ternary. A tail / assign-RHS If is lifted to
+            // statement form by rt_emit_body; any other If is embedded
+            // in mid-expression, which would need an IIFE — fail
+            // loudly until a real case forces that work.
+            panic!(
+                "Go emit: ternary in embedded expression position — \
+                 not yet supported (would need IIFE lowering)"
+            )
+        }
+        other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
+    }
+}
+
+fn rt_emit_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    env: &HashMap<String, Ty>,
+) -> String {
+    if let (Some(r), [arg]) = (recv, args) {
+        if is_go_binop(method) {
+            return format!(
+                "{} {method} {}",
+                rt_emit_expr(r, env),
+                rt_emit_expr(arg, env)
+            );
+        }
+    }
+    format!("/* TODO: send {method} */")
+}
+
+fn is_go_binop(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "<<"
+            | ">>"
+            | "|"
+            | "&"
+            | "^"
+    )
+}
+
+fn rt_emit_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Nil => "nil".to_string(),
+        Literal::Bool { value } => value.to_string(),
+        Literal::Int { value } => value.to_string(),
+        Literal::Float { value } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        Literal::Str { value } => format!("{value:?}"),
+        Literal::Sym { value } => format!("{:?}", value.as_str()),
+    }
+}
+
+fn rt_emit_string_interp(parts: &[InterpPart], env: &HashMap<String, Ty>) -> String {
+    // Ruby `"x #{e} y"` → Go `fmt.Sprintf("x <verb> y", e)` where the
+    // verb depends on e's type (%s for string, %d for int, %g for
+    // float, %v for everything else).
+    let mut fmt = String::new();
+    let mut args: Vec<String> = Vec::new();
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => {
+                for c in value.chars() {
+                    if c == '%' {
+                        fmt.push_str("%%");
+                    } else {
+                        fmt.push(c);
+                    }
+                }
+            }
+            InterpPart::Expr { expr } => {
+                let verb = go_format_verb(expr, env);
+                fmt.push_str(verb);
+                args.push(rt_emit_expr(expr, env));
+            }
+        }
+    }
+    if args.is_empty() {
+        format!("{fmt:?}")
+    } else {
+        format!("fmt.Sprintf({fmt:?}, {})", args.join(", "))
+    }
+}
+
+fn go_format_verb(e: &Expr, env: &HashMap<String, Ty>) -> &'static str {
+    let ty = match &*e.node {
+        ExprNode::Var { name, .. } => env.get(name.as_str()).cloned(),
+        ExprNode::Lit { value: Literal::Int { .. } } => Some(Ty::Int),
+        ExprNode::Lit { value: Literal::Float { .. } } => Some(Ty::Float),
+        ExprNode::Lit { value: Literal::Str { .. } } => Some(Ty::Str),
+        ExprNode::Lit { value: Literal::Bool { .. } } => Some(Ty::Bool),
+        _ => None,
+    };
+    match ty {
+        Some(Ty::Str) | Some(Ty::Sym) => "%s",
+        Some(Ty::Int) => "%d",
+        Some(Ty::Float) => "%g",
+        Some(Ty::Bool) => "%t",
+        _ => "%v",
+    }
+}
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
