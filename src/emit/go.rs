@@ -48,9 +48,11 @@ const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/go/view_helpers.go
 /// layout, handles `_method` override for Rails forms. Copied
 /// verbatim as `app/server.go`.
 const SERVER_SOURCE: &str = include_str!("../../runtime/go/server.go");
-/// Go cable scaffolding — `/cable` endpoint stub plus a
-/// `Broadcast` entry point. Parity with rust/python cable runtimes
-/// is scoped to a later pass. Copied as `app/cable.go`.
+/// Go cable runtime — Action Cable WebSocket + Turbo Streams
+/// broadcaster. Mirrors runtime/rust/cable.rs +
+/// runtime/python/cable.py: actioncable-v1-json subprotocol,
+/// per-channel subscriber map, partial-renderer registry. Copied
+/// as `app/cable.go`.
 const CABLE_SOURCE: &str = include_str!("../../runtime/go/cable.go");
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
@@ -120,7 +122,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 /// persistence runtime uses. The toolchain test runs `go mod tidy`
 /// before building to populate go.sum.
 fn emit_go_mod() -> EmittedFile {
-    let content = "module app\n\ngo 1.24\n\nrequire modernc.org/sqlite v1.34.1\n";
+    // nhooyr.io/websocket powers /cable; go mod tidy resolves its
+    // transitive graph on first build.
+    let content = "module app\n\ngo 1.24\n\nrequire (\n\tmodernc.org/sqlite v1.34.1\n\tnhooyr.io/websocket v1.8.10\n)\n";
     EmittedFile {
         path: PathBuf::from("go.mod"),
         content: content.to_string(),
@@ -181,6 +185,45 @@ fn emit_go_main(app: &App) -> EmittedFile {
     writeln!(s, ")").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "func main() {{").unwrap();
+    // Register partial renderers for any model whose plural
+    // resource has a scaffold partial (`_<singular>.html.erb`).
+    // Cable's broadcast_*_to resolves the partial by model class
+    // name through this registry. Only register partials whose
+    // singular matches a known model class — `_form.html.erb` is
+    // a view-only partial, not a model.
+    let known_model_names: std::collections::BTreeSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .collect();
+    let mut registered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for v in &app.views {
+        let name = v.name.as_str();
+        if let Some((dir, base)) = name.rsplit_once('/') {
+            if let Some(singular) = base.strip_prefix('_') {
+                let class = crate::naming::camelize(singular);
+                if !known_model_names.contains(&class) {
+                    continue;
+                }
+                if registered.insert(class.clone()) {
+                    let fn_name = format!(
+                        "Render{}{}",
+                        pascalize_word(dir),
+                        pascalize_word(singular),
+                    );
+                    writeln!(
+                        s,
+                        "\tapp.RegisterPartial({class:?}, func(id int64) string {{",
+                    )
+                    .unwrap();
+                    writeln!(s, "\t\tr := app.{class}Find(id)").unwrap();
+                    writeln!(s, "\t\tif r == nil {{ return \"\" }}").unwrap();
+                    writeln!(s, "\t\treturn app.{fn_name}(r)").unwrap();
+                    writeln!(s, "\t}})").unwrap();
+                }
+            }
+        }
+    }
     writeln!(s, "\tapp.Start(app.StartOptions{{").unwrap();
     writeln!(s, "\t\tSchemaSQL: app.CreateTables,").unwrap();
     if !layout_field.is_empty() {
@@ -237,13 +280,33 @@ fn emit_models(app: &App) -> EmittedFile {
             .any(|k| k.as_str() != "id");
         if has_table {
             writeln!(body).unwrap();
-            emit_persistence_methods_go(&mut body, model, !lowered.is_empty(), app);
+            let broadcasts = crate::lower::lower_broadcasts(model);
+            emit_persistence_methods_go(
+                &mut body,
+                model,
+                !lowered.is_empty(),
+                app,
+                !broadcasts.is_empty(),
+            );
+            if !broadcasts.is_empty() {
+                let lp = crate::lower::lower_persistence(model, app);
+                emit_go_broadcaster_methods(
+                    &mut body,
+                    lp.class.0.as_str(),
+                    lp.table.as_str(),
+                    receiver_letter(model).as_str(),
+                    &broadcasts,
+                );
+            }
         }
     }
     // Conditional imports: scan the emitted body for package prefixes
     // that indicate which stdlib we need. Go errors on unused imports,
     // so we only emit what's actually referenced.
     let mut imports: Vec<&str> = Vec::new();
+    if body.contains("fmt.") {
+        imports.push("fmt");
+    }
     if body.contains("strings.") {
         imports.push("strings");
     }
@@ -2704,11 +2767,168 @@ fn emit_validate_method_go(
 /// is database/sql API shape, the `?N → ?` placeholder rewrite, and
 /// class-method-as-package-function naming (`Article.count` →
 /// `ArticleCount()`).
+// ── Broadcaster emission ────────────────────────────────────────
+
+fn emit_go_broadcaster_methods(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    recv: &str,
+    decls: &crate::lower::LoweredBroadcasts,
+) {
+    writeln!(out).unwrap();
+    writeln!(out, "func ({recv} *{class}) broadcastAfterSave() {{").unwrap();
+    if decls.save.is_empty() {
+        writeln!(out, "\t_ = {recv}").unwrap();
+    } else {
+        for b in &decls.save {
+            emit_go_one_broadcast_call(out, class, table, recv, b);
+        }
+    }
+    writeln!(out, "}}").unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(out, "func ({recv} *{class}) broadcastAfterDelete() {{").unwrap();
+    if decls.destroy.is_empty() {
+        writeln!(out, "\t_ = {recv}").unwrap();
+    } else {
+        for b in &decls.destroy {
+            emit_go_one_broadcast_call(out, class, table, recv, b);
+        }
+    }
+    writeln!(out, "}}").unwrap();
+}
+
+fn emit_go_one_broadcast_call(
+    out: &mut String,
+    class: &str,
+    table: &str,
+    recv: &str,
+    b: &crate::lower::LoweredBroadcast,
+) {
+    let channel = go_render_broadcast_expr(&b.channel, b.self_param.as_ref(), recv);
+    let target = b
+        .target
+        .as_ref()
+        .map(|t| go_render_broadcast_expr(t, b.self_param.as_ref(), recv))
+        .unwrap_or_else(|| "\"\"".to_string());
+    if let Some(assoc) = &b.on_association {
+        let var = assoc.name.as_str();
+        let target_class = assoc.target_class.as_str();
+        let target_table = assoc.target_table.as_str();
+        let fk_field = go_field_name(assoc.foreign_key.as_str());
+        writeln!(out, "\t{var} := {target_class}Find({recv}.{fk_field})").unwrap();
+        writeln!(out, "\tif {var} != nil {{").unwrap();
+        if b.action == crate::lower::BroadcastAction::Remove {
+            writeln!(
+                out,
+                "\t\tBroadcastRemoveTo({target_table:?}, {var}.ID, {channel}, {target})",
+            )
+            .unwrap();
+        } else {
+            let func = go_action_fn(b.action);
+            writeln!(
+                out,
+                "\t\t{func}({target_table:?}, {var}.ID, {target_class:?}, {channel}, {target})",
+            )
+            .unwrap();
+        }
+        writeln!(out, "\t}}").unwrap();
+        return;
+    }
+    if b.action == crate::lower::BroadcastAction::Remove {
+        writeln!(
+            out,
+            "\tBroadcastRemoveTo({table:?}, {recv}.ID, {channel}, {target})",
+        )
+        .unwrap();
+    } else {
+        let func = go_action_fn(b.action);
+        writeln!(
+            out,
+            "\t{func}({table:?}, {recv}.ID, {class:?}, {channel}, {target})",
+        )
+        .unwrap();
+    }
+}
+
+fn go_action_fn(action: crate::lower::BroadcastAction) -> &'static str {
+    match action {
+        crate::lower::BroadcastAction::Prepend => "BroadcastPrependTo",
+        crate::lower::BroadcastAction::Append => "BroadcastAppendTo",
+        crate::lower::BroadcastAction::Replace => "BroadcastReplaceTo",
+        crate::lower::BroadcastAction::Remove => "BroadcastRemoveTo",
+    }
+}
+
+/// Render a broadcast channel/target expression as a Go
+/// expression. Literals → quoted string/int; bare references to the
+/// broadcasts_to param → `{recv}`; `param.field` reads →
+/// `{recv}.{GoField}`; interpolated strings → `fmt.Sprintf`. Any
+/// shape we haven't taught the emitter falls through to `""` so the
+/// resulting call is still syntactically valid.
+fn go_render_broadcast_expr(
+    expr: &Expr,
+    self_param: Option<&Symbol>,
+    recv: &str,
+) -> String {
+    let p = self_param.map(|s| s.as_str());
+    match &*expr.node {
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        ExprNode::Lit { value: Literal::Int { value } } => format!("{value}"),
+        ExprNode::Var { name, .. } => {
+            if let Some(pname) = p {
+                let stripped = pname.strip_prefix('_').unwrap_or(pname);
+                if name.as_str() == pname || name.as_str() == stripped {
+                    return recv.to_string();
+                }
+            }
+            name.as_str().to_string()
+        }
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            let recv_s = go_render_broadcast_expr(r, self_param, recv);
+            format!("{recv_s}.{}", go_field_name(method.as_str()))
+        }
+        ExprNode::StringInterp { parts } => {
+            use crate::expr::InterpPart;
+            let mut fmt = String::from("\"");
+            let mut args: Vec<String> = Vec::new();
+            for part in parts {
+                match part {
+                    InterpPart::Text { value } => {
+                        for c in value.chars() {
+                            match c {
+                                '"' => fmt.push_str("\\\""),
+                                '\\' => fmt.push_str("\\\\"),
+                                '\n' => fmt.push_str("\\n"),
+                                '%' => fmt.push_str("%%"),
+                                _ => fmt.push(c),
+                            }
+                        }
+                    }
+                    InterpPart::Expr { expr } => {
+                        fmt.push_str("%v");
+                        args.push(go_render_broadcast_expr(expr, self_param, recv));
+                    }
+                }
+            }
+            fmt.push('"');
+            if args.is_empty() {
+                fmt
+            } else {
+                format!("fmt.Sprintf({fmt}, {})", args.join(", "))
+            }
+        }
+        _ => "\"\"".to_string(),
+    }
+}
+
 fn emit_persistence_methods_go(
     out: &mut String,
     model: &Model,
     has_validate: bool,
     app: &App,
+    has_broadcasts: bool,
 ) {
     let lp = crate::lower::lower_persistence(model, app);
     let class = lp.class.0.as_str();
@@ -2766,6 +2986,9 @@ fn emit_persistence_methods_go(
     .unwrap();
     writeln!(out, "\t\tif err != nil {{ panic(err) }}").unwrap();
     writeln!(out, "\t}}").unwrap();
+    if has_broadcasts {
+        writeln!(out, "\t{recv}.broadcastAfterSave()").unwrap();
+    }
     writeln!(out, "\treturn true").unwrap();
     writeln!(out, "}}").unwrap();
 
@@ -2804,6 +3027,9 @@ fn emit_persistence_methods_go(
         "\tif _, err := Conn().Exec({delete_sql:?}, {recv}.ID); err != nil {{ panic(err) }}",
     )
     .unwrap();
+    if has_broadcasts {
+        writeln!(out, "\t{recv}.broadcastAfterDelete()").unwrap();
+    }
     writeln!(out, "}}").unwrap();
 
     // ----- Count (package-level function, since Go has no class methods) -----
