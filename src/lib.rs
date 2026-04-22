@@ -19,6 +19,7 @@ pub mod ingest;
 pub mod lower;
 pub mod naming;
 pub mod query;
+pub mod rbs;
 pub mod schema;
 pub mod span;
 pub mod ty;
