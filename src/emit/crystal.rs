@@ -25,10 +25,13 @@
 //! rendering lives in `ty` (with `crystal_ty` re-exported here for the
 //! external surface that `bin/build-site` uses).
 
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
+use crate::dialect::{MethodDef, MethodReceiver};
+use crate::ty::Ty;
 
 mod app;
 mod controller;
@@ -49,6 +52,61 @@ mod view;
 // External API: kept for `bin/build-site` and tests that key off
 // `crystal_ty` directly.
 pub use ty::crystal_ty;
+
+/// Emit a typed `MethodDef` as a standalone Crystal function
+/// (trailing newline included). Methods authored as `def self.NAME`
+/// in the Ruby source (receiver = Class) emit with the `self.` prefix
+/// — matches Crystal's module-utility convention. Runtime-extraction
+/// pipeline entry point.
+pub fn emit_method(m: &MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(
+        sig_params.len(),
+        m.params.len(),
+        "method `{}`: signature/param arity mismatch",
+        m.name
+    );
+
+    let prefix = match m.receiver {
+        MethodReceiver::Instance => "",
+        MethodReceiver::Class => "self.",
+    };
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(name, p)| format!("{} : {}", name, crystal_ty(&p.ty)))
+        .collect();
+
+    let ret_s = crystal_ty(ret);
+    let body = expr::emit_body(&m.body);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "def {prefix}{}({}) : {}",
+        m.name,
+        param_list.join(", "),
+        ret_s
+    )
+    .unwrap();
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    out.push_str("end\n");
+    out
+}
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/crystal/runtime.cr");
 const DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");

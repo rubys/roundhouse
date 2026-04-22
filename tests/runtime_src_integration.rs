@@ -26,25 +26,44 @@ fn load_typed(name: &str) -> Vec<MethodDef> {
     parse_methods_with_rbs(&ruby, &rbs).expect("Ruby+RBS parses and types cleanly")
 }
 
-#[test]
-fn inflector_pluralize_lives_in_runtime_python() {
+fn pluralize_method() -> MethodDef {
     let methods = load_typed("inflector");
-    let pluralize = methods
-        .iter()
+    methods
+        .into_iter()
         .find(|m| m.name.as_str() == "pluralize")
-        .expect("inflector.rb defines pluralize");
+        .expect("inflector.rb defines pluralize")
+}
 
-    let emitted = roundhouse::emit::python::emit_method(pluralize);
-    let file = fs::read_to_string("runtime/python/view_helpers.py")
-        .expect("runtime/python/view_helpers.py exists");
-
+fn assert_emitted_lives_in(emitted: &str, file_path: &str) {
+    let file = fs::read_to_string(file_path).unwrap_or_else(|_| panic!("{file_path} exists"));
+    // Target runtime files typically nest the function inside a
+    // module, so compare line-by-line modulo leading whitespace: the
+    // emitter output must appear as a consecutive run of file lines
+    // with only their indentation removed.
+    let emitted_lines: Vec<&str> = emitted.lines().map(str::trim_start).collect();
+    let file_lines: Vec<&str> = file.lines().map(str::trim_start).collect();
+    let found = file_lines
+        .windows(emitted_lines.len())
+        .any(|w| w == emitted_lines.as_slice());
     assert!(
-        file.contains(&emitted),
-        "runtime/python/view_helpers.py does not contain the emitted pluralize.\n\
-         Expected (from runtime/ruby/inflector.rb + .rbs):\n\
+        found,
+        "{file_path} does not contain the emitted function.\n\
+         Expected (from runtime/ruby/inflector.rb + .rbs, compared modulo indent):\n\
          ----\n{emitted}----\n\
          If the emitter is now the source of truth, the runtime file must be \
-         updated to match; if instead the runtime file's pluralize was edited \
-         deliberately, the Ruby/RBS source needs the same edit."
+         updated to match; if instead the runtime file was edited deliberately, \
+         the Ruby/RBS source needs the same edit."
     );
+}
+
+#[test]
+fn inflector_pluralize_lives_in_runtime_python() {
+    let emitted = roundhouse::emit::python::emit_method(&pluralize_method());
+    assert_emitted_lives_in(&emitted, "runtime/python/view_helpers.py");
+}
+
+#[test]
+fn inflector_pluralize_lives_in_runtime_crystal() {
+    let emitted = roundhouse::emit::crystal::emit_method(&pluralize_method());
+    assert_emitted_lives_in(&emitted, "runtime/crystal/view_helpers.cr");
 }

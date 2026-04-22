@@ -2,7 +2,6 @@
 //! method emitter and by other modules that need a fallback for
 //! arbitrary `Expr` rendering.
 
-use super::shared::indent;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 
 // Bodies + expressions -------------------------------------------------
@@ -51,15 +50,13 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            // Crystal's if/else/end is identical to Ruby's.
+            // Crystal ternary `cond ? a : b` (same syntax as Ruby).
+            // emit_expr is always in expression position; the spec and
+            // view emitters own statement-form If handling.
             let cond_s = emit_expr(cond);
-            let then_s = emit_body(then_branch);
-            let else_s = emit_body(else_branch);
-            format!(
-                "if {cond_s}\n{}\nelse\n{}\nend",
-                indent(&then_s, 1),
-                indent(&else_s, 1),
-            )
+            let then_s = emit_expr(then_branch);
+            let else_s = emit_expr(else_branch);
+            format!("{cond_s} ? {then_s} : {else_s}")
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::{BoolOpKind, BoolOpSurface};
@@ -145,6 +142,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
+    // Ruby's binary operators ride the Send channel. Crystal's syntax
+    // matches Ruby's for these, so emit infix directly.
+    if let (Some(r), [arg]) = (recv, args) {
+        if is_cr_binop(method) {
+            return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
+        }
+    }
     match recv {
         None => {
             if args_s.is_empty() {
@@ -162,6 +166,28 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
         }
     }
+}
+
+fn is_cr_binop(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "**"
+            | "<<"
+            | ">>"
+            | "|"
+            | "&"
+            | "^"
+    )
 }
 
 pub(super) fn emit_literal(lit: &Literal) -> String {

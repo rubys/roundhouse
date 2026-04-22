@@ -178,7 +178,7 @@ module Roundhouse
       prefix.empty? ? base : "#{prefix}_#{base}"
     end
 
-    def self.pluralize(count : Int, word : String) : String
+    def self.pluralize(count : Int64, word : String) : String
       count == 1 ? "1 #{word}" : "#{count} #{word}s"
     end
 
