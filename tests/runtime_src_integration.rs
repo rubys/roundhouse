@@ -73,3 +73,9 @@ fn inflector_pluralize_lives_in_runtime_rust() {
     let emitted = roundhouse::emit::rust::emit_method(&pluralize_method());
     assert_emitted_lives_in(&emitted, "runtime/rust/view_helpers.rs");
 }
+
+#[test]
+fn inflector_pluralize_lives_in_runtime_elixir() {
+    let emitted = roundhouse::emit::elixir::emit_method(&pluralize_method());
+    assert_emitted_lives_in(&emitted, "runtime/elixir/view_helpers.ex");
+}
