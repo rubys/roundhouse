@@ -76,6 +76,55 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     emit_with_adapter(app, &crate::adapter::SqliteAdapter)
 }
 
+/// Emit a typed `MethodDef` as a standalone exported TypeScript
+/// function (trailing newline included). Requires `signature` to be
+/// populated — `parse_methods_with_rbs` does this. Used by the
+/// runtime-extraction pipeline.
+pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(
+        sig_params.len(),
+        m.params.len(),
+        "method `{}`: signature/param arity mismatch",
+        m.name
+    );
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter())
+        .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
+        .collect();
+
+    let ret_s = ts_ty(ret);
+    let body = emit_body(&m.body, ret);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "export function {}({}): {} {{",
+        m.name,
+        param_list.join(", "),
+        ret_s
+    )
+    .unwrap();
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// Emit with an explicit adapter. Async-capable targets (this one,
 /// eventually Rust and Python) consult the adapter's
 /// `is_suspending_effect` per Send site and insert `await` where
@@ -1405,10 +1454,13 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
+            // TS ternary `cond ? a : b`. `emit_expr` is always called in
+            // an expression position; controller/view emitters have
+            // their own statement-form If handlers.
             let cond_s = emit_expr(cond);
-            let then_s = indent_lines(&emit_expr(then_branch), 1);
-            let else_s = indent_lines(&emit_expr(else_branch), 1);
-            format!("if ({cond_s}) {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+            let then_s = emit_expr(then_branch);
+            let else_s = emit_expr(else_branch);
+            format!("{cond_s} ? {then_s} : {else_s}")
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
@@ -1475,6 +1527,14 @@ fn emit_send_with_parens(
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
+    // Ruby's binary operators ride the Send channel. TS needs infix;
+    // `==` and `!=` map to strict `===` / `!==` so equality semantics
+    // match Ruby (Ruby has no implicit type coercion).
+    if let (Some(r), [arg]) = (recv, args) {
+        if let Some(op) = ts_binop(method) {
+            return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
+        }
+    }
     // Ruby stdlib method → TS equivalent, when the Ruby name collides
     // with a nonexistent TS property. Keyed on name only today; a
     // receiver-typed dispatch would replace this when per-type
@@ -1524,14 +1584,6 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
     }
 }
 
-fn indent_lines(text: &str, depth: usize) -> String {
-    let pad = "  ".repeat(depth);
-    text.lines()
-        .map(|l| format!("{pad}{l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 // Types ----------------------------------------------------------------
 
 pub fn ts_ty(ty: &Ty) -> String {
@@ -1579,6 +1631,29 @@ fn ts_field_name(ruby_name: &str) -> String {
 /// then, the Rails-side name survives and Juntos maps at runtime.
 pub(super) fn ts_method_name(ruby_name: &str) -> String {
     ruby_name.to_string()
+}
+
+fn ts_binop(method: &str) -> Option<&'static str> {
+    Some(match method {
+        "==" => "===",
+        "!=" => "!==",
+        "<" => "<",
+        "<=" => "<=",
+        ">" => ">",
+        ">=" => ">=",
+        "+" => "+",
+        "-" => "-",
+        "*" => "*",
+        "/" => "/",
+        "%" => "%",
+        "**" => "**",
+        "<<" => "<<",
+        ">>" => ">>",
+        "|" => "|",
+        "&" => "&",
+        "^" => "^",
+        _ => return None,
+    })
 }
 
 // Fixtures + specs ----------------------------------------------------
