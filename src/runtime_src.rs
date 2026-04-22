@@ -1,0 +1,337 @@
+//! Parse a standalone Ruby source file (intended to hold runtime
+//! library code authored in Ruby) into Roundhouse `MethodDef` values.
+//!
+//! This is the Ruby-body half of the runtime-extraction pipeline;
+//! [`crate::rbs`] covers signatures. A later step marries the two: for
+//! each method name, the body from here gets the signature from there.
+//!
+//! Scope: top-level `def`s and `def`s inside a single-level `module`/
+//! `class` body. Required positional params only. Anything more exotic
+//! (keyword args, rest/splat, blocks, nested scopes) is rejected with
+//! `Err` rather than silently dropped, mirroring the RBS side.
+
+use ruby_prism::{Node, parse};
+
+use crate::dialect::{MethodDef, MethodReceiver};
+use crate::effect::EffectSet;
+use crate::expr::{Expr, ExprNode};
+use crate::ident::Symbol;
+use crate::ingest::ingest_expr;
+use crate::span::Span;
+
+const VIRTUAL_FILE: &str = "<runtime>";
+
+/// Parse Ruby source and extract every `def` it finds (at top level
+/// and one level inside module/class bodies) as a `MethodDef`.
+pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
+    let result = parse(source.as_bytes());
+
+    let errors: Vec<String> = result
+        .errors()
+        .map(|e| e.message().to_string())
+        .collect();
+    if !errors.is_empty() {
+        return Err(format!("parse error: {}", errors.join("; ")));
+    }
+
+    let root = result.node();
+    let mut out = Vec::new();
+    walk_scope(&root, &mut out)?;
+    Ok(out)
+}
+
+fn walk_scope(node: &Node<'_>, out: &mut Vec<MethodDef>) -> Result<(), String> {
+    if let Some(program) = node.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            collect_from_stmt(&stmt, out)?;
+        }
+    } else if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_from_stmt(&stmt, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_from_stmt(node: &Node<'_>, out: &mut Vec<MethodDef>) -> Result<(), String> {
+    if let Some(def) = node.as_def_node() {
+        out.push(method_def_from(&def)?);
+        return Ok(());
+    }
+    if let Some(module) = node.as_module_node() {
+        if let Some(body) = module.body() {
+            walk_scope(&body, out)?;
+        }
+        return Ok(());
+    }
+    if let Some(class) = node.as_class_node() {
+        if let Some(body) = class.body() {
+            walk_scope(&body, out)?;
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn method_def_from(def: &ruby_prism::DefNode<'_>) -> Result<MethodDef, String> {
+    let name_bytes = def.name().as_slice();
+    let name = Symbol::new(
+        std::str::from_utf8(name_bytes)
+            .map_err(|_| "method name is not UTF-8".to_string())?,
+    );
+
+    let receiver = if def.receiver().is_some() {
+        MethodReceiver::Class
+    } else {
+        MethodReceiver::Instance
+    };
+
+    let params = method_params(def, name.as_str())?;
+
+    let body = match def.body() {
+        Some(b) => ingest_expr(&b, VIRTUAL_FILE).map_err(|e| format!("in `{name}`: {e}"))?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+
+    Ok(MethodDef {
+        name,
+        receiver,
+        params,
+        body,
+        signature: None,
+        effects: EffectSet::pure(),
+    })
+}
+
+fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec<Symbol>, String> {
+    let Some(params_node) = def.parameters() else {
+        return Ok(Vec::new());
+    };
+
+    // Anything beyond required positionals means the runtime source has
+    // reached for a feature the extractor doesn't support yet. Better to
+    // fail loudly than to silently drop a keyword arg or block param.
+    if params_node.optionals().iter().next().is_some() {
+        return Err(format!("method `{method_name}`: optional params not yet supported"));
+    }
+    if params_node.rest().is_some() {
+        return Err(format!("method `{method_name}`: rest/splat params not yet supported"));
+    }
+    if params_node.keywords().iter().next().is_some() {
+        return Err(format!("method `{method_name}`: keyword params not yet supported"));
+    }
+    if params_node.keyword_rest().is_some() {
+        return Err(format!("method `{method_name}`: **kwargs not yet supported"));
+    }
+    if params_node.block().is_some() {
+        return Err(format!("method `{method_name}`: block params not yet supported"));
+    }
+    if params_node.posts().iter().next().is_some() {
+        return Err(format!(
+            "method `{method_name}`: post-rest positional params not yet supported"
+        ));
+    }
+
+    let mut names = Vec::new();
+    for req in params_node.requireds().iter() {
+        let rp = req.as_required_parameter_node().ok_or_else(|| {
+            format!("method `{method_name}`: unexpected required-parameter shape")
+        })?;
+        let name_bytes = rp.name().as_slice();
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(|_| format!("method `{method_name}`: param name is not UTF-8"))?;
+        names.push(Symbol::new(name));
+    }
+    Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{ExprNode, InterpPart, Literal};
+
+    fn parse_one(src: &str) -> MethodDef {
+        let mut methods = parse_methods(src).expect("parses");
+        assert_eq!(methods.len(), 1, "expected exactly one method");
+        methods.remove(0)
+    }
+
+    #[test]
+    fn toplevel_def_is_found() {
+        let src = "def pluralize(count, word)\n  count == 1 ? \"1 #{word}\" : \"#{count} #{word}s\"\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.name.as_str(), "pluralize");
+        assert_eq!(m.receiver, MethodReceiver::Instance);
+        assert_eq!(
+            m.params.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["count", "word"]
+        );
+    }
+
+    #[test]
+    fn module_nested_def_is_found() {
+        let src = "module Inflector\n  def pluralize(count, word)\n    \"#{count} #{word}\"\n  end\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.name.as_str(), "pluralize");
+        assert_eq!(m.params.len(), 2);
+    }
+
+    #[test]
+    fn class_nested_def_is_found() {
+        let src = "class Inflector\n  def f\n    1\n  end\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.name.as_str(), "f");
+        assert!(m.params.is_empty());
+    }
+
+    #[test]
+    fn self_receiver_is_class_kind() {
+        let src = "module M\n  def self.f\n    1\n  end\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.receiver, MethodReceiver::Class);
+    }
+
+    #[test]
+    fn pluralize_body_has_conditional_shape() {
+        let src = "def pluralize(count, word)\n  count == 1 ? \"1 #{word}\" : \"#{count} #{word}s\"\nend\n";
+        let m = parse_one(src);
+
+        let (cond, then_branch, else_branch) = match *m.body.node {
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => (cond, then_branch, else_branch),
+            other => panic!("expected If at body, got {other:?}"),
+        };
+
+        // cond: count == 1
+        match *cond.node {
+            ExprNode::Send { method, .. } => assert_eq!(method.as_str(), "=="),
+            other => panic!("expected `==` send in cond, got {other:?}"),
+        }
+
+        // Then branch: "1 #{word}"
+        match *then_branch.node {
+            ExprNode::StringInterp { parts } => {
+                assert!(has_literal_text(&parts, "1 "), "then-branch missing `1 `");
+                assert!(has_expr_var(&parts, "word"), "then-branch missing `word`");
+            }
+            other => panic!("expected StringInterp in then-branch, got {other:?}"),
+        }
+
+        // Else branch: "#{count} #{word}s"
+        match *else_branch.node {
+            ExprNode::StringInterp { parts } => {
+                assert!(has_expr_var(&parts, "count"), "else-branch missing `count`");
+                assert!(has_expr_var(&parts, "word"), "else-branch missing `word`");
+                assert!(has_literal_text(&parts, "s"), "else-branch missing trailing `s`");
+            }
+            other => panic!("expected StringInterp in else-branch, got {other:?}"),
+        }
+    }
+
+    fn has_literal_text(parts: &[InterpPart], needle: &str) -> bool {
+        parts.iter().any(|p| match p {
+            InterpPart::Text { value } => value.contains(needle),
+            _ => false,
+        })
+    }
+
+    fn has_expr_var(parts: &[InterpPart], var: &str) -> bool {
+        parts.iter().any(|p| match p {
+            InterpPart::Expr { expr } => matches!(
+                &*expr.node,
+                ExprNode::Var { name, .. } if name.as_str() == var
+            ),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn multiple_defs_in_order() {
+        let src = "def a; 1; end\ndef b; 2; end\n";
+        let methods = parse_methods(src).expect("parses");
+        assert_eq!(
+            methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn integer_literal_body_roundtrips() {
+        let src = "def f\n  42\nend\n";
+        let m = parse_one(src);
+        assert!(matches!(
+            &*m.body.node,
+            ExprNode::Lit {
+                value: Literal::Int { value: 42 }
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_statement_body_is_sequenced() {
+        let src = "def f\n  1\n  2\nend\n";
+        let m = parse_one(src);
+        let exprs = match *m.body.node {
+            ExprNode::Seq { exprs } => exprs,
+            other => panic!("expected Seq for multi-stmt body, got {other:?}"),
+        };
+        assert_eq!(exprs.len(), 2);
+    }
+
+    #[test]
+    fn parse_error_surfaces() {
+        let err = parse_methods("def f(").unwrap_err();
+        assert!(err.contains("parse error"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn keyword_params_rejected_explicitly() {
+        let src = "def f(a:, b:)\n  1\nend\n";
+        let err = parse_methods(src).unwrap_err();
+        assert!(
+            err.contains("keyword params"),
+            "expected keyword-param rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn splat_params_rejected_explicitly() {
+        let src = "def f(*args)\n  1\nend\n";
+        let err = parse_methods(src).unwrap_err();
+        assert!(
+            err.contains("rest/splat"),
+            "expected splat rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn block_params_rejected_explicitly() {
+        let src = "def f(&blk)\n  1\nend\n";
+        let err = parse_methods(src).unwrap_err();
+        assert!(
+            err.contains("block params"),
+            "expected block-param rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn optional_params_rejected_explicitly() {
+        let src = "def f(a = 1)\n  a\nend\n";
+        let err = parse_methods(src).unwrap_err();
+        assert!(
+            err.contains("optional params"),
+            "expected optional-param rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn def_without_params_or_body() {
+        let src = "def f\nend\n";
+        let m = parse_one(src);
+        assert!(m.params.is_empty());
+        assert!(matches!(&*m.body.node, ExprNode::Seq { exprs } if exprs.is_empty()));
+    }
+}
