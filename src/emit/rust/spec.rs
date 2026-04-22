@@ -15,7 +15,7 @@ use crate::naming::snake_case;
 
 use super::super::EmittedFile;
 use super::controller::{emit_body, EmitCtx};
-use super::emit_literal;
+use super::shared::emit_literal;
 
 /// Emit a `src/tests/<snake>.rs` file containing one `#[test] fn` per
 /// Ruby `test "..."` declaration in the source test module. Test names

@@ -16,7 +16,7 @@ use crate::ty::Ty;
 use crate::lower::CtrlWalker as _;
 
 use super::super::EmittedFile;
-use super::{apply_rust_chain_modifier, emit_literal};
+use super::shared::emit_literal;
 
 /// `src/controllers.rs` — declares each emitted controller submodule
 /// so `src/controllers/<name>_controller.rs` files land on the module
@@ -1181,5 +1181,53 @@ fn map_instance_method(method: &str, recv_ty: Option<&Ty>) -> (String, String) {
             _ => (method.into(), String::new()),
         },
         _ => (method.into(), String::new()),
+    }
+}
+
+/// Compose one AR modifier onto the running rust expression.
+/// `all`/`includes`/`preload`/`joins`/`distinct`/`select` are
+/// no-ops for our in-memory Vec. `order({field: :dir})` lowers to
+/// a `.sort_by` with a direction-aware comparator. `limit(N)`
+/// truncates via `.into_iter().take(N).collect()`.
+///
+/// Chain-walk lives in `src/lower/chain.rs`; this fn just renders
+/// one already-classified layer.
+pub(in crate::emit::rust) fn apply_rust_chain_modifier(
+    prev: String,
+    m: crate::lower::ChainModifier<'_>,
+) -> String {
+    match m.method {
+        "all" | "includes" | "preload" | "joins" | "distinct" | "select" => prev,
+        "order" => {
+            let Some(hash) = m.args.first() else { return prev };
+            let ExprNode::Hash { entries, .. } = &*hash.node else { return prev };
+            let Some((k, v)) = entries.first() else { return prev };
+            let field = match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => return prev,
+            };
+            let dir = match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => "asc".to_string(),
+            };
+            let cmp = if dir == "desc" {
+                format!("|a, b| b.{field}.cmp(&a.{field})")
+            } else {
+                format!("|a, b| a.{field}.cmp(&b.{field})")
+            };
+            format!(
+                "{{ let mut __v = {prev}; __v.sort_by({cmp}); __v }}"
+            )
+        }
+        "limit" => {
+            let Some(n) = m.args.first() else { return prev };
+            if let ExprNode::Lit { value: Literal::Int { value } } = &*n.node {
+                return format!("{prev}.into_iter().take({value} as usize).collect::<Vec<_>>()");
+            }
+            prev
+        }
+        _ => prev,
     }
 }

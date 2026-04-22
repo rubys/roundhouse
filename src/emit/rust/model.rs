@@ -12,7 +12,7 @@ use crate::ty::Ty;
 
 use super::super::EmittedFile;
 use super::controller::{emit_expr, EmitCtx};
-use super::rust_ty;
+use super::ty::rust_ty;
 
 // ── Broadcaster emission ───────────────────────────────────────
 

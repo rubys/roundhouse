@@ -8,7 +8,7 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 
 use super::super::EmittedFile;
-use super::emit_literal;
+use super::shared::emit_literal;
 
 pub(super) fn emit_views(app: &App) -> EmittedFile {
     let mut s = String::new();
