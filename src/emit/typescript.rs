@@ -146,7 +146,7 @@ pub fn emit_with_adapter(
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
     if !app.models.is_empty() {
-        files.push(schema_sql::emit_schema_sql_ts(app));
+        files.push(schema_sql::emit_schema_sql(app));
     }
     files.extend(model::emit_models(app));
     if !app.controllers.is_empty() {

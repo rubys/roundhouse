@@ -304,7 +304,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/db.go"),
             content: DB_SOURCE.to_string(),
         });
-        files.push(schema_sql::emit_schema_sql_go(app));
+        files.push(schema_sql::emit_schema_sql(app));
     }
     if !app.controllers.is_empty() {
         // HTTP runtime + TestClient — copied verbatim, same posture as

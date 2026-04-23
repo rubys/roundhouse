@@ -133,7 +133,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/db.py"),
             content: DB_SOURCE.to_string(),
         });
-        files.push(schema_sql::emit_schema_sql_py(app));
+        files.push(schema_sql::emit_schema_sql(app));
         files.push(EmittedFile {
             path: PathBuf::from("app/__init__.py"),
             content: String::new(),

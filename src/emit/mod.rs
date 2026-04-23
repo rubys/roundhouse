@@ -5,11 +5,11 @@
 
 pub mod crystal;
 pub mod elixir;
-pub mod eq;
 pub mod go;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod shared;
 pub mod typescript;
 
 use std::path::PathBuf;

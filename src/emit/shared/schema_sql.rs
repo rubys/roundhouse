@@ -1,10 +1,14 @@
-//! Target-neutral schema DDL lowering.
+//! Target-neutral schema DDL rendering.
 //!
 //! Produces a single CREATE TABLE ... string covering every table in the
 //! ingested `Schema`. Each per-target emitter embeds the result in its
 //! generated project (e.g. a `pub const CREATE_TABLES: &str` in Rust,
 //! a `CREATE_TABLES = """ ... """` in Python) so a fresh `:memory:`
 //! SQLite connection can initialize via `execute_batch(CREATE_TABLES)`.
+//!
+//! Lives under `emit/shared/` rather than `lower/` because it produces
+//! final target text, not a structured lower-level IR — the rest of
+//! `lower/` is structured-to-structured in the compiler sense.
 //!
 //! SQLite-specific today. When a target demands Postgres/MySQL, the
 //! per-dialect rendering moves behind a `Dialect` enum — the `Schema`
@@ -19,7 +23,7 @@ use crate::schema::{ColumnType, Schema};
 /// `INTEGER PRIMARY KEY AUTOINCREMENT` so rowids stay stable and
 /// monotonic across inserts — matching what the Rails sqlite3 adapter
 /// emits for the default `id` column.
-pub fn lower_schema(schema: &Schema) -> String {
+pub fn render_schema_sql(schema: &Schema) -> String {
     let mut s = String::new();
     for (_name, table) in &schema.tables {
         writeln!(s, "CREATE TABLE {} (", table.name.as_str()).unwrap();
@@ -55,7 +59,7 @@ pub fn lower_schema(schema: &Schema) -> String {
 /// type system is looser than most SQL engines; these mappings follow
 /// what the Rails sqlite3 adapter emits so stored values round-trip
 /// through both stacks.
-pub fn sqlite_type(ct: &ColumnType) -> &'static str {
+fn sqlite_type(ct: &ColumnType) -> &'static str {
     match ct {
         ColumnType::Integer | ColumnType::BigInt => "INTEGER",
         ColumnType::Float | ColumnType::Decimal { .. } => "REAL",

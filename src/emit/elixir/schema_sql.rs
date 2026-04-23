@@ -7,12 +7,12 @@ use super::super::EmittedFile;
 use crate::App;
 
 /// `lib/roundhouse/schema_sql.ex` — Elixir module exposing the
-/// target-neutral DDL produced by `lower::lower_schema` as a
+/// target-neutral DDL produced by `emit::shared::schema_sql` as a
 /// `create_tables/0` function (Elixir module attributes can't hold
 /// arbitrary strings at compile time in all versions; a function is
 /// uniform).
-pub(super) fn emit_schema_sql_ex(app: &App) -> EmittedFile {
-    let ddl = crate::lower::lower_schema(&app.schema);
+pub(super) fn emit_schema_sql(app: &App) -> EmittedFile {
+    let ddl = crate::emit::shared::schema_sql::render_schema_sql(&app.schema);
     // Escape the DDL for a single-quoted Elixir string: backslashes,
     // quotes, newlines. Heredoc would be cleaner but needs matching
     // indentation, which collides with the DDL's column-0 layout.

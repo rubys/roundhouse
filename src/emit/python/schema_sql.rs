@@ -10,8 +10,8 @@ use crate::App;
 /// `app/schema_sql.py` — Python module exposing the target-neutral
 /// DDL as `CREATE_TABLES`. sqlite3's `executescript` handles
 /// multi-statement strings directly, so no splitting needed.
-pub(super) fn emit_schema_sql_py(app: &App) -> EmittedFile {
-    let ddl = crate::lower::lower_schema(&app.schema);
+pub(super) fn emit_schema_sql(app: &App) -> EmittedFile {
+    let ddl = crate::emit::shared::schema_sql::render_schema_sql(&app.schema);
     // Use a Python triple-quoted raw string so the DDL renders with
     // its original line breaks and doesn't need escape-sequence
     // handling. Raw so backslashes in identifiers (none today but

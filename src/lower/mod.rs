@@ -27,7 +27,6 @@ pub mod fixtures;
 pub mod persistence;
 pub mod controller_walk;
 pub mod routes;
-pub mod schema_sql;
 pub mod validations;
 pub mod view;
 
@@ -62,7 +61,6 @@ pub use fixtures::{
 };
 pub use persistence::{lower_persistence, BelongsToCheck, DependentChild, LoweredPersistence};
 pub use routes::{flatten_routes, standard_resource_actions, FlatRoute};
-pub use schema_sql::{lower_schema, sqlite_type};
 pub use validations::{lower_validations, Check, InclusionValue, LoweredValidation};
 pub use view::{
     classify_class_value, classify_errors_field_predicate, classify_form_builder_args,

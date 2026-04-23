@@ -81,7 +81,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("lib/roundhouse/db.ex"),
             content: DB_SOURCE.to_string(),
         });
-        files.push(schema_sql::emit_schema_sql_ex(app));
+        files.push(schema_sql::emit_schema_sql(app));
     }
     for model in &app.models {
         files.push(model::emit_model_file(model, app));

@@ -186,7 +186,7 @@ fn emit_send(
     // one side as Ty::Nil.
     if let (Some(r), [arg]) = (recv, args) {
         if method == "==" || method == "!=" {
-            use crate::emit::eq::{classify_eq, EqCase};
+            use crate::emit::shared::eq::{classify_eq, EqCase};
             if let EqCase::NilCheck { subject } = classify_eq(r, arg) {
                 let s = emit_expr(subject, receiver_arg);
                 return if method == "==" {
