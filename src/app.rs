@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::{Controller, Fixture, Model, RouteTable, TestModule, View};
 use crate::expr::Expr;
+use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
+use crate::ty::Ty;
 
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
@@ -40,6 +44,15 @@ pub struct App {
     /// head matches structurally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stylesheets: Vec<String>,
+    /// User-authored RBS sidecars discovered under `sig/**/*.rbs` in
+    /// the Rails app root. Keyed by fully-qualified class/module name
+    /// (nested namespaces joined with `::`), inner map is method name
+    /// → signature (`Ty::Fn`). The analyzer consults these when
+    /// building `ClassInfo` so user methods the Rails conventions
+    /// can't fully type (helpers, concerns, POROs) still flow types.
+    /// Empty when the app ships no `sig/` directory.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
@@ -77,6 +90,7 @@ impl App {
             seeds: None,
             importmap: None,
             stylesheets: Vec::new(),
+            rbs_signatures: HashMap::new(),
         }
     }
 }

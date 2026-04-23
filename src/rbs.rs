@@ -41,6 +41,86 @@ pub fn parse_signatures(source: &str) -> Result<Signatures, String> {
     Ok(out)
 }
 
+/// Parse RBS source and extract method signatures grouped by their
+/// enclosing class/module. Used by Rails-app ingestion to apply
+/// user-authored RBS sidecars — `sig/**/*.rbs` files that declare
+/// method signatures for app classes the Rails conventions can't
+/// fully type on their own (helper modules, concerns, service
+/// classes, ad-hoc user methods).
+///
+/// Nested classes/modules produce namespaced `ClassId`s joined with
+/// `::` (e.g., `Api::V1::Post`). Instance and singleton methods are
+/// merged into the same method table today — the analyzer's dispatch
+/// looks up in both class_methods and instance_methods anyway, so
+/// the distinction can be recovered later when it matters.
+pub fn parse_app_signatures(
+    source: &str,
+) -> Result<std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>, String> {
+    let signature = parse(source)?;
+    let mut out: std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>> =
+        std::collections::HashMap::new();
+
+    for decl in signature.declarations().iter() {
+        walk_decl(&decl, None, &mut out)?;
+    }
+
+    Ok(out)
+}
+
+fn walk_decl(
+    decl: &Node<'_>,
+    parent: Option<&str>,
+    out: &mut std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>,
+) -> Result<(), String> {
+    match decl {
+        Node::Class(class) => {
+            let name = namespace_join(parent, class.name().name().as_str());
+            collect_class_methods(class.members().iter(), &name, out)?;
+        }
+        Node::Module(module) => {
+            let name = namespace_join(parent, module.name().name().as_str());
+            collect_class_methods(module.members().iter(), &name, out)?;
+        }
+        Node::Interface(iface) => {
+            let name = namespace_join(parent, iface.name().name().as_str());
+            collect_class_methods(iface.members().iter(), &name, out)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_class_methods<'a, I: Iterator<Item = Node<'a>>>(
+    members: I,
+    class_name: &str,
+    out: &mut std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>,
+) -> Result<(), String> {
+    let class_id = ClassId(Symbol::new(class_name));
+    for member in members {
+        match member {
+            Node::MethodDefinition(method) => {
+                let name = Symbol::new(method.name().as_str());
+                let ty = method_signature_ty(&method)?;
+                out.entry(class_id.clone()).or_default().insert(name, ty);
+            }
+            // Nested class/module inside this one — recurse with the
+            // combined namespace.
+            Node::Class(_) | Node::Module(_) | Node::Interface(_) => {
+                walk_decl(&member, Some(class_name), out)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn namespace_join(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(p) => format!("{p}::{name}"),
+        None => name.to_string(),
+    }
+}
+
 fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
     members: I,
     out: &mut Signatures,
@@ -392,5 +472,86 @@ mod tests {
     fn parse_errors_surface() {
         let err = parse_signatures("class { end").unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    // ── parse_app_signatures ────────────────────────────────────────
+
+    #[test]
+    fn app_sigs_group_methods_by_class() {
+        let src = "\
+class Article
+  def full_name: () -> String
+  def word_count: () -> Integer
+end
+
+class Post
+  def title: () -> String
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let article_id = ClassId(Symbol::from("Article"));
+        let post_id = ClassId(Symbol::from("Post"));
+
+        assert_eq!(out.len(), 2);
+        let article_methods = &out[&article_id];
+        assert_eq!(article_methods.len(), 2);
+        assert!(article_methods.contains_key(&Symbol::from("full_name")));
+        assert!(article_methods.contains_key(&Symbol::from("word_count")));
+
+        let post_methods = &out[&post_id];
+        assert_eq!(post_methods.len(), 1);
+        assert!(post_methods.contains_key(&Symbol::from("title")));
+    }
+
+    #[test]
+    fn app_sigs_namespace_nested_classes() {
+        let src = "\
+module Api
+  class V1
+    class Post
+      def title: () -> String
+    end
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let nested = ClassId(Symbol::from("Api::V1::Post"));
+        assert!(out.contains_key(&nested), "got keys: {:?}", out.keys().collect::<Vec<_>>());
+        assert!(out[&nested].contains_key(&Symbol::from("title")));
+    }
+
+    #[test]
+    fn app_sigs_module_methods() {
+        let src = "\
+module ApplicationHelper
+  def format_date: (String) -> String
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let helper_id = ClassId(Symbol::from("ApplicationHelper"));
+        assert!(out.contains_key(&helper_id));
+        assert!(out[&helper_id].contains_key(&Symbol::from("format_date")));
+    }
+
+    #[test]
+    fn app_sigs_method_signatures_are_ty_fn() {
+        let src = "\
+class Article
+  def full_name: () -> String
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let methods = &out[&ClassId(Symbol::from("Article"))];
+        let ty = &methods[&Symbol::from("full_name")];
+        let Ty::Fn { ret, .. } = ty else {
+            panic!("expected Ty::Fn, got {ty:?}");
+        };
+        assert_eq!(**ret, Ty::Str);
+    }
+
+    #[test]
+    fn app_sigs_empty_source_is_empty_result() {
+        let out = parse_app_signatures("").expect("parses");
+        assert!(out.is_empty());
     }
 }

@@ -106,6 +106,7 @@ fn tiny_blog() -> App {
         seeds: None,
         importmap: None,
         stylesheets: vec![],
+        rbs_signatures: std::collections::HashMap::new(),
     }
 }
 

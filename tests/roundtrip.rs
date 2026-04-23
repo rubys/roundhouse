@@ -113,6 +113,7 @@ fn tiny_blog_round_trips() {
         seeds: None,
         importmap: None,
         stylesheets: vec![],
+        rbs_signatures: std::collections::HashMap::new(),
     };
 
     let json = serde_json::to_string_pretty(&app).expect("serialize");

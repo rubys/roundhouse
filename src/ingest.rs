@@ -198,6 +198,44 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     }
     app.stylesheets = stylesheets;
 
+    // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
+    // Rails conventions can't fully type on their own. Recursively
+    // walk the sig dir, parse each file, merge into app.rbs_signatures
+    // keyed by the declared class/module's fully-qualified name.
+    let sig_dir = dir.join("sig");
+    if sig_dir.is_dir() {
+        let mut stack = vec![sig_dir];
+        while let Some(current) = stack.pop() {
+            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&current)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect();
+            entries.sort();
+            for entry in entries {
+                if entry.is_dir() {
+                    stack.push(entry);
+                    continue;
+                }
+                if entry.extension().and_then(|s| s.to_str()) != Some("rbs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&entry)?;
+                let path_str = entry.display().to_string();
+                let sigs = crate::rbs::parse_app_signatures(&source).map_err(|message| {
+                    IngestError::Parse {
+                        file: path_str.clone(),
+                        message,
+                    }
+                })?;
+                for (class_id, methods) in sigs {
+                    app.rbs_signatures
+                        .entry(class_id)
+                        .or_default()
+                        .extend(methods);
+                }
+            }
+        }
+    }
+
     Ok(app)
 }
 

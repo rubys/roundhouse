@@ -256,6 +256,20 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
         classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
 
+        // User-authored RBS sidecars. Signatures discovered under
+        // `sig/**/*.rbs` at ingest time apply on top of the hardcoded
+        // catalog — later entries win, so RBS overrides conventions
+        // when both declare the same method. All RBS methods land in
+        // `instance_methods` since dispatch consults both tables and
+        // parse_app_signatures doesn't yet distinguish singleton vs
+        // instance; per-kind separation is a follow-up when it matters.
+        for (class_id, methods) in &app.rbs_signatures {
+            let cls = classes.entry(class_id.clone()).or_default();
+            for (name, ty) in methods {
+                cls.instance_methods.insert(name.clone(), ty.clone());
+            }
+        }
+
         Self { classes, adapter }
     }
 
@@ -1157,5 +1171,92 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod rbs_ingestion_tests {
+    use super::*;
+
+    fn fn_ty_returning(ret: Ty) -> Ty {
+        Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::default(),
+        }
+    }
+
+    #[test]
+    fn analyzer_applies_rbs_signatures_to_user_class() {
+        // A user class not in any Rails convention: `Settings`.
+        // RBS declares `theme` returns String.
+        let mut app = App::new();
+        let mut settings_methods: HashMap<Symbol, Ty> = HashMap::new();
+        settings_methods.insert(Symbol::from("theme"), fn_ty_returning(Ty::Str));
+        app.rbs_signatures
+            .insert(ClassId(Symbol::from("Settings")), settings_methods);
+
+        let analyzer = Analyzer::new(&app);
+        let settings = analyzer
+            .classes
+            .get(&ClassId(Symbol::from("Settings")))
+            .expect("Settings class is in the analyzer's table");
+        let theme = settings
+            .instance_methods
+            .get(&Symbol::from("theme"))
+            .expect("theme method from RBS is in Settings's instance_methods");
+
+        // Returned Ty is the Ty::Fn — the whole method type, since
+        // parameterless method dispatch preserves this shape today.
+        let Ty::Fn { ret, .. } = theme else {
+            panic!("expected Ty::Fn for theme");
+        };
+        assert_eq!(**ret, Ty::Str);
+    }
+
+    #[test]
+    fn analyzer_rbs_signatures_overlay_the_hardcoded_catalog() {
+        // If RBS declares a method that also exists in the Rails
+        // catalog, RBS wins (inserted last). Demonstrate by
+        // overriding `find` on a model.
+        let mut app = App::new();
+        let model_name = ClassId(Symbol::from("Article"));
+        let mut article_methods: HashMap<Symbol, Ty> = HashMap::new();
+        // Pretend Article is a user class with a custom `find` that
+        // returns a plain String (nonsense, but easy to detect).
+        article_methods.insert(Symbol::from("find"), fn_ty_returning(Ty::Str));
+        app.rbs_signatures.insert(model_name.clone(), article_methods);
+
+        let analyzer = Analyzer::new(&app);
+        let article = analyzer
+            .classes
+            .get(&model_name)
+            .expect("Article class is in the analyzer's table");
+        let find = article
+            .instance_methods
+            .get(&Symbol::from("find"))
+            .expect("find method from RBS is in Article's instance_methods");
+
+        // The RBS override is present with the user-declared return.
+        let Ty::Fn { ret, .. } = find else {
+            panic!("expected Ty::Fn for find override");
+        };
+        assert_eq!(**ret, Ty::Str);
+    }
+
+    #[test]
+    fn analyzer_with_no_rbs_signatures_is_unchanged() {
+        // Regression guard: an App with an empty rbs_signatures
+        // produces the same analyzer state as a default App.
+        let app = App::new();
+        let analyzer = Analyzer::new(&app);
+        // Just confirm the hardcoded entries survived.
+        assert!(analyzer
+            .classes
+            .contains_key(&ClassId(Symbol::from("ApplicationController"))));
+        assert!(analyzer
+            .classes
+            .contains_key(&ClassId(Symbol::from("ActiveModel::Errors"))));
     }
 }
