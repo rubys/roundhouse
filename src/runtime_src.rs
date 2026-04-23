@@ -90,6 +90,28 @@ pub fn parse_methods_with_rbs(
         ));
     }
 
+    // Run the body-typer on each method with the RBS-derived param
+    // types seeded into the local environment. This populates `.ty`
+    // throughout each body, which target emitters consume for
+    // type-directed dispatch (Go's %d vs %s, eventually `==`
+    // semantics per the type dispatch table).
+    //
+    // Runtime code doesn't reference user classes today, so the
+    // dispatch table is empty — the body-typer falls back to its
+    // primitive method tables for everything.
+    let classes: std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> =
+        std::collections::HashMap::new();
+    let typer = crate::analyze::BodyTyper::new(&classes);
+    for m in &mut methods {
+        let mut ctx = crate::analyze::Ctx::default();
+        if let Some(Ty::Fn { params, .. }) = &m.signature {
+            for (name, p) in m.params.iter().zip(params.iter()) {
+                ctx.local_bindings.insert(name.clone(), p.ty.clone());
+            }
+        }
+        typer.analyze_expr(&mut m.body, &ctx);
+    }
+
     Ok(methods)
 }
 
@@ -494,5 +516,50 @@ mod tests {
     fn rbs_parse_error_surfaces_through_marrying() {
         let err = parse_methods_with_rbs("", "class { end").unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    // ── body-typer integration ──────────────────────────────────────
+
+    fn find_var_ty(e: &crate::expr::Expr, name: &str) -> Option<Ty> {
+        // Walk the tree looking for `Var { name }` and return its `.ty`.
+        match &*e.node {
+            ExprNode::Var { name: n, .. } if n.as_str() == name => e.ty.clone(),
+            ExprNode::If { cond, then_branch, else_branch } => find_var_ty(cond, name)
+                .or_else(|| find_var_ty(then_branch, name))
+                .or_else(|| find_var_ty(else_branch, name)),
+            ExprNode::Send { recv, args, .. } => {
+                if let Some(r) = recv {
+                    if let Some(t) = find_var_ty(r, name) {
+                        return Some(t);
+                    }
+                }
+                args.iter().find_map(|a| find_var_ty(a, name))
+            }
+            ExprNode::StringInterp { parts } => parts.iter().find_map(|p| match p {
+                crate::expr::InterpPart::Expr { expr } => find_var_ty(expr, name),
+                _ => None,
+            }),
+            ExprNode::Seq { exprs } => exprs.iter().find_map(|e| find_var_ty(e, name)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn body_typer_populates_param_refs_with_signature_types() {
+        let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("types");
+        let m = &methods[0];
+        // `count` is used in the cond (`count == 1`) and in the else-branch
+        // interpolation (`"#{count} ..."`); both should resolve to Int.
+        assert_eq!(find_var_ty(&m.body, "count"), Some(Ty::Int));
+        // `word` is used in both branches; should resolve to Str.
+        assert_eq!(find_var_ty(&m.body, "word"), Some(Ty::Str));
+    }
+
+    #[test]
+    fn body_typer_populates_literal_and_interp_types() {
+        let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("types");
+        let m = &methods[0];
+        // The If as a whole unions its branches (both StringInterp → Str).
+        assert_eq!(m.body.ty.as_ref(), Some(&Ty::Str));
     }
 }

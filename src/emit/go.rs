@@ -22,7 +22,6 @@
 //! rendering lives in `ty` (with `go_ty` re-exported here for any
 //! external surface that may key off it).
 
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -100,14 +99,6 @@ pub fn emit_method(m: &MethodDef) -> String {
         m.name
     );
 
-    // Build a name → Ty map for format-specifier resolution inside
-    // StringInterp. Local bindings (Let / Assign) would extend this
-    // too; runtime code doesn't use them yet.
-    let mut type_env: HashMap<String, Ty> = HashMap::new();
-    for (name, p) in m.params.iter().zip(sig_params.iter()) {
-        type_env.insert(name.as_str().to_string(), p.ty.clone());
-    }
-
     let param_list: Vec<String> = m
         .params
         .iter()
@@ -116,7 +107,7 @@ pub fn emit_method(m: &MethodDef) -> String {
         .collect();
 
     let ret_s = go_ty(ret);
-    let body = rt_emit_body(&m.body, &type_env);
+    let body = rt_emit_body(&m.body);
 
     let mut out = String::new();
     writeln!(
@@ -151,12 +142,12 @@ fn go_export_name(name: &str) -> String {
 /// rewritten to Go's early-return form (no `else` branch after the
 /// `if` — Go's idiom). Nested tail `If`s cascade into else-if chains
 /// via recursion.
-fn rt_emit_body(body: &Expr, env: &HashMap<String, Ty>) -> String {
+fn rt_emit_body(body: &Expr) -> String {
     match &*body.node {
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = rt_emit_expr(cond, env);
-            let then_s = rt_emit_body(then_branch, env);
-            let else_s = rt_emit_body(else_branch, env);
+            let cond_s = rt_emit_expr(cond);
+            let then_s = rt_emit_body(then_branch);
+            let else_s = rt_emit_body(else_branch);
             let mut out = String::new();
             writeln!(out, "if {cond_s} {{").unwrap();
             for line in then_s.lines() {
@@ -173,7 +164,7 @@ fn rt_emit_body(body: &Expr, env: &HashMap<String, Ty>) -> String {
             let last = exprs.len() - 1;
             for (i, e) in exprs.iter().enumerate() {
                 if i == last {
-                    out.push_str(&rt_emit_body(e, env));
+                    out.push_str(&rt_emit_body(e));
                 } else {
                     // Other stmt shapes (Assign, etc.) arrive when runtime
                     // code actually uses them — for now, reject.
@@ -182,19 +173,19 @@ fn rt_emit_body(body: &Expr, env: &HashMap<String, Ty>) -> String {
             }
             out
         }
-        _ => format!("return {}\n", rt_emit_expr(body, env)),
+        _ => format!("return {}\n", rt_emit_expr(body)),
     }
 }
 
-fn rt_emit_expr(e: &Expr, env: &HashMap<String, Ty>) -> String {
+fn rt_emit_expr(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => rt_emit_literal(value),
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Send { recv, method, args, .. } => {
-            rt_emit_send(recv.as_ref(), method.as_str(), args, env)
+            rt_emit_send(recv.as_ref(), method.as_str(), args)
         }
-        ExprNode::StringInterp { parts } => rt_emit_string_interp(parts, env),
-        ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0], env),
+        ExprNode::StringInterp { parts } => rt_emit_string_interp(parts),
+        ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0]),
         ExprNode::If { .. } => {
             // Go has no ternary. A tail / assign-RHS If is lifted to
             // statement form by rt_emit_body; any other If is embedded
@@ -209,18 +200,13 @@ fn rt_emit_expr(e: &Expr, env: &HashMap<String, Ty>) -> String {
     }
 }
 
-fn rt_emit_send(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-    env: &HashMap<String, Ty>,
-) -> String {
+fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if let (Some(r), [arg]) = (recv, args) {
         if is_go_binop(method) {
             return format!(
                 "{} {method} {}",
-                rt_emit_expr(r, env),
-                rt_emit_expr(arg, env)
+                rt_emit_expr(r),
+                rt_emit_expr(arg)
             );
         }
     }
@@ -262,10 +248,11 @@ fn rt_emit_literal(lit: &Literal) -> String {
     }
 }
 
-fn rt_emit_string_interp(parts: &[InterpPart], env: &HashMap<String, Ty>) -> String {
+fn rt_emit_string_interp(parts: &[InterpPart]) -> String {
     // Ruby `"x #{e} y"` → Go `fmt.Sprintf("x <verb> y", e)` where the
     // verb depends on e's type (%s for string, %d for int, %g for
-    // float, %v for everything else).
+    // float, %v for everything else). Types come from the body-typer
+    // populating `expr.ty` during parse_methods_with_rbs.
     let mut fmt = String::new();
     let mut args: Vec<String> = Vec::new();
     for p in parts {
@@ -280,9 +267,9 @@ fn rt_emit_string_interp(parts: &[InterpPart], env: &HashMap<String, Ty>) -> Str
                 }
             }
             InterpPart::Expr { expr } => {
-                let verb = go_format_verb(expr, env);
+                let verb = go_format_verb(expr);
                 fmt.push_str(verb);
-                args.push(rt_emit_expr(expr, env));
+                args.push(rt_emit_expr(expr));
             }
         }
     }
@@ -293,17 +280,9 @@ fn rt_emit_string_interp(parts: &[InterpPart], env: &HashMap<String, Ty>) -> Str
     }
 }
 
-fn go_format_verb(e: &Expr, env: &HashMap<String, Ty>) -> &'static str {
-    let ty = match &*e.node {
-        ExprNode::Var { name, .. } => env.get(name.as_str()).cloned(),
-        ExprNode::Lit { value: Literal::Int { .. } } => Some(Ty::Int),
-        ExprNode::Lit { value: Literal::Float { .. } } => Some(Ty::Float),
-        ExprNode::Lit { value: Literal::Str { .. } } => Some(Ty::Str),
-        ExprNode::Lit { value: Literal::Bool { .. } } => Some(Ty::Bool),
-        _ => None,
-    };
-    match ty {
-        Some(Ty::Str) | Some(Ty::Sym) => "%s",
+fn go_format_verb(e: &Expr) -> &'static str {
+    match e.ty.as_ref() {
+        Some(Ty::Str | Ty::Sym) => "%s",
         Some(Ty::Int) => "%d",
         Some(Ty::Float) => "%g",
         Some(Ty::Bool) => "%t",
