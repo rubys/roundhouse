@@ -300,6 +300,7 @@ fn rewrite_view_body_ivars_cr(expr: &Expr) -> Expr {
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
+        diagnostic: expr.diagnostic.clone(),
     }
 }
 

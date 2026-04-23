@@ -9,6 +9,7 @@ pub mod analyze;
 pub mod app;
 pub mod bytecode;
 pub mod catalog;
+pub mod diagnostic;
 pub mod dialect;
 pub mod effect;
 pub mod emit;

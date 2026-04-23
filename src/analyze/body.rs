@@ -65,10 +65,15 @@ impl<'a> BodyTyper<'a> {
 
     /// Analyze an expression: compute its type, populate `expr.ty`,
     /// return the computed type. Recurses into sub-expressions, which
-    /// in turn get their `ty` populated.
+    /// in turn get their `ty` populated. After typing, runs a
+    /// diagnostic-detection pass on the node to flag sites the body-
+    /// typer recognizes as user errors (Incompatible `+`, …). The
+    /// annotation rides with the IR so emitters can render a runtime
+    /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
+        detect_diagnostic(expr);
         ty
     }
 
@@ -544,6 +549,32 @@ fn union_many(mut tys: Vec<Ty>) -> Ty {
         0 => Ty::Nil,
         1 => tys.pop().unwrap(),
         _ => Ty::Union { variants: tys },
+    }
+}
+
+// Diagnostic detection ------------------------------------------------
+
+/// Run each known analyze-time diagnostic check on `expr`, setting
+/// `expr.diagnostic` if any fires. Called after types have been
+/// computed so classifiers can consult child `.ty` annotations.
+///
+/// Today: detects `Int + Str` and similar Incompatible-add sites.
+/// Future kinds (embedded conditionals the target can't emit,
+/// Hash `+`, etc.) hook in here the same way.
+fn detect_diagnostic(expr: &mut Expr) {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
+        if method.as_str() == "+" && args.len() == 1 {
+            use crate::diagnostic::DiagnosticKind;
+            use crate::emit::shared::add::{AddCase, classify_add};
+            if matches!(classify_add(r, &args[0]), AddCase::Incompatible) {
+                let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
+                let rhs_ty = args[0].ty.clone().unwrap_or(Ty::Nil);
+                expr.diagnostic = Some(DiagnosticKind::IncompatibleAdd {
+                    lhs_ty,
+                    rhs_ty,
+                });
+            }
+        }
     }
 }
 
@@ -1174,5 +1205,60 @@ mod tests {
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
         assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+    }
+
+    // ── diagnostic annotation ─────────────────────────────────────
+
+    #[test]
+    fn incompatible_add_annotates_diagnostic_on_send() {
+        // Build: `1 + "hello"` — concrete Int + Str. Body-typer should
+        // annotate the enclosing Send with an IncompatibleAdd
+        // diagnostic.
+        let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
+        let rhs = synth(ExprNode::Lit {
+            value: Literal::Str { value: "hello".to_string() },
+        });
+        let add = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("+"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = add;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        match diag {
+            crate::diagnostic::DiagnosticKind::IncompatibleAdd { lhs_ty, rhs_ty } => {
+                assert_eq!(lhs_ty, &Ty::Int);
+                assert_eq!(rhs_ty, &Ty::Str);
+            }
+            other => panic!("expected IncompatibleAdd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compatible_add_leaves_diagnostic_empty() {
+        // Int + Int must NOT be annotated — it's valid Ruby.
+        let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
+        let rhs = synth(ExprNode::Lit { value: Literal::Int { value: 2 } });
+        let add = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("+"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = add;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        assert!(expr.diagnostic.is_none());
     }
 }

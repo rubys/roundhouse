@@ -44,6 +44,11 @@ fn emit_stmt(e: &Expr, receiver_arg: Option<&str>) -> String {
 }
 
 pub(super) fn emit_expr(e: &Expr, receiver_arg: Option<&str>) -> String {
+    // Analyzer-set diagnostic annotations short-circuit to a target
+    // raise-equivalent (preserves Ruby's runtime-raise semantics).
+    if e.diagnostic.is_some() {
+        return r#"raise "roundhouse: + with incompatible operand types""#.to_string();
+    }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {

@@ -178,6 +178,11 @@ fn rt_emit_body(body: &Expr) -> String {
 }
 
 fn rt_emit_expr(e: &Expr) -> String {
+    // Analyzer-set diagnostic annotations short-circuit to a target
+    // raise-equivalent (preserves Ruby's runtime-raise semantics).
+    if e.diagnostic.is_some() {
+        return r#"panic("roundhouse: + with incompatible operand types")"#.to_string();
+    }
     match &*e.node {
         ExprNode::Lit { value } => rt_emit_literal(value),
         ExprNode::Var { name, .. } => name.to_string(),

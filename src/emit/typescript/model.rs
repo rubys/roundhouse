@@ -571,5 +571,6 @@ fn rewrite_bare_attrs_to_ivars(
         ty: e.ty.clone(),
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
+        diagnostic: e.diagnostic.clone(),
     }
 }

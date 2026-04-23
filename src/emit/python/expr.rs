@@ -57,6 +57,13 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
+    // Analyze may have annotated this expression as a user error
+    // (e.g., Incompatible `+`). If so, emit the target raise-
+    // equivalent instead of the normal rendering — matches Ruby's
+    // behavior of raising at runtime.
+    if e.diagnostic.is_some() {
+        return r#"(_ for _ in ()).throw(TypeError("roundhouse: + with incompatible operand types"))"#.to_string();
+    }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {

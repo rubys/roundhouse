@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::diagnostic::DiagnosticKind;
 use crate::effect::EffectSet;
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
@@ -32,6 +33,14 @@ pub struct Expr {
     /// at ingest time.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leading_blank_line: bool,
+    /// Analyzer-set diagnostic annotation — present when the body-
+    /// typer detected a user error (Incompatible `+`, etc.) at this
+    /// site. Emitters read this first on the expr: if set, they
+    /// produce a target-language raise-equivalent instead of the
+    /// normal emission. Consumed by `analyze::diagnose` to surface
+    /// to users; empty on well-typed input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<DiagnosticKind>,
 }
 
 impl Expr {
@@ -42,6 +51,7 @@ impl Expr {
             ty: None,
             effects: EffectSet::pure(),
             leading_blank_line: false,
+            diagnostic: None,
         }
     }
 }

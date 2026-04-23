@@ -35,7 +35,6 @@ use crate::dialect::{Action, Filter, FilterKind, RenderTarget};
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::span::Span;
 use crate::ty::Ty;
 
 pub struct Analyzer {
@@ -981,32 +980,11 @@ fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 
 // Diagnostic emission -----------------------------------------------------
 
-/// A single unresolved-type finding from the analyzer's output. Produced by
-/// walking the annotated IR after `Analyzer::analyze` populated types;
-/// anything that matters for typed emission but ended up as `Ty::Var(0)`
-/// (unknown) generates one of these.
-///
-/// We accumulate diagnostics rather than aborting: a Rails program with
-/// one unresolved site should still transpile the rest, and the set of
-/// diagnostics is the "work list" for filling registry gaps or adding
-/// annotations. Zero diagnostics = the program is in the analyzable subset.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Diagnostic {
-    pub span: Span,
-    pub kind: DiagnosticKind,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum DiagnosticKind {
-    /// `@name` read at a site where no action seeded the ivar — the
-    /// controller→view channel (or before_action flow) didn't bind it.
-    IvarUnresolved { name: Symbol },
-    /// `recv.method(...)` where `recv` has a known type but the method
-    /// isn't in the registry for that type. Indicates a dialect gap —
-    /// add the method to the relevant class/table lookup.
-    SendDispatchFailed { method: Symbol, recv_ty: Ty },
-}
+/// Re-exports: the shared diagnostic types live in `crate::diagnostic`
+/// so the body-typer can annotate `Expr.diagnostic` without a
+/// dependency cycle. External callers (tests, future CLIs) continue
+/// to import them from `roundhouse::analyze` as before.
+pub use crate::diagnostic::{Diagnostic, DiagnosticKind};
 
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
@@ -1055,6 +1033,29 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
 }
 
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    // Diagnostic annotations set by the body-typer during analyze.
+    // These are the IR-carried path: detection happens once at the
+    // point of typing, and every reader (including this walker) sees
+    // the same set.
+    if let Some(kind) = &expr.diagnostic {
+        let message = match kind {
+            DiagnosticKind::IncompatibleAdd { lhs_ty, rhs_ty } => {
+                format!("`+` with incompatible operand types: {lhs_ty:?} + {rhs_ty:?}")
+            }
+            DiagnosticKind::IvarUnresolved { name } => {
+                format!("@{} has no known type", name.as_str())
+            }
+            DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
+                format!("no known method `{}` on {recv_ty:?}", method.as_str())
+            }
+        };
+        out.push(Diagnostic {
+            span: expr.span,
+            kind: kind.clone(),
+            message,
+        });
+    }
+
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {

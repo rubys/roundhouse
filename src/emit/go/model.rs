@@ -178,6 +178,7 @@ fn rewrite_bare_attrs_to_receiver(
         ty: None,
         effects: crate::effect::EffectSet::pure(),
         leading_blank_line: false,
+        diagnostic: None,
     };
     let new_node = match &*e.node {
         ExprNode::Send { recv: None, method, args, block: None, parenthesized }
@@ -296,6 +297,7 @@ fn rewrite_bare_attrs_to_receiver(
         ty: e.ty.clone(),
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
+        diagnostic: e.diagnostic.clone(),
     }
 }
 
