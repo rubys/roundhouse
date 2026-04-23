@@ -194,8 +194,21 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
-                let t = self.analyze_expr(then_branch, ctx);
-                let e = self.analyze_expr(else_branch, ctx);
+                let pred = extract_narrowing(cond);
+                let t = match &pred {
+                    Some(p) => {
+                        let then_ctx = apply_narrowing(ctx, p, true);
+                        self.analyze_expr(then_branch, &then_ctx)
+                    }
+                    None => self.analyze_expr(then_branch, ctx),
+                };
+                let e = match &pred {
+                    Some(p) => {
+                        let else_ctx = apply_narrowing(ctx, p, false);
+                        self.analyze_expr(else_branch, &else_ctx)
+                    }
+                    None => self.analyze_expr(else_branch, ctx),
+                };
                 union_of(t, e)
             }
 
@@ -479,5 +492,414 @@ fn union_many(mut tys: Vec<Ty>) -> Ty {
         0 => Ty::Nil,
         1 => tys.pop().unwrap(),
         _ => Ty::Union { variants: tys },
+    }
+}
+
+// Narrowing -----------------------------------------------------------
+
+/// A variable reference that narrowing can target: either a local
+/// binding (`x`) or an instance variable (`@x`).
+enum VarKey {
+    Local(Symbol),
+    Ivar(Symbol),
+}
+
+/// A condition that narrows a variable's type in the branches of an
+/// `if`. Only nil-shaped and class-shaped predicates are recognized —
+/// more complex conditions fall through with no narrowing applied.
+enum NarrowPred {
+    /// `x.nil?` or `x == nil` — true in then, false in else.
+    IsNil(VarKey),
+    /// `!x.nil?` or `x != nil` — false in then, true in else.
+    IsNotNil(VarKey),
+    /// `x.is_a?(T)` — narrow to T in then, remove T from union in else.
+    IsA(VarKey, Ty),
+    /// `!x.is_a?(T)` — inverse.
+    IsNotA(VarKey, Ty),
+}
+
+fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
+    match &*cond.node {
+        // Ruby's `!` is a method call: `!x` parses as `x.!`. So
+        // `!x.nil?` is Send(method="!", recv=Some(Send(method="nil?", recv=Var(x)))).
+        ExprNode::Send { recv: Some(inner), method, args, .. }
+            if method.as_str() == "!" && args.is_empty() =>
+        {
+            extract_narrowing(inner).map(negate_pred)
+        }
+        ExprNode::Send { recv: Some(target), method, args, .. } => {
+            match (method.as_str(), args.as_slice()) {
+                ("nil?", []) => var_key(target).map(NarrowPred::IsNil),
+                ("==", [arg]) if is_nil_lit(arg) => {
+                    var_key(target).map(NarrowPred::IsNil)
+                }
+                ("!=", [arg]) if is_nil_lit(arg) => {
+                    var_key(target).map(NarrowPred::IsNotNil)
+                }
+                ("is_a?" | "kind_of?" | "instance_of?", [arg]) => {
+                    let key = var_key(target)?;
+                    let ty = const_to_ty(arg)?;
+                    Some(NarrowPred::IsA(key, ty))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn negate_pred(p: NarrowPred) -> NarrowPred {
+    match p {
+        NarrowPred::IsNil(k) => NarrowPred::IsNotNil(k),
+        NarrowPred::IsNotNil(k) => NarrowPred::IsNil(k),
+        NarrowPred::IsA(k, t) => NarrowPred::IsNotA(k, t),
+        NarrowPred::IsNotA(k, t) => NarrowPred::IsA(k, t),
+    }
+}
+
+fn var_key(e: &Expr) -> Option<VarKey> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(VarKey::Local(name.clone())),
+        ExprNode::Ivar { name } => Some(VarKey::Ivar(name.clone())),
+        _ => None,
+    }
+}
+
+fn is_nil_lit(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// A constant path used as a class argument to `is_a?` — map built-in
+/// class names to their structural types, user classes to `Ty::Class`.
+fn const_to_ty(e: &Expr) -> Option<Ty> {
+    let ExprNode::Const { path } = &*e.node else {
+        return None;
+    };
+    let name = path.last()?;
+    Some(match name.as_str() {
+        "Integer" | "Numeric" => Ty::Int,
+        "Float" => Ty::Float,
+        "String" => Ty::Str,
+        "Symbol" => Ty::Sym,
+        "NilClass" => Ty::Nil,
+        "TrueClass" | "FalseClass" => Ty::Bool,
+        other => Ty::Class {
+            id: ClassId(Symbol::from(other)),
+            args: vec![],
+        },
+    })
+}
+
+fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -> Ctx {
+    let mut new_ctx = ctx.clone();
+    match pred {
+        NarrowPred::IsNil(k) | NarrowPred::IsNotNil(k) => {
+            let is_is_nil = matches!(pred, NarrowPred::IsNil(_));
+            let narrow_to_nil = is_is_nil == then_branch;
+            narrow_binding(&mut new_ctx, k, |current| {
+                if narrow_to_nil {
+                    Ty::Nil
+                } else {
+                    remove_nil(current)
+                }
+            });
+        }
+        NarrowPred::IsA(k, ty) | NarrowPred::IsNotA(k, ty) => {
+            let is_is_a = matches!(pred, NarrowPred::IsA(_, _));
+            let narrow_to_ty = is_is_a == then_branch;
+            narrow_binding(&mut new_ctx, k, |current| {
+                if narrow_to_ty {
+                    intersect_with(current, ty)
+                } else {
+                    remove_variant(current, ty)
+                }
+            });
+        }
+    }
+    new_ctx
+}
+
+fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
+    let (name, bindings) = match key {
+        VarKey::Local(n) => (n, &mut ctx.local_bindings),
+        VarKey::Ivar(n) => (n, &mut ctx.ivar_bindings),
+    };
+    if let Some(current) = bindings.get(name).cloned() {
+        let narrowed = f(&current);
+        bindings.insert(name.clone(), narrowed);
+    }
+}
+
+fn remove_nil(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Union { variants } => {
+            let kept: Vec<Ty> = variants
+                .iter()
+                .filter(|v| !matches!(v, Ty::Nil))
+                .cloned()
+                .collect();
+            match kept.len() {
+                0 => Ty::Nil,
+                1 => kept.into_iter().next().unwrap(),
+                _ => Ty::Union { variants: kept },
+            }
+        }
+        // Not a union — if the type is bare Nil, the "non-nil" branch
+        // is unreachable in Ruby; we keep Nil here (the analyzer doesn't
+        // flag contradictions). For non-Nil concrete types, no change.
+        other => other.clone(),
+    }
+}
+
+/// Given a current type and a narrower one, return the narrower form.
+/// `String | Nil ∩ String = String`; `Post ∩ Post = Post`; anything
+/// else returns the narrower type on the assumption the check would
+/// have succeeded (matches Ruby's `is_a?` semantics at run time).
+fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
+    match current {
+        Ty::Union { variants } => {
+            // Keep only variants compatible with the narrower type.
+            let kept: Vec<Ty> = variants
+                .iter()
+                .filter(|v| ty_compatible(v, narrower))
+                .cloned()
+                .collect();
+            match kept.len() {
+                0 => narrower.clone(),
+                1 => kept.into_iter().next().unwrap(),
+                _ => Ty::Union { variants: kept },
+            }
+        }
+        _ => narrower.clone(),
+    }
+}
+
+/// Remove variants matching `ty` from a union (for `is_a?` else-branch).
+fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
+    match current {
+        Ty::Union { variants } => {
+            let kept: Vec<Ty> = variants
+                .iter()
+                .filter(|v| !ty_compatible(v, ty))
+                .cloned()
+                .collect();
+            match kept.len() {
+                0 => current.clone(),
+                1 => kept.into_iter().next().unwrap(),
+                _ => Ty::Union { variants: kept },
+            }
+        }
+        _ => current.clone(),
+    }
+}
+
+/// Structural equality on types — pre-subtyping approximation.
+/// Used only by narrowing today; full subtype checks can replace it
+/// when polymorphism lands.
+fn ty_compatible(a: &Ty, b: &Ty) -> bool {
+    a == b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::ExprNode;
+    use crate::ident::VarId;
+    use crate::span::Span;
+
+    fn synth(node: ExprNode) -> Expr {
+        Expr::new(Span::synthetic(), node)
+    }
+
+    fn var(name: &str) -> Expr {
+        synth(ExprNode::Var {
+            id: VarId(0),
+            name: Symbol::from(name),
+        })
+    }
+
+    fn nil_lit() -> Expr {
+        synth(ExprNode::Lit { value: Literal::Nil })
+    }
+
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        synth(ExprNode::Send {
+            recv,
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        })
+    }
+
+    fn empty_classes() -> HashMap<ClassId, ClassInfo> {
+        HashMap::new()
+    }
+
+    fn ctx_with_local(name: &str, ty: Ty) -> Ctx {
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(Symbol::from(name), ty);
+        ctx
+    }
+
+    fn optional_str() -> Ty {
+        Ty::Union {
+            variants: vec![Ty::Str, Ty::Nil],
+        }
+    }
+
+    #[test]
+    fn if_nil_narrows_variable_to_nil_in_then_branch() {
+        let cond = send(Some(var("x")), "nil?", vec![]);
+        let pred = extract_narrowing(&cond).expect("narrowing detected");
+        let ctx = ctx_with_local("x", optional_str());
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        assert_eq!(then_ctx.local_bindings[&Symbol::from("x")], Ty::Nil);
+    }
+
+    #[test]
+    fn if_nil_narrows_variable_removing_nil_in_else_branch() {
+        let cond = send(Some(var("x")), "nil?", vec![]);
+        let pred = extract_narrowing(&cond).unwrap();
+        let ctx = ctx_with_local("x", optional_str());
+        let else_ctx = apply_narrowing(&ctx, &pred, false);
+        assert_eq!(else_ctx.local_bindings[&Symbol::from("x")], Ty::Str);
+    }
+
+    #[test]
+    fn not_nil_is_inverse() {
+        let inner = send(Some(var("x")), "nil?", vec![]);
+        let cond = send(Some(inner), "!", vec![]);
+        let pred = extract_narrowing(&cond).expect("negation recognized");
+        let ctx = ctx_with_local("x", optional_str());
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        let else_ctx = apply_narrowing(&ctx, &pred, false);
+        assert_eq!(then_ctx.local_bindings[&Symbol::from("x")], Ty::Str);
+        assert_eq!(else_ctx.local_bindings[&Symbol::from("x")], Ty::Nil);
+    }
+
+    #[test]
+    fn explicit_equality_to_nil_narrows() {
+        let cond = send(Some(var("x")), "==", vec![nil_lit()]);
+        let pred = extract_narrowing(&cond).expect("== nil recognized");
+        let ctx = ctx_with_local("x", optional_str());
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        assert_eq!(then_ctx.local_bindings[&Symbol::from("x")], Ty::Nil);
+    }
+
+    #[test]
+    fn explicit_inequality_to_nil_narrows_inversely() {
+        let cond = send(Some(var("x")), "!=", vec![nil_lit()]);
+        let pred = extract_narrowing(&cond).expect("!= nil recognized");
+        let ctx = ctx_with_local("x", optional_str());
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        let else_ctx = apply_narrowing(&ctx, &pred, false);
+        assert_eq!(then_ctx.local_bindings[&Symbol::from("x")], Ty::Str);
+        assert_eq!(else_ctx.local_bindings[&Symbol::from("x")], Ty::Nil);
+    }
+
+    #[test]
+    fn ivar_narrowing() {
+        let ivar = synth(ExprNode::Ivar {
+            name: Symbol::from("post"),
+        });
+        let cond = send(Some(ivar), "nil?", vec![]);
+        let pred = extract_narrowing(&cond).unwrap();
+        let mut ctx = Ctx::default();
+        ctx.ivar_bindings
+            .insert(Symbol::from("post"), optional_str());
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        let else_ctx = apply_narrowing(&ctx, &pred, false);
+        assert_eq!(then_ctx.ivar_bindings[&Symbol::from("post")], Ty::Nil);
+        assert_eq!(else_ctx.ivar_bindings[&Symbol::from("post")], Ty::Str);
+    }
+
+    #[test]
+    fn missing_binding_is_a_noop() {
+        let cond = send(Some(var("x")), "nil?", vec![]);
+        let pred = extract_narrowing(&cond).unwrap();
+        let ctx = Ctx::default();
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        assert!(then_ctx.local_bindings.is_empty());
+    }
+
+    #[test]
+    fn non_narrowing_condition_returns_none() {
+        let cond = send(Some(var("x")), "length", vec![]);
+        assert!(extract_narrowing(&cond).is_none());
+    }
+
+    #[test]
+    fn is_a_string_narrows_to_str() {
+        let class_ref = synth(ExprNode::Const {
+            path: vec![Symbol::from("String")],
+        });
+        let cond = send(Some(var("x")), "is_a?", vec![class_ref]);
+        let pred = extract_narrowing(&cond).expect("is_a? recognized");
+        let mixed = Ty::Union {
+            variants: vec![Ty::Str, Ty::Int, Ty::Nil],
+        };
+        let ctx = ctx_with_local("x", mixed);
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        let else_ctx = apply_narrowing(&ctx, &pred, false);
+        assert_eq!(then_ctx.local_bindings[&Symbol::from("x")], Ty::Str);
+        assert_eq!(
+            else_ctx.local_bindings[&Symbol::from("x")],
+            Ty::Union {
+                variants: vec![Ty::Int, Ty::Nil],
+            }
+        );
+    }
+
+    #[test]
+    fn is_a_user_class_narrows_to_class_ty() {
+        let class_ref = synth(ExprNode::Const {
+            path: vec![Symbol::from("Post")],
+        });
+        let cond = send(Some(var("x")), "is_a?", vec![class_ref]);
+        let pred = extract_narrowing(&cond).unwrap();
+        let ctx = ctx_with_local(
+            "x",
+            Ty::Class {
+                id: ClassId(Symbol::from("Post")),
+                args: vec![],
+            },
+        );
+        let then_ctx = apply_narrowing(&ctx, &pred, true);
+        assert_eq!(
+            then_ctx.local_bindings[&Symbol::from("x")],
+            Ty::Class {
+                id: ClassId(Symbol::from("Post")),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn end_to_end_if_nil_narrows_through_analyzer() {
+        // Build: `if x.nil?; x; else; x.length; end` — with x: String | Nil,
+        // the If's type should be Nil | Int (then is Nil, else is Int
+        // because x narrows to String and String#length → Int).
+        let then_branch = var("x");
+        let else_branch = send(Some(var("x")), "length", vec![]);
+        let if_expr = synth(ExprNode::If {
+            cond: send(Some(var("x")), "nil?", vec![]),
+            then_branch,
+            else_branch,
+        });
+        let mut expr = if_expr;
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("x", optional_str());
+        let t = typer.analyze_expr(&mut expr, &ctx);
+
+        // Result should be the union of (Nil) | (Int) — i.e., { Nil, Int }.
+        let variants = match t {
+            Ty::Union { variants } => variants,
+            other => panic!("expected Union, got {other:?}"),
+        };
+        assert!(variants.contains(&Ty::Nil), "variants: {variants:?}");
+        assert!(variants.contains(&Ty::Int), "variants: {variants:?}");
     }
 }
