@@ -9,7 +9,7 @@
 //! The split between "annotation on Expr" and "walker-produced" is
 //! historical: older kinds (`IvarUnresolved`, `SendDispatchFailed`)
 //! are produced by traversing the analyzed tree and inferring from
-//! context. Newer kinds (`IncompatibleAdd`) are set directly by the
+//! context. Newer kinds (`IncompatibleBinop`) are set directly by the
 //! body-typer at the point of detection. Over time the walker-based
 //! ones can migrate to annotations too; the visible output is the
 //! same either way.
@@ -32,12 +32,12 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// Short identifier for this diagnostic kind — a grep-friendly
     /// code the user can search for (`ivar_unresolved`,
-    /// `send_dispatch_failed`, `incompatible_add`).
+    /// `send_dispatch_failed`, `incompatible_binop`).
     pub fn code(&self) -> &'static str {
         match self.kind {
             DiagnosticKind::IvarUnresolved { .. } => "ivar_unresolved",
             DiagnosticKind::SendDispatchFailed { .. } => "send_dispatch_failed",
-            DiagnosticKind::IncompatibleAdd { .. } => "incompatible_add",
+            DiagnosticKind::IncompatibleBinop { .. } => "incompatible_binop",
         }
     }
 }
@@ -90,10 +90,11 @@ mod tests {
     }
 
     #[test]
-    fn display_renders_incompatible_add() {
+    fn display_renders_incompatible_binop() {
         let d = Diagnostic {
             span: Span::synthetic(),
-            kind: DiagnosticKind::IncompatibleAdd {
+            kind: DiagnosticKind::IncompatibleBinop {
+                op: Symbol::from("+"),
                 lhs_ty: Ty::Int,
                 rhs_ty: Ty::Str,
             },
@@ -101,7 +102,7 @@ mod tests {
         };
         assert_eq!(
             d.to_string(),
-            "error[incompatible_add]: `+` with incompatible operand types: Int + Str"
+            "error[incompatible_binop]: `+` with incompatible operand types: Int + Str"
         );
     }
 }
@@ -117,10 +118,17 @@ pub enum DiagnosticKind {
     /// isn't in the registry for that type. Produced by the walker
     /// in `analyze::diagnose`.
     SendDispatchFailed { method: Symbol, recv_ty: Ty },
-    /// `a + b` with concrete operand types that Ruby would reject at
-    /// runtime (`Int + Str`, `Hash + Hash`, etc.). Ruby raises
-    /// `TypeError` on evaluation; the emitter produces a target-side
-    /// raise-equivalent so the compiled program preserves that
-    /// behavior. Annotated directly on the Send Expr by the body-typer.
-    IncompatibleAdd { lhs_ty: Ty, rhs_ty: Ty },
+    /// `a OP b` with concrete operand types that Ruby would reject
+    /// at runtime — `Int + Str`, `Hash + Hash`, `1 < "hello"`, etc.
+    /// `op` is the Ruby method symbol (`+`, `<`, `==`, …) so a
+    /// single variant covers every binary operator; the message
+    /// formatter uses it to name the operator for the user. The
+    /// emitter produces a target-side raise-equivalent at the site
+    /// so the compiled program preserves Ruby's runtime behavior.
+    /// Annotated directly on the Send Expr by the body-typer.
+    IncompatibleBinop {
+        op: Symbol,
+        lhs_ty: Ty,
+        rhs_ty: Ty,
+    },
 }

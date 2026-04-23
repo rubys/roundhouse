@@ -9,5 +9,6 @@
 //! `crate::lower`.
 
 pub mod add;
+pub mod cmp;
 pub mod eq;
 pub mod schema_sql;

@@ -175,6 +175,31 @@ fn rt_emit_expr(e: &Expr) -> String {
 
 fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if let (Some(r), [arg]) = (recv, args) {
+        // Comparison dispatch: Rust requires explicit cast on the
+        // Int side for mixed Int/Float comparison (`1 as f64 < 2.0`).
+        // SameType and Unknown fall through to native infix.
+        if matches!(method, "<" | "<=" | ">" | ">=") {
+            use crate::emit::shared::cmp::{classify_cmp, CmpCase};
+            use crate::ty::Ty;
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_cmp(r, arg) {
+                CmpCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                        _ => (ls, rs),
+                    };
+                    return format!("{ls_cast} {method} {rs_cast}");
+                }
+                CmpCase::Incompatible => {
+                    return format!(
+                        r#"panic!("roundhouse: `{method}` with incompatible operand types")"#
+                    );
+                }
+                CmpCase::SameType | CmpCase::Unknown => {}
+            }
+        }
         // `+` dispatch: Rust needs distinct emission for strings and
         // arrays because native `+` doesn't work on them.
         if method == "+" {

@@ -1042,8 +1042,12 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     // the same set.
     if let Some(kind) = &expr.diagnostic {
         let message = match kind {
-            DiagnosticKind::IncompatibleAdd { lhs_ty, rhs_ty } => {
-                format!("`+` with incompatible operand types: {lhs_ty:?} + {rhs_ty:?}")
+            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => {
+                format!(
+                    "`{}` with incompatible operand types: {lhs_ty:?} {} {rhs_ty:?}",
+                    op.as_str(),
+                    op.as_str()
+                )
             }
             DiagnosticKind::IvarUnresolved { name } => {
                 format!("@{} has no known type", name.as_str())

@@ -265,9 +265,9 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             };
             ("SendDispatchFailed".into(), format!("{}:{}", method.as_str(), recv_descriptor))
         }
-        DiagnosticKind::IncompatibleAdd { lhs_ty, rhs_ty } => (
-            "IncompatibleAdd".into(),
-            format!("{lhs_ty:?} + {rhs_ty:?}"),
+        DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => (
+            "IncompatibleBinop".into(),
+            format!("{lhs_ty:?} {} {rhs_ty:?}", op.as_str()),
         ),
     }
 }

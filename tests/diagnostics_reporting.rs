@@ -31,7 +31,7 @@ fn send(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
 }
 
 #[test]
-fn diagnose_on_app_with_incompatible_add_returns_one_diagnostic() {
+fn diagnose_on_app_with_incompatible_binop_returns_one_diagnostic() {
     // Build an App whose seeds body is `1 + "hello"`. Seeds is a top-
     // level expression the analyzer walks, so it's the simplest seam
     // to stuff synthetic IR into without building a full controller.
@@ -56,8 +56,8 @@ fn diagnose_on_app_with_incompatible_add_returns_one_diagnostic() {
     );
     let incompat = diags
         .iter()
-        .find(|d| d.code() == "incompatible_add")
-        .expect("incompatible_add diagnostic should fire");
+        .find(|d| d.code() == "incompatible_binop")
+        .expect("incompatible_binop diagnostic should fire");
     assert!(
         incompat.message.contains("Int") && incompat.message.contains("Str"),
         "unexpected message: {}",
@@ -65,7 +65,7 @@ fn diagnose_on_app_with_incompatible_add_returns_one_diagnostic() {
     );
     assert!(incompat
         .to_string()
-        .starts_with("error[incompatible_add]: "));
+        .starts_with("error[incompatible_binop]: "));
 }
 
 #[test]

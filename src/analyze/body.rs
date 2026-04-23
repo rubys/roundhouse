@@ -563,17 +563,30 @@ fn union_many(mut tys: Vec<Ty>) -> Ty {
 /// Hash `+`, etc.) hook in here the same way.
 fn detect_diagnostic(expr: &mut Expr) {
     if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
-        if method.as_str() == "+" && args.len() == 1 {
-            use crate::diagnostic::DiagnosticKind;
-            use crate::emit::shared::add::{AddCase, classify_add};
-            if matches!(classify_add(r, &args[0]), AddCase::Incompatible) {
-                let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
-                let rhs_ty = args[0].ty.clone().unwrap_or(Ty::Nil);
-                expr.diagnostic = Some(DiagnosticKind::IncompatibleAdd {
-                    lhs_ty,
-                    rhs_ty,
-                });
+        if args.len() != 1 {
+            return;
+        }
+        let rhs = &args[0];
+        let incompatible = match method.as_str() {
+            "+" => {
+                use crate::emit::shared::add::{AddCase, classify_add};
+                matches!(classify_add(r, rhs), AddCase::Incompatible)
             }
+            "<" | "<=" | ">" | ">=" => {
+                use crate::emit::shared::cmp::{CmpCase, classify_cmp};
+                matches!(classify_cmp(r, rhs), CmpCase::Incompatible)
+            }
+            _ => false,
+        };
+        if incompatible {
+            use crate::diagnostic::DiagnosticKind;
+            let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
+            let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
+            expr.diagnostic = Some(DiagnosticKind::IncompatibleBinop {
+                op: method.clone(),
+                lhs_ty,
+                rhs_ty,
+            });
         }
     }
 }
@@ -1212,7 +1225,7 @@ mod tests {
     #[test]
     fn incompatible_add_annotates_diagnostic_on_send() {
         // Build: `1 + "hello"` — concrete Int + Str. Body-typer should
-        // annotate the enclosing Send with an IncompatibleAdd
+        // annotate the enclosing Send with an IncompatibleBinop
         // diagnostic.
         let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
         let rhs = synth(ExprNode::Lit {
@@ -1233,12 +1246,74 @@ mod tests {
 
         let diag = expr.diagnostic.as_ref().expect("diagnostic set");
         match diag {
-            crate::diagnostic::DiagnosticKind::IncompatibleAdd { lhs_ty, rhs_ty } => {
+            crate::diagnostic::DiagnosticKind::IncompatibleBinop {
+                op,
+                lhs_ty,
+                rhs_ty,
+            } => {
+                assert_eq!(op.as_str(), "+");
                 assert_eq!(lhs_ty, &Ty::Int);
                 assert_eq!(rhs_ty, &Ty::Str);
             }
-            other => panic!("expected IncompatibleAdd, got {other:?}"),
+            other => panic!("expected IncompatibleBinop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn incompatible_compare_annotates_diagnostic_on_send() {
+        // `1 < "hello"` — Ruby's Comparable raises on mixed types.
+        // Body-typer should annotate the Send.
+        let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
+        let rhs = synth(ExprNode::Lit {
+            value: Literal::Str { value: "hello".to_string() },
+        });
+        let cmp = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("<"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = cmp;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        match diag {
+            crate::diagnostic::DiagnosticKind::IncompatibleBinop {
+                op,
+                lhs_ty,
+                rhs_ty,
+            } => {
+                assert_eq!(op.as_str(), "<");
+                assert_eq!(lhs_ty, &Ty::Int);
+                assert_eq!(rhs_ty, &Ty::Str);
+            }
+            other => panic!("expected IncompatibleBinop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compatible_compare_leaves_diagnostic_empty() {
+        // Int < Int is valid.
+        let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
+        let rhs = synth(ExprNode::Lit { value: Literal::Int { value: 2 } });
+        let cmp = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("<"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = cmp;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        assert!(expr.diagnostic.is_none());
     }
 
     #[test]
