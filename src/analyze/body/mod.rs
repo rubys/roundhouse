@@ -20,6 +20,10 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::{Row, Ty};
 
+mod diagnostic;
+mod narrowing;
+mod send;
+
 /// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,
 /// block body, Seq walk with new ivar/local bindings).
@@ -59,6 +63,14 @@ pub struct BodyTyper<'a> {
 }
 
 impl<'a> BodyTyper<'a> {
+    /// Submodule accessor for the dispatch table. `classes` itself
+    /// stays private to this module; `send.rs` reaches it here.
+    pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
+        self.classes
+    }
+}
+
+impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
         Self { classes }
     }
@@ -73,7 +85,7 @@ impl<'a> BodyTyper<'a> {
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
-        detect_diagnostic(expr);
+        diagnostic::detect_diagnostic(expr);
         ty
     }
 
@@ -209,17 +221,17 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
-                let pred = extract_narrowing(cond);
+                let pred = narrowing::extract_narrowing(cond);
                 let t = match &pred {
                     Some(p) => {
-                        let then_ctx = apply_narrowing(ctx, p, true);
+                        let then_ctx = narrowing::apply_narrowing(ctx, p, true);
                         self.analyze_expr(then_branch, &then_ctx)
                     }
                     None => self.analyze_expr(then_branch, ctx),
                 };
                 let e = match &pred {
                     Some(p) => {
-                        let else_ctx = apply_narrowing(ctx, p, false);
+                        let else_ctx = narrowing::apply_narrowing(ctx, p, false);
                         self.analyze_expr(else_branch, &else_ctx)
                     }
                     None => self.analyze_expr(else_branch, ctx),
@@ -287,123 +299,11 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
-    /// Build the Ctx used to analyze a block passed to `recv.method(...) { |p1, p2| ... }`.
-    /// Seeds the block's local_bindings with parameter types derived from the receiver
-    /// and method (e.g. `array.each { |x| }` binds `x` to the array's element type).
-    fn block_ctx_for(
-        &self,
-        outer: &Ctx,
-        recv_ty: Option<&Ty>,
-        method: &Symbol,
-        block: &Expr,
-    ) -> Ctx {
-        let mut new_ctx = outer.clone();
-        let ExprNode::Lambda { params, .. } = &*block.node else {
-            return new_ctx;
-        };
-        let Some(param_tys) = self.block_params_for(recv_ty, method) else {
-            return new_ctx;
-        };
-        for (name, ty) in params.iter().zip(param_tys.iter()) {
-            new_ctx.local_bindings.insert(name.clone(), ty.clone());
-        }
-        new_ctx
-    }
-
-    /// Per-param types a block yields, given the receiver type and method.
-    /// `None` means "no binding info available" — params stay unknown.
-    fn block_params_for(&self, recv_ty: Option<&Ty>, method: &Symbol) -> Option<Vec<Ty>> {
-        let recv_ty = recv_ty?;
-        match recv_ty {
-            Ty::Array { elem } => match method.as_str() {
-                "each" | "map" | "collect" | "flat_map" | "collect_concat"
-                | "select" | "filter" | "reject"
-                | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
-                | "any?" | "all?" | "none?" | "one?" => Some(vec![(**elem).clone()]),
-                "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
-                _ => None,
-            },
-            Ty::Hash { key, value } => match method.as_str() {
-                "each" | "each_pair" | "map" | "collect"
-                | "flat_map" | "collect_concat"
-                | "select" | "filter" | "reject"
-                | "any?" | "all?" | "none?" => {
-                    Some(vec![(**key).clone(), (**value).clone()])
-                }
-                // `transform_values { |v| ... }` — block receives just the value.
-                "transform_values" => Some(vec![(**value).clone()]),
-                // `transform_keys { |k| ... }` — block receives just the key.
-                "transform_keys" => Some(vec![(**key).clone()]),
-                _ => None,
-            },
-            // ActiveModel::Errors iteration yields an Error to the block.
-            Ty::Class { id, .. } if id.0.as_str() == "ActiveModel::Errors" => {
-                match method.as_str() {
-                    "each" | "map" | "collect" | "select" | "filter" | "reject"
-                    | "any?" | "all?" | "none?" => Some(vec![Ty::Class {
-                        id: ClassId(Symbol::from("ActiveModel::Error")),
-                        args: vec![],
-                    }]),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn dispatch(
-        &self,
-        recv_ty: Option<&Ty>,
-        method: &Symbol,
-        block_ret: Option<&Ty>,
-    ) -> Ty {
-        match recv_ty {
-            None => unknown(),
-            Some(Ty::Class { id, .. }) => {
-                if let Some(cls) = self.classes.get(id) {
-                    if let Some(ty) = cls.class_methods.get(method) {
-                        return ty.clone();
-                    }
-                    if let Some(ty) = cls.instance_methods.get(method) {
-                        return ty.clone();
-                    }
-                }
-                unknown()
-            }
-            Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
-            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
-            Some(Ty::Str) => str_method(method),
-            Some(Ty::Int) => int_method(method),
-            // Union dispatch: try each concrete (non-Nil, non-Var) variant
-            // and union the resolved results. Covers the common
-            // `T | Nil` pattern (`find_by`, `params[:k]`, `.find` on
-            // relation) where the method is valid on `T` and the Nil case
-            // is handled elsewhere at run time.
-            Some(Ty::Union { variants }) => {
-                let mut resolved: Vec<Ty> = Vec::new();
-                for v in variants {
-                    if matches!(v, Ty::Nil | Ty::Var { .. }) {
-                        continue;
-                    }
-                    let r = self.dispatch(Some(v), method, block_ret);
-                    if !matches!(r, Ty::Var { .. }) {
-                        resolved.push(r);
-                    }
-                }
-                match resolved.len() {
-                    0 => unknown(),
-                    1 => resolved.into_iter().next().unwrap(),
-                    _ => union_many(resolved),
-                }
-            }
-            _ => unknown(),
-        }
-    }
 }
 
 // Literal / primitive types ---------------------------------------------
 
-fn lit_ty(lit: &Literal) -> Ty {
+pub(super) fn lit_ty(lit: &Literal) -> Ty {
     match lit {
         Literal::Nil => Ty::Nil,
         Literal::Bool { .. } => Ty::Bool,
@@ -414,129 +314,12 @@ fn lit_ty(lit: &Literal) -> Ty {
     }
 }
 
-fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
-    // AR-specific dispatches go FIRST so they win over the generic
-    // array methods that share a name (`find` on a relation raises, so
-    // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
-    if matches!(elem, Ty::Class { .. }) {
-        match method.as_str() {
-            // Relation chain methods preserve Array<Self>.
-            "where" | "order" | "limit" | "offset" | "includes" | "preload"
-            | "joins" | "distinct" | "group" | "having" => {
-                return Ty::Array { elem: Box::new(elem.clone()) };
-            }
-            // CollectionProxy constructors return an element instance.
-            "build" | "create" | "create!" | "find" | "find!" => {
-                return elem.clone();
-            }
-            _ => {}
-        }
-    }
-    // Block-returning transformations: output element type comes from
-    // the block body when available (populated by the body-typer),
-    // otherwise falls back to the input element type.
-    let transformed_elem = || block_ret.cloned().unwrap_or_else(|| elem.clone());
-    match method.as_str() {
-        "length" | "size" | "count" => Ty::Int,
-        "first" | "last" => Ty::Union {
-            variants: vec![elem.clone(), Ty::Nil],
-        },
-        "[]" => Ty::Union {
-            variants: vec![elem.clone(), Ty::Nil],
-        },
-        // `map` / `collect` produce Array of the block's return type.
-        "map" | "collect" => Ty::Array { elem: Box::new(transformed_elem()) },
-        // `flat_map` expects the block to return an Array, flattens by one.
-        "flat_map" | "collect_concat" => match block_ret {
-            Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
-            _ => Ty::Array { elem: Box::new(elem.clone()) },
-        },
-        // `each`, predicates, and shape-preserving transforms keep elem.
-        "each" | "select" | "filter" | "reject"
-        | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
-            Ty::Array { elem: Box::new(elem.clone()) }
-        }
-        "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
-        "find" | "detect" => Ty::Union {
-            variants: vec![elem.clone(), Ty::Nil],
-        },
-        _ => unknown(),
-    }
-}
 
-fn hash_method(method: &Symbol, key: &Ty, value: &Ty, block_ret: Option<&Ty>) -> Ty {
-    match method.as_str() {
-        "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
-        "length" | "size" | "count" => Ty::Int,
-        "values" => Ty::Array { elem: Box::new(value.clone()) },
-        "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
-        "keys" => Ty::Array { elem: Box::new(key.clone()) },
-        "fetch" => value.clone(),
-        "merge" => Ty::Hash {
-            key: Box::new(key.clone()),
-            value: Box::new(value.clone()),
-        },
-        // `Hash#map` / `Hash#collect` returns an Array — block yields
-        // (k, v) and returns some U; result is Array[U].
-        "map" | "collect" => Ty::Array {
-            elem: Box::new(block_ret.cloned().unwrap_or_else(unknown)),
-        },
-        // `transform_values { |v| ... }` → Hash[K, U].
-        "transform_values" => Ty::Hash {
-            key: Box::new(key.clone()),
-            value: Box::new(block_ret.cloned().unwrap_or_else(|| value.clone())),
-        },
-        // `transform_keys { |k| ... }` → Hash[U, V].
-        "transform_keys" => Ty::Hash {
-            key: Box::new(block_ret.cloned().unwrap_or_else(|| key.clone())),
-            value: Box::new(value.clone()),
-        },
-        // Rails strong-params: `params.expect(:id)` and
-        // `params.expect(k: [...])` both return the coerced value (a
-        // scalar or a permitted-params-hash). Approximate both as the
-        // value type for now; refine when a fixture forces a richer
-        // return shape.
-        "expect" | "require" | "permit" => value.clone(),
-        _ => unknown(),
-    }
-}
-
-fn str_method(method: &Symbol) -> Ty {
-    match method.as_str() {
-        "length" | "size" | "bytesize" => Ty::Int,
-        "upcase" | "downcase" | "strip" | "chomp" | "chop" | "reverse" | "to_s"
-        | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone" => Ty::Str,
-        "to_i" => Ty::Int,
-        "to_f" => Ty::Float,
-        "empty?" | "blank?" | "present?" | "include?" | "start_with?"
-        | "end_with?" | "match?" => Ty::Bool,
-        // Operators. `+` concats; `<<` mutates in place but still returns self.
-        // `*` is repetition ("a" * 3). Comparisons uniformly return Bool.
-        "+" | "<<" | "*" | "concat" => Ty::Str,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
-        _ => unknown(),
-    }
-}
-
-fn int_method(method: &Symbol) -> Ty {
-    match method.as_str() {
-        "to_s" => Ty::Str,
-        "to_i" | "abs" | "succ" | "pred" => Ty::Int,
-        "to_f" => Ty::Float,
-        "zero?" | "positive?" | "negative?" | "even?" | "odd?" => Ty::Bool,
-        // Arithmetic: Int op Int → Int (we approximate Int/Float mixing here;
-        // refine when a fixture demands it).
-        "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
-        _ => unknown(),
-    }
-}
-
-fn unknown() -> Ty {
+pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
 }
 
-fn union_of(a: Ty, b: Ty) -> Ty {
+pub(super) fn union_of(a: Ty, b: Ty) -> Ty {
     if a == b {
         a
     } else {
@@ -544,7 +327,7 @@ fn union_of(a: Ty, b: Ty) -> Ty {
     }
 }
 
-fn union_many(mut tys: Vec<Ty>) -> Ty {
+pub(super) fn union_many(mut tys: Vec<Ty>) -> Ty {
     match tys.len() {
         0 => Ty::Nil,
         1 => tys.pop().unwrap(),
@@ -552,253 +335,12 @@ fn union_many(mut tys: Vec<Ty>) -> Ty {
     }
 }
 
-// Diagnostic detection ------------------------------------------------
 
-/// Run each known analyze-time diagnostic check on `expr`, setting
-/// `expr.diagnostic` if any fires. Called after types have been
-/// computed so classifiers can consult child `.ty` annotations.
-///
-/// Today: detects `Int + Str` and similar Incompatible-add sites.
-/// Future kinds (embedded conditionals the target can't emit,
-/// Hash `+`, etc.) hook in here the same way.
-fn detect_diagnostic(expr: &mut Expr) {
-    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
-        if args.len() != 1 {
-            return;
-        }
-        let rhs = &args[0];
-        let incompatible = match method.as_str() {
-            "+" => {
-                use crate::emit::shared::add::{AddCase, classify_add};
-                matches!(classify_add(r, rhs), AddCase::Incompatible)
-            }
-            "<" | "<=" | ">" | ">=" => {
-                use crate::emit::shared::cmp::{CmpCase, classify_cmp};
-                matches!(classify_cmp(r, rhs), CmpCase::Incompatible)
-            }
-            _ => false,
-        };
-        if incompatible {
-            use crate::diagnostic::DiagnosticKind;
-            let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
-            let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
-            expr.diagnostic = Some(DiagnosticKind::IncompatibleBinop {
-                op: method.clone(),
-                lhs_ty,
-                rhs_ty,
-            });
-        }
-    }
-}
-
-// Narrowing -----------------------------------------------------------
-
-/// A variable reference that narrowing can target: either a local
-/// binding (`x`) or an instance variable (`@x`).
-enum VarKey {
-    Local(Symbol),
-    Ivar(Symbol),
-}
-
-/// A condition that narrows a variable's type in the branches of an
-/// `if`. Only nil-shaped and class-shaped predicates are recognized —
-/// more complex conditions fall through with no narrowing applied.
-enum NarrowPred {
-    /// `x.nil?` or `x == nil` — true in then, false in else.
-    IsNil(VarKey),
-    /// `!x.nil?` or `x != nil` — false in then, true in else.
-    IsNotNil(VarKey),
-    /// `x.is_a?(T)` — narrow to T in then, remove T from union in else.
-    IsA(VarKey, Ty),
-    /// `!x.is_a?(T)` — inverse.
-    IsNotA(VarKey, Ty),
-}
-
-fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
-    match &*cond.node {
-        // Ruby's `!` is a method call: `!x` parses as `x.!`. So
-        // `!x.nil?` is Send(method="!", recv=Some(Send(method="nil?", recv=Var(x)))).
-        ExprNode::Send { recv: Some(inner), method, args, .. }
-            if method.as_str() == "!" && args.is_empty() =>
-        {
-            extract_narrowing(inner).map(negate_pred)
-        }
-        ExprNode::Send { recv: Some(target), method, args, .. } => {
-            match (method.as_str(), args.as_slice()) {
-                ("nil?", []) => var_key(target).map(NarrowPred::IsNil),
-                ("==", [arg]) if is_nil_lit(arg) => {
-                    var_key(target).map(NarrowPred::IsNil)
-                }
-                ("!=", [arg]) if is_nil_lit(arg) => {
-                    var_key(target).map(NarrowPred::IsNotNil)
-                }
-                ("is_a?" | "kind_of?" | "instance_of?", [arg]) => {
-                    let key = var_key(target)?;
-                    let ty = const_to_ty(arg)?;
-                    Some(NarrowPred::IsA(key, ty))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-fn negate_pred(p: NarrowPred) -> NarrowPred {
-    match p {
-        NarrowPred::IsNil(k) => NarrowPred::IsNotNil(k),
-        NarrowPred::IsNotNil(k) => NarrowPred::IsNil(k),
-        NarrowPred::IsA(k, t) => NarrowPred::IsNotA(k, t),
-        NarrowPred::IsNotA(k, t) => NarrowPred::IsA(k, t),
-    }
-}
-
-fn var_key(e: &Expr) -> Option<VarKey> {
-    match &*e.node {
-        ExprNode::Var { name, .. } => Some(VarKey::Local(name.clone())),
-        ExprNode::Ivar { name } => Some(VarKey::Ivar(name.clone())),
-        _ => None,
-    }
-}
-
-fn is_nil_lit(e: &Expr) -> bool {
-    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
-}
-
-/// A constant path used as a class argument to `is_a?` — map built-in
-/// class names to their structural types, user classes to `Ty::Class`.
-fn const_to_ty(e: &Expr) -> Option<Ty> {
-    let ExprNode::Const { path } = &*e.node else {
-        return None;
-    };
-    let name = path.last()?;
-    Some(match name.as_str() {
-        "Integer" | "Numeric" => Ty::Int,
-        "Float" => Ty::Float,
-        "String" => Ty::Str,
-        "Symbol" => Ty::Sym,
-        "NilClass" => Ty::Nil,
-        "TrueClass" | "FalseClass" => Ty::Bool,
-        other => Ty::Class {
-            id: ClassId(Symbol::from(other)),
-            args: vec![],
-        },
-    })
-}
-
-fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -> Ctx {
-    let mut new_ctx = ctx.clone();
-    match pred {
-        NarrowPred::IsNil(k) | NarrowPred::IsNotNil(k) => {
-            let is_is_nil = matches!(pred, NarrowPred::IsNil(_));
-            let narrow_to_nil = is_is_nil == then_branch;
-            narrow_binding(&mut new_ctx, k, |current| {
-                if narrow_to_nil {
-                    Ty::Nil
-                } else {
-                    remove_nil(current)
-                }
-            });
-        }
-        NarrowPred::IsA(k, ty) | NarrowPred::IsNotA(k, ty) => {
-            let is_is_a = matches!(pred, NarrowPred::IsA(_, _));
-            let narrow_to_ty = is_is_a == then_branch;
-            narrow_binding(&mut new_ctx, k, |current| {
-                if narrow_to_ty {
-                    intersect_with(current, ty)
-                } else {
-                    remove_variant(current, ty)
-                }
-            });
-        }
-    }
-    new_ctx
-}
-
-fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
-    let (name, bindings) = match key {
-        VarKey::Local(n) => (n, &mut ctx.local_bindings),
-        VarKey::Ivar(n) => (n, &mut ctx.ivar_bindings),
-    };
-    if let Some(current) = bindings.get(name).cloned() {
-        let narrowed = f(&current);
-        bindings.insert(name.clone(), narrowed);
-    }
-}
-
-fn remove_nil(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Union { variants } => {
-            let kept: Vec<Ty> = variants
-                .iter()
-                .filter(|v| !matches!(v, Ty::Nil))
-                .cloned()
-                .collect();
-            match kept.len() {
-                0 => Ty::Nil,
-                1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
-            }
-        }
-        // Not a union — if the type is bare Nil, the "non-nil" branch
-        // is unreachable in Ruby; we keep Nil here (the analyzer doesn't
-        // flag contradictions). For non-Nil concrete types, no change.
-        other => other.clone(),
-    }
-}
-
-/// Given a current type and a narrower one, return the narrower form.
-/// `String | Nil ∩ String = String`; `Post ∩ Post = Post`; anything
-/// else returns the narrower type on the assumption the check would
-/// have succeeded (matches Ruby's `is_a?` semantics at run time).
-fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
-    match current {
-        Ty::Union { variants } => {
-            // Keep only variants compatible with the narrower type.
-            let kept: Vec<Ty> = variants
-                .iter()
-                .filter(|v| ty_compatible(v, narrower))
-                .cloned()
-                .collect();
-            match kept.len() {
-                0 => narrower.clone(),
-                1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
-            }
-        }
-        _ => narrower.clone(),
-    }
-}
-
-/// Remove variants matching `ty` from a union (for `is_a?` else-branch).
-fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
-    match current {
-        Ty::Union { variants } => {
-            let kept: Vec<Ty> = variants
-                .iter()
-                .filter(|v| !ty_compatible(v, ty))
-                .cloned()
-                .collect();
-            match kept.len() {
-                0 => current.clone(),
-                1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
-            }
-        }
-        _ => current.clone(),
-    }
-}
-
-/// Structural equality on types — pre-subtyping approximation.
-/// Used only by narrowing today; full subtype checks can replace it
-/// when polymorphism lands.
-fn ty_compatible(a: &Ty, b: &Ty) -> bool {
-    a == b
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::narrowing::{apply_narrowing, extract_narrowing};
     use crate::expr::ExprNode;
     use crate::ident::VarId;
     use crate::span::Span;
