@@ -16,7 +16,9 @@ use std::fs;
 use std::path::Path;
 
 use roundhouse::dialect::MethodDef;
+use roundhouse::expr::{Expr, ExprNode, InterpPart};
 use roundhouse::runtime_src::parse_methods_with_rbs;
+use roundhouse::ty::Ty;
 
 fn load_typed(name: &str) -> Vec<MethodDef> {
     let ruby = fs::read_to_string(Path::new("runtime/ruby").join(format!("{name}.rb")))
@@ -84,4 +86,152 @@ fn inflector_pluralize_lives_in_runtime_elixir() {
 fn inflector_pluralize_lives_in_runtime_go() {
     let emitted = roundhouse::emit::go::emit_method(&pluralize_method());
     assert_emitted_lives_in(&emitted, "runtime/go/view_helpers.go");
+}
+
+// ── full-typing invariant ───────────────────────────────────────────
+
+/// Enumerate every `*.rb` in runtime/ruby/ and return the stem name
+/// (without extension). Used to sweep the runtime source tree so new
+/// files are picked up automatically.
+fn runtime_ruby_stems() -> Vec<String> {
+    let dir = Path::new("runtime/ruby");
+    let mut out: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|_| panic!("runtime/ruby/ exists"))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("rb") {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
+    let ty_ok = matches!(&e.ty, Some(t) if !matches!(t, Ty::Var { .. }));
+    if !ty_ok {
+        out.push(format!("{path}: {:?} has ty={:?}", &e.node, e.ty));
+    }
+    match &*e.node {
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. } => {}
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_untyped(cond, &format!("{path}/if.cond"), out);
+            collect_untyped(then_branch, &format!("{path}/if.then"), out);
+            collect_untyped(else_branch, &format!("{path}/if.else"), out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_untyped(r, &format!("{path}/send.recv"), out);
+            }
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped(a, &format!("{path}/send.arg[{i}]"), out);
+            }
+            if let Some(b) = block {
+                collect_untyped(b, &format!("{path}/send.block"), out);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for (i, p) in parts.iter().enumerate() {
+                if let InterpPart::Expr { expr } = p {
+                    collect_untyped(expr, &format!("{path}/interp[{i}]"), out);
+                }
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for (i, e) in exprs.iter().enumerate() {
+                collect_untyped(e, &format!("{path}/seq[{i}]"), out);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_untyped(left, &format!("{path}/boolop.left"), out);
+            collect_untyped(right, &format!("{path}/boolop.right"), out);
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            collect_untyped(expr, &format!("{path}/rescue.expr"), out);
+            collect_untyped(fallback, &format!("{path}/rescue.fallback"), out);
+        }
+        ExprNode::Let { value, body, .. } => {
+            collect_untyped(value, &format!("{path}/let.value"), out);
+            collect_untyped(body, &format!("{path}/let.body"), out);
+        }
+        ExprNode::Lambda { body, .. } => {
+            collect_untyped(body, &format!("{path}/lambda.body"), out)
+        }
+        ExprNode::Apply { fun, args, block } => {
+            collect_untyped(fun, &format!("{path}/apply.fun"), out);
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped(a, &format!("{path}/apply.arg[{i}]"), out);
+            }
+            if let Some(b) = block {
+                collect_untyped(b, &format!("{path}/apply.block"), out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (i, (k, v)) in entries.iter().enumerate() {
+                collect_untyped(k, &format!("{path}/hash[{i}].key"), out);
+                collect_untyped(v, &format!("{path}/hash[{i}].value"), out);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for (i, el) in elements.iter().enumerate() {
+                collect_untyped(el, &format!("{path}/array[{i}]"), out);
+            }
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_untyped(scrutinee, &format!("{path}/case.scrut"), out);
+            for (i, arm) in arms.iter().enumerate() {
+                if let Some(g) = &arm.guard {
+                    collect_untyped(g, &format!("{path}/case.arm[{i}].guard"), out);
+                }
+                collect_untyped(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
+            }
+        }
+        ExprNode::Assign { value, .. } => {
+            collect_untyped(value, &format!("{path}/assign.value"), out)
+        }
+        ExprNode::Yield { args } => {
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped(a, &format!("{path}/yield.arg[{i}]"), out);
+            }
+        }
+        ExprNode::Raise { value } => {
+            collect_untyped(value, &format!("{path}/raise.value"), out)
+        }
+    }
+}
+
+/// Every method body across every `runtime/ruby/*.rb` must be fully
+/// typed — no None, no `Ty::Var` sentinels. Mirrors the Rails-side
+/// promise enforced by `tests/real_blog.rs::type_analysis_coverage`:
+/// our runtime source of truth is held to the same standard as a
+/// real Rails app. New runtime files are picked up automatically.
+#[test]
+fn every_runtime_method_body_is_fully_typed() {
+    let stems = runtime_ruby_stems();
+    assert!(!stems.is_empty(), "runtime/ruby/ should have at least one .rb file");
+
+    let mut all_untyped: Vec<String> = Vec::new();
+    for stem in &stems {
+        let methods = load_typed(stem);
+        for m in &methods {
+            let path = format!("{stem}.rb::{}", m.name);
+            collect_untyped(&m.body, &path, &mut all_untyped);
+        }
+    }
+
+    assert!(
+        all_untyped.is_empty(),
+        "{} untyped sub-expression(s) across runtime/ruby/:\n{}",
+        all_untyped.len(),
+        all_untyped.join("\n")
+    );
 }
