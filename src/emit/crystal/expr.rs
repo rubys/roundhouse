@@ -158,6 +158,18 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 };
             }
         }
+        // `+` dispatch: Crystal's native `+` handles numeric, string,
+        // and Array concat. The dispatch's only behavior change is
+        // rejecting Incompatible pairs.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            if matches!(classify_add(r, arg), AddCase::Incompatible) {
+                panic!(
+                    "Crystal emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                );
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

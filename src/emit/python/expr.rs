@@ -162,6 +162,19 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 return format!("{} {keyword} None", emit_expr(subject));
             }
         }
+        // `+` dispatch: Python's native `+` handles all of the
+        // supported cases (numeric, string, list). The dispatch's
+        // only behavior change is rejecting Incompatible pairs
+        // (Int+Str, Hash+Hash, …) that Ruby would raise on.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            if matches!(classify_add(r, arg), AddCase::Incompatible) {
+                panic!(
+                    "Python emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                );
+            }
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }

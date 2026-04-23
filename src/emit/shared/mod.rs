@@ -8,5 +8,6 @@
 //! doesn't fit the structured-to-structured lowering pattern in
 //! `crate::lower`.
 
+pub mod add;
 pub mod eq;
 pub mod schema_sql;

@@ -147,6 +147,21 @@ pub(super) fn emit_send_with_parens(
     // `==` and `!=` map to strict `===` / `!==` so equality semantics
     // match Ruby (Ruby has no implicit type coercion).
     if let (Some(r), [arg]) = (recv, args) {
+        // `+` dispatch: TS's native `+` handles numeric and string;
+        // Array concat wants spread. Incompatible pairs refuse.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            match classify_add(r, arg) {
+                AddCase::ArrayConcat { .. } => {
+                    return format!("[...{}, ...{}]", emit_expr(r), emit_expr(arg));
+                }
+                AddCase::Incompatible => panic!(
+                    "TypeScript emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                ),
+                _ => {}
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }

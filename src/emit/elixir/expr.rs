@@ -196,6 +196,24 @@ fn emit_send(
                 };
             }
         }
+        // `+` dispatch: Elixir uses `<>` for strings and `++` for
+        // lists. Numerics go through the normal infix binop below.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            let ls = emit_expr(r, receiver_arg);
+            let rs = emit_expr(arg, receiver_arg);
+            match classify_add(r, arg) {
+                AddCase::StringConcat => return format!("{ls} <> {rs}"),
+                AddCase::ArrayConcat { .. } => return format!("{ls} ++ {rs}"),
+                AddCase::Incompatible => panic!(
+                    "Elixir emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                ),
+                // Numeric / NumericPromote / Unknown fall through to
+                // the plain infix binop path below.
+                _ => {}
+            }
+        }
         if is_ex_binop(method) {
             return format!(
                 "{} {method} {}",

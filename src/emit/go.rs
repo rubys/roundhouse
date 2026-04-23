@@ -202,6 +202,35 @@ fn rt_emit_expr(e: &Expr) -> String {
 
 fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if let (Some(r), [arg]) = (recv, args) {
+        // `+` dispatch: Go supports native `+` for numerics and
+        // strings; Array concat needs `append(a, b...)`; mixed
+        // numerics need an explicit cast.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_add(r, arg) {
+                AddCase::ArrayConcat { .. } => {
+                    return format!("append({ls}, {rs}...)");
+                }
+                AddCase::NumericPromote => {
+                    // Cast the Int side to float64 (Float is already
+                    // float64 in our go_ty mapping).
+                    let (ls_cast, rs_cast) =
+                        match (r.ty.as_ref(), arg.ty.as_ref()) {
+                            (Some(Ty::Int), _) => (format!("float64({ls})"), rs),
+                            (_, Some(Ty::Int)) => (ls, format!("float64({rs})")),
+                            _ => (ls, rs),
+                        };
+                    return format!("{ls_cast} + {rs_cast}");
+                }
+                AddCase::Incompatible => panic!(
+                    "Go emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                ),
+                AddCase::Numeric | AddCase::StringConcat | AddCase::Unknown => {}
+            }
+        }
         if is_go_binop(method) {
             return format!(
                 "{} {method} {}",

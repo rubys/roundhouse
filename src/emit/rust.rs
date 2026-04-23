@@ -170,6 +170,37 @@ fn rt_emit_expr(e: &Expr) -> String {
 
 fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if let (Some(r), [arg]) = (recv, args) {
+        // `+` dispatch: Rust needs distinct emission for strings and
+        // arrays because native `+` doesn't work on them.
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            use crate::ty::Ty;
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_add(r, arg) {
+                AddCase::StringConcat => {
+                    return format!("format!(\"{{}}{{}}\", {ls}, {rs})");
+                }
+                AddCase::ArrayConcat { .. } => {
+                    return format!("[&{ls}[..], &{rs}[..]].concat()");
+                }
+                AddCase::NumericPromote => {
+                    // Cast the Int side to f64; Float is already f64.
+                    let (ls_cast, rs_cast) =
+                        match (r.ty.as_ref(), arg.ty.as_ref()) {
+                            (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                            (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                            _ => (ls, rs),
+                        };
+                    return format!("{ls_cast} + {rs_cast}");
+                }
+                AddCase::Incompatible => panic!(
+                    "Rust emit: `+` with incompatible operand types \
+                     (Ruby would raise TypeError)"
+                ),
+                AddCase::Numeric | AddCase::Unknown => {}
+            }
+        }
         if is_rust_binop(method) {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }
