@@ -143,8 +143,21 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
     // Ruby's binary operators ride the Send channel. Crystal's syntax
-    // matches Ruby's for these, so emit infix directly.
+    // matches Ruby's for these, so emit infix directly. Equality
+    // against Nil prefers the `.nil?` predicate when the body-typer
+    // flagged one side as Ty::Nil.
     if let (Some(r), [arg]) = (recv, args) {
+        if method == "==" || method == "!=" {
+            use crate::emit::eq::{classify_eq, EqCase};
+            if let EqCase::NilCheck { subject } = classify_eq(r, arg) {
+                let s = emit_expr(subject);
+                return if method == "==" {
+                    format!("{s}.nil?")
+                } else {
+                    format!("!{s}.nil?")
+                };
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

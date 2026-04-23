@@ -181,8 +181,21 @@ fn emit_send(
     }
 
     // Ruby's binary operators ride the Send channel. Elixir's surface
-    // matches for these, so emit infix directly.
-    if let (Some(r), [_arg]) = (recv, args) {
+    // matches for these, so emit infix directly. Equality against
+    // Nil prefers the `is_nil/1` guard when the body-typer flagged
+    // one side as Ty::Nil.
+    if let (Some(r), [arg]) = (recv, args) {
+        if method == "==" || method == "!=" {
+            use crate::emit::eq::{classify_eq, EqCase};
+            if let EqCase::NilCheck { subject } = classify_eq(r, arg) {
+                let s = emit_expr(subject, receiver_arg);
+                return if method == "==" {
+                    format!("is_nil({s})")
+                } else {
+                    format!("!is_nil({s})")
+                };
+            }
+        }
         if is_ex_binop(method) {
             return format!(
                 "{} {method} {}",

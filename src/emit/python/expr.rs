@@ -151,8 +151,17 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     }
     // Ruby's binary operators ride the Send channel (`a == b` is
     // `a.==(b)`). Python needs infix; emit as `recv op arg` for the
-    // ones whose syntax matches 1:1.
+    // ones whose syntax matches 1:1. Equality against Nil gets the
+    // idiomatic `is None` / `is not None` form when the body-typer
+    // flagged one side as Ty::Nil.
     if let (Some(r), [arg]) = (recv, args) {
+        if method == "==" || method == "!=" {
+            use crate::emit::eq::{classify_eq, EqCase};
+            if let EqCase::NilCheck { subject } = classify_eq(r, arg) {
+                let keyword = if method == "==" { "is" } else { "is not" };
+                return format!("{} {keyword} None", emit_expr(subject));
+            }
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }
