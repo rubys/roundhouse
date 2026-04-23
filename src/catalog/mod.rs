@@ -414,7 +414,9 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        // Same as `create` — raises on failure rather than returning
+        // false, but on success still returns the instance.
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "update_all",

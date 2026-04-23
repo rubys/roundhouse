@@ -1019,6 +1019,9 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     for view in &app.views {
         diagnose_expr(&view.body, &mut out);
     }
+    if let Some(seeds) = &app.seeds {
+        diagnose_expr(seeds, &mut out);
+    }
     out
 }
 
