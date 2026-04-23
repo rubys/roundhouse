@@ -164,10 +164,9 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         if method == "+" {
             use crate::emit::shared::add::{classify_add, AddCase};
             if matches!(classify_add(r, arg), AddCase::Incompatible) {
-                panic!(
-                    "Crystal emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                );
+                // Emit a runtime raise; Crystal's `raise` returns
+                // `NoReturn`, so it works as an expression value.
+                return r#"raise "roundhouse: + with incompatible operand types""#.to_string();
             }
         }
         if is_cr_binop(method) {

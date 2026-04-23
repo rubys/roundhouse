@@ -224,10 +224,16 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         };
                     return format!("{ls_cast} + {rs_cast}");
                 }
-                AddCase::Incompatible => panic!(
-                    "Go emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                ),
+                AddCase::Incompatible => {
+                    // Emit a runtime panic. Go's `panic()` has no
+                    // return type, so in expression position it
+                    // produces a Go compile error — which is itself
+                    // a loud, line-specific diagnostic. A typed
+                    // helper (generics: `func rhIncompat[T](m) T`)
+                    // would yield cleaner output; deferred until a
+                    // runtime function actually triggers this case.
+                    return r#"panic("roundhouse: + with incompatible operand types")"#.to_string();
+                }
                 AddCase::Numeric | AddCase::StringConcat | AddCase::Unknown => {}
             }
         }

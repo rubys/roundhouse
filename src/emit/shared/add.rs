@@ -37,7 +37,13 @@ pub enum AddCase<'a> {
     },
     /// Both sides typed concretely but `+` isn't defined in Ruby
     /// for that pair (`Int + Str`, `Hash + Hash`, etc.). Ruby would
-    /// raise at runtime; callers refuse at emit.
+    /// raise at runtime; callers emit a target-language
+    /// raise-equivalent at the expression site so the compiled
+    /// program also raises if execution reaches that point. This
+    /// matches Ruby's behavior (not stricter, not looser) and keeps
+    /// the rest of the compilation going — one bad `+` doesn't halt
+    /// emission, it just produces a program that fails at the
+    /// specific bad line if run.
     Incompatible,
     /// Type info missing on either side — fall back to native infix.
     /// Matches the conservative policy: emit what we'd emit without

@@ -194,10 +194,12 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         };
                     return format!("{ls_cast} + {rs_cast}");
                 }
-                AddCase::Incompatible => panic!(
-                    "Rust emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                ),
+                AddCase::Incompatible => {
+                    // Emit a runtime panic; Rust's `panic!()` has
+                    // type `!`, so it's valid in any expression
+                    // position.
+                    return r#"panic!("roundhouse: + with incompatible operand types")"#.to_string();
+                }
                 AddCase::Numeric | AddCase::Unknown => {}
             }
         }

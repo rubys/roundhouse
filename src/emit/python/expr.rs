@@ -169,10 +169,11 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         if method == "+" {
             use crate::emit::shared::add::{classify_add, AddCase};
             if matches!(classify_add(r, arg), AddCase::Incompatible) {
-                panic!(
-                    "Python emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                );
+                // Emit a runtime raise in Python, matching Ruby's
+                // behavior (Ruby would raise TypeError at this line).
+                // `raise` is a statement, so use a generator `.throw`
+                // trick to keep the form expression-valued.
+                return r#"(_ for _ in ()).throw(TypeError("roundhouse: + with incompatible operand types"))"#.to_string();
             }
         }
         if is_py_binop(method) {

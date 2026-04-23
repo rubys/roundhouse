@@ -205,10 +205,11 @@ fn emit_send(
             match classify_add(r, arg) {
                 AddCase::StringConcat => return format!("{ls} <> {rs}"),
                 AddCase::ArrayConcat { .. } => return format!("{ls} ++ {rs}"),
-                AddCase::Incompatible => panic!(
-                    "Elixir emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                ),
+                AddCase::Incompatible => {
+                    // Emit a runtime raise; Elixir's `raise` never
+                    // returns (bottom-typed), so it's expression-valued.
+                    return r#"raise "roundhouse: + with incompatible operand types""#.to_string();
+                }
                 // Numeric / NumericPromote / Unknown fall through to
                 // the plain infix binop path below.
                 _ => {}

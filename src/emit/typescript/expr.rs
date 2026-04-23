@@ -155,10 +155,12 @@ pub(super) fn emit_send_with_parens(
                 AddCase::ArrayConcat { .. } => {
                     return format!("[...{}, ...{}]", emit_expr(r), emit_expr(arg));
                 }
-                AddCase::Incompatible => panic!(
-                    "TypeScript emit: `+` with incompatible operand types \
-                     (Ruby would raise TypeError)"
-                ),
+                AddCase::Incompatible => {
+                    // Emit a runtime throw via IIFE; `throw` is a
+                    // statement in JS/TS so wrapping is required to
+                    // keep the form expression-valued.
+                    return r#"(() => { throw new Error("roundhouse: + with incompatible operand types"); })()"#.to_string();
+                }
                 _ => {}
             }
         }
