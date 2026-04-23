@@ -185,11 +185,21 @@ impl<'a> BodyTyper<'a> {
                     None => ctx.self_ty.clone(),
                 };
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
-                if let Some(b) = block {
+                let block_ret = if let Some(b) = block {
                     let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, b);
                     self.analyze_expr(b, &block_ctx);
-                }
-                self.dispatch(recv_ty.as_ref(), method)
+                    // The Lambda walker stores the analyzed body's type
+                    // on the body expr itself. `map`/`collect`/similar
+                    // use that to determine the output element type.
+                    if let ExprNode::Lambda { body, .. } = &*b.node {
+                        body.ty.clone()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref())
             }
 
             ExprNode::If { cond, then_branch, else_branch } => {
@@ -301,17 +311,24 @@ impl<'a> BodyTyper<'a> {
         let recv_ty = recv_ty?;
         match recv_ty {
             Ty::Array { elem } => match method.as_str() {
-                "each" | "map" | "collect" | "select" | "filter" | "reject"
+                "each" | "map" | "collect" | "flat_map" | "collect_concat"
+                | "select" | "filter" | "reject"
                 | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
                 | "any?" | "all?" | "none?" | "one?" => Some(vec![(**elem).clone()]),
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
                 _ => None,
             },
             Ty::Hash { key, value } => match method.as_str() {
-                "each" | "each_pair" | "map" | "collect" | "select" | "filter"
-                | "reject" | "any?" | "all?" | "none?" => {
+                "each" | "each_pair" | "map" | "collect"
+                | "flat_map" | "collect_concat"
+                | "select" | "filter" | "reject"
+                | "any?" | "all?" | "none?" => {
                     Some(vec![(**key).clone(), (**value).clone()])
                 }
+                // `transform_values { |v| ... }` — block receives just the value.
+                "transform_values" => Some(vec![(**value).clone()]),
+                // `transform_keys { |k| ... }` — block receives just the key.
+                "transform_keys" => Some(vec![(**key).clone()]),
                 _ => None,
             },
             // ActiveModel::Errors iteration yields an Error to the block.
@@ -329,7 +346,12 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
-    fn dispatch(&self, recv_ty: Option<&Ty>, method: &Symbol) -> Ty {
+    fn dispatch(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        block_ret: Option<&Ty>,
+    ) -> Ty {
         match recv_ty {
             None => unknown(),
             Some(Ty::Class { id, .. }) => {
@@ -343,8 +365,8 @@ impl<'a> BodyTyper<'a> {
                 }
                 unknown()
             }
-            Some(Ty::Array { elem }) => array_method(method, elem),
-            Some(Ty::Hash { value, .. }) => hash_method(method, value),
+            Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
+            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Int) => int_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
@@ -358,7 +380,7 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let r = self.dispatch(Some(v), method);
+                    let r = self.dispatch(Some(v), method, block_ret);
                     if !matches!(r, Ty::Var { .. }) {
                         resolved.push(r);
                     }
@@ -387,7 +409,7 @@ fn lit_ty(lit: &Literal) -> Ty {
     }
 }
 
-fn array_method(method: &Symbol, elem: &Ty) -> Ty {
+fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
     // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
@@ -405,6 +427,10 @@ fn array_method(method: &Symbol, elem: &Ty) -> Ty {
             _ => {}
         }
     }
+    // Block-returning transformations: output element type comes from
+    // the block body when available (populated by the body-typer),
+    // otherwise falls back to the input element type.
+    let transformed_elem = || block_ret.cloned().unwrap_or_else(|| elem.clone());
     match method.as_str() {
         "length" | "size" | "count" => Ty::Int,
         "first" | "last" => Ty::Union {
@@ -413,7 +439,15 @@ fn array_method(method: &Symbol, elem: &Ty) -> Ty {
         "[]" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
-        "each" | "map" | "collect" | "select" | "filter" | "reject"
+        // `map` / `collect` produce Array of the block's return type.
+        "map" | "collect" => Ty::Array { elem: Box::new(transformed_elem()) },
+        // `flat_map` expects the block to return an Array, flattens by one.
+        "flat_map" | "collect_concat" => match block_ret {
+            Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
+            _ => Ty::Array { elem: Box::new(elem.clone()) },
+        },
+        // `each`, predicates, and shape-preserving transforms keep elem.
+        "each" | "select" | "filter" | "reject"
         | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
@@ -425,15 +459,33 @@ fn array_method(method: &Symbol, elem: &Ty) -> Ty {
     }
 }
 
-fn hash_method(method: &Symbol, value: &Ty) -> Ty {
+fn hash_method(method: &Symbol, key: &Ty, value: &Ty, block_ret: Option<&Ty>) -> Ty {
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
         "length" | "size" | "count" => Ty::Int,
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
-        "keys" => Ty::Array { elem: Box::new(Ty::Sym) },
+        "keys" => Ty::Array { elem: Box::new(key.clone()) },
         "fetch" => value.clone(),
-        "merge" => Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(value.clone()) },
+        "merge" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
+        // `Hash#map` / `Hash#collect` returns an Array — block yields
+        // (k, v) and returns some U; result is Array[U].
+        "map" | "collect" => Ty::Array {
+            elem: Box::new(block_ret.cloned().unwrap_or_else(unknown)),
+        },
+        // `transform_values { |v| ... }` → Hash[K, U].
+        "transform_values" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(block_ret.cloned().unwrap_or_else(|| value.clone())),
+        },
+        // `transform_keys { |k| ... }` → Hash[U, V].
+        "transform_keys" => Ty::Hash {
+            key: Box::new(block_ret.cloned().unwrap_or_else(|| key.clone())),
+            value: Box::new(value.clone()),
+        },
         // Rails strong-params: `params.expect(:id)` and
         // `params.expect(k: [...])` both return the coerced value (a
         // scalar or a permitted-params-hash). Approximate both as the
@@ -901,5 +953,226 @@ mod tests {
         };
         assert!(variants.contains(&Ty::Nil), "variants: {variants:?}");
         assert!(variants.contains(&Ty::Int), "variants: {variants:?}");
+    }
+
+    // ── block return propagation (7b) ──────────────────────────────
+
+    use crate::expr::BlockStyle;
+
+    fn lambda(params: Vec<&str>, body: Expr) -> Expr {
+        synth(ExprNode::Lambda {
+            params: params.into_iter().map(Symbol::from).collect(),
+            block_param: None,
+            body,
+            block_style: BlockStyle::Do,
+        })
+    }
+
+    #[test]
+    fn array_map_returns_block_body_type() {
+        // arr.map { |x| x.to_s } on arr: Array[Int] should produce Array[Str]
+        let arr = {
+            let mut e = var("arr");
+            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e
+        };
+        let block_body = send(Some(var("x")), "to_s", vec![]);
+        let lam = lambda(vec!["x"], block_body);
+        let call = synth(ExprNode::Send {
+            recv: Some(arr),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(lam),
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("arr"),
+            Ty::Array { elem: Box::new(Ty::Int) },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn array_select_preserves_element_type() {
+        // arr.select { |x| x > 0 } on arr: Array[Int] should still be Array[Int]
+        let arr = {
+            let mut e = var("arr");
+            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e
+        };
+        let block_body = send(Some(var("x")), ">", vec![synth(ExprNode::Lit {
+            value: Literal::Int { value: 0 },
+        })]);
+        let lam = lambda(vec!["x"], block_body);
+        let call = synth(ExprNode::Send {
+            recv: Some(arr),
+            method: Symbol::from("select"),
+            args: vec![],
+            block: Some(lam),
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("arr"),
+            Ty::Array { elem: Box::new(Ty::Int) },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+    }
+
+    #[test]
+    fn array_flat_map_flattens_one_level() {
+        // arr.flat_map { |x| [x.to_s] } on arr: Array[Int] should be Array[Str]
+        let arr = {
+            let mut e = var("arr");
+            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e
+        };
+        let inner_arr = synth(ExprNode::Array {
+            elements: vec![send(Some(var("x")), "to_s", vec![])],
+            style: Default::default(),
+        });
+        let lam = lambda(vec!["x"], inner_arr);
+        let call = synth(ExprNode::Send {
+            recv: Some(arr),
+            method: Symbol::from("flat_map"),
+            args: vec![],
+            block: Some(lam),
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("arr"),
+            Ty::Array { elem: Box::new(Ty::Int) },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn hash_map_returns_array_of_block_ret() {
+        // h.map { |k, v| v.to_s } on h: Hash[Sym, Int] should be Array[Str]
+        let h = {
+            let mut e = var("h");
+            e.ty = Some(Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Int),
+            });
+            e
+        };
+        let block_body = send(Some(var("v")), "to_s", vec![]);
+        let lam = lambda(vec!["k", "v"], block_body);
+        let call = synth(ExprNode::Send {
+            recv: Some(h),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(lam),
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("h"),
+            Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Int),
+            },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn hash_transform_values_changes_value_type() {
+        // h.transform_values { |v| v.to_s } on Hash[Sym, Int] → Hash[Sym, Str]
+        let h = {
+            let mut e = var("h");
+            e.ty = Some(Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Int),
+            });
+            e
+        };
+        let block_body = send(Some(var("v")), "to_s", vec![]);
+        let lam = lambda(vec!["v"], block_body);
+        let call = synth(ExprNode::Send {
+            recv: Some(h),
+            method: Symbol::from("transform_values"),
+            args: vec![],
+            block: Some(lam),
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("h"),
+            Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Int),
+            },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(
+            ty,
+            Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Str),
+            }
+        );
+    }
+
+    #[test]
+    fn map_without_block_falls_back_to_input_elem() {
+        // arr.map (no block — Symbol-to-Proc pattern handled elsewhere)
+        // should still produce a sensible Array[elem] type.
+        let arr = {
+            let mut e = var("arr");
+            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e
+        };
+        let call = synth(ExprNode::Send {
+            recv: Some(arr),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = call;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        ctx.local_bindings.insert(
+            Symbol::from("arr"),
+            Ty::Array { elem: Box::new(Ty::Int) },
+        );
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
     }
 }
