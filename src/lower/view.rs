@@ -58,6 +58,84 @@ pub enum ViewHelperKind<'a> {
     ButtonTo { text: &'a Expr, target: &'a Expr, opts: Option<&'a Expr> },
 }
 
+/// A recognized `render ...` call inside an ERB view body. Each
+/// variant captures the IR shape; emitters pick naming, iteration
+/// syntax, and decide whether a Var/Ivar name resolves to a known
+/// renderable (via `ctx.is_local`, `known_models`, etc.) at
+/// emission time.
+#[derive(Debug)]
+pub enum RenderPartial<'a> {
+    /// `render @posts` / `render posts` — iterate a named
+    /// collection, calling a partial per element. `name` is the
+    /// collection's surface name (used by emitters to derive the
+    /// partial-fn name and any foreign-key/class lookups).
+    Collection { collection: &'a Expr, name: &'a str },
+    /// `render @post.comments` — iterate an association method on
+    /// a receiver Var/Ivar, calling a partial per element.
+    Association { receiver: &'a Expr, method: &'a str },
+    /// `render "posts/post", post: @post` — call a named partial
+    /// with the first hash entry's value as its argument. Every
+    /// target ignores additional hash entries today; centralizing
+    /// that quirk here keeps it documented.
+    Named { partial: &'a str, arg: Option<&'a Expr> },
+}
+
+/// Recognize a `render ...` call inside an ERB view body. Returns
+/// `None` when the shape doesn't match any supported form, when
+/// there's a receiver, when a block is attached, or when a
+/// one-arg Var/Ivar doesn't name a view-scope local (`is_local`).
+pub fn classify_render_partial<'a>(
+    recv: Option<&'a Expr>,
+    method: &str,
+    args: &'a [Expr],
+    block: Option<&'a Expr>,
+    is_local: &impl Fn(&str) -> bool,
+) -> Option<RenderPartial<'a>> {
+    if method != "render" || recv.is_some() || block.is_some() {
+        return None;
+    }
+    match args {
+        [arg] => match &*arg.node {
+            ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+                if is_local(name.as_str()) =>
+            {
+                Some(RenderPartial::Collection {
+                    collection: arg,
+                    name: name.as_str(),
+                })
+            }
+            ExprNode::Send {
+                recv: Some(r),
+                method: m,
+                args: sub_args,
+                ..
+            } if sub_args.is_empty()
+                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
+            {
+                Some(RenderPartial::Association {
+                    receiver: r,
+                    method: m.as_str(),
+                })
+            }
+            _ => None,
+        },
+        [a, b] => {
+            let ExprNode::Lit { value: Literal::Str { value: partial } } = &*a.node else {
+                return None;
+            };
+            let ExprNode::Hash { entries, .. } = &*b.node else {
+                return None;
+            };
+            let arg = entries.first().map(|(_k, v)| v);
+            Some(RenderPartial::Named {
+                partial: partial.as_str(),
+                arg,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Recognize a bare `Send { recv: None, args, block: None }` as
 /// a Rails view helper. Returns `None` for unrecognized method
 /// names or arities that don't match any variant.

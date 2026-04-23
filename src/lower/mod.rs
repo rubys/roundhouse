@@ -65,6 +65,7 @@ pub use validations::{lower_validations, Check, InclusionValue, LoweredValidatio
 pub use view::{
     classify_class_value, classify_errors_field_predicate, classify_form_builder_args,
     classify_form_builder_method, classify_nested_form_child, classify_nested_url_element,
-    classify_view_helper, classify_view_url_arg, ClassValueShape, ErrorsFieldPredicate,
-    FormBuilderMethod, NestedFormChild, NestedUrlElement, ViewHelperKind, ViewUrlArg,
+    classify_render_partial, classify_view_helper, classify_view_url_arg, ClassValueShape,
+    ErrorsFieldPredicate, FormBuilderMethod, NestedFormChild, NestedUrlElement, RenderPartial,
+    ViewHelperKind, ViewUrlArg,
 };

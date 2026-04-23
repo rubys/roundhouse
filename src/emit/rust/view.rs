@@ -335,30 +335,16 @@ fn emit_view_append(arg: &Expr, ctx: &ViewEmitCtx, buf_name: &str) -> Vec<String
     }
     let inner = unwrap_to_s_rust(arg);
 
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "render" {
-            if args.len() == 1 {
-                let loop_expr = emit_view_render_call(&args[0], ctx);
-                return vec![format!("{buf_name}.push_str(&{loop_expr});")];
-            }
-            if args.len() == 2 {
-                if let (
-                    ExprNode::Lit { value: Literal::Str { value: partial } },
-                    ExprNode::Hash { entries, .. },
-                ) = (&*args[0].node, &*args[1].node)
-                {
-                    let partial_fn = format!("render_{partial}");
-                    for (k, v) in entries {
-                        if let ExprNode::Lit { value: Literal::Sym { value: kname } } = &*k.node {
-                            let arg_expr = emit_view_expr(v, ctx);
-                            let _ = kname;
-                            return vec![format!(
-                                "{buf_name}.push_str(&{partial_fn}({arg_expr}));"
-                            )];
-                        }
-                    }
-                }
-            }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*inner.node {
+        if let Some(rp) = crate::lower::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|n| ctx.is_local(n),
+        ) {
+            let expr = emit_rust_render_partial(&rp, ctx);
+            return vec![format!("{buf_name}.push_str(&{expr});")];
         }
     }
 
@@ -1189,8 +1175,10 @@ fn emit_view_send(
     block: Option<&Expr>,
     ctx: &ViewEmitCtx,
 ) -> String {
-    if recv.is_none() && method == "render" && args.len() == 1 && block.is_none() {
-        return emit_view_render_call(&args[0], ctx);
+    if let Some(rp) =
+        crate::lower::classify_render_partial(recv, method, args, block, &|n| ctx.is_local(n))
+    {
+        return emit_rust_render_partial(&rp, ctx);
     }
     let sanitized_method = sanitize_method_name(method);
     if recv.is_none()
@@ -1298,32 +1286,31 @@ fn emit_view_url_arg(arg: &Expr, ctx: &ViewEmitCtx) -> String {
     }
 }
 
-fn emit_view_render_call(arg: &Expr, ctx: &ViewEmitCtx) -> String {
-    match &*arg.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } if ctx.is_local(name.as_str()) => {
-            let singular = crate::naming::singularize(name.as_str());
+fn emit_rust_render_partial(
+    rp: &crate::lower::RenderPartial<'_>,
+    ctx: &ViewEmitCtx,
+) -> String {
+    use crate::lower::RenderPartial;
+    match rp {
+        RenderPartial::Collection { name, .. } => {
+            let singular = crate::naming::singularize(name);
             let partial_name = format!("render_{singular}");
-            let coll = name.to_string();
             format!(
-                "{{ let mut __s = String::new(); for __r in {coll} {{ __s.push_str(&{partial_name}(__r)); }} __s }}",
+                "{{ let mut __s = String::new(); for __r in {name} {{ __s.push_str(&{partial_name}(__r)); }} __s }}",
             )
         }
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if args.is_empty()
-                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
-        {
-            let assoc_plural = method.as_str();
+        RenderPartial::Association { receiver, method } => {
+            let assoc_plural = *method;
             let target_class = crate::naming::singularize_camelize(assoc_plural);
             if !ctx.known_models.iter().any(|m| m.as_str() == target_class) {
                 return "/* TODO ERB: render over unknown collection */ String::new()".to_string();
             }
-            let parent_name = match &*r.node {
+            let parent_name = match &*receiver.node {
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
-                _ => unreachable!(),
+                _ => return "/* TODO ERB: render over unknown receiver */ String::new()".to_string(),
             };
-            let parent_singular = crate::naming::singularize(
-                &crate::naming::singularize(&parent_name),
-            );
+            let parent_singular =
+                crate::naming::singularize(&crate::naming::singularize(&parent_name));
             let fk = format!("{parent_singular}_id");
             let singular = crate::naming::singularize(assoc_plural);
             let partial_name = format!("render_{singular}");
@@ -1331,7 +1318,14 @@ fn emit_view_render_call(arg: &Expr, ctx: &ViewEmitCtx) -> String {
                 "{{ let mut __s = String::new(); for __r in {target_class}::all().into_iter().filter(|__c| __c.{fk} == {parent_name}.id) {{ __s.push_str(&{partial_name}(&__r)); }} __s }}",
             )
         }
-        _ => "/* TODO ERB: render */ String::new()".to_string(),
+        RenderPartial::Named { partial, arg } => {
+            let partial_fn = format!("render_{partial}");
+            let arg_expr = match arg {
+                Some(v) => emit_view_expr(v, ctx),
+                None => "/* TODO ERB: render without args */ String::new()".to_string(),
+            };
+            format!("{partial_fn}({arg_expr})")
+        }
     }
 }
 

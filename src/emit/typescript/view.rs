@@ -406,32 +406,15 @@ fn emit_ts_view_append_pass2(arg: &Expr, ctx: &TsViewCtx) -> String {
     let inner = unwrap_to_s_ts(arg);
 
     // `render @coll` / `render "partial", locals` — expand.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "render" {
-            if args.len() == 1 {
-                return emit_ts_render_call(&args[0], ctx);
-            }
-            if args.len() == 2 {
-                if let (
-                    ExprNode::Lit { value: Literal::Str { value: partial } },
-                    ExprNode::Hash { entries, .. },
-                ) = (&*args[0].node, &*args[1].node)
-                {
-                    let plural_pascal = crate::naming::camelize(&ctx.resource_dir);
-                    let partial_fn = format!(
-                        "Views.render{}{}",
-                        plural_pascal,
-                        crate::naming::camelize(partial),
-                    );
-                    if let Some((_, v)) = entries.first() {
-                        if is_ts_simple_expr(v, ctx) {
-                            let arg_expr = emit_ts_view_expr_raw(v, ctx);
-                            return format!("_buf += {partial_fn}({arg_expr});");
-                        }
-                    }
-                    return format!("_buf += {partial_fn}(undefined as any);");
-                }
-            }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*inner.node {
+        if let Some(rp) = crate::lower::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|n| ctx.is_local(n),
+        ) {
+            return emit_ts_render_partial(&rp, ctx);
         }
     }
 
@@ -1071,38 +1054,49 @@ fn emit_ts_captured_helper(
     }
 }
 
-fn emit_ts_render_call(arg: &Expr, ctx: &TsViewCtx) -> String {
-    match &*arg.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
-            if ctx.is_local(name.as_str()) =>
-        {
-            let plural_pascal = crate::naming::camelize(name.as_str());
+fn emit_ts_render_partial(
+    rp: &crate::lower::RenderPartial<'_>,
+    ctx: &TsViewCtx,
+) -> String {
+    use crate::lower::RenderPartial;
+    match rp {
+        RenderPartial::Collection { name, .. } => {
+            let plural_pascal = crate::naming::camelize(name);
             let singular_pascal =
-                crate::naming::camelize(&crate::naming::singularize(name.as_str()));
+                crate::naming::camelize(&crate::naming::singularize(name));
             let partial_fn = format!("Views.render{plural_pascal}{singular_pascal}");
-            let coll = name.to_string();
             format!(
-                "_buf += {coll}.map((__r: any) => {partial_fn}(__r)).join(\"\");",
+                "_buf += {name}.map((__r: any) => {partial_fn}(__r)).join(\"\");",
             )
         }
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if args.is_empty()
-                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
-        {
-            let assoc_plural = method.as_str();
-            let plural_pascal = crate::naming::camelize(assoc_plural);
+        RenderPartial::Association { receiver, method } => {
+            let plural_pascal = crate::naming::camelize(method);
             let singular_pascal =
-                crate::naming::camelize(&crate::naming::singularize(assoc_plural));
+                crate::naming::camelize(&crate::naming::singularize(method));
             let partial_fn = format!("Views.render{plural_pascal}{singular_pascal}");
-            let parent_name = match &*r.node {
+            let parent_name = match &*receiver.node {
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
-                _ => unreachable!(),
+                _ => return "_buf += \"\"; /* TODO ERB: render */".to_string(),
             };
             format!(
-                "_buf += {parent_name}.{assoc_plural}.map((__c: any) => {partial_fn}(__c)).join(\"\");",
+                "_buf += {parent_name}.{method}.map((__c: any) => {partial_fn}(__c)).join(\"\");",
             )
         }
-        _ => "_buf += \"\"; /* TODO ERB: render */".to_string(),
+        RenderPartial::Named { partial, arg } => {
+            let plural_pascal = crate::naming::camelize(&ctx.resource_dir);
+            let partial_fn = format!(
+                "Views.render{}{}",
+                plural_pascal,
+                crate::naming::camelize(partial),
+            );
+            match arg {
+                Some(v) if is_ts_simple_expr(v, ctx) => {
+                    let arg_expr = emit_ts_view_expr_raw(v, ctx);
+                    format!("_buf += {partial_fn}({arg_expr});")
+                }
+                _ => format!("_buf += {partial_fn}(undefined as any);"),
+            }
+        }
     }
 }
 

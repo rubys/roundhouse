@@ -564,27 +564,15 @@ fn emit_cr_view_append(arg: &Expr, ctx: &CrViewCtx) -> String {
     }
 
     // `render @coll` / `render "partial", hash`.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "render" {
-            if args.len() == 1 {
-                return emit_cr_render_call(&args[0], ctx);
-            }
-            if args.len() == 2 {
-                if let (
-                    ExprNode::Lit { value: Literal::Str { value: partial } },
-                    ExprNode::Hash { entries, .. },
-                ) = (&*args[0].node, &*args[1].node)
-                {
-                    let partial_fn = format!("render_{}_{}", ctx.resource_dir, partial);
-                    if let Some((_, v)) = entries.first() {
-                        if is_cr_simple_expr(v, ctx) {
-                            let arg_expr = emit_cr_view_expr_raw(v, ctx);
-                            return format!("io << Views.{partial_fn}({arg_expr})");
-                        }
-                    }
-                    return "io << \"\" # TODO ERB: render partial".to_string();
-                }
-            }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*inner.node {
+        if let Some(rp) = crate::lower::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|n| ctx.is_local(n),
+        ) {
+            return emit_cr_render_partial(&rp, ctx);
         }
     }
 
@@ -1241,41 +1229,47 @@ fn emit_cr_form_builder_call(
 }
 
 
-fn emit_cr_render_call(arg: &Expr, ctx: &CrViewCtx) -> String {
-    match &*arg.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
-            if ctx.is_local(name.as_str()) =>
-        {
-            let plural = name.as_str();
+fn emit_cr_render_partial(
+    rp: &crate::lower::RenderPartial<'_>,
+    ctx: &CrViewCtx,
+) -> String {
+    use crate::lower::RenderPartial;
+    match rp {
+        RenderPartial::Collection { name, .. } => {
+            let plural = *name;
             let singular = crate::naming::singularize(plural);
             let partial_fn = format!("render_{plural}_{singular}");
-            let coll = name.to_string();
-            format!("{coll}.each {{ |__r| io << Views.{partial_fn}(__r) }}")
+            format!("{plural}.each {{ |__r| io << Views.{partial_fn}(__r) }}")
         }
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if args.is_empty()
-                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
-        {
+        RenderPartial::Association { receiver, method } => {
             // `render @article.comments` — has_many association.
             // Resolve via the flattened `has_manys` table and inline
             // a filter query, matching the expr_raw path.
-            let owner_name = match &*r.node {
+            let owner_name = match &*receiver.node {
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
                 _ => return "io << \"\" # TODO ERB: render".to_string(),
             };
             if let Some((target_class, fk)) =
-                ctx.resolve_has_many_on_local(&owner_name, method.as_str())
+                ctx.resolve_has_many_on_local(&owner_name, method)
             {
-                let assoc_plural = method.as_str();
-                let singular = crate::naming::singularize(assoc_plural);
-                let partial_fn = format!("render_{assoc_plural}_{singular}");
+                let singular = crate::naming::singularize(method);
+                let partial_fn = format!("render_{method}_{singular}");
                 return format!(
                     "{target_class}.all.select {{ |__r| __r.{fk} == {owner_name}.id }}.each {{ |__r| io << Views.{partial_fn}(__r) }}"
                 );
             }
             "io << \"\" # TODO ERB: render assoc (unresolved)".to_string()
         }
-        _ => "io << \"\" # TODO ERB: render".to_string(),
+        RenderPartial::Named { partial, arg } => {
+            let partial_fn = format!("render_{}_{}", ctx.resource_dir, partial);
+            match arg {
+                Some(v) if is_cr_simple_expr(v, ctx) => {
+                    let arg_expr = emit_cr_view_expr_raw(v, ctx);
+                    format!("io << Views.{partial_fn}({arg_expr})")
+                }
+                _ => "io << \"\" # TODO ERB: render partial".to_string(),
+            }
+        }
     }
 }
 

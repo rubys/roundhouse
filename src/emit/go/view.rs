@@ -430,32 +430,15 @@ fn emit_go_view_append(arg: &Expr, ctx: &GoViewCtx) -> Vec<String> {
     }
 
     // `render @coll` or `render "partial", locals` — expand.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "render" {
-            if args.len() == 1 {
-                return emit_go_render_call(&args[0], ctx);
-            }
-            if args.len() == 2 {
-                if let (
-                    ExprNode::Lit { value: Literal::Str { value: partial } },
-                    ExprNode::Hash { entries, .. },
-                ) = (&*args[0].node, &*args[1].node)
-                {
-                    let partial_trim = partial.trim_start_matches('_');
-                    let partial_fn = format!(
-                        "Render{}{}",
-                        pascalize_word(&ctx.resource_dir),
-                        pascalize_word(partial_trim),
-                    );
-                    if let Some((_, v)) = entries.first() {
-                        if is_go_simple_view_expr(v, ctx) {
-                            let arg_expr = emit_go_view_expr_raw(v, ctx);
-                            return vec![format!("_buf += {partial_fn}({arg_expr})")];
-                        }
-                    }
-                    return vec![format!("_buf += {partial_fn}(nil)")];
-                }
-            }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*inner.node {
+        if let Some(rp) = crate::lower::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|n| ctx.is_local(n),
+        ) {
+            return emit_go_render_partial(&rp, ctx);
         }
     }
 
@@ -885,40 +868,50 @@ fn emit_go_form_builder_call(
 }
 
 
-/// Emit a `render @coll` / `render parent.assoc` call by expanding
-/// into a Go `for` loop that concatenates the partial's rendering.
-fn emit_go_render_call(arg: &Expr, _ctx: &GoViewCtx) -> Vec<String> {
-    match &*arg.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
-            let singular = crate::naming::singularize(name.as_str());
+/// Emit a classified render call by expanding into a Go `for` loop
+/// (collection/association) or a direct partial call (named).
+fn emit_go_render_partial(
+    rp: &crate::lower::RenderPartial<'_>,
+    ctx: &GoViewCtx,
+) -> Vec<String> {
+    use crate::lower::RenderPartial;
+    match rp {
+        RenderPartial::Collection { name, .. } => {
+            let singular = crate::naming::singularize(name);
             let partial_fn =
-                format!("Render{}{}", pascalize_word(name.as_str()), pascalize_word(&singular));
-            let coll = name.to_string();
+                format!("Render{}{}", pascalize_word(name), pascalize_word(&singular));
             vec![format!(
-                "for _, _r := range {coll} {{ _buf += {partial_fn}(_r) }}"
+                "for _, _r := range {name} {{ _buf += {partial_fn}(_r) }}"
             )]
         }
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if args.is_empty()
-                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
-        {
-            let assoc_plural = method.as_str();
-            let singular = crate::naming::singularize(assoc_plural);
-            let partial_fn = format!(
-                "Render{}{}",
-                pascalize_word(assoc_plural),
-                pascalize_word(&singular),
-            );
-            let parent_name = match &*r.node {
+        RenderPartial::Association { receiver, method } => {
+            let singular = crate::naming::singularize(method);
+            let partial_fn =
+                format!("Render{}{}", pascalize_word(method), pascalize_word(&singular));
+            let parent_name = match &*receiver.node {
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
-                _ => unreachable!(),
+                _ => return vec!["_buf += \"\" // TODO view: render".to_string()],
             };
             vec![format!(
                 "for _, _c := range {parent_name}.{}() {{ _buf += {partial_fn}(_c) }}",
-                pascalize_word(assoc_plural),
+                pascalize_word(method),
             )]
         }
-        _ => vec!["_buf += \"\" // TODO view: render".to_string()],
+        RenderPartial::Named { partial, arg } => {
+            let partial_trim = partial.trim_start_matches('_');
+            let partial_fn = format!(
+                "Render{}{}",
+                pascalize_word(&ctx.resource_dir),
+                pascalize_word(partial_trim),
+            );
+            match arg {
+                Some(v) if is_go_simple_view_expr(v, ctx) => {
+                    let arg_expr = emit_go_view_expr_raw(v, ctx);
+                    vec![format!("_buf += {partial_fn}({arg_expr})")]
+                }
+                _ => vec![format!("_buf += {partial_fn}(nil)")],
+            }
+        }
     }
 }
 

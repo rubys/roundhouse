@@ -415,31 +415,15 @@ fn emit_py_view_append_pass2(arg: &Expr, ctx: &PyViewCtx) -> String {
     }
 
     // `render @coll` or `render "partial", locals` — expand.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
-        if method.as_str() == "render" {
-            if args.len() == 1 {
-                return emit_py_render_call(&args[0], ctx);
-            }
-            if args.len() == 2 {
-                if let (
-                    ExprNode::Lit { value: Literal::Str { value: partial } },
-                    ExprNode::Hash { entries, .. },
-                ) = (&*args[0].node, &*args[1].node)
-                {
-                    let partial_fn = format!(
-                        "render_{}_{}",
-                        ctx.resource_dir,
-                        partial.trim_start_matches('_'),
-                    );
-                    if let Some((_, v)) = entries.first() {
-                        if is_py_simple_expr(v, ctx) {
-                            let arg_expr = emit_py_view_expr_raw(v, ctx);
-                            return format!("_buf += {partial_fn}({arg_expr})");
-                        }
-                    }
-                    return format!("_buf += {partial_fn}(None)");
-                }
-            }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*inner.node {
+        if let Some(rp) = crate::lower::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|n| ctx.is_local(n),
+        ) {
+            return emit_py_render_partial(&rp, ctx);
         }
     }
 
@@ -1047,32 +1031,42 @@ fn py_nested_form_path_expr(
     )
 }
 
-fn emit_py_render_call(arg: &Expr, ctx: &PyViewCtx) -> String {
-    match &*arg.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
-            if ctx.is_local(name.as_str()) =>
-        {
-            let singular = crate::naming::singularize(name.as_str());
-            let partial_fn = format!("render_{}_{singular}", name.as_str());
-            let coll = name.to_string();
-            format!("_buf += \"\".join({partial_fn}(_r) for _r in {coll})")
+fn emit_py_render_partial(
+    rp: &crate::lower::RenderPartial<'_>,
+    ctx: &PyViewCtx,
+) -> String {
+    use crate::lower::RenderPartial;
+    match rp {
+        RenderPartial::Collection { name, .. } => {
+            let singular = crate::naming::singularize(name);
+            let partial_fn = format!("render_{name}_{singular}");
+            format!("_buf += \"\".join({partial_fn}(_r) for _r in {name})")
         }
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if args.is_empty()
-                && matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) =>
-        {
-            let assoc_plural = method.as_str();
-            let singular = crate::naming::singularize(assoc_plural);
-            let partial_fn = format!("render_{assoc_plural}_{singular}");
-            let parent_name = match &*r.node {
+        RenderPartial::Association { receiver, method } => {
+            let singular = crate::naming::singularize(method);
+            let partial_fn = format!("render_{method}_{singular}");
+            let parent_name = match &*receiver.node {
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
-                _ => unreachable!(),
+                _ => return "_buf += \"\"  # TODO ERB: render".to_string(),
             };
             format!(
-                "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{assoc_plural})"
+                "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{method})"
             )
         }
-        _ => "_buf += \"\"  # TODO ERB: render".to_string(),
+        RenderPartial::Named { partial, arg } => {
+            let partial_fn = format!(
+                "render_{}_{}",
+                ctx.resource_dir,
+                partial.trim_start_matches('_'),
+            );
+            match arg {
+                Some(v) if is_py_simple_expr(v, ctx) => {
+                    let arg_expr = emit_py_view_expr_raw(v, ctx);
+                    format!("_buf += {partial_fn}({arg_expr})")
+                }
+                _ => format!("_buf += {partial_fn}(None)"),
+            }
+        }
     }
 }
 
