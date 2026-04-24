@@ -187,6 +187,14 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         }
         // Array `+` (concat) and `-` (set difference) preserve Array[elem].
         "+" | "-" => Ty::Array { elem: Box::new(elem.clone()) },
+        // Array `*` with an Int is array repetition (preserves Array[elem]);
+        // with a Str it's `.join(sep)`, returning Str. The body-typer's
+        // dispatch hands us the method name but not argument types, so
+        // we can't distinguish here — the emitter's classifier handles
+        // that branch using the operand `.ty` annotations. Returning
+        // Array[elem] is the safe default (join→Str case is rare and the
+        // result rarely chains into further array methods).
+        "*" => Ty::Array { elem: Box::new(elem.clone()) },
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],

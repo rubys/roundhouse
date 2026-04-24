@@ -911,6 +911,40 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_mul_annotates_diagnostic_on_send() {
+        // `{} * {}` — Hash * Hash is NoMethodError in Ruby.
+        let h = || {
+            let mut e = synth(ExprNode::Hash {
+                entries: vec![],
+                braced: true,
+            });
+            e.ty = Some(Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Int),
+            });
+            e
+        };
+        let mul = synth(ExprNode::Send {
+            recv: Some(h()),
+            method: Symbol::from("*"),
+            args: vec![h()],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = mul;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        assert!(matches!(
+            diag,
+            crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "*"
+        ));
+    }
+
+    #[test]
     fn compatible_add_leaves_diagnostic_empty() {
         // Int + Int must NOT be annotated — it's valid Ruby.
         let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });

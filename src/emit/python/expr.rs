@@ -201,6 +201,26 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 _ => {}
             }
         }
+        // `*` dispatch: Python's native `*` handles numeric, string
+        // repeat, and list repeat. Only array-join needs `.join(...)`;
+        // Incompatible pairs refuse.
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            match classify_mul(r, arg) {
+                MulCase::ArrayJoin { .. } => {
+                    // `sep.join(str(x) for x in arr)` — Python's idiom.
+                    return format!(
+                        "{}.join(str(x) for x in {})",
+                        emit_expr(arg),
+                        emit_expr(r)
+                    );
+                }
+                MulCase::Incompatible => {
+                    return r#"(_ for _ in ()).throw(TypeError("roundhouse: * with incompatible operand types"))"#.to_string();
+                }
+                _ => {}
+            }
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }

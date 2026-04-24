@@ -187,6 +187,32 @@ pub(super) fn emit_send_with_parens(
                 _ => {}
             }
         }
+        // `*` dispatch: TS's native `*` handles numerics. String repeat
+        // uses `.repeat(n)`; array repeat has no built-in (flat
+        // map-ish trick); array join uses `.join(sep)`.
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            match classify_mul(r, arg) {
+                MulCase::StringRepeat => {
+                    return format!("{}.repeat({})", emit_expr(r), emit_expr(arg));
+                }
+                MulCase::ArrayRepeat { .. } => {
+                    // Array(n).fill(lhs).flat() repeats the array n times.
+                    return format!(
+                        "Array({}).fill({}).flat()",
+                        emit_expr(arg),
+                        emit_expr(r)
+                    );
+                }
+                MulCase::ArrayJoin { .. } => {
+                    return format!("{}.join({})", emit_expr(r), emit_expr(arg));
+                }
+                MulCase::Incompatible => {
+                    return r#"(() => { throw new Error("roundhouse: * with incompatible operand types"); })()"#.to_string();
+                }
+                _ => {}
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }

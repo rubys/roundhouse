@@ -262,6 +262,45 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 SubCase::Numeric | SubCase::Unknown => {}
             }
         }
+        // `*` dispatch: Rust's native `*` handles numerics (with a
+        // cast on the Int side of a mixed pair). String/array repeat
+        // use `.repeat()`. Array join uses `.join()` (elem Str) or a
+        // to_string fan-out for other element types. Incompatible
+        // pairs refuse.
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_mul(r, arg) {
+                MulCase::StringRepeat => {
+                    return format!("{ls}.repeat({rs} as usize)");
+                }
+                MulCase::ArrayRepeat { .. } => {
+                    return format!("{ls}.repeat({rs} as usize)");
+                }
+                MulCase::ArrayJoin { elem } => {
+                    if matches!(elem, Ty::Str) {
+                        return format!("{ls}.join(&{rs})");
+                    } else {
+                        return format!(
+                            "{ls}.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(&{rs})"
+                        );
+                    }
+                }
+                MulCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                        _ => (ls, rs),
+                    };
+                    return format!("{ls_cast} * {rs_cast}");
+                }
+                MulCase::Incompatible => {
+                    return r#"panic!("roundhouse: * with incompatible operand types")"#.to_string();
+                }
+                MulCase::Numeric | MulCase::Unknown => {}
+            }
+        }
         if is_rust_binop(method) {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }

@@ -182,6 +182,21 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 return r#"raise "roundhouse: - with incompatible operand types""#.to_string();
             }
         }
+        // `*` dispatch: Crystal's native `*` handles numeric, String
+        // repetition, and Array repetition. Array join (`arr * sep`)
+        // is Ruby-specific; Crystal prefers `.join(sep)`, so rewrite.
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            match classify_mul(r, arg) {
+                MulCase::ArrayJoin { .. } => {
+                    return format!("{}.join({})", emit_expr(r), emit_expr(arg));
+                }
+                MulCase::Incompatible => {
+                    return r#"raise "roundhouse: * with incompatible operand types""#.to_string();
+                }
+                _ => {}
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

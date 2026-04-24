@@ -34,6 +34,10 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
                 use crate::emit::shared::sub::{SubCase, classify_sub};
                 matches!(classify_sub(r, rhs), SubCase::Incompatible)
             }
+            "*" => {
+                use crate::emit::shared::mul::{MulCase, classify_mul};
+                matches!(classify_mul(r, rhs), MulCase::Incompatible)
+            }
             "<" | "<=" | ">" | ">=" => {
                 use crate::emit::shared::cmp::{CmpCase, classify_cmp};
                 matches!(classify_cmp(r, rhs), CmpCase::Incompatible)

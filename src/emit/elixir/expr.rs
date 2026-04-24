@@ -235,6 +235,29 @@ fn emit_send(
                 _ => {}
             }
         }
+        // `*` dispatch: Elixir's `*` is numeric-only; strings use
+        // `String.duplicate(s, n)`, lists use `List.duplicate(l, n)
+        // |> List.flatten`, and list-join uses `Enum.join(l, sep)`.
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            let ls = emit_expr(r, receiver_arg);
+            let rs = emit_expr(arg, receiver_arg);
+            match classify_mul(r, arg) {
+                MulCase::StringRepeat => {
+                    return format!("String.duplicate({ls}, {rs})");
+                }
+                MulCase::ArrayRepeat { .. } => {
+                    return format!("List.duplicate({ls}, {rs}) |> List.flatten()");
+                }
+                MulCase::ArrayJoin { .. } => {
+                    return format!("Enum.join({ls}, {rs})");
+                }
+                MulCase::Incompatible => {
+                    return r#"raise "roundhouse: * with incompatible operand types""#.to_string();
+                }
+                _ => {}
+            }
+        }
         if is_ex_binop(method) {
             return format!(
                 "{} {method} {}",
