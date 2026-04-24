@@ -434,15 +434,61 @@ impl Analyzer {
             );
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: class_ivars,
+                ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
             };
+
+            // Pass A: type every method body with only `@attributes`
+            // seeded. Assignments inside bodies (e.g. `@_comments = ...`
+            // in a memoizing getter) populate `value.ty` on those
+            // assignments, which Pass B harvests.
             for scope in model.scopes_mut() {
                 self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
             }
             for method in model.methods_mut() {
                 self.body_typer().analyze_expr(&mut method.body, &class_ctx);
-                method.effects = self.collect_effects(&mut method.body, &class_ctx);
+            }
+
+            // Pass B: gather every ivar assignment across the model's
+            // methods. Each discovered `@x = value` seeds the ivar's
+            // type for the second typing pass, so reads that occur
+            // *before* the assignment lexically (e.g. the left side of
+            // `@x ||= ...` lowered to `@x || (@x = ...)`) still resolve
+            // cleanly.
+            let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            for method in model.methods() {
+                extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+            for scope in model.scopes() {
+                extract_ivar_assignments(&scope.body, &mut flow_ivars);
+            }
+
+            if !flow_ivars.is_empty() {
+                // Re-seed ctx with discovered ivars alongside @attributes.
+                // Memoizing ivars become `Union<T, Nil>` to reflect that
+                // the read can be nil before the first assignment.
+                let mut reseeded = class_ivars;
+                for (name, ty) in flow_ivars {
+                    let union_ty = Ty::Union { variants: vec![ty, Ty::Nil] };
+                    reseeded.insert(name, union_ty);
+                }
+                let reseeded_ctx = Ctx {
+                    self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                    ivar_bindings: reseeded,
+                    local_bindings: HashMap::new(),
+                };
+
+                for scope in model.scopes_mut() {
+                    self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
+                }
+                for method in model.methods_mut() {
+                    self.body_typer().analyze_expr(&mut method.body, &reseeded_ctx);
+                    method.effects = self.collect_effects(&mut method.body, &reseeded_ctx);
+                }
+            } else {
+                for method in model.methods_mut() {
+                    method.effects = self.collect_effects(&mut method.body, &class_ctx);
+                }
             }
         }
         // Partial-locals channel: we need action/top-level views analyzed first
@@ -1041,7 +1087,14 @@ fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             if let Some(ty) = value.ty.clone() {
-                out.insert(name.clone(), ty);
+                // Union with existing entry so repeated assignments to
+                // the same ivar accumulate (rather than the last write
+                // winning). Mirrors the simple flow-sensitive join.
+                let merged = match out.remove(name) {
+                    Some(prev) => crate::analyze::body::union_of(prev, ty),
+                    None => ty,
+                };
+                out.insert(name.clone(), merged);
             }
         }
         ExprNode::Seq { exprs } => {
@@ -1062,6 +1115,29 @@ fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
                 extract_ivar_assignments(&arm.body, out);
             }
         }
+        // `@x ||= y` lowers to `BoolOp::Or(Ivar, Assign(Ivar, y))`.
+        // The assignment lives inside the Or's right branch, so we
+        // must descend or the memoization idiom's ivar never gets typed.
+        ExprNode::BoolOp { left, right, .. } => {
+            extract_ivar_assignments(left, out);
+            extract_ivar_assignments(right, out);
+        }
+        // Rescue/ensure and lifecycle constructs may also contain
+        // assignments; recurse to catch them.
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            extract_ivar_assignments(body, out);
+            for r in rescues {
+                extract_ivar_assignments(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                extract_ivar_assignments(e, out);
+            }
+            if let Some(e) = ensure {
+                extract_ivar_assignments(e, out);
+            }
+        }
+        ExprNode::Lambda { body, .. } => extract_ivar_assignments(body, out),
+        ExprNode::Return { value } => extract_ivar_assignments(value, out),
         _ => {}
     }
 }
