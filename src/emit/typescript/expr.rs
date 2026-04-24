@@ -44,6 +44,15 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("this.{} = {};", ts_field_name(name.as_str()), emit_expr(value))
         }
+        // Return at statement position: emit as a native `return` rather
+        // than wrapping in an IIFE. Nil value becomes bare `return;`.
+        ExprNode::Return { value } => {
+            if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                "return;".to_string()
+            } else {
+                format!("return {};", emit_expr(value))
+            }
+        }
         _ => {
             if is_last && !void_return {
                 format!("return {};", emit_expr(e))
@@ -129,8 +138,84 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             out.push('`');
             out
         }
+        ExprNode::SelfRef => "this".to_string(),
+        ExprNode::Return { value } => {
+            // Expression-position return is rare — typically the
+            // statement-level emitter handles Return cleanly. An IIFE
+            // preserves semantics when Return appears inside a larger
+            // expression (e.g., ternary guard `cond ? (return x) : y`).
+            format!("(() => {{ return {}; }})()", emit_expr(value))
+        }
+        ExprNode::Super { args } => {
+            // Ruby's `super` forwards to the parent class's same-named
+            // method. TS requires `super.methodName(...)`, which needs
+            // enclosing-method context that this emitter doesn't carry.
+            // Emit syntactically-valid `super(...)` — class-level
+            // emitters rewrite to `super.X(...)` where they know X.
+            let args_s: Vec<String> = match args {
+                None => vec![],
+                Some(a) => a.iter().map(emit_expr).collect(),
+            };
+            format!("super({})", args_s.join(", "))
+        }
+        ExprNode::BeginRescue { body, rescues, ensure, .. } => {
+            // Expression-position begin/rescue — wrap the try/catch in
+            // an IIFE so the whole thing evaluates to a value. Single
+            // bare `rescue` is common; multi-clause becomes an
+            // instanceof chain in the catch body.
+            let body_s = emit_expr(body);
+            let catch_body = build_catch_body(rescues);
+            let ensure_s = match ensure {
+                Some(e) => format!(" finally {{ {}; }}", emit_expr(e)),
+                None => String::new(),
+            };
+            format!(
+                "(() => {{ try {{ return {body_s}; }} catch (e) {{ {catch_body} }}{ensure_s} }})()"
+            )
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            format!(
+                "(() => {{ try {{ return {}; }} catch {{ return {}; }} }})()",
+                emit_expr(expr),
+                emit_expr(fallback)
+            )
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
+}
+
+fn build_catch_body(rescues: &[crate::expr::RescueClause]) -> String {
+    if rescues.is_empty() {
+        return "throw e;".to_string();
+    }
+    // Bare rescue (no explicit classes) catches everything.
+    if rescues.len() == 1 && rescues[0].classes.is_empty() {
+        return format!("return {};", emit_expr(&rescues[0].body));
+    }
+    let mut out = String::new();
+    let mut has_bare_catchall = false;
+    for (i, rc) in rescues.iter().enumerate() {
+        if rc.classes.is_empty() {
+            out.push_str(&format!(" else {{ return {}; }}", emit_expr(&rc.body)));
+            has_bare_catchall = true;
+            break;
+        }
+        let keyword = if i == 0 { "if" } else { "else if" };
+        let instanceof_s: Vec<String> = rc
+            .classes
+            .iter()
+            .map(|c| format!("e instanceof {}", emit_expr(c)))
+            .collect();
+        out.push_str(&format!(
+            "{keyword} ({}) {{ return {}; }}",
+            instanceof_s.join(" || "),
+            emit_expr(&rc.body)
+        ));
+    }
+    if !has_bare_catchall {
+        out.push_str(" else { throw e; }");
+    }
+    out
 }
 
 /// Core send emission. `parenthesized` reflects whether the Ruby
