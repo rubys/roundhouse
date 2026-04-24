@@ -183,6 +183,24 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 return r#"(_ for _ in ()).throw(TypeError("roundhouse: + with incompatible operand types"))"#.to_string();
             }
         }
+        // `-` dispatch: Python supports numeric `-` natively; list
+        // difference needs a comprehension. Incompatible refuses.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            match classify_sub(r, arg) {
+                SubCase::ArrayDifference { .. } => {
+                    return format!(
+                        "[x for x in {} if x not in {}]",
+                        emit_expr(r),
+                        emit_expr(arg)
+                    );
+                }
+                SubCase::Incompatible => {
+                    return r#"(_ for _ in ()).throw(TypeError("roundhouse: - with incompatible operand types"))"#.to_string();
+                }
+                _ => {}
+            }
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }

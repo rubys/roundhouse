@@ -169,6 +169,24 @@ pub(super) fn emit_send_with_parens(
                 _ => {}
             }
         }
+        // `-` dispatch: TS's native `-` handles numerics. Array set-
+        // difference uses filter + includes. Incompatible pairs refuse.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            match classify_sub(r, arg) {
+                SubCase::ArrayDifference { .. } => {
+                    return format!(
+                        "{}.filter(x => !{}.includes(x))",
+                        emit_expr(r),
+                        emit_expr(arg)
+                    );
+                }
+                SubCase::Incompatible => {
+                    return r#"(() => { throw new Error("roundhouse: - with incompatible operand types"); })()"#.to_string();
+                }
+                _ => {}
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }

@@ -12,3 +12,4 @@ pub mod add;
 pub mod cmp;
 pub mod eq;
 pub mod schema_sql;
+pub mod sub;

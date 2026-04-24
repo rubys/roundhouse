@@ -220,6 +220,21 @@ fn emit_send(
                 _ => {}
             }
         }
+        // `-` dispatch: Elixir uses `--` for list subtraction; numerics
+        // fall through to the normal infix binop below. Incompatible
+        // pairs refuse.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            let ls = emit_expr(r, receiver_arg);
+            let rs = emit_expr(arg, receiver_arg);
+            match classify_sub(r, arg) {
+                SubCase::ArrayDifference { .. } => return format!("{ls} -- {rs}"),
+                SubCase::Incompatible => {
+                    return r#"raise "roundhouse: - with incompatible operand types""#.to_string();
+                }
+                _ => {}
+            }
+        }
         if is_ex_binop(method) {
             return format!(
                 "{} {method} {}",

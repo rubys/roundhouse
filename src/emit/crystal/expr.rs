@@ -174,6 +174,14 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 return r#"raise "roundhouse: + with incompatible operand types""#.to_string();
             }
         }
+        // `-` dispatch: Crystal's native `-` handles numerics and
+        // Array set difference. We only refuse Incompatible pairs.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            if matches!(classify_sub(r, arg), SubCase::Incompatible) {
+                return r#"raise "roundhouse: - with incompatible operand types""#.to_string();
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

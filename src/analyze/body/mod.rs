@@ -859,6 +859,58 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_sub_annotates_diagnostic_on_send() {
+        // `"a" - "b"` — Ruby's String doesn't define `-`, NoMethodError.
+        let lhs = synth(ExprNode::Lit { value: Literal::Str { value: "a".to_string() } });
+        let rhs = synth(ExprNode::Lit { value: Literal::Str { value: "b".to_string() } });
+        let sub = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("-"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = sub;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        match diag {
+            crate::diagnostic::DiagnosticKind::IncompatibleBinop {
+                op, lhs_ty, rhs_ty,
+            } => {
+                assert_eq!(op.as_str(), "-");
+                assert_eq!(lhs_ty, &Ty::Str);
+                assert_eq!(rhs_ty, &Ty::Str);
+            }
+            other => panic!("expected IncompatibleBinop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compatible_sub_leaves_diagnostic_empty() {
+        // Int - Int is valid.
+        let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 5 } });
+        let rhs = synth(ExprNode::Lit { value: Literal::Int { value: 2 } });
+        let sub = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("-"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = sub;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        assert!(expr.diagnostic.is_none());
+    }
+
+    #[test]
     fn compatible_add_leaves_diagnostic_empty() {
         // Int + Int must NOT be annotated — it's valid Ruby.
         let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });

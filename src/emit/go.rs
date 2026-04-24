@@ -266,6 +266,34 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 AddCase::Numeric | AddCase::StringConcat | AddCase::Unknown => {}
             }
         }
+        // `-` dispatch: Go supports native `-` for numerics; array
+        // set-difference has no built-in, so emit an IIFE with a
+        // nested loop. Mixed numerics need an explicit cast.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_sub(r, arg) {
+                SubCase::ArrayDifference { elem } => {
+                    let elem_ty = go_ty(elem);
+                    return format!(
+                        "func() []{elem_ty} {{ result := []{elem_ty}{{}}; for _, v := range {ls} {{ exclude := false; for _, w := range {rs} {{ if v == w {{ exclude = true; break }} }}; if !exclude {{ result = append(result, v) }} }}; return result }}()"
+                    );
+                }
+                SubCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("float64({ls})"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("float64({rs})")),
+                        _ => (ls, rs),
+                    };
+                    return format!("{ls_cast} - {rs_cast}");
+                }
+                SubCase::Incompatible => {
+                    return r#"panic("roundhouse: - with incompatible operand types")"#.to_string();
+                }
+                SubCase::Numeric | SubCase::Unknown => {}
+            }
+        }
         if is_go_binop(method) {
             return format!(
                 "{} {method} {}",

@@ -233,6 +233,35 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 AddCase::Numeric | AddCase::Unknown => {}
             }
         }
+        // `-` dispatch: Rust's native `-` handles numerics (with a
+        // cast on the Int side of a mixed pair). Array set-difference
+        // has no native form — emit an iterator filter. Incompatible
+        // pairs are refused.
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_sub(r, arg) {
+                SubCase::ArrayDifference { elem } => {
+                    let elem_ty = rust_ty(elem);
+                    return format!(
+                        "{ls}.iter().filter(|x| !{rs}.contains(x)).cloned().collect::<Vec<{elem_ty}>>()"
+                    );
+                }
+                SubCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                        _ => (ls, rs),
+                    };
+                    return format!("{ls_cast} - {rs_cast}");
+                }
+                SubCase::Incompatible => {
+                    return r#"panic!("roundhouse: - with incompatible operand types")"#.to_string();
+                }
+                SubCase::Numeric | SubCase::Unknown => {}
+            }
+        }
         if is_rust_binop(method) {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }

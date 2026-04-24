@@ -185,6 +185,8 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
+        // Array `+` (concat) and `-` (set difference) preserve Array[elem].
+        "+" | "-" => Ty::Array { elem: Box::new(elem.clone()) },
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
