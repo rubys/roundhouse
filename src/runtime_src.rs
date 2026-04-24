@@ -51,6 +51,23 @@ pub fn parse_methods_with_rbs(
     ruby_src: &str,
     rbs_src: &str,
 ) -> Result<Vec<MethodDef>, String> {
+    parse_methods_with_rbs_in_ctx(
+        ruby_src,
+        rbs_src,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// Same as `parse_methods_with_rbs` but takes a pre-built class
+/// registry — so cross-class method dispatch during body-typing can
+/// resolve. Used by the runtime-sweep test, which builds a unified
+/// registry from every `runtime/ruby/**/*.rbs` file before typing any
+/// file's method bodies individually.
+pub fn parse_methods_with_rbs_in_ctx(
+    ruby_src: &str,
+    rbs_src: &str,
+    classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+) -> Result<Vec<MethodDef>, String> {
     let mut methods = parse_methods(ruby_src)?;
     let sigs = parse_signatures(rbs_src)?;
 
@@ -99,9 +116,7 @@ pub fn parse_methods_with_rbs(
     // Runtime code doesn't reference user classes today, so the
     // dispatch table is empty — the body-typer falls back to its
     // primitive method tables for everything.
-    let classes: std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
-    let typer = crate::analyze::BodyTyper::new(&classes);
+    let typer = crate::analyze::BodyTyper::new(classes);
     for m in &mut methods {
         let mut ctx = crate::analyze::Ctx::default();
         if let Some(Ty::Fn { params, .. }) = &m.signature {

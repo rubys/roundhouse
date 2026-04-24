@@ -126,10 +126,26 @@ fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
     out: &mut Signatures,
 ) -> Result<(), String> {
     for member in members {
-        if let Node::MethodDefinition(method) = member {
-            let name = Symbol::new(method.name().as_str());
-            let ty = method_signature_ty(&method)?;
-            out.methods.push((name, ty));
+        match member {
+            Node::MethodDefinition(method) => {
+                let name = Symbol::new(method.name().as_str());
+                let ty = method_signature_ty(&method)?;
+                out.methods.push((name, ty));
+            }
+            // Nested class / module / interface — recurse so methods
+            // defined inside get collected into the same flat table.
+            // Mirrors `parse_methods` on the Ruby side, which walks
+            // into class/module bodies to collect their `def`s.
+            Node::Class(class) => {
+                collect_members(class.members().iter(), out)?;
+            }
+            Node::Module(module) => {
+                collect_members(module.members().iter(), out)?;
+            }
+            Node::Interface(iface) => {
+                collect_members(iface.members().iter(), out)?;
+            }
+            _ => {}
         }
     }
     Ok(())

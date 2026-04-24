@@ -90,9 +90,14 @@ fn inflector_pluralize_lives_in_runtime_go() {
 
 // ── full-typing invariant ───────────────────────────────────────────
 
-/// Enumerate every `*.rb` in runtime/ruby/ and return the stem name
-/// (without extension). Used to sweep the runtime source tree so new
-/// files are picked up automatically.
+/// Enumerate every `*.rb` at the top level of runtime/ruby/ and return
+/// the stem name (without extension). Non-recursive by design: the
+/// framework library code under `runtime/ruby/active_record/` is not
+/// yet covered by this invariant. Extending to recursive will require
+/// writing RBS for ~8 files, teaching `runtime_src::method_params`
+/// about optional/keyword/rest/block params, and iterating on
+/// body-typing gaps. Tracked as future work; for now the sweep covers
+/// top-level files where the invariant is achievable today.
 fn runtime_ruby_stems() -> Vec<String> {
     let dir = Path::new("runtime/ruby");
     let mut out: Vec<String> = fs::read_dir(dir)
