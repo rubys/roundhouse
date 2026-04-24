@@ -186,10 +186,19 @@ fn ingest_method(
         MethodReceiver::Instance
     };
 
-    // Parameter-list parsing beyond "no params" lands when a fixture uses
-    // optional/keyword/rest params. Record an empty list for now; Prism's
-    // ParametersNode has the detail we need when we need it.
-    let params: Vec<Symbol> = Vec::new();
+    // Collect required positional parameter names. Optional/keyword/
+    // rest params will need richer handling; required params alone
+    // cover setter methods (`def x=(v)`) and the common method shapes
+    // used by transpiled-shape models.
+    let params: Vec<Symbol> = match def.parameters() {
+        Some(pn) => pn
+            .requireds()
+            .iter()
+            .filter_map(|req| req.as_required_parameter_node())
+            .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+            .collect(),
+        None => Vec::new(),
+    };
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,

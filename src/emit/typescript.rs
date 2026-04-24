@@ -35,6 +35,7 @@ use crate::ty::Ty;
 mod controller;
 mod expr;
 mod fixture;
+mod library;
 mod model;
 mod naming;
 mod package_json;
@@ -76,6 +77,29 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // awaits beyond the `async function` wrapper that was already
     // there.
     emit_with_adapter(app, &crate::adapter::SqliteAdapter)
+}
+
+/// Emit library-shape TypeScript — for transpiled-shape input where
+/// model bodies contain explicit getters/setters/lifecycle hooks
+/// rather than class-level Rails DSLs. Complementary to `emit`;
+/// skips the Rails-app-shaped artifacts (controllers, routes, views,
+/// fixtures, test specs, HTTP/server runtime) and emits only the
+/// package scaffold + juntos stub + one TS file per model.
+///
+/// Intended entry point for emitting framework Ruby (the forthcoming
+/// Ruby-authored ActiveRecord runtime) and any other library-shape
+/// input whose job is "produce importable TS classes," not "produce
+/// a runnable Rails app."
+pub fn emit_library(app: &App) -> Vec<EmittedFile> {
+    let mut files = Vec::new();
+    files.push(package_json::emit_package_json());
+    files.push(package_json::emit_tsconfig_json(app));
+    files.push(EmittedFile {
+        path: PathBuf::from("src/juntos.ts"),
+        content: JUNTOS_STUB_SOURCE.to_string(),
+    });
+    files.extend(library::emit_library_classes(app));
+    files
 }
 
 /// Emit a typed `MethodDef` as a standalone exported TypeScript

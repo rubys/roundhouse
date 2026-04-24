@@ -568,7 +568,10 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
                         method: Symbol::from(method_name),
                         args: vec![],
                         block: None,
-                        parenthesized: false,
+                        // `&:sym` shorthand is a method *call*, not a
+                        // property read. Mark as parenthesized so the
+                        // emitter produces `x.sym()` not `x.sym`.
+                        parenthesized: true,
                     },
                 );
                 return Ok(Some(Expr::new(

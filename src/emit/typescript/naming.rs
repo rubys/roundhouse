@@ -12,10 +12,17 @@ pub(super) fn ts_field_name(ruby_name: &str) -> String {
     ruby_name.to_string()
 }
 
-/// Method name: same snake_case preservation as fields. Method calls
-/// that should resolve to JS-native APIs (e.g. `findBy` vs Ruby's
-/// `find_by`) will need a per-method translation table later; until
-/// then, the Rails-side name survives and Juntos maps at runtime.
+/// Method name: snake_case preservation. Ruby's `?` (predicate) and
+/// `!` (bang) suffixes are stripped — TS has no notion of them in
+/// identifiers, and Juntos's runtime mirrors Rails's convention of
+/// dropping them at the boundary (`Article.exists(id)` not
+/// `Article.exists?(id)`). Method calls that should resolve to
+/// JS-native APIs (e.g. `findBy` vs Ruby's `find_by`) will need a
+/// per-method translation table later; until then, the Rails-side
+/// name survives and Juntos maps at runtime.
 pub(super) fn ts_method_name(ruby_name: &str) -> String {
-    ruby_name.to_string()
+    ruby_name
+        .trim_end_matches('?')
+        .trim_end_matches('!')
+        .to_string()
 }

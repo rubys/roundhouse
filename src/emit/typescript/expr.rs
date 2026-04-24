@@ -76,8 +76,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => format!("this.{}", ts_field_name(name.as_str())),
-        ExprNode::Send { recv, method, args, parenthesized, .. } => {
-            emit_send_with_parens(recv.as_ref(), method.as_str(), args, *parenthesized)
+        ExprNode::Send { recv, method, args, block, parenthesized } => {
+            emit_send_with_block(
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                *parenthesized,
+            )
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {
@@ -139,6 +145,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             out
         }
         ExprNode::SelfRef => "this".to_string(),
+        ExprNode::Lambda { params, body, .. } => {
+            let params_s: Vec<String> = params.iter().map(|p| p.as_str().to_string()).collect();
+            let body_s = emit_expr(body);
+            match params.len() {
+                0 => format!("() => {body_s}"),
+                1 => format!("{} => {body_s}", params_s[0]),
+                _ => format!("({}) => {body_s}", params_s.join(", ")),
+            }
+        }
         ExprNode::Return { value } => {
             // Expression-position return is rare — typically the
             // statement-level emitter handles Return cleanly. An IIFE
@@ -223,6 +238,24 @@ fn build_catch_body(rescues: &[crate::expr::RescueClause]) -> String {
 /// receiver calls we use it to decide between `recv.name` (Ruby
 /// reader convention, JS property access) and `recv.name()` (method
 /// call). Always emits parens when args are present.
+/// Send emission that folds a trailing block (Ruby `do ... end` / `&:sym`)
+/// in as an arrow-function argument — TS's closest equivalent. The
+/// block-less path delegates directly to `emit_send_with_parens`.
+pub(super) fn emit_send_with_block(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    parenthesized: bool,
+) -> String {
+    let Some(blk) = block else {
+        return emit_send_with_parens(recv, method, args, parenthesized);
+    };
+    let mut all_args: Vec<Expr> = args.to_vec();
+    all_args.push(blk.clone());
+    emit_send_with_parens(recv, method, &all_args, true)
+}
+
 pub(super) fn emit_send_with_parens(
     recv: Option<&Expr>,
     method: &str,
@@ -232,6 +265,34 @@ pub(super) fn emit_send_with_parens(
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
+    }
+    // `recv.[]=(k, v)` — indexed assignment lowered to a Send. TS needs
+    // the LHS form `recv[k] = v`.
+    if method == "[]=" && recv.is_some() && args.len() == 2 {
+        return format!(
+            "{}[{}] = {}",
+            emit_expr(recv.unwrap()),
+            args_s[0],
+            args_s[1]
+        );
+    }
+    // `Target.new(args)` → `new Target(args)`. Ruby's standard constructor
+    // call convention; Juntos-side classes use the JS `new` keyword.
+    if method == "new" && recv.is_some() {
+        let recv_s = emit_expr(recv.unwrap());
+        if args_s.is_empty() {
+            return format!("new {recv_s}()");
+        }
+        return format!("new {recv_s}({})", args_s.join(", "));
+    }
+    // `x.nil?` → `x == null`. Ruby predicate with no TS equivalent.
+    if method == "nil?" && recv.is_some() && args.is_empty() {
+        return format!("{} == null", emit_expr(recv.unwrap()));
+    }
+    // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
+    // to `cond.!`). Emit TS's prefix `!`.
+    if method == "!" && recv.is_some() && args.is_empty() {
+        return format!("!{}", emit_expr(recv.unwrap()));
     }
     // Ruby's binary operators ride the Send channel. TS needs infix;
     // `==` and `!=` map to strict `===` / `!==` so equality semantics

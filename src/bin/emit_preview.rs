@@ -11,11 +11,20 @@ fn main() {
     } else {
         "typescript".into()
     };
+    let library_mode = args.iter().position(|a| a == "--library").map(|i| { args.remove(i); true }).unwrap_or(false);
     let fixture = args.first().cloned().unwrap_or_else(|| "fixtures/real-blog".into());
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let (files, out_dir) = match target.as_str() {
-        "typescript" | "ts" => (typescript::emit(&app), "/tmp/rh-ts-pass2"),
+        "typescript" | "ts" => {
+            let emitted = if library_mode {
+                typescript::emit_library(&app)
+            } else {
+                typescript::emit(&app)
+            };
+            let dir = if library_mode { "/tmp/rh-ts-lib" } else { "/tmp/rh-ts-pass2" };
+            (emitted, dir)
+        }
         "crystal" | "cr" => (crystal::emit(&app), "/tmp/rh-cr-pass2"),
         "rust" | "rs" => (rust::emit(&app), "/tmp/rh-rs-pass2"),
         "python" | "py" => (python::emit(&app), "/tmp/rh-py-pass2"),
