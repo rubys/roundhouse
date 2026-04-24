@@ -197,6 +197,16 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 _ => {}
             }
         }
+        // `/` and `**` dispatch: Crystal has both natively (Int#**,
+        // Float#**, Number#/). Only refuse Incompatible pairs.
+        if method == "/" || method == "**" {
+            use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+            if matches!(classify_div_pow(r, arg), DivPowCase::Incompatible) {
+                return format!(
+                    r#"raise "roundhouse: `{method}` with incompatible operand types""#
+                );
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

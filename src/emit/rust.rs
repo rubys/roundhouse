@@ -301,6 +301,44 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 MulCase::Numeric | MulCase::Unknown => {}
             }
         }
+        // `/` and `**` dispatch: both pure-numeric. `/` is native
+        // infix; `**` is a method call (`.pow(n)` for Int, `.powf(n)`
+        // for Float). Mixed numerics need explicit `as f64` casts.
+        if method == "/" || method == "**" {
+            use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_div_pow(r, arg) {
+                DivPowCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                        _ => (ls, rs),
+                    };
+                    if method == "**" {
+                        return format!("{ls_cast}.powf({rs_cast})");
+                    }
+                    return format!("{ls_cast} / {rs_cast}");
+                }
+                DivPowCase::Numeric => {
+                    if method == "**" {
+                        // Pick integer-vs-float pow based on lhs type.
+                        let is_float = matches!(r.ty.as_ref(), Some(Ty::Float));
+                        let pow_m = if is_float { "powf" } else { "pow" };
+                        // .pow takes u32 for integers; cast on the Int side.
+                        let rs_cast = if is_float { rs } else { format!("{rs} as u32") };
+                        return format!("{ls}.{pow_m}({rs_cast})");
+                    }
+                    // `/` falls through to native.
+                }
+                DivPowCase::Incompatible => {
+                    return format!(
+                        r#"panic!("roundhouse: `{method}` with incompatible operand types")"#
+                    );
+                }
+                DivPowCase::Unknown => {}
+            }
+        }
         if is_rust_binop(method) {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }

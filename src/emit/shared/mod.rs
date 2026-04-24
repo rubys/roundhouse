@@ -10,6 +10,7 @@
 
 pub mod add;
 pub mod cmp;
+pub mod div_pow;
 pub mod eq;
 pub mod mul;
 pub mod schema_sql;

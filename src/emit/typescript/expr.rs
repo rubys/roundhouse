@@ -213,6 +213,16 @@ pub(super) fn emit_send_with_parens(
                 _ => {}
             }
         }
+        // `/` and `**` dispatch: TS has both as native operators. Only
+        // Incompatible pairs need special handling.
+        if method == "/" || method == "**" {
+            use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+            if matches!(classify_div_pow(r, arg), DivPowCase::Incompatible) {
+                return format!(
+                    r#"(() => {{ throw new Error("roundhouse: `{method}` with incompatible operand types"); }})()"#
+                );
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }

@@ -258,6 +258,28 @@ fn emit_send(
                 _ => {}
             }
         }
+        // `/` and `**` dispatch: Elixir has `/` natively (returns Float
+        // always; use `div/2` for integer division — TODO refine).
+        // `**` is `:math.pow/2`, always Float-returning.
+        if method == "/" || method == "**" {
+            use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+            let ls = emit_expr(r, receiver_arg);
+            let rs = emit_expr(arg, receiver_arg);
+            match classify_div_pow(r, arg) {
+                DivPowCase::Numeric | DivPowCase::NumericPromote => {
+                    if method == "**" {
+                        return format!(":math.pow({ls}, {rs})");
+                    }
+                    // `/` falls through to native infix below.
+                }
+                DivPowCase::Incompatible => {
+                    return format!(
+                        r#"raise "roundhouse: `{method}` with incompatible operand types""#
+                    );
+                }
+                DivPowCase::Unknown => {}
+            }
+        }
         if is_ex_binop(method) {
             return format!(
                 "{} {method} {}",

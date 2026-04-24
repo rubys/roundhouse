@@ -334,6 +334,39 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 MulCase::Numeric | MulCase::Unknown => {}
             }
         }
+        // `/` and `**` dispatch: Go has native `/`; `**` needs
+        // `math.Pow` (always float64-typed). Mixed numerics need casts.
+        if method == "/" || method == "**" {
+            use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_div_pow(r, arg) {
+                DivPowCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("float64({ls})"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("float64({rs})")),
+                        _ => (ls, rs),
+                    };
+                    if method == "**" {
+                        return format!("math.Pow({ls_cast}, {rs_cast})");
+                    }
+                    return format!("{ls_cast} / {rs_cast}");
+                }
+                DivPowCase::Numeric => {
+                    if method == "**" {
+                        // Go's math.Pow takes float64 only.
+                        return format!("math.Pow(float64({ls}), float64({rs}))");
+                    }
+                    // `/` falls through to native below.
+                }
+                DivPowCase::Incompatible => {
+                    return format!(
+                        r#"panic("roundhouse: `{method}` with incompatible operand types")"#
+                    );
+                }
+                DivPowCase::Unknown => {}
+            }
+        }
         if is_go_binop(method) {
             return format!(
                 "{} {method} {}",

@@ -945,6 +945,31 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_div_annotates_diagnostic_on_send() {
+        // `"a" / 2` — String doesn't define `/`.
+        let lhs = synth(ExprNode::Lit { value: Literal::Str { value: "a".to_string() } });
+        let rhs = synth(ExprNode::Lit { value: Literal::Int { value: 2 } });
+        let div = synth(ExprNode::Send {
+            recv: Some(lhs),
+            method: Symbol::from("/"),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        });
+
+        let mut expr = div;
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        typer.analyze_expr(&mut expr, &Ctx::default());
+
+        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        assert!(matches!(
+            diag,
+            crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "/"
+        ));
+    }
+
+    #[test]
     fn compatible_add_leaves_diagnostic_empty() {
         // Int + Int must NOT be annotated — it's valid Ruby.
         let lhs = synth(ExprNode::Lit { value: Literal::Int { value: 1 } });
