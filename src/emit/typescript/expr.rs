@@ -26,6 +26,13 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
             }
             lines.join("\n")
         }
+        // Method-body-level begin/rescue emits as native try/catch rather
+        // than IIFE-wrapped. Preserves control flow: early `return` inside
+        // the body actually exits the method, `throw e` outside the match
+        // arms rethrows cleanly, and no needless `(() => { ... })()` noise.
+        ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
+            emit_begin_rescue_stmt(inner, rescues, else_branch.as_ref(), ensure.as_ref(), return_ty)
+        }
         _ => {
             if is_void {
                 format!("{};", emit_expr(body))
@@ -36,6 +43,96 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
     }
 }
 
+/// Render a begin/rescue at statement position — inside a method body
+/// rather than as an expression. Preserves native TS control flow:
+/// `try { ... } catch (e) { ... } finally { ... }` with early-return
+/// and rethrow working as Ruby's semantics expect.
+fn emit_begin_rescue_stmt(
+    body: &Expr,
+    rescues: &[crate::expr::RescueClause],
+    else_branch: Option<&Expr>,
+    ensure: Option<&Expr>,
+    return_ty: &Ty,
+) -> String {
+    let mut out = String::new();
+    out.push_str("try {\n");
+    let body_s = emit_body(body, return_ty);
+    for line in body_s.lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if let Some(eb) = else_branch {
+        // Ruby's `else` runs iff the body raised nothing. Appending to
+        // the try block preserves that ordering.
+        let eb_s = emit_body(eb, return_ty);
+        for line in eb_s.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("} catch (e) {\n");
+
+    // Chain rescue clauses as `if (e instanceof X) { ... } else if ...
+    // else { throw e; }`. Bare rescue (no classes) is the catchall.
+    let mut bare_catchall = false;
+    for (i, rc) in rescues.iter().enumerate() {
+        let body_s = emit_body(&rc.body, return_ty);
+        let indented = indent_block(&body_s, 4);
+        if rc.classes.is_empty() {
+            out.push_str("  ");
+            out.push_str(&indented.trim_start().to_string());
+            out.push('\n');
+            bare_catchall = true;
+            break;
+        }
+        let instanceof_s: Vec<String> = rc
+            .classes
+            .iter()
+            .map(|c| format!("e instanceof {}", emit_expr(c)))
+            .collect();
+        let keyword = if i == 0 { "if" } else { "} else if" };
+        out.push_str("  ");
+        out.push_str(&format!("{keyword} ({}) {{\n", instanceof_s.join(" || ")));
+        for line in body_s.lines() {
+            out.push_str("    ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !bare_catchall && !rescues.is_empty() {
+        out.push_str("  } else {\n");
+        out.push_str("    throw e;\n");
+        out.push_str("  }\n");
+    } else if rescues.is_empty() {
+        // `begin; body; ensure; ...; end` with no rescue — must still
+        // rethrow in the catch to preserve exception propagation.
+        out.push_str("  throw e;\n");
+    }
+    out.push_str("}");
+
+    if let Some(en) = ensure {
+        out.push_str(" finally {\n");
+        let en_s = emit_body(en, &Ty::Nil);
+        for line in en_s.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("}");
+    }
+    out
+}
+
+fn indent_block(s: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    s.lines()
+        .map(|l| format!("{pad}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
@@ -44,13 +141,25 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("this.{} = {};", ts_field_name(name.as_str()), emit_expr(value))
         }
-        // Return at statement position: emit as a native `return` rather
-        // than wrapping in an IIFE. Nil value becomes bare `return;`.
+        // Return at statement position: emit as a native `return`
+        // rather than wrapping in an IIFE. Ruby's `return nil` returns
+        // nil, not undefined — emit `return null;` (not bare `return;`)
+        // to preserve that semantic under TS's strict equality rules.
         ExprNode::Return { value } => {
-            if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
-                "return;".to_string()
+            format!("return {};", emit_expr(value))
+        }
+        // Guard-return pattern: `if (cond) { return X; }` at statement
+        // position, with no else branch (or an else that's nil). Rather
+        // than emit a ternary, produce a native guard — preserves the
+        // Ruby idiom `return nil if cond` as idiomatic TS.
+        ExprNode::If { cond, then_branch, else_branch }
+            if matches!(&*then_branch.node, ExprNode::Return { .. })
+                && is_nil_or_empty(else_branch) =>
+        {
+            if let ExprNode::Return { value } = &*then_branch.node {
+                format!("if ({}) return {};", emit_expr(cond), emit_expr(value))
             } else {
-                format!("return {};", emit_expr(value))
+                unreachable!()
             }
         }
         _ => {
@@ -59,6 +168,24 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             } else {
                 format!("{};", emit_expr(e))
             }
+        }
+    }
+}
+
+fn is_nil_or_empty(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Lit { value: Literal::Nil }
+            | ExprNode::Seq { .. }  // empty Seq also falls here
+    ) && matches!(
+        &*e.node,
+        ExprNode::Lit { value: Literal::Nil }
+            | ExprNode::Seq { exprs: _ }
+    ) && {
+        if let ExprNode::Seq { exprs } = &*e.node {
+            exprs.is_empty()
+        } else {
+            matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
         }
     }
 }
