@@ -1,53 +1,28 @@
 # Transpiled shape of fixtures/real-blog/app/models/comment.rb.
-#
-# Expansion applied:
-#   - attributes: explicit getter/setter per schema column
-#   - belongs_to :article: explicit `article` reader + FK-existence
-#     check inlined into validate
-#   - validates: explicit `validate` method
-#   - broadcasts_to ->(comment) { "article_#{comment.article_id}_comments" },
-#     target: "comments":
-#     inlined into after_create_commit / after_update_commit / after_destroy_commit
-#     — the lambda body becomes a string interpolation with self.
-#   - after_create_commit { article.broadcast_replace_to("articles") rescue nil }:
-#     composed with the broadcasts_to expansion. Both effects live in the
-#     same after_create_commit override; the explicit-block form goes after
-#     the broadcasts_to derivation.
 
 class Comment < ApplicationRecord
   def self.table_name
     "comments"
   end
 
-  # --- Attributes (from schema) ---
-  def id;             @attributes[:id];             end
-  def id=(v);         @attributes[:id] = v;         end
-  def article_id;     @attributes[:article_id];     end
-  def article_id=(v); @attributes[:article_id] = v; end
-  def commenter;      @attributes[:commenter];      end
-  def commenter=(v);  @attributes[:commenter] = v;  end
-  def body;           @attributes[:body];           end
-  def body=(v);       @attributes[:body] = v;       end
-  def created_at;     @attributes[:created_at];     end
-  def created_at=(v); @attributes[:created_at] = v; end
-  def updated_at;     @attributes[:updated_at];     end
-  def updated_at=(v); @attributes[:updated_at] = v; end
+  # Schema columns. attr_accessor declares typed-ivar fields and tracks
+  # them via schema_column_names for adapter (de)serialization.
+  attr_accessor :id, :article_id, :commenter, :body, :created_at, :updated_at
 
   # --- belongs_to :article ---
   def article
-    return nil if @attributes[:article_id].nil?
-    Article.find(@attributes[:article_id])
-  rescue ActiveRecord::RecordNotFound
-    nil
+    if @article_id.nil?
+      nil
+    else
+      Article.find(@article_id)
+    end
   end
 
   # --- validates: FK presence (from belongs_to, not optional) + presences ---
   # Note: validates_presence_of(:article) checks that the FK column is
   # set, not that the referenced record exists. Matches Rails's default
-  # belongs_to behavior (FK-existence is a separate concern — Rails adds
-  # it via an implicit validates_associated-like check that varies by
-  # version). Juntos's baseline doesn't enforce FK-existence either, so
-  # this shape matches the ecosystem.
+  # belongs_to behavior; Juntos's baseline doesn't enforce FK-existence
+  # either.
   def validate
     validates_presence_of(:article)
     validates_presence_of(:commenter)

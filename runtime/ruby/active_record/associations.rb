@@ -22,7 +22,7 @@ module ActiveRecord
     def to_a
       rows = ActiveRecord.adapter.where(
         @target_class.table_name,
-        @foreign_key => @owner[:id]
+        @foreign_key => @owner.id
       )
       rows.map { |r| @target_class.instantiate(r) }
     end
@@ -34,7 +34,7 @@ module ActiveRecord
     def size
       ActiveRecord.adapter.where(
         @target_class.table_name,
-        @foreign_key => @owner[:id]
+        @foreign_key => @owner.id
       ).size
     end
     alias_method :length, :size
@@ -45,7 +45,7 @@ module ActiveRecord
     end
 
     def build(attrs = {})
-      @target_class.new(attrs.merge(@foreign_key => @owner[:id]))
+      @target_class.new(attrs.merge(@foreign_key => @owner.id))
     end
 
     def create(attrs = {})

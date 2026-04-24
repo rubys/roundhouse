@@ -1,41 +1,42 @@
 # Transpiled shape of fixtures/real-blog/app/models/article.rb.
 #
-# Expansion applied (per ruby2js's filter/rails/model.rb):
-#   - attributes: explicit getter/setter per schema column
-#   - has_many :comments, dependent: :destroy: explicit `comments` getter
-#     returning a CollectionProxy, plus explicit `destroy` override that
-#     cascades.
+# Expansion applied (per ruby2js's filter/rails/model.rb, updated
+# for a typed-field-per-attribute representation):
+#   - schema columns: declared via `attr_accessor` — tells the transpile
+#     these are typed fields per the migration, not polymorphic Hash
+#     lookups. Each becomes its own typed ivar (@title, @body, etc.)
+#     in the emitted target, enabling fully-typed output for Rust and
+#     similar strict targets without forcing an `untyped`/`Any` escape.
+#   - has_many :comments, dependent: :destroy: explicit `comments`
+#     getter returning a CollectionProxy, plus explicit `destroy`
+#     override that cascades.
 #   - validates: explicit `validate` instance method calling validates_*
-#     helper methods provided by the runtime.
+#     helpers provided by the runtime.
 #   - broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend:
 #     explicit overrides of lifecycle hooks (after_create_commit etc.)
-#     with the lambda body inlined and the inserts_by: routed to the
-#     matching broadcast_*_to runtime call.
+#     with the lambda body inlined.
 
 class Article < ApplicationRecord
   def self.table_name
     "articles"
   end
 
-  # --- Attributes (from schema: articles.id/title/body/created_at/updated_at) ---
-  def id;             @attributes[:id];             end
-  def id=(v);         @attributes[:id] = v;         end
-  def title;          @attributes[:title];          end
-  def title=(v);      @attributes[:title] = v;      end
-  def body;           @attributes[:body];           end
-  def body=(v);       @attributes[:body] = v;       end
-  def created_at;     @attributes[:created_at];     end
-  def created_at=(v); @attributes[:created_at] = v; end
-  def updated_at;     @attributes[:updated_at];     end
-  def updated_at=(v); @attributes[:updated_at] = v; end
+  # Schema columns (from articles.id/title/body/created_at/updated_at).
+  # attr_accessor generates typed-ivar getter/setter pairs; Base tracks
+  # the names via schema_column_names to drive adapter (de)serialization.
+  attr_accessor :id, :title, :body, :created_at, :updated_at
 
   # --- has_many :comments ---
   def comments
-    @_comments ||= ActiveRecord::CollectionProxy.new(
-      owner: self,
-      target_class: Comment,
-      foreign_key: :article_id
-    )
+    if @_comments
+      @_comments
+    else
+      @_comments = ActiveRecord::CollectionProxy.new(
+        owner: self,
+        target_class: Comment,
+        foreign_key: :article_id
+      )
+    end
   end
 
   # --- dependent: :destroy ---

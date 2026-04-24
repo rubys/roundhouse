@@ -419,11 +419,17 @@ impl Analyzer {
             }
         }
         for model in &mut app.models {
-            // Model instance methods access `@attributes` as the typed
-            // attribute hash. Transpiled-shape models reference it
-            // directly from getter/setter methods; prime the ivar with
-            // the expected shape so the body-typer doesn't flag every
-            // attribute method as unresolved.
+            // Seed class ivars for the body-typer. Three shapes in play:
+            // 1. `@attributes` — the legacy Hash-storage access path
+            //    (some transpiled patterns still use it).
+            // 2. Per-schema-column ivars (`@title`, `@body`, ...) — the
+            //    typed-field representation. `attr_accessor :title, ...`
+            //    in a transpiled model generates accessors that read/
+            //    write these ivars, but the generated methods aren't
+            //    `def` nodes so flow-sensitive typing can't discover
+            //    them — seed directly from schema metadata.
+            // 3. Memoization ivars (`@_comments`) — discovered by the
+            //    flow-sensitive pre-pass below.
             let mut class_ivars: HashMap<Symbol, Ty> = HashMap::new();
             class_ivars.insert(
                 Symbol::from("attributes"),
@@ -432,6 +438,17 @@ impl Analyzer {
                     value: Box::new(Ty::Var { var: crate::ident::TyVar(0) }),
                 },
             );
+            for (name, ty) in &model.attributes.fields {
+                // Ivar reads may observe nil before the first write;
+                // union with Nil reflects that. The column's declared
+                // type from schema covers the post-initialization case.
+                class_ivars.insert(
+                    name.clone(),
+                    Ty::Union {
+                        variants: vec![ty.clone(), Ty::Nil],
+                    },
+                );
+            }
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
