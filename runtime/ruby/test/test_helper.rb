@@ -4,9 +4,10 @@ require_relative "../active_record"
 # Load the blog demo's actual models against our framework Ruby.
 # This is the real test: can the untouched blog models run under our
 # runtime?
-BLOG_ROOT = File.expand_path("../../../fixtures/real-blog", __dir__)
-BLOG_MODELS = "#{BLOG_ROOT}/app/models"
-BLOG_MIGRATIONS = "#{BLOG_ROOT}/db/migrate"
+REAL_BLOG_ROOT = File.expand_path("../../../fixtures/real-blog", __dir__)
+TRANSPILED_BLOG_ROOT = File.expand_path("fixtures/transpiled_blog", __dir__)
+BLOG_MODELS = "#{TRANSPILED_BLOG_ROOT}/app/models"
+BLOG_MIGRATIONS = "#{REAL_BLOG_ROOT}/db/migrate"
 
 module BlogSchema
   def self.load!
@@ -31,8 +32,6 @@ module BlogSchema
       load f
     end
 
-    # Reset column caches since tables were just created.
-    [Article, Comment].each(&:reset_schema_cache!)
   end
 end
 

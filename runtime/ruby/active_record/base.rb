@@ -1,29 +1,7 @@
 module ActiveRecord
   class Base
     include Validations
-    include Callbacks
-    include Associations
     include Broadcasts
-
-    @@class_registry = {}
-
-    def self.inherited(subclass)
-      super
-      @@class_registry[subclass.name] = subclass
-      subclass.instance_variable_set(:@schema_columns, nil)
-    end
-
-    def self.lookup_class(name)
-      @@class_registry[name.to_s] || Object.const_get(name.to_s)
-    end
-
-    def self.primary_abstract_class
-      @abstract_class = true
-    end
-
-    def self.abstract_class?
-      @abstract_class == true
-    end
 
     def self.table_name
       @table_name ||= begin
@@ -36,15 +14,8 @@ module ActiveRecord
       @table_name = n.to_s
     end
 
-    def self.schema_columns
-      @schema_columns ||= begin
-        s = ActiveRecord.adapter.schema(table_name)
-        s ? s[:columns].map(&:to_sym) : []
-      end
-    end
-
-    def self.reset_schema_cache!
-      @schema_columns = nil
+    def self.abstract?
+      false
     end
 
     def self.instantiate(row)
@@ -98,7 +69,9 @@ module ActiveRecord
 
     def initialize(attrs = {})
       @attributes = {}
+      @errors = []
       @persisted = false
+      @destroyed = false
       assign_attributes(attrs)
     end
 
@@ -110,16 +83,16 @@ module ActiveRecord
       @attributes.dup
     end
 
-    def id
-      @attributes[:id]
-    end
-
     def persisted?
       @persisted
     end
 
     def new_record?
       !@persisted
+    end
+
+    def destroyed?
+      @destroyed == true
     end
 
     def read_attribute(name)
@@ -134,40 +107,63 @@ module ActiveRecord
       @attributes[name.to_sym] = value
     end
 
+    # Lifecycle hooks — no-op defaults; transpiled models override
+    # the ones they need. These are defined explicitly (not via
+    # method_missing or registration DSL) so they're transpile-clean.
+    def before_validation; end
+    def after_validation; end
+    def before_save; end
+    def after_save; end
+    def before_create; end
+    def after_create; end
+    def before_update; end
+    def after_update; end
+    def before_destroy; end
+    def after_destroy; end
+    def after_commit; end
+    def after_create_commit; end
+    def after_update_commit; end
+    def after_destroy_commit; end
+    def after_save_commit; end
+    def after_touch; end
+
+    # Model's `validate` defines its own checks; default is empty.
+    def validate; end
+
+    def valid?
+      @errors = []
+      validate
+      @errors.empty?
+    end
+
     def save
-      run_callbacks(:before_validation)
-      unless valid?
-        run_callbacks(:after_validation)
-        return false
-      end
-      run_callbacks(:after_validation)
+      before_validation
+      ok = valid?
+      after_validation
+      return false unless ok
 
-      return false unless foreign_keys_valid?
-
-      run_callbacks(:before_save)
+      before_save
       new_record = new_record?
       if new_record
-        run_callbacks(:before_create)
+        before_create
         id = ActiveRecord.adapter.insert(self.class.table_name, @attributes)
         @attributes[:id] = id
         @persisted = true
-        run_callbacks(:after_create)
+        after_create
       else
-        run_callbacks(:before_update)
+        before_update
         ActiveRecord.adapter.update(self.class.table_name, @attributes[:id], @attributes)
-        run_callbacks(:after_update)
+        after_update
       end
-      run_callbacks(:after_save)
+      after_save
 
-      # Commit callbacks — in real AR these fire after transaction commit.
-      # In-memory adapter has no transaction; fire them immediately.
       if new_record
-        run_callbacks(:after_create_commit)
+        after_create_commit
       else
-        run_callbacks(:after_update_commit)
+        after_update_commit
       end
-      run_callbacks(:after_save_commit)
-      run_callbacks(:after_commit)
+      after_save_commit
+      after_commit
       true
     end
 
@@ -177,19 +173,14 @@ module ActiveRecord
 
     def destroy
       return self unless persisted?
-      run_callbacks(:before_destroy)
-      destroy_dependents
+      before_destroy
       ActiveRecord.adapter.delete(self.class.table_name, @attributes[:id])
       @persisted = false
       @destroyed = true
-      run_callbacks(:after_destroy)
-      run_callbacks(:after_destroy_commit)
-      run_callbacks(:after_commit)
+      after_destroy
+      after_destroy_commit
+      after_commit
       self
-    end
-
-    def destroyed?
-      @destroyed == true
     end
 
     def update(attrs)
@@ -198,73 +189,21 @@ module ActiveRecord
     end
 
     def ==(other)
-      other.is_a?(self.class) && !id.nil? && id == other.id
+      other.is_a?(self.class) && !@attributes[:id].nil? && @attributes[:id] == other[:id]
     end
     alias_method :eql?, :==
 
     def hash
-      [self.class, id].hash
-    end
-
-    # Dynamic attribute access. Looks up method_missing style so that
-    # `article.title` and `article.title = "x"` work without explicit
-    # attr_accessor — schema-driven.
-    def method_missing(name, *args)
-      str = name.to_s
-      if str.end_with?("=") && args.size == 1
-        @attributes[str.chomp("=").to_sym] = args.first
-      elsif args.empty? && @attributes.key?(name)
-        @attributes[name]
-      elsif args.empty? && self.class.schema_columns.include?(name)
-        @attributes[name]
-      else
-        super
-      end
-    end
-
-    def respond_to_missing?(name, include_private = false)
-      str = name.to_s
-      if str.end_with?("=")
-        true
-      elsif @attributes.key?(name) || self.class.schema_columns.include?(name)
-        true
-      else
-        super
-      end
+      [self.class, @attributes[:id]].hash
     end
 
     private
 
     def init_from_row(row)
       @attributes = row.dup
+      @errors = []
       @persisted = true
       @destroyed = false
-      @errors = []
-    end
-
-    def foreign_keys_valid?
-      self.class.associations.each do |_, assoc|
-        next unless assoc[:kind] == :belongs_to
-        next if assoc[:optional]
-        fk_val = @attributes[assoc[:foreign_key]]
-        if fk_val.nil?
-          errors << "#{assoc[:foreign_key]} can't be blank"
-          return false
-        end
-        target = ActiveRecord::Base.lookup_class(assoc[:target])
-        unless ActiveRecord.adapter.exists?(target.table_name, fk_val)
-          errors << "#{assoc[:target]} must exist"
-          return false
-        end
-      end
-      true
-    end
-
-    def destroy_dependents
-      self.class.associations.each do |name, assoc|
-        next unless assoc[:kind] == :has_many && assoc[:dependent] == :destroy
-        send(name).each(&:destroy)
-      end
     end
   end
 end

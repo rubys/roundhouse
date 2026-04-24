@@ -1,30 +1,9 @@
 module ActiveRecord
-  # Phase-1 stubs — record calls for test inspection. Target-native
-  # Turbo integration is a Phase-3+ concern.
+  # Instance-level broadcast helpers. Transpiled models call these
+  # from their lifecycle hook overrides. Phase-1 stubs log the call
+  # for test inspection; target-native Turbo integration is a later
+  # concern.
   module Broadcasts
-    def self.included(base)
-      base.extend(ClassMethods)
-    end
-
-    module ClassMethods
-      def broadcast_declarations
-        @broadcast_declarations ||= []
-      end
-
-      def inherited(subclass)
-        super
-        subclass.instance_variable_set(:@broadcast_declarations, broadcast_declarations.dup)
-      end
-
-      def broadcasts_to(channel = nil, target: nil, inserts_by: nil, &block)
-        broadcast_declarations << {
-          channel: channel || block,
-          target: target,
-          inserts_by: inserts_by
-        }
-      end
-    end
-
     def broadcast_replace_to(*channels, target: nil)
       ActiveRecord::Broadcasts.log << { action: :replace, record: self, channels: channels, target: target }
       nil

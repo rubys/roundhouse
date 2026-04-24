@@ -1,116 +1,74 @@
 module ActiveRecord
+  # Instance-level validation helpers. Transpiled models call these
+  # from their `validate` method.
   module Validations
-    def self.included(base)
-      base.extend(ClassMethods)
-    end
-
-    module ClassMethods
-      def validations
-        @validations ||= []
-      end
-
-      def inherited(subclass)
-        super
-        subclass.instance_variable_set(:@validations, validations.dup)
-      end
-
-      def validates(*attrs)
-        options = attrs.last.is_a?(Hash) ? attrs.pop : {}
-        attrs.each do |attr|
-          options.each do |check_name, check_options|
-            validations << { attribute: attr, check: check_name, options: check_options }
-          end
-        end
-      end
-    end
-
     def errors
       @errors ||= []
     end
 
-    def valid?
-      @errors = []
-      self.class.validations.each { |v| run_check(v) }
-      @errors.empty?
+    def validates_presence_of(attr)
+      value = @attributes[attr.to_sym]
+      errors << "#{attr} can't be blank" if blank?(value)
     end
 
-    private
-
-    def run_check(v)
-      value = read_attribute_for_validation(v[:attribute])
-      case v[:check]
-      when :presence
-        errors << "#{v[:attribute]} can't be blank" if blank?(value)
-      when :absence
-        errors << "#{v[:attribute]} must be blank" unless blank?(value)
-      when :length
-        validate_length(v[:attribute], value, v[:options])
-      when :numericality
-        validate_numericality(v[:attribute], value, v[:options])
-      when :inclusion
-        in_set = v[:options].is_a?(Hash) ? v[:options][:in] : v[:options]
-        errors << "#{v[:attribute]} is not included in the list" unless in_set.include?(value)
-      when :format
-        pattern = v[:options].is_a?(Hash) ? v[:options][:with] : v[:options]
-        errors << "#{v[:attribute]} is invalid" unless value.is_a?(String) && pattern.match?(value)
-      when :uniqueness
-        validate_uniqueness(v[:attribute], value, v[:options])
-      end
+    def validates_absence_of(attr)
+      value = @attributes[attr.to_sym]
+      errors << "#{attr} must be blank" unless blank?(value)
     end
 
-    def read_attribute_for_validation(attr)
-      @attributes[attr.to_sym]
-    end
-
-    def blank?(value)
-      value.nil? || (value.respond_to?(:empty?) && value.empty?)
-    end
-
-    def validate_length(attr, value, options)
-      options = { is: options } if options.is_a?(Integer)
+    def validates_length_of(attr, minimum: nil, maximum: nil, is: nil)
+      value = @attributes[attr.to_sym]
       return if value.nil?
       len = value.respond_to?(:length) ? value.length : 0
-      if options[:minimum] && len < options[:minimum]
-        errors << "#{attr} is too short (minimum is #{options[:minimum]})"
-      end
-      if options[:maximum] && len > options[:maximum]
-        errors << "#{attr} is too long (maximum is #{options[:maximum]})"
-      end
-      if options[:is] && len != options[:is]
-        errors << "#{attr} is the wrong length (should be #{options[:is]})"
-      end
+      errors << "#{attr} is too short (minimum is #{minimum})" if minimum && len < minimum
+      errors << "#{attr} is too long (maximum is #{maximum})" if maximum && len > maximum
+      errors << "#{attr} is the wrong length (should be #{is})" if is && len != is
     end
 
-    def validate_numericality(attr, value, options)
-      options = {} unless options.is_a?(Hash)
+    def validates_numericality_of(attr, greater_than: nil, less_than: nil, only_integer: false)
+      value = @attributes[attr.to_sym]
       if value.nil? || !value.is_a?(Numeric)
         errors << "#{attr} is not a number"
         return
       end
-      if options[:greater_than] && !(value > options[:greater_than])
-        errors << "#{attr} must be greater than #{options[:greater_than]}"
-      end
-      if options[:less_than] && !(value < options[:less_than])
-        errors << "#{attr} must be less than #{options[:less_than]}"
-      end
-      if options[:only_integer] && !value.is_a?(Integer)
-        errors << "#{attr} must be an integer"
-      end
+      errors << "#{attr} must be greater than #{greater_than}" if greater_than && !(value > greater_than)
+      errors << "#{attr} must be less than #{less_than}" if less_than && !(value < less_than)
+      errors << "#{attr} must be an integer" if only_integer && !value.is_a?(Integer)
     end
 
-    def validate_uniqueness(attr, value, options)
-      options = {} unless options.is_a?(Hash)
+    def validates_inclusion_of(attr, in:)
+      set = binding.local_variable_get(:in)
+      value = @attributes[attr.to_sym]
+      errors << "#{attr} is not included in the list" unless set.include?(value)
+    end
+
+    def validates_format_of(attr, with:)
+      value = @attributes[attr.to_sym]
+      errors << "#{attr} is invalid" unless value.is_a?(String) && with.match?(value)
+    end
+
+    def validates_uniqueness_of(attr, scope: [], case_sensitive: true)
+      value = @attributes[attr.to_sym]
       table = self.class.table_name
-      scope_attrs = Array(options[:scope])
+      scope_attrs = Array(scope)
       matches = ActiveRecord.adapter.all(table).select do |row|
         row_val = row[attr.to_sym]
-        same = options[:case_sensitive] == false && row_val.is_a?(String) && value.is_a?(String) ?
-          row_val.downcase == value.downcase : row_val == value
+        same = if !case_sensitive && row_val.is_a?(String) && value.is_a?(String)
+                 row_val.downcase == value.downcase
+               else
+                 row_val == value
+               end
         same &&
           (!persisted? || row[:id] != @attributes[:id]) &&
           scope_attrs.all? { |s| row[s.to_sym] == @attributes[s.to_sym] }
       end
       errors << "#{attr} has already been taken" unless matches.empty?
+    end
+
+    private
+
+    def blank?(value)
+      value.nil? || (value.respond_to?(:empty?) && value.empty?)
     end
   end
 end
