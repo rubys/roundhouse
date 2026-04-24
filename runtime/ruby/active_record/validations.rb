@@ -8,6 +8,12 @@ module ActiveRecord
 
     def validates_presence_of(attr)
       value = @attributes[attr.to_sym]
+      # belongs_to fallback: `validates_presence_of(:article)` checks the
+      # `article_id` foreign key when there's no direct `article` column.
+      # Mirrors Juntos's active_record_base#validates_presence_of.
+      if value.nil? && @attributes.key?("#{attr}_id".to_sym)
+        value = @attributes["#{attr}_id".to_sym]
+      end
       errors << "#{attr} can't be blank" if blank?(value)
     end
 

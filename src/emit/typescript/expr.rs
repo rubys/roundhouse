@@ -285,14 +285,36 @@ pub(super) fn emit_send_with_parens(
         }
         return format!("new {recv_s}({})", args_s.join(", "));
     }
-    // `x.nil?` → `x == null`. Ruby predicate with no TS equivalent.
+    // `x.nil?` → `x === null`. Ruby's `nil?` only matches nil (not
+    // `false`, and TS equivalent must distinguish from `undefined`).
+    // Strict equality preserves semantics.
     if method == "nil?" && recv.is_some() && args.is_empty() {
-        return format!("{} == null", emit_expr(recv.unwrap()));
+        return format!("{} === null", emit_expr(recv.unwrap()));
     }
     // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
     // to `cond.!`). Emit TS's prefix `!`.
     if method == "!" && recv.is_some() && args.is_empty() {
         return format!("!{}", emit_expr(recv.unwrap()));
+    }
+    // Ruby's `<<` is polymorphic: Int bit-shift, Array/String append,
+    // or a method call on classes that define it (like
+    // ActiveModel::Errors.add). Dispatch on receiver type. TS has no
+    // `<<` operator overloading, so the Class case has to emit as a
+    // method call; the method name is `add` by convention (matches
+    // Juntos's ActiveModel::Errors and similar collection APIs).
+    if method == "<<" && recv.is_some() && args.len() == 1 {
+        let r = recv.unwrap();
+        if let Some(recv_ty) = &r.ty {
+            match recv_ty {
+                Ty::Class { .. } => {
+                    return format!("{}.add({})", emit_expr(r), args_s[0]);
+                }
+                Ty::Array { .. } => {
+                    return format!("{}.push({})", emit_expr(r), args_s[0]);
+                }
+                _ => {}
+            }
+        }
     }
     // Ruby's binary operators ride the Send channel. TS needs infix;
     // `==` and `!=` map to strict `===` / `!==` so equality semantics
