@@ -565,7 +565,8 @@ fn action_aggregate_equals_subtree_fold() {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
-            | ExprNode::Const { .. } => {}
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     fold(k, acc);
@@ -653,6 +654,29 @@ fn action_aggregate_equals_subtree_fold() {
                 }
             }
             ExprNode::Raise { value } => fold(value, acc),
+            ExprNode::Return { value } => fold(value, acc),
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args {
+                        fold(a, acc);
+                    }
+                }
+            }
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                fold(body, acc);
+                for r in rescues {
+                    for c in &r.classes {
+                        fold(c, acc);
+                    }
+                    fold(&r.body, acc);
+                }
+                if let Some(e) = else_branch {
+                    fold(e, acc);
+                }
+                if let Some(e) = ensure {
+                    fold(e, acc);
+                }
+            }
         }
     }
 
@@ -927,7 +951,30 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
             }
         }
         ExprNode::Raise { value } => collect_ivar_reads(value, out),
-        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Const { .. } => {}
+        ExprNode::Return { value } => collect_ivar_reads(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_ivar_reads(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_ivar_reads(body, out);
+            for r in rescues {
+                for c in &r.classes {
+                    collect_ivar_reads(c, out);
+                }
+                collect_ivar_reads(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_ivar_reads(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_ivar_reads(e, out);
+            }
+        }
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
 
@@ -1057,7 +1104,30 @@ fn collect_var_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Optio
             }
         }
         ExprNode::Raise { value } => collect_var_reads(value, out),
-        ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } => {}
+        ExprNode::Return { value } => collect_var_reads(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_var_reads(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_var_reads(body, out);
+            for r in rescues {
+                for c in &r.classes {
+                    collect_var_reads(c, out);
+                }
+                collect_var_reads(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_var_reads(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_var_reads(e, out);
+            }
+        }
+        ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
 
@@ -1156,7 +1226,30 @@ fn collect_bare_name_sends(
             }
         }
         ExprNode::Raise { value } => collect_bare_name_sends(value, out),
-        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } => {}
+        ExprNode::Return { value } => collect_bare_name_sends(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_bare_name_sends(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_bare_name_sends(body, out);
+            for r in rescues {
+                for c in &r.classes {
+                    collect_bare_name_sends(c, out);
+                }
+                collect_bare_name_sends(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_bare_name_sends(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_bare_name_sends(e, out);
+            }
+        }
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
 

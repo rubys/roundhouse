@@ -122,7 +122,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. } => {}
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -205,6 +206,31 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         }
         ExprNode::Raise { value } => {
             collect_untyped(value, &format!("{path}/raise.value"), out)
+        }
+        ExprNode::Return { value } => {
+            collect_untyped(value, &format!("{path}/return.value"), out)
+        }
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for (i, a) in args.iter().enumerate() {
+                    collect_untyped(a, &format!("{path}/super.arg[{i}]"), out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_untyped(body, &format!("{path}/begin.body"), out);
+            for (i, r) in rescues.iter().enumerate() {
+                for (j, c) in r.classes.iter().enumerate() {
+                    collect_untyped(c, &format!("{path}/begin.rescue[{i}].class[{j}]"), out);
+                }
+                collect_untyped(&r.body, &format!("{path}/begin.rescue[{i}].body"), out);
+            }
+            if let Some(e) = else_branch {
+                collect_untyped(e, &format!("{path}/begin.else"), out);
+            }
+            if let Some(e) = ensure {
+                collect_untyped(e, &format!("{path}/begin.ensure"), out);
+            }
         }
     }
 }
