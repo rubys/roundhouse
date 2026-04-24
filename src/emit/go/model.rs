@@ -291,7 +291,28 @@ fn rewrite_bare_attrs_to_receiver(
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. } => (*e.node).clone(),
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => (*e.node).clone(),
+        ExprNode::Return { value } => ExprNode::Return { value: rewrite(value) },
+        ExprNode::Super { args } => ExprNode::Super {
+            args: args.as_ref().map(|v| v.iter().map(&rewrite).collect()),
+        },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: rewrite(body),
+                rescues: rescues
+                    .iter()
+                    .map(|rc| crate::expr::RescueClause {
+                        classes: rc.classes.iter().map(&rewrite).collect(),
+                        binding: rc.binding.clone(),
+                        body: rewrite(&rc.body),
+                    })
+                    .collect(),
+                else_branch: else_branch.as_ref().map(&rewrite),
+                ensure: ensure.as_ref().map(&rewrite),
+                implicit: *implicit,
+            }
+        }
     };
     let _ = Pattern::Wildcard;
     Expr {

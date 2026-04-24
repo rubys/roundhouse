@@ -211,6 +211,47 @@ pub enum ExprNode {
     /// as its surface form so the Ruby emitter can round-trip it
     /// without promoting it to a multi-line `begin` block.
     RescueModifier { expr: Expr, fallback: Expr },
+    /// Bare `self` reference. Refers to the enclosing method's receiver
+    /// (instance methods) or the class itself (class-scope / class
+    /// methods). The body-typer fills `ty` with the appropriate type
+    /// from its lexical context.
+    SelfRef,
+    /// Early return from enclosing method: `return` (value = Lit::Nil)
+    /// or `return x`. Control-flow construct; the analyzer treats the
+    /// expression type as `Never`/divergent, and the emitter lowers to
+    /// the target language's return statement.
+    Return { value: Expr },
+    /// `super` (args = None — forward current method's args unchanged)
+    /// or `super(args...)` (args = Some(vec)). Distinct from Send with
+    /// an implicit receiver because the dispatch target is the parent
+    /// class's method, not the current one.
+    Super {
+        args: Option<Vec<Expr>>,
+    },
+    /// Multi-clause `begin / rescue / else / ensure / end`. For the
+    /// single-line modifier form (`expr rescue fallback`) use
+    /// `RescueModifier` instead. An `implicit` begin arises when a
+    /// `def` body contains trailing `rescue` clauses — same shape, no
+    /// surface `begin` keyword.
+    BeginRescue {
+        body: Expr,
+        rescues: Vec<RescueClause>,
+        else_branch: Option<Expr>,
+        ensure: Option<Expr>,
+        #[serde(default)]
+        implicit: bool,
+    },
+}
+
+/// One `rescue` clause inside a `BeginRescue`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RescueClause {
+    /// Exception classes this clause catches. Empty means the default
+    /// `StandardError` (Ruby's implicit when none given).
+    pub classes: Vec<Expr>,
+    /// Name bound to the exception object: `rescue E => name`.
+    pub binding: Option<Symbol>,
+    pub body: Expr,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

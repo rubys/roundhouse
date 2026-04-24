@@ -506,5 +506,9 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Yield { .. } => "Yield",
         ExprNode::Raise { .. } => "Raise",
         ExprNode::RescueModifier { .. } => "RescueModifier",
+        ExprNode::SelfRef => "SelfRef",
+        ExprNode::Return { .. } => "Return",
+        ExprNode::Super { .. } => "Super",
+        ExprNode::BeginRescue { .. } => "BeginRescue",
     }
 }

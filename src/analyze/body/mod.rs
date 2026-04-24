@@ -109,6 +109,45 @@ impl<'a> BodyTyper<'a> {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
             }
 
+            ExprNode::SelfRef => ctx.self_ty.clone().unwrap_or_else(unknown),
+
+            ExprNode::Return { value } => {
+                self.analyze_expr(value, ctx);
+                // `return x` diverges; represent as the value's type for
+                // now (downstream effects/typing handle control flow).
+                value.ty.clone().unwrap_or_else(unknown)
+            }
+
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args.iter_mut() {
+                        self.analyze_expr(a, ctx);
+                    }
+                }
+                // Return type of super is the parent's method return type;
+                // catalog-driven resolution is future work.
+                unknown()
+            }
+
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                self.analyze_expr(body, ctx);
+                for rc in rescues.iter_mut() {
+                    for c in rc.classes.iter_mut() {
+                        self.analyze_expr(c, ctx);
+                    }
+                    self.analyze_expr(&mut rc.body, ctx);
+                }
+                if let Some(e) = else_branch {
+                    self.analyze_expr(e, ctx);
+                }
+                if let Some(e) = ensure {
+                    self.analyze_expr(e, ctx);
+                }
+                // Union of body type and rescue body types; approximate
+                // as body's type for now.
+                body.ty.clone().unwrap_or_else(unknown)
+            }
+
             ExprNode::Hash { entries, .. } => {
                 let mut key_ty: Option<Ty> = None;
                 let mut value_ty: Option<Ty> = None;

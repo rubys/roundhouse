@@ -332,6 +332,163 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // `unless cond; then; else alt; end` lowers to `if cond; alt; else then; end`
+        // — same IR, swapped branches. Ruby's semantics match exactly.
+        n if n.as_unless_node().is_some() => {
+            let u = n.as_unless_node().unwrap();
+            let cond = ingest_expr(&u.predicate(), file)?;
+            // In Prism, `unless`'s `statements()` is the "when false" body
+            // and `consequent()` (if present) is the `else` body.
+            let when_false = match u.statements() {
+                Some(s) => ingest_expr(&s.as_node(), file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            let when_true = match u.else_clause() {
+                Some(else_node) => match else_node.statements() {
+                    Some(s) => ingest_expr(&s.as_node(), file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+                },
+                None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            };
+            ExprNode::If {
+                cond,
+                then_branch: when_true,
+                else_branch: when_false,
+            }
+        }
+        n if n.as_self_node().is_some() => ExprNode::SelfRef,
+        n if n.as_return_node().is_some() => {
+            let r = n.as_return_node().unwrap();
+            // `return` with no value is `return nil` semantically.
+            let value = match r.arguments() {
+                Some(a) => {
+                    let args: Vec<Node<'_>> = a.arguments().iter().collect();
+                    match args.len() {
+                        0 => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                        1 => ingest_expr(&args[0], file)?,
+                        _ => {
+                            // `return a, b` → return an Array (Ruby semantics).
+                            let elems = args
+                                .iter()
+                                .map(|a| ingest_expr(a, file))
+                                .collect::<IngestResult<Vec<_>>>()?;
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Array {
+                                    elements: elems,
+                                    style: crate::expr::ArrayStyle::Brackets,
+                                },
+                            )
+                        }
+                    }
+                }
+                None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            };
+            ExprNode::Return { value }
+        }
+        n if n.as_forwarding_super_node().is_some() => {
+            // `super` without parens forwards the current method's args.
+            ExprNode::Super { args: None }
+        }
+        n if n.as_super_node().is_some() => {
+            // `super(args)` / `super()` — args = Some(vec).
+            let s = n.as_super_node().unwrap();
+            let args = match s.arguments() {
+                Some(a) => a
+                    .arguments()
+                    .iter()
+                    .map(|arg| ingest_expr(&arg, file))
+                    .collect::<IngestResult<Vec<_>>>()?,
+                None => vec![],
+            };
+            ExprNode::Super { args: Some(args) }
+        }
+        n if n.as_begin_node().is_some() => {
+            let b = n.as_begin_node().unwrap();
+            let body = match b.statements() {
+                Some(s) => ingest_expr(&s.as_node(), file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            let mut rescues: Vec<crate::expr::RescueClause> = Vec::new();
+            // Walk rescue chain via the parser's `subsequent()` link.
+            // Prism doesn't derive Clone on these node wrappers, so we
+            // descend by rebinding instead of cloning.
+            if let Some(rc) = b.rescue_clause() {
+                let mut current_rc = rc;
+                loop {
+                    let classes = current_rc
+                        .exceptions()
+                        .iter()
+                        .map(|e| ingest_expr(&e, file))
+                        .collect::<IngestResult<Vec<_>>>()?;
+                    let binding = current_rc.reference().and_then(|r| {
+                        r.as_local_variable_target_node()
+                            .map(|lvt| Symbol::from(constant_id_str(&lvt.name())))
+                    });
+                    let rc_body = match current_rc.statements() {
+                        Some(s) => ingest_expr(&s.as_node(), file)?,
+                        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+                    };
+                    rescues.push(crate::expr::RescueClause {
+                        classes,
+                        binding,
+                        body: rc_body,
+                    });
+                    match current_rc.subsequent() {
+                        Some(next) => current_rc = next,
+                        None => break,
+                    }
+                }
+            }
+            let else_branch = match b.else_clause() {
+                Some(e) => match e.statements() {
+                    Some(s) => Some(ingest_expr(&s.as_node(), file)?),
+                    None => None,
+                },
+                None => None,
+            };
+            let ensure = match b.ensure_clause() {
+                Some(e) => match e.statements() {
+                    Some(s) => Some(ingest_expr(&s.as_node(), file)?),
+                    None => None,
+                },
+                None => None,
+            };
+            ExprNode::BeginRescue {
+                body,
+                rescues,
+                else_branch,
+                ensure,
+                implicit: false,
+            }
+        }
+        // `@x ||= y` desugars to `@x || (@x = y)` — evaluate `@x`, and only
+        // assign on a falsy read. Side-effect-preserving; semantically what
+        // Ruby does.
+        n if n.as_instance_variable_or_write_node().is_some() => {
+            let w = n.as_instance_variable_or_write_node().unwrap();
+            let raw = constant_id_str(&w.name());
+            let name = raw.strip_prefix('@').unwrap_or(raw).to_string();
+            let sym = Symbol::from(name);
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: sym.clone() },
+            );
+            let value = ingest_expr(&w.value(), file)?;
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: sym },
+                    value,
+                },
+            );
+            ExprNode::BoolOp {
+                op: BoolOpKind::Or,
+                surface: BoolOpSurface::Symbol,
+                left: read,
+                right: assign,
+            }
+        }
         other => {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -390,9 +547,55 @@ fn detect_leading_guard<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 /// attached to a method call. Represented as a `Lambda` expression.
 /// Returns `None` for block-argument nodes (`&block`) which aren't closures.
 fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
-    let Some(b) = node.as_block_node() else {
-        // `&block` — pass-through block argument, not a closure.
+    // `&:method_name` — symbol-to-proc shorthand. Ruby treats this as
+    // `{ |x| x.method_name }`. Lower to an explicit Lambda so downstream
+    // emitters see a real closure.
+    if let Some(ba) = node.as_block_argument_node() {
+        if let Some(expr) = ba.expression() {
+            if expr.as_symbol_node().is_some() {
+                let method_name = symbol_value(&expr).unwrap_or_default();
+                let param_name = Symbol::from("x");
+                let body = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Var {
+                                id: crate::ident::VarId(0),
+                                name: param_name.clone(),
+                            },
+                        )),
+                        method: Symbol::from(method_name),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                return Ok(Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lambda {
+                        params: vec![param_name],
+                        block_param: None,
+                        body,
+                        block_style: crate::expr::BlockStyle::Brace,
+                    },
+                )));
+            }
+            // `&some_proc_var` — passing an existing proc. Not a literal
+            // closure; flag as unsupported rather than silently dropping.
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "block-argument forms other than `&:symbol` not yet supported".into(),
+            });
+        }
         return Ok(None);
+    }
+    let Some(b) = node.as_block_node() else {
+        // Unknown node shape in block position — surface rather than drop.
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("unexpected block-position node: {node:?}"),
+        });
     };
     let params = block_param_names(&b);
     let body = match b.body() {

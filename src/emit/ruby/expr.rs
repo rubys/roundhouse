@@ -18,6 +18,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => format!("@{name}"),
+        ExprNode::SelfRef => "self".to_string(),
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }
@@ -90,6 +91,57 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
         ExprNode::RescueModifier { expr, fallback } => {
             format!("{} rescue {}", emit_expr(expr), emit_expr(fallback))
+        }
+        ExprNode::Return { value } => {
+            // `return nil` round-trips as bare `return` for source fidelity.
+            if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                "return".to_string()
+            } else {
+                format!("return {}", emit_expr(value))
+            }
+        }
+        ExprNode::Super { args } => match args {
+            None => "super".to_string(),
+            Some(args) => {
+                let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+                format!("super({})", args_s.join(", "))
+            }
+        },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            let mut s = String::new();
+            if !*implicit {
+                s.push_str("begin\n");
+            }
+            s.push_str(&indent_lines(&emit_expr(body), 1));
+            s.push('\n');
+            for rc in rescues {
+                s.push_str("rescue");
+                if !rc.classes.is_empty() {
+                    let cs: Vec<String> = rc.classes.iter().map(emit_expr).collect();
+                    s.push(' ');
+                    s.push_str(&cs.join(", "));
+                }
+                if let Some(name) = &rc.binding {
+                    s.push_str(&format!(" => {name}"));
+                }
+                s.push('\n');
+                s.push_str(&indent_lines(&emit_expr(&rc.body), 1));
+                s.push('\n');
+            }
+            if let Some(eb) = else_branch {
+                s.push_str("else\n");
+                s.push_str(&indent_lines(&emit_expr(eb), 1));
+                s.push('\n');
+            }
+            if let Some(en) = ensure {
+                s.push_str("ensure\n");
+                s.push_str(&indent_lines(&emit_expr(en), 1));
+                s.push('\n');
+            }
+            if !*implicit {
+                s.push_str("end");
+            }
+            s
         }
     }
 }

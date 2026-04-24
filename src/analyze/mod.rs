@@ -456,7 +456,34 @@ impl Analyzer {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
-            | ExprNode::Const { .. } => {}
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef => {}
+
+            ExprNode::Return { value } => self.visit_effects(value, ctx, out),
+
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args {
+                        self.visit_effects(a, ctx, out);
+                    }
+                }
+            }
+
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                self.visit_effects(body, ctx, out);
+                for rc in rescues {
+                    for c in &mut rc.classes {
+                        self.visit_effects(c, ctx, out);
+                    }
+                    self.visit_effects(&mut rc.body, ctx, out);
+                }
+                if let Some(e) = else_branch {
+                    self.visit_effects(e, ctx, out);
+                }
+                if let Some(e) = ensure {
+                    self.visit_effects(e, ctx, out);
+                }
+            }
 
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -1175,10 +1202,34 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             }
         }
         ExprNode::Raise { value } => diagnose_expr(value, out),
+        ExprNode::Return { value } => diagnose_expr(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    diagnose_expr(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            diagnose_expr(body, out);
+            for rc in rescues {
+                for c in &rc.classes {
+                    diagnose_expr(c, out);
+                }
+                diagnose_expr(&rc.body, out);
+            }
+            if let Some(e) = else_branch {
+                diagnose_expr(e, out);
+            }
+            if let Some(e) = ensure {
+                diagnose_expr(e, out);
+            }
+        }
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. } => {}
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
     }
 }
 

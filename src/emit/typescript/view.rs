@@ -1406,7 +1406,32 @@ fn collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
         // Leaves without subexpressions.
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
-        | ExprNode::Const { .. } => {}
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
+
+        ExprNode::Return { value } => collect_ivars_into(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_ivars_into(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_ivars_into(body, out);
+            for rc in rescues {
+                for c in &rc.classes {
+                    collect_ivars_into(c, out);
+                }
+                collect_ivars_into(&rc.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_ivars_into(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_ivars_into(e, out);
+            }
+        }
     }
 }
 
