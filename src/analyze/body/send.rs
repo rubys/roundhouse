@@ -100,7 +100,7 @@ impl<'a> BodyTyper<'a> {
         }
         match recv_ty {
             None => unknown(),
-            Some(Ty::Class { id, .. }) => {
+            Some(Ty::Class { id, args }) => {
                 if let Some(cls) = self.classes().get(id) {
                     if let Some(ty) = cls.class_methods.get(method) {
                         return ty.clone();
@@ -108,6 +108,15 @@ impl<'a> BodyTyper<'a> {
                     if let Some(ty) = cls.instance_methods.get(method) {
                         return ty.clone();
                     }
+                }
+                // Every class in Ruby responds to `.new`, returning an
+                // instance of itself. Serve this universally — covers
+                // unregistered classes (`InMemoryAdapter.new`,
+                // user-defined helpers) without requiring the class to
+                // appear in the catalog. Explicit catalog registrations
+                // still win because they're checked above.
+                if method.as_str() == "new" {
+                    return Ty::Class { id: id.clone(), args: args.clone() };
                 }
                 unknown()
             }
