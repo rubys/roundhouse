@@ -92,6 +92,12 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Ty {
+        // Universal Ruby methods — available on every object regardless
+        // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
+        // don't fall through to per-type method tables that would miss.
+        if let Some(ty) = universal_method(method) {
+            return ty;
+        }
         match recv_ty {
             None => unknown(),
             Some(Ty::Class { id, .. }) => {
@@ -109,6 +115,7 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Int) => int_method(method),
+            Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
             // `T | Nil` pattern (`find_by`, `params[:k]`, `.find` on
@@ -211,6 +218,13 @@ pub(super) fn hash_method(
 ) -> Ty {
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        // `h[k] = v` returns the assigned value in Ruby, but here we
+        // can't tell the argument's type from just the receiver's
+        // generic Value — and the result is rarely chained. Return
+        // Nil to keep the expression's type known (avoids a false
+        // "unresolved" diagnostic when the hash's Value itself is a
+        // type variable).
+        "[]=" | "store" => Ty::Nil,
         "length" | "size" | "count" => Ty::Int,
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
@@ -273,6 +287,38 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // refine when a fixture demands it).
         "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        _ => unknown(),
+    }
+}
+
+/// Methods available on every Ruby object. Resolved before per-type
+/// dispatch so receiver type doesn't matter — `nil?` on a String, an
+/// Int, a user class, even Nil itself all return Bool.
+pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
+    match method.as_str() {
+        // Type predicates.
+        "nil?" | "is_a?" | "kind_of?" | "instance_of?" | "respond_to?"
+        | "frozen?" | "tainted?" | "untrusted?" => Some(Ty::Bool),
+        // Value equality / comparison operators.
+        "==" | "!=" | "eql?" | "equal?" => Some(Ty::Bool),
+        // Object introspection.
+        "class" => Some(Ty::Class {
+            id: ClassId(Symbol::from("Class")),
+            args: vec![],
+        }),
+        "hash" | "object_id" => Some(Ty::Int),
+        "inspect" | "to_s" => Some(Ty::Str),
+        _ => None,
+    }
+}
+
+pub(super) fn bool_method(method: &Symbol) -> Ty {
+    match method.as_str() {
+        // Unary `!` and bitwise/logical operators all produce Bool.
+        "!" | "&" | "|" | "^" => Ty::Bool,
+        "==" | "!=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        "to_s" => Ty::Str,
+        "inspect" => Ty::Str,
         _ => unknown(),
     }
 }

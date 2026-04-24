@@ -216,10 +216,58 @@ impl Analyzer {
         errors_cls
             .instance_methods
             .insert(Symbol::from("each"), error_ty.clone());
+        // `errors << "message"` is the transpiled-shape idiom for adding
+        // errors from a model's `validate` method. Returns the errors
+        // collection (same as Array#<<). `add` is the semantically-
+        // equivalent Rails idiom.
+        errors_cls.instance_methods.insert(
+            Symbol::from("<<"),
+            Ty::Class {
+                id: ClassId(Symbol::from("ActiveModel::Errors")),
+                args: vec![],
+            },
+        );
+        errors_cls.instance_methods.insert(
+            Symbol::from("add"),
+            Ty::Class {
+                id: ClassId(Symbol::from("ActiveModel::Errors")),
+                args: vec![],
+            },
+        );
+        errors_cls.instance_methods.insert(
+            Symbol::from("clear"),
+            Ty::Class {
+                id: ClassId(Symbol::from("ActiveModel::Errors")),
+                args: vec![],
+            },
+        );
         classes.insert(
             ClassId(Symbol::from("ActiveModel::Errors")),
             errors_cls,
         );
+
+        // CollectionProxy — the runtime helper transpiled models use
+        // for has_many associations. `new(...)` returns an instance;
+        // iteration/build/create/count/size live on the instance.
+        // Registered under the bare last-segment name because the
+        // body-typer instantiates `Const { path }` using `path.last()`
+        // — see ExprNode::Const branch in analyze/body/mod.rs.
+        let cp_class = ClassId(Symbol::from("CollectionProxy"));
+        let mut cp_cls = ClassInfo::default();
+        cp_cls.class_methods.insert(
+            Symbol::from("new"),
+            Ty::Class { id: cp_class.clone(), args: vec![] },
+        );
+        cp_cls.instance_methods.insert(Symbol::from("size"), Ty::Int);
+        cp_cls.instance_methods.insert(Symbol::from("length"), Ty::Int);
+        cp_cls.instance_methods.insert(Symbol::from("count"), Ty::Int);
+        cp_cls.instance_methods.insert(Symbol::from("empty?"), Ty::Bool);
+        // `each`, `build`, `create` — return types depend on the target
+        // class which isn't known from the proxy type alone. Leave as
+        // unknown() placeholders; real resolution requires threading
+        // association metadata through the ivar type, which is future
+        // work.
+        classes.insert(cp_class, cp_cls);
 
         // Individual Error with its Rails API.
         let mut error_cls = ClassInfo::default();
@@ -371,9 +419,22 @@ impl Analyzer {
             }
         }
         for model in &mut app.models {
+            // Model instance methods access `@attributes` as the typed
+            // attribute hash. Transpiled-shape models reference it
+            // directly from getter/setter methods; prime the ivar with
+            // the expected shape so the body-typer doesn't flag every
+            // attribute method as unresolved.
+            let mut class_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            class_ivars.insert(
+                Symbol::from("attributes"),
+                Ty::Hash {
+                    key: Box::new(Ty::Sym),
+                    value: Box::new(Ty::Var { var: crate::ident::TyVar(0) }),
+                },
+            );
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: HashMap::new(),
+                ivar_bindings: class_ivars,
                 local_bindings: HashMap::new(),
             };
             for scope in model.scopes_mut() {
