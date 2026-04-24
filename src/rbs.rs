@@ -185,11 +185,146 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
     };
 
     let mut params = Vec::new();
-    for (idx, node) in fn_type.required_positionals().iter().enumerate() {
+    let method_name = method.name().as_str().to_string();
+
+    collect_function_params(
+        fn_type.required_positionals().iter(),
+        &mut params,
+        ParamKind::Required,
+        &method_name,
+        "required",
+    )?;
+    collect_function_params(
+        fn_type.optional_positionals().iter(),
+        &mut params,
+        ParamKind::Optional,
+        &method_name,
+        "optional",
+    )?;
+
+    // `*rest` positional. Prism-rbs models this as a single optional
+    // FunctionParam; if present, it becomes one `Rest` param.
+    if let Some(rest_node) = fn_type.rest_positionals() {
+        let Node::FunctionParam(fn_param) = rest_node else {
+            return Err(format!(
+                "method `{method_name}` rest positional is not a FunctionParam"
+            ));
+        };
+        let name = fn_param
+            .name()
+            .map(|s| Symbol::new(s.as_str()))
+            .unwrap_or_else(|| Symbol::new("rest"));
+        let ty = ty_from_node(&fn_param.type_())?;
+        params.push(Param { name, ty, kind: ParamKind::Rest });
+    }
+
+    collect_function_params(
+        fn_type.trailing_positionals().iter(),
+        &mut params,
+        ParamKind::Required,
+        &method_name,
+        "trailing",
+    )?;
+
+    // Required keywords: `k: Ty` (no default marker on the RBS side).
+    for (key, value) in fn_type.required_keywords().iter() {
+        let name = keyword_name(&key, &method_name, "required keyword")?;
+        let Node::FunctionParam(fn_param) = value else {
+            return Err(format!(
+                "method `{method_name}` required keyword `{}` is not a FunctionParam",
+                name.as_str()
+            ));
+        };
+        let ty = ty_from_node(&fn_param.type_())?;
+        params.push(Param {
+            name,
+            ty,
+            kind: ParamKind::Keyword { required: true },
+        });
+    }
+
+    // Optional keywords: `?k: Ty`.
+    for (key, value) in fn_type.optional_keywords().iter() {
+        let name = keyword_name(&key, &method_name, "optional keyword")?;
+        let Node::FunctionParam(fn_param) = value else {
+            return Err(format!(
+                "method `{method_name}` optional keyword `{}` is not a FunctionParam",
+                name.as_str()
+            ));
+        };
+        let ty = ty_from_node(&fn_param.type_())?;
+        params.push(Param {
+            name,
+            ty,
+            kind: ParamKind::Keyword { required: false },
+        });
+    }
+
+    // `**rest_keywords` / `**opts`.
+    if let Some(rest_node) = fn_type.rest_keywords() {
+        let Node::FunctionParam(fn_param) = rest_node else {
+            return Err(format!(
+                "method `{method_name}` rest keywords is not a FunctionParam"
+            ));
+        };
+        let name = fn_param
+            .name()
+            .map(|s| Symbol::new(s.as_str()))
+            .unwrap_or_else(|| Symbol::new("opts"));
+        let ty = ty_from_node(&fn_param.type_())?;
+        params.push(Param {
+            name,
+            ty,
+            kind: ParamKind::KeywordRest,
+        });
+    }
+
+    let ret = ty_from_node(&fn_type.return_type())?;
+
+    // Block signature: `{ (...) -> T }` — captured on method_type, not
+    // fn_type. For now we only surface its presence via the block
+    // param in `Ty::Fn`; full block-signature typing is a future step.
+    let block = method_type.block().map(|_| Box::new(Ty::Var { var: crate::ident::TyVar(0) }));
+    if block.is_some() {
+        params.push(Param {
+            name: Symbol::new("block"),
+            ty: Ty::Var { var: crate::ident::TyVar(0) },
+            kind: ParamKind::Block,
+        });
+    }
+
+    Ok(Ty::Fn {
+        params,
+        block,
+        ret: Box::new(ret),
+        effects: EffectSet::pure(),
+    })
+}
+
+fn keyword_name(key: &Node<'_>, method_name: &str, category: &str) -> Result<Symbol, String> {
+    if let Node::Symbol(sym) = key {
+        Ok(Symbol::new(sym.as_str()))
+    } else {
+        Err(format!(
+            "method `{method_name}` {category} key is not a symbol"
+        ))
+    }
+}
+
+fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
+    iter: I,
+    out: &mut Vec<Param>,
+    kind: ParamKind,
+    method_name: &str,
+    category: &str,
+) -> Result<(), String> {
+    // Placeholder prefix for unnamed positionals. Keep "arg" for the
+    // required/optional/trailing cases so the existing convention
+    // (and dependent tests) stays stable.
+    for (idx, node) in iter.enumerate() {
         let Node::FunctionParam(fn_param) = node else {
             return Err(format!(
-                "method `{}` positional #{idx} is not a FunctionParam",
-                method.name()
+                "method `{method_name}` {category} #{idx} is not a FunctionParam"
             ));
         };
         let name = fn_param
@@ -197,21 +332,9 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new(format!("arg{idx}")));
         let ty = ty_from_node(&fn_param.type_())?;
-        params.push(Param {
-            name,
-            ty,
-            kind: ParamKind::Required,
-        });
+        out.push(Param { name, ty, kind: kind.clone() });
     }
-
-    let ret = ty_from_node(&fn_type.return_type())?;
-
-    Ok(Ty::Fn {
-        params,
-        block: None,
-        ret: Box::new(ret),
-        effects: EffectSet::pure(),
-    })
+    Ok(())
 }
 
 fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {

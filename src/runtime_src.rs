@@ -193,46 +193,94 @@ fn method_def_from(def: &ruby_prism::DefNode<'_>) -> Result<MethodDef, String> {
     })
 }
 
+/// Collect every parameter's name, in source order, across all kinds:
+/// required positional, optional positional, rest (`*args`), post-rest,
+/// required keyword, optional keyword, kwargs (`**opts`), and block
+/// (`&block`). Anonymous forms (`*`, `**`, `&`) are skipped.
+///
+/// Returned list is flat — no kind distinction preserved. The RBS
+/// signature's `Ty::Fn` encodes the per-position kind; the arity check
+/// in `parse_methods_with_rbs_in_ctx` ensures same-length alignment,
+/// and the body-typer seeds local bindings by position-zipping names
+/// to signature params.
 fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec<Symbol>, String> {
     let Some(params_node) = def.parameters() else {
         return Ok(Vec::new());
     };
 
-    // Anything beyond required positionals means the runtime source has
-    // reached for a feature the extractor doesn't support yet. Better to
-    // fail loudly than to silently drop a keyword arg or block param.
-    if params_node.optionals().iter().next().is_some() {
-        return Err(format!("method `{method_name}`: optional params not yet supported"));
-    }
-    if params_node.rest().is_some() {
-        return Err(format!("method `{method_name}`: rest/splat params not yet supported"));
-    }
-    if params_node.keywords().iter().next().is_some() {
-        return Err(format!("method `{method_name}`: keyword params not yet supported"));
-    }
-    if params_node.keyword_rest().is_some() {
-        return Err(format!("method `{method_name}`: **kwargs not yet supported"));
-    }
-    if params_node.block().is_some() {
-        return Err(format!("method `{method_name}`: block params not yet supported"));
-    }
-    if params_node.posts().iter().next().is_some() {
-        return Err(format!(
-            "method `{method_name}`: post-rest positional params not yet supported"
-        ));
-    }
-
     let mut names = Vec::new();
+
+    // Required positional: `def foo(a, b)`.
     for req in params_node.requireds().iter() {
         let rp = req.as_required_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected required-parameter shape")
         })?;
-        let name_bytes = rp.name().as_slice();
-        let name = std::str::from_utf8(name_bytes)
-            .map_err(|_| format!("method `{method_name}`: param name is not UTF-8"))?;
-        names.push(Symbol::new(name));
+        names.push(Symbol::new(decode_utf8(rp.name().as_slice(), method_name)?));
     }
+
+    // Optional positional: `def foo(a = 1)`.
+    for opt in params_node.optionals().iter() {
+        let op = opt.as_optional_parameter_node().ok_or_else(|| {
+            format!("method `{method_name}`: unexpected optional-parameter shape")
+        })?;
+        names.push(Symbol::new(decode_utf8(op.name().as_slice(), method_name)?));
+    }
+
+    // Rest/splat: `*args`. Anonymous `*` has no name — skip.
+    if let Some(rest) = params_node.rest() {
+        if let Some(rp) = rest.as_rest_parameter_node() {
+            if let Some(loc) = rp.name() {
+                names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+            }
+        }
+        // ImplicitRestNode (shorthand `def foo(a, *)`) has no name.
+    }
+
+    // Post-rest required positional: `def foo(*rest, a, b)`.
+    for post in params_node.posts().iter() {
+        let pp = post.as_required_parameter_node().ok_or_else(|| {
+            format!("method `{method_name}`: unexpected post-required-parameter shape")
+        })?;
+        names.push(Symbol::new(decode_utf8(pp.name().as_slice(), method_name)?));
+    }
+
+    // Keywords (required and optional): `def foo(a:, b: 1)`.
+    for kw in params_node.keywords().iter() {
+        if let Some(rkp) = kw.as_required_keyword_parameter_node() {
+            names.push(Symbol::new(decode_utf8(rkp.name().as_slice(), method_name)?));
+        } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
+            names.push(Symbol::new(decode_utf8(okp.name().as_slice(), method_name)?));
+        } else {
+            return Err(format!(
+                "method `{method_name}`: unexpected keyword-parameter shape"
+            ));
+        }
+    }
+
+    // Kwargs splat: `**opts`. `**nil` explicitly forbids kwargs and has
+    // no name — skip it.
+    if let Some(krest) = params_node.keyword_rest() {
+        if let Some(krp) = krest.as_keyword_rest_parameter_node() {
+            if let Some(loc) = krp.name() {
+                names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+            }
+        }
+        // NoKeywordsParameterNode (`**nil`) — skip.
+    }
+
+    // Block: `&block`. Anonymous `&` has no name — skip.
+    if let Some(block) = params_node.block() {
+        if let Some(loc) = block.name() {
+            names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+        }
+    }
+
     Ok(names)
+}
+
+fn decode_utf8<'a>(bytes: &'a [u8], method_name: &str) -> Result<&'a str, String> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| format!("method `{method_name}`: param name is not UTF-8"))
 }
 
 #[cfg(test)]
@@ -378,43 +426,63 @@ mod tests {
     }
 
     #[test]
-    fn keyword_params_rejected_explicitly() {
-        let src = "def f(a:, b:)\n  1\nend\n";
-        let err = parse_methods(src).unwrap_err();
-        assert!(
-            err.contains("keyword params"),
-            "expected keyword-param rejection, got: {err}"
+    fn keyword_params_collected() {
+        let src = "def f(a:, b: 1)\n  1\nend\n";
+        let m = parse_one(src);
+        assert_eq!(
+            m.params,
+            vec![Symbol::new("a"), Symbol::new("b")],
+            "keyword param names preserved in order"
         );
     }
 
     #[test]
-    fn splat_params_rejected_explicitly() {
+    fn splat_params_collected() {
         let src = "def f(*args)\n  1\nend\n";
-        let err = parse_methods(src).unwrap_err();
-        assert!(
-            err.contains("rest/splat"),
-            "expected splat rejection, got: {err}"
-        );
+        let m = parse_one(src);
+        assert_eq!(m.params, vec![Symbol::new("args")]);
     }
 
     #[test]
-    fn block_params_rejected_explicitly() {
+    fn block_params_collected() {
         let src = "def f(&blk)\n  1\nend\n";
-        let err = parse_methods(src).unwrap_err();
-        assert!(
-            err.contains("block params"),
-            "expected block-param rejection, got: {err}"
+        let m = parse_one(src);
+        assert_eq!(m.params, vec![Symbol::new("blk")]);
+    }
+
+    #[test]
+    fn optional_params_collected() {
+        let src = "def f(a = 1)\n  a\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.params, vec![Symbol::new("a")]);
+    }
+
+    #[test]
+    fn mixed_param_kinds_in_source_order() {
+        let src = "def f(a, b = 1, *rest, c, d:, e: 2, **opts, &blk)\n  a\nend\n";
+        let m = parse_one(src);
+        assert_eq!(
+            m.params,
+            vec![
+                Symbol::new("a"),
+                Symbol::new("b"),
+                Symbol::new("rest"),
+                Symbol::new("c"),
+                Symbol::new("d"),
+                Symbol::new("e"),
+                Symbol::new("opts"),
+                Symbol::new("blk"),
+            ]
         );
     }
 
     #[test]
-    fn optional_params_rejected_explicitly() {
-        let src = "def f(a = 1)\n  a\nend\n";
-        let err = parse_methods(src).unwrap_err();
-        assert!(
-            err.contains("optional params"),
-            "expected optional-param rejection, got: {err}"
-        );
+    fn anonymous_splat_and_block_skipped() {
+        // `*` and `&` without names are positional/block anonymous
+        // forwards. No name to capture; kept out of the params list.
+        let src = "def f(a, *, &)\n  a\nend\n";
+        let m = parse_one(src);
+        assert_eq!(m.params, vec![Symbol::new("a")]);
     }
 
     #[test]
