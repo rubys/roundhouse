@@ -1,0 +1,31 @@
+module ActiveRecord
+  class Migration
+    def self.[]: (Float version) -> Class
+    def change: () -> void
+    def up: () -> void
+    def migrate: () -> void
+    def create_table: (Symbol name, **String _options) { (TableBuilder) -> void } -> void
+    def drop_table: (Symbol name) -> void
+  end
+
+  class TableBuilder
+    attr_reader columns: Array[Symbol]
+    attr_reader foreign_keys: Array[Hash[Symbol, String]]
+
+    def initialize: (Symbol name) -> void
+    def string: (Symbol name) -> Array[Symbol]
+    def text: (Symbol name) -> Array[Symbol]
+    def integer: (Symbol name) -> Array[Symbol]
+    def bigint: (Symbol name) -> Array[Symbol]
+    def float: (Symbol name) -> Array[Symbol]
+    def decimal: (Symbol name) -> Array[Symbol]
+    def boolean: (Symbol name) -> Array[Symbol]
+    def date: (Symbol name) -> Array[Symbol]
+    def datetime: (Symbol name) -> Array[Symbol]
+    def time: (Symbol name) -> Array[Symbol]
+    def timestamps: () -> Array[Symbol]
+    def references: (Symbol name, ?null: bool, ?foreign_key: bool, ?polymorphic: bool) -> void
+    def belongs_to: (Symbol name, ?null: bool, ?foreign_key: bool, ?polymorphic: bool) -> void
+    def index: (Array[Symbol] cols) -> void
+  end
+end

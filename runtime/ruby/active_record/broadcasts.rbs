@@ -1,0 +1,15 @@
+module ActiveRecord
+  module Broadcasts
+    def broadcast_replace_to: (*String channels, ?target: String?) -> nil
+    def broadcast_append_to: (*String channels, ?target: String?) -> nil
+    def broadcast_prepend_to: (*String channels, ?target: String?) -> nil
+    def broadcast_remove_to: (*String channels, ?target: String?) -> nil
+
+    # The log is a heterogeneous array of Hash entries (action/record/
+    # channels/target). Until Ty::Untyped lands in the IR, approximate
+    # as `Array[Hash[Symbol, String]]` — loses record-field precision
+    # but satisfies arity and gives downstream consumers a typed handle.
+    def self.log: () -> Array[Hash[Symbol, String]]
+    def self.reset_log: () -> Array[Hash[Symbol, String]]
+  end
+end

@@ -297,6 +297,14 @@ pub struct MethodDef {
     pub body: Expr,
     pub signature: Option<Ty>,
     pub effects: EffectSet,
+    /// Class/module the method is defined under, if any. `None` for
+    /// top-level `def`s. Used by the body-typer to seed `self_ty` when
+    /// analyzing library-shape code (runtime_src) — Rails app ingest
+    /// holds this info on the enclosing Model/Controller struct
+    /// instead. Carried as the last-segment name (e.g. `Base`, not
+    /// `ActiveRecord::Base`), matching how `Const { path }` types.
+    #[serde(default)]
+    pub enclosing_class: Option<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

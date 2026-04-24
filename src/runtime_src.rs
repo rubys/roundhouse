@@ -38,7 +38,7 @@ pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
 
     let root = result.node();
     let mut out = Vec::new();
-    walk_scope(&root, &mut out)?;
+    walk_scope(&root, &mut out, None)?;
     Ok(out)
 }
 
@@ -124,46 +124,75 @@ pub fn parse_methods_with_rbs_in_ctx(
                 ctx.local_bindings.insert(name.clone(), p.ty.clone());
             }
         }
+        // Seed `self_ty` from the enclosing class/module so
+        // `SelfRef` in method bodies types cleanly. For module
+        // instance methods (e.g. `Broadcasts#broadcast_replace_to`),
+        // `self` is the includer — approximated as the module type
+        // itself. Downstream refinement could narrow this to the
+        // include chain once the analyzer tracks module consumers.
+        if let Some(enclosing) = &m.enclosing_class {
+            ctx.self_ty = Some(Ty::Class {
+                id: crate::ident::ClassId(enclosing.clone()),
+                args: vec![],
+            });
+        }
         typer.analyze_expr(&mut m.body, &ctx);
     }
 
     Ok(methods)
 }
 
-fn walk_scope(node: &Node<'_>, out: &mut Vec<MethodDef>) -> Result<(), String> {
+fn walk_scope(
+    node: &Node<'_>,
+    out: &mut Vec<MethodDef>,
+    enclosing: Option<&str>,
+) -> Result<(), String> {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_from_stmt(&stmt, out)?;
+            collect_from_stmt(&stmt, out, enclosing)?;
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_from_stmt(&stmt, out)?;
+            collect_from_stmt(&stmt, out, enclosing)?;
         }
     }
     Ok(())
 }
 
-fn collect_from_stmt(node: &Node<'_>, out: &mut Vec<MethodDef>) -> Result<(), String> {
+fn collect_from_stmt(
+    node: &Node<'_>,
+    out: &mut Vec<MethodDef>,
+    enclosing: Option<&str>,
+) -> Result<(), String> {
     if let Some(def) = node.as_def_node() {
-        out.push(method_def_from(&def)?);
+        out.push(method_def_from(&def, enclosing)?);
         return Ok(());
     }
     if let Some(module) = node.as_module_node() {
+        let name_bytes = module.name().as_slice();
+        let name_str = std::str::from_utf8(name_bytes)
+            .map_err(|_| "module name is not UTF-8".to_string())?;
         if let Some(body) = module.body() {
-            walk_scope(&body, out)?;
+            walk_scope(&body, out, Some(name_str))?;
         }
         return Ok(());
     }
     if let Some(class) = node.as_class_node() {
+        let name_bytes = class.name().as_slice();
+        let name_str = std::str::from_utf8(name_bytes)
+            .map_err(|_| "class name is not UTF-8".to_string())?;
         if let Some(body) = class.body() {
-            walk_scope(&body, out)?;
+            walk_scope(&body, out, Some(name_str))?;
         }
         return Ok(());
     }
     Ok(())
 }
 
-fn method_def_from(def: &ruby_prism::DefNode<'_>) -> Result<MethodDef, String> {
+fn method_def_from(
+    def: &ruby_prism::DefNode<'_>,
+    enclosing: Option<&str>,
+) -> Result<MethodDef, String> {
     let name_bytes = def.name().as_slice();
     let name = Symbol::new(
         std::str::from_utf8(name_bytes)
@@ -190,6 +219,7 @@ fn method_def_from(def: &ruby_prism::DefNode<'_>) -> Result<MethodDef, String> {
         body,
         signature: None,
         effects: EffectSet::pure(),
+        enclosing_class: enclosing.map(Symbol::new),
     })
 }
 

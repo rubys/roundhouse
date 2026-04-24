@@ -1,0 +1,18 @@
+module ActiveRecord
+  # CollectionProxy is structurally generic over its `target_class` —
+  # `to_a`/`each`/`build`/`create` return instances of whatever class
+  # was passed to `new`. Our IR doesn't yet have generics; each return
+  # site is typed as `Base` (the common ancestor). Refine when `Ty::Var`
+  # or a Self-type variant lands.
+  class CollectionProxy
+    def initialize: (owner: Base, target_class: Base, foreign_key: Symbol) -> void
+    def to_a: () -> Array[Base]
+    def each: () { (Base) -> void } -> void
+    def size: () -> Integer
+    def length: () -> Integer
+    def count: () -> Integer
+    def empty?: () -> bool
+    def build: (?Hash[Symbol, String] attrs) -> Base
+    def create: (?Hash[Symbol, String] attrs) -> Base
+  end
+end

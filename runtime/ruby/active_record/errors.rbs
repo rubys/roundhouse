@@ -1,0 +1,8 @@
+module ActiveRecord
+  class RecordNotFound < StandardError
+  end
+
+  class RecordInvalid < StandardError
+    def initialize: (Base record) -> void
+  end
+end

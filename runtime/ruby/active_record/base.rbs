@@ -1,0 +1,64 @@
+module ActiveRecord
+  class Base
+    # Class metadata + schema tracking
+    def self.attr_accessor: (*Symbol names) -> void
+    def self.schema_column_names: () -> Array[Symbol]
+    def self.inherited: (Class subclass) -> void
+    def self.table_name: () -> String
+    def self.table_name=: (String n) -> String
+    def self.abstract?: () -> bool
+
+    # Class-level CRUD. Returns the concrete class instance; our IR
+    # lacks a Self type, so Base stands in for the specific subclass.
+    def self.instantiate: (Hash[Symbol, String] row) -> Base
+    def self.create: (?Hash[Symbol, String] attrs) -> Base
+    def self.create!: (?Hash[Symbol, String] attrs) -> Base
+    def self.all: () -> Array[Base]
+    def self.find: (Integer id) -> Base
+    def self.find_by: (Hash[Symbol, String] conditions) -> Base?
+    def self.where: (Hash[Symbol, String] conditions) -> Array[Base]
+    def self.count: () -> Integer
+    def self.exists?: (Integer id) -> bool
+    def self.destroy_all: () -> Array[Base]
+
+    # Instance lifecycle
+    def initialize: (?Hash[Symbol, String] attrs) -> void
+    def attributes: () -> Hash[Symbol, String]
+    def persisted?: () -> bool
+    def new_record?: () -> bool
+    def destroyed?: () -> bool
+    def read_attribute: (Symbol name) -> String
+    def []: (Symbol name) -> String
+    def []=: (Symbol name, String value) -> String
+
+    # Lifecycle hooks — subclasses override. Default: no-op.
+    def before_validation: () -> void
+    def after_validation: () -> void
+    def before_save: () -> void
+    def after_save: () -> void
+    def before_create: () -> void
+    def after_create: () -> void
+    def before_update: () -> void
+    def after_update: () -> void
+    def before_destroy: () -> void
+    def after_destroy: () -> void
+    def after_commit: () -> void
+    def after_create_commit: () -> void
+    def after_update_commit: () -> void
+    def after_destroy_commit: () -> void
+    def after_save_commit: () -> void
+    def after_touch: () -> void
+
+    def validate: () -> void
+    def valid?: () -> bool
+    def save: () -> bool
+    def save!: () -> bool
+    def destroy: () -> Base
+    def update: (Hash[Symbol, String] attrs) -> bool
+    def ==: (Base other) -> bool
+    def hash: () -> Integer
+
+    private
+    def init_from_row: (Hash[Symbol, String] row) -> void
+  end
+end

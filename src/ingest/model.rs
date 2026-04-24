@@ -212,6 +212,9 @@ fn ingest_method(
         body,
         signature: None,
         effects: EffectSet::pure(),
+        // Rails model methods carry their owner on the surrounding
+        // Model struct (model.name); no need to duplicate here.
+        enclosing_class: None,
     })
 }
 
