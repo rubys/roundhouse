@@ -367,6 +367,38 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 DivPowCase::Unknown => {}
             }
         }
+        // `%` dispatch: Go's `%` works only on integers (not floats).
+        // For Float%Float or mixed, need `math.Mod`. Str % args has
+        // no direct Go equivalent — emit a runtime panic.
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_modulo(r, arg) {
+                ModuloCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("float64({ls})"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("float64({rs})")),
+                        _ => (ls, rs),
+                    };
+                    return format!("math.Mod({ls_cast}, {rs_cast})");
+                }
+                ModuloCase::Numeric => {
+                    // Float%Float needs math.Mod; Int%Int uses native.
+                    if matches!(r.ty.as_ref(), Some(Ty::Float)) {
+                        return format!("math.Mod({ls}, {rs})");
+                    }
+                    // Int%Int falls through to native `%`.
+                }
+                ModuloCase::StringFormat => {
+                    return r#"panic("roundhouse: String % (sprintf) not yet supported for Go target")"#.to_string();
+                }
+                ModuloCase::Incompatible => {
+                    return r#"panic("roundhouse: % with incompatible operand types")"#.to_string();
+                }
+                ModuloCase::Unknown => {}
+            }
+        }
         if is_go_binop(method) {
             return format!(
                 "{} {method} {}",

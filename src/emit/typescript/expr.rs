@@ -223,6 +223,20 @@ pub(super) fn emit_send_with_parens(
                 );
             }
         }
+        // `%` dispatch: TS has native `%` for numerics; Str % args
+        // (Ruby sprintf) has no JS/TS equivalent — emit a throw.
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            match classify_modulo(r, arg) {
+                ModuloCase::StringFormat => {
+                    return r#"(() => { throw new Error("roundhouse: String % (sprintf) not yet supported for TypeScript target"); })()"#.to_string();
+                }
+                ModuloCase::Incompatible => {
+                    return r#"(() => { throw new Error("roundhouse: % with incompatible operand types"); })()"#.to_string();
+                }
+                _ => {}
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }

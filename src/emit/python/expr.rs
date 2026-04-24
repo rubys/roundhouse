@@ -233,6 +233,15 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 );
             }
         }
+        // `%` dispatch: Python's native `%` covers numeric and string
+        // format directly (same printf-style as Ruby). Only refuse
+        // Incompatible pairs.
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            if matches!(classify_modulo(r, arg), ModuloCase::Incompatible) {
+                return r#"(_ for _ in ()).throw(TypeError("roundhouse: % with incompatible operand types"))"#.to_string();
+            }
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }

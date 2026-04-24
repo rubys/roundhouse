@@ -4,6 +4,7 @@
 
 use super::shared::indent;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ty::Ty;
 
 // Bodies ---------------------------------------------------------------
 
@@ -278,6 +279,36 @@ fn emit_send(
                     );
                 }
                 DivPowCase::Unknown => {}
+            }
+        }
+        // `%` dispatch: Elixir has no `%` operator. `rem/2` for
+        // integers, `:math.fmod/2` for floats. Str % args is Ruby's
+        // sprintf — emit a runtime raise (no direct Elixir equivalent).
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            let ls = emit_expr(r, receiver_arg);
+            let rs = emit_expr(arg, receiver_arg);
+            match classify_modulo(r, arg) {
+                ModuloCase::Numeric => {
+                    if matches!(r.ty.as_ref(), Some(Ty::Float)) {
+                        return format!(":math.fmod({ls}, {rs})");
+                    }
+                    return format!("rem({ls}, {rs})");
+                }
+                ModuloCase::NumericPromote => {
+                    return format!(":math.fmod({ls}, {rs})");
+                }
+                ModuloCase::StringFormat => {
+                    return r#"raise "roundhouse: String % (sprintf) not yet supported for Elixir target""#.to_string();
+                }
+                ModuloCase::Incompatible => {
+                    return r#"raise "roundhouse: % with incompatible operand types""#.to_string();
+                }
+                ModuloCase::Unknown => {
+                    // Fallback: assume integer context (rem/2 is the most
+                    // common case). Will fail at Elixir compile if wrong.
+                    return format!("rem({ls}, {rs})");
+                }
             }
         }
         if is_ex_binop(method) {

@@ -207,6 +207,15 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 );
             }
         }
+        // `%` dispatch: Crystal's native `%` covers numeric and string
+        // format (`"%s" % [x]` is Ruby-compatible). Only refuse
+        // Incompatible pairs.
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            if matches!(classify_modulo(r, arg), ModuloCase::Incompatible) {
+                return r#"raise "roundhouse: % with incompatible operand types""#.to_string();
+            }
+        }
         if is_cr_binop(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }

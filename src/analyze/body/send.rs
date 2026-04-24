@@ -255,8 +255,9 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
         // Operators. `+` concats; `<<` mutates in place but still returns self.
-        // `*` is repetition ("a" * 3). Comparisons uniformly return Bool.
-        "+" | "<<" | "*" | "concat" => Ty::Str,
+        // `*` is repetition ("a" * 3); `%` is sprintf (returns Str). Comparisons
+        // uniformly return Bool.
+        "+" | "<<" | "*" | "%" | "concat" => Ty::Str,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
     }

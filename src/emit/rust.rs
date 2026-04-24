@@ -339,6 +339,32 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 DivPowCase::Unknown => {}
             }
         }
+        // `%` dispatch: numeric uses native `%` (with `as f64` cast
+        // on mixed). Str % args is Ruby's sprintf — Rust has no direct
+        // equivalent (format! needs compile-time format string), so
+        // emit a runtime panic with a clear message.
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            let ls = rt_emit_expr(r);
+            let rs = rt_emit_expr(arg);
+            match classify_modulo(r, arg) {
+                ModuloCase::NumericPromote => {
+                    let (ls_cast, rs_cast) = match (r.ty.as_ref(), arg.ty.as_ref()) {
+                        (Some(Ty::Int), _) => (format!("{ls} as f64"), rs),
+                        (_, Some(Ty::Int)) => (ls, format!("{rs} as f64")),
+                        _ => (ls, rs),
+                    };
+                    return format!("{ls_cast} % {rs_cast}");
+                }
+                ModuloCase::StringFormat => {
+                    return r#"panic!("roundhouse: String % (sprintf) not yet supported for Rust target")"#.to_string();
+                }
+                ModuloCase::Incompatible => {
+                    return r#"panic!("roundhouse: % with incompatible operand types")"#.to_string();
+                }
+                ModuloCase::Numeric | ModuloCase::Unknown => {}
+            }
+        }
         if is_rust_binop(method) {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }
