@@ -91,18 +91,66 @@ fn ingest_library_method(
         MethodReceiver::Instance
     };
 
-    // Required positional parameters only — same shape as the model
-    // ingest. Richer kinds (optional, keyword, block) land when a
-    // fixture drives the gap.
-    let params: Vec<Symbol> = match def.parameters() {
-        Some(pn) => pn
-            .requireds()
-            .iter()
-            .filter_map(|req| req.as_required_parameter_node())
-            .map(|rp| Symbol::from(constant_id_str(&rp.name())))
-            .collect(),
-        None => Vec::new(),
-    };
+    // Collect parameters across all kinds Ruby supports. Mirrors
+    // runtime_src::method_params; the flat list loses the kind
+    // distinction (re-derived from the def node when needed by emit).
+    // Bodies under app/models/ legitimately use optionals (`attrs = {}`)
+    // and keywords (`columns:`); the model ingest doesn't need them yet
+    // but library classes do.
+    let mut params: Vec<Symbol> = Vec::new();
+    if let Some(pn) = def.parameters() {
+        for req in pn.requireds().iter() {
+            if let Some(rp) = req.as_required_parameter_node() {
+                params.push(Symbol::from(constant_id_str(&rp.name())));
+            }
+        }
+        for opt in pn.optionals().iter() {
+            if let Some(op) = opt.as_optional_parameter_node() {
+                params.push(Symbol::from(constant_id_str(&op.name())));
+            }
+        }
+        if let Some(rest) = pn.rest() {
+            if let Some(rp) = rest.as_rest_parameter_node() {
+                if let Some(loc) = rp.name() {
+                    if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
+                        params.push(Symbol::from(s));
+                    }
+                }
+            }
+        }
+        for post in pn.posts().iter() {
+            if let Some(pp) = post.as_required_parameter_node() {
+                params.push(Symbol::from(constant_id_str(&pp.name())));
+            }
+        }
+        for kw in pn.keywords().iter() {
+            if let Some(rkp) = kw.as_required_keyword_parameter_node() {
+                if let Ok(s) = std::str::from_utf8(rkp.name().as_slice()) {
+                    params.push(Symbol::from(s));
+                }
+            } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
+                if let Ok(s) = std::str::from_utf8(okp.name().as_slice()) {
+                    params.push(Symbol::from(s));
+                }
+            }
+        }
+        if let Some(krest) = pn.keyword_rest() {
+            if let Some(krp) = krest.as_keyword_rest_parameter_node() {
+                if let Some(loc) = krp.name() {
+                    if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
+                        params.push(Symbol::from(s));
+                    }
+                }
+            }
+        }
+        if let Some(block) = pn.block() {
+            if let Some(loc) = block.name() {
+                if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
+                    params.push(Symbol::from(s));
+                }
+            }
+        }
+    }
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
