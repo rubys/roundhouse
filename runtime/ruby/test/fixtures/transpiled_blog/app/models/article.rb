@@ -1,15 +1,19 @@
 # Transpiled shape of fixtures/real-blog/app/models/article.rb.
 #
 # Expansion applied (per ruby2js's filter/rails/model.rb, updated
-# for a typed-field-per-attribute representation):
+# for a typed-field-per-attribute + specialized-association representation):
 #   - schema columns: declared via `attr_accessor` — tells the transpile
 #     these are typed fields per the migration, not polymorphic Hash
 #     lookups. Each becomes its own typed ivar (@title, @body, etc.)
 #     in the emitted target, enabling fully-typed output for Rust and
 #     similar strict targets without forcing an `untyped`/`Any` escape.
 #   - has_many :comments, dependent: :destroy: explicit `comments`
-#     getter returning a CollectionProxy, plus explicit `destroy`
-#     override that cascades.
+#     getter returning a per-association proxy class
+#     (`ArticleCommentsProxy`) with the target class, table, and
+#     foreign key baked in. Specialized form replaces the generic
+#     CollectionProxy[T] — no type parameter survives into the IR,
+#     which sidesteps generics-substitution work for strict targets.
+#     `destroy` override cascades.
 #   - validates: explicit `validate` instance method calling validates_*
 #     helpers provided by the runtime.
 #   - broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend:
@@ -28,15 +32,7 @@ class Article < ApplicationRecord
 
   # --- has_many :comments ---
   def comments
-    if @_comments
-      @_comments
-    else
-      @_comments = ActiveRecord::CollectionProxy.new(
-        owner: self,
-        target_class: Comment,
-        foreign_key: :article_id
-      )
-    end
+    @_comments ||= ArticleCommentsProxy.new(self)
   end
 
   # --- dependent: :destroy ---
