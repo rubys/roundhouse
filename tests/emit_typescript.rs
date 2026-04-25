@@ -973,6 +973,40 @@ fn async_adapter_places_await_at_suspending_subexpression() {
 }
 
 #[test]
+fn library_class_emits_as_plain_ts_class() {
+    // transpiled_blog has ArticleCommentsProxy as a non-model class
+    // under app/models/. The TS emitter should produce a plain
+    // `export class ArticleCommentsProxy { ... }` — no
+    // ApplicationRecord parent, no modelRegistry registration.
+    let mut app = ingest_app(Path::new("runtime/ruby/test/fixtures/transpiled_blog"))
+        .expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = typescript::emit(&app);
+    let content = find(&files, "app/models/article_comments_proxy.ts");
+
+    assert!(
+        content.contains("export class ArticleCommentsProxy {"),
+        "expected plain class declaration, got:\n{content}"
+    );
+    assert!(
+        !content.contains("extends ApplicationRecord"),
+        "library class should not extend ApplicationRecord:\n{content}"
+    );
+    assert!(
+        !content.contains("modelRegistry["),
+        "library class should not register in modelRegistry:\n{content}"
+    );
+    // Methods are present as walked bodies (correctness of body
+    // emission is tracked by separate work).
+    for method in ["initialize", "to_a", "size", "build", "create"] {
+        assert!(
+            content.contains(method),
+            "expected {method} in proxy output:\n{content}"
+        );
+    }
+}
+
+#[test]
 fn sync_and_async_differ_only_on_awaits() {
     // Byte-diff the two outputs: the only differences should be
     // `await ` insertions. Same actions, same function bodies

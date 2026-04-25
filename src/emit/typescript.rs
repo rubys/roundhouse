@@ -99,6 +99,7 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
     files.extend(library::emit_library_classes(app));
+    files.extend(library::emit_library_class_decls(app));
     files
 }
 
@@ -173,6 +174,7 @@ pub fn emit_with_adapter(
         files.push(schema_sql::emit_schema_sql(app));
     }
     files.extend(model::emit_models(app));
+    files.extend(library::emit_library_class_decls(app));
     if !app.controllers.is_empty() {
         files.push(EmittedFile {
             path: PathBuf::from("src/http.ts"),
