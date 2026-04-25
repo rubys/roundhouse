@@ -12,11 +12,18 @@ use crate::ty::Ty;
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
     let is_void = matches!(return_ty, Ty::Nil);
     match &*body.node {
-        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+        // `def initialize(owner); @owner = owner; end` — the assignment
+        // is the whole body. Emit the assignment as a statement, then
+        // return its value if non-void. Without this, the side-effect
+        // of setting the ivar is lost (`{};` of the value alone reads
+        // the local but doesn't write the ivar).
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            let field = ts_field_name(name.as_str());
+            let value_s = emit_expr(value);
             if is_void {
-                format!("{};", emit_expr(value))
+                format!("this.{field} = {value_s};")
             } else {
-                format!("return {};", emit_expr(value))
+                format!("return this.{field} = {value_s};")
             }
         }
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
