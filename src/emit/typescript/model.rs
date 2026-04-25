@@ -441,17 +441,31 @@ fn emit_model_method(out: &mut String, m: &MethodDef, model: &Model) {
     };
     let is_static = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
     let static_prefix = if is_static { "static " } else { "" };
+    // Mirror library.rs: zero-arg instance methods emit as getters so
+    // they match Juntos's reader idiom. Avoids overriding base-class
+    // accessors with methods (a TS error) — e.g. Article#destroy
+    // overriding ApplicationRecord's `get destroy()`.
+    //
+    // Exception list: methods that ApplicationRecord declares as
+    // methods (not getters) must override as methods, not getters,
+    // or TS errors with "function/accessor mismatch."
+    let stays_method = matches!(name.as_str(), "validate");
+    let is_getter = !is_static && m.params.is_empty() && !stays_method;
     let params: Vec<String> = m
         .params
         .iter()
         .map(|p| format!("{}: unknown", p.as_str()))
         .collect();
-    writeln!(
-        out,
-        "  {static_prefix}{name}({}){ret_annot} {{",
-        params.join(", ")
-    )
-    .unwrap();
+    if is_getter {
+        writeln!(out, "  get {name}(){ret_annot} {{").unwrap();
+    } else {
+        writeln!(
+            out,
+            "  {static_prefix}{name}({}){ret_annot} {{",
+            params.join(", ")
+        )
+        .unwrap();
+    }
     let attrs: Vec<crate::ident::Symbol> =
         model.attributes.fields.keys().cloned().collect();
     let rewritten = rewrite_bare_attrs_to_ivars(&m.body, &attrs);

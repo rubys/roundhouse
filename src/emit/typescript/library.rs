@@ -375,25 +375,34 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
     let is_static = matches!(m.receiver, MethodReceiver::Class);
     let static_prefix = if is_static { "static " } else { "" };
 
-    let mut params: Vec<String> = m
-        .params
-        .iter()
-        .map(|p| format!("{}: unknown", p.as_str()))
-        .collect();
-    // If the body uses `yield`, inject `__block` as the trailing
-    // parameter so the Yield handler in expr.rs has something to call.
-    // Ruby's yield always targets the enclosing method's implicit
-    // block; surfacing it as a named TS parameter keeps the rewrite
-    // local and avoids reaching for generators.
-    if body_uses_yield(&m.body) {
-        params.push("__block: (...args: any[]) => any".to_string());
+    let uses_yield = body_uses_yield(&m.body);
+
+    // Zero-arg, no-yield, instance methods emit as TS getters. Matches
+    // the Juntos convention (and Ruby's no-paren reader idiom): callers
+    // invoke `record.size` as a property access, not a function call.
+    // Static methods stay as methods (Class.foo() reads naturally with
+    // parens). Methods with parameters or `yield` always emit as methods
+    // since getters can't take args.
+    let is_getter = !is_static && m.params.is_empty() && !uses_yield;
+
+    if is_getter {
+        writeln!(s, "  get {name}(): {ret_s} {{").unwrap();
+    } else {
+        let mut params: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| format!("{}: unknown", p.as_str()))
+            .collect();
+        if uses_yield {
+            params.push("__block: (...args: any[]) => any".to_string());
+        }
+        writeln!(
+            s,
+            "  {static_prefix}{name}({}): {ret_s} {{",
+            params.join(", ")
+        )
+        .unwrap();
     }
-    writeln!(
-        s,
-        "  {static_prefix}{name}({}): {ret_s} {{",
-        params.join(", ")
-    )
-    .unwrap();
     let method_body = rewrite_for_class_method(&m.body, m.name.as_str());
     let body = emit_body(&method_body, &ret_ty);
     for line in body.lines() {
