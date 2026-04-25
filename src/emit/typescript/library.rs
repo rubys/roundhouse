@@ -139,7 +139,7 @@ fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFile {
 /// segments). Misses are fine: if a referenced name isn't here, the
 /// import scan won't generate an import for it, but emission still
 /// produces a TS reference that surfaces at tsc-check time.
-fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
+pub(super) fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
     use crate::expr::LValue;
     match &*e.node {
         ExprNode::Const { path } => {

@@ -18,10 +18,10 @@ use super::ty::ts_ty;
 
 /// Emit one `app/models/<snake>.ts` per model.
 pub(super) fn emit_models(app: &App) -> Vec<EmittedFile> {
-    app.models.iter().map(emit_model_file).collect()
+    app.models.iter().map(|m| emit_model_file(m, app)).collect()
 }
 
-fn emit_model_file(model: &Model) -> EmittedFile {
+fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
     let name = model.name.0.as_str();
     let file_stem = crate::naming::snake_case(name);
     let mut s = String::new();
@@ -65,6 +65,44 @@ fn emit_model_file(model: &Model) -> EmittedFile {
         imports.join(", ")
     )
     .unwrap();
+
+    // Cross-class refs from method bodies: scan, partition into
+    // sibling-models / library-classes, emit per-file imports. Methods
+    // overriding lifecycle hooks (`def destroy; comments.each(...); end`)
+    // commonly reference the proxy/related-model classes; without these
+    // imports the emitted file won't tsc-check.
+    let mut refs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for m in model.methods() {
+        super::library::collect_class_refs(&m.body, &mut refs);
+    }
+    refs.remove(name);
+    refs.remove(&parent); // already imported from juntos
+    let mut sibling_imports: Vec<(String, String)> = Vec::new();
+    for r in &refs {
+        let r_str: &str = r;
+        if matches!(
+            r_str,
+            "ActiveRecord"
+                | "ApplicationRecord"
+                | "CollectionProxy"
+                | "ErrorCollection"
+                | "Reference"
+                | "modelRegistry"
+                | "conn"
+        ) {
+            // already covered or covered above; future improvement
+            // could thread these into the juntos import set.
+            continue;
+        }
+        if app.models.iter().any(|m| m.name.0.as_str() == r_str)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == r_str)
+        {
+            sibling_imports.push((r.clone(), crate::naming::snake_case(r_str)));
+        }
+    }
+    for (n, stem) in &sibling_imports {
+        writeln!(s, "import {{ {n} }} from \"./{stem}.js\";").unwrap();
+    }
     writeln!(s).unwrap();
 
     writeln!(s, "export class {name} extends {parent} {{").unwrap();
