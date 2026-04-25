@@ -198,6 +198,17 @@ export class ApplicationRecord {
     return new (this as any)();
   }
 
+  /** `Model.instantiate(row)` — wrap a raw row in a model instance.
+   *  Used by association proxies to lift adapter results to typed
+   *  model objects. Mirrors `ActiveRecord::Base.instantiate` in the
+   *  framework Ruby. */
+  static instantiate<T extends typeof ApplicationRecord>(
+    this: T,
+    row: Record<string, any>,
+  ): InstanceType<T> {
+    return Object.assign(new (this as any)(), row) as InstanceType<T>;
+  }
+
   /** `@record.reload` — re-fetch by id and copy over self. */
   reload(): void {
     const fresh = (this.constructor as any).find((this as any).id);

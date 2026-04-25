@@ -440,6 +440,29 @@ pub(super) fn emit_send_with_parens(
     if method == "!" && recv.is_some() && args.is_empty() {
         return format!("!{}", emit_expr(recv.unwrap()));
     }
+    // Type-aware Ruby Enumerable → JS Array method rename. JS arrays
+    // don't have `.each` (they have `.forEach`) and use `.length` not
+    // `.size`. When the analyzer has typed the receiver as Array, emit
+    // the JS-native form.
+    if let Some(r) = recv {
+        if let Some(Ty::Array { .. }) = &r.ty {
+            match method {
+                "each" => {
+                    let recv_s = emit_expr(r);
+                    return if args_s.is_empty() {
+                        format!("{recv_s}.forEach")
+                    } else {
+                        format!("{recv_s}.forEach({})", args_s.join(", "))
+                    };
+                }
+                "size" if args.is_empty() => {
+                    return format!("{}.length", emit_expr(r));
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Ruby's `<<` is polymorphic: Int bit-shift, Array/String append,
     // or a method call on classes that define it (like
     // ActiveModel::Errors.add). Dispatch on receiver type. TS has no
