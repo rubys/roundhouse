@@ -143,6 +143,7 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Str) => str_method(method),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Bool) => bool_method(method),
+            Some(Ty::Sym) => sym_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
             // `T | Nil` pattern (`find_by`, `params[:k]`, `.find` on
@@ -293,6 +294,8 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
+        "to_sym" | "intern" => Ty::Sym,
+        "chars" | "lines" | "split" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
         // Operators. `+` concats; `<<` mutates in place but still returns self.
@@ -300,6 +303,18 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // uniformly return Bool.
         "+" | "<<" | "*" | "%" | "concat" => Ty::Str,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        _ => unknown(),
+    }
+}
+
+pub(super) fn sym_method(method: &Symbol) -> Ty {
+    match method.as_str() {
+        "to_s" | "id2name" | "name" | "inspect" => Ty::Str,
+        "to_sym" | "to_proc" | "intern" => Ty::Sym,
+        "length" | "size" => Ty::Int,
+        "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
+        "==" | "!=" | "<=>" | "eql?" | "equal?" | "empty?" | "match?"
+        | "start_with?" | "end_with?" => Ty::Bool,
         _ => unknown(),
     }
 }
