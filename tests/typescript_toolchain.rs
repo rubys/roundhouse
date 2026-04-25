@@ -94,6 +94,45 @@ fn tiny_blog_tsc_passes() {
     assert_tsc_passes("tiny-blog", &scratch);
 }
 
+/// Diagnostic test: emit transpiled_blog and dump tsc errors so we
+/// know what the body-walker still needs to fix. Does NOT assert
+/// success — purely an inspection helper.
+#[test]
+#[ignore]
+fn dump_transpiled_blog_tsc_errors() {
+    let fixture = Path::new("runtime/ruby/test/fixtures/transpiled_blog");
+    let scratch = scratch_dir("transpiled-blog-tsc-dump");
+    generate_project(fixture, &scratch);
+
+    let install = Command::new("npm")
+        .arg("install")
+        .arg("--silent")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .current_dir(&scratch)
+        .output()
+        .expect("run npm install");
+    if !install.status.success() {
+        eprintln!(
+            "npm install failed:\n{}",
+            String::from_utf8_lossy(&install.stderr)
+        );
+        return;
+    }
+
+    let output = Command::new("./node_modules/.bin/tsc")
+        .arg("-p")
+        .arg(".")
+        .arg("--noEmit")
+        .current_dir(&scratch)
+        .output()
+        .expect("run tsc");
+
+    println!("=== tsc exit status: {} ===", output.status);
+    println!("=== stdout ===\n{}", String::from_utf8_lossy(&output.stdout));
+    println!("=== stderr ===\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
 #[test]
 #[ignore]
 fn real_blog_tsc_passes() {

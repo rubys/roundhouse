@@ -441,10 +441,26 @@ fn emit_model_method(out: &mut String, m: &MethodDef, model: &Model) {
     };
     let is_static = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
     let static_prefix = if is_static { "static " } else { "" };
-    writeln!(out, "  {static_prefix}{name}(){ret_annot} {{").unwrap();
+    let params: Vec<String> = m
+        .params
+        .iter()
+        .map(|p| format!("{}: unknown", p.as_str()))
+        .collect();
+    writeln!(
+        out,
+        "  {static_prefix}{name}({}){ret_annot} {{",
+        params.join(", ")
+    )
+    .unwrap();
     let attrs: Vec<crate::ident::Symbol> =
         model.attributes.fields.keys().cloned().collect();
     let rewritten = rewrite_bare_attrs_to_ivars(&m.body, &attrs);
+    // Apply the same implicit-self / Super rewrite the library-shape
+    // path uses. Without this, transpiled-shape model methods that
+    // call sibling instance methods (e.g. `comments.each(...)` from
+    // a `dependent: :destroy` override) emit as bare names — invalid
+    // TS. `super` similarly needs to become `super.methodName(...)`.
+    let rewritten = super::library::rewrite_for_class_method(&rewritten, m.name.as_str());
     let body_text = emit_body(&rewritten, &ret);
     for line in body_text.lines() {
         writeln!(out, "    {line}").unwrap();

@@ -329,6 +329,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 emit_expr(fallback)
             )
         }
+        ExprNode::Yield { args } => {
+            // Ruby's `yield` invokes the enclosing method's implicit
+            // block. Library-class emit gives every yield-using method
+            // an injected `__block` parameter (see emit_plain_method);
+            // here we just call it. Yield always targets the enclosing
+            // *method*, not surrounding lambdas, so a naive substitution
+            // is safe — the caller arranges __block to be in scope.
+            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            format!("__block({})", args_s.join(", "))
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

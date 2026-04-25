@@ -375,11 +375,19 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
     let is_static = matches!(m.receiver, MethodReceiver::Class);
     let static_prefix = if is_static { "static " } else { "" };
 
-    let params: Vec<String> = m
+    let mut params: Vec<String> = m
         .params
         .iter()
         .map(|p| format!("{}: unknown", p.as_str()))
         .collect();
+    // If the body uses `yield`, inject `__block` as the trailing
+    // parameter so the Yield handler in expr.rs has something to call.
+    // Ruby's yield always targets the enclosing method's implicit
+    // block; surfacing it as a named TS parameter keeps the rewrite
+    // local and avoids reaching for generators.
+    if body_uses_yield(&m.body) {
+        params.push("__block: (...args: any[]) => any".to_string());
+    }
     writeln!(
         s,
         "  {static_prefix}{name}({}): {ret_s} {{",
@@ -392,6 +400,69 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
         writeln!(s, "    {line}").unwrap();
     }
     writeln!(s, "  }}").unwrap();
+}
+
+/// True if the expression tree contains an `ExprNode::Yield` anywhere.
+/// Used by `emit_plain_method` to decide whether to inject a `__block`
+/// parameter. Lambdas do *not* mask yield (Ruby's yield always targets
+/// the enclosing method, not the surrounding block), so naive
+/// recursion is correct.
+fn body_uses_yield(e: &Expr) -> bool {
+    use crate::expr::LValue;
+    match &*e.node {
+        ExprNode::Yield { .. } => true,
+        ExprNode::Send { recv, args, block, .. } => {
+            recv.as_ref().is_some_and(|r| body_uses_yield(r))
+                || args.iter().any(body_uses_yield)
+                || block.as_ref().is_some_and(|b| body_uses_yield(b))
+        }
+        ExprNode::Apply { fun, args, block } => {
+            body_uses_yield(fun)
+                || args.iter().any(body_uses_yield)
+                || block.as_ref().is_some_and(|b| body_uses_yield(b))
+        }
+        ExprNode::Hash { entries, .. } => {
+            entries.iter().any(|(k, v)| body_uses_yield(k) || body_uses_yield(v))
+        }
+        ExprNode::Array { elements, .. } => elements.iter().any(body_uses_yield),
+        ExprNode::StringInterp { parts } => parts.iter().any(|p| {
+            matches!(p, InterpPart::Expr { expr } if body_uses_yield(expr))
+        }),
+        ExprNode::BoolOp { left, right, .. } => body_uses_yield(left) || body_uses_yield(right),
+        ExprNode::Let { value, body, .. } => body_uses_yield(value) || body_uses_yield(body),
+        ExprNode::Lambda { body, .. } => body_uses_yield(body),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            body_uses_yield(cond) || body_uses_yield(then_branch) || body_uses_yield(else_branch)
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            body_uses_yield(scrutinee) || arms.iter().any(|a| body_uses_yield(&a.body))
+        }
+        ExprNode::Seq { exprs } => exprs.iter().any(body_uses_yield),
+        ExprNode::Assign { target, value } => {
+            let target_yields = matches!(
+                target,
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } if body_uses_yield(recv)
+            );
+            target_yields || body_uses_yield(value)
+        }
+        ExprNode::Raise { value } => body_uses_yield(value),
+        ExprNode::RescueModifier { expr, fallback } => {
+            body_uses_yield(expr) || body_uses_yield(fallback)
+        }
+        ExprNode::Return { value } => body_uses_yield(value),
+        ExprNode::Super { args } => args.as_ref().is_some_and(|a| a.iter().any(body_uses_yield)),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            body_uses_yield(body)
+                || rescues.iter().any(|r| body_uses_yield(&r.body))
+                || else_branch.as_ref().is_some_and(|e| body_uses_yield(e))
+                || ensure.as_ref().is_some_and(|e| body_uses_yield(e))
+        }
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => false,
+    }
 }
 
 /// Ruby allows `?` and `!` suffixes on method names; TS does not.
@@ -416,7 +487,7 @@ fn sanitize_identifier(ruby_name: &str) -> String {
 /// `enclosing_method` is the Ruby method name (may end in `=` for
 /// setters). The `=` is dropped for the super-call target so the
 /// method name is a valid TS identifier.
-fn rewrite_for_class_method(e: &Expr, enclosing_method: &str) -> Expr {
+pub(super) fn rewrite_for_class_method(e: &Expr, enclosing_method: &str) -> Expr {
     let method_for_super = enclosing_method.trim_end_matches('=').to_string();
     rewrite(e, &method_for_super)
 }
