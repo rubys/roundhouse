@@ -115,7 +115,25 @@ impl<'a> BodyTyper<'a> {
                 // user-defined helpers) without requiring the class to
                 // appear in the catalog. Explicit catalog registrations
                 // still win because they're checked above.
+                //
+                // Built-in containers map to their parameterized IR
+                // type so subsequent `[]` / `[]=` / `each` etc. dispatch
+                // through hash_method / array_method instead of falling
+                // back to the (no-op) class-method table. Element types
+                // start as Var; usage narrows them via flow-typing.
                 if method.as_str() == "new" {
+                    match id.0.as_str() {
+                        "Hash" => {
+                            return Ty::Hash {
+                                key: Box::new(unknown()),
+                                value: Box::new(unknown()),
+                            };
+                        }
+                        "Array" => {
+                            return Ty::Array { elem: Box::new(unknown()) };
+                        }
+                        _ => {}
+                    }
                     return Ty::Class { id: id.clone(), args: args.clone() };
                 }
                 unknown()
