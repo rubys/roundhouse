@@ -92,6 +92,19 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Ty {
+        // `obj.class` returns the class of `obj`. For typing we
+        // preserve the receiver's class id so chained `.X` calls
+        // dispatch through that class's class_methods —
+        // `self.class.find(id)` resolves against `Base.find`, not
+        // a generic `Class` whose method table we don't model.
+        // Falls back to the Class("Class") form when the receiver
+        // type is opaque (Ty::Var or absent).
+        if method.as_str() == "class" {
+            if let Some(Ty::Class { id, args }) = recv_ty {
+                return Ty::Class { id: id.clone(), args: args.clone() };
+            }
+        }
+
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
