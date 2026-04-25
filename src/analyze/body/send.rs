@@ -54,7 +54,8 @@ impl<'a> BodyTyper<'a> {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
                 | "select" | "filter" | "reject"
                 | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
-                | "any?" | "all?" | "none?" | "one?" => Some(vec![(**elem).clone()]),
+                | "any?" | "all?" | "none?" | "one?"
+                | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
                 _ => None,
             },
@@ -247,6 +248,26 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
+        // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
+        // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>
+        // when the block's tuple types aren't tracked at this layer;
+        // refine when fixture demands richer tuple-element typing.
+        "to_h" => match block_ret {
+            Some(Ty::Tuple { elems }) if elems.len() == 2 => Ty::Hash {
+                key: Box::new(elems[0].clone()),
+                value: Box::new(elems[1].clone()),
+            },
+            Some(Ty::Array { elem: inner }) => Ty::Hash {
+                key: Box::new((**inner).clone()),
+                value: Box::new((**inner).clone()),
+            },
+            _ => Ty::Hash {
+                key: Box::new(elem.clone()),
+                value: Box::new(unknown()),
+            },
+        },
+        "to_a" => Ty::Array { elem: Box::new(elem.clone()) },
+        "join" => Ty::Str,
         _ => unknown(),
     }
 }
