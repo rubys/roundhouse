@@ -483,9 +483,146 @@ export class CollectionProxy<T extends ApplicationRecord = ApplicationRecord> {
 
 export const modelRegistry: Record<string, any> = {};
 
+// ── ActiveRecord adapter shim ──
+//
+// The framework Ruby (transpiled from `runtime/ruby/active_record/`)
+// calls into a stable 12-method API surface for all DB access. Each
+// target language provides an implementation of this interface; that's
+// the per-target glue. The framework Ruby is portable across targets
+// because it touches nothing else.
+
+/** A single row as plain primitives. Adapters serialize to/from this
+ *  shape; the per-model classes typecast on the way out. */
+export type Row = Record<string, string | number | null>;
+
+/** Equality conditions for `where(table, conditions)`. Richer queries
+ *  (range, comparison, joins) live above the adapter. */
+export type Conditions = Record<string, string | number | null>;
+
+export type ForeignKey = { column: string; references: string };
+export interface AdapterSchema {
+  columns: string[];
+  foreign_keys: ForeignKey[];
+}
+
+/** The full adapter surface — twelve methods. Framework Ruby calls
+ *  exclusively through this interface; targets implement it. */
+export interface ActiveRecordAdapter {
+  // DDL
+  create_table(name: string, columns: string[], foreign_keys?: ForeignKey[]): void;
+  drop_table(name: string): void;
+  schema(table: string): AdapterSchema | null;
+  // Read
+  find(table: string, id: number): Row | null;
+  all(table: string): Row[];
+  where(table: string, conditions: Conditions): Row[];
+  count(table: string): number;
+  exists(table: string, id: number): boolean;
+  // Write
+  insert(table: string, row: Row): number;
+  update(table: string, id: number, row: Row): boolean;
+  delete(table: string, id: number): boolean;
+}
+
+/** In-memory test adapter. Mirrors the semantics of
+ *  `runtime/ruby/active_record/in_memory_adapter.rb`; transpiling that
+ *  file to this shape is a milestone validation point for the
+ *  strategic bet (currently hand-written here while the body-walker
+ *  catches up to the patterns it uses). */
+export class InMemoryActiveRecordAdapter implements ActiveRecordAdapter {
+  private tables: Map<string, Map<number, Row>> = new Map();
+  private schemas: Map<string, AdapterSchema> = new Map();
+  private nextId: Map<string, number> = new Map();
+
+  create_table(name: string, columns: string[], foreign_keys: ForeignKey[] = []): void {
+    this.tables.set(name, new Map());
+    this.schemas.set(name, { columns, foreign_keys });
+  }
+
+  drop_table(name: string): void {
+    this.tables.delete(name);
+    this.schemas.delete(name);
+    this.nextId.delete(name);
+  }
+
+  schema(table: string): AdapterSchema | null {
+    return this.schemas.get(table) ?? null;
+  }
+
+  insert(table: string, row: Row): number {
+    const t = this.tables.get(table);
+    if (!t) throw new Error(`insert: unknown table ${table}`);
+    const id = (this.nextId.get(table) ?? 0) + 1;
+    this.nextId.set(table, id);
+    const stored = { ...row, id };
+    t.set(id, stored);
+    return id;
+  }
+
+  update(table: string, id: number, row: Row): boolean {
+    const t = this.tables.get(table);
+    if (!t || !t.has(id)) return false;
+    t.set(id, { ...row, id });
+    return true;
+  }
+
+  delete(table: string, id: number): boolean {
+    const t = this.tables.get(table);
+    if (!t) return false;
+    return t.delete(id);
+  }
+
+  find(table: string, id: number): Row | null {
+    return this.tables.get(table)?.get(id) ?? null;
+  }
+
+  all(table: string): Row[] {
+    const t = this.tables.get(table);
+    return t ? Array.from(t.values()) : [];
+  }
+
+  where(table: string, conditions: Conditions): Row[] {
+    const entries = Object.entries(conditions);
+    return this.all(table).filter((row) =>
+      entries.every(([k, v]) => row[k] === v),
+    );
+  }
+
+  count(table: string): number {
+    return this.tables.get(table)?.size ?? 0;
+  }
+
+  exists(table: string, id: number): boolean {
+    return this.tables.get(table)?.has(id) ?? false;
+  }
+}
+
 // ActiveRecord appears in extends clauses after normalization
-// (`ActiveRecord::Base` → `ActiveRecord`).
-export class ActiveRecord extends ApplicationRecord {}
+// (`ActiveRecord::Base` → `ActiveRecord`). It also carries the
+// per-process adapter slot — `ActiveRecord.adapter.where(...)` from
+// transpiled framework Ruby resolves here.
+export class ActiveRecord extends ApplicationRecord {
+  /** Current process-wide adapter. Lazily initialized to an in-memory
+   *  instance so test code that doesn't explicitly set up a DB still
+   *  works. Production callers replace it via `ActiveRecord.adapter = ...`. */
+  private static _adapter: ActiveRecordAdapter | null = null;
+
+  static get adapter(): ActiveRecordAdapter {
+    if (!ActiveRecord._adapter) {
+      ActiveRecord._adapter = new InMemoryActiveRecordAdapter();
+    }
+    return ActiveRecord._adapter;
+  }
+
+  static set adapter(a: ActiveRecordAdapter) {
+    ActiveRecord._adapter = a;
+  }
+
+  /** Reset to a fresh in-memory adapter — test setup helper. */
+  static reset_adapter(): void {
+    ActiveRecord._adapter = new InMemoryActiveRecordAdapter();
+  }
+}
 
 // Controller/router surface — controllers return ActionResponse;
 // the router's match table lets tests dispatch without a live HTTP
