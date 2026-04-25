@@ -1,29 +1,10 @@
 module ActiveRecord
-  # Instance-level broadcast helpers. Transpiled models call these
-  # from their lifecycle hook overrides. Phase-1 stubs log the call
-  # for test inspection; target-native Turbo integration is a later
-  # concern.
-  module Broadcasts
-    def broadcast_replace_to(*channels, target: nil)
-      ActiveRecord::Broadcasts.log << { action: :replace, record: self, channels: channels, target: target }
-      nil
-    end
-
-    def broadcast_append_to(*channels, target: nil)
-      ActiveRecord::Broadcasts.log << { action: :append, record: self, channels: channels, target: target }
-      nil
-    end
-
-    def broadcast_prepend_to(*channels, target: nil)
-      ActiveRecord::Broadcasts.log << { action: :prepend, record: self, channels: channels, target: target }
-      nil
-    end
-
-    def broadcast_remove_to(*channels, target: nil)
-      ActiveRecord::Broadcasts.log << { action: :remove, record: self, channels: channels, target: target }
-      nil
-    end
-
+  # Broadcasts log holder. The instance methods (`broadcast_replace_to`
+  # etc.) live on `Base` — inlined rather than mixed in via a module
+  # so the body-typer can resolve `self.class.X` cross-method calls
+  # against Base's class methods. This class keeps the per-process
+  # log state and reset hook used by tests.
+  class Broadcasts
     def self.log
       @log ||= []
     end
