@@ -298,7 +298,6 @@ module ActiveRecord
     def validates_uniqueness_of(attr, scope: [], case_sensitive: true)
       value = read_for_validation(attr)
       table = self.class.table_name
-      scope_attrs = Array(scope)
       matches = ActiveRecord.adapter.all(table).select do |row|
         row_val = row[attr.to_sym]
         same = if !case_sensitive && row_val.is_a?(String) && value.is_a?(String)
@@ -308,7 +307,7 @@ module ActiveRecord
                end
         same &&
           (!persisted? || row[:id] != @id) &&
-          scope_attrs.all? { |s| row[s.to_sym] == _read_accessor(s) }
+          scope.all? { |s| row[s.to_sym] == _read_accessor(s) }
       end
       errors << "#{attr} has already been taken" unless matches.empty?
     end
