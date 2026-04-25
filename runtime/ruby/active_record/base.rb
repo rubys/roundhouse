@@ -113,7 +113,7 @@ module ActiveRecord
       # Expose the current ivar state as a Hash for callers (adapter
       # interface, debugging). Built from the tracked column list so
       # internal ivars like @_comments stay out.
-      self.class.schema_column_names.to_h { |c| [c, instance_variable_get("@#{c}")] }
+      self.class.schema_column_names.to_h { |c| [c, _read_ivar(c)] }
     end
 
     def persisted?
@@ -129,15 +129,15 @@ module ActiveRecord
     end
 
     def read_attribute(name)
-      instance_variable_get("@#{name}")
+      _read_ivar(name)
     end
 
     def [](name)
-      instance_variable_get("@#{name}")
+      _read_ivar(name)
     end
 
     def []=(name, value)
-      instance_variable_set("@#{name}", value)
+      _write_ivar(name, value)
     end
 
     # Lifecycle hooks — no-op defaults; transpiled models override
@@ -244,8 +244,9 @@ module ActiveRecord
       value = read_for_validation(attr)
       # belongs_to fallback: `validates_presence_of(:article)` checks the
       # `article_id` foreign key when there's no direct `article` column.
-      if value.nil? && respond_to?("#{attr}_id")
-        value = send("#{attr}_id")
+      fk_attr = "#{attr}_id"
+      if value.nil? && _has_accessor?(fk_attr)
+        value = _read_accessor(fk_attr)
       end
       errors << "#{attr} can't be blank" if blank?(value)
     end
@@ -299,7 +300,7 @@ module ActiveRecord
                end
         same &&
           (!persisted? || row[:id] != @id) &&
-          scope_attrs.all? { |s| row[s.to_sym] == send(s) }
+          scope_attrs.all? { |s| row[s.to_sym] == _read_accessor(s) }
       end
       errors << "#{attr} has already been taken" unless matches.empty?
     end
@@ -338,16 +339,40 @@ module ActiveRecord
       @persisted = true
       @destroyed = false
       self.class.schema_column_names.each do |col|
-        instance_variable_set("@#{col}", row[col])
+        _write_ivar(col, row[col])
       end
     end
 
     def read_for_validation(attr)
-      respond_to?(attr) ? send(attr) : instance_variable_get("@#{attr}")
+      _has_accessor?(attr) ? _read_accessor(attr) : _read_ivar(attr)
     end
 
     def blank?(value)
       value.nil? || (value.respond_to?(:empty?) && value.empty?)
+    end
+
+    # ── Reflection chokepoints ──────────────────────────────────────
+    #
+    # Ruby's `instance_variable_get/set`, `send`, and `respond_to?`
+    # are unavoidable for the cross-attribute helpers above (the
+    # framework is generic over the model's column set). Funneling
+    # them through these typed chokepoints means callers compile
+    # cleanly and only the chokepoint bodies themselves are untypable.
+
+    def _read_ivar(name)
+      instance_variable_get("@#{name}")
+    end
+
+    def _write_ivar(name, value)
+      instance_variable_set("@#{name}", value)
+    end
+
+    def _read_accessor(name)
+      send(name)
+    end
+
+    def _has_accessor?(name)
+      respond_to?(name)
     end
   end
 end

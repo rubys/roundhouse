@@ -79,5 +79,13 @@ module ActiveRecord
     def init_from_row: (Hash[Symbol, String] row) -> void
     def read_for_validation: (Symbol attr) -> String
     def blank?: (String value) -> bool
+
+    # Reflection chokepoints — bodies use instance_variable_*, send,
+    # and respond_to?. The RBS sigs let callers type cleanly even
+    # though the bodies themselves remain unavoidably reflective.
+    def _read_ivar: (Symbol name) -> String
+    def _write_ivar: (Symbol name, String value) -> String
+    def _read_accessor: (Symbol name) -> String
+    def _has_accessor?: (Symbol name) -> bool
   end
 end
