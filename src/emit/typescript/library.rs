@@ -116,6 +116,22 @@ fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFile {
 
     writeln!(s, "export class {name}{extends_clause} {{").unwrap();
 
+    // Collect ivar names referenced by any method body and emit them
+    // as class fields. Without these declarations, TS rejects
+    // `this.owner = owner` and `this.owner.id` reads. Declared as
+    // `any` for now — proper typing per ivar lands when the analyzer
+    // exposes its discovered ivar types to emit.
+    let mut ivar_names: BTreeSet<String> = BTreeSet::new();
+    for m in &lc.methods {
+        collect_ivar_names(&m.body, &mut ivar_names);
+    }
+    if !ivar_names.is_empty() {
+        for name in &ivar_names {
+            writeln!(s, "  {name}: any;").unwrap();
+        }
+        writeln!(s).unwrap();
+    }
+
     let mut first = true;
     for m in &lc.methods {
         if !first {
@@ -377,15 +393,28 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
 
     let uses_yield = body_uses_yield(&m.body);
 
+    // Ruby's `def initialize` maps to TS's `constructor`. Constructors
+    // can't have a return-type annotation (TS rejects them) and don't
+    // use the `function` keyword.
+    let is_constructor = !is_static && m.name.as_str() == "initialize";
+
     // Zero-arg, no-yield, instance methods emit as TS getters. Matches
     // the Juntos convention (and Ruby's no-paren reader idiom): callers
     // invoke `record.size` as a property access, not a function call.
     // Static methods stay as methods (Class.foo() reads naturally with
     // parens). Methods with parameters or `yield` always emit as methods
-    // since getters can't take args.
-    let is_getter = !is_static && m.params.is_empty() && !uses_yield;
+    // since getters can't take args. Constructors are also methods.
+    let is_getter =
+        !is_static && !is_constructor && m.params.is_empty() && !uses_yield;
 
-    if is_getter {
+    if is_constructor {
+        let params: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| format!("{}: unknown", p.as_str()))
+            .collect();
+        writeln!(s, "  constructor({}) {{", params.join(", ")).unwrap();
+    } else if is_getter {
         writeln!(s, "  get {name}(): {ret_s} {{").unwrap();
     } else {
         let mut params: Vec<String> = m
@@ -404,11 +433,134 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
         .unwrap();
     }
     let method_body = rewrite_for_class_method(&m.body, m.name.as_str());
-    let body = emit_body(&method_body, &ret_ty);
+    // Constructors can't return a value — force void emission so
+    // `@x = y` emits as `this.x = y;` not `return this.x = y;`.
+    let emit_ty = if is_constructor { Ty::Nil } else { ret_ty.clone() };
+    let body = emit_body(&method_body, &emit_ty);
     for line in body.lines() {
         writeln!(s, "    {line}").unwrap();
     }
     writeln!(s, "  }}").unwrap();
+}
+
+/// Walk an expression tree collecting ivar names (the leading `@` is
+/// stripped — `@owner` becomes `owner`). Used by library-class
+/// emission to produce TS field declarations so reads/writes
+/// type-check.
+fn collect_ivar_names(e: &Expr, out: &mut BTreeSet<String>) {
+    use crate::expr::LValue;
+    match &*e.node {
+        ExprNode::Ivar { name } => {
+            out.insert(name.as_str().to_string());
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            out.insert(name.as_str().to_string());
+            collect_ivar_names(value, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_ivar_names(r, out);
+            }
+            for a in args {
+                collect_ivar_names(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_names(b, out);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            collect_ivar_names(fun, out);
+            for a in args {
+                collect_ivar_names(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_names(b, out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                collect_ivar_names(k, out);
+                collect_ivar_names(v, out);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for el in elements {
+                collect_ivar_names(el, out);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let InterpPart::Expr { expr } = p {
+                    collect_ivar_names(expr, out);
+                }
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_ivar_names(left, out);
+            collect_ivar_names(right, out);
+        }
+        ExprNode::Let { value, body, .. } => {
+            collect_ivar_names(value, out);
+            collect_ivar_names(body, out);
+        }
+        ExprNode::Lambda { body, .. } => collect_ivar_names(body, out),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_ivar_names(cond, out);
+            collect_ivar_names(then_branch, out);
+            collect_ivar_names(else_branch, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_ivar_names(scrutinee, out);
+            for arm in arms {
+                collect_ivar_names(&arm.body, out);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_ivar_names(e, out);
+            }
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_ivar_names(recv, out);
+            }
+            collect_ivar_names(value, out);
+        }
+        ExprNode::Yield { args } => {
+            for a in args {
+                collect_ivar_names(a, out);
+            }
+        }
+        ExprNode::Raise { value } => collect_ivar_names(value, out),
+        ExprNode::RescueModifier { expr, fallback } => {
+            collect_ivar_names(expr, out);
+            collect_ivar_names(fallback, out);
+        }
+        ExprNode::Return { value } => collect_ivar_names(value, out),
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_ivar_names(a, out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_ivar_names(body, out);
+            for r in rescues {
+                collect_ivar_names(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_ivar_names(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_ivar_names(e, out);
+            }
+        }
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
+    }
 }
 
 /// True if the expression tree contains an `ExprNode::Yield` anywhere.
