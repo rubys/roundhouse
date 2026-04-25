@@ -107,18 +107,14 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
 
     writeln!(s, "export class {name} extends {parent} {{").unwrap();
 
-    // Skip the auto-generated `static table_name = "..."` when the
-    // model defines `def self.table_name` explicitly. Both would emit
-    // and TS rejects the duplicate identifier. The user's def takes
-    // precedence; the auto field exists only when no user override.
-    let user_defined_table_name = model.methods().any(|m| {
-        matches!(m.receiver, crate::dialect::MethodReceiver::Class)
-            && m.name.as_str() == "table_name"
-    });
-    if !user_defined_table_name {
-        let table = model.table.0.as_str();
-        writeln!(s, "  static table_name = {table:?};").unwrap();
-    }
+    // Always emit the auto static `table_name` field — matches
+    // ApplicationRecord's `static table_name: string` shape so the
+    // class extension is variance-clean. Transpiled-shape models
+    // sometimes redundantly write `def self.table_name; "..."; end`
+    // (it's a no-op against schema-derived metadata); we treat that
+    // def as metadata-only and drop it from method emission below.
+    let table = model.table.0.as_str();
+    writeln!(s, "  static table_name = {table:?};").unwrap();
 
     let columns: Vec<String> = model
         .attributes
@@ -209,6 +205,15 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
     }
 
     for method in model.methods() {
+        // `def self.table_name` is a redundant metadata declaration
+        // (the auto static field above already encodes it). Skip it
+        // — emitting both would either produce a duplicate identifier
+        // or a static-side variance mismatch with ApplicationRecord.
+        if matches!(method.receiver, crate::dialect::MethodReceiver::Class)
+            && method.name.as_str() == "table_name"
+        {
+            continue;
+        }
         writeln!(s).unwrap();
         emit_model_method(&mut s, method, model);
     }
