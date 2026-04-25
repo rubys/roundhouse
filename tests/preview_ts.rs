@@ -51,3 +51,17 @@ fn dump_real_blog_rust() {
         println!("{}", f.content);
     }
 }
+
+/// Dump the model TS output for `transpiled_blog` — used while
+/// landing the post-lowering input shape end-to-end. Ignored because
+/// it's a manual inspection helper, not a regression test.
+#[test]
+#[ignore]
+fn dump_transpiled_blog_ts() {
+    for f in typescript::emit(&analyzed("runtime/ruby/test/fixtures/transpiled_blog")) {
+        if f.path.starts_with("app/models") {
+            println!("// ======= {} =======", f.path.display());
+            println!("{}", f.content);
+        }
+    }
+}

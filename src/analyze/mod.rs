@@ -317,6 +317,16 @@ impl Analyzer {
             }
         }
 
+        // Library classes: non-model classes living under app/models/
+        // (e.g. specialized has_many proxies). Register each as a known
+        // class so references like `ArticleCommentsProxy.new(self)` from
+        // model methods resolve. Method-by-method registration with
+        // proper signatures is a follow-up; for now an empty ClassInfo
+        // is enough to type the constructor reference.
+        for lc in &app.library_classes {
+            classes.entry(lc.name.clone()).or_default();
+        }
+
         Self { classes, adapter }
     }
 
@@ -508,6 +518,50 @@ impl Analyzer {
                 }
             }
         }
+
+        // Library classes (non-model classes under app/models/): mirror
+        // the per-model body typing pass on a smaller surface — no
+        // schema attributes, no associations, just methods. Two-pass
+        // ivar discovery handles `def initialize(x); @x = x; end`
+        // shapes where reads in subsequent methods (`@x.foo`) resolve
+        // against the type written in initialize.
+        for lc in &mut app.library_classes {
+            let class_ctx = Ctx {
+                self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+                ivar_bindings: HashMap::new(),
+                local_bindings: HashMap::new(),
+            };
+
+            for method in &mut lc.methods {
+                self.body_typer().analyze_expr(&mut method.body, &class_ctx);
+            }
+
+            let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            for method in &lc.methods {
+                extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+
+            if !flow_ivars.is_empty() {
+                let mut reseeded: HashMap<Symbol, Ty> = HashMap::new();
+                for (name, ty) in flow_ivars {
+                    reseeded.insert(name, Ty::Union { variants: vec![ty, Ty::Nil] });
+                }
+                let reseeded_ctx = Ctx {
+                    self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+                    ivar_bindings: reseeded,
+                    local_bindings: HashMap::new(),
+                };
+                for method in &mut lc.methods {
+                    self.body_typer().analyze_expr(&mut method.body, &reseeded_ctx);
+                    method.effects = self.collect_effects(&mut method.body, &reseeded_ctx);
+                }
+            } else {
+                for method in &mut lc.methods {
+                    method.effects = self.collect_effects(&mut method.body, &class_ctx);
+                }
+            }
+        }
+
         // Partial-locals channel: we need action/top-level views analyzed first
         // so their expression types are known at each `render` call site. We
         // then harvest the locals each render passes to the target partial,
