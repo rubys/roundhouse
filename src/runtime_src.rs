@@ -107,36 +107,74 @@ pub fn parse_methods_with_rbs_in_ctx(
         ));
     }
 
-    // Run the body-typer on each method with the RBS-derived param
-    // types seeded into the local environment. This populates `.ty`
-    // throughout each body, which target emitters consume for
-    // type-directed dispatch (Go's %d vs %s, eventually `==`
-    // semantics per the type dispatch table).
+    // Two-pass body typing with flow-sensitive ivar discovery — the
+    // same shape the model-side analyzer uses (analyze/mod.rs around
+    // the per-model loop). Pass A types each body with only RBS-
+    // derived param/self types in scope; ivar reads against an
+    // unbound ivar fall back to `Ty::Var` so assignments still record
+    // a `value.ty`. Pass B harvests every `@x = value.ty` from the
+    // typed bodies. Pass A re-runs with the harvested ivars seeded —
+    // memoizing reads (`@_x ||= ...`) and cross-method ivar accesses
+    // resolve against the type written in initialize-or-equivalent.
     //
     // Runtime code doesn't reference user classes today, so the
     // dispatch table is empty — the body-typer falls back to its
     // primitive method tables for everything.
     let typer = crate::analyze::BodyTyper::new(classes);
-    for m in &mut methods {
+
+    let build_ctx = |m: &MethodDef, ivars: &std::collections::HashMap<
+        Symbol,
+        Ty,
+    >|
+     -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         if let Some(Ty::Fn { params, .. }) = &m.signature {
             for (name, p) in m.params.iter().zip(params.iter()) {
                 ctx.local_bindings.insert(name.clone(), p.ty.clone());
             }
         }
-        // Seed `self_ty` from the enclosing class/module so
-        // `SelfRef` in method bodies types cleanly. For module
-        // instance methods (e.g. `Broadcasts#broadcast_replace_to`),
-        // `self` is the includer — approximated as the module type
-        // itself. Downstream refinement could narrow this to the
-        // include chain once the analyzer tracks module consumers.
         if let Some(enclosing) = &m.enclosing_class {
             ctx.self_ty = Some(Ty::Class {
                 id: crate::ident::ClassId(enclosing.clone()),
                 args: vec![],
             });
         }
+        for (name, ty) in ivars {
+            ctx.ivar_bindings.insert(name.clone(), ty.clone());
+        }
+        ctx
+    };
+
+    let empty_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    for m in &mut methods {
+        let ctx = build_ctx(m, &empty_ivars);
         typer.analyze_expr(&mut m.body, &ctx);
+    }
+
+    let mut flow_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    for m in &methods {
+        crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
+    }
+
+    if !flow_ivars.is_empty() {
+        // Memoizing ivars surface as `Union<T, Nil>` so reads that
+        // occur lexically before the assignment (e.g. the left side
+        // of `@x ||= ...` lowered to `@x || (@x = ...)`) still resolve
+        // — same convention the model-side pass uses.
+        let mut reseeded: std::collections::HashMap<Symbol, Ty> =
+            std::collections::HashMap::new();
+        for (name, ty) in flow_ivars {
+            reseeded.insert(
+                name,
+                Ty::Union { variants: vec![ty, Ty::Nil] },
+            );
+        }
+        for m in &mut methods {
+            let ctx = build_ctx(m, &reseeded);
+            typer.analyze_expr(&mut m.body, &ctx);
+        }
     }
 
     Ok(methods)
