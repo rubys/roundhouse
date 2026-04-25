@@ -107,8 +107,18 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
 
     writeln!(s, "export class {name} extends {parent} {{").unwrap();
 
-    let table = model.table.0.as_str();
-    writeln!(s, "  static table_name = {table:?};").unwrap();
+    // Skip the auto-generated `static table_name = "..."` when the
+    // model defines `def self.table_name` explicitly. Both would emit
+    // and TS rejects the duplicate identifier. The user's def takes
+    // precedence; the auto field exists only when no user override.
+    let user_defined_table_name = model.methods().any(|m| {
+        matches!(m.receiver, crate::dialect::MethodReceiver::Class)
+            && m.name.as_str() == "table_name"
+    });
+    if !user_defined_table_name {
+        let table = model.table.0.as_str();
+        writeln!(s, "  static table_name = {table:?};").unwrap();
+    }
 
     let columns: Vec<String> = model
         .attributes
