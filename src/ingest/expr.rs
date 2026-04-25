@@ -462,6 +462,71 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 implicit: false,
             }
         }
+        // `recv[idx] op= val` (e.g. `@next_id[name] += 1`) — desugar to
+        // `recv[idx] = recv[idx] op val`. Re-evaluates the receiver and
+        // index expressions twice, mirroring Ruby's surface semantics
+        // for in-place ops on indexed targets.
+        n if n.as_index_operator_write_node().is_some() => {
+            let w = n.as_index_operator_write_node().unwrap();
+            let recv_node = w.receiver().ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "index-operator-write without receiver".into(),
+            })?;
+            let recv = ingest_expr(&recv_node, file)?;
+            let args_node = w.arguments().ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "index-operator-write without arguments".into(),
+            })?;
+            let mut args: Vec<Expr> = Vec::new();
+            for a in args_node.arguments().iter() {
+                args.push(ingest_expr(&a, file)?);
+            }
+            let value = ingest_expr(&w.value(), file)?;
+            // Operator is e.g. "+=" — strip trailing "=" to get the
+            // binary op name the Send dispatch expects ("+", "-", ...).
+            let op_full = constant_id_str(&w.binary_operator());
+            let op = op_full.strip_suffix('=').unwrap_or(op_full).to_string();
+
+            // Single-index case is the only shape we've seen in real
+            // framework code (`@h[k] += 1`); multi-index `[a, b] += v`
+            // would need a tuple Index target. Defer until a fixture
+            // forces it.
+            if args.len() != 1 {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "index-operator-write with {} indices not yet supported",
+                        args.len()
+                    ),
+                });
+            }
+            let index = args.remove(0);
+
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(recv.clone()),
+                    method: Symbol::from("[]"),
+                    args: vec![index.clone()],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let combined = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(read),
+                    method: Symbol::from(op),
+                    args: vec![value],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            ExprNode::Assign {
+                target: crate::expr::LValue::Index { recv, index },
+                value: combined,
+            }
+        }
         // `@x ||= y` desugars to `@x || (@x = y)` — evaluate `@x`, and only
         // assign on a falsy read. Side-effect-preserving; semantically what
         // Ruby does.
