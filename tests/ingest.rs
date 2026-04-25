@@ -543,3 +543,48 @@ fn array_literal_styles() {
         other => panic!("expected Array, got {other:?}"),
     }
 }
+
+#[test]
+fn classifies_models_vs_library_classes() {
+    // The transpiled_blog fixture pairs Article (extends ApplicationRecord)
+    // and ArticleCommentsProxy (no superclass) under app/models/. The
+    // classifier must route the two through different paths.
+    let app =
+        ingest_app(Path::new("runtime/ruby/test/fixtures/transpiled_blog")).expect("ingest");
+
+    let model_names: Vec<&str> =
+        app.models.iter().map(|m| m.name.0.as_str()).collect();
+    assert!(
+        model_names.contains(&"Article"),
+        "Article should be classified as a model, got models={model_names:?}"
+    );
+    assert!(
+        model_names.contains(&"Comment"),
+        "Comment should be classified as a model, got models={model_names:?}"
+    );
+
+    let lib_names: Vec<&str> =
+        app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect();
+    assert_eq!(
+        lib_names,
+        vec!["ArticleCommentsProxy"],
+        "ArticleCommentsProxy should be the lone library class"
+    );
+
+    // Library class carries `include Enumerable`, picked up by ingest.
+    let proxy = &app.library_classes[0];
+    let include_names: Vec<&str> =
+        proxy.includes.iter().map(|c| c.0.as_str()).collect();
+    assert_eq!(include_names, vec!["Enumerable"]);
+
+    // Methods present on the proxy: initialize, to_a, each, size,
+    // empty?, build, create. (length/count are aliases, not defs.)
+    let method_names: Vec<&str> =
+        proxy.methods.iter().map(|m| m.name.as_str()).collect();
+    for expected in ["initialize", "to_a", "each", "size", "empty?", "build", "create"] {
+        assert!(
+            method_names.contains(&expected),
+            "expected method {expected} on ArticleCommentsProxy, got {method_names:?}"
+        );
+    }
+}

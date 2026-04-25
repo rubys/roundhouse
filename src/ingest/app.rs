@@ -12,6 +12,7 @@ use crate::App;
 use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
+use super::library_class::{classify_class_file, ingest_library_class, ClassKind};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::ingest_schema;
@@ -33,9 +34,18 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     if models_dir.is_dir() {
         for entry in read_rb_files(&models_dir)? {
             let source = std::fs::read(&entry)?;
-            if let Some(model) = ingest_model(&source, &entry.display().to_string(), &app.schema)?
-            {
-                app.models.push(model);
+            let path_str = entry.display().to_string();
+            match classify_class_file(&source) {
+                Some(ClassKind::Model) | None => {
+                    if let Some(model) = ingest_model(&source, &path_str, &app.schema)? {
+                        app.models.push(model);
+                    }
+                }
+                Some(ClassKind::LibraryClass) => {
+                    if let Some(lc) = ingest_library_class(&source, &path_str)? {
+                        app.library_classes.push(lc);
+                    }
+                }
             }
         }
     }

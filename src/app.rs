@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dialect::{Controller, Fixture, Model, RouteTable, TestModule, View};
+use crate::dialect::{Controller, Fixture, LibraryClass, Model, RouteTable, TestModule, View};
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
@@ -15,6 +15,12 @@ pub struct App {
     pub schema_version: u32,
     pub schema: Schema,
     pub models: Vec<Model>,
+    /// Non-model classes living under `app/models/` (e.g. specialized
+    /// has_many proxies). Classified at ingest time by superclass:
+    /// extends ApplicationRecord/ActiveRecord::Base → `models`;
+    /// otherwise → here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_classes: Vec<LibraryClass>,
     pub controllers: Vec<Controller>,
     pub routes: RouteTable,
     pub views: Vec<View>,
@@ -82,6 +88,7 @@ impl App {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
             models: Vec::new(),
+            library_classes: Vec::new(),
             controllers: Vec::new(),
             routes: RouteTable::default(),
             views: Vec::new(),

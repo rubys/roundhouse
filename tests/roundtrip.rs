@@ -105,6 +105,7 @@ fn tiny_blog_round_trips() {
         schema_version: App::SCHEMA_VERSION,
         schema,
         models: vec![post_model],
+        library_classes: vec![],
         controllers: vec![posts_controller],
         routes,
         views: vec![],

@@ -98,6 +98,7 @@ fn tiny_blog() -> App {
         schema_version: App::SCHEMA_VERSION,
         schema,
         models: vec![post_model],
+        library_classes: vec![],
         controllers: vec![controller],
         routes,
         views: vec![],

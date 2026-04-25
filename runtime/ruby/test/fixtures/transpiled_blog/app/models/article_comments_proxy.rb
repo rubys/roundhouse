@@ -19,8 +19,12 @@ class ArticleCommentsProxy
     rows.map { |r| Comment.instantiate(r) }
   end
 
-  def each(&block)
-    to_a.each(&block)
+  # `each(&block)` would be more idiomatic, but the ingest doesn't yet
+  # support `&local` block forwarding (only `&:symbol`). Yield form
+  # is semantically equivalent for a single-arity Enumerable each;
+  # revisit when the ingest gap closes.
+  def each
+    to_a.each { |comment| yield comment }
   end
 
   def size

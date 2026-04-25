@@ -314,6 +314,26 @@ pub enum MethodReceiver {
     Class,
 }
 
+// Library classes -------------------------------------------------------
+
+/// A non-model class living under `app/models/`. Surfaced by lowerings
+/// like has_many specialization (`ArticleCommentsProxy`) — the file is
+/// in the models directory but the class doesn't extend
+/// `ApplicationRecord` / `ActiveRecord::Base`, so the model emission
+/// path's table-name/columns/modelRegistry scaffolding doesn't apply.
+/// Emitted as a plain class in each target language.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LibraryClass {
+    pub name: ClassId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ClassId>,
+    /// `include` directives at the class top level, in source order
+    /// (e.g. `Enumerable`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<ClassId>,
+    pub methods: Vec<MethodDef>,
+}
+
 // Controllers -----------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
