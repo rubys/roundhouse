@@ -13,19 +13,22 @@ module ActiveRecord
     attr_reader foreign_keys: Array[Hash[Symbol, String]]
 
     def initialize: (Symbol name) -> void
-    def string: (Symbol name) -> Array[Symbol]
-    def text: (Symbol name) -> Array[Symbol]
-    def integer: (Symbol name) -> Array[Symbol]
-    def bigint: (Symbol name) -> Array[Symbol]
-    def float: (Symbol name) -> Array[Symbol]
-    def decimal: (Symbol name) -> Array[Symbol]
-    def boolean: (Symbol name) -> Array[Symbol]
-    def date: (Symbol name) -> Array[Symbol]
-    def datetime: (Symbol name) -> Array[Symbol]
-    def time: (Symbol name) -> Array[Symbol]
-    def timestamps: () -> Array[Symbol]
-    def references: (Symbol name, ?null: bool, ?foreign_key: bool, ?polymorphic: bool) -> void
-    def belongs_to: (Symbol name, ?null: bool, ?foreign_key: bool, ?polymorphic: bool) -> void
-    def index: (Array[Symbol] cols) -> void
+    def string: (Symbol name, **String _opts) -> Array[Symbol]
+    def text: (Symbol name, **String _opts) -> Array[Symbol]
+    def integer: (Symbol name, **String _opts) -> Array[Symbol]
+    def bigint: (Symbol name, **String _opts) -> Array[Symbol]
+    def float: (Symbol name, **String _opts) -> Array[Symbol]
+    def decimal: (Symbol name, **String _opts) -> Array[Symbol]
+    def boolean: (Symbol name, **String _opts) -> Array[Symbol]
+    def date: (Symbol name, **String _opts) -> Array[Symbol]
+    def datetime: (Symbol name, **String _opts) -> Array[Symbol]
+    def time: (Symbol name, **String _opts) -> Array[Symbol]
+    def timestamps: (**String _opts) -> Array[Symbol]
+    def references: (Symbol name, ?null: bool, ?foreign_key: bool, ?polymorphic: bool, **String _opts) -> void
+    # belongs_to is an `alias_method :belongs_to, :references` in
+    # migration.rb — not a `def`. The runtime_src parser doesn't yet
+    # follow alias_method. Drop the RBS sig until alias support lands;
+    # callers will still resolve via Ruby's alias at runtime.
+    def index: (Array[Symbol] cols, **String _opts) -> void
   end
 end
