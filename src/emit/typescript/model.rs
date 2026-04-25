@@ -126,7 +126,11 @@ fn emit_model_file(model: &Model, app: &App) -> EmittedFile {
     if columns.is_empty() {
         writeln!(s, "  static columns: string[] = [];").unwrap();
     } else {
-        writeln!(s, "  static columns = [{}];", columns.join(", ")).unwrap();
+        // Annotate as `string[]` so the literal tuple isn't inferred
+        // as a readonly tuple type — that diverges from
+        // ApplicationRecord's `static columns: string[]` declaration
+        // and breaks variance for the static side.
+        writeln!(s, "  static columns: string[] = [{}];", columns.join(", ")).unwrap();
     }
 
     let field_defaults: Vec<(String, String, String)> = model

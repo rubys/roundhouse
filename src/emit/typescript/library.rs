@@ -678,12 +678,19 @@ fn rewrite(e: &Expr, super_method: &str) -> Expr {
                 Some(v) => v.iter().map(|a| rewrite(a, super_method)).collect(),
                 None => vec![],
             };
+            // Bare `super` (no args) calling a method that's a getter
+            // in the base class needs property-access form, not method
+            // call. Mirrors the per-name allowlist used for emit-time
+            // getter-vs-method choice. With args, always method form.
+            let is_base_getter =
+                matches!(super_method, "save" | "destroy" | "errors" | "attributes");
+            let parenthesized = !args_vec.is_empty() || !is_base_getter;
             ExprNode::Send {
                 recv: Some(super_recv),
                 method: Symbol::from(super_method.to_string()),
                 args: args_vec,
                 block: None,
-                parenthesized: true,
+                parenthesized,
             }
         }
         ExprNode::Seq { exprs } => ExprNode::Seq {
