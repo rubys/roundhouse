@@ -280,10 +280,14 @@ module ActiveRecord
       errors << "#{attr} must be an integer" if only_integer && !value.is_a?(Integer)
     end
 
-    def validates_inclusion_of(attr, in:)
-      set = binding.local_variable_get(:in)
+    def validates_inclusion_of(attr, within:)
+      # The Rails DSL uses `in:`; we use `within:` to dodge Ruby's
+      # `in` keyword (which forces a `binding.local_variable_get(:in)`
+      # workaround that's body-typer hostile). Lowerers translating
+      # `validates :x, inclusion: { in: [...] }` should map to
+      # `validates_inclusion_of(:x, within: [...])`.
       value = read_for_validation(attr)
-      errors << "#{attr} is not included in the list" unless set.include?(value)
+      errors << "#{attr} is not included in the list" unless within.include?(value)
     end
 
     def validates_format_of(attr, with:)

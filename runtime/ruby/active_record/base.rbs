@@ -64,7 +64,7 @@ module ActiveRecord
     def validates_absence_of: (Symbol attr) -> void
     def validates_length_of: (Symbol attr, ?minimum: Integer?, ?maximum: Integer?, ?is: Integer?) -> void
     def validates_numericality_of: (Symbol attr, ?greater_than: Integer?, ?less_than: Integer?, ?only_integer: bool) -> void
-    def validates_inclusion_of: (Symbol attr, in: Array[String]) -> void
+    def validates_inclusion_of: (Symbol attr, within: Array[String]) -> void
     def validates_format_of: (Symbol attr, with: String) -> void
     def validates_uniqueness_of: (Symbol attr, ?scope: Array[Symbol], ?case_sensitive: bool) -> void
 
