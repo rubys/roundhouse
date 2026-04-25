@@ -103,10 +103,10 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Class { id, args }) => {
                 if let Some(cls) = self.classes().get(id) {
                     if let Some(ty) = cls.class_methods.get(method) {
-                        return ty.clone();
+                        return unwrap_fn_ret(ty);
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
-                        return ty.clone();
+                        return unwrap_fn_ret(ty);
                     }
                 }
                 // Every class in Ruby responds to `.new`, returning an
@@ -297,6 +297,19 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
+    }
+}
+
+/// Unwrap a method's stored type to the call-site result type. Two
+/// registration styles coexist: the catalog stores return types
+/// directly (`Article.find: Ty::Class("Article")`), while
+/// `parse_app_signatures` stores full function types
+/// (`Ty::Fn { ret: ..., .. }`). Dispatch wants the return-type form
+/// in both cases.
+fn unwrap_fn_ret(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Fn { ret, .. } => (**ret).clone(),
+        other => other.clone(),
     }
 }
 
