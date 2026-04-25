@@ -50,8 +50,12 @@ module ActiveRecord
     end
 
     def self.instantiate(row)
-      obj = allocate
-      obj.send(:init_from_row, row)
+      # Use `new` rather than `allocate` so the body-typer doesn't have
+      # to model Ruby's allocate-without-initialize bypass. The empty-
+      # attrs initialize is a no-op against `init_from_row`'s overwrite,
+      # so the result is equivalent.
+      obj = new
+      obj.init_from_row(row)
       obj
     end
 
@@ -332,8 +336,8 @@ module ActiveRecord
       nil
     end
 
-    private
-
+    # Public so `Base.instantiate` can call it without `send`-reflection.
+    # Conceptually private API; user code shouldn't call it directly.
     def init_from_row(row)
       @errors = []
       @persisted = true
@@ -342,6 +346,8 @@ module ActiveRecord
         _write_ivar(col, row[col])
       end
     end
+
+    private
 
     def read_for_validation(attr)
       _has_accessor?(attr) ? _read_accessor(attr) : _read_ivar(attr)

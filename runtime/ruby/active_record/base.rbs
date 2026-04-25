@@ -75,8 +75,10 @@ module ActiveRecord
     def broadcast_prepend_to: (*String channels, ?target: String?) -> nil
     def broadcast_remove_to: (*String channels, ?target: String?) -> nil
 
-    private
+    # Public conceptually-private — see base.rb comment.
     def init_from_row: (Hash[Symbol, String] row) -> void
+
+    private
     def read_for_validation: (Symbol attr) -> String
     def blank?: (String value) -> bool
 
