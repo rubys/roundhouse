@@ -253,6 +253,26 @@ pub(super) fn hash_method(
         // "unresolved" diagnostic when the hash's Value itself is a
         // type variable).
         "[]=" | "store" => Ty::Nil,
+        // `delete(k)` returns the removed value, or nil if not found.
+        "delete" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        "clear" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
+        "to_a" => Ty::Array {
+            elem: Box::new(Ty::Tuple { elems: vec![key.clone(), value.clone()] }),
+        },
+        "dup" | "clone" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
+        // Predicate-form indexing tested by `key?` / `value?`.
+        "value?" | "has_value?" | "member?" => Ty::Bool,
+        // `each` and similar return the receiver hash for chaining.
+        "each" | "each_pair" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
         "length" | "size" | "count" => Ty::Int,
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
