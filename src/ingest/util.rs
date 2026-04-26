@@ -61,6 +61,11 @@ pub(super) fn find_first_class<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Clas
             }
         }
     }
+    if let Some(m) = node.as_module_node() {
+        if let Some(body) = m.body() {
+            return find_first_class(&body);
+        }
+    }
     None
 }
 
