@@ -8,6 +8,8 @@ $LOAD_PATH.unshift(File.join(ROOT, "config"))
 require "sqlite_adapter"
 require "active_record"
 require "schema"
+require "action_dispatch"
+require "action_controller"
 
 # One-time global setup: configure the adapter against an in-memory
 # SQLite database, load the schema, and wire ActiveRecord.adapter to
@@ -28,5 +30,78 @@ module SchemaSetup
       SqliteAdapter.db.execute("DELETE FROM #{t}")
       SqliteAdapter.db.execute("DELETE FROM sqlite_sequence WHERE name = ?", [t])
     end
+  end
+end
+
+# In-process request dispatch — equivalent of Rails's
+# ActionDispatch::IntegrationTest. Test classes that need to exercise
+# controller actions extend this module to get get/post/patch/delete.
+class ActionResponse
+  attr_reader :status, :body, :location, :flash
+
+  def initialize(status:, body:, location:, flash:)
+    @status   = status
+    @body     = body
+    @location = location
+    @flash    = flash
+  end
+
+  def redirect?
+    !@location.nil? && @status >= 300 && @status < 400
+  end
+
+  def success?
+    @status >= 200 && @status < 300
+  end
+
+  def unprocessable?
+    @status == 422
+  end
+end
+
+module RequestDispatch
+  def get(path, params: {})
+    dispatch_request("GET", path, params)
+  end
+
+  def post(path, params: {})
+    dispatch_request("POST", path, params)
+  end
+
+  def patch(path, params: {})
+    dispatch_request("PATCH", path, params)
+  end
+
+  def delete(path, params: {})
+    dispatch_request("DELETE", path, params)
+  end
+
+  def dispatch_request(method, path, params)
+    require "routes"
+    ViewHelpers.reset_slots!
+    matched = Router.match(method, path, Routes::TABLE)
+    raise "No route matches #{method} #{path}" if matched.nil?
+    controller = matched[:controller].new
+    merged = matched[:path_params].dup
+    params.each { |k, v| merged[k] = v }
+    controller.params  = ActionController::Parameters.new(merged)
+    controller.session = @__session ||= {}
+    controller.flash   = @__flash   ||= {}
+    controller.request_method = method
+    controller.request_path   = path
+    controller.process_action(matched[:action])
+    @__flash = controller.flash
+    ActionResponse.new(
+      status:   controller.status,
+      body:     controller.body,
+      location: controller.location,
+      flash:    controller.flash,
+    )
+  end
+
+  def assert_redirected_to(expected_path, response)
+    assert response.redirect?,
+      "expected a redirect, got status=#{response.status} location=#{response.location.inspect}"
+    assert_equal expected_path, response.location
   end
 end
