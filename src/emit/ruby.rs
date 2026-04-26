@@ -18,6 +18,7 @@ mod controller;
 mod expr;
 mod fixture;
 mod importmap;
+mod library;
 mod model;
 mod route;
 mod schema;
@@ -57,6 +58,15 @@ pub fn emit_method(m: &MethodDef) -> String {
     }
     out.push_str("end\n");
     out
+}
+
+/// Emit library-shape Ruby — for transpiled-shape input where class
+/// bodies contain explicit methods rather than Rails DSL calls.
+/// Complementary to `emit`; skips Rails-app artifacts (controllers,
+/// routes, views, fixtures, importmap, schema) and emits only one
+/// `.rb` file per `LibraryClass`. Mirrors `typescript::emit_library`.
+pub fn emit_library(app: &App) -> Vec<EmittedFile> {
+    library::emit_library_class_decls(app)
 }
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
