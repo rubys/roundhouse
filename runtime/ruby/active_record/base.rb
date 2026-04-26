@@ -88,10 +88,9 @@ module ActiveRecord
       @errors = []
       @persisted = false
       @destroyed = false
-      # Populate each schema ivar the attr_accessor generated. Using
-      # `send("#{k}=", v)` routes through any override the model
-      # provides (e.g. normalization, aliases) — matches Rails.
-      attrs.each { |k, v| send("#{k}=", v) }
+      # Populate each schema ivar via the chokepoint helper. Routes
+      # through any override the model provides — matches Rails.
+      attrs.each { |k, v| _write_accessor(k, v) }
     end
 
     def attributes
@@ -201,7 +200,7 @@ module ActiveRecord
     end
 
     def update(attrs)
-      attrs.each { |k, v| send("#{k}=", v) }
+      attrs.each { |k, v| _write_accessor(k, v) }
       save
     end
 
@@ -359,6 +358,10 @@ module ActiveRecord
 
     def _read_accessor(name)
       send(name)
+    end
+
+    def _write_accessor(name, value)
+      send("#{name}=", value)
     end
 
     def _has_accessor?(name)

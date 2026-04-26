@@ -89,6 +89,7 @@ module ActiveRecord
     def _read_ivar: (Symbol name) -> String
     def _write_ivar: (Symbol name, String value) -> String
     def _read_accessor: (Symbol name) -> String
+    def _write_accessor: (Symbol name, String value) -> String
     def _has_accessor?: (Symbol name) -> bool
   end
 end
