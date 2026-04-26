@@ -92,6 +92,26 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Ty {
+        // `obj.class` is receiver-aware: our type system flattens the
+        // class object and instances onto the same `Ty::Class { id }`,
+        // so `instance_of_Base.class` returns `Ty::Class { Base }`
+        // (not the generic `Ty::Class { Class }`). Keeps the type
+        // available for chained dispatch like `self.class.table_name`.
+        // For non-class receivers (`1.class`, `"x".class`) we still
+        // hand back generic `Class` since the per-primitive metaclass
+        // isn't represented in the registry.
+        if method.as_str() == "class" {
+            return match recv_ty {
+                Some(Ty::Class { id, args }) => Ty::Class {
+                    id: id.clone(),
+                    args: args.clone(),
+                },
+                _ => Ty::Class {
+                    id: ClassId(Symbol::from("Class")),
+                    args: vec![],
+                },
+            };
+        }
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
@@ -329,11 +349,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         | "frozen?" | "tainted?" | "untrusted?" => Some(Ty::Bool),
         // Value equality / comparison operators.
         "==" | "!=" | "eql?" | "equal?" => Some(Ty::Bool),
-        // Object introspection.
-        "class" => Some(Ty::Class {
-            id: ClassId(Symbol::from("Class")),
-            args: vec![],
-        }),
+        // `class` is receiver-aware and handled in `dispatch` itself
+        // (preserves `Ty::Class { id }` so chained `obj.class.foo`
+        // resolves against `id`'s registry entry).
         "hash" | "object_id" => Some(Ty::Int),
         "inspect" | "to_s" => Some(Ty::Str),
         _ => None,
