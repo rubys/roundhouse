@@ -7,8 +7,10 @@
 
 use ruby_prism::parse;
 
-use crate::dialect::{AttrDecl, AttrKind, LibraryClass};
-use crate::expr::{Expr, ExprNode};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::effect::EffectSet;
+use crate::expr::{Expr, ExprNode, LValue};
+use crate::ident::VarId;
 use crate::span::Span;
 use crate::{ClassId, Symbol};
 
@@ -65,8 +67,7 @@ fn library_class_from_node(
     });
 
     let mut includes: Vec<ClassId> = Vec::new();
-    let mut attrs: Vec<AttrDecl> = Vec::new();
-    let mut methods: Vec<crate::dialect::MethodDef> = Vec::new();
+    let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
@@ -88,12 +89,11 @@ fn library_class_from_node(
                             }
                         }
                         "attr_reader" | "attr_writer" | "attr_accessor" => {
-                            let kind = match kw {
-                                "attr_reader" => AttrKind::Reader,
-                                "attr_writer" => AttrKind::Writer,
-                                "attr_accessor" => AttrKind::Accessor,
-                                _ => unreachable!(),
-                            };
+                            // Lower to method definitions at ingest time
+                            // (per the YAGNI-on-round-trip decision):
+                            //   attr_reader :foo  → def foo; @foo; end
+                            //   attr_writer :foo  → def foo=(v); @foo = v; end
+                            //   attr_accessor :foo → both
                             let mut names: Vec<Symbol> = Vec::new();
                             if let Some(args) = call.arguments() {
                                 for arg in args.arguments().iter() {
@@ -102,8 +102,15 @@ fn library_class_from_node(
                                     }
                                 }
                             }
-                            if !names.is_empty() {
-                                attrs.push(AttrDecl { kind, names });
+                            for name in &names {
+                                let want_reader = matches!(kw, "attr_reader" | "attr_accessor");
+                                let want_writer = matches!(kw, "attr_writer" | "attr_accessor");
+                                if want_reader {
+                                    methods.push(synth_attr_reader(&owner, name));
+                                }
+                                if want_writer {
+                                    methods.push(synth_attr_writer(&owner, name));
+                                }
                             }
                         }
                         _ => {
@@ -125,9 +132,54 @@ fn library_class_from_node(
         name: owner,
         parent,
         includes,
-        attrs,
         methods,
     })
+}
+
+/// Synthesize `def <name>; @<name>; end`.
+fn synth_attr_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Ivar { name: name.clone() },
+    );
+    MethodDef {
+        name: name.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+    }
+}
+
+/// Synthesize `def <name>=(value); @<name> = value; end`.
+fn synth_attr_writer(owner: &ClassId, name: &Symbol) -> MethodDef {
+    let value_param = Symbol::from("value");
+    let rhs = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var {
+            id: VarId(0),
+            name: value_param.clone(),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: name.clone() },
+            value: rhs,
+        },
+    );
+    let setter_name = Symbol::from(format!("{}=", name.as_str()));
+    MethodDef {
+        name: setter_name,
+        receiver: MethodReceiver::Instance,
+        params: vec![value_param],
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+    }
 }
 
 fn ingest_library_method(

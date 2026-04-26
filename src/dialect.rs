@@ -331,27 +331,12 @@ pub struct LibraryClass {
     /// (e.g. `Enumerable`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
-    /// `attr_reader` / `attr_writer` / `attr_accessor` declarations at
-    /// the class top level. Source-order preserved across kinds, but
-    /// emit groups by-kind under one keyword line per declaration. A
-    /// later refinement can pair these with method bodies (TS emits
-    /// `get/set`); for now Ruby targets just round-trip the literal.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attrs: Vec<AttrDecl>,
+    /// All instance + class methods in the class. `attr_reader` /
+    /// `attr_writer` / `attr_accessor` are lowered to synthetic
+    /// `MethodDef`s at ingest time (not preserved as attr declarations
+    /// — surface form is sacrificed for downstream uniformity per the
+    /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AttrDecl {
-    pub kind: AttrKind,
-    pub names: Vec<crate::ident::Symbol>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttrKind {
-    Reader,
-    Writer,
-    Accessor,
 }
 
 // Controllers -----------------------------------------------------------

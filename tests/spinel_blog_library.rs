@@ -1,17 +1,18 @@
-//! Round-trip the spinel-blog framework runtime through the library-shape
-//! pipeline. Anchors step 1 of the spinel-blog plan: ingest a runtime
-//! file, emit Ruby, verify the rich shapes survive.
+//! Anchor for step 1 of the spinel-blog plan: ingest a spinel-blog
+//! runtime file through the library-shape pipeline, emit Ruby, verify
+//! the IR captures the semantics.
 //!
-//! Smallest non-trivial entry: `runtime/active_record/errors.rb` — two
-//! classes inside `module ActiveRecord` (`RecordNotFound`,
+//! Note on goal: this is *not* a strict source-equivalence round-trip.
+//! `attr_reader :foo` is lowered to `def foo; @foo; end` at ingest
+//! time (per the YAGNI-on-round-trip decision); emitted Ruby differs
+//! syntactically from input. The forcing function is "Spinel can
+//! compile the emitted Ruby and the result behaves the same as the
+//! original" — surface preservation is not the goal.
+//!
+//! Smallest non-trivial entry: `runtime/active_record/errors.rb` —
+//! two classes inside `module ActiveRecord` (`RecordNotFound`,
 //! `RecordInvalid`), one ivar, one `super` call with a string-interp
-//! arg, one `attr_reader`. Exercises the library-shape pipeline end
-//! to end.
-//!
-//! When this test starts failing, the delta is the work queue: either
-//! a new shape surfaced in spinel-blog that the ingest/emit path
-//! doesn't yet handle, or an existing pattern stopped round-tripping.
-//! Hold the line.
+//! arg, one `attr_reader` (which lowers to a getter method).
 
 use std::path::PathBuf;
 
@@ -22,7 +23,7 @@ use roundhouse::ingest::ingest_library_classes;
 const ERRORS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/errors.rb";
 
 #[test]
-fn errors_rb_round_trips_via_library_path() {
+fn errors_rb_ingests_and_emits_via_library_path() {
     let path = PathBuf::from(ERRORS_RB_PATH);
     let source = std::fs::read(&path).expect("read errors.rb");
     let path_str = path.display().to_string();
@@ -49,21 +50,22 @@ fn errors_rb_round_trips_via_library_path() {
         assert_eq!(parent, "StandardError", "{}: parent {parent}", lc.name.0.as_str());
     }
 
-    // RecordInvalid is the rich one. It should carry the attr_reader
-    // and the initialize method.
+    // RecordInvalid is the rich one. attr_reader :record lowers to
+    // a getter method, so the methods Vec should hold both that
+    // synthesized getter and the source-defined initialize.
     let invalid = classes
         .iter()
         .find(|c| c.name.0.as_str() == "RecordInvalid")
         .expect("RecordInvalid present");
-    assert_eq!(
-        invalid.attrs.len(),
-        1,
-        "RecordInvalid should have one attr declaration (attr_reader :record)",
+    let method_names: Vec<&str> = invalid.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        method_names.contains(&"record"),
+        "expected synthesized getter for attr_reader :record; got {method_names:?}",
     );
-    assert_eq!(invalid.attrs[0].names.len(), 1);
-    assert_eq!(invalid.attrs[0].names[0].as_str(), "record");
-    assert_eq!(invalid.methods.len(), 1, "RecordInvalid: initialize only");
-    assert_eq!(invalid.methods[0].name.as_str(), "initialize");
+    assert!(
+        method_names.contains(&"initialize"),
+        "expected initialize method; got {method_names:?}",
+    );
 
     let mut app = App::new();
     for lc in classes {
@@ -78,8 +80,12 @@ fn errors_rb_round_trips_via_library_path() {
         .expect("record_invalid.rb emitted");
     let content = &invalid_file.content;
 
+    // Class shell + parent.
     assert!(content.contains("class RecordInvalid < StandardError"), "emitted: {content}");
-    assert!(content.contains("attr_reader :record"), "emitted: {content}");
+    // Lowered attr_reader: a `def record` returning `@record`.
+    assert!(content.contains("def record"), "emitted: {content}");
+    assert!(content.contains("@record"), "emitted: {content}");
+    // The source-defined initialize body round-trips.
     assert!(content.contains("def initialize(record)"), "emitted: {content}");
     assert!(content.contains("super("), "emitted: {content}");
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
