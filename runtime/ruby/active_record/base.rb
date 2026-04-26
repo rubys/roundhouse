@@ -339,15 +339,15 @@ module ActiveRecord
       nil
     end
 
-    # Public so `Base.instantiate` can call it without `send`-reflection.
-    # Conceptually private API; user code shouldn't call it directly.
+    # Per-model concrete: each model lowerer generates an
+    # `init_from_row(row)` that explicitly assigns each schema column.
+    # Base provides a stub so direct `Base.new.init_from_row(row)`
+    # surfaces the missing override loudly. Replacing the generic
+    # `schema_column_names.each + _write_ivar` reflective loop with
+    # per-model concrete assignments lets the body-typer fully resolve
+    # init paths on every emitted target.
     def init_from_row(row)
-      @errors = []
-      @persisted = true
-      @destroyed = false
-      self.class.schema_column_names.each do |col|
-        _write_ivar(col, row[col])
-      end
+      raise NotImplementedError, "#{self.class} must override init_from_row"
     end
 
     private

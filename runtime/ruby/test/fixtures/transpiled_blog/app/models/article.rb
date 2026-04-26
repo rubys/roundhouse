@@ -30,6 +30,21 @@ class Article < ApplicationRecord
   # the names via schema_column_names to drive adapter (de)serialization.
   attr_accessor :id, :title, :body, :created_at, :updated_at
 
+  # Generated per-model: explicit ivar assignments from a row Hash.
+  # Replaces the framework's reflective
+  # `schema_column_names.each { |c| _write_ivar(c, row[c]) }` loop so
+  # the IR is fully typed on every target.
+  def init_from_row(row)
+    @errors = []
+    @persisted = true
+    @destroyed = false
+    @id = row[:id]
+    @title = row[:title]
+    @body = row[:body]
+    @created_at = row[:created_at]
+    @updated_at = row[:updated_at]
+  end
+
   # --- has_many :comments ---
   def comments
     @_comments ||= ArticleCommentsProxy.new(self)
