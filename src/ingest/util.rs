@@ -114,6 +114,67 @@ pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<S
     constant_path_segments_strs(&cp)
 }
 
+/// Collect every `module` declaration reachable from `node` that has
+/// at least one direct `def` in its body. Modules with only nested
+/// classes/modules (pure namespace wrappers like `module ActiveRecord`
+/// in errors.rb) are skipped — their nested decls are already picked
+/// up by `find_all_classes` / recursive `find_all_modules` calls.
+///
+/// Used by the library-shape ingest path to lower modules-as-
+/// namespaces (e.g. `module Inflector with def self.pluralize`) into
+/// LibraryClass with no parent. Mixin semantics (modules whose
+/// instance methods are `include`d into classes) are not handled
+/// here — they need a separate lowering when the include site is
+/// known.
+pub(super) fn find_all_modules<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ModuleNode<'pr>> {
+    let mut out = Vec::new();
+    collect_modules(node, &mut out);
+    out
+}
+
+fn collect_modules<'pr>(node: &Node<'pr>, out: &mut Vec<ruby_prism::ModuleNode<'pr>>) {
+    if let Some(m) = node.as_module_node() {
+        let body = m.body();
+        if module_has_direct_def(&m) {
+            out.push(m);
+        }
+        if let Some(b) = body {
+            collect_modules(&b, out);
+        }
+        return;
+    }
+    if let Some(c) = node.as_class_node() {
+        if let Some(body) = c.body() {
+            collect_modules(&body, out);
+        }
+        return;
+    }
+    if let Some(p) = node.as_program_node() {
+        collect_modules(&p.statements().as_node(), out);
+        return;
+    }
+    if let Some(s) = node.as_statements_node() {
+        for stmt in s.body().iter() {
+            collect_modules(&stmt, out);
+        }
+    }
+}
+
+fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
+    let Some(body) = m.body() else { return false };
+    for stmt in flatten_statements(body) {
+        if stmt.as_def_node().is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn module_name_path(m: &ruby_prism::ModuleNode<'_>) -> Option<Vec<String>> {
+    let cp = m.constant_path();
+    constant_path_segments_strs(&cp)
+}
+
 pub(super) fn constant_path_of(node: &Node<'_>) -> Option<Vec<String>> {
     constant_path_segments_strs(node)
 }

@@ -21,6 +21,7 @@ use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 
 const ERRORS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/errors.rb";
+const INFLECTOR_RB_PATH: &str = "fixtures/spinel-blog/runtime/inflector.rb";
 
 #[test]
 fn errors_rb_ingests_and_emits_via_library_path() {
@@ -88,5 +89,60 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     // The source-defined initialize body round-trips.
     assert!(content.contains("def initialize(record)"), "emitted: {content}");
     assert!(content.contains("super("), "emitted: {content}");
+    assert!(content.trim_end().ends_with("end"), "emitted: {content}");
+}
+
+/// `runtime/inflector.rb`: a `module Inflector` with one `def
+/// self.pluralize`. Lowered to a `LibraryClass` with no parent and
+/// the singleton method (per the YAGNI-on-round-trip decision —
+/// callers only use `Inflector.pluralize(...)`, never `include`, so
+/// module-vs-class distinction can collapse to class semantics).
+#[test]
+fn inflector_rb_ingests_module_as_namespace() {
+    let path = PathBuf::from(INFLECTOR_RB_PATH);
+    let source = std::fs::read(&path).expect("read inflector.rb");
+    let path_str = path.display().to_string();
+
+    let classes = ingest_library_classes(&source, &path_str)
+        .expect("ingest_library_classes returned Err");
+
+    assert_eq!(
+        classes.len(),
+        1,
+        "expected one LibraryClass (Inflector); got {} ({:?})",
+        classes.len(),
+        classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
+    );
+
+    let inflector = &classes[0];
+    assert_eq!(inflector.name.0.as_str(), "Inflector");
+    assert!(inflector.parent.is_none(), "module-as-namespace has no parent");
+    assert_eq!(inflector.methods.len(), 1);
+
+    let m = &inflector.methods[0];
+    assert_eq!(m.name.as_str(), "pluralize");
+    // `def self.pluralize` → MethodReceiver::Class.
+    assert!(
+        matches!(m.receiver, roundhouse::dialect::MethodReceiver::Class),
+        "expected class-method receiver; got {:?}",
+        m.receiver,
+    );
+    assert_eq!(
+        m.params.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        vec!["count", "word"],
+    );
+
+    let mut app = App::new();
+    for lc in classes {
+        app.library_classes.push(lc);
+    }
+    let files = emit_library(&app);
+    assert_eq!(files.len(), 1);
+    let content = &files[0].content;
+
+    // Module lowered to class shell; singleton method emits as `def self.x`.
+    assert!(content.contains("class Inflector"), "emitted: {content}");
+    assert!(content.contains("def self.pluralize(count, word)"), "emitted: {content}");
+    assert!(content.contains("if "), "emitted: {content}");
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
 }

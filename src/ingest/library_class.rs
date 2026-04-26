@@ -16,8 +16,8 @@ use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_all_classes, find_first_class,
-    flatten_statements, symbol_value,
+    class_name_path, constant_id_str, constant_path_of, find_all_classes, find_all_modules,
+    find_first_class, flatten_statements, module_name_path, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -33,11 +33,20 @@ pub fn ingest_library_class(
     Ok(Some(library_class_from_node(&class, file)?))
 }
 
-/// Plural variant — returns one `LibraryClass` per class declaration in
-/// the file (descending through modules and nested classes). Used by
-/// the library-shape ingest path where a file like
+/// Plural variant — returns one `LibraryClass` per class declaration
+/// AND per module-as-namespace (a module whose body contains direct
+/// `def`s) in the file, descending through nested classes and modules.
+/// Used by the library-shape ingest path where a file like
 /// `runtime/active_record/errors.rb` declares several classes side by
-/// side inside one module.
+/// side inside one module, or like `runtime/inflector.rb` declares a
+/// module-with-self-methods.
+///
+/// Modules-as-namespaces are lowered to `LibraryClass` with `parent:
+/// None` (per the YAGNI-on-round-trip decision: surface
+/// module-vs-class distinction is sacrificed for downstream
+/// uniformity, which is fine when callers only use the module as a
+/// dotted-call namespace). Mixin modules (whose instance methods get
+/// `include`d into a class) are NOT handled by this path yet.
 pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
@@ -47,6 +56,9 @@ pub fn ingest_library_classes(
     let mut out = Vec::new();
     for class in find_all_classes(&root) {
         out.push(library_class_from_node(&class, file)?);
+    }
+    for module in find_all_modules(&root) {
+        out.push(library_class_from_module_node(&module, file)?);
     }
     Ok(out)
 }
@@ -59,81 +71,116 @@ fn library_class_from_node(
         file: file.into(),
         message: "library class name must be a simple constant or path".into(),
     })?;
-    let class_name = Symbol::from(name_path.join("::"));
-    let owner = ClassId(class_name.clone());
+    let owner = ClassId(Symbol::from(name_path.join("::")));
 
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
-    let mut includes: Vec<ClassId> = Vec::new();
-    let mut methods: Vec<MethodDef> = Vec::new();
-
-    if let Some(class_body) = class.body() {
-        for stmt in flatten_statements(class_body) {
-            if let Some(def) = stmt.as_def_node() {
-                methods.push(ingest_library_method(&def, &owner, file)?);
-                continue;
-            }
-            if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none() {
-                    let kw = constant_id_str(&call.name());
-                    match kw {
-                        "include" => {
-                            if let Some(args) = call.arguments() {
-                                for arg in args.arguments().iter() {
-                                    if let Some(path) = constant_path_of(&arg) {
-                                        includes.push(ClassId(Symbol::from(path.join("::"))));
-                                    }
-                                }
-                            }
-                        }
-                        "attr_reader" | "attr_writer" | "attr_accessor" => {
-                            // Lower to method definitions at ingest time
-                            // (per the YAGNI-on-round-trip decision):
-                            //   attr_reader :foo  → def foo; @foo; end
-                            //   attr_writer :foo  → def foo=(v); @foo = v; end
-                            //   attr_accessor :foo → both
-                            let mut names: Vec<Symbol> = Vec::new();
-                            if let Some(args) = call.arguments() {
-                                for arg in args.arguments().iter() {
-                                    if let Some(s) = symbol_value(&arg) {
-                                        names.push(Symbol::from(s));
-                                    }
-                                }
-                            }
-                            for name in &names {
-                                let want_reader = matches!(kw, "attr_reader" | "attr_accessor");
-                                let want_writer = matches!(kw, "attr_writer" | "attr_accessor");
-                                if want_reader {
-                                    methods.push(synth_attr_reader(&owner, name));
-                                }
-                                if want_writer {
-                                    methods.push(synth_attr_writer(&owner, name));
-                                }
-                            }
-                        }
-                        _ => {
-                            // Other top-level calls (alias_method, etc.)
-                            // — drop on the floor for now; each emitter
-                            // that cares can lift these as needed.
-                        }
-                    }
-                }
-            }
-            // Nested class declarations (`class Outer; class Inner;`)
-            // also fall through here. They surface as separate
-            // `LibraryClass` entries via the plural API above; the
-            // singular path drops them.
-        }
-    }
-
+    let (includes, methods) = walk_decl_body(class.body(), &owner, file)?;
     Ok(LibraryClass {
         name: owner,
         parent,
         includes,
         methods,
     })
+}
+
+/// Same as `library_class_from_node` but for module-as-namespace
+/// declarations — modules whose body has at least one direct `def`,
+/// surfaced via `find_all_modules`. Lowered to a `LibraryClass` with
+/// no parent.
+fn library_class_from_module_node(
+    module: &ruby_prism::ModuleNode<'_>,
+    file: &str,
+) -> IngestResult<LibraryClass> {
+    let name_path = module_name_path(module).ok_or_else(|| IngestError::Unsupported {
+        file: file.into(),
+        message: "library module name must be a simple constant or path".into(),
+    })?;
+    let owner = ClassId(Symbol::from(name_path.join("::")));
+
+    let (includes, methods) = walk_decl_body(module.body(), &owner, file)?;
+    Ok(LibraryClass {
+        name: owner,
+        parent: None,
+        includes,
+        methods,
+    })
+}
+
+/// Walk a class or module body, collecting `include` directives and
+/// method definitions (with `attr_*` lowered to synthesized methods).
+/// Other top-level calls (alias_method, etc.) and nested class/module
+/// declarations are dropped — those surface separately via the plural
+/// ingest entry points.
+fn walk_decl_body<'pr>(
+    body: Option<ruby_prism::Node<'pr>>,
+    owner: &ClassId,
+    file: &str,
+) -> IngestResult<(Vec<ClassId>, Vec<MethodDef>)> {
+    let mut includes: Vec<ClassId> = Vec::new();
+    let mut methods: Vec<MethodDef> = Vec::new();
+
+    let Some(b) = body else {
+        return Ok((includes, methods));
+    };
+
+    for stmt in flatten_statements(b) {
+        if let Some(def) = stmt.as_def_node() {
+            methods.push(ingest_library_method(&def, owner, file)?);
+            continue;
+        }
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none() {
+                let kw = constant_id_str(&call.name());
+                match kw {
+                    "include" => {
+                        if let Some(args) = call.arguments() {
+                            for arg in args.arguments().iter() {
+                                if let Some(path) = constant_path_of(&arg) {
+                                    includes.push(ClassId(Symbol::from(path.join("::"))));
+                                }
+                            }
+                        }
+                    }
+                    "attr_reader" | "attr_writer" | "attr_accessor" => {
+                        // Lower to method definitions at ingest time
+                        // (per the YAGNI-on-round-trip decision):
+                        //   attr_reader :foo  → def foo; @foo; end
+                        //   attr_writer :foo  → def foo=(v); @foo = v; end
+                        //   attr_accessor :foo → both
+                        let mut names: Vec<Symbol> = Vec::new();
+                        if let Some(args) = call.arguments() {
+                            for arg in args.arguments().iter() {
+                                if let Some(s) = symbol_value(&arg) {
+                                    names.push(Symbol::from(s));
+                                }
+                            }
+                        }
+                        for name in &names {
+                            let want_reader = matches!(kw, "attr_reader" | "attr_accessor");
+                            let want_writer = matches!(kw, "attr_writer" | "attr_accessor");
+                            if want_reader {
+                                methods.push(synth_attr_reader(owner, name));
+                            }
+                            if want_writer {
+                                methods.push(synth_attr_writer(owner, name));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other top-level calls (alias_method, etc.) —
+                        // drop on the floor for now.
+                    }
+                }
+            }
+        }
+        // Nested class/module declarations also fall through here; they
+        // surface as separate entries via the plural API.
+    }
+
+    Ok((includes, methods))
 }
 
 /// Synthesize `def <name>; @<name>; end`.
