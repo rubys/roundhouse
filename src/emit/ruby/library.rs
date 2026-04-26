@@ -27,9 +27,14 @@ fn emit_library_class_decl(lc: &LibraryClass) -> EmittedFile {
     let file_stem = snake_case(name);
     let mut s = String::new();
 
-    let header = match lc.parent.as_ref() {
-        Some(p) => format!("class {name} < {}", p.0.as_str()),
-        None => format!("class {name}"),
+    let header = if lc.is_module {
+        // Modules don't take a parent; ingest already enforces this.
+        format!("module {name}")
+    } else {
+        match lc.parent.as_ref() {
+            Some(p) => format!("class {name} < {}", p.0.as_str()),
+            None => format!("class {name}"),
+        }
     };
     writeln!(s, "{header}").unwrap();
 

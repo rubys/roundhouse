@@ -325,6 +325,14 @@ pub enum MethodReceiver {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryClass {
     pub name: ClassId,
+    /// True when the source declared this with `module` rather than
+    /// `class`. Carried because Ruby (and Spinel) require the
+    /// distinction at use sites: `include X` works only on a Module
+    /// and raises TypeError on a Class. Without this flag, mixin
+    /// modules emitted as classes would fail to compile when their
+    /// including class hits the `include` call.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_module: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ClassId>,
     /// `include` directives at the class top level, in source order
@@ -337,6 +345,10 @@ pub struct LibraryClass {
     /// — surface form is sacrificed for downstream uniformity per the
     /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // Controllers -----------------------------------------------------------

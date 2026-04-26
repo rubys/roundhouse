@@ -80,6 +80,7 @@ fn library_class_from_node(
     let (includes, methods) = walk_decl_body(class.body(), &owner, file)?;
     Ok(LibraryClass {
         name: owner,
+        is_module: false,
         parent,
         includes,
         methods,
@@ -89,7 +90,9 @@ fn library_class_from_node(
 /// Same as `library_class_from_node` but for module-as-namespace
 /// declarations — modules whose body has at least one direct `def`,
 /// surfaced via `find_all_modules`. Lowered to a `LibraryClass` with
-/// no parent.
+/// `is_module: true` and `parent: None`. The `is_module` flag is
+/// load-bearing: callers using `include` on the result need it to be
+/// emitted as `module`, not `class`, or Ruby will raise TypeError.
 fn library_class_from_module_node(
     module: &ruby_prism::ModuleNode<'_>,
     file: &str,
@@ -103,6 +106,7 @@ fn library_class_from_module_node(
     let (includes, methods) = walk_decl_body(module.body(), &owner, file)?;
     Ok(LibraryClass {
         name: owner,
+        is_module: true,
         parent: None,
         includes,
         methods,
