@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::LibraryClass;
+use crate::dialect::{AttrKind, LibraryClass};
 use crate::naming::snake_case;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
@@ -36,7 +36,20 @@ fn emit_library_class_decl(lc: &LibraryClass) -> EmittedFile {
     for inc in &lc.includes {
         writeln!(s, "  include {}", inc.0.as_str()).unwrap();
     }
-    if !lc.includes.is_empty() && !lc.methods.is_empty() {
+
+    for attr in &lc.attrs {
+        let kw = match attr.kind {
+            AttrKind::Reader => "attr_reader",
+            AttrKind::Writer => "attr_writer",
+            AttrKind::Accessor => "attr_accessor",
+        };
+        let names: Vec<String> =
+            attr.names.iter().map(|n| format!(":{}", n.as_str())).collect();
+        writeln!(s, "  {kw} {}", names.join(", ")).unwrap();
+    }
+
+    let has_pre_method_decls = !lc.includes.is_empty() || !lc.attrs.is_empty();
+    if has_pre_method_decls && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
 

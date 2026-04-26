@@ -7,7 +7,7 @@
 
 use ruby_prism::parse;
 
-use crate::dialect::LibraryClass;
+use crate::dialect::{AttrDecl, AttrKind, LibraryClass};
 use crate::expr::{Expr, ExprNode};
 use crate::span::Span;
 use crate::{ClassId, Symbol};
@@ -15,7 +15,7 @@ use crate::{ClassId, Symbol};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes, find_first_class,
-    flatten_statements,
+    flatten_statements, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -65,6 +65,7 @@ fn library_class_from_node(
     });
 
     let mut includes: Vec<ClassId> = Vec::new();
+    let mut attrs: Vec<AttrDecl> = Vec::new();
     let mut methods: Vec<crate::dialect::MethodDef> = Vec::new();
 
     if let Some(class_body) = class.body() {
@@ -74,24 +75,45 @@ fn library_class_from_node(
                 continue;
             }
             if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none() && constant_id_str(&call.name()) == "include" {
-                    if let Some(args) = call.arguments() {
-                        for arg in args.arguments().iter() {
-                            if let Some(path) = constant_path_of(&arg) {
-                                includes
-                                    .push(ClassId(Symbol::from(path.join("::"))));
+                if call.receiver().is_none() {
+                    let kw = constant_id_str(&call.name());
+                    match kw {
+                        "include" => {
+                            if let Some(args) = call.arguments() {
+                                for arg in args.arguments().iter() {
+                                    if let Some(path) = constant_path_of(&arg) {
+                                        includes.push(ClassId(Symbol::from(path.join("::"))));
+                                    }
+                                }
                             }
+                        }
+                        "attr_reader" | "attr_writer" | "attr_accessor" => {
+                            let kind = match kw {
+                                "attr_reader" => AttrKind::Reader,
+                                "attr_writer" => AttrKind::Writer,
+                                "attr_accessor" => AttrKind::Accessor,
+                                _ => unreachable!(),
+                            };
+                            let mut names: Vec<Symbol> = Vec::new();
+                            if let Some(args) = call.arguments() {
+                                for arg in args.arguments().iter() {
+                                    if let Some(s) = symbol_value(&arg) {
+                                        names.push(Symbol::from(s));
+                                    }
+                                }
+                            }
+                            if !names.is_empty() {
+                                attrs.push(AttrDecl { kind, names });
+                            }
+                        }
+                        _ => {
+                            // Other top-level calls (alias_method, etc.)
+                            // — drop on the floor for now; each emitter
+                            // that cares can lift these as needed.
                         }
                     }
                 }
-                // Other top-level calls (alias_method, etc.) — drop on
-                // the floor for now; each emitter that cares can lift
-                // these as needed.
             }
-            // `attr_accessor`, etc. — not a model body, but a library
-            // class might still use them. Defer until a fixture forces
-            // it.
-            //
             // Nested class declarations (`class Outer; class Inner;`)
             // also fall through here. They surface as separate
             // `LibraryClass` entries via the plural API above; the
@@ -103,6 +125,7 @@ fn library_class_from_node(
         name: owner,
         parent,
         includes,
+        attrs,
         methods,
     })
 }
