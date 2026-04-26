@@ -100,7 +100,13 @@ fn models_declare_static_table_name_and_columns() {
     let content = find(&files, "app/models/post.ts");
     assert!(content.contains("static table_name = \"posts\""), "got:\n{content}");
     // `id` is excluded — Juntos handles the primary key universally.
-    assert!(content.contains("static columns = [\"title\"];"), "got:\n{content}");
+    // Annotated `: string[]` so the literal isn't inferred as a
+    // readonly tuple type (which broke variance against
+    // ApplicationRecord's static side).
+    assert!(
+        content.contains("static columns: string[] = [\"title\"];"),
+        "got:\n{content}"
+    );
     assert!(!content.contains("\"id\""), "columns must omit id, got:\n{content}");
 }
 
@@ -997,11 +1003,12 @@ fn library_class_emits_as_plain_ts_class() {
         "library class should not register in modelRegistry:\n{content}"
     );
     // Methods are present as walked bodies (correctness of body
-    // emission is tracked by separate work).
-    for method in ["initialize", "to_a", "size", "build", "create"] {
+    // emission is tracked by separate work). `initialize` emits as
+    // a TS `constructor` per the Ruby→TS convention.
+    for fragment in ["constructor(", "to_a", "size", "build", "create"] {
         assert!(
-            content.contains(method),
-            "expected {method} in proxy output:\n{content}"
+            content.contains(fragment),
+            "expected `{fragment}` in proxy output:\n{content}"
         );
     }
 }
