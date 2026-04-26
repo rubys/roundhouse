@@ -123,6 +123,7 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Str) => str_method(method),
+            Some(Ty::Sym) => sym_method(method),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
@@ -202,7 +203,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             Ty::Array { elem: Box::new(elem.clone()) }
         }
         // Array `+` (concat) and `-` (set difference) preserve Array[elem].
-        "+" | "-" => Ty::Array { elem: Box::new(elem.clone()) },
+        // `<<` mutates in place and returns self (the array). `concat` /
+        // `push` likewise return the modified array.
+        "+" | "-" | "<<" | "concat" | "push" | "unshift" | "prepend" | "append" => {
+            Ty::Array { elem: Box::new(elem.clone()) }
+        }
         // Array `*` with an Int is array repetition (preserves Array[elem]);
         // with a Str it's `.join(sep)`, returning Str. The body-typer's
         // dispatch hands us the method name but not argument types, so
@@ -282,6 +287,20 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // uniformly return Bool.
         "+" | "<<" | "*" | "%" | "concat" => Ty::Str,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        _ => unknown(),
+    }
+}
+
+pub(super) fn sym_method(method: &Symbol) -> Ty {
+    // Universal methods (`==`, `!=`, `to_s`, `inspect`, `class`, …)
+    // resolve in `universal_method` before this is reached. Cover only
+    // Sym-specific shapes here.
+    match method.as_str() {
+        "to_sym" => Ty::Sym,
+        "length" | "size" => Ty::Int,
+        "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
+        "empty?" => Ty::Bool,
+        "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
         _ => unknown(),
     }
 }
