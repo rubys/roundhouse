@@ -1,5 +1,3 @@
-require "cgi"
-
 # View helpers — module functions invoked from Views::* render methods.
 #
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/
@@ -52,9 +50,25 @@ module ViewHelpers
 
   # ── escaping / formatting ────────────────────────────────────────
 
+  # Hand-rolled to drop the `cgi` stdlib dependency (which spinel
+  # doesn't ship). Matches CGI.escapeHTML semantics: replaces `&`,
+  # `<`, `>`, `"`, and `'`. The `'` mapping uses `&#39;` (numeric)
+  # rather than `&apos;` (named) — same convention as CGI.escapeHTML
+  # in CRuby, so test assertions written against the prior behavior
+  # keep passing.
+  HTML_ESCAPES = {
+    "&" => "&amp;",
+    "<" => "&lt;",
+    ">" => "&gt;",
+    '"' => "&quot;",
+    "'" => "&#39;",
+  }.freeze
+
+  HTML_ESCAPE_PATTERN = /[&<>"']/.freeze
+
   def html_escape(s)
     return "" if s.nil?
-    CGI.escapeHTML(s.to_s)
+    s.to_s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
   end
 
   def truncate(s, length: 30, omission: "...")

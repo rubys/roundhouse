@@ -25,11 +25,11 @@ module SchemaSetup
 
   TABLES = %w[articles comments].freeze
 
+  # Adapter-agnostic: dispatches through ActiveRecord.adapter.truncate
+  # so tests work whether the adapter is SqliteAdapter or
+  # InMemoryAdapter (or any future adapter conforming to the API).
   def reset!
-    TABLES.each do |t|
-      SqliteAdapter.db.execute("DELETE FROM #{t}")
-      SqliteAdapter.db.execute("DELETE FROM sqlite_sequence WHERE name = ?", [t])
-    end
+    TABLES.each { |t| ActiveRecord.adapter.truncate(t) }
   end
 end
 
