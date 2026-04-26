@@ -31,7 +31,9 @@ pub use app::ingest_app;
 pub use controller::ingest_controller;
 pub use expr::ingest_expr;
 pub use fixture::ingest_fixture_file;
-pub use library_class::{classify_class_file, ingest_library_class, ClassKind};
+pub use library_class::{
+    classify_class_file, ingest_library_class, ingest_library_classes, ClassKind,
+};
 pub use model::ingest_model;
 pub use routes::ingest_routes;
 pub use schema::ingest_schema;

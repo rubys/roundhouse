@@ -69,6 +69,46 @@ pub(super) fn find_first_class<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Clas
     None
 }
 
+/// Collect every `class` declaration reachable from `node`, descending
+/// through `program`, `statements`, and `module` bodies. Source-order
+/// preserved. Used by the library-shape ingest path where one file
+/// can declare multiple classes (e.g.
+/// `runtime/active_record/errors.rb`).
+pub(super) fn find_all_classes<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ClassNode<'pr>> {
+    let mut out = Vec::new();
+    collect_classes(node, &mut out);
+    out
+}
+
+fn collect_classes<'pr>(node: &Node<'pr>, out: &mut Vec<ruby_prism::ClassNode<'pr>>) {
+    if let Some(c) = node.as_class_node() {
+        // Save body before moving `c` into the Vec; body() borrows `c`
+        // but the returned Node is tied to the tree's lifetime, so it
+        // outlives the move.
+        let body = c.body();
+        out.push(c);
+        if let Some(b) = body {
+            collect_classes(&b, out);
+        }
+        return;
+    }
+    if let Some(p) = node.as_program_node() {
+        collect_classes(&p.statements().as_node(), out);
+        return;
+    }
+    if let Some(s) = node.as_statements_node() {
+        for stmt in s.body().iter() {
+            collect_classes(&stmt, out);
+        }
+        return;
+    }
+    if let Some(m) = node.as_module_node() {
+        if let Some(body) = m.body() {
+            collect_classes(&body, out);
+        }
+    }
+}
+
 pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<String>> {
     let cp = class.constant_path();
     constant_path_segments_strs(&cp)

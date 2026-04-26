@@ -14,7 +14,8 @@ use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_first_class, flatten_statements,
+    class_name_path, constant_id_str, constant_path_of, find_all_classes, find_first_class,
+    flatten_statements,
 };
 use super::{IngestError, IngestResult};
 
@@ -27,8 +28,32 @@ pub fn ingest_library_class(
     let Some(class) = find_first_class(&root) else {
         return Ok(None);
     };
+    Ok(Some(library_class_from_node(&class, file)?))
+}
 
-    let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
+/// Plural variant — returns one `LibraryClass` per class declaration in
+/// the file (descending through modules and nested classes). Used by
+/// the library-shape ingest path where a file like
+/// `runtime/active_record/errors.rb` declares several classes side by
+/// side inside one module.
+pub fn ingest_library_classes(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    let result = parse(source);
+    let root = result.node();
+    let mut out = Vec::new();
+    for class in find_all_classes(&root) {
+        out.push(library_class_from_node(&class, file)?);
+    }
+    Ok(out)
+}
+
+fn library_class_from_node(
+    class: &ruby_prism::ClassNode<'_>,
+    file: &str,
+) -> IngestResult<LibraryClass> {
+    let name_path = class_name_path(class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "library class name must be a simple constant or path".into(),
     })?;
@@ -66,15 +91,20 @@ pub fn ingest_library_class(
             // `attr_accessor`, etc. — not a model body, but a library
             // class might still use them. Defer until a fixture forces
             // it.
+            //
+            // Nested class declarations (`class Outer; class Inner;`)
+            // also fall through here. They surface as separate
+            // `LibraryClass` entries via the plural API above; the
+            // singular path drops them.
         }
     }
 
-    Ok(Some(LibraryClass {
+    Ok(LibraryClass {
         name: owner,
         parent,
         includes,
         methods,
-    }))
+    })
 }
 
 fn ingest_library_method(

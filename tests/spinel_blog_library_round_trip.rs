@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use roundhouse::App;
 use roundhouse::emit::ruby::emit_library;
-use roundhouse::ingest::ingest_library_class;
+use roundhouse::ingest::ingest_library_classes;
 
 const ERRORS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/errors.rb";
 
@@ -39,35 +39,62 @@ fn errors_rb_round_trips_via_library_path() {
     let source = std::fs::read(&path).expect("read errors.rb");
     let path_str = path.display().to_string();
 
-    // Gap 1+2: today ingest_library_class returns Ok(None) because
-    // find_first_class doesn't descend into modules. The expect below
-    // is what surfaces the gap.
-    let lc = ingest_library_class(&source, &path_str)
-        .expect("ingest_library_class returned Err")
-        .expect("ingest_library_class returned None — module descent missing");
+    let classes = ingest_library_classes(&source, &path_str)
+        .expect("ingest_library_classes returned Err");
 
-    // Once gap 1 closes, gap 2 surfaces here: only one of the two
-    // classes will land. Track both class names so the assertion
-    // accepts either resolution choice (FQN or last-segment).
-    let name = lc.name.0.as_str();
-    assert!(
-        name == "RecordNotFound"
-            || name == "RecordInvalid"
-            || name == "ActiveRecord::RecordNotFound"
-            || name == "ActiveRecord::RecordInvalid",
-        "unexpected library class name: {name}",
+    // Both classes from errors.rb should land. Names are last-segment
+    // (Prism reports the syntactic name; module nesting is implicit).
+    assert_eq!(
+        classes.len(),
+        2,
+        "expected RecordNotFound + RecordInvalid; got {} ({:?})",
+        classes.len(),
+        classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
     );
+    let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
+    assert!(names.contains(&"RecordNotFound"), "names: {names:?}");
+    assert!(names.contains(&"RecordInvalid"), "names: {names:?}");
+
+    // Both inherit from StandardError.
+    for lc in &classes {
+        let parent = lc.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("(none)");
+        assert_eq!(parent, "StandardError", "{}: parent {parent}", lc.name.0.as_str());
+    }
+
+    // RecordInvalid is the rich one. It should carry:
+    //  - `attr_reader :record`     (gap 3 — ingest doesn't capture it today)
+    //  - `def initialize(record)`  with `super(...)` and ivar assign (gap 4)
+    let invalid = classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "RecordInvalid")
+        .expect("RecordInvalid present");
+    assert_eq!(
+        invalid.methods.len(),
+        1,
+        "RecordInvalid should have one ingested method (initialize); got {}",
+        invalid.methods.len(),
+    );
+    assert_eq!(invalid.methods[0].name.as_str(), "initialize");
 
     let mut app = App::new();
-    app.library_classes.push(lc);
+    for lc in classes {
+        app.library_classes.push(lc);
+    }
     let files = emit_library(&app);
+    assert_eq!(files.len(), 2, "one file per LibraryClass");
 
-    assert_eq!(files.len(), 1, "one file emitted per LibraryClass");
-    let content = &files[0].content;
+    // Find the rich one in the emitted files.
+    let invalid_file = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("record_invalid.rb"))
+        .expect("record_invalid.rb emitted");
+    let content = &invalid_file.content;
 
-    // Structural assertions — the file should at minimum declare the
-    // class with its parent and end with `end`.
-    assert!(content.contains("class "), "emitted: {content}");
-    assert!(content.contains("< StandardError"), "emitted: {content}");
+    assert!(content.contains("class RecordInvalid < StandardError"), "emitted: {content}");
+    assert!(content.contains("def initialize(record)"), "emitted: {content}");
+    // Gap 3: attr_reader :record must round-trip.
+    assert!(content.contains("attr_reader :record"), "emitted: {content}");
+    // Gap 4: super(...) must round-trip.
+    assert!(content.contains("super("), "emitted: {content}");
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
 }
