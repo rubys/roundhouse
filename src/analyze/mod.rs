@@ -99,6 +99,8 @@ impl Analyzer {
                         key: Box::new(Ty::Sym),
                         value: Box::new(Ty::Str),
                     },
+                    ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
+                    ReturnKind::Str => Ty::Str,
                     ReturnKind::ClassRef(path) => Ty::Class {
                         id: ClassId(Symbol::from(path)),
                         args: vec![],
