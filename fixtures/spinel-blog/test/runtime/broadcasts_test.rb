@@ -73,4 +73,68 @@ class BroadcastsTest < Minitest::Test
     assert_includes out, %(action="append")
     assert_includes out, "<template></template>"
   end
+
+  # ── file IPC ──────────────────────────────────────────────────
+
+  def test_no_files_written_when_BROADCAST_DIR_unset
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      ENV.delete("BROADCAST_DIR")
+      Broadcasts.append(stream: "articles", target: "articles", html: "<p>")
+      assert_empty Dir.children(dir)
+    end
+  end
+
+  def test_writes_frag_file_when_BROADCAST_DIR_set
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      ENV["BROADCAST_DIR"] = dir
+      Broadcasts.append(stream: "articles", target: "articles", html: "<p>hi</p>")
+      files = Dir.children(dir)
+      assert_equal 1, files.length
+      assert files.first.start_with?("articles__")
+      assert files.first.end_with?(".frag")
+    ensure
+      ENV.delete("BROADCAST_DIR")
+    end
+  end
+
+  def test_frag_content_is_rendered_turbo_stream
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      ENV["BROADCAST_DIR"] = dir
+      Broadcasts.replace(stream: "articles", target: "article_5", html: "<p>x</p>")
+      content = File.read(File.join(dir, Dir.children(dir).first))
+      assert_includes content, %(<turbo-stream action="replace" target="article_5">)
+      assert_includes content, "<template><p>x</p></template>"
+    ensure
+      ENV.delete("BROADCAST_DIR")
+    end
+  end
+
+  def test_special_chars_in_stream_name_get_sanitized
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      ENV["BROADCAST_DIR"] = dir
+      Broadcasts.append(stream: "article_5_comments/foo bar!", target: "comments", html: "<p>")
+      file = Dir.children(dir).first
+      refute_nil file
+      # Filename must round-trip safely on any FS — no slashes, spaces, etc.
+      assert_match(/\A[a-zA-Z0-9_-]+__\d+T\d+\.frag\z/, file)
+    ensure
+      ENV.delete("BROADCAST_DIR")
+    end
+  end
+
+  def test_in_memory_log_still_populated_alongside_file_writes
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      ENV["BROADCAST_DIR"] = dir
+      Broadcasts.append(stream: "x", target: "t", html: "h")
+      assert_equal 1, Broadcasts.log.length
+      assert_equal 1, Dir.children(dir).length
+    ensure
+      ENV.delete("BROADCAST_DIR")
+    end
+  end
 end

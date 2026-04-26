@@ -38,7 +38,33 @@ module Broadcasts
   end
 
   def record(action:, stream:, target:, html:)
-    LOG << { action: action, stream: stream, target: target, html: html }
+    entry = { action: action, stream: stream, target: target, html: html }
+    LOG << entry
+    write_to_disk(entry) unless ENV["BROADCAST_DIR"].to_s.empty?
+    nil
+  end
+
+  # File-based IPC for the dev server (`server/dev_server.rb`). When
+  # ENV["BROADCAST_DIR"] is set, every broadcast is also written as a
+  # `.frag` file in that directory. The dev server's filesystem
+  # watcher consumes these files and fans out the contents over
+  # WebSockets to subscribed Turbo clients.
+  #
+  # Filename: <safe_stream>__<microsecond_ts>.frag
+  #   - stream name encodes which subscribers receive this fragment
+  #     (the dev server splits filename on "__" to recover it)
+  #   - microsecond timestamp gives temporal ordering + uniqueness
+  #     (single broadcast per microsecond per stream is the floor)
+  # Content: the rendered <turbo-stream> HTML, as produced by
+  # render_fragment — no JSON envelope (the dev server constructs
+  # the ActionCable wire-format envelope when forwarding to WS).
+  def write_to_disk(entry)
+    dir = ENV["BROADCAST_DIR"]
+    return if dir.nil? || dir.empty?
+    fragment = render_fragment(action: entry[:action], target: entry[:target], html: entry[:html])
+    safe = entry[:stream].gsub(/[^a-zA-Z0-9_-]/, "_")
+    ts   = Time.now.utc.strftime("%Y%m%dT%H%M%S%6N")
+    File.write(File.join(dir, "#{safe}__#{ts}.frag"), fragment)
     nil
   end
 

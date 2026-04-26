@@ -103,8 +103,18 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, %(href="/assets/app.css")
   end
 
-  def test_javascript_importmap_tags
+  def test_javascript_importmap_tags_has_importmap_script
     assert_includes ViewHelpers.javascript_importmap_tags, %(<script type="importmap">)
+  end
+
+  def test_javascript_importmap_tags_pins_turbo
+    out = ViewHelpers.javascript_importmap_tags
+    assert_includes out, %("@hotwired/turbo":"/assets/turbo.min.js")
+  end
+
+  def test_javascript_importmap_tags_imports_turbo_module
+    out = ViewHelpers.javascript_importmap_tags
+    assert_includes out, %(<script type="module">import "@hotwired/turbo")
   end
 
   def test_csrf_and_csp_meta_tags

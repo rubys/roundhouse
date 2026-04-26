@@ -143,11 +143,18 @@ module ViewHelpers
     "<link#{attrs}>"
   end
 
+  # Emit an importmap pointing at the bundled Turbo JS, plus a
+  # module-script that imports it (Turbo registers itself on import,
+  # so no further bootstrap is needed).
+  #
+  # The Makefile copies turbo.min.js out of the turbo-rails gem into
+  # static/turbo.min.js; deployment maps `/assets/` → `static/`.
+  # Hardcoded path here; an iteration that needs cache-busting digests
+  # would inject the manifest at compile time.
   def javascript_importmap_tags(_pins = nil, _entry = "application")
-    # Stub: emits an empty importmap script. Iteration ≥3 will read
-    # config/importmap.rb and emit real <script type="importmap"> +
-    # <script type="module"> tags.
-    %(<script type="importmap"></script>)
+    %(<script type="importmap">{"imports":{"@hotwired/turbo":"/assets/turbo.min.js"}}</script>) +
+      "\n    " +
+      %(<script type="module">import "@hotwired/turbo"</script>)
   end
 
   def turbo_stream_from(stream)
