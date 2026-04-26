@@ -52,7 +52,16 @@ module Main
     request[:params].each { |k, v| merged[k] = v }
     controller.params  = ActionController::Parameters.new(merged)
     controller.session = {}
-    controller.flash   = {}
+
+    # Decode inbound flash from cookies. Each flash key carries via
+    # its own cookie (`flash_notice`, `flash_alert`) so the cookie
+    # plumbing stays format-free.
+    cookies = request[:cookies] || {}
+    inbound_flash = {}
+    inbound_flash[:notice] = cookies[:flash_notice] if cookies.key?(:flash_notice)
+    inbound_flash[:alert]  = cookies[:flash_alert]  if cookies.key?(:flash_alert)
+    controller.flash = inbound_flash
+
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
 
@@ -63,16 +72,26 @@ module Main
       return
     end
 
+    # Encode outbound flash. On render: clear the inbound cookies
+    # (the action used flash for display; the next request shouldn't
+    # see the same notice again). On redirect: ship the controller's
+    # current flash as cookies for the next request to consume.
+    out_cookies = {}
     if controller.location.nil?
+      out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
+      out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
       page = Views::Layouts.application(controller.body)
-      CgiIo.write_response(stdout, controller.status, page)
+      CgiIo.write_response(stdout, controller.status, page, set_cookies: out_cookies)
     else
+      out_cookies[:flash_notice] = controller.flash[:notice] unless controller.flash[:notice].nil?
+      out_cookies[:flash_alert]  = controller.flash[:alert]  unless controller.flash[:alert].nil?
       # Redirects: short-circuit body to a one-line "redirecting"
       # message; real browsers follow the Location header without
       # rendering the body anyway.
       CgiIo.write_response(stdout, controller.status,
         %(<a href="#{controller.location}">Redirecting</a>),
-        location: controller.location)
+        location: controller.location,
+        set_cookies: out_cookies)
     end
   end
 

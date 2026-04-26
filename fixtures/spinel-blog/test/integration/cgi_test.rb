@@ -12,6 +12,33 @@ require "stringio"
 # returns early when ActiveRecord.adapter is set).
 require_relative "../../main"
 
+# Captures the parsed shape of a CGI response. Predicates are real
+# methods (not OpenStruct attribute lookups, which would silently
+# return nil on `?` suffix and pass `assert nil` accidentally).
+class CgiResult
+  attr_reader :status, :body, :location, :raw, :set_cookies
+
+  def initialize(status:, body:, location:, raw:, set_cookies:)
+    @status      = status
+    @body        = body
+    @location    = location
+    @raw         = raw
+    @set_cookies = set_cookies
+  end
+
+  def redirect?
+    !@location.nil? && @status >= 300 && @status < 400
+  end
+
+  def success?
+    @status >= 200 && @status < 300
+  end
+
+  def unprocessable?
+    @status == 422
+  end
+end
+
 class CgiIntegrationTest < Minitest::Test
   def setup
     SchemaSetup.reset!
@@ -19,9 +46,10 @@ class CgiIntegrationTest < Minitest::Test
   end
 
   # Helper: synthesize a CGI request and capture the response.
-  # Returns the raw response string (status line + headers + blank
-  # line + body), the parsed status code, and the body.
-  def cgi(method:, path:, query: nil, body: nil, content_type: "application/x-www-form-urlencoded")
+  # `cookies:` is sent as the request's `Cookie:` header (CGI/1.1's
+  # `HTTP_COOKIE` env var). Response parsing extracts Set-Cookie
+  # headers as well so tests can assert on the cookie round-trip.
+  def cgi(method:, path:, query: nil, body: nil, content_type: "application/x-www-form-urlencoded", cookies: nil)
     env = {
       "REQUEST_METHOD" => method,
       "PATH_INFO"      => path,
@@ -31,19 +59,18 @@ class CgiIntegrationTest < Minitest::Test
       env["CONTENT_LENGTH"] = body.bytesize.to_s
       env["CONTENT_TYPE"]   = content_type
     end
+    env["HTTP_COOKIE"] = cookies if cookies
     stdin  = StringIO.new(body || "")
     stdout = StringIO.new
     Main.run(env, stdin, stdout)
     raw = stdout.string
     status = raw[/\AStatus: (\d+)/, 1].to_i
     location = raw[/^Location: (\S+)/, 1]
-    # body = everything after the first \r\n\r\n
+    set_cookies = raw.scan(/^Set-Cookie: ([^=]+)=([^;\r\n]*)/).to_h
     sep_idx = raw.index("\r\n\r\n")
     body_str = sep_idx ? raw[(sep_idx + 4)..] : ""
-    OpenStruct.new(status: status, location: location, body: body_str, raw: raw)
+    CgiResult.new(status: status, location: location, body: body_str, raw: raw, set_cookies: set_cookies)
   end
-
-  require "ostruct"
 
   # ── 404 paths ────────────────────────────────────────────────────
 
@@ -170,6 +197,96 @@ class CgiIntegrationTest < Minitest::Test
     assert_equal 302, res.status
     assert_equal "/articles/#{article.id}", res.location
     assert_equal 1, Comment.count
+  end
+
+  # ── flash via cookies ────────────────────────────────────────────
+
+  def test_create_redirect_emits_flash_notice_cookie
+    body = "article%5Btitle%5D=Has+notice&article%5Bbody%5D=Long+enough+body+content."
+    res = cgi(method: "POST", path: "/articles", body: body)
+    assert res.redirect?
+    assert_equal "Article%20was%20successfully%20created.",
+                 res.set_cookies["flash_notice"]
+  end
+
+  def test_destroy_redirect_emits_flash_notice
+    article = Article.new(title: "Doomed", body: "Long enough body content here.")
+    article.save
+    res = cgi(method: "DELETE", path: "/articles/#{article.id}")
+    assert res.redirect?
+    assert_equal "Article%20was%20successfully%20destroyed.",
+                 res.set_cookies["flash_notice"]
+  end
+
+  def test_render_after_arriving_with_flash_cookie_displays_notice
+    article = Article.new(title: "Already there", body: "Long enough body content here.")
+    article.save
+    res = cgi(
+      method: "GET",
+      path: "/articles/#{article.id}",
+      cookies: "flash_notice=Hello%20from%20last%20request",
+    )
+    assert_equal 200, res.status
+    assert_includes res.body, %(id="notice")
+    assert_includes res.body, ">Hello from last request</p>"
+  end
+
+  def test_render_clears_inbound_flash_cookie
+    article = Article.new(title: "Already there", body: "Long enough body content here.")
+    article.save
+    res = cgi(
+      method: "GET",
+      path: "/articles/#{article.id}",
+      cookies: "flash_notice=Consume%20me",
+    )
+    # Set-Cookie: flash_notice=; Max-Age=0 — clears it
+    assert_includes res.raw, "Set-Cookie: flash_notice=;"
+    assert_includes res.raw, "Max-Age=0"
+  end
+
+  def test_render_without_inbound_flash_does_not_set_cookie
+    article = Article.new(title: "x", body: "Long enough body content here.")
+    article.save
+    res = cgi(method: "GET", path: "/articles/#{article.id}")
+    refute_includes res.raw, "Set-Cookie: flash_notice"
+    refute_includes res.raw, "Set-Cookie: flash_alert"
+  end
+
+  def test_full_round_trip_post_then_follow_with_cookie
+    body = "article%5Btitle%5D=Round+trip&article%5Bbody%5D=Long+enough+body+content."
+    res1 = cgi(method: "POST", path: "/articles", body: body)
+    assert res1.redirect?
+    flash_value = res1.set_cookies["flash_notice"]
+    refute_nil flash_value
+    article_id = res1.location[%r{/articles/(\d+)}, 1].to_i
+
+    # Follow the redirect, sending the cookie back.
+    res2 = cgi(
+      method: "GET",
+      path: "/articles/#{article_id}",
+      cookies: "flash_notice=#{flash_value}",
+    )
+    assert_equal 200, res2.status
+    assert_includes res2.body, ">Article was successfully created.</p>"
+    # The cookie is cleared on this response (consumed).
+    assert_includes res2.raw, "Set-Cookie: flash_notice=;"
+  end
+
+  def test_invalid_create_does_not_emit_flash
+    body = "article%5Btitle%5D=&article%5Bbody%5D=short"
+    res = cgi(method: "POST", path: "/articles", body: body)
+    assert_equal 422, res.status
+    refute_includes res.raw, "Set-Cookie: flash_notice"
+  end
+
+  def test_comment_create_alert_path_emits_flash_alert
+    article = Article.new(title: "Host", body: "Long enough body content here.")
+    article.save
+    body = "comment%5Bcommenter%5D=&comment%5Bbody%5D=Body"
+    res = cgi(method: "POST", path: "/articles/#{article.id}/comments", body: body)
+    assert res.redirect?
+    assert_equal "Could%20not%20create%20comment.",
+                 res.set_cookies["flash_alert"]
   end
 
   # ── query string parsing ─────────────────────────────────────────

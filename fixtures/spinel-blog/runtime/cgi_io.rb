@@ -41,7 +41,7 @@ module CgiIo
   }.freeze
 
   # Parse a CGI request from the given env hash + body-readable IO.
-  # Returns: { method:, path:, params: {sym => str | hash} }.
+  # Returns: { method:, path:, params:, cookies: }.
   def parse_request(env, stdin)
     method = (env["REQUEST_METHOD"] || "GET").upcase
     path   = env["PATH_INFO"] || "/"
@@ -59,19 +59,48 @@ module CgiIo
       end
     end
 
-    { method: method, path: path, params: params }
+    cookies = parse_cookies(env["HTTP_COOKIE"])
+
+    { method: method, path: path, params: params, cookies: cookies }
   end
 
-  # Write a CGI response to the given writable IO.
-  def write_response(io, status, body, location: nil)
+  # Write a CGI response to the given writable IO. `set_cookies` is
+  # `{ name => value | nil }`; nil clears the cookie via Max-Age=0.
+  def write_response(io, status, body, location: nil, content_type: "text/html; charset=utf-8", set_cookies: {})
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
-    io.write("Content-Type: text/html; charset=utf-8\r\n")
+    io.write("Content-Type: #{content_type}\r\n")
     io.write("Location: #{location}\r\n") unless location.nil?
+    set_cookies.each do |name, val|
+      if val.nil?
+        io.write("Set-Cookie: #{name}=; Path=/; Max-Age=0\r\n")
+      else
+        io.write("Set-Cookie: #{name}=#{url_encode(val.to_s)}; Path=/; HttpOnly\r\n")
+      end
+    end
     io.write("\r\n")
     io.write(body.to_s)
     nil
+  end
+
+  # ── cookie parsing ──────────────────────────────────────────────
+
+  # Parse a `Cookie:` header value into a Hash[Symbol => String].
+  # The `; ` separator between cookies is RFC 6265 standard; tolerate
+  # extra whitespace around the `=` and around separators.
+  def parse_cookies(header)
+    out = {}
+    return out if header.nil? || header.empty?
+    header.split(";").each do |pair|
+      pair = pair.strip
+      eq = pair.index("=")
+      next if eq.nil?
+      name = url_decode(pair[0, eq].strip)
+      val  = url_decode(pair[(eq + 1)..].to_s.strip)
+      out[name.to_sym] = val unless name.empty?
+    end
+    out
   end
 
   # ── form-urlencoded parsing ─────────────────────────────────────
@@ -107,6 +136,24 @@ module CgiIo
     inner = raw_key[(open_bracket + 1)...close_bracket].to_sym
     into[outer] = {} unless into[outer].is_a?(Hash)
     into[outer][inner] = val
+  end
+
+  # Spinel-friendly URL encode: pass-through for unreserved chars
+  # (RFC 3986 §2.3: ALPHA / DIGIT / `-` / `.` / `_` / `~`); percent-
+  # encode everything else as `%XX`. Used for cookie values; cookies
+  # are Latin-1 in the wire format but our values are ASCII for the
+  # demo, so byte-by-byte is sufficient.
+  def url_encode(s)
+    out = String.new
+    s.to_s.each_byte do |b|
+      if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+         b == 45 || b == 46 || b == 95 || b == 126
+        out << b.chr
+      else
+        out << format("%%%02X", b)
+      end
+    end
+    out
   end
 
   # Spinel-friendly URL decode: % escapes + `+` → space.
