@@ -107,17 +107,29 @@ pub fn parse_methods_with_rbs_in_ctx(
         ));
     }
 
-    // Run the body-typer on each method with the RBS-derived param
-    // types seeded into the local environment. This populates `.ty`
-    // throughout each body, which target emitters consume for
-    // type-directed dispatch (Go's %d vs %s, eventually `==`
-    // semantics per the type dispatch table).
+    // Two-pass flow-sensitive ivar typing, mirroring the model-side
+    // analyzer (`src/analyze/mod.rs`):
+    //
+    // Pass A: type each body with only RBS-derived params + self_ty
+    // seeded. Ivar reads resolve to `Ty::Var` (unknown), but ivar
+    // *assignments* leave their value-expression typed, which Pass B
+    // harvests.
+    //
+    // Pass B: gather every `@x = expr` across all method bodies,
+    // wrap each in `Union<T, Nil>` (a first read can observe nil
+    // before any assignment), seed `ivar_bindings`, and re-type.
+    // Reads now resolve cleanly even when they lexically precede
+    // the assignment (e.g. `@cache ||= compute` lowers to a `BoolOp`
+    // whose left arm reads the unset ivar).
     //
     // Runtime code doesn't reference user classes today, so the
     // dispatch table is empty — the body-typer falls back to its
     // primitive method tables for everything.
     let typer = crate::analyze::BodyTyper::new(classes);
-    for m in &mut methods {
+
+    let build_ctx = |m: &MethodDef,
+                     ivars: &std::collections::HashMap<Symbol, Ty>|
+     -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         if let Some(Ty::Fn { params, .. }) = &m.signature {
             for (name, p) in m.params.iter().zip(params.iter()) {
@@ -136,7 +148,32 @@ pub fn parse_methods_with_rbs_in_ctx(
                 args: vec![],
             });
         }
+        ctx.ivar_bindings = ivars.clone();
+        ctx
+    };
+
+    let empty_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    for m in &mut methods {
+        let ctx = build_ctx(m, &empty_ivars);
         typer.analyze_expr(&mut m.body, &ctx);
+    }
+
+    let mut flow_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    for m in &methods {
+        crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
+    }
+
+    if !flow_ivars.is_empty() {
+        let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
+            .into_iter()
+            .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil] }))
+            .collect();
+        for m in &mut methods {
+            let ctx = build_ctx(m, &reseeded);
+            typer.analyze_expr(&mut m.body, &ctx);
+        }
     }
 
     Ok(methods)

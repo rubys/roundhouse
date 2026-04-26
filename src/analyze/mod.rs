@@ -1100,7 +1100,7 @@ fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol>
 /// conditionally still show up. Deliberately does NOT walk into blocks
 /// (Lambda bodies): ivars assigned inside iteration are run-time per-element
 /// state, not the "data the controller passes to the view."
-fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
+pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             if let Some(ty) = value.ty.clone() {
