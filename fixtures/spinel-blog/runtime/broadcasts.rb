@@ -64,7 +64,13 @@ module Broadcasts
     fragment = render_fragment(action: entry[:action], target: entry[:target], html: entry[:html])
     safe = entry[:stream].gsub(/[^a-zA-Z0-9_-]/, "_")
     ts   = Time.now.utc.strftime("%Y%m%dT%H%M%S%6N")
-    File.write(File.join(dir, "#{safe}__#{ts}.frag"), fragment)
+    final = File.join(dir, "#{safe}__#{ts}.frag")
+    # Atomic publish: write to a `.tmp` sibling first, then rename.
+    # The watcher globs `*.frag` only, so it never observes a
+    # half-written file. Rename is atomic on POSIX filesystems.
+    tmp = "#{final}.tmp"
+    File.write(tmp, fragment)
+    File.rename(tmp, final)
     nil
   end
 
