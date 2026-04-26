@@ -150,6 +150,25 @@ impl<'a> BodyTyper<'a> {
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
                 }
+                // Module/Class introspection built-ins — fall through
+                // when no user-defined method shadows them. `name` on
+                // a class returns the class's name as String;
+                // `superclass`, `ancestors` are class-introspection
+                // returning a Class / Array<Class> respectively.
+                match method.as_str() {
+                    "name" => return Ty::Str,
+                    "superclass" => return Ty::Class {
+                        id: ClassId(Symbol::from("Class")),
+                        args: vec![],
+                    },
+                    "ancestors" => return Ty::Array {
+                        elem: Box::new(Ty::Class {
+                            id: ClassId(Symbol::from("Class")),
+                            args: vec![],
+                        }),
+                    },
+                    _ => {}
+                }
                 unknown()
             }
             Some(Ty::Array { elem }) => array_method(method, elem, block_ret),

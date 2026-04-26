@@ -1,5 +1,5 @@
 module ActiveRecord
-  def self.adapter: () -> InMemoryAdapter
-  def self.adapter=: (InMemoryAdapter a) -> InMemoryAdapter
-  def self.reset_adapter: () -> InMemoryAdapter
+  def self.adapter: () -> AbstractAdapter
+  def self.adapter=: (AbstractAdapter a) -> AbstractAdapter
+  def self.reset_adapter: () -> AbstractAdapter
 end

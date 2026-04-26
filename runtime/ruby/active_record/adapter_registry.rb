@@ -1,8 +1,12 @@
 module ActiveRecord
+  # Process-wide adapter slot. Concrete implementations install
+  # themselves via `ActiveRecord.adapter = ...`. The framework refers
+  # to whatever's installed through the AbstractAdapter interface;
+  # raises if accessed before install.
   @adapter = nil
 
   def self.adapter
-    @adapter ||= InMemoryAdapter.new
+    @adapter || raise("ActiveRecord adapter not installed; assign ActiveRecord.adapter = <impl> before use")
   end
 
   def self.adapter=(a)
@@ -10,6 +14,6 @@ module ActiveRecord
   end
 
   def self.reset_adapter
-    @adapter = InMemoryAdapter.new
+    @adapter = nil
   end
 end

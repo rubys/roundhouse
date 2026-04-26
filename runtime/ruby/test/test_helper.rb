@@ -1,5 +1,11 @@
 require "minitest/autorun"
 require_relative "../active_record"
+# CRuby-only adapter implementation. Lives outside the framework
+# tree because adapter implementations are per-target boundary code,
+# not portable framework Ruby. The framework refers to the adapter
+# abstractly via AbstractAdapter; the test helper installs the
+# concrete in-memory implementation here.
+require_relative "in_memory_adapter"
 
 # Load the blog demo's actual models against our framework Ruby.
 # This is the real test: can the untouched blog models run under our
@@ -11,7 +17,7 @@ BLOG_MIGRATIONS = "#{REAL_BLOG_ROOT}/db/migrate"
 
 module BlogSchema
   def self.load!
-    ActiveRecord.reset_adapter
+    ActiveRecord.adapter = ActiveRecord::InMemoryAdapter.new
     ActiveRecord::Broadcasts.reset_log
 
     # Run migrations via the actual migration files.
