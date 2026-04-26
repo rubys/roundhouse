@@ -1,7 +1,7 @@
 module Schema
   STATEMENTS = [
     <<~SQL,
-      CREATE TABLE articles (
+      CREATE TABLE IF NOT EXISTS articles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT,
         body TEXT,
@@ -10,7 +10,7 @@ module Schema
       )
     SQL
     <<~SQL,
-      CREATE TABLE comments (
+      CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         article_id INTEGER NOT NULL,
         commenter TEXT,
@@ -19,7 +19,7 @@ module Schema
         updated_at TEXT NOT NULL
       )
     SQL
-    "CREATE INDEX index_comments_on_article_id ON comments (article_id)",
+    "CREATE INDEX IF NOT EXISTS index_comments_on_article_id ON comments (article_id)",
   ].freeze
 
   def self.load!(adapter)
