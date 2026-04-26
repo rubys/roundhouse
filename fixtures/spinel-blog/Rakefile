@@ -1,0 +1,15 @@
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "runtime"
+  t.libs << "app"
+  t.test_files = FileList["test/**/*_test.rb"]
+  t.warning = false
+end
+
+task :lint do
+  ruby "tools/check_spinel_subset.rb"
+end
+
+task default: [:test, :lint]

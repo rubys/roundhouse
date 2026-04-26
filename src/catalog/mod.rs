@@ -150,6 +150,17 @@ pub enum ReturnKind {
     /// another Hash shape enters the catalog, generalize to a
     /// `HashOf(PrimKind, PrimKind)` variant.
     HashSymStr,
+    /// Returns `Array<Sym>`. Example: `.schema_column_names` on
+    /// an ActiveRecord class — the schema column list the lowerer
+    /// will emit per-model once `Base`'s `attr_accessor` override
+    /// is removed.
+    ArrayOfSym,
+    /// Returns `Str`. Example: `#read_attribute`, `#[]`, `#[]=`
+    /// on an ActiveRecord instance — declared per the current
+    /// `Base.rbs` contract. Imprecise for non-string columns
+    /// (`article[:id]` is actually Int), but matches the existing
+    /// declared shape and isn't worse than today.
+    Str,
     /// Reference to a concrete class by dotted-name path
     /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
     /// `Ty::Class { id: ClassId(<path>), args: vec![] }`.
@@ -626,6 +637,51 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveModel::Errors")),
     },
+    // ---- Per-model accessors (currently in `Base` via reflection) ----
+    // These methods exist on every model. Today their bodies live in
+    // `runtime/ruby/active_record/base.rb` and rely on
+    // `instance_variable_get/set("@#{col}")`. The plan (see step 1 of
+    // the metaprogramming-removal sketch) is to lower them per-model
+    // — each emitted model class gets a typed body, and `Base` sheds
+    // the reflective versions. Cataloguing the contract here keeps
+    // the analyzer's per-model registry honest both before and after
+    // that move: callers like `article[:title]` resolve regardless
+    // of where the body lives.
+    CatalogedMethod {
+        name: "instantiate",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "schema_column_names",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ArrayOfSym),
+    },
+    CatalogedMethod {
+        name: "read_attribute",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
+    CatalogedMethod {
+        name: "[]",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
+    CatalogedMethod {
+        name: "[]=",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
 ];
 
 /// Look up a method in the catalog by name + receiver context.
@@ -788,6 +844,26 @@ mod tests {
                 ChainKind::Terminal,
                 "`{m}` should be Terminal",
             );
+        }
+    }
+
+    #[test]
+    fn per_model_accessors_are_cataloged() {
+        // The five accessors moving out of `Base`'s reflective
+        // implementations into per-model lowered bodies. Cataloguing
+        // them here keeps the analyzer's per-model registry honest
+        // both before and after that move.
+        for (name, recv, kind) in [
+            ("instantiate",         ReceiverContext::Class,    ReturnKind::SelfType),
+            ("schema_column_names", ReceiverContext::Class,    ReturnKind::ArrayOfSym),
+            ("read_attribute",      ReceiverContext::Instance, ReturnKind::Str),
+            ("[]",                  ReceiverContext::Instance, ReturnKind::Str),
+            ("[]=",                 ReceiverContext::Instance, ReturnKind::Str),
+        ] {
+            let entry = lookup(name, recv)
+                .unwrap_or_else(|| panic!("missing catalog entry for `{name}` on {recv:?}"));
+            assert_eq!(entry.return_kind, Some(kind), "wrong return_kind for `{name}`");
+            assert_eq!(entry.effect, EffectClass::Pure, "`{name}` should be Pure");
         }
     }
 

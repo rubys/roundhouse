@@ -358,7 +358,7 @@ pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
 }
 
-pub(super) fn union_of(a: Ty, b: Ty) -> Ty {
+pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     if a == b {
         a
     } else {

@@ -99,6 +99,8 @@ impl Analyzer {
                         key: Box::new(Ty::Sym),
                         value: Box::new(Ty::Str),
                     },
+                    ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
+                    ReturnKind::Str => Ty::Str,
                     ReturnKind::ClassRef(path) => Ty::Class {
                         id: ClassId(Symbol::from(path)),
                         args: vec![],
@@ -1154,7 +1156,7 @@ fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol>
 /// conditionally still show up. Deliberately does NOT walk into blocks
 /// (Lambda bodies): ivars assigned inside iteration are run-time per-element
 /// state, not the "data the controller passes to the view."
-pub fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
+pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             if let Some(ty) = value.ty.clone() {

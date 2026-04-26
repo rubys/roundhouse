@@ -313,7 +313,16 @@ fn every_runtime_method_body_is_fully_typed() {
             let short_id = ClassId(roundhouse::ident::Symbol::new(&last));
             let entry = class_registry.entry(short_id).or_default();
             for (name, ty) in methods {
-                entry.instance_methods.insert(name, ty);
+                // The dispatch table's value is the call's *result* type,
+                // not the method's signature object. parse_app_signatures
+                // returns Ty::Fn { params, ret, .. }; unwrap to ret so a
+                // bare-name call like `table_name` resolves to Ty::Str
+                // (its return) rather than Ty::Fn (the function value).
+                let ret_ty = match ty {
+                    Ty::Fn { ret, .. } => *ret,
+                    other => other,
+                };
+                entry.instance_methods.insert(name, ret_ty);
             }
         }
     }

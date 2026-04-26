@@ -1,0 +1,12 @@
+# Build products — re-generable via `make`.
+/build/
+/static/
+
+# Tailwind / npm working files (when `make assets` runs from this dir).
+/node_modules/
+/package.json
+/package-lock.json
+
+# Broadcast IPC — populated by `main.rb` when BROADCAST_DIR is set;
+# the dev server consumes + deletes these.
+/tmp/

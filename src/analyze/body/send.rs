@@ -93,19 +93,26 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Ty {
-        // `obj.class` returns the class of `obj`. For typing we
-        // preserve the receiver's class id so chained `.X` calls
-        // dispatch through that class's class_methods —
-        // `self.class.find(id)` resolves against `Base.find`, not
-        // a generic `Class` whose method table we don't model.
-        // Falls back to the Class("Class") form when the receiver
-        // type is opaque (Ty::Var or absent).
+        // `obj.class` is receiver-aware: our type system flattens the
+        // class object and instances onto the same `Ty::Class { id }`,
+        // so `instance_of_Base.class` returns `Ty::Class { Base }`
+        // (not the generic `Ty::Class { Class }`). Keeps the type
+        // available for chained dispatch like `self.class.table_name`.
+        // For non-class receivers (`1.class`, `"x".class`) we still
+        // hand back generic `Class` since the per-primitive metaclass
+        // isn't represented in the registry.
         if method.as_str() == "class" {
-            if let Some(Ty::Class { id, args }) = recv_ty {
-                return Ty::Class { id: id.clone(), args: args.clone() };
-            }
+            return match recv_ty {
+                Some(Ty::Class { id, args }) => Ty::Class {
+                    id: id.clone(),
+                    args: args.clone(),
+                },
+                _ => Ty::Class {
+                    id: ClassId(Symbol::from("Class")),
+                    args: vec![],
+                },
+            };
         }
-
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
@@ -174,9 +181,9 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Str) => str_method(method),
+            Some(Ty::Sym) => sym_method(method),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Bool) => bool_method(method),
-            Some(Ty::Sym) => sym_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
             // `T | Nil` pattern (`find_by`, `params[:k]`, `.find` on
@@ -253,11 +260,6 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
-        // `<<` (push), `concat`, and `unshift` mutate in place but
-        // return the receiver array.
-        "<<" | "push" | "concat" | "unshift" | "prepend" => {
-            Ty::Array { elem: Box::new(elem.clone()) }
-        }
         // `delete(x)` returns the deleted element or nil.
         "delete" | "delete_at" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
@@ -267,7 +269,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "dup" | "clone" => Ty::Array { elem: Box::new(elem.clone()) },
         // Array `+` (concat) and `-` (set difference) preserve Array[elem].
-        "+" | "-" => Ty::Array { elem: Box::new(elem.clone()) },
+        // `<<` mutates in place and returns self (the array). `concat` /
+        // `push` / `unshift` / `prepend` / `append` likewise return the
+        // modified array.
+        "+" | "-" | "<<" | "concat" | "push" | "unshift" | "prepend" | "append" => {
+            Ty::Array { elem: Box::new(elem.clone()) }
+        }
         // Array `*` with an Int is array repetition (preserves Array[elem]);
         // with a Str it's `.join(sep)`, returning Str. The body-typer's
         // dispatch hands us the method name but not argument types, so
@@ -394,13 +401,15 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
 }
 
 pub(super) fn sym_method(method: &Symbol) -> Ty {
+    // Universal methods (`==`, `!=`, `to_s`, `inspect`, `class`, …)
+    // resolve in `universal_method` before this is reached. Cover only
+    // Sym-specific shapes here.
     match method.as_str() {
-        "to_s" | "id2name" | "name" | "inspect" => Ty::Str,
-        "to_sym" | "to_proc" | "intern" => Ty::Sym,
+        "to_sym" => Ty::Sym,
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
-        "==" | "!=" | "<=>" | "eql?" | "equal?" | "empty?" | "match?"
-        | "start_with?" | "end_with?" => Ty::Bool,
+        "empty?" => Ty::Bool,
+        "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
         _ => unknown(),
     }
 }
@@ -442,11 +451,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         | "frozen?" | "tainted?" | "untrusted?" => Some(Ty::Bool),
         // Value equality / comparison operators.
         "==" | "!=" | "eql?" | "equal?" => Some(Ty::Bool),
-        // Object introspection.
-        "class" => Some(Ty::Class {
-            id: ClassId(Symbol::from("Class")),
-            args: vec![],
-        }),
+        // `class` is receiver-aware and handled in `dispatch` itself
+        // (preserves `Ty::Class { id }` so chained `obj.class.foo`
+        // resolves against `id`'s registry entry).
         "hash" | "object_id" => Some(Ty::Int),
         "inspect" | "to_s" => Some(Ty::Str),
         _ => None,

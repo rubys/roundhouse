@@ -1,0 +1,16 @@
+source "https://rubygems.org"
+
+ruby "~> 3.4"
+
+gem "sqlite3"
+gem "minitest"
+gem "rake"
+
+# Build-only: turbo-rails is installed for its bundled `turbo.min.js`
+# asset (read by the Makefile from the gem's directory). Nothing in
+# this fixture's runtime ever `require`s it, and the spinel-compiled
+# binary doesn't see it. Pulled into Bundler so the gem dir is
+# consistently locatable across machines.
+group :assets do
+  gem "turbo-rails"
+end

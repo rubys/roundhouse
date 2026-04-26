@@ -107,25 +107,28 @@ pub fn parse_methods_with_rbs_in_ctx(
         ));
     }
 
-    // Two-pass body typing with flow-sensitive ivar discovery — the
-    // same shape the model-side analyzer uses (analyze/mod.rs around
-    // the per-model loop). Pass A types each body with only RBS-
-    // derived param/self types in scope; ivar reads against an
-    // unbound ivar fall back to `Ty::Var` so assignments still record
-    // a `value.ty`. Pass B harvests every `@x = value.ty` from the
-    // typed bodies. Pass A re-runs with the harvested ivars seeded —
-    // memoizing reads (`@_x ||= ...`) and cross-method ivar accesses
-    // resolve against the type written in initialize-or-equivalent.
+    // Two-pass flow-sensitive ivar typing, mirroring the model-side
+    // analyzer (`src/analyze/mod.rs`):
+    //
+    // Pass A: type each body with only RBS-derived params + self_ty
+    // seeded. Ivar reads resolve to `Ty::Var` (unknown), but ivar
+    // *assignments* leave their value-expression typed, which Pass B
+    // harvests.
+    //
+    // Pass B: gather every `@x = expr` across all method bodies,
+    // wrap each in `Union<T, Nil>` (a first read can observe nil
+    // before any assignment), seed `ivar_bindings`, and re-type.
+    // Reads now resolve cleanly even when they lexically precede
+    // the assignment (e.g. `@cache ||= compute` lowers to a `BoolOp`
+    // whose left arm reads the unset ivar).
     //
     // Runtime code doesn't reference user classes today, so the
     // dispatch table is empty — the body-typer falls back to its
     // primitive method tables for everything.
     let typer = crate::analyze::BodyTyper::new(classes);
 
-    let build_ctx = |m: &MethodDef, ivars: &std::collections::HashMap<
-        Symbol,
-        Ty,
-    >|
+    let build_ctx = |m: &MethodDef,
+                     ivars: &std::collections::HashMap<Symbol, Ty>|
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         if let Some(Ty::Fn { params, .. }) = &m.signature {
@@ -139,9 +142,7 @@ pub fn parse_methods_with_rbs_in_ctx(
                 args: vec![],
             });
         }
-        for (name, ty) in ivars {
-            ctx.ivar_bindings.insert(name.clone(), ty.clone());
-        }
+        ctx.ivar_bindings = ivars.clone();
         ctx
     };
 
@@ -159,18 +160,10 @@ pub fn parse_methods_with_rbs_in_ctx(
     }
 
     if !flow_ivars.is_empty() {
-        // Memoizing ivars surface as `Union<T, Nil>` so reads that
-        // occur lexically before the assignment (e.g. the left side
-        // of `@x ||= ...` lowered to `@x || (@x = ...)`) still resolve
-        // — same convention the model-side pass uses.
-        let mut reseeded: std::collections::HashMap<Symbol, Ty> =
-            std::collections::HashMap::new();
-        for (name, ty) in flow_ivars {
-            reseeded.insert(
-                name,
-                Ty::Union { variants: vec![ty, Ty::Nil] },
-            );
-        }
+        let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
+            .into_iter()
+            .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil] }))
+            .collect();
         for m in &mut methods {
             let ctx = build_ctx(m, &reseeded);
             typer.analyze_expr(&mut m.body, &ctx);
