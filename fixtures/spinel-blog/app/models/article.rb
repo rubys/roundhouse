@@ -1,4 +1,6 @@
 require_relative "application_record"
+require "broadcasts"
+require "views/articles/_article"
 
 # Lowered shape: real-blog's `Article < ApplicationRecord` with
 # `has_many :comments, dependent: :destroy`, `validates :title, presence: true`,
@@ -87,5 +89,32 @@ class Article < ApplicationRecord
   # has_many :comments, dependent: :destroy → cascade in before_destroy.
   def before_destroy
     comments.each { |c| c.destroy }
+  end
+
+  # broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend
+  #   → prepend partial to the "articles" stream's "articles" target on create
+  #   → replace partial at "article_<id>" target on update
+  #   → remove element at "article_<id>" target on destroy
+  def after_create_commit
+    Broadcasts.prepend(
+      stream: "articles",
+      target: "articles",
+      html: Views::Articles.article(self),
+    )
+  end
+
+  def after_update_commit
+    Broadcasts.replace(
+      stream: "articles",
+      target: "article_#{@id}",
+      html: Views::Articles.article(self),
+    )
+  end
+
+  def after_destroy_commit
+    Broadcasts.remove(
+      stream: "articles",
+      target: "article_#{@id}",
+    )
   end
 end

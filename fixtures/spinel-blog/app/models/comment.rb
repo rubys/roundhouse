@@ -1,4 +1,7 @@
 require_relative "application_record"
+require "broadcasts"
+require "views/comments/_comment"
+require "views/articles/_article"
 
 # Lowered shape: real-blog's `Comment < ApplicationRecord` with
 # `belongs_to :article`, presence validations on commenter and body,
@@ -84,5 +87,51 @@ class Comment < ApplicationRecord
   # belongs_to :article  → typed accessor; nil when FK doesn't resolve.
   def article
     @article_id == 0 ? nil : Article.find_by(id: @article_id)
+  end
+
+  # broadcasts_to ->(comment) { "article_<id>_comments" }, target: "comments"
+  #   → append partial to "comments" target on create
+  #   → replace partial at "comment_<id>" target on update
+  #   → remove element at "comment_<id>" target on destroy
+  #
+  # Plus the explicit re-render-parent hooks from real-blog: each
+  # create/destroy of a comment also replaces the parent article on
+  # the index-page "articles" stream, so the comment-count display
+  # in the article partial stays current.
+  def after_create_commit
+    Broadcasts.append(
+      stream: "article_#{@article_id}_comments",
+      target: "comments",
+      html: Views::Comments.comment(self),
+    )
+    parent = article
+    return if parent.nil?
+    Broadcasts.replace(
+      stream: "articles",
+      target: "article_#{parent.id}",
+      html: Views::Articles.article(parent),
+    )
+  end
+
+  def after_update_commit
+    Broadcasts.replace(
+      stream: "article_#{@article_id}_comments",
+      target: "comment_#{@id}",
+      html: Views::Comments.comment(self),
+    )
+  end
+
+  def after_destroy_commit
+    Broadcasts.remove(
+      stream: "article_#{@article_id}_comments",
+      target: "comment_#{@id}",
+    )
+    parent = article
+    return if parent.nil?
+    Broadcasts.replace(
+      stream: "articles",
+      target: "article_#{parent.id}",
+      html: Views::Articles.article(parent),
+    )
   end
 end
