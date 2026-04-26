@@ -2,35 +2,16 @@ module ActiveRecord
   class Base
     # ── Per-class schema metadata ───────────────────────────────────
     #
-    # Each subclass tracks its schema column names via an override of
-    # attr_accessor. Calling `attr_accessor :id, :title, ...` in a
-    # subclass does two things:
-    # 1. Generates standard @ivar-backed getter/setter pairs (Ruby's
-    #    built-in behavior).
-    # 2. Appends the names to the subclass's column list, which Base
-    #    consults when serializing to/from the adapter.
-    #
-    # This makes each schema column a typed ivar (@title: String, etc.)
-    # rather than a polymorphic Hash lookup — a representation that
-    # transpiles naturally to typed targets (Rust structs, Crystal
-    # classes) while still being Rails-idiomatic in the source.
-
-    def self.attr_accessor(*names)
-      super
-      @_schema_columns ||= []
-      @_schema_columns.concat(names)
-    end
+    # Each model lowerer generates `self.schema_column_names` returning
+    # the explicit symbol list for that model's schema columns. Base
+    # only provides a stub; previously this was tracked dynamically via
+    # an `attr_accessor` override + `@_schema_columns` ivar that
+    # subclasses inherited via `inherited`. Per-model concrete arrays
+    # remove the reflection (instance_variable_set, class-level @ivar
+    # mutation across inheritance) the body-typer can't follow.
 
     def self.schema_column_names
-      @_schema_columns ||= []
-    end
-
-    def self.inherited(subclass)
-      super
-      # Each subclass gets its own column list — don't inherit the
-      # parent's. (ApplicationRecord declares none; each model declares
-      # its own.)
-      subclass.instance_variable_set(:@_schema_columns, [])
+      []
     end
 
     # ── Class-level table metadata ───────────────────────────────────

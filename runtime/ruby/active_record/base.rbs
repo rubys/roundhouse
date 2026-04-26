@@ -1,9 +1,10 @@
 module ActiveRecord
   class Base
-    # Class metadata + schema tracking
-    def self.attr_accessor: (*Symbol names) -> void
+    # Class metadata + schema tracking. `schema_column_names` is
+    # provided per-model by the lowerer; Base's stub returns an empty
+    # array. `attr_accessor` and `inherited` overrides are gone; their
+    # tracking responsibilities moved to per-model generated methods.
     def self.schema_column_names: () -> Array[Symbol]
-    def self.inherited: (Class subclass) -> void
     def self.table_name: () -> String
     def self.table_name=: (String n) -> String
     def self.abstract?: () -> bool

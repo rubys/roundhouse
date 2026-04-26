@@ -30,6 +30,12 @@ class Article < ApplicationRecord
   # the names via schema_column_names to drive adapter (de)serialization.
   attr_accessor :id, :title, :body, :created_at, :updated_at
 
+  # Generated per-model: schema columns as an explicit Symbol array,
+  # replacing the framework's class-ivar inheritance machinery.
+  def self.schema_column_names
+    [:id, :title, :body, :created_at, :updated_at]
+  end
+
   # Generated per-model: explicit ivar assignments from a row Hash.
   # Replaces the framework's reflective
   # `schema_column_names.each { |c| _write_ivar(c, row[c]) }` loop so
