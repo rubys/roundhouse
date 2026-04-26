@@ -234,6 +234,19 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
+        // `<<` (push), `concat`, and `unshift` mutate in place but
+        // return the receiver array.
+        "<<" | "push" | "concat" | "unshift" | "prepend" => {
+            Ty::Array { elem: Box::new(elem.clone()) }
+        }
+        // `delete(x)` returns the deleted element or nil.
+        "delete" | "delete_at" => Ty::Union {
+            variants: vec![elem.clone(), Ty::Nil],
+        },
+        "pop" | "shift" => Ty::Union {
+            variants: vec![elem.clone(), Ty::Nil],
+        },
+        "dup" | "clone" => Ty::Array { elem: Box::new(elem.clone()) },
         // Array `+` (concat) and `-` (set difference) preserve Array[elem].
         "+" | "-" => Ty::Array { elem: Box::new(elem.clone()) },
         // Array `*` with an Int is array repetition (preserves Array[elem]);
