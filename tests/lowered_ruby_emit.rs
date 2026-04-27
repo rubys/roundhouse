@@ -137,6 +137,24 @@ fn equality_send_renders_as_infix() {
 }
 
 #[test]
+fn comment_block_callbacks_render_as_methods() {
+    // real-blog's Comment has:
+    //   after_create_commit { article.broadcast_replace_to("articles") rescue nil }
+    //   after_destroy_commit { article.broadcast_replace_to("articles") rescue nil }
+    // Lowered to `def after_create_commit; …; end` etc.
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    assert!(src.contains("def after_create_commit"), "{src}");
+    assert!(src.contains("def after_destroy_commit"), "{src}");
+    // The block body uses `... rescue nil` — RescueModifier must render
+    // surface-form as `expr rescue nil`.
+    assert!(
+        src.contains("article.broadcast_replace_to(\"articles\") rescue nil"),
+        "expected RescueModifier surface form; got:\n{src}",
+    );
+}
+
+#[test]
 fn setter_send_renders_with_space_around_equals() {
     // The lowered initialize/update bodies call setters via
     // `Send { method: "x=", args: [v] }` (since attr_writer methods
