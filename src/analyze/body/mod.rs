@@ -335,6 +335,37 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(value, ctx);
                 Ty::Nil
             }
+
+            ExprNode::Next { value } => {
+                if let Some(v) = value { self.analyze_expr(v, ctx); }
+                unknown()
+            }
+
+            ExprNode::MultiAssign { targets, value } => {
+                self.analyze_expr(value, ctx);
+                for target in targets.iter_mut() {
+                    if let LValue::Attr { recv, .. } = target {
+                        self.analyze_expr(recv, ctx);
+                    }
+                    if let LValue::Index { recv, index } = target {
+                        self.analyze_expr(recv, ctx);
+                        self.analyze_expr(index, ctx);
+                    }
+                }
+                value.ty.clone().unwrap_or_else(unknown)
+            }
+
+            ExprNode::While { cond, body, .. } => {
+                self.analyze_expr(cond, ctx);
+                self.analyze_expr(body, ctx);
+                Ty::Nil
+            }
+
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin { self.analyze_expr(b, ctx); }
+                if let Some(e) = end { self.analyze_expr(e, ctx); }
+                unknown()
+            }
         }
     }
 
@@ -350,6 +381,7 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
         Literal::Float { .. } => Ty::Float,
         Literal::Str { .. } => Ty::Str,
         Literal::Sym { .. } => Ty::Sym,
+        Literal::Regex { .. } => unknown(),
     }
 }
 

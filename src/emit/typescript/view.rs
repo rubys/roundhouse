@@ -1432,6 +1432,18 @@ fn collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
                 collect_ivars_into(e, out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_ivars_into(v, out); }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_ivars_into(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_ivars_into(cond, out);
+            collect_ivars_into(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_ivars_into(b, out); }
+            if let Some(e) = end { collect_ivars_into(e, out); }
+        }
     }
 }
 

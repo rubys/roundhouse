@@ -273,5 +273,8 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         // Crystal has first-class symbols just like Ruby.
         Literal::Sym { value } => format!(":{}", value.as_str()),
+        // Crystal regex syntax matches Ruby's; not exercised by any
+        // current Crystal target test.
+        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
     }
 }

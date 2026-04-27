@@ -527,6 +527,89 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value: combined,
             }
         }
+        // `name op= val` (e.g. `sql += " WHERE..."`) — desugar to
+        // `name = name op val`. Mirrors the IndexOperatorWriteNode arm
+        // above for indexed targets.
+        n if n.as_local_variable_operator_write_node().is_some() => {
+            let w = n.as_local_variable_operator_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            let op_full = constant_id_str(&w.binary_operator());
+            let op = op_full.strip_suffix('=').unwrap_or(op_full).to_string();
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
+            );
+            let combined = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(read),
+                    method: Symbol::from(op),
+                    args: vec![value],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                value: combined,
+            }
+        }
+        // `recv[idx] ||= val` desugars to `recv[idx] || (recv[idx] = val)`.
+        // Same shape as `@x ||= y` below, but with an Index target. Re-
+        // evaluates the receiver and index; matches Ruby's surface
+        // semantics. The fixture (`@h[k] ||= {}`) only uses single-index
+        // form; multi-index defers until needed.
+        n if n.as_index_or_write_node().is_some() => {
+            let w = n.as_index_or_write_node().unwrap();
+            let recv_node = w.receiver().ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "index-or-write without receiver".into(),
+            })?;
+            let recv = ingest_expr(&recv_node, file)?;
+            let args_node = w.arguments().ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "index-or-write without arguments".into(),
+            })?;
+            let mut args: Vec<Expr> = Vec::new();
+            for a in args_node.arguments().iter() {
+                args.push(ingest_expr(&a, file)?);
+            }
+            if args.len() != 1 {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "index-or-write with {} indices not yet supported",
+                        args.len()
+                    ),
+                });
+            }
+            let index = args.remove(0);
+            let value = ingest_expr(&w.value(), file)?;
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(recv.clone()),
+                    method: Symbol::from("[]"),
+                    args: vec![index.clone()],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Index { recv, index },
+                    value,
+                },
+            );
+            ExprNode::BoolOp {
+                op: BoolOpKind::Or,
+                surface: BoolOpSurface::Symbol,
+                left: read,
+                right: assign,
+            }
+        }
         // `@x ||= y` desugars to `@x || (@x = y)` — evaluate `@x`, and only
         // assign on a falsy read. Side-effect-preserving; semantically what
         // Ruby does.
@@ -553,6 +636,142 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 left: read,
                 right: assign,
             }
+        }
+        // `$1`, `$2`, ... — regex-match group references. Ruby's
+        // implicit globals set by `=~` and `String#match`. Ingest as
+        // a `Var` whose name encodes the sigil; `$N` is not a valid
+        // local-variable name in Ruby so the namespaces don't collide.
+        // The Ruby emitter round-trips by reading the name verbatim.
+        n if n.as_numbered_reference_read_node().is_some() => {
+            let r = n.as_numbered_reference_read_node().unwrap();
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from(format!("${}", r.number())),
+            }
+        }
+        n if n.as_while_node().is_some() => {
+            let w = n.as_while_node().unwrap();
+            if w.is_begin_modifier() {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "`begin … end while` (do-while) form not yet supported".into(),
+                });
+            }
+            let cond = ingest_expr(&w.predicate(), file)?;
+            let body = match w.statements() {
+                Some(s) => ingest_expr(&s.as_node(), file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            ExprNode::While { cond, body, until_form: false }
+        }
+        n if n.as_until_node().is_some() => {
+            let u = n.as_until_node().unwrap();
+            if u.is_begin_modifier() {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "`begin … end until` (do-until) form not yet supported".into(),
+                });
+            }
+            let cond = ingest_expr(&u.predicate(), file)?;
+            let body = match u.statements() {
+                Some(s) => ingest_expr(&s.as_node(), file)?,
+                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            };
+            ExprNode::While { cond, body, until_form: true }
+        }
+        n if n.as_range_node().is_some() => {
+            let r = n.as_range_node().unwrap();
+            let begin = match r.left() {
+                Some(node) => Some(ingest_expr(&node, file)?),
+                None => None,
+            };
+            let end = match r.right() {
+                Some(node) => Some(ingest_expr(&node, file)?),
+                None => None,
+            };
+            ExprNode::Range { begin, end, exclusive: r.is_exclude_end() }
+        }
+        n if n.as_regular_expression_node().is_some() => {
+            let r = n.as_regular_expression_node().unwrap();
+            let pattern = String::from_utf8_lossy(r.unescaped()).into_owned();
+            let mut flags = String::new();
+            // Canonical order: imxoesun (matching Ruby's own to_s).
+            if r.is_ignore_case() { flags.push('i'); }
+            if r.is_multi_line() { flags.push('m'); }
+            if r.is_extended() { flags.push('x'); }
+            if r.is_once() { flags.push('o'); }
+            if r.is_euc_jp() { flags.push('e'); }
+            if r.is_windows_31j() { flags.push('s'); }
+            if r.is_utf_8() { flags.push('u'); }
+            if r.is_ascii_8bit() { flags.push('n'); }
+            ExprNode::Lit { value: Literal::Regex { pattern, flags } }
+        }
+        n if n.as_next_node().is_some() => {
+            let nx = n.as_next_node().unwrap();
+            // `next` typically has no args; `next value` and `next a, b`
+            // are rarer. Multi-arg `next` returns an Array (Ruby semantics).
+            let value = match nx.arguments() {
+                None => None,
+                Some(a) => {
+                    let args: Vec<Node<'_>> = a.arguments().iter().collect();
+                    match args.len() {
+                        0 => None,
+                        1 => Some(ingest_expr(&args[0], file)?),
+                        _ => {
+                            let elems = args
+                                .iter()
+                                .map(|a| ingest_expr(a, file))
+                                .collect::<IngestResult<Vec<_>>>()?;
+                            Some(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Array {
+                                    elements: elems,
+                                    style: crate::expr::ArrayStyle::Brackets,
+                                },
+                            ))
+                        }
+                    }
+                }
+            };
+            ExprNode::Next { value }
+        }
+        n if n.as_multi_write_node().is_some() => {
+            let mw = n.as_multi_write_node().unwrap();
+            // Only the simple `a, b = expr` shape — no splat (`*rest`)
+            // and no post-rest targets. The fixture-driven scope.
+            if mw.rest().is_some() {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "multi-write with splat (`a, *b = c`) not yet supported".into(),
+                });
+            }
+            let rights: Vec<Node<'_>> = mw.rights().iter().collect();
+            if !rights.is_empty() {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "multi-write with post-rest targets not yet supported".into(),
+                });
+            }
+            let mut targets: Vec<crate::expr::LValue> = Vec::new();
+            for left in mw.lefts().iter() {
+                if let Some(lvt) = left.as_local_variable_target_node() {
+                    targets.push(crate::expr::LValue::Var {
+                        id: crate::ident::VarId(0),
+                        name: Symbol::from(constant_id_str(&lvt.name())),
+                    });
+                } else if let Some(ivt) = left.as_instance_variable_target_node() {
+                    let raw = constant_id_str(&ivt.name());
+                    let name = raw.strip_prefix('@').unwrap_or(raw);
+                    targets.push(crate::expr::LValue::Ivar { name: Symbol::from(name) });
+                } else {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("unsupported multi-write target: {left:?}"),
+                    });
+                }
+            }
+            let value = ingest_expr(&mw.value(), file)?;
+            ExprNode::MultiAssign { targets, value }
         }
         other => {
             return Err(IngestError::Unsupported {

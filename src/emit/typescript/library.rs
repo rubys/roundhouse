@@ -262,6 +262,18 @@ pub(super) fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_class_refs(e, out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_class_refs(v, out); }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_class_refs(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_class_refs(cond, out);
+            collect_class_refs(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_class_refs(b, out); }
+            if let Some(e) = end { collect_class_refs(e, out); }
+        }
         // Leaf nodes — nothing to walk.
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
@@ -556,6 +568,25 @@ fn collect_ivar_names(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_ivar_names(e, out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_ivar_names(v, out); }
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            collect_ivar_names(value, out);
+            for t in targets {
+                if let LValue::Ivar { name } = t {
+                    out.insert(name.as_str().to_string());
+                }
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_ivar_names(cond, out);
+            collect_ivar_names(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_ivar_names(b, out); }
+            if let Some(e) = end { collect_ivar_names(e, out); }
+        }
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Const { .. }
@@ -617,6 +648,12 @@ fn body_uses_yield(e: &Expr) -> bool {
                 || rescues.iter().any(|r| body_uses_yield(&r.body))
                 || else_branch.as_ref().is_some_and(|e| body_uses_yield(e))
                 || ensure.as_ref().is_some_and(|e| body_uses_yield(e))
+        }
+        ExprNode::Next { value } => value.as_ref().is_some_and(body_uses_yield),
+        ExprNode::MultiAssign { value, .. } => body_uses_yield(value),
+        ExprNode::While { cond, body, .. } => body_uses_yield(cond) || body_uses_yield(body),
+        ExprNode::Range { begin, end, .. } => {
+            begin.as_ref().is_some_and(body_uses_yield) || end.as_ref().is_some_and(body_uses_yield)
         }
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
@@ -803,6 +840,23 @@ fn rewrite(e: &Expr, super_method: &str) -> Expr {
             name: name.clone(),
             value: rewrite(value, super_method),
             body: rewrite(body, super_method),
+        },
+        ExprNode::Next { value } => ExprNode::Next {
+            value: value.as_ref().map(|v| rewrite(v, super_method)),
+        },
+        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
+            targets: targets.clone(),
+            value: rewrite(value, super_method),
+        },
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: rewrite(cond, super_method),
+            body: rewrite(body, super_method),
+            until_form: *until_form,
+        },
+        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
+            begin: begin.as_ref().map(|b| rewrite(b, super_method)),
+            end: end.as_ref().map(|e| rewrite(e, super_method)),
+            exclusive: *exclusive,
         },
         // Leaves pass through unchanged.
         ExprNode::Lit { .. }

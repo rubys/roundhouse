@@ -247,6 +247,26 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(e, &format!("{path}/begin.ensure"), out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value {
+                collect_untyped(v, &format!("{path}/next.value"), out);
+            }
+        }
+        ExprNode::MultiAssign { value, .. } => {
+            collect_untyped(value, &format!("{path}/multi_assign.value"), out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_untyped(cond, &format!("{path}/while.cond"), out);
+            collect_untyped(body, &format!("{path}/while.body"), out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin {
+                collect_untyped(b, &format!("{path}/range.begin"), out);
+            }
+            if let Some(e) = end {
+                collect_untyped(e, &format!("{path}/range.end"), out);
+            }
+        }
     }
 }
 

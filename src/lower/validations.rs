@@ -204,5 +204,6 @@ fn lit_to_inclusion_value(lit: &crate::expr::Literal) -> Option<InclusionValue> 
         Literal::Float { value } => Some(InclusionValue::Float { value: *value }),
         Literal::Bool { value } => Some(InclusionValue::Bool { value: *value }),
         Literal::Nil => None,
+        Literal::Regex { .. } => None,
     }
 }

@@ -829,6 +829,7 @@ fn emit_ts_literal(v: &Literal) -> String {
         Literal::Bool { value } => value.to_string(),
         Literal::Nil => "null".to_string(),
         Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
     }
 }
 

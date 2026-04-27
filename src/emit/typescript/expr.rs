@@ -622,6 +622,7 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         // the scaffold a string is unambiguous and round-trips through
         // comparison as expected.
         Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
     }
 }
 

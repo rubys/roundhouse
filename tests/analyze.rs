@@ -677,6 +677,18 @@ fn action_aggregate_equals_subtree_fold() {
                     fold(e, acc);
                 }
             }
+            ExprNode::Next { value } => {
+                if let Some(v) = value { fold(v, acc); }
+            }
+            ExprNode::MultiAssign { value, .. } => fold(value, acc),
+            ExprNode::While { cond, body, .. } => {
+                fold(cond, acc);
+                fold(body, acc);
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin { fold(b, acc); }
+                if let Some(e) = end { fold(e, acc); }
+            }
         }
     }
 
@@ -974,6 +986,18 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
                 collect_ivar_reads(e, out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_ivar_reads(v, out); }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_ivar_reads(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_ivar_reads(cond, out);
+            collect_ivar_reads(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_ivar_reads(b, out); }
+            if let Some(e) = end { collect_ivar_reads(e, out); }
+        }
         ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
@@ -1127,6 +1151,18 @@ fn collect_var_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Optio
                 collect_var_reads(e, out);
             }
         }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_var_reads(v, out); }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_var_reads(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_var_reads(cond, out);
+            collect_var_reads(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_var_reads(b, out); }
+            if let Some(e) = end { collect_var_reads(e, out); }
+        }
         ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
@@ -1248,6 +1284,18 @@ fn collect_bare_name_sends(
             if let Some(e) = ensure {
                 collect_bare_name_sends(e, out);
             }
+        }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { collect_bare_name_sends(v, out); }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_bare_name_sends(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_bare_name_sends(cond, out);
+            collect_bare_name_sends(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { collect_bare_name_sends(b, out); }
+            if let Some(e) = end { collect_bare_name_sends(e, out); }
         }
         ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }

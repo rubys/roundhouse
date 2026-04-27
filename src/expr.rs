@@ -228,6 +228,34 @@ pub enum ExprNode {
     Super {
         args: Option<Vec<Expr>>,
     },
+    /// `next` inside an iterator block. `value` is `None` for bare
+    /// `next`, `Some(expr)` for `next val`. Divergent control flow
+    /// (analyzer treats type as `Never`); only meaningful inside a
+    /// Lambda body attached as a block to an iterator Send.
+    Next { value: Option<Expr> },
+    /// Parallel assignment: `a, b = expr` — RHS evaluates once, then
+    /// is destructured (Ruby array-like) across the targets. Limited
+    /// to the no-rest, no-rights shape; `a, *b = c` is not yet
+    /// supported.
+    MultiAssign { targets: Vec<LValue>, value: Expr },
+    /// `while cond; body; end` (and `until cond; body; end`, mapped
+    /// here with `until_form: true`). Evaluates to nil; loop control
+    /// flows through `Next` and `Return`. Ruby's `begin … end while`
+    /// (do-while) form is not yet supported.
+    While {
+        cond: Expr,
+        body: Expr,
+        #[serde(default)]
+        until_form: bool,
+    },
+    /// Range literal: `begin..end` (inclusive) or `begin...end`
+    /// (exclusive). Either side may be `None` for endless / beginless
+    /// ranges (`1..`, `..5`).
+    Range {
+        begin: Option<Expr>,
+        end: Option<Expr>,
+        exclusive: bool,
+    },
     /// Multi-clause `begin / rescue / else / ensure / end`. For the
     /// single-line modifier form (`expr rescue fallback`) use
     /// `RescueModifier` instead. An `implicit` begin arises when a
@@ -263,6 +291,11 @@ pub enum Literal {
     Float { value: f64 },
     Str { value: String },
     Sym { value: Symbol },
+    /// Regex literal: `/pattern/flags`. `pattern` is the unescaped
+    /// pattern bytes (lossy UTF-8); `flags` is a string of the
+    /// supported single-letter Ruby flags concatenated in canonical
+    /// `imxoesun` order (`/foo/im`, `/foo/x`).
+    Regex { pattern: String, flags: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

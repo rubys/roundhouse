@@ -380,6 +380,9 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         // Ruby symbols map cleanly to Elixir atoms.
         Literal::Sym { value } => format!(":{}", value.as_str()),
+        // Elixir's sigil form for regexes; not exercised by any current
+        // Elixir target test.
+        Literal::Regex { pattern, flags } => format!("~r/{pattern}/{flags}"),
     }
 }
 

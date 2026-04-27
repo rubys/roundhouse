@@ -107,6 +107,28 @@ fn emit_node(n: &ExprNode) -> String {
                 format!("super({})", args_s.join(", "))
             }
         },
+        ExprNode::Next { value } => match value {
+            None => "next".to_string(),
+            Some(v) => format!("next {}", emit_expr(v)),
+        },
+        ExprNode::MultiAssign { targets, value } => {
+            let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
+            format!("{} = {}", lhs.join(", "), emit_expr(value))
+        }
+        ExprNode::While { cond, body, until_form } => {
+            let kw = if *until_form { "until" } else { "while" };
+            format!(
+                "{kw} {}\n{}\nend",
+                emit_expr(cond),
+                indent_lines(&emit_expr(body), 1),
+            )
+        }
+        ExprNode::Range { begin, end, exclusive } => {
+            let op = if *exclusive { "..." } else { ".." };
+            let b = begin.as_ref().map(emit_expr).unwrap_or_default();
+            let e = end.as_ref().map(emit_expr).unwrap_or_default();
+            format!("{b}{op}{e}")
+        }
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
             let mut s = String::new();
             if !*implicit {
@@ -374,6 +396,7 @@ pub(super) fn emit_literal(l: &Literal) -> String {
         }
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!(":{value}"),
+        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
     }
 }
 

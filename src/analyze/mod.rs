@@ -762,6 +762,29 @@ impl Analyzer {
                 // Could record a Raises effect here once we track exception
                 // class hierarchies. Skip for now.
             }
+            ExprNode::Next { value } => {
+                if let Some(v) = value { self.visit_effects(v, ctx, out); }
+            }
+            ExprNode::MultiAssign { targets, value } => {
+                self.visit_effects(value, ctx, out);
+                for target in targets.iter_mut() {
+                    if let LValue::Attr { recv, .. } = target {
+                        self.visit_effects(recv, ctx, out);
+                    }
+                    if let LValue::Index { recv, index } = target {
+                        self.visit_effects(recv, ctx, out);
+                        self.visit_effects(index, ctx, out);
+                    }
+                }
+            }
+            ExprNode::While { cond, body, .. } => {
+                self.visit_effects(cond, ctx, out);
+                self.visit_effects(body, ctx, out);
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin { self.visit_effects(b, ctx, out); }
+                if let Some(e) = end { self.visit_effects(e, ctx, out); }
+            }
         }
 
         // Persist local effects onto this node and feed the running
@@ -1434,6 +1457,29 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             if let Some(e) = ensure {
                 diagnose_expr(e, out);
             }
+        }
+        ExprNode::Next { value } => {
+            if let Some(v) = value { diagnose_expr(v, out); }
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            diagnose_expr(value, out);
+            for target in targets {
+                if let LValue::Attr { recv, .. } = target {
+                    diagnose_expr(recv, out);
+                }
+                if let LValue::Index { recv, index } = target {
+                    diagnose_expr(recv, out);
+                    diagnose_expr(index, out);
+                }
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            diagnose_expr(cond, out);
+            diagnose_expr(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin { diagnose_expr(b, out); }
+            if let Some(e) = end { diagnose_expr(e, out); }
         }
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }

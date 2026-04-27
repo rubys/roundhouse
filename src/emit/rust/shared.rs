@@ -14,5 +14,8 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         // so Hash entries mixing `"x"` (strings) and `:y` (symbols) stay
         // a uniform `HashMap<&str, String>`.
         Literal::Sym { value } => format!("{:?}.to_string()", value.as_str()),
+        Literal::Regex { pattern, flags } => {
+            format!("regex::Regex::new({:?}).unwrap()", format!("(?{flags}){pattern}"))
+        }
     }
 }

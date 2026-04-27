@@ -733,6 +733,23 @@ fn rewrite_bare_attrs_to_ivars_ex(e: &Expr, attrs: &[Symbol]) -> Expr {
                 implicit: *implicit,
             }
         }
+        ExprNode::Next { value } => ExprNode::Next {
+            value: value.as_ref().map(&rewrite),
+        },
+        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
+            targets: targets.clone(),
+            value: rewrite(value),
+        },
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: rewrite(cond),
+            body: rewrite(body),
+            until_form: *until_form,
+        },
+        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
+            begin: begin.as_ref().map(&rewrite),
+            end: end.as_ref().map(&rewrite),
+            exclusive: *exclusive,
+        },
     };
     let _ = Pattern::Wildcard;
     Expr {

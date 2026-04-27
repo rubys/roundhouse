@@ -203,6 +203,11 @@ impl Walker {
                 let id = self.intern_symbol(value.as_str().to_string());
                 self.emit(Op::LoadSym { id });
             }
+            Literal::Regex { .. } => {
+                return Err(WalkError::NotYetSupported(
+                    "Literal::Regex in bytecode walker".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -510,5 +515,9 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Return { .. } => "Return",
         ExprNode::Super { .. } => "Super",
         ExprNode::BeginRescue { .. } => "BeginRescue",
+        ExprNode::Next { .. } => "Next",
+        ExprNode::MultiAssign { .. } => "MultiAssign",
+        ExprNode::While { .. } => "While",
+        ExprNode::Range { .. } => "Range",
     }
 }

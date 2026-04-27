@@ -334,3 +334,65 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
     assert!(arc.contains("def self.adapter"), "active_record.rb: {arc}");
     assert!(arc.contains("def self.adapter=(value)"), "active_record.rb: {arc}");
 }
+
+/// Sweep every `.rb` file under `fixtures/spinel-blog/runtime/` through
+/// `ingest_library_classes` and `emit_library`. Doesn't make per-file
+/// shape assertions — just confirms each file ingests without error
+/// and the resulting LibraryClasses serialize to non-empty Ruby (when
+/// they contain anything). Whatever fails here next is the next gap.
+#[test]
+fn all_spinel_blog_runtime_files_ingest_and_emit() {
+    let runtime_dir = PathBuf::from("fixtures/spinel-blog/runtime");
+
+    let mut walked = 0usize;
+    let mut walk_errors: Vec<String> = Vec::new();
+    walk_rb_files(&runtime_dir, &mut |path: &std::path::Path| {
+        walked += 1;
+        let source = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                walk_errors.push(format!("{}: read failed: {e}", path.display()));
+                return;
+            }
+        };
+        let path_str = path.display().to_string();
+        let classes = match ingest_library_classes(&source, &path_str) {
+            Ok(c) => c,
+            Err(e) => {
+                walk_errors.push(format!("{}: ingest failed: {e}", path.display()));
+                return;
+            }
+        };
+        let mut app = App::new();
+        for lc in classes {
+            app.library_classes.push(lc);
+        }
+        // Emit shouldn't panic. Pure-`require` aggregator files
+        // emit zero output, which is fine.
+        let _ = emit_library(&app);
+    });
+
+    assert!(
+        walked > 0,
+        "expected to walk at least one .rb file under {}",
+        runtime_dir.display(),
+    );
+    assert!(
+        walk_errors.is_empty(),
+        "{} file(s) failed:\n  {}",
+        walk_errors.len(),
+        walk_errors.join("\n  "),
+    );
+}
+
+fn walk_rb_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_rb_files(&path, f);
+        } else if path.extension().map(|e| e == "rb").unwrap_or(false) {
+            f(&path);
+        }
+    }
+}

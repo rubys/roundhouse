@@ -307,5 +307,21 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         // literals. Enum detection would refine this into a typed
         // Enum subclass later.
         Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Regex { pattern, flags } => {
+            let flag_expr = python_regex_flag_expr(flags);
+            if flag_expr.is_empty() {
+                format!("re.compile({pattern:?})")
+            } else {
+                format!("re.compile({pattern:?}, {flag_expr})")
+            }
+        }
     }
+}
+
+fn python_regex_flag_expr(flags: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if flags.contains('i') { parts.push("re.IGNORECASE"); }
+    if flags.contains('m') { parts.push("re.MULTILINE"); }
+    if flags.contains('x') { parts.push("re.VERBOSE"); }
+    parts.join(" | ")
 }
