@@ -19,7 +19,9 @@
 //! explicitly; the rich `Model` dialect remains the input for emitters
 //! that haven't migrated.
 
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Model};
+use crate::dialect::{
+    Association, Dependent, LibraryClass, MethodDef, MethodReceiver, Model,
+};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -41,6 +43,9 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     if let Some(table) = schema.tables.get(&model.table.0) {
         push_schema_methods(&mut methods, model, table);
     }
+
+    push_association_methods(&mut methods, model);
+    push_dependent_destroy(&mut methods, model);
 
     LibraryClass {
         name: model.name.clone(),
@@ -444,6 +449,132 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Associations: has_many becomes a typed reader returning a where-style
+// query. dependent: :destroy generates a `before_destroy` cascade that
+// iterates and destroys each child.
+// ---------------------------------------------------------------------------
+
+fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    let owner = &model.name;
+    for assoc in model.associations() {
+        if let Association::HasMany { name, target, foreign_key, .. } = assoc {
+            methods.push(synth_has_many_reader(owner, name, target, foreign_key));
+        }
+    }
+}
+
+fn synth_has_many_reader(
+    owner: &ClassId,
+    name: &Symbol,
+    target: &ClassId,
+    foreign_key: &Symbol,
+) -> MethodDef {
+    // def comments; Comment.where(article_id: @id); end
+    let where_args = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash {
+            entries: vec![(
+                lit_sym(foreign_key.clone()),
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Ivar { name: Symbol::from("id") },
+                ),
+            )],
+            braced: false,
+        },
+    )];
+
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(target)),
+            method: Symbol::from("where"),
+            args: where_args,
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    MethodDef {
+        name: name.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+    }
+}
+
+/// `has_many :children, dependent: :destroy` lowers to a `before_destroy`
+/// callback cascading `destroy` over each child. Multiple dependent
+/// has_manys collapse into one `before_destroy` since Ruby allows only
+/// one `def` per name — they fold into a single body in source order.
+fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
+    let mut stmts: Vec<Expr> = Vec::new();
+
+    for assoc in model.associations() {
+        if let Association::HasMany { name, dependent, .. } = assoc {
+            if matches!(dependent, Dependent::Destroy) {
+                // assoc_name.each { |c| c.destroy }
+                let iter_body = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(var_ref(Symbol::from("c"))),
+                        method: Symbol::from("destroy"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                let block = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lambda {
+                        params: vec![Symbol::from("c")],
+                        block_param: None,
+                        body: iter_body,
+                        block_style: crate::expr::BlockStyle::Brace,
+                    },
+                );
+                stmts.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: None,
+                                method: name.clone(),
+                                args: Vec::new(),
+                                block: None,
+                                parenthesized: false,
+                            },
+                        )),
+                        method: Symbol::from("each"),
+                        args: Vec::new(),
+                        block: Some(block),
+                        parenthesized: false,
+                    },
+                ));
+            }
+        }
+    }
+
+    if stmts.is_empty() {
+        return;
+    }
+
+    methods.push(MethodDef {
+        name: Symbol::from("before_destroy"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: seq(stmts),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+    });
 }
 
 // ---------------------------------------------------------------------------

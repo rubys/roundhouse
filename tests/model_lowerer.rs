@@ -115,3 +115,60 @@ fn article_lowers_with_schema_methods() {
         }
     }
 }
+
+#[test]
+fn article_lowers_has_many_to_collection_reader() {
+    let lc = lower("Article");
+    let comments = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "comments")
+        .expect("comments method present (has_many :comments)");
+
+    assert!(matches!(comments.receiver, MethodReceiver::Instance));
+    assert!(comments.params.is_empty());
+
+    // Body should be `Comment.where(article_id: @id)`.
+    let (recv_path, method) = match &*comments.body.node {
+        roundhouse::ExprNode::Send { recv, method, .. } => {
+            let recv = recv.as_ref().expect("comments body should be Comment.where(...)");
+            let path = match &*recv.node {
+                roundhouse::ExprNode::Const { path } => {
+                    path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>()
+                }
+                other => panic!("comments receiver should be Const; got {other:?}"),
+            };
+            (path, method.as_str().to_string())
+        }
+        other => panic!("comments body is not Send: {other:?}"),
+    };
+    assert_eq!(recv_path, vec!["Comment".to_string()]);
+    assert_eq!(method, "where");
+}
+
+#[test]
+fn article_lowers_dependent_destroy_to_before_destroy() {
+    let lc = lower("Article");
+    let cb = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "before_destroy")
+        .expect("before_destroy method present (has_many dependent: :destroy)");
+
+    assert!(matches!(cb.receiver, MethodReceiver::Instance));
+    let body = &*cb.body.node;
+    let exprs = match body {
+        roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
+        // Single statement collapses to non-Seq; treat as one-element list.
+        _ => vec![cb.body.clone()],
+    };
+    assert!(!exprs.is_empty(), "before_destroy should not be empty");
+    // First (and only) statement: `comments.each { |c| c.destroy }`.
+    let first = &exprs[0];
+    let (method, block_present) = match &*first.node {
+        roundhouse::ExprNode::Send { method, block, .. } => (method.as_str(), block.is_some()),
+        other => panic!("expected each-Send in before_destroy; got {other:?}"),
+    };
+    assert_eq!(method, "each");
+    assert!(block_present, "each call should carry a block");
+}
