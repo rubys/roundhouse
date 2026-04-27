@@ -26,6 +26,7 @@ pub mod erb_trim;
 pub mod fixtures;
 pub mod persistence;
 pub mod controller_walk;
+pub mod model_to_library;
 pub mod routes;
 pub mod validations;
 pub mod view;
@@ -36,6 +37,7 @@ pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };
 pub use chain::{collect_chain_modifiers, ChainModifier};
+pub use model_to_library::lower_model_to_library_class;
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
 };
