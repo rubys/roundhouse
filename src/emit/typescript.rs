@@ -37,6 +37,7 @@ mod expr;
 mod fixture;
 mod library;
 mod model;
+mod model_from_library;
 mod naming;
 mod package_json;
 mod route;
