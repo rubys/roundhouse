@@ -289,11 +289,42 @@ pub enum CallbackHook {
     AfterRollback,
 }
 
+/// A formal parameter on a `MethodDef`. Carries the parameter name and an
+/// optional default expression. Today only positional-with-default is
+/// represented; keyword variants are tracked as a future gap (see
+/// `project_lowered_ir_gaps_for_runnability`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Param {
+    pub name: Symbol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Expr>,
+}
+
+impl Param {
+    pub fn positional(name: Symbol) -> Self {
+        Self { name, default: None }
+    }
+
+    pub fn with_default(name: Symbol, default: Expr) -> Self {
+        Self { name, default: Some(default) }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
+impl std::fmt::Display for Param {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MethodDef {
     pub name: Symbol,
     pub receiver: MethodReceiver,
-    pub params: Vec<Symbol>,
+    pub params: Vec<Param>,
     pub body: Expr,
     pub signature: Option<Ty>,
     pub effects: EffectSet,

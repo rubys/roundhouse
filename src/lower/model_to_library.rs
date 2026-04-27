@@ -20,7 +20,7 @@
 //! that haven't migrated.
 
 use crate::dialect::{
-    Association, Dependent, LibraryClass, MethodDef, MethodReceiver, Model, ModelBodyItem,
+    Association, Dependent, LibraryClass, MethodDef, MethodReceiver, Model, ModelBodyItem, Param,
     ValidationRule,
 };
 use crate::effect::EffectSet;
@@ -167,7 +167,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol) -> MethodDef {
     MethodDef {
         name: Symbol::from(format!("{}=", name.as_str())),
         receiver: MethodReceiver::Instance,
-        params: vec![value_param],
+        params: vec![Param::positional(value_param)],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -214,7 +214,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     MethodDef {
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
-        params: vec![row],
+        params: vec![Param::positional(row)],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -273,10 +273,18 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         ));
     }
 
+    // Spinel-blog's `def initialize(attrs = {})` — empty hash default
+    // lets `Article.new` (no args) succeed, which the controller's
+    // `new_action` relies on. Without the default, callers hit
+    // `wrong number of arguments (given 0, expected 1)`.
+    let attrs_default = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries: Vec::new(), braced: true },
+    );
     MethodDef {
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
-        params: vec![attrs],
+        params: vec![Param::with_default(attrs, attrs_default)],
         body: seq(stmts),
         signature: None,
         effects: EffectSet::default(),
@@ -339,7 +347,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
     MethodDef {
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
-        params: vec![name],
+        params: vec![Param::positional(name)],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -380,7 +388,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
     MethodDef {
         name: Symbol::from("[]="),
         receiver: MethodReceiver::Instance,
-        params: vec![name, value],
+        params: vec![Param::positional(name), Param::positional(value)],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -453,7 +461,7 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
     MethodDef {
         name: Symbol::from("update"),
         receiver: MethodReceiver::Instance,
-        params: vec![attrs],
+        params: vec![Param::positional(attrs)],
         body: seq(stmts),
         signature: None,
         effects: EffectSet::default(),

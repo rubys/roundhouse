@@ -7,7 +7,7 @@
 
 use ruby_prism::parse;
 
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::VarId;
@@ -251,7 +251,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
     MethodDef {
         name: setter_name,
         receiver,
-        params: vec![value_param],
+        params: vec![Param::positional(value_param)],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -342,7 +342,7 @@ fn ingest_library_method(
     Ok(MethodDef {
         name,
         receiver,
-        params,
+        params: params.into_iter().map(Param::positional).collect(),
         body,
         signature: None,
         effects: crate::effect::EffectSet::default(),

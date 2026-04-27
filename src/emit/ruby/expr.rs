@@ -302,7 +302,11 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
         })
         .collect();
     if braced {
-        format!("{{ {} }}", parts.join(", "))
+        if parts.is_empty() {
+            "{}".to_string()
+        } else {
+            format!("{{ {} }}", parts.join(", "))
+        }
     } else {
         parts.join(", ")
     }

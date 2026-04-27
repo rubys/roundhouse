@@ -295,8 +295,8 @@ fn build_method_ctx(
     ctx.ivar_bindings = ivars.clone();
     if let Some(class_sigs) = sigs.get(class_id) {
         if let Some(Ty::Fn { params, .. }) = class_sigs.get(&method.name) {
-            for (name, p) in method.params.iter().zip(params.iter()) {
-                ctx.local_bindings.insert(name.clone(), p.ty.clone());
+            for (param, p) in method.params.iter().zip(params.iter()) {
+                ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
             }
         }
     }

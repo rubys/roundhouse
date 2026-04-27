@@ -12,7 +12,7 @@
 
 use ruby_prism::{Node, parse};
 
-use crate::dialect::{MethodDef, MethodReceiver};
+use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
@@ -132,8 +132,8 @@ pub fn parse_methods_with_rbs_in_ctx(
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         if let Some(Ty::Fn { params, .. }) = &m.signature {
-            for (name, p) in m.params.iter().zip(params.iter()) {
-                ctx.local_bindings.insert(name.clone(), p.ty.clone());
+            for (param, p) in m.params.iter().zip(params.iter()) {
+                ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
             }
         }
         if let Some(enclosing) = &m.enclosing_class {
@@ -264,7 +264,7 @@ fn method_def_from(
 /// in `parse_methods_with_rbs_in_ctx` ensures same-length alignment,
 /// and the body-typer seeds local bindings by position-zipping names
 /// to signature params.
-fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec<Symbol>, String> {
+fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec<Param>, String> {
     let Some(params_node) = def.parameters() else {
         return Ok(Vec::new());
     };
@@ -276,7 +276,7 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
         let rp = req.as_required_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected required-parameter shape")
         })?;
-        names.push(Symbol::new(decode_utf8(rp.name().as_slice(), method_name)?));
+        names.push(Param::positional(Symbol::new(decode_utf8(rp.name().as_slice(), method_name)?)));
     }
 
     // Optional positional: `def foo(a = 1)`.
@@ -284,14 +284,14 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
         let op = opt.as_optional_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected optional-parameter shape")
         })?;
-        names.push(Symbol::new(decode_utf8(op.name().as_slice(), method_name)?));
+        names.push(Param::positional(Symbol::new(decode_utf8(op.name().as_slice(), method_name)?)));
     }
 
     // Rest/splat: `*args`. Anonymous `*` has no name — skip.
     if let Some(rest) = params_node.rest() {
         if let Some(rp) = rest.as_rest_parameter_node() {
             if let Some(loc) = rp.name() {
-                names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+                names.push(Param::positional(Symbol::new(decode_utf8(loc.as_slice(), method_name)?)));
             }
         }
         // ImplicitRestNode (shorthand `def foo(a, *)`) has no name.
@@ -302,15 +302,15 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
         let pp = post.as_required_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected post-required-parameter shape")
         })?;
-        names.push(Symbol::new(decode_utf8(pp.name().as_slice(), method_name)?));
+        names.push(Param::positional(Symbol::new(decode_utf8(pp.name().as_slice(), method_name)?)));
     }
 
     // Keywords (required and optional): `def foo(a:, b: 1)`.
     for kw in params_node.keywords().iter() {
         if let Some(rkp) = kw.as_required_keyword_parameter_node() {
-            names.push(Symbol::new(decode_utf8(rkp.name().as_slice(), method_name)?));
+            names.push(Param::positional(Symbol::new(decode_utf8(rkp.name().as_slice(), method_name)?)));
         } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
-            names.push(Symbol::new(decode_utf8(okp.name().as_slice(), method_name)?));
+            names.push(Param::positional(Symbol::new(decode_utf8(okp.name().as_slice(), method_name)?)));
         } else {
             return Err(format!(
                 "method `{method_name}`: unexpected keyword-parameter shape"
@@ -323,7 +323,7 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
     if let Some(krest) = params_node.keyword_rest() {
         if let Some(krp) = krest.as_keyword_rest_parameter_node() {
             if let Some(loc) = krp.name() {
-                names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+                names.push(Param::positional(Symbol::new(decode_utf8(loc.as_slice(), method_name)?)));
             }
         }
         // NoKeywordsParameterNode (`**nil`) — skip.
@@ -332,7 +332,7 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
     // Block: `&block`. Anonymous `&` has no name — skip.
     if let Some(block) = params_node.block() {
         if let Some(loc) = block.name() {
-            names.push(Symbol::new(decode_utf8(loc.as_slice(), method_name)?));
+            names.push(Param::positional(Symbol::new(decode_utf8(loc.as_slice(), method_name)?)));
         }
     }
 
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(m.name.as_str(), "pluralize");
         assert_eq!(m.receiver, MethodReceiver::Instance);
         assert_eq!(
-            m.params.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             vec!["count", "word"]
         );
     }
@@ -491,8 +491,8 @@ mod tests {
         let src = "def f(a:, b: 1)\n  1\nend\n";
         let m = parse_one(src);
         assert_eq!(
-            m.params,
-            vec![Symbol::new("a"), Symbol::new("b")],
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
             "keyword param names preserved in order"
         );
     }
@@ -501,21 +501,30 @@ mod tests {
     fn splat_params_collected() {
         let src = "def f(*args)\n  1\nend\n";
         let m = parse_one(src);
-        assert_eq!(m.params, vec![Symbol::new("args")]);
+        assert_eq!(
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["args"]
+        );
     }
 
     #[test]
     fn block_params_collected() {
         let src = "def f(&blk)\n  1\nend\n";
         let m = parse_one(src);
-        assert_eq!(m.params, vec![Symbol::new("blk")]);
+        assert_eq!(
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["blk"]
+        );
     }
 
     #[test]
     fn optional_params_collected() {
         let src = "def f(a = 1)\n  a\nend\n";
         let m = parse_one(src);
-        assert_eq!(m.params, vec![Symbol::new("a")]);
+        assert_eq!(
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
     }
 
     #[test]
@@ -523,17 +532,8 @@ mod tests {
         let src = "def f(a, b = 1, *rest, c, d:, e: 2, **opts, &blk)\n  a\nend\n";
         let m = parse_one(src);
         assert_eq!(
-            m.params,
-            vec![
-                Symbol::new("a"),
-                Symbol::new("b"),
-                Symbol::new("rest"),
-                Symbol::new("c"),
-                Symbol::new("d"),
-                Symbol::new("e"),
-                Symbol::new("opts"),
-                Symbol::new("blk"),
-            ]
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "rest", "c", "d", "e", "opts", "blk"],
         );
     }
 
@@ -543,7 +543,10 @@ mod tests {
         // forwards. No name to capture; kept out of the params list.
         let src = "def f(a, *, &)\n  a\nend\n";
         let m = parse_one(src);
-        assert_eq!(m.params, vec![Symbol::new("a")]);
+        assert_eq!(
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
     }
 
     #[test]
@@ -589,7 +592,7 @@ mod tests {
         let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("types");
         let m = &methods[0];
         assert_eq!(
-            m.params.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             vec!["count", "word"]
         );
     }

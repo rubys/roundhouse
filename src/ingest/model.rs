@@ -208,7 +208,7 @@ fn ingest_method(
     Ok(MethodDef {
         name,
         receiver,
-        params,
+        params: params.into_iter().map(crate::dialect::Param::positional).collect(),
         body,
         signature: None,
         effects: EffectSet::pure(),

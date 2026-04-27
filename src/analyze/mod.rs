@@ -690,9 +690,9 @@ impl Analyzer {
             return base.clone();
         };
         let mut ctx = base.clone();
-        for (name, ty) in method.params.iter().zip(types.iter()) {
+        for (param, ty) in method.params.iter().zip(types.iter()) {
             if !matches!(ty, Ty::Var { .. }) {
-                ctx.local_bindings.insert(name.clone(), ty.clone());
+                ctx.local_bindings.insert(param.name.clone(), ty.clone());
             }
         }
         ctx

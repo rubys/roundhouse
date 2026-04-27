@@ -24,7 +24,7 @@
 //! follow-on slices once their forcing fixtures are exercised.
 
 use crate::App;
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, View};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
 use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -62,12 +62,27 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
     // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars).
     let extra_params = collect_extra_params(&rewritten, &arg_name);
 
-    let mut params: Vec<Symbol> = Vec::new();
+    // The inferred record arg (e.g. `articles`, `article`) is the
+    // required positional. Free locals discovered downstream
+    // (`notice`, `alert`, …) get a `nil` default so controllers that
+    // don't have a flash to pass can still call `Views::X.action(rec)`
+    // without arity errors. Spinel-blog's hand-written views use
+    // keyword-with-default for these (`notice: nil`); the lowerer
+    // models the same callability with positional-with-nil-default
+    // until kw-args are first-class in `Param`.
+    let nil_default = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Nil },
+    );
+    let mut params: Vec<Param> = Vec::new();
     if !arg_name.is_empty() {
-        params.push(Symbol::from(arg_name.clone()));
+        params.push(Param::positional(Symbol::from(arg_name.clone())));
     }
     for n in &extra_params {
-        params.push(Symbol::from(n.clone()));
+        params.push(Param::with_default(
+            Symbol::from(n.clone()),
+            nil_default.clone(),
+        ));
     }
 
     let mut locals: Vec<String> = Vec::new();

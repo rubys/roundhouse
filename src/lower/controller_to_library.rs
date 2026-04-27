@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 
 use crate::dialect::{
     Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass, MethodDef,
-    MethodReceiver,
+    MethodReceiver, Param,
 };
 use crate::effect::EffectSet;
 use crate::expr::{Arm, ArrayStyle, BlockStyle, Expr, ExprNode, InterpPart, LValue, Literal, Pattern, RescueClause};
@@ -123,7 +123,7 @@ fn synthesize_process_action(filters: &[&Filter], publics: &[Action]) -> MethodD
     MethodDef {
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,
-        params: vec![Symbol::from("action_name")],
+        params: vec![Param::positional(Symbol::from("action_name"))],
         body,
         signature: None,
         effects: EffectSet::default(),
@@ -228,7 +228,12 @@ fn action_to_method(
     is_public: bool,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
-    let params: Vec<Symbol> = a.params.fields.iter().map(|(n, _)| n.clone()).collect();
+    let params: Vec<Param> = a
+        .params
+        .fields
+        .iter()
+        .map(|(n, _)| Param::positional(n.clone()))
+        .collect();
     let body = lower_action_body(&a.body, controller, a.name.as_str(), privs, is_public);
     MethodDef {
         name: Symbol::from(method_name),

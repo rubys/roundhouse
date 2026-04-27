@@ -89,7 +89,7 @@ fn article_renders_schema_scaffold_methods() {
         "def self.table_name",
         "def self.schema_columns",
         "def self.instantiate(row)",
-        "def initialize(attrs)",
+        "def initialize(attrs = {})",
         "def attributes",
         "def [](name)",
         "def []=(name, value)",

@@ -43,7 +43,14 @@ pub fn emit_method(m: &MethodDef) -> String {
     let params = if m.params.is_empty() {
         String::new()
     } else {
-        let ps: Vec<&str> = m.params.iter().map(|p| p.as_str()).collect();
+        let ps: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| match &p.default {
+                Some(default) => format!("{} = {}", p.name.as_str(), expr::emit_expr(default)),
+                None => p.name.as_str().to_string(),
+            })
+            .collect();
         format!("({})", ps.join(", "))
     };
     let mut out = String::new();
