@@ -1,1 +1,1 @@
-require "action_dispatch/router"
+require_relative "action_dispatch/router"

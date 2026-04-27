@@ -1,4 +1,4 @@
-require "active_record"
+require_relative "../../runtime/active_record"
 
 # Application-level abstract base. Real-blog parity: each concrete model
 # inherits from `ApplicationRecord`, not directly from `ActiveRecord::Base`.

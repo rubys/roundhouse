@@ -1,6 +1,6 @@
 require_relative "application_controller"
-require "models/article"
-require "views"
+require_relative "../models/article"
+require_relative "../views"
 
 # Lowered shape of fixtures/real-blog/app/controllers/articles_controller.rb.
 #

@@ -1,2 +1,2 @@
-require "action_controller/parameters"
-require "action_controller/base"
+require_relative "action_controller/parameters"
+require_relative "action_controller/base"

@@ -1,5 +1,5 @@
-require "action_controller/parameters"
-require "action_view"
+require_relative "parameters"
+require_relative "../action_view"
 
 module ActionController
   # Symbolic HTTP statuses used in real-blog. Maps the symbol form
@@ -32,7 +32,7 @@ module ActionController
     attr_reader   :status, :body, :location
 
     def initialize
-      @params  = Parameters.new
+      @params  = ActionController::Parameters.new({})
       @session = {}
       @flash   = {}
       @status  = 200

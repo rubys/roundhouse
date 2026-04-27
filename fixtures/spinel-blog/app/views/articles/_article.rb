@@ -1,5 +1,5 @@
-require "action_view"
-require "inflector"
+require_relative "../../../runtime/action_view"
+require_relative "../../../runtime/inflector"
 
 module Views
   module Articles

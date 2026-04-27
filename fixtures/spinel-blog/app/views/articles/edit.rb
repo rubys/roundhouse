@@ -1,4 +1,4 @@
-require "action_view"
+require_relative "../../../runtime/action_view"
 require_relative "_form"
 
 module Views

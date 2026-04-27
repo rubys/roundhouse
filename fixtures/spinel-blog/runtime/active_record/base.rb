@@ -1,10 +1,18 @@
-require "active_record/errors"
-require "active_record/validations"
+require_relative "errors"
+require_relative "validations"
 require "time"
 
 module ActiveRecord
-  class << self
-    attr_accessor :adapter
+  # Spinel has no `SingletonClassNode` handler in its codegen dispatch.
+  # Replacing `class << self; attr_accessor :adapter; end` with two
+  # explicit module-level methods backed by a module ivar gives the
+  # same external API without the singleton-class node.
+  def self.adapter
+    @adapter
+  end
+
+  def self.adapter=(value)
+    @adapter = value
   end
 
   # Base class for all models. Designed to contain *zero* metaprogramming:

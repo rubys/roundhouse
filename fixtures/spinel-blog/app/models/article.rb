@@ -1,6 +1,6 @@
 require_relative "application_record"
-require "broadcasts"
-require "views/articles/_article"
+require_relative "../../runtime/broadcasts"
+require_relative "../views/articles/_article"
 
 # Lowered shape: real-blog's `Article < ApplicationRecord` with
 # `has_many :comments, dependent: :destroy`, `validates :title, presence: true`,

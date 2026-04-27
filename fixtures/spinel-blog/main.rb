@@ -15,19 +15,15 @@
 #   AddHandler cgi-script .rb       (apache)
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
 
-$LOAD_PATH.unshift(File.expand_path("runtime", __dir__))
-$LOAD_PATH.unshift(File.expand_path("app",     __dir__))
-$LOAD_PATH.unshift(File.expand_path("config",  __dir__))
-
-require "sqlite_adapter"
-require "active_record"
-require "schema"
-require "action_dispatch"
-require "action_controller"
-require "broadcasts"
-require "cgi_io"
-require "routes"
-require "views"
+require_relative "runtime/in_memory_adapter"
+require_relative "runtime/active_record"
+require_relative "config/schema"
+require_relative "runtime/action_dispatch"
+require_relative "runtime/action_controller"
+require_relative "runtime/broadcasts"
+require_relative "runtime/cgi_io"
+require_relative "config/routes"
+require_relative "app/views"
 
 module Main
   module_function
@@ -47,7 +43,7 @@ module Main
       return
     end
 
-    controller = matched[:controller].new
+    controller = Main.instantiate_controller(matched[:controller])
     merged = matched[:path_params].dup
     request[:params].each { |k, v| merged[k] = v }
     controller.params  = ActionController::Parameters.new(merged)
@@ -95,23 +91,46 @@ module Main
     end
   end
 
+  # Maps the routes-table controller symbol to a literal `.new`
+  # constructor call. Spinel's hash specializations don't accept class
+  # references as values, so the route table stores symbols and this
+  # case turns the symbol back into an instance via direct
+  # constructor calls (statically resolvable; no `.send`).
+  def instantiate_controller(sym)
+    case sym
+    when :articles then ArticlesController.new
+    when :comments then CommentsController.new
+    end
+  end
+
   # First-time setup. Idempotent: skips when already configured (so
   # tests that load main.rb don't conflict with their own test_helper
-  # setup). When BLOG_DB env var points at a file path, persists
-  # state across invocations; otherwise an `:memory:` DB is fresh per
-  # process (fine for one-shot smoke tests).
+  # setup). The Spinel-target build uses InMemoryAdapter (no FFI
+  # required); CRuby tests configure SqliteAdapter via test_helper.
   def configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
-    SqliteAdapter.configure(ENV["BLOG_DB"] || ":memory:")
-    ActiveRecord.adapter = SqliteAdapter
-    Schema.load!(SqliteAdapter)
+    InMemoryAdapter.configure
+    ActiveRecord.adapter = InMemoryAdapter
+    Schema.load!(InMemoryAdapter)
   end
 end
 
 # Auto-run only when invoked as a script (`ruby main.rb`). When loaded
 # via `require_relative "main"` from tests, the dispatch isn't
 # triggered — tests call Main.run themselves with constructed I/O.
+#
+# The env hash is built explicitly from the CGI variables we read,
+# rather than `ENV.to_h` — Spinel supports `ENV[]` indexing reliably
+# but `.to_h` is on the verify list.
 if __FILE__ == $PROGRAM_NAME
   Main.configure_default_adapter!
-  Main.run(ENV.to_h, $stdin, $stdout)
+  env = {
+    "REQUEST_METHOD" => ENV["REQUEST_METHOD"],
+    "PATH_INFO"      => ENV["PATH_INFO"],
+    "QUERY_STRING"   => ENV["QUERY_STRING"],
+    "CONTENT_LENGTH" => ENV["CONTENT_LENGTH"],
+    "CONTENT_TYPE"   => ENV["CONTENT_TYPE"],
+    "HTTP_COOKIE"    => ENV["HTTP_COOKIE"],
+  }
+  Main.run(env, $stdin, $stdout)
 end

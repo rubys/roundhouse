@@ -1,6 +1,6 @@
 require_relative "application_controller"
-require "models/article"
-require "models/comment"
+require_relative "../models/article"
+require_relative "../models/comment"
 
 # Lowered shape of fixtures/real-blog/app/controllers/comments_controller.rb.
 #

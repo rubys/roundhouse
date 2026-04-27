@@ -1,4 +1,4 @@
-require "action_view"
+require_relative "../../../runtime/action_view"
 
 module Views
   module Comments

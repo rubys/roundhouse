@@ -81,7 +81,10 @@ module RequestDispatch
     ViewHelpers.reset_slots!
     matched = Router.match(method, path, Routes::TABLE)
     raise "No route matches #{method} #{path}" if matched.nil?
-    controller = matched[:controller].new
+    controller = case matched[:controller]
+                 when :articles then ArticlesController.new
+                 when :comments then CommentsController.new
+                 end
     merged = matched[:path_params].dup
     params.each { |k, v| merged[k] = v }
     controller.params  = ActionController::Parameters.new(merged)

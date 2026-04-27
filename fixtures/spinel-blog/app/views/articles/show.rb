@@ -1,6 +1,6 @@
-require "action_view"
+require_relative "../../../runtime/action_view"
 require_relative "../comments/_comment"
-require "models/comment"
+require_relative "../../models/comment"
 
 module Views
   module Articles

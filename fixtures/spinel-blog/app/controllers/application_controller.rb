@@ -1,4 +1,4 @@
-require "action_controller"
+require_relative "../../runtime/action_controller"
 
 # Application-level abstract base; mirrors real-blog's
 # ApplicationController. Currently empty — anywhere app-wide policies

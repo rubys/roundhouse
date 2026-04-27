@@ -1,7 +1,7 @@
 require_relative "application_record"
-require "broadcasts"
-require "views/comments/_comment"
-require "views/articles/_article"
+require_relative "../../runtime/broadcasts"
+require_relative "../views/comments/_comment"
+require_relative "../views/articles/_article"
 
 # Lowered shape: real-blog's `Comment < ApplicationRecord` with
 # `belongs_to :article`, presence validations on commenter and body,
