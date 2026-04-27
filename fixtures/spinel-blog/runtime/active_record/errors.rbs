@@ -1,0 +1,13 @@
+module ActiveRecord
+  # Raised by `Base.find` when no row matches the given id.
+  # No own methods — inherits StandardError's surface.
+  class RecordNotFound < StandardError
+  end
+
+  # Raised by `Base#save!` when validation fails. `record` is the
+  # invalid model; `attr_reader :record` lowers to a getter at ingest.
+  class RecordInvalid < StandardError
+    def record: () -> Base
+    def initialize: (Base record) -> void
+  end
+end

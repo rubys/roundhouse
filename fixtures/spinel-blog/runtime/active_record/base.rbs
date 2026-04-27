@@ -1,0 +1,124 @@
+module ActiveRecord
+  # The global adapter slot. Set once during boot; read everywhere
+  # `Base.find` / `Base.create!` / etc. needs to dispatch a query.
+  # `class << self; attr_accessor :adapter; end` lowers to
+  # `def self.adapter` / `def self.adapter=` at ingest time.
+  #
+  # Type as `untyped`: the adapter's interface is defined elsewhere
+  # (each backend has its own implementation — InMemoryAdapter,
+  # SqliteAdapter, etc.). Inside the spinel-blog active_record/
+  # corpus we don't have a class declaration to point to. Calls like
+  # `ActiveRecord.adapter.all(...)` will dispatch against `Ty::Var`
+  # and return `Ty::Var` — documented residual.
+  def self.adapter: () -> untyped
+  def self.adapter=: (untyped) -> untyped
+
+  # Base class for all models. Spinel-friendly shape: zero
+  # metaprogramming. Per-model subclasses define their own column
+  # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
+  # the shared CRUD + lifecycle protocol.
+  class Base
+    include Validations
+
+    # `attr_accessor :id` — instance-level, lowers at ingest to a
+    # getter/setter pair that the RBS must declare.
+    def id: () -> Integer
+    def id=: (Integer) -> Integer
+
+    def initialize: () -> void
+
+    # Per-model overrides — base bodies raise NotImplementedError.
+    # The contract is what subclasses MUST satisfy; declare the
+    # contract type even though the Base body itself never returns
+    # one. The body-typer treats `raise` as divergent; it doesn't
+    # contradict the declared return type.
+    def self.table_name: () -> String
+    def self.schema_columns: () -> Array[Symbol]
+    def self.instantiate: (Hash[Symbol, untyped] _row) -> Base
+
+    # Subclass-overridden instance API. `attributes` returns the
+    # column hash for adapter writes; `assign_from_row` populates
+    # state from a fetched row (raises in Base).
+    def attributes: () -> Hash[Symbol, untyped]
+    def assign_from_row: (Hash[Symbol, untyped] _row) -> void
+
+    # `[]/[]=` are NOT defined on Base directly — subclasses
+    # provide their column-specific indexer. Declared here as
+    # contract so `fill_timestamps`'s `self[:updated_at] = now` /
+    # `self[:created_at].nil?` resolve through dispatch. Value
+    # type is `untyped` because columns hold any type (String,
+    # Integer, Float, …). Note: the .rb has no body for these;
+    # the orphan check is skipped in the new test path.
+    def []: (Symbol name) -> untyped
+    def []=: (Symbol name, untyped value) -> untyped
+
+    # Persistence state — backed by `@persisted` / `@destroyed`.
+    def persisted?: () -> bool
+    def new_record?: () -> bool
+    def destroyed?: () -> bool
+    def mark_persisted!: () -> bool
+
+    # Class-level CRUD — delegate to the adapter. Return types
+    # follow the implementation (Array[Base] for collections, Base
+    # for single fetches, Base? for nullable, Integer for count, …).
+    def self.all: () -> Array[Base]
+    def self.find: (Integer id) -> Base
+    def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
+    def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
+    def self.count: () -> Integer
+    def self.exists?: (Integer id) -> bool
+    def self.destroy_all: () -> Array[Base]
+
+    # Instance lifecycle. `save` returns true/false based on
+    # validity; `save!` returns self or raises; `destroy` returns
+    # self either way (idempotent on already-destroyed records).
+    def save: () -> bool
+    def save!: () -> Base
+    def destroy: () -> Base
+
+    # Lifecycle hooks — no-op defaults. Subclasses override.
+    def before_validation: () -> void
+    def after_validation: () -> void
+    def before_save: () -> void
+    def after_save: () -> void
+    def before_create: () -> void
+    def after_create: () -> void
+    def before_update: () -> void
+    def after_update: () -> void
+    def before_destroy: () -> void
+    def after_destroy: () -> void
+    def after_commit: () -> void
+    def after_create_commit: () -> void
+    def after_update_commit: () -> void
+    def after_destroy_commit: () -> void
+    def after_save_commit: () -> void
+    def after_touch: () -> void
+
+    def validate: () -> void
+
+    # `creating:` is a required keyword; body uses
+    # `self.class.schema_columns` and `self[]=`. Returns whatever
+    # the last expression returns — `nil` for the false branches,
+    # `untyped` from `self[]=` otherwise. Declare `void` since
+    # callers ignore the result.
+    def fill_timestamps: (creating: bool) -> void
+
+    def valid?: () -> bool
+
+    # `Base` inlines the `Validations` module via `include`. The
+    # body-typer doesn't follow include relationships into the
+    # registry today, so methods Base inherits via include must be
+    # restated here for dispatch through `Ty::Class { Base }` to
+    # resolve. `errors` is the only Validations method the Base
+    # body itself calls (in `valid?` via `@errors.empty?`); the
+    # `validates_*_of` family is invoked from per-model subclass
+    # bodies, where dispatch goes through the subclass's registry.
+    def errors: () -> Array[String]
+
+    # Equality. `other` is genuinely polymorphic — the body
+    # narrows via `is_a?(self.class)` before reading `other.id`.
+    def ==: (untyped other) -> bool
+    def eql?: (untyped other) -> bool
+    def hash: () -> Integer
+  end
+end

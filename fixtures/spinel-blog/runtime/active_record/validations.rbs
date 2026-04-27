@@ -1,0 +1,35 @@
+module ActiveRecord
+  # Validation helpers callable from a model's `validate` method.
+  # `include`d into Base — the `@errors` ivar lives on the including
+  # class, not on the module. The body-typer can't resolve `@errors`
+  # against Validations alone; resolution happens via Base#errors
+  # (declared in base.rbs) when these methods are dispatched on a Base
+  # subclass.
+  module Validations
+    # Lazily-initialized errors array. Returns the same Array<String>
+    # that `validate` mutates via `errors << "..."`.
+    def errors: () -> Array[String]
+
+    # Each `validates_*_of` takes an attribute name and a block that
+    # returns the current attribute value. The block return is genuinely
+    # polymorphic — `String` for :title, `Array` for :tags, `Numeric`
+    # for :age — so `untyped` is the deliberate choice. Inside the body
+    # the value is narrowed via `is_a?(String)` / `is_a?(Array)` etc.,
+    # which the analyzer's narrowing.rs picks up.
+    def validates_presence_of: (Symbol attr_name) { () -> untyped } -> void
+    def validates_absence_of: (Symbol attr_name) { () -> untyped } -> void
+    def validates_length_of: (Symbol attr_name, ?minimum: Integer?, ?maximum: Integer?, ?is: Integer?) { () -> untyped } -> void
+    def validates_numericality_of: (Symbol attr_name, ?greater_than: Numeric?, ?less_than: Numeric?, ?only_integer: bool) { () -> untyped } -> void
+
+    # `within` is the inclusion list. Real callers pass `Array[String]`
+    # / `Array[Symbol]` / `Range[Integer]`; spinel-blog only exercises
+    # `Array[String]` per the fixture, so narrow to that. Widen if a
+    # future fixture forces it.
+    def validates_inclusion_of: (Symbol attr_name, within: Array[String]) { () -> untyped } -> void
+
+    # `with` is the format pattern — Regexp at the Ruby level. RBS's
+    # `Regexp` type is supported by ruby-rbs; the body uses `with.match?`
+    # which body-typer resolves via the universal_method table.
+    def validates_format_of: (Symbol attr_name, with: Regexp) { () -> untyped } -> void
+  end
+end

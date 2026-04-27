@@ -352,6 +352,13 @@ fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {
         Node::BoolType(_) => Ok(Ty::Bool),
         Node::NilType(_) => Ok(Ty::Nil),
         Node::VoidType(_) => Ok(Ty::Nil),
+        // `untyped` is RBS's escape hatch for genuinely polymorphic
+        // positions (block-yielded values whose type depends on the
+        // calling class, etc.). Maps to the analyzer's unknown
+        // sentinel — body-typing then narrows via `is_a?` / `nil?`
+        // checks where present, otherwise leaves a Var that the
+        // residual report categorizes as RBS-expressiveness.
+        Node::AnyType(_) => Ok(Ty::Var { var: crate::ident::TyVar(0) }),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_())?;
             Ok(union_of(vec![inner, Ty::Nil]))
