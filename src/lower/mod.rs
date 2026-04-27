@@ -31,6 +31,7 @@ pub mod model_to_library;
 pub mod routes;
 pub mod validations;
 pub mod view;
+pub mod view_to_library;
 
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
@@ -40,6 +41,7 @@ pub use associations::{
 pub use chain::{collect_chain_modifiers, ChainModifier};
 pub use controller_to_library::lower_controller_to_library_class;
 pub use model_to_library::lower_model_to_library_class;
+pub use view_to_library::lower_view_to_library_class;
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
 };

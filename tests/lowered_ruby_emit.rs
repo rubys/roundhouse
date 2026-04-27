@@ -33,6 +33,11 @@ fn lowered_real_blog_controllers() -> Vec<EmittedFile> {
     ruby::emit_lowered_controllers(&app)
 }
 
+fn lowered_real_blog_views() -> Vec<EmittedFile> {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    ruby::emit_lowered_views(&app)
+}
+
 fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
     files
         .iter()
@@ -1026,5 +1031,636 @@ fn setter_send_renders_with_space_around_equals() {
     assert!(
         !src.contains("self.title= "),
         "setter should not render as fused `x= ` form; got:\n{src}",
+    );
+}
+
+// ── lowered views ───────────────────────────────────────────────
+//
+// Drives `emit_lowered_views` against real-blog and asserts the
+// articles/index template lowers to the `Views::Articles.index`
+// spinel-blog shape: a Views module, an `index` class method, an
+// io-buffer body that funnels every static chunk and helper call
+// through `io << ...`, and helper-call rewrites
+// (`turbo_stream_from`, `content_for`, `link_to`+path-helper,
+// `render @collection`).
+//
+// Structural assertions, not byte-match — surface formatting churn
+// shouldn't ripple in. Spinel-blog's hand-written
+// `app/views/articles/index.rb` is the visual reference.
+
+#[test]
+fn lowered_views_emit_articles_index_file() {
+    let files = lowered_real_blog_views();
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with("app/views/articles/index.rb")),
+        "{names:?}",
+    );
+}
+
+#[test]
+fn lowered_index_view_renders_module_and_method() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/index.rb");
+    assert!(
+        src.contains("module Views::Articles"),
+        "expected `module Views::Articles`; got:\n{src}",
+    );
+    assert!(
+        src.contains("def self.index("),
+        "expected `def self.index(...)`; got:\n{src}",
+    );
+    assert!(
+        src.contains("io = String.new"),
+        "expected `io = String.new` prologue; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_index_view_rewrites_view_helpers() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/index.rb");
+    // `<%= turbo_stream_from "articles" %>` → ViewHelpers call.
+    assert!(
+        src.contains("ViewHelpers.turbo_stream_from(\"articles\")"),
+        "expected ViewHelpers.turbo_stream_from rewrite; got:\n{src}",
+    );
+    // `<% content_for :title, "Articles" %>` → ViewHelpers setter.
+    assert!(
+        src.contains("ViewHelpers.content_for_set(:title, \"Articles\")"),
+        "expected ViewHelpers.content_for_set rewrite; got:\n{src}",
+    );
+    // `<%= link_to "New article", new_article_path, class: "..." %>`
+    // → ViewHelpers.link_to with path-helper rewrite.
+    assert!(
+        src.contains("ViewHelpers.link_to"),
+        "expected ViewHelpers.link_to rewrite; got:\n{src}",
+    );
+    assert!(
+        src.contains("RouteHelpers.new_article_path"),
+        "expected RouteHelpers.new_article_path rewrite; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_index_view_renders_collection_partial_via_each() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/index.rb");
+    // `<%= render @articles %>` → `articles.each { |a| io <<
+    // Views::Articles.article(a) }`.
+    assert!(
+        src.contains("articles.each"),
+        "expected collection `each` iteration; got:\n{src}",
+    );
+    assert!(
+        src.contains("Views::Articles.article("),
+        "expected per-element partial dispatch; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_index_view_auto_escapes_bare_interpolation() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/index.rb");
+    // `<%= notice %>` is a bare interpolation (not a recognized
+    // helper), so emission funnels through ViewHelpers.html_escape.
+    assert!(
+        src.contains("ViewHelpers.html_escape(notice)"),
+        "expected html_escape on bare `notice` interpolation; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_index_view_rewrites_present_to_negated_empty() {
+    // Rails-style `notice.present?` lowers to `! recv.empty?` in spinel
+    // shape (collection emptiness rather than the Rails predicate). The
+    // unary-not is emitted via `Send { recv: None, method: "!", args:
+    // [empty_call] }` so the surface form is `! notice.empty?`, not
+    // `notice.empty?.!`.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/index.rb");
+    assert!(
+        src.contains("! notice.empty?"),
+        "expected `! notice.empty?`; got:\n{src}",
+    );
+    assert!(
+        !src.contains("notice.present?"),
+        "Rails-style `.present?` should be rewritten away; got:\n{src}",
+    );
+    assert!(
+        !src.contains("notice.empty?.!"),
+        "unary-! should not render as method-call form; got:\n{src}",
+    );
+    // Same rewrite applies to `@articles.any?` (after ivar rewrite to
+    // `articles.any?`) — the `<% if @articles.any? %>` branch.
+    assert!(
+        src.contains("! articles.empty?"),
+        "expected `! articles.empty?` rewrite of `@articles.any?`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_emits_module_method_signature() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    assert!(
+        src.contains("module Views::Articles"),
+        "expected `module Views::Articles`; got:\n{src}",
+    );
+    // Partial methods take the singular form of the directory.
+    assert!(
+        src.contains("def self.article(article)"),
+        "expected `def self.article(article)`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_renders_dom_id_with_and_without_prefix() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    // `<%= dom_id(article) %>` → 1-arg form.
+    assert!(
+        src.contains("ViewHelpers.dom_id(article)"),
+        "expected 1-arg dom_id; got:\n{src}",
+    );
+    // `<%= dom_id(article, :comments_count) %>` → 2-arg form preserves
+    // the symbol prefix.
+    assert!(
+        src.contains("ViewHelpers.dom_id(article, :comments_count)"),
+        "expected 2-arg dom_id with sym prefix; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_pluralize_uses_inflector() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    // `<%= pluralize(article.comments.size, "comment") %>` →
+    // Inflector.pluralize (separate from ActiveSupport's string
+    // pluralization helpers; spinel-blog convention).
+    assert!(
+        src.contains("Inflector.pluralize(article.comments.size, \"comment\")"),
+        "expected Inflector.pluralize; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_truncate_wrapped_in_html_escape() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    // `<%= truncate(article.body, length: 100) %>` returns a plain
+    // string in spinel's runtime — so the lowering wraps it in
+    // html_escape. link_to / button_to / dom_id stay raw because they
+    // already return escape-correct output.
+    assert!(
+        src.contains("ViewHelpers.html_escape(ViewHelpers.truncate(article.body, length: 100))"),
+        "expected html_escape-wrapped truncate; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    // `<%= link_to article.title, article, ... %>` — the URL arg is a
+    // bare local record. Lowering rewrites to `RouteHelpers
+    // .article_path(article.id)`.
+    assert!(
+        src.contains("ViewHelpers.link_to(article.title, RouteHelpers.article_path(article.id)"),
+        "expected link_to(text, RouteHelpers.article_path(article.id), …); got:\n{src}",
+    );
+    // `<%= link_to "Show", article, ... %>` — same pattern, literal text.
+    assert!(
+        src.contains("ViewHelpers.link_to(\"Show\", RouteHelpers.article_path(article.id)"),
+        "expected `Show` link to article record; got:\n{src}",
+    );
+    // `<%= link_to "Edit", edit_article_path(article), ... %>` —
+    // path-helper URL with bare-local arg → `article.id`.
+    assert!(
+        src.contains("ViewHelpers.link_to(\"Edit\", RouteHelpers.edit_article_path(article.id)"),
+        "expected `Edit` link with edit_article_path(article.id); got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_article_partial_button_to_record_with_options() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_article.rb");
+    // `<%= button_to "Destroy", article, method: :delete, ... %>` —
+    // ButtonTo classifier produces a `RouteHelpers.article_path(.id)`
+    // URL and threads the opts hash through unchanged.
+    assert!(
+        src.contains("ViewHelpers.button_to(\"Destroy\", RouteHelpers.article_path(article.id)"),
+        "expected button_to with article_path; got:\n{src}",
+    );
+    assert!(
+        src.contains("method: :delete"),
+        "expected `method: :delete` opts entry; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_emits_module_method() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    assert!(
+        src.contains("module Views::Articles"),
+        "expected `module Views::Articles`; got:\n{src}",
+    );
+    assert!(
+        src.contains("def self.form(article)"),
+        "expected `def self.form(article)`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_form_with_capture_uses_inner_body_accumulator() {
+    // `<%= form_with(...) do |form| ... %>` lowers to a
+    // `ViewHelpers.form_with(...) do |form| body = String.new ; … ;
+    // body end` capture. Inner template stmts append to `body`, not
+    // the outer `io`, so the captured string is what the form_with
+    // helper consumes.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    assert!(
+        src.contains("io << ViewHelpers.form_with(model: article"),
+        "expected outer io append of form_with; got:\n{src}",
+    );
+    assert!(
+        src.contains("do |form|"),
+        "expected `do |form|` block; got:\n{src}",
+    );
+    // Inner accumulator is `body`, not `io`.
+    assert!(
+        src.contains("body = String.new"),
+        "expected fresh `body = String.new` inside the form_with block; got:\n{src}",
+    );
+    assert!(
+        src.contains("body << form.label"),
+        "expected `body << form.label(...)` (inner accumulator) inside the block; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_errors_predicate_rewrite() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    // `<% if article.errors.any? %>` → `if ! article.errors.empty?`
+    // (predicate-cond rewrite applied through the receiver chain).
+    assert!(
+        src.contains("if ! article.errors.empty?"),
+        "expected predicate-rewrite on errors.any?; got:\n{src}",
+    );
+    assert!(
+        !src.contains("article.errors.any?"),
+        "Rails-style `.any?` should be rewritten away; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_form_builder_methods() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    // `form.label :title` → `form.label(:title)` — pass-through.
+    assert!(
+        src.contains("body << form.label(:title)"),
+        "expected form.label dispatch; got:\n{src}",
+    );
+    // `form.text_field :title, class: [...]` →
+    // `form.text_field(:title, class: "<base-string>")` — class
+    // array collapses to its first element.
+    assert!(
+        src.contains("body << form.text_field(:title, class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full\")"),
+        "expected form.text_field with class-array simplified to base string; got:\n{src}",
+    );
+    // `form.textarea :body, rows: 4, ...` → `form.text_area(:body,
+    // rows: 4, ...)` — alias normalized to underscore form.
+    assert!(
+        src.contains("body << form.text_area(:body, rows: 4"),
+        "expected form.textarea aliased to text_area; got:\n{src}",
+    );
+    assert!(
+        !src.contains("form.textarea("),
+        "form.textarea alias should not survive; got:\n{src}",
+    );
+    // `form.submit class: "..."` → `form.submit(nil, class: "...")` —
+    // leading `nil` inserted when no positional arg was provided.
+    assert!(
+        src.contains("body << form.submit(nil, class: "),
+        "expected leading-nil insertion on form.submit; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_errors_each_iterates_with_html_escape() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    // `<% article.errors.each do |error| %>...<% end %>` walks as a
+    // template-level each block, body indented under it and using
+    // the active accumulator (`body` since we're inside form_with).
+    assert!(
+        src.contains("article.errors.each do |error|"),
+        "expected article.errors.each block; got:\n{src}",
+    );
+    // `<%= error.full_message %>` is a bareword interpolation —
+    // auto-escaped via html_escape.
+    assert!(
+        src.contains("body << ViewHelpers.html_escape(error.full_message)"),
+        "expected html_escape on bare error.full_message interpolation; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_form_partial_pluralize_count_uses_inflector() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/_form.rb");
+    // `<%= pluralize(article.errors.count, "error") %>` →
+    // `Inflector.pluralize(article.errors.count, "error")`. (spinel-
+    // blog uses `.length` instead of `.count` — both work in Ruby;
+    // size/length/count normalization is a future slice.)
+    assert!(
+        src.contains("Inflector.pluralize(article.errors.count, \"error\")"),
+        "expected Inflector.pluralize on errors.count; got:\n{src}",
+    );
+}
+
+// ── comments/_comment.html.erb ──────────────────────────────────
+
+#[test]
+fn lowered_comment_partial_emits_module_method() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/comments/_comment.rb");
+    assert!(
+        src.contains("module Views::Comments"),
+        "expected `module Views::Comments`; got:\n{src}",
+    );
+    assert!(
+        src.contains("def self.comment(comment)"),
+        "expected `def self.comment(comment)`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_comment_partial_nested_url_array_to_path_helper() {
+    // `<%= button_to "Delete", [comment.article, comment], method:
+    // :delete, ... %>` lowers the nested-resource array to
+    // `RouteHelpers.article_comment_path(comment.article_id,
+    // comment.id)`. The parent `comment.article` is a belongs_to
+    // read; we use the FK column `comment.article_id` (avoiding the
+    // dereference) and the child `comment.id` directly.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/comments/_comment.rb");
+    assert!(
+        src.contains(
+            "ViewHelpers.button_to(\"Delete\", RouteHelpers.article_comment_path(comment.article_id, comment.id)"
+        ),
+        "expected nested-array URL → article_comment_path with FK + id; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_comment_partial_auto_escape_on_attrs() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/comments/_comment.rb");
+    // Bare-attr interpolations get html_escape on the way to io.
+    assert!(
+        src.contains("ViewHelpers.html_escape(comment.commenter)"),
+        "expected html_escape(comment.commenter); got:\n{src}",
+    );
+    assert!(
+        src.contains("ViewHelpers.html_escape(comment.body)"),
+        "expected html_escape(comment.body); got:\n{src}",
+    );
+}
+
+// ── articles/show.html.erb ──────────────────────────────────────
+
+#[test]
+fn lowered_show_view_emits_module_method() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/show.rb");
+    assert!(
+        src.contains("module Views::Articles"),
+        "expected `module Views::Articles`; got:\n{src}",
+    );
+    assert!(
+        src.contains("def self.show(article"),
+        "expected `def self.show(article, ...)`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_show_view_renders_association_partial_via_each() {
+    // `<%= render @article.comments %>` — has_many association
+    // partial. Lowered to `article.comments.each { |c| io <<
+    // Views::Comments.comment(c) }`. The receiver is the
+    // post-ivar-rewrite `article`; the var name is the singular's
+    // first letter (`c`).
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/show.rb");
+    assert!(
+        src.contains("article.comments.each { |c| io << Views::Comments.comment(c) }"),
+        "expected article.comments.each association iteration; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_show_view_turbo_stream_from_with_string_interp() {
+    // `<%= turbo_stream_from "article_#{@article.id}_comments" %>`
+    // — the channel is a StringInterp with an ivar that rewrites
+    // through to `"article_#{article.id}_comments"`. Helper emits
+    // raw (no html_escape — turbo_stream_from is html-safe).
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/show.rb");
+    assert!(
+        src.contains("ViewHelpers.turbo_stream_from(\"article_#{article.id}_comments\")"),
+        "expected turbo_stream_from with interpolated channel; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
+    // `<%= form_with model: [@article, Comment.new], ... do |form|
+    // %>` — the model is an array (no single record local), so
+    // `find_kwarg_local_name` returns None. The form_with handler
+    // still registers the form param so FormBuilder method
+    // dispatch resolves inside the block — `form.label`,
+    // `form.text_field`, etc. lower to direct sends rather than
+    // falling through to html_escape.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/show.rb");
+    assert!(
+        src.contains("ViewHelpers.form_with(model: [article, Comment.new]"),
+        "expected form_with with nested-array model; got:\n{src}",
+    );
+    // FormBuilder dispatch — direct sends, not wrapped in html_escape.
+    assert!(
+        src.contains("body << form.label(:commenter, class: \"block font-medium\")"),
+        "expected form.label dispatch; got:\n{src}",
+    );
+    assert!(
+        src.contains("body << form.text_field(:commenter, class: \"block w-full border rounded p-2\")"),
+        "expected form.text_field dispatch; got:\n{src}",
+    );
+    assert!(
+        src.contains("body << form.text_area(:body, rows: 3"),
+        "expected form.text_area dispatch (with textarea→text_area alias); got:\n{src}",
+    );
+    // `form.submit "Add Comment", class: "..."` — a positional
+    // String already, so no leading-nil insertion (unlike
+    // `form.submit class: "..."` in articles/_form.rb).
+    assert!(
+        src.contains("body << form.submit(\"Add Comment\", class: "),
+        "expected form.submit with positional label preserved; got:\n{src}",
+    );
+    assert!(
+        !src.contains("ViewHelpers.html_escape(form."),
+        "FormBuilder calls should not be html_escape-wrapped; got:\n{src}",
+    );
+}
+
+// ── layouts/application.html.erb ────────────────────────────────
+
+#[test]
+fn lowered_layout_view_emits_module_method() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("module Views::Layouts"),
+        "expected `module Views::Layouts`; got:\n{src}",
+    );
+    // Layouts take an explicit `body` parameter — bare `<%= yield %>`
+    // in the source resolves to this local.
+    assert!(
+        src.contains("def self.application(body)"),
+        "expected `def self.application(body)`; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_layout_view_bare_yield_renders_body_local() {
+    // `<%= yield %>` (no slot arg) is the layout's body slot — lowers
+    // to `io << body` (the explicit param), not a ViewHelpers call.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("io << body"),
+        "expected `io << body` from bare yield; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_layout_view_yield_slot_uses_get_slot() {
+    // `<%= yield :head %>` → `ViewHelpers.get_slot(:head)`.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("io << ViewHelpers.get_slot(:head)"),
+        "expected `ViewHelpers.get_slot(:head)` for yielded slot; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_layout_view_head_helpers() {
+    // The bare zero-arg layout helpers all dispatch to ViewHelpers.*.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("io << ViewHelpers.csrf_meta_tags"),
+        "expected csrf_meta_tags rewrite; got:\n{src}",
+    );
+    assert!(
+        src.contains("io << ViewHelpers.csp_meta_tag"),
+        "expected csp_meta_tag rewrite; got:\n{src}",
+    );
+    assert!(
+        src.contains("io << ViewHelpers.javascript_importmap_tags"),
+        "expected javascript_importmap_tags rewrite; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_layout_view_stylesheet_link_tag_converts_sym_arg() {
+    // `<%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>`
+    // → `ViewHelpers.stylesheet_link_tag("app", "data-turbo-track":
+    // "reload")`. Spinel-runtime convention: the stylesheet group
+    // arg is a string, not a symbol; opts hash threads through.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains("io << ViewHelpers.stylesheet_link_tag(\"app\""),
+        "expected stylesheet_link_tag with `:app` symbol → \"app\" string; got:\n{src}",
+    );
+    assert!(
+        src.contains("\"data-turbo-track\""),
+        "expected `data-turbo-track` opts entry preserved; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_layout_view_content_for_default_via_bool_op() {
+    // `<%= content_for(:title) || "Real Blog" %>` — the BoolOp's
+    // left side is a bare `content_for(:title)` Send. The auto-
+    // escape path's `rewrite_helpers_in_expr` recurses through the
+    // BoolOp and rewrites the inner helper to its ViewHelpers
+    // form before the html_escape wrap is added.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/layouts/application.rb");
+    assert!(
+        src.contains(
+            "ViewHelpers.html_escape(ViewHelpers.content_for_get(:title) || \"Real Blog\")"
+        ),
+        "expected nested helper rewrite under BoolOp + outer html_escape; got:\n{src}",
+    );
+    // Make sure the raw `content_for(:title)` Send did not survive.
+    assert!(
+        !src.contains("content_for(:title) ||"),
+        "raw content_for Send should be rewritten; got:\n{src}",
+    );
+}
+
+// ── articles/new + articles/edit (named-partial dispatch) ───────
+
+#[test]
+fn lowered_new_view_dispatches_named_partial() {
+    // `<%= render "form", article: @article %>` is the Named
+    // RenderPartial variant. Bare partial name `"form"` routes to
+    // the current resource_dir's module — `Views::Articles.form
+    // (article)`. The hash's first value (`@article` post-ivar
+    // rewrite → `article`) becomes the call's positional arg.
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/new.rb");
+    assert!(
+        src.contains("def self.new(article)"),
+        "expected `def self.new(article)`; got:\n{src}",
+    );
+    assert!(
+        src.contains("io << Views::Articles.form(article)"),
+        "expected named-partial dispatch to Views::Articles.form(article); got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_edit_view_dispatches_named_partial_and_record_link() {
+    let files = lowered_real_blog_views();
+    let src = find(&files, "app/views/articles/edit.rb");
+    assert!(
+        src.contains("def self.edit(article)"),
+        "expected `def self.edit(article)`; got:\n{src}",
+    );
+    // Same shared partial as `new.html.erb`.
+    assert!(
+        src.contains("io << Views::Articles.form(article)"),
+        "expected named-partial dispatch; got:\n{src}",
+    );
+    // `<%= link_to "Show this article", @article, ... %>` — the URL
+    // arg is the bare local record (post-ivar-rewrite), so it
+    // resolves to `RouteHelpers.article_path(article.id)`.
+    assert!(
+        src.contains("ViewHelpers.link_to(\"Show this article\", RouteHelpers.article_path(article.id)"),
+        "expected link_to(text, RouteHelpers.article_path(article.id)) for record-ref URL; got:\n{src}",
     );
 }

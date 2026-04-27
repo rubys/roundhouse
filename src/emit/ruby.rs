@@ -125,6 +125,32 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     controller::emit_lowered_controllers(app)
 }
 
+/// Lower each `app.views` entry through `view_to_library` and emit
+/// the resulting `LibraryClass` as a Ruby source file under
+/// `app/views/<dir>/<base>.rb`. Output is the universal post-lowering
+/// shape: a `Views::<Plural>` module with one `def self.<action>(args)`
+/// per view, body in `io = String.new ; io << ViewHelpers.x(...) ; io`
+/// form. See `project_universal_post_lowering_ir.md`.
+pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
+    app.views
+        .iter()
+        .map(|v| {
+            let lc = crate::lower::lower_view_to_library_class(v, app);
+            let mut file = library::emit_library_class_decl(&lc, app);
+            file.path = view_output_path(v.name.as_str());
+            file
+        })
+        .collect()
+}
+
+/// Map a view name (`articles/index`, `articles/_article`,
+/// `layouts/application`) to the output path under `app/views/`.
+/// Partials retain their leading underscore in the basename so the
+/// require-relative graph keeps working without a separate alias step.
+fn view_output_path(view_name: &str) -> PathBuf {
+    PathBuf::from(format!("app/views/{view_name}.rb"))
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {
