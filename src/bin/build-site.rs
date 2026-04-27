@@ -63,7 +63,7 @@ fn run(fixture: &Path, out: &Path) -> Result<(), String> {
     for target in TARGETS {
         let manifest = match *target {
             "ruby" => ruby_manifest(fixture)?,
-            "spinel" => build_manifest("spinel", spinel_files(&app)),
+            "spinel" => build_manifest("spinel", emit::ruby::emit_spinel(&app)),
             "crystal" => build_manifest("crystal", emit::crystal::emit(&app)),
             "elixir" => build_manifest("elixir", emit::elixir::emit(&app)),
             "go" => build_manifest("go", emit::go::emit(&app)),
@@ -105,20 +105,6 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Spinel-shape Ruby: lowered IR rendered as runnable Ruby. The five
-/// lowered emitters are the validation target of the lowering pipeline
-/// (per `project_lowerers_first_validate_via_spinel.md`); concatenating
-/// their outputs reproduces the spinel-blog directory shape.
-fn spinel_files(app: &roundhouse::App) -> Vec<EmittedFile> {
-    let mut files = Vec::new();
-    files.push(emit::ruby::emit_lowered_schema(app));
-    files.push(emit::ruby::emit_lowered_routes(app));
-    files.extend(emit::ruby::emit_lowered_models(app));
-    files.extend(emit::ruby::emit_lowered_controllers(app));
-    files.extend(emit::ruby::emit_lowered_views(app));
-    files
 }
 
 fn build_manifest(language: &str, files: Vec<EmittedFile>) -> String {

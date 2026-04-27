@@ -159,6 +159,23 @@ fn view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("app/views/{view_name}.rb"))
 }
 
+/// Spinel-shape emit: lowered IR rendered as runnable Ruby. Composes
+/// the five `emit_lowered_*` functions into a single project — schema,
+/// routes, models, controllers, views — matching `fixtures/spinel-blog`'s
+/// directory shape. The natural validation target of the lowering
+/// pipeline (per `project_lowerers_first_validate_via_spinel.md`):
+/// CRuby executes the output, and spinel-blog's hand-written tests
+/// serve as the contract until spinel grows its own test runner.
+pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
+    let mut files = Vec::new();
+    files.push(emit_lowered_schema(app));
+    files.push(emit_lowered_routes(app));
+    files.extend(emit_lowered_models(app));
+    files.extend(emit_lowered_controllers(app));
+    files.extend(emit_lowered_views(app));
+    files
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {

@@ -164,6 +164,35 @@ jobs:
       - name: cargo test --test elixir_toolchain -- --ignored
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
 
+  # -------------------------------------------------------------------
+  # Spinel toolchain. Methodology asymmetry vs. the other toolchain
+  # jobs: Spinel doesn't yet have its own test runner, so this job
+  # emits ONLY the lowered app/ from real-blog and runs spinel-blog's
+  # hand-written tests (fixtures/spinel-blog/test/) over the emitted
+  # output via CRuby (Spinel is a Ruby subset). Other toolchain jobs
+  # emit both app + tests and run the emitted tests; the swap will
+  # happen here once Spinel grows a runner. See
+  # `project_spinel_test_asymmetry`.
+  toolchain-spinel:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/spinel-blog
+      - name: cargo test --test spinel_toolchain -- --ignored
+        run: cargo test --test spinel_toolchain -- --ignored --nocapture
+
   toolchain-python:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -348,6 +377,7 @@ jobs:
       - toolchain-go
       - toolchain-elixir
       - toolchain-python
+      - toolchain-spinel
       - compare-rust
       - compare-crystal
       - compare-typescript
