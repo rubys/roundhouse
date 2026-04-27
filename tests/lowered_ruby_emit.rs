@@ -640,6 +640,60 @@ fn controllers_article_params_lowers_expect_hash_to_require_permit() {
 }
 
 #[test]
+fn controllers_polymorphic_redirect_to_ivar_uses_route_helpers_singular_path() {
+    // `redirect_to @article, notice: "..."` lowers to
+    // `redirect_to(RouteHelpers.article_path(@article.id), notice: "...")`.
+    // The .id arg comes from the model's PK; spinel's RouteHelpers
+    // expects scalar args, not model instances.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains(
+            "redirect_to(RouteHelpers.article_path(@article.id), notice: \"Article was successfully created.\")"
+        ),
+        "create's redirect_to:\n{src}",
+    );
+    assert!(
+        src.contains(
+            "redirect_to(RouteHelpers.article_path(@article.id), notice: \"Article was successfully updated.\", status: :see_other)"
+        ),
+        "update's redirect_to:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_path_helper_redirect_to_gets_route_helpers_prefix() {
+    // `redirect_to articles_path, ...` lowers to
+    // `redirect_to(RouteHelpers.articles_path, ...)` — the path helper
+    // is a no-recv Send whose method ends in _path; spinel's runtime
+    // defines all path helpers as module functions on RouteHelpers.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains(
+            "redirect_to(RouteHelpers.articles_path, notice: \"Article was successfully destroyed.\", status: :see_other)"
+        ),
+        "destroy's redirect_to:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_redirect_to_renders_with_parens_uniformly() {
+    // Every redirect_to call site uses parenthesized form so the
+    // emitted shape is uniform — the rewriter sets `parenthesized: true`
+    // on the outer Send regardless of whether the source had parens.
+    // This is what spinel's reference fixture uses.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    let count_total = src.matches("redirect_to").count();
+    let count_with_parens = src.matches("redirect_to(").count();
+    assert_eq!(
+        count_total, count_with_parens,
+        "expected every redirect_to with parens; got {count_with_parens}/{count_total} in:\n{src}"
+    );
+}
+
+#[test]
 fn controllers_application_controller_has_no_dispatcher() {
     // ApplicationController has no actions and no filters in real-blog,
     // so process_action shouldn't be synthesized at all — just the

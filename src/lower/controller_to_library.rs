@@ -221,8 +221,7 @@ fn case_dispatch(publics: &[Action]) -> Expr {
 fn action_to_method(a: &Action) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     let params: Vec<Symbol> = a.params.fields.iter().map(|(n, _)| n.clone()).collect();
-    let unwrapped = unwrap_respond_to(&a.body);
-    let body = rewrite_params(&unwrapped);
+    let body = lower_action_body(&a.body);
     MethodDef {
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
@@ -234,11 +233,194 @@ fn action_to_method(a: &Action) -> MethodDef {
     }
 }
 
+/// Apply the controller-body rewrite pipeline in declared order:
+///
+/// 1. `unwrap_respond_to` — drop `respond_to do |format| format.html
+///    {…}; format.json {…} end` wrappers, keeping the HTML branch.
+/// 2. `rewrite_params` — `params` → `@params`, `params.expect(...)` →
+///    indexed/require-permit forms.
+/// 3. `rewrite_redirect_to` — polymorphic `redirect_to @x` →
+///    `redirect_to(RouteHelpers.<x>_path(@x.id), ...)`.
+/// 4. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
+///    (covers `articles_path` and the like that appear outside
+///    redirect_to's first arg).
+///
+/// Run in this order because each pass leaves the IR in a shape the
+/// next pass expects: redirect_to rewrite needs the bare ivar before
+/// route_helpers prefixes it; route_helpers needs to skip already-
+/// rewritten `RouteHelpers.x_path(...)` calls (they have a recv now).
+fn lower_action_body(body: &Expr) -> Expr {
+    let unwrapped = unwrap_respond_to(body);
+    let with_params = rewrite_params(&unwrapped);
+    let with_redirects = rewrite_redirect_to(&with_params);
+    rewrite_route_helpers(&with_redirects)
+}
+
 /// Action name → Ruby method name. `new` is the only rename (it
 /// shadows `Object#new` if defined as an instance method; spinel's
 /// router maps `:new` action to `new_action`).
 fn method_name_for_action(action: &str) -> &str {
     if action == "new" { "new_action" } else { action }
+}
+
+// ---------------------------------------------------------------------------
+// Generic Expr rewrite helper. `f` runs on each node pre-order: when
+// it returns `Some(replacement)`, the result is used verbatim (no
+// further recursion into that subtree — `f` is responsible for
+// recursing into children if needed). When it returns `None`, the
+// default structural map runs, applying `map_expr` to every child.
+//
+// This is the small kernel that lets each rewriter (params,
+// redirect_to, …) be a 10-line pattern match instead of a 130-line
+// case-per-variant walker.
+// ---------------------------------------------------------------------------
+
+fn map_expr<F>(expr: &Expr, f: &F) -> Expr
+where
+    F: Fn(&Expr) -> Option<Expr>,
+{
+    if let Some(replacement) = f(expr) {
+        return replacement;
+    }
+    let new_node = match &*expr.node {
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(|e| map_expr(e, f)).collect(),
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: map_expr(cond, f),
+            then_branch: map_expr(then_branch, f),
+            else_branch: map_expr(else_branch, f),
+        },
+        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
+            scrutinee: map_expr(scrutinee, f),
+            arms: arms
+                .iter()
+                .map(|a| Arm {
+                    pattern: a.pattern.clone(),
+                    guard: a.guard.as_ref().map(|g| map_expr(g, f)),
+                    body: map_expr(&a.body, f),
+                })
+                .collect(),
+        },
+        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
+            recv: recv.as_ref().map(|r| map_expr(r, f)),
+            method: method.clone(),
+            args: args.iter().map(|a| map_expr(a, f)).collect(),
+            block: block.as_ref().map(|b| map_expr(b, f)),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: map_expr(fun, f),
+            args: args.iter().map(|a| map_expr(a, f)).collect(),
+            block: block.as_ref().map(|b| map_expr(b, f)),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: map_expr(left, f),
+            right: map_expr(right, f),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: map_expr(body, f),
+            block_style: *block_style,
+        },
+        ExprNode::Assign { target, value } => {
+            let new_target = match target {
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: map_expr(recv, f),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: map_expr(recv, f),
+                    index: map_expr(index, f),
+                },
+                other => other.clone(),
+            };
+            ExprNode::Assign { target: new_target, value: map_expr(value, f) }
+        }
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements.iter().map(|e| map_expr(e, f)).collect(),
+            style: *style,
+        },
+        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (map_expr(k, f), map_expr(v, f)))
+                .collect(),
+            braced: *braced,
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Expr { expr } => InterpPart::Expr { expr: map_expr(expr, f) },
+                    other => other.clone(),
+                })
+                .collect(),
+        },
+        ExprNode::Yield { args } => ExprNode::Yield {
+            args: args.iter().map(|a| map_expr(a, f)).collect(),
+        },
+        ExprNode::Raise { value } => ExprNode::Raise { value: map_expr(value, f) },
+        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
+            expr: map_expr(expr, f),
+            fallback: map_expr(fallback, f),
+        },
+        ExprNode::Return { value } => ExprNode::Return { value: map_expr(value, f) },
+        ExprNode::Super { args: Some(args) } => ExprNode::Super {
+            args: Some(args.iter().map(|a| map_expr(a, f)).collect()),
+        },
+        ExprNode::Next { value: Some(v) } => ExprNode::Next { value: Some(map_expr(v, f)) },
+        ExprNode::Let { name, id, value, body } => ExprNode::Let {
+            name: name.clone(),
+            id: *id,
+            value: map_expr(value, f),
+            body: map_expr(body, f),
+        },
+        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
+            targets: targets.clone(),
+            value: map_expr(value, f),
+        },
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: map_expr(cond, f),
+            body: map_expr(body, f),
+            until_form: *until_form,
+        },
+        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
+            begin: begin.as_ref().map(|b| map_expr(b, f)),
+            end: end.as_ref().map(|e| map_expr(e, f)),
+            exclusive: *exclusive,
+        },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: map_expr(body, f),
+                rescues: rescues
+                    .iter()
+                    .map(|r| RescueClause {
+                        classes: r.classes.iter().map(|c| map_expr(c, f)).collect(),
+                        binding: r.binding.clone(),
+                        body: map_expr(&r.body, f),
+                    })
+                    .collect(),
+                else_branch: else_branch.as_ref().map(|e| map_expr(e, f)),
+                ensure: ensure.as_ref().map(|e| map_expr(e, f)),
+                implicit: *implicit,
+            }
+        }
+        // Leaves (Lit / Var / Ivar / Const / SelfRef / Super{None} /
+        // Next{None}) carry no children to rewrite.
+        other => other.clone(),
+    };
+    Expr {
+        span: expr.span,
+        node: Box::new(new_node),
+        ty: expr.ty.clone(),
+        effects: expr.effects.clone(),
+        leading_blank_line: expr.leading_blank_line,
+        diagnostic: expr.diagnostic.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,160 +438,159 @@ fn method_name_for_action(action: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 fn rewrite_params(expr: &Expr) -> Expr {
-    let new_node = match &*expr.node {
-        // `params.expect(...)` — recognized first so the recv is the
-        // bare params Send, NOT the rewritten ivar (which would lose
+    map_expr(expr, &|e| match &*e.node {
+        // `params.expect(...)` — recognized first so the recv is still
+        // the bare `params` Send, not the @params ivar (which would lose
         // the recognition pattern).
         ExprNode::Send { recv: Some(recv), method, args, block, parenthesized }
             if method.as_str() == "expect" && is_bare_params(recv) =>
         {
-            return rewrite_expect(args, block.as_ref(), *parenthesized, expr.span);
+            Some(rewrite_expect(args, block.as_ref(), *parenthesized, e.span))
         }
         // Bare `params` (no recv, no args, no block) → `@params`.
         ExprNode::Send { recv: None, method, args, block: None, .. }
             if method.as_str() == "params" && args.is_empty() =>
         {
-            ExprNode::Ivar { name: Symbol::from("params") }
+            Some(Expr::new(e.span, ExprNode::Ivar { name: Symbol::from("params") }))
         }
-        // Generic structural recursion.
-        ExprNode::Seq { exprs } => ExprNode::Seq {
-            exprs: exprs.iter().map(rewrite_params).collect(),
-        },
-        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: rewrite_params(cond),
-            then_branch: rewrite_params(then_branch),
-            else_branch: rewrite_params(else_branch),
-        },
-        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
-            scrutinee: rewrite_params(scrutinee),
-            arms: arms
-                .iter()
-                .map(|a| Arm {
-                    pattern: a.pattern.clone(),
-                    guard: a.guard.as_ref().map(rewrite_params),
-                    body: rewrite_params(&a.body),
-                })
-                .collect(),
-        },
-        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_params),
-            method: method.clone(),
-            args: args.iter().map(rewrite_params).collect(),
-            block: block.as_ref().map(rewrite_params),
-            parenthesized: *parenthesized,
-        },
-        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
-            fun: rewrite_params(fun),
-            args: args.iter().map(rewrite_params).collect(),
-            block: block.as_ref().map(rewrite_params),
-        },
-        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
-            op: *op,
-            surface: *surface,
-            left: rewrite_params(left),
-            right: rewrite_params(right),
-        },
-        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
-            params: params.clone(),
-            block_param: block_param.clone(),
-            body: rewrite_params(body),
-            block_style: *block_style,
-        },
-        ExprNode::Assign { target, value } => {
-            let new_target = match target {
-                LValue::Attr { recv, name } => LValue::Attr {
-                    recv: rewrite_params(recv),
-                    name: name.clone(),
-                },
-                LValue::Index { recv, index } => LValue::Index {
-                    recv: rewrite_params(recv),
-                    index: rewrite_params(index),
-                },
-                other => other.clone(),
+        _ => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `redirect_to` polymorphic rewrite. Rails' `redirect_to @article` does
+// implicit polymorphic resolution to `article_path(@article)`; spinel
+// requires the explicit form. The IR-level shape:
+//
+//   Send { method: "redirect_to", args: [Ivar{name}, ...kwargs] }
+//
+// becomes:
+//
+//   Send { method: "redirect_to", args: [
+//     Send { recv: Const(RouteHelpers), method: "<name>_path",
+//            args: [Send { recv: Ivar{name}, method: "id" }] },
+//     ...kwargs
+//   ], parenthesized: true }
+//
+// Only the first positional arg is rewritten; trailing keyword-hash
+// args (notice:, status:) pass through unchanged.
+// ---------------------------------------------------------------------------
+
+fn rewrite_redirect_to(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block, .. }
+            if method.as_str() == "redirect_to" && !args.is_empty() =>
+        {
+            // Two recognized first-arg shapes:
+            //   - `@x` (Ivar) → wrap as `RouteHelpers.<x>_path(@x.id)`.
+            //   - `<x>_path` (no-recv Send ending in _path) → prefix
+            //     with RouteHelpers so all redirect_to call sites
+            //     render uniformly with the parenthesized form.
+            //
+            // Other shapes (string URL, hash, …) leave the call alone
+            // so we don't accidentally mangle an idiom we don't handle.
+            let first = &args[0];
+            let new_first = match &*first.node {
+                ExprNode::Ivar { name } => polymorphic_path(name, e.span),
+                ExprNode::Send { recv: None, method: m, args: m_args, block: m_block, parenthesized }
+                    if m.as_str().ends_with("_path") =>
+                {
+                    Expr::new(
+                        first.span,
+                        ExprNode::Send {
+                            recv: Some(const_path(&["RouteHelpers"], first.span)),
+                            method: m.clone(),
+                            args: m_args.clone(),
+                            block: m_block.clone(),
+                            parenthesized: *parenthesized,
+                        },
+                    )
+                }
+                _ => return None,
             };
-            ExprNode::Assign { target: new_target, value: rewrite_params(value) }
+            let mut new_args = vec![new_first];
+            new_args.extend(args.iter().skip(1).cloned());
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("redirect_to"),
+                    args: new_args,
+                    block: block.clone(),
+                    parenthesized: true,
+                },
+            ))
         }
-        ExprNode::Array { elements, style } => ExprNode::Array {
-            elements: elements.iter().map(rewrite_params).collect(),
-            style: *style,
+        _ => None,
+    })
+}
+
+/// `RouteHelpers.<ivar_name>_path(@<ivar_name>.id)` — the explicit form
+/// that replaces Rails' polymorphic `redirect_to @x`.
+fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
+    let ivar_id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(ivar_name.as_str(), span)),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
-            entries: entries
-                .iter()
-                .map(|(k, v)| (rewrite_params(k), rewrite_params(v)))
-                .collect(),
-            braced: *braced,
+    );
+    let helper_name = format!("{}_path", ivar_name.as_str());
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&["RouteHelpers"], span)),
+            method: Symbol::from(helper_name),
+            args: vec![ivar_id],
+            block: None,
+            parenthesized: true,
         },
-        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
-            parts: parts
-                .iter()
-                .map(|p| match p {
-                    InterpPart::Expr { expr } => InterpPart::Expr { expr: rewrite_params(expr) },
-                    other => other.clone(),
-                })
-                .collect(),
-        },
-        ExprNode::Yield { args } => ExprNode::Yield {
-            args: args.iter().map(rewrite_params).collect(),
-        },
-        ExprNode::Raise { value } => ExprNode::Raise { value: rewrite_params(value) },
-        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
-            expr: rewrite_params(expr),
-            fallback: rewrite_params(fallback),
-        },
-        ExprNode::Return { value } => ExprNode::Return { value: rewrite_params(value) },
-        ExprNode::Super { args: Some(args) } => ExprNode::Super {
-            args: Some(args.iter().map(rewrite_params).collect()),
-        },
-        ExprNode::Next { value: Some(v) } => ExprNode::Next { value: Some(rewrite_params(v)) },
-        ExprNode::Let { name, id, value, body } => ExprNode::Let {
-            name: name.clone(),
-            id: *id,
-            value: rewrite_params(value),
-            body: rewrite_params(body),
-        },
-        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
-            targets: targets.clone(),
-            value: rewrite_params(value),
-        },
-        ExprNode::While { cond, body, until_form } => ExprNode::While {
-            cond: rewrite_params(cond),
-            body: rewrite_params(body),
-            until_form: *until_form,
-        },
-        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
-            begin: begin.as_ref().map(rewrite_params),
-            end: end.as_ref().map(rewrite_params),
-            exclusive: *exclusive,
-        },
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
-            ExprNode::BeginRescue {
-                body: rewrite_params(body),
-                rescues: rescues
-                    .iter()
-                    .map(|r| RescueClause {
-                        classes: r.classes.iter().map(rewrite_params).collect(),
-                        binding: r.binding.clone(),
-                        body: rewrite_params(&r.body),
-                    })
-                    .collect(),
-                else_branch: else_branch.as_ref().map(rewrite_params),
-                ensure: ensure.as_ref().map(rewrite_params),
-                implicit: *implicit,
-            }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// `<x>_path` route-helper prefix. Bare calls to route helpers (`Send`
+// with no recv whose method ends in `_path`) get the `RouteHelpers.`
+// receiver added. Spinel's runtime defines all path helpers as module
+// functions on `RouteHelpers`; controllers must call them through that
+// namespace, since the `xxx_path` magic Rails injects via include
+// doesn't exist here.
+//
+// This pass runs AFTER `rewrite_redirect_to` so the polymorphic
+// rewrite's freshly-synthesized `RouteHelpers.x_path(...)` calls (which
+// have a recv) are skipped — only original bare calls get the prefix.
+// ---------------------------------------------------------------------------
+
+fn rewrite_route_helpers(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block, parenthesized }
+            if method.as_str().ends_with("_path") =>
+        {
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(const_path(&["RouteHelpers"], e.span)),
+                    method: method.clone(),
+                    args: args.iter().map(rewrite_route_helpers).collect(),
+                    block: block.as_ref().map(rewrite_route_helpers),
+                    parenthesized: *parenthesized,
+                },
+            ))
         }
-        // Leaves (Lit / Var / Ivar / Const / SelfRef / Super{None} /
-        // Next{None}) carry no children to rewrite.
-        other => other.clone(),
-    };
-    Expr {
-        span: expr.span,
-        node: Box::new(new_node),
-        ty: expr.ty.clone(),
-        effects: expr.effects.clone(),
-        leading_blank_line: expr.leading_blank_line,
-        diagnostic: expr.diagnostic.clone(),
-    }
+        _ => None,
+    })
+}
+
+fn const_path(segments: &[&str], span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Const {
+            path: segments.iter().map(|s| Symbol::from(*s)).collect(),
+        },
+    )
 }
 
 /// True when `e` is a bare `params` send: no receiver, no args, no
