@@ -1,0 +1,9 @@
+[env]
+# Rust spawns test worker threads with a 2 MB default stack on macOS.
+# The recursive walkers in analyze (`analyze_expr`, `visit_effects`,
+# `diagnose_expr`) bottom out near that on deeper fixtures
+# (`fixtures/real-blog`). Bump to 32 MB so test runs aren't sensitive
+# to fixture depth. Production code uses the main thread's larger
+# default; if depth ever bites at runtime, switch the load-bearing
+# walkers to `stacker::maybe_grow` instead.
+RUST_MIN_STACK = "33554432"
