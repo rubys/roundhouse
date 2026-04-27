@@ -8,8 +8,9 @@
 
 Roundhouse reads Ruby source — specifically, Rails applications — and
 produces standalone projects in other target languages. The deployment
-target (Rust binary, TypeScript bundle, Elixir OTP app, …) becomes a
-compiler flag rather than a runtime choice.
+target (Rust binary, TypeScript bundle, Crystal or Go service, Elixir
+OTP app, Python project, browser bundle, or Spinel-compiled Ruby)
+becomes a compiler flag rather than a runtime choice.
 
 A roundhouse is the circular hub in a rail yard where engines rotate and
 route onto different tracks. That's the pipeline shape: one Ruby source
@@ -35,7 +36,10 @@ edges Rails conventions already draw (schema → models, associations,
 before_action, render → view, partials). Lower expands Rails-dialect
 nodes into target-neutral IR — validations become `Check` enums, routes
 become a flat dispatch table, controller bodies become a walker-ready
-`LoweredAction`. Emit walks the IR per target, consulting each
+`LoweredAction`. Additional passes canonicalize controller idioms
+(`params.to_h`, `redirect_to`, path helpers, association builders) and
+query DSL (`order`, `includes`, `where`) into shapes each emitter
+consumes directly. Emit walks the IR per target, consulting each
 expression's type and effect where the target needs it, and each emitted
 project links a small hand-written `runtime/<target>/` library for the
 bits that don't belong in generated code (DB connection, HTTP server,
@@ -52,12 +56,12 @@ associations, controller actions, `before_action` flow, views,
 partials, and collection rendering all resolve to concrete types.
 A test enforces zero diagnostics on every commit.
 
-Six target emitters are live: **Rust** and **TypeScript** now produce
+Seven target emitters are live: **Rust** and **TypeScript** now produce
 runnable projects end-to-end — they boot an HTTP + Action Cable server,
 serve the generated blog with working forms, validation error display,
-Turbo streams, and Tailwind styling. Crystal, Elixir, Go, and Python
-share the same controller walker and pre-emit lowering passes; their
-runtime glue is in flight.
+Turbo streams, and Tailwind styling. Crystal, Elixir, Go, Python, and
+the Spinel-targeted Ruby emitter share the same controller walker and
+pre-emit lowering passes; their runtime glue is in flight.
 
 Cross-runtime correctness is enforced by `tools/compare/`, which
 fetches the same URL from Rails and from any roundhouse-emitted runtime
