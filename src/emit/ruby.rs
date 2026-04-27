@@ -86,7 +86,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         .iter()
         .map(|m| {
             let lc = crate::lower::lower_model_to_library_class(m, &app.schema);
-            library::emit_library_class_decl(&lc, app)
+            let stem = crate::naming::snake_case(lc.name.0.as_str());
+            let out_path = PathBuf::from(format!("app/models/{stem}.rb"));
+            library::emit_library_class_decl(&lc, app, out_path)
         })
         .collect()
 }
@@ -136,9 +138,8 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
         .iter()
         .map(|v| {
             let lc = crate::lower::lower_view_to_library_class(v, app);
-            let mut file = library::emit_library_class_decl(&lc, app);
-            file.path = view_output_path(v.name.as_str());
-            file
+            let out_path = view_output_path(v.name.as_str());
+            library::emit_library_class_decl(&lc, app, out_path)
         })
         .collect()
 }

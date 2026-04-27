@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
@@ -21,23 +21,40 @@ use crate::naming::{singularize, snake_case};
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     app.library_classes
         .iter()
-        .map(|lc| emit_library_class_decl(lc, app))
+        .map(|lc| {
+            let file_stem = snake_case(lc.name.0.as_str());
+            let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
+            emit_library_class_decl(lc, app, out_path)
+        })
         .collect()
 }
 
-pub(super) fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFile {
+/// Emit a single library-shape file. `out_path` is the project-root-relative
+/// destination for the file; the require resolver computes paths relative to
+/// `out_path`'s parent, so files emitted to `app/views/<plural>/` get
+/// `../../../runtime/<x>` while files in `app/models/` get `../../runtime/<x>`.
+pub(super) fn emit_library_class_decl(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+) -> EmittedFile {
     let name = lc.name.0.as_str();
-    let file_stem = snake_case(name);
+    let out_dir = out_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(PathBuf::new);
+    let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
-    // Parent + body-derived `require_relative` headers. Ruby's autoload
-    // covers same-directory siblings; explicit requires kick in for the
-    // parent (referenced at class-definition time) and runtime / view
-    // modules that live outside `app/models/`.
+    // Parent + body-derived `require_relative` headers. Helpers return
+    // project-root-anchored paths; we relpath each one against `out_dir`
+    // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
     if let Some(parent) = lc.parent.as_ref() {
-        if let Some(path) = require_path_for_parent(parent, app) {
-            requires.push(path);
+        if let Some(anchor) = require_path_for_parent(parent, app) {
+            if anchor != self_anchor {
+                requires.push(relpath(&out_dir, &anchor));
+            }
         }
     }
     let mut const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
@@ -46,8 +63,10 @@ pub(super) fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFi
     }
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for path in &const_paths {
-        if let Some(req) = require_path_for_body_const(path, app, name) {
-            body_requires.insert(req);
+        if let Some(anchor) = require_path_for_body_const(path, app, name) {
+            if anchor != self_anchor {
+                body_requires.insert(relpath(&out_dir, &anchor));
+            }
         }
     }
     requires.extend(body_requires);
@@ -113,36 +132,33 @@ pub(super) fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFi
         writeln!(s, "{}end", "  ".repeat(i)).unwrap();
     }
 
-    EmittedFile {
-        path: PathBuf::from(format!("app/models/{file_stem}.rb")),
-        content: s,
-    }
+    EmittedFile { path: out_path, content: s }
 }
 
-/// `require_relative` path for a parent class, if one is needed.
+/// Project-root-anchored require target for a parent class, if one is needed.
 /// `ActiveRecord::Base` lives in the runtime; same-dir parents
-/// (ApplicationRecord, custom abstract bases) require the snake-case
-/// filename. Everything else returns `None` (assume the loader sees
+/// (ApplicationRecord, custom abstract bases) resolve to a sibling under
+/// `app/models/`. Everything else returns `None` (assume the loader sees
 /// the parent some other way).
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     let raw = parent.0.as_str();
     if raw == "ActiveRecord::Base" {
-        return Some("../../runtime/active_record".to_string());
+        return Some("runtime/active_record".to_string());
     }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
     {
-        return Some(snake_case(raw));
+        return Some(format!("app/models/{}", snake_case(raw)));
     }
     None
 }
 
-/// `require_relative` path for a body-referenced constant, if one is
-/// needed. Same-dir siblings (other models, library_classes) get
-/// autoloaded — skip. `Views::<Plural>` resolves to a view-partial
-/// file (`../views/<plural>/_<singular>`); known runtime modules
-/// (`Broadcasts`, …) resolve to `runtime/<snake>`. Unknowns drop
-/// silently — the loader will fail loudly at runtime if needed.
+/// Project-root-anchored require target for a body-referenced constant.
+/// `Views::<Plural>` resolves to `app/views/<plural>/_<singular>`; runtime
+/// modules resolve to `runtime/<x>`. The caller relpaths the result against
+/// the requirer's `out_dir`, so a single mapping serves every output kind.
+/// Same-dir siblings (other models, library_classes) drop because Ruby's
+/// load path covers them; unknowns drop silently.
 fn require_path_for_body_const(
     path: &[String],
     app: &App,
@@ -165,14 +181,40 @@ fn require_path_for_body_const(
             let plural = path.get(1)?;
             let plural_snake = snake_case(plural);
             let singular_snake = singularize(&plural_snake);
-            Some(format!("../views/{plural_snake}/_{singular_snake}"))
+            Some(format!("app/views/{plural_snake}/_{singular_snake}"))
         }
-        // Runtime modules under `runtime/`. Add entries here as
-        // lowerings introduce new ones; unknown idents silently
-        // drop so we don't emit broken requires.
-        "Broadcasts" => Some("../../runtime/broadcasts".to_string()),
+        // Runtime modules under `runtime/`. ViewHelpers and RouteHelpers
+        // both live under `runtime/action_view.rb` (it requires both
+        // submodules), so they share a target. Add entries as lowerings
+        // introduce new ones; unknown idents silently drop.
+        "Broadcasts" => Some("runtime/broadcasts".to_string()),
+        "Inflector" => Some("runtime/inflector".to_string()),
+        "ViewHelpers" | "RouteHelpers" => Some("runtime/action_view".to_string()),
         _ => None,
     }
+}
+
+/// Compute a `require_relative`-style relative path from `from_dir` to
+/// the project-root-anchored `to_anchor`. Both inputs are slash-separated;
+/// the result has no `.rb` extension because `require_relative` doesn't
+/// need one.
+fn relpath(from_dir: &Path, to_anchor: &str) -> String {
+    let from_parts: Vec<&str> = from_dir
+        .to_str()
+        .unwrap_or("")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let to_parts: Vec<&str> = to_anchor.split('/').filter(|s| !s.is_empty()).collect();
+    let common = from_parts
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ups = from_parts.len() - common;
+    let mut parts: Vec<&str> = std::iter::repeat("..").take(ups).collect();
+    parts.extend(&to_parts[common..]);
+    parts.join("/")
 }
 
 pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
