@@ -704,6 +704,124 @@ fn controllers_application_controller_has_no_dispatcher() {
 }
 
 #[test]
+fn controllers_index_synthesizes_render_views_call() {
+    // Real-blog's `def index; @articles = Article.includes(...)...; end`
+    // has no top-level terminal — Rails relies on implicit render. Spinel
+    // requires an explicit `render(Views::Articles.index(<ivars>))` call
+    // appended to the body.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("render(Views::Articles.index(@articles))"),
+        "expected synthesized Views::Articles.index call; got:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_show_views_call_pulls_ivars_from_filter_targets() {
+    // `def show; end` has an empty body, but `before_action :set_article`
+    // fires for it; @article is set inside set_article. The synthesized
+    // render call needs to find ivars across body + filter targets.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("render(Views::Articles.show(@article))"),
+        "expected Views::Articles.show(@article); got:\n{src}",
+    );
+    assert!(
+        src.contains("render(Views::Articles.edit(@article))"),
+        "expected Views::Articles.edit(@article); got:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_new_action_views_call_uses_action_name_not_method_name() {
+    // The view module method is `new` (matches the action symbol), even
+    // though the Ruby method is renamed to `new_action` to avoid the
+    // Object#new shadow.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("render(Views::Articles.new(@article))"),
+        "expected Views::Articles.new(@article); got:\n{src}",
+    );
+    assert!(
+        !src.contains("Views::Articles.new_action"),
+        "view-module method should be `new`, not `new_action`:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
+    // create's `respond_to` block has the HTML-branch
+    // `render :new, status: :unprocessable_entity` after unwrap_respond_to.
+    // Should rewrite to `render(Views::Articles.new(@article), status: ...)`.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("render(Views::Articles.new(@article), status: :unprocessable_entity)"),
+        "expected Views call in create's else branch; got:\n{src}",
+    );
+    // update has the parallel `render :edit, status: :unprocessable_entity`.
+    assert!(
+        src.contains("render(Views::Articles.edit(@article), status: :unprocessable_entity)"),
+        "expected Views call in update's else branch; got:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_render_symbol_does_not_appear_after_lowering() {
+    // No `render :symbol` form should survive the rewrite — every
+    // template render lowers to a Views::Module.method(...) call.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    for sym in [":index", ":show", ":new", ":edit"] {
+        let render_sym = format!("render {sym}");
+        assert!(
+            !src.contains(&render_sym),
+            "render-symbol form `{render_sym}` should be lowered:\n{src}",
+        );
+    }
+}
+
+#[test]
+fn controllers_views_aggregate_required_when_views_referenced() {
+    // Once render(Views::Articles.X(...)) appears in a body, the
+    // `require_relative "../views"` aggregate header must be present.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("require_relative \"../views\""),
+        "expected `../views` require once Views::* is referenced; got:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_no_render_synth_when_action_already_terminates() {
+    // destroy ends with `redirect_to articles_path, ...` (terminal); no
+    // implicit render should be appended. The body should contain
+    // exactly one redirect_to and no Views::Articles.destroy call.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        !src.contains("Views::Articles.destroy"),
+        "destroy already redirects; should not synthesize a Views call:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_application_controller_has_no_views_require() {
+    // ApplicationController has no actions, no Views references — so no
+    // `require_relative "../views"` should appear.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "application_controller.rb");
+    assert!(
+        !src.contains("require_relative \"../views\""),
+        "ApplicationController references no views; should not require:\n{src}",
+    );
+}
+
+#[test]
 fn setter_send_renders_with_space_around_equals() {
     // The lowered initialize/update bodies call setters via
     // `Send { method: "x=", args: [v] }` (since attr_writer methods

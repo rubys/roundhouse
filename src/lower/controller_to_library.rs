@@ -24,6 +24,8 @@
 //! top by transforming each action's `body` Expr before it's hung off
 //! the synthesized `MethodDef`.
 
+use std::collections::BTreeSet;
+
 use crate::dialect::{
     Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass, MethodDef,
     MethodReceiver,
@@ -31,7 +33,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Arm, ArrayStyle, Expr, ExprNode, InterpPart, LValue, Literal, Pattern, RescueClause};
 use crate::ident::{Symbol, VarId};
-use crate::lower::controller::body::unwrap_respond_to;
+use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_to};
 use crate::span::Span;
 
 /// Entry point: take a `Controller` (Rails-shape, with filters +
@@ -50,10 +52,10 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     }
 
     for a in &publics {
-        methods.push(action_to_method(a));
+        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ true));
     }
     for a in &privs {
-        methods.push(action_to_method(a));
+        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false));
     }
 
     LibraryClass {
@@ -215,13 +217,19 @@ fn case_dispatch(publics: &[Action]) -> Expr {
 
 /// Convert one `Action` into a `MethodDef`. Renames `new` →
 /// `new_action` (Ruby `def new` would shadow `Object#new`); applies
-/// `unwrap_respond_to` to drop format dispatch and `rewrite_params`
-/// to lower `params` references to the `@params` ivar shape spinel
-/// expects.
-fn action_to_method(a: &Action) -> MethodDef {
+/// the full action-body rewrite pipeline (see `lower_action_body`).
+/// `is_public` gates the implicit-render synthesis: private filter
+/// targets (`set_article`) and param helpers (`article_params`)
+/// don't render — their callers do.
+fn action_to_method(
+    a: &Action,
+    controller: &Controller,
+    privs: &[Action],
+    is_public: bool,
+) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     let params: Vec<Symbol> = a.params.fields.iter().map(|(n, _)| n.clone()).collect();
-    let body = lower_action_body(&a.body);
+    let body = lower_action_body(&a.body, controller, a.name.as_str(), privs, is_public);
     MethodDef {
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
@@ -237,23 +245,298 @@ fn action_to_method(a: &Action) -> MethodDef {
 ///
 /// 1. `unwrap_respond_to` — drop `respond_to do |format| format.html
 ///    {…}; format.json {…} end` wrappers, keeping the HTML branch.
-/// 2. `rewrite_params` — `params` → `@params`, `params.expect(...)` →
+/// 2. `synthesize_implicit_render` — append `render :<action>` when
+///    the body has no top-level terminal (Rails' implicit-render).
+/// 3. `rewrite_render_to_views` — `render :sym, **kw` →
+///    `render(Views::<Module>.<sym>(<ivars>), **kw)`. Uses the action's
+///    ivar scope (body + every `before_action` filter target that fires)
+///    to determine the positional args of the Views call.
+/// 4. `rewrite_params` — `params` → `@params`, `params.expect(...)` →
 ///    indexed/require-permit forms.
-/// 3. `rewrite_redirect_to` — polymorphic `redirect_to @x` →
+/// 5. `rewrite_redirect_to` — polymorphic `redirect_to @x` →
 ///    `redirect_to(RouteHelpers.<x>_path(@x.id), ...)`.
-/// 4. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
+/// 6. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
 ///    (covers `articles_path` and the like that appear outside
 ///    redirect_to's first arg).
 ///
 /// Run in this order because each pass leaves the IR in a shape the
-/// next pass expects: redirect_to rewrite needs the bare ivar before
+/// next pass expects: render-views needs the synthesized symbol-form
+/// call to rewrite; redirect_to rewrite needs the bare ivar before
 /// route_helpers prefixes it; route_helpers needs to skip already-
 /// rewritten `RouteHelpers.x_path(...)` calls (they have a recv now).
-fn lower_action_body(body: &Expr) -> Expr {
+fn lower_action_body(
+    body: &Expr,
+    controller: &Controller,
+    action_name: &str,
+    privs: &[Action],
+    is_public: bool,
+) -> Expr {
     let unwrapped = unwrap_respond_to(body);
-    let with_params = rewrite_params(&unwrapped);
+    let with_render = if is_public {
+        let synth = synthesize_implicit_render(&unwrapped, action_name);
+        let ivars = ivars_in_scope(controller, action_name, &synth, privs);
+        let module_name = views_module_name(controller);
+        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars)
+    } else {
+        unwrapped
+    };
+    let with_params = rewrite_params(&with_render);
     let with_redirects = rewrite_redirect_to(&with_params);
     rewrite_route_helpers(&with_redirects)
+}
+
+// ---------------------------------------------------------------------------
+// Render-template-as-Views-call rewrite. Spinel doesn't have Rails'
+// implicit-render-of-eponymous-template; every render goes through an
+// explicit `render(Views::<Module>.<method>(<args>))` call. This pass
+// handles two source shapes uniformly:
+//
+//   - `render :show` (synthesized by the upstream pass for actions with
+//     no terminal) → `render(Views::Articles.show(@article))`.
+//   - `render :new, status: :unprocessable_entity` (explicit, in
+//     create's else branch after unwrap_respond_to) →
+//     `render(Views::Articles.new(@article), status: :unprocessable_entity)`.
+//
+// `ivars` is the precomputed scope: every `@x = ...` assignment in the
+// action body PLUS every filter target that fires for this action. The
+// view-method call gets all of them as positional args, in the order
+// they appear in scope. View-side parameter names that don't match
+// here are a follow-on lowerer's problem.
+// ---------------------------------------------------------------------------
+
+fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, ivars: &[Symbol]) -> Expr {
+    let Some(module) = module_name else {
+        return expr.clone();
+    };
+    let module_name_owned = module.to_string();
+    let ivars = ivars.to_vec();
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block, .. }
+            if method.as_str() == "render" && !args.is_empty() =>
+        {
+            let view_method = match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+                _ => return None,
+            };
+            let view_args: Vec<Expr> = ivars
+                .iter()
+                .map(|n| ivar(n.as_str(), e.span))
+                .collect();
+            let view_call = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(const_path(&["Views", &module_name_owned], e.span)),
+                    method: view_method,
+                    args: view_args,
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            let mut new_args = vec![view_call];
+            new_args.extend(args.iter().skip(1).cloned());
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("render"),
+                    args: new_args,
+                    block: block.clone(),
+                    parenthesized: true,
+                },
+            ))
+        }
+        _ => None,
+    })
+}
+
+/// Derive the `Views::*` submodule name from a controller's class name.
+/// `ArticlesController` → `Articles`. Returns None when the name doesn't
+/// follow the `*Controller` convention or strips down to "Application"
+/// (which has no view module).
+fn views_module_name(controller: &Controller) -> Option<String> {
+    let name = controller.name.0.as_str();
+    let stem = name.strip_suffix("Controller")?;
+    if stem.is_empty() || stem == "Application" {
+        return None;
+    }
+    Some(stem.to_string())
+}
+
+/// Collect every ivar that this action sees in scope at render time:
+/// each `@x = ...` assignment in the body itself, plus the same in
+/// every filter target whose `only:`/`except:` filter applies to this
+/// action. Source order is preserved (body first, then each fired
+/// filter in declaration order); duplicates dropped.
+fn ivars_in_scope(
+    controller: &Controller,
+    action_name: &str,
+    body: &Expr,
+    privs: &[Action],
+) -> Vec<Symbol> {
+    let mut seen: BTreeSet<Symbol> = BTreeSet::new();
+    let mut out: Vec<Symbol> = Vec::new();
+
+    let push = |sym: Symbol, seen: &mut BTreeSet<Symbol>, out: &mut Vec<Symbol>| {
+        if seen.insert(sym.clone()) {
+            out.push(sym);
+        }
+    };
+
+    let mut from_body: Vec<Symbol> = Vec::new();
+    collect_assigned_ivars(body, &mut from_body);
+    for s in from_body {
+        push(s, &mut seen, &mut out);
+    }
+
+    let action_sym = Symbol::from(action_name);
+    for filter in controller.filters() {
+        if !matches!(filter.kind, FilterKind::Before) {
+            continue;
+        }
+        if !filter_applies_to(filter, &action_sym) {
+            continue;
+        }
+        let Some(target_action) = privs.iter().find(|p| p.name == filter.target) else {
+            continue;
+        };
+        let mut from_filter: Vec<Symbol> = Vec::new();
+        collect_assigned_ivars(&target_action.body, &mut from_filter);
+        for s in from_filter {
+            push(s, &mut seen, &mut out);
+        }
+    }
+
+    out
+}
+
+/// True when `filter` applies to `action`, per its `only:` / `except:`
+/// list. Empty `only` + empty `except` = applies to everything.
+fn filter_applies_to(filter: &Filter, action: &Symbol) -> bool {
+    if !filter.only.is_empty() {
+        return filter.only.iter().any(|a| a == action);
+    }
+    if !filter.except.is_empty() {
+        return !filter.except.iter().any(|a| a == action);
+    }
+    true
+}
+
+/// Walk `expr` collecting every ivar that appears on the LHS of an
+/// `Assign`. Source-order, deduplication is done by the caller.
+fn collect_assigned_ivars(expr: &Expr, out: &mut Vec<Symbol>) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*expr.node {
+        out.push(name.clone());
+    }
+    walk_children(expr, &mut |c| collect_assigned_ivars(c, out));
+}
+
+/// Visit every direct child Expr of `expr`. Mirrors `map_expr`'s
+/// traversal but in read-only form — used by passes that need to scan
+/// the tree without rewriting it.
+fn walk_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
+    match &*expr.node {
+        ExprNode::Seq { exprs } => exprs.iter().for_each(f),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            f(cond);
+            f(then_branch);
+            f(else_branch);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            f(scrutinee);
+            for a in arms {
+                if let Some(g) = a.guard.as_ref() {
+                    f(g);
+                }
+                f(&a.body);
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv.as_ref() {
+                f(r);
+            }
+            args.iter().for_each(&mut *f);
+            if let Some(b) = block.as_ref() {
+                f(b);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            f(fun);
+            args.iter().for_each(&mut *f);
+            if let Some(b) = block.as_ref() {
+                f(b);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        ExprNode::Lambda { body, .. } => f(body),
+        ExprNode::Assign { target, value } => {
+            match target {
+                LValue::Attr { recv, .. } => f(recv),
+                LValue::Index { recv, index } => {
+                    f(recv);
+                    f(index);
+                }
+                _ => {}
+            }
+            f(value);
+        }
+        ExprNode::Array { elements, .. } => elements.iter().for_each(&mut *f),
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                f(k);
+                f(v);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let InterpPart::Expr { expr } = p {
+                    f(expr);
+                }
+            }
+        }
+        ExprNode::Yield { args } => args.iter().for_each(&mut *f),
+        ExprNode::Raise { value } => f(value),
+        ExprNode::RescueModifier { expr, fallback } => {
+            f(expr);
+            f(fallback);
+        }
+        ExprNode::Return { value } => f(value),
+        ExprNode::Super { args: Some(args) } => args.iter().for_each(&mut *f),
+        ExprNode::Next { value: Some(v) } => f(v),
+        ExprNode::Let { value, body, .. } => {
+            f(value);
+            f(body);
+        }
+        ExprNode::MultiAssign { value, .. } => f(value),
+        ExprNode::While { cond, body, .. } => {
+            f(cond);
+            f(body);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin.as_ref() {
+                f(b);
+            }
+            if let Some(e) = end.as_ref() {
+                f(e);
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            f(body);
+            for r in rescues {
+                r.classes.iter().for_each(&mut *f);
+                f(&r.body);
+            }
+            if let Some(e) = else_branch.as_ref() {
+                f(e);
+            }
+            if let Some(e) = ensure.as_ref() {
+                f(e);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Action name → Ruby method name. `new` is the only rename (it
