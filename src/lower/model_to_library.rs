@@ -20,7 +20,8 @@
 //! that haven't migrated.
 
 use crate::dialect::{
-    Association, Dependent, LibraryClass, MethodDef, MethodReceiver, Model, ValidationRule,
+    Association, Dependent, LibraryClass, MethodDef, MethodReceiver, Model, ModelBodyItem,
+    ValidationRule,
 };
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
@@ -47,6 +48,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     push_validate_method(&mut methods, model);
     push_association_methods(&mut methods, model);
     push_dependent_destroy(&mut methods, model);
+    push_unknown_marker_methods(&mut methods, model);
 
     LibraryClass {
         name: model.name.clone(),
@@ -823,6 +825,39 @@ fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
     });
+}
+
+// ---------------------------------------------------------------------------
+// Unknown body items recognized as Rails markers. Most Unknowns stay
+// dropped (they're emitter responsibility or future-lowerer work), but
+// a small set carry semantics that translate cleanly into method
+// definitions on the lowered class.
+// ---------------------------------------------------------------------------
+
+/// `primary_abstract_class` marks a model as the abstract base of a Rails
+/// app. Lowered to `def self.abstract?; true; end` — the explicit form
+/// spinel-blog's runtime expects.
+fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    for item in &model.body {
+        if let ModelBodyItem::Unknown { expr, .. } = item {
+            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+                if args.is_empty() && method.as_str() == "primary_abstract_class" {
+                    methods.push(MethodDef {
+                        name: Symbol::from("abstract?"),
+                        receiver: MethodReceiver::Class,
+                        params: Vec::new(),
+                        body: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Bool { value: true } },
+                        ),
+                        signature: None,
+                        effects: EffectSet::default(),
+                        enclosing_class: Some(model.name.0.clone()),
+                    });
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

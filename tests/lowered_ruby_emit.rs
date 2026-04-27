@@ -47,14 +47,13 @@ fn one_file_per_model() {
 }
 
 #[test]
-fn application_record_lowers_to_empty_class_with_parent() {
+fn application_record_renders_abstract_marker() {
     let files = lowered_real_blog();
     let src = find(&files, "application_record.rb");
     assert!(src.contains("class ApplicationRecord < ActiveRecord::Base"), "{src}");
-    assert!(src.contains("end"), "{src}");
-    // Empty body — primary_abstract_class is dropped (Unknown items
-    // don't lower yet). No methods means just header + `end`.
-    assert!(!src.contains("def "), "expected no methods, got:\n{src}");
+    // `primary_abstract_class` lowers to `def self.abstract?; true; end`
+    // — the explicit form spinel-blog uses.
+    assert!(src.contains("def self.abstract?"), "{src}");
 }
 
 #[test]

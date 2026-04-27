@@ -37,20 +37,20 @@ fn method_names(lc: &LibraryClass) -> Vec<&str> {
 }
 
 #[test]
-fn application_record_lowers_to_empty_library_class() {
+fn application_record_lowers_with_abstract_marker() {
     // application_record.rb is abstract — no schema table, no
-    // associations, no validations. Lowering should produce a
-    // LibraryClass with the right name + parent + zero methods.
+    // associations, no validations. The `primary_abstract_class`
+    // marker lowers to `def self.abstract?; true; end`; nothing else
+    // synthesizes.
     let lc = lower("ApplicationRecord");
     assert_eq!(lc.name.0.as_str(), "ApplicationRecord");
     let parent = lc.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("(none)");
     assert_eq!(parent, "ActiveRecord::Base", "parent: {parent}");
     assert!(!lc.is_module);
-    assert!(
-        lc.methods.is_empty(),
-        "ApplicationRecord lowering should have no methods (got {:?})",
-        method_names(&lc),
-    );
+    assert_eq!(method_names(&lc), vec!["abstract?"]);
+    let m = &lc.methods[0];
+    assert!(matches!(m.receiver, MethodReceiver::Class));
+    assert!(m.params.is_empty());
 }
 
 #[test]
