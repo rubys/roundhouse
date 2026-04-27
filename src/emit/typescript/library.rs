@@ -365,7 +365,7 @@ fn emit_library_class(model: &Model) -> EmittedFile {
     }
 }
 
-fn emit_getter_setter_pair(s: &mut String, getter: &MethodDef, setter: &MethodDef) {
+pub(super) fn emit_getter_setter_pair(s: &mut String, getter: &MethodDef, setter: &MethodDef) {
     let name = sanitize_identifier(getter.name.as_str());
     let getter_ret = getter.body.ty.clone().unwrap_or(Ty::Nil);
     let ret_s = ts_ty(&getter_ret);
@@ -396,7 +396,7 @@ fn emit_getter_setter_pair(s: &mut String, getter: &MethodDef, setter: &MethodDe
     writeln!(s, "  }}").unwrap();
 }
 
-fn emit_plain_method(s: &mut String, m: &MethodDef) {
+pub(super) fn emit_plain_method(s: &mut String, m: &MethodDef) {
     let name = sanitize_identifier(m.name.as_str());
     let ret_ty = m.body.ty.clone().unwrap_or(Ty::Nil);
     let ret_s = ts_ty(&ret_ty);
@@ -459,7 +459,7 @@ fn emit_plain_method(s: &mut String, m: &MethodDef) {
 /// stripped — `@owner` becomes `owner`). Used by library-class
 /// emission to produce TS field declarations so reads/writes
 /// type-check.
-fn collect_ivar_names(e: &Expr, out: &mut BTreeSet<String>) {
+pub(super) fn collect_ivar_names(e: &Expr, out: &mut BTreeSet<String>) {
     use crate::expr::LValue;
     match &*e.node {
         ExprNode::Ivar { name } => {
