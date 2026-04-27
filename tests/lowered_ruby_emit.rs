@@ -137,6 +137,83 @@ fn equality_send_renders_as_infix() {
 }
 
 #[test]
+fn article_broadcasts_to_synthesizes_three_lifecycle_methods() {
+    // Article has `broadcasts_to ->(_article) { "articles" },
+    // inserts_by: :prepend`. Lowered into three methods: prepend on
+    // create (per inserts_by), replace on update, remove on destroy.
+    // Channel is the literal "articles"; per-record target falls
+    // back to "article_#{@id}" on update + destroy.
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(
+        src.contains(
+            "Broadcasts.prepend(stream: \"articles\", target: \"articles\", html: Views::Articles.article(self))"
+        ),
+        "{src}",
+    );
+    assert!(
+        src.contains(
+            "Broadcasts.replace(stream: \"articles\", target: \"article_#{@id}\", html: Views::Articles.article(self))"
+        ),
+        "{src}",
+    );
+    assert!(
+        src.contains(
+            "Broadcasts.remove(stream: \"articles\", target: \"article_#{@id}\")"
+        ),
+        "{src}",
+    );
+}
+
+#[test]
+fn comment_broadcasts_rewrite_lambda_param_to_ivar() {
+    // Comment has `broadcasts_to ->(comment) { "article_#{comment.article_id}_comments" },
+    // target: "comments"`. The lambda param `comment` rewrites to
+    // ivar references in the expanded body — `comment.article_id`
+    // becomes `@article_id`.
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    assert!(
+        src.contains("stream: \"article_#{@article_id}_comments\""),
+        "expected lambda-param→ivar rewrite; got:\n{src}",
+    );
+    // create uses the explicit `target: "comments"` override.
+    assert!(
+        src.contains("Broadcasts.append(stream: \"article_#{@article_id}_comments\", target: \"comments\""),
+        "{src}",
+    );
+    // update uses the canonical per-record target, NOT the override
+    // (Rails turbo convention: target: only governs create-time DOM).
+    assert!(
+        src.contains("Broadcasts.replace(stream: \"article_#{@article_id}_comments\", target: \"comment_#{@id}\""),
+        "{src}",
+    );
+}
+
+#[test]
+fn comment_broadcasts_compose_with_block_form_callback() {
+    // Comment has both `broadcasts_to` AND
+    // `after_create_commit { article.broadcast_replace_to(...) rescue nil }`.
+    // The two sources fold into one method body; broadcasts_to runs
+    // first (source order in the lowering), block-form follows.
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    let create_block = src
+        .split("def after_create_commit").nth(1).unwrap()
+        .split("def ").next().unwrap();
+    assert!(
+        create_block.contains("Broadcasts.append")
+            && create_block.contains("article.broadcast_replace_to(\"articles\") rescue nil"),
+        "expected composed body; got:\n{create_block}",
+    );
+    // The Broadcasts.append call appears BEFORE the rescue line —
+    // composition order matches the expected source-order semantics.
+    let pos_broadcasts = create_block.find("Broadcasts.append").unwrap();
+    let pos_rescue = create_block.find("rescue nil").unwrap();
+    assert!(pos_broadcasts < pos_rescue, "{create_block}");
+}
+
+#[test]
 fn comment_block_callbacks_render_as_methods() {
     // real-blog's Comment has:
     //   after_create_commit { article.broadcast_replace_to("articles") rescue nil }
