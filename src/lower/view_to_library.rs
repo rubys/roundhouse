@@ -1191,13 +1191,11 @@ fn emit_yield(args: &[Expr], ctx: &ViewCtx) -> Expr {
 /// inner `_buf = _buf + …` lines become `body << …` and the block
 /// returns the captured string.
 ///
-/// Today the original `opts` hash passes through unchanged (today
-/// this means the lowered call carries the surface kwargs the
-/// developer wrote — `model:`, `class:`, etc. — rather than the
-/// spinel-blog's restructured `model: / model_name: / action: /
-/// method: / opts:` form). The action/method computation from
-/// `record.persisted?` is a follow-on slice; this slice's job is
-/// the capture mechanism + FormBuilder dispatch wiring.
+/// The surface call's kwargs are restructured into the spinel
+/// runtime's required shape: `model:`, `model_name:` (singular of
+/// `resource_dir`), `action:` and `method:` (computed from
+/// `record.persisted?`), and `opts:` (any leftover surface kwargs).
+/// See `restructure_form_with_kwargs`.
 fn emit_form_with_capture(args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Expr {
     let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
         return accumulator_append_call(lit_str(String::new()), ctx);
@@ -1244,8 +1242,150 @@ fn emit_form_with_capture(args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Expr {
         },
     );
 
-    let form_with_call = view_helpers_call_with_block("form_with", args.to_vec(), block_lambda);
+    let restructured = restructure_form_with_kwargs(args, ctx);
+    let form_with_call = view_helpers_call_with_block("form_with", restructured, block_lambda);
     accumulator_append_call(form_with_call, ctx)
+}
+
+/// Map the surface `form_with(model: rec, class: "...")` kwargs to
+/// the spinel runtime's expected shape:
+///   `model: rec, model_name: "<singular>", action: <expr>, method: <sym>, opts: { class: "..." }`
+/// where `action`/`method` branch on `rec.persisted?` so a new record
+/// posts to the collection path and an existing record patches the
+/// member path. `model_name` derives from `ctx.resource_dir`
+/// (e.g. `"articles"` → `"article"`). Unknown kwargs collect into
+/// `opts:` so the runtime can stringify them onto the `<form>` tag.
+fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let mut model_expr: Option<Expr> = None;
+    let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
+    let mut other_args: Vec<Expr> = Vec::new();
+
+    for arg in args {
+        if let ExprNode::Hash { entries, .. } = &*arg.node {
+            for (k, v) in entries {
+                if let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node {
+                    if key.as_str() == "model" {
+                        model_expr = Some(v.clone());
+                        continue;
+                    }
+                }
+                opts_entries.push((k.clone(), v.clone()));
+            }
+        } else {
+            other_args.push(arg.clone());
+        }
+    }
+
+    let Some(model) = model_expr else {
+        // No `model:` kwarg — pass through unchanged. Non-resource
+        // form_with isn't exercised by the fixture; if it becomes
+        // a real shape, derive `model_name`/`action` differently.
+        return args.to_vec();
+    };
+
+    // Polymorphic array form: `model: [parent, child]` (nested resource).
+    // Spinel-blog rewrites these as
+    // `model: <child>, model_name: "<child_singular>",
+    //  action: RouteHelpers.<parent_local>_<child_plural>_path(<parent>.id),
+    //  method: :post` (the `Class.new` last element is never persisted).
+    // Detected when `model:` is an Array literal whose last element is a
+    // `Class.new(...)` Send. Other array shapes fall through.
+    let route_helpers = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+        )
+    };
+
+    if let Some((nested_model, nested_name, nested_action)) =
+        nested_resource_form(&model, &route_helpers)
+    {
+        let opts_hash = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries: opts_entries, braced: true },
+        );
+        let entries: Vec<(Expr, Expr)> = vec![
+            (lit_sym(Symbol::from("model")), nested_model),
+            (lit_sym(Symbol::from("model_name")), lit_str(nested_name)),
+            (lit_sym(Symbol::from("action")), nested_action),
+            (lit_sym(Symbol::from("method")), lit_sym(Symbol::from("post"))),
+            (lit_sym(Symbol::from("opts")), opts_hash),
+        ];
+        let new_hash = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries, braced: false },
+        );
+        let mut out = other_args;
+        out.push(new_hash);
+        return out;
+    }
+
+    let plural = ctx.resource_dir.as_str();
+    let singular = singularize(plural);
+
+    let model_name = lit_str(singular.clone());
+
+    // record.persisted?
+    let persisted = send(Some(model.clone()), "persisted?", Vec::new(), None, false);
+
+    // RouteHelpers.<singular>_path(record.id)
+    let model_id = send(Some(model.clone()), "id", Vec::new(), None, false);
+    let member_path = send(
+        Some(route_helpers()),
+        &format!("{singular}_path"),
+        vec![model_id],
+        None,
+        true,
+    );
+    // RouteHelpers.<plural>_path
+    let collection_path = send(
+        Some(route_helpers()),
+        &format!("{plural}_path"),
+        Vec::new(),
+        None,
+        false,
+    );
+
+    let action = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: persisted.clone(),
+            then_branch: member_path,
+            else_branch: collection_path,
+        },
+    );
+    let method = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: persisted,
+            then_branch: lit_sym(Symbol::from("patch")),
+            else_branch: lit_sym(Symbol::from("post")),
+        },
+    );
+
+    let opts_hash = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries: opts_entries, braced: true },
+    );
+
+    let new_entries: Vec<(Expr, Expr)> = vec![
+        (lit_sym(Symbol::from("model")), model),
+        (lit_sym(Symbol::from("model_name")), model_name),
+        (lit_sym(Symbol::from("action")), action),
+        (lit_sym(Symbol::from("method")), method),
+        (lit_sym(Symbol::from("opts")), opts_hash),
+    ];
+    // `braced: false` so the kwargs render bare (`model: rec, …`) at
+    // the call site, matching `f(a: 1, b: 2)` Ruby surface. The inner
+    // `opts:` value above stays braced because it's an explicit hash.
+    let new_hash = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries: new_entries, braced: false },
+    );
+
+    let mut out = other_args;
+    out.push(new_hash);
+    out
 }
 
 /// `ViewHelpers.<method>(args) do |params| body end` — companion to
@@ -1257,6 +1397,69 @@ fn view_helpers_call_with_block(method: &str, args: Vec<Expr>, block: Expr) -> E
         ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
     );
     send(Some(recv), method, args, Some(block), true)
+}
+
+/// Match `model: [parent, Class.new(...)]` (the polymorphic-array form
+/// Rails uses for nested resources) and produce `(child, child_singular,
+/// nested_action_expr)` where the action targets the nested collection
+/// path. Returns None for any other shape so the caller falls through
+/// to plain-record handling.
+fn nested_resource_form(
+    model: &Expr,
+    route_helpers: &dyn Fn() -> Expr,
+) -> Option<(Expr, String, Expr)> {
+    let ExprNode::Array { elements, .. } = &*model.node else {
+        return None;
+    };
+    if elements.len() < 2 {
+        return None;
+    }
+    let parent = elements.first()?;
+    let child = elements.last()?;
+
+    // Parent local name: only support a Var receiver (e.g. `article`)
+    // for now. An ivar would have been pre-rewritten to a local.
+    let parent_local = match &*parent.node {
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        ExprNode::Send {
+            recv: None, method, args, block: None, ..
+        } if args.is_empty() => method.as_str().to_string(),
+        _ => return None,
+    };
+    let parent_singular = singularize(&snake_case(&parent_local));
+
+    // Child class: only support `Class.new(...)` shape. Comment.new is
+    // by definition not persisted, so the action is the nested
+    // collection path with method :post.
+    let ExprNode::Send {
+        recv: Some(child_recv),
+        method: child_method,
+        ..
+    } = &*child.node
+    else {
+        return None;
+    };
+    if child_method.as_str() != "new" {
+        return None;
+    }
+    let ExprNode::Const { path } = &*child_recv.node else {
+        return None;
+    };
+    let class_name = path.last()?.as_str();
+    let child_singular = snake_case(class_name);
+    let child_plural = format!("{child_singular}s"); // naïve; comments fixture only
+
+    // RouteHelpers.<parent_singular>_<child_plural>_path(parent.id)
+    let parent_id = send(Some(parent.clone()), "id", Vec::new(), None, false);
+    let action = send(
+        Some(route_helpers()),
+        &format!("{parent_singular}_{child_plural}_path"),
+        vec![parent_id],
+        None,
+        true,
+    );
+
+    Some((child.clone(), child_singular, action))
 }
 
 /// Find the `model:` kwarg in a Hash arg of a form_with call and

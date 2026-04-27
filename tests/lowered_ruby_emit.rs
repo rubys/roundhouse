@@ -1484,17 +1484,29 @@ fn lowered_show_view_turbo_stream_from_with_string_interp() {
 #[test]
 fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     // `<%= form_with model: [@article, Comment.new], ... do |form|
-    // %>` — the model is an array (no single record local), so
-    // `find_kwarg_local_name` returns None. The form_with handler
-    // still registers the form param so FormBuilder method
-    // dispatch resolves inside the block — `form.label`,
-    // `form.text_field`, etc. lower to direct sends rather than
-    // falling through to html_escape.
+    // %>` — polymorphic-array form_with for a nested resource.
+    // The lowerer rewrites it to spinel's expected shape:
+    // `model: Comment.new` (the child), `model_name: "comment"`,
+    // `action: RouteHelpers.article_comments_path(article.id)` (the
+    // nested collection path), `method: :post` (Class.new is never
+    // persisted). FormBuilder dispatch resolves inside the block.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("ViewHelpers.form_with(model: [article, Comment.new]"),
-        "expected form_with with nested-array model; got:\n{src}",
+        src.contains("ViewHelpers.form_with(model: Comment.new"),
+        "expected form_with with nested-array model rewritten to child; got:\n{src}",
+    );
+    assert!(
+        src.contains("model_name: \"comment\""),
+        "expected model_name derived from child class; got:\n{src}",
+    );
+    assert!(
+        src.contains("action: RouteHelpers.article_comments_path(article.id)"),
+        "expected nested collection path action; got:\n{src}",
+    );
+    assert!(
+        src.contains("method: :post"),
+        "expected method :post (Class.new is never persisted); got:\n{src}",
     );
     // FormBuilder dispatch — direct sends, not wrapped in html_escape.
     assert!(
