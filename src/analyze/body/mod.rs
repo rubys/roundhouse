@@ -190,11 +190,32 @@ impl<'a> BodyTyper<'a> {
                 Ty::Str
             }
 
-            ExprNode::BoolOp { left, right, .. } => {
+            ExprNode::BoolOp { left, op, right, .. } => {
                 let lt = self.analyze_expr(left, ctx);
-                let rt = self.analyze_expr(right, ctx);
-                // Short-circuit: the result is either left (if truthy) or
-                // right — a union of the two operand types.
+                // Short-circuit narrowing: when the right arm runs,
+                // the left arm has already produced a value that
+                // determined the short-circuit. For `&&` the right
+                // arm runs only if left was truthy; for `||` only if
+                // left was falsy. If the left arm was a recognized
+                // narrowing predicate (`x.is_a?(T)`, `x.nil?`, etc.),
+                // type the right arm under the corresponding
+                // narrowed Ctx so subsequent reads of the same var
+                // see the refined type. Mirrors how the `If` arm
+                // threads narrowing into its then/else branches.
+                let pred = narrowing::extract_narrowing(left);
+                let right_ctx = match (&pred, op) {
+                    (Some(p), crate::expr::BoolOpKind::And) => {
+                        narrowing::apply_narrowing(ctx, p, true)
+                    }
+                    (Some(p), crate::expr::BoolOpKind::Or) => {
+                        narrowing::apply_narrowing(ctx, p, false)
+                    }
+                    _ => ctx.clone(),
+                };
+                let rt = self.analyze_expr(right, &right_ctx);
+                // Short-circuit: the result is either left (if it
+                // determined the short-circuit) or right — a union
+                // of the two operand types.
                 union_of(lt, rt)
             }
 

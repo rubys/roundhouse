@@ -15,7 +15,7 @@
 //! Called from the `If` arm in the body-typer's `compute` match.
 
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::Ty;
 
 use super::Ctx;
@@ -100,12 +100,25 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
     };
     let name = path.last()?;
     Some(match name.as_str() {
-        "Integer" | "Numeric" => Ty::Int,
+        "Integer" => Ty::Int,
+        // `Numeric` covers Int and Float in Ruby's hierarchy. Union
+        // both so subsequent dispatch resolves either via int_method
+        // or as Float (universal methods cover the overlap).
+        "Numeric" => Ty::Union { variants: vec![Ty::Int, Ty::Float] },
         "Float" => Ty::Float,
         "String" => Ty::Str,
         "Symbol" => Ty::Sym,
         "NilClass" => Ty::Nil,
         "TrueClass" | "FalseClass" => Ty::Bool,
+        // `Array` and `Hash` must narrow to their parameterized IR
+        // forms — `Ty::Class { id: Array }` falls through dispatch
+        // (which goes through array_method only on `Ty::Array { .. }`).
+        // Element type unknown at narrowing time → `Ty::Var`.
+        "Array" => Ty::Array { elem: Box::new(Ty::Var { var: TyVar(0) }) },
+        "Hash" => Ty::Hash {
+            key: Box::new(Ty::Var { var: TyVar(0) }),
+            value: Box::new(Ty::Var { var: TyVar(0) }),
+        },
         other => Ty::Class {
             id: ClassId(Symbol::from(other)),
             args: vec![],
