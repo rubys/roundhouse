@@ -255,7 +255,11 @@ fn action_to_method(
 ///    indexed/require-permit forms.
 /// 5. `rewrite_redirect_to` — polymorphic `redirect_to @x` →
 ///    `redirect_to(RouteHelpers.<x>_path(@x.id), ...)`.
-/// 6. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
+/// 6. `rewrite_assoc_through_parent` — `@parent.assoc.build(args)` →
+///    3-statement `attrs = …; attrs[:fk] = @parent.id; @x = Class.new(attrs)`.
+///    `@parent.assoc.find(args)` → `@x = Class.find(args); if @x.fk !=
+///    @parent.id; head(:not_found); return; end`.
+/// 7. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
 ///    (covers `articles_path` and the like that appear outside
 ///    redirect_to's first arg).
 ///
@@ -282,7 +286,8 @@ fn lower_action_body(
     };
     let with_params = rewrite_params(&with_render);
     let with_redirects = rewrite_redirect_to(&with_params);
-    rewrite_route_helpers(&with_redirects)
+    let with_assoc = rewrite_assoc_through_parent(&with_redirects);
+    rewrite_route_helpers(&with_assoc)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +352,256 @@ fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, ivars: &[Symb
         }
         _ => None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Has-many-through-parent rewrite. Rails' `@article.comments.build(args)`
+// and `@article.comments.find(args)` both go through the association
+// proxy: build pre-fills the FK from the parent, find scopes the lookup
+// to children of the parent. Spinel doesn't have association proxies;
+// the parent linkage has to be made explicit at the call site.
+//
+//   @x = @parent.<assoc>.build(<args>)
+//   ─────────────────────────────────────────────────────────────────
+//   attrs = <args>.to_h
+//   attrs[:<parent>_id] = @parent.id
+//   @x = <Singular>.new(attrs)
+//
+//   @x = @parent.<assoc>.find(<args>)
+//   ─────────────────────────────────────────────────────────────────
+//   @x = <Singular>.find(<args>)
+//   if @x.<parent>_id != @parent.id
+//     head(:not_found)
+//     return
+//   end
+//
+// One Assign expands to a Seq of multiple Exprs — the outer Seq the
+// emitter walks for line-per-statement output flattens implicitly.
+// ---------------------------------------------------------------------------
+
+fn rewrite_assoc_through_parent(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| {
+        let ExprNode::Assign { target: LValue::Ivar { name: lhs }, value } = &*e.node else {
+            return None;
+        };
+        let ExprNode::Send {
+            recv: Some(outer_recv),
+            method: outer_method,
+            args: outer_args,
+            block: None,
+            ..
+        } = &*value.node
+        else {
+            return None;
+        };
+        let kind = match outer_method.as_str() {
+            "build" => AssocKind::Build,
+            "find" => AssocKind::Find,
+            _ => return None,
+        };
+        if outer_args.len() != 1 {
+            return None;
+        }
+        let ExprNode::Send {
+            recv: Some(inner_recv),
+            method: assoc_method,
+            args: inner_args,
+            block: None,
+            ..
+        } = &*outer_recv.node
+        else {
+            return None;
+        };
+        if !inner_args.is_empty() {
+            return None;
+        }
+        let ExprNode::Ivar { name: parent_name } = &*inner_recv.node else {
+            return None;
+        };
+        let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
+        let fk = format!("{}_id", parent_name.as_str());
+        Some(match kind {
+            AssocKind::Build => expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span),
+            AssocKind::Find => expand_find(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span),
+        })
+    })
+}
+
+enum AssocKind {
+    Build,
+    Find,
+}
+
+fn expand_build(
+    model_class: &str,
+    fk: &str,
+    parent: &Symbol,
+    lhs: &Symbol,
+    arg: &Expr,
+    span: Span,
+) -> Expr {
+    // attrs = <arg>.to_h
+    let to_h = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(arg.clone()),
+            method: Symbol::from("to_h"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let attrs_assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("attrs") },
+            value: to_h,
+        },
+    );
+
+    // attrs[:<fk>] = @<parent>.id
+    let parent_id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(parent.as_str(), span)),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let fk_sym = Expr::new(
+        span,
+        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(fk) } },
+    );
+    let attrs_var = Expr::new(
+        span,
+        ExprNode::Var { id: VarId(0), name: Symbol::from("attrs") },
+    );
+    let index_assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Index { recv: attrs_var.clone(), index: fk_sym },
+            value: parent_id,
+        },
+    );
+
+    // @<lhs> = <Class>.new(attrs)
+    let new_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&[model_class], span)),
+            method: Symbol::from("new"),
+            args: vec![attrs_var],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let final_assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: lhs.clone() },
+            value: new_call,
+        },
+    );
+
+    Expr::new(
+        span,
+        ExprNode::Seq { exprs: vec![attrs_assign, index_assign, final_assign] },
+    )
+}
+
+fn expand_find(
+    model_class: &str,
+    fk: &str,
+    parent: &Symbol,
+    lhs: &Symbol,
+    arg: &Expr,
+    span: Span,
+) -> Expr {
+    // @<lhs> = <Class>.find(<arg>)
+    let find_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&[model_class], span)),
+            method: Symbol::from("find"),
+            args: vec![arg.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let lhs_assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: lhs.clone() },
+            value: find_call,
+        },
+    );
+
+    // if @<lhs>.<fk> != @<parent>.id; head(:not_found); return; end
+    let lhs_fk = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(lhs.as_str(), span)),
+            method: Symbol::from(fk),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let parent_id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(parent.as_str(), span)),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let cond = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(lhs_fk),
+            method: Symbol::from("!="),
+            args: vec![parent_id],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let head_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("head"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Sym { value: Symbol::from("not_found") } },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let return_stmt = Expr::new(
+        span,
+        ExprNode::Return {
+            value: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+    let if_body = Expr::new(
+        span,
+        ExprNode::Seq { exprs: vec![head_call, return_stmt] },
+    );
+    let if_stmt = Expr::new(
+        span,
+        ExprNode::If {
+            cond,
+            then_branch: if_body,
+            else_branch: Expr::new(span, ExprNode::Seq { exprs: vec![] }),
+        },
+    );
+
+    Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, if_stmt] })
 }
 
 /// Derive the `Views::*` submodule name from a controller's class name.

@@ -822,6 +822,75 @@ fn controllers_application_controller_has_no_views_require() {
 }
 
 #[test]
+fn comments_create_expands_assoc_build_to_three_statements() {
+    // `@comment = @article.comments.build(comment_params)` lowers to
+    // three statements: build the attrs hash, set the FK, then call
+    // `Comment.new(attrs)`. Mirrors spinel-blog's reference shape.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "comments_controller.rb");
+    assert!(
+        src.contains("attrs = comment_params.to_h"),
+        "expected `attrs = …to_h` first stmt; got:\n{src}",
+    );
+    assert!(
+        src.contains("attrs[:article_id] = @article.id"),
+        "expected `attrs[:article_id] = @article.id` second stmt; got:\n{src}",
+    );
+    assert!(
+        src.contains("@comment = Comment.new(attrs)"),
+        "expected `@comment = Comment.new(attrs)` third stmt; got:\n{src}",
+    );
+    // The original `.comments.build(...)` form must not survive.
+    assert!(
+        !src.contains("@article.comments.build"),
+        "assoc.build should be lowered, not preserved:\n{src}",
+    );
+}
+
+#[test]
+fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
+    // `@comment = @article.comments.find(params.expect(:id))` lowers to
+    //   @comment = Comment.find(@params[:id].to_i)
+    //   if @comment.article_id != @article.id
+    //     head(:not_found)
+    //     return
+    //   end
+    // The guard preserves the belongs-to-article semantics that Rails
+    // would have enforced via the through-association lookup.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "comments_controller.rb");
+    assert!(
+        src.contains("@comment = Comment.find(@params[:id].to_i)"),
+        "expected direct Comment.find lookup; got:\n{src}",
+    );
+    assert!(
+        src.contains("if @comment.article_id != @article.id"),
+        "expected belongs-to guard predicate; got:\n{src}",
+    );
+    assert!(
+        src.contains("head(:not_found)"),
+        "expected head(:not_found) in guard body; got:\n{src}",
+    );
+    assert!(
+        !src.contains("@article.comments.find"),
+        "assoc.find should be lowered:\n{src}",
+    );
+}
+
+#[test]
+fn comments_controller_requires_comment_model_after_assoc_lowering() {
+    // Once `Comment.new` and `Comment.find` appear in the body, the
+    // emitter's body-derived requires should pull in
+    // `../models/comment` automatically.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "comments_controller.rb");
+    assert!(
+        src.contains("require_relative \"../models/comment\""),
+        "expected ../models/comment require; got:\n{src}",
+    );
+}
+
+#[test]
 fn setter_send_renders_with_space_around_equals() {
     // The lowered initialize/update bodies call setters via
     // `Send { method: "x=", args: [v] }` (since attr_writer methods
