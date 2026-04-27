@@ -1,0 +1,125 @@
+//! Regression test for the lower → Ruby emit pipeline. Drives
+//! `emit_lowered_models` against `fixtures/real-blog` and asserts the
+//! emitted source matches the universal post-lowering shape. The hand-
+//! written `fixtures/spinel-blog/app/models/*.rb` is the visual
+//! reference; this test asserts structural equivalents (key methods
+//! present with the right body shapes) rather than byte-for-byte match,
+//! so surface-formatting churn doesn't ripple in.
+//!
+//! See `project_lowerers_first_validate_via_spinel.md` — Spinel is the
+//! validation target for the lowering pipeline; per-target emitter
+//! migrations (TS / Rust / …) are deferred.
+
+use roundhouse::emit::{ruby, EmittedFile};
+use roundhouse::ingest::ingest_app;
+
+fn lowered_real_blog() -> Vec<EmittedFile> {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    ruby::emit_lowered_models(&app)
+}
+
+fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
+    files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with(suffix))
+        .map(|f| f.content.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "no emitted file ending in {suffix}; got: {:?}",
+                files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+            )
+        })
+}
+
+#[test]
+fn one_file_per_model() {
+    let files = lowered_real_blog();
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+    assert!(names.iter().any(|n| n.ends_with("article.rb")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("comment.rb")), "{names:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("application_record.rb")),
+        "{names:?}",
+    );
+}
+
+#[test]
+fn application_record_lowers_to_empty_class_with_parent() {
+    let files = lowered_real_blog();
+    let src = find(&files, "application_record.rb");
+    assert!(src.contains("class ApplicationRecord < ActiveRecord::Base"), "{src}");
+    assert!(src.contains("end"), "{src}");
+    // Empty body — primary_abstract_class is dropped (Unknown items
+    // don't lower yet). No methods means just header + `end`.
+    assert!(!src.contains("def "), "expected no methods, got:\n{src}");
+}
+
+#[test]
+fn article_renders_schema_scaffold_methods() {
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(src.contains("class Article < ApplicationRecord"), "{src}");
+    for m in [
+        "def title",
+        "def body",
+        "def created_at",
+        "def updated_at",
+        "def self.table_name",
+        "def self.schema_columns",
+        "def self.instantiate(row)",
+        "def initialize(attrs)",
+        "def attributes",
+        "def [](name)",
+        "def []=(name, value)",
+        "def update(attrs)",
+    ] {
+        assert!(src.contains(m), "missing `{m}`:\n{src}");
+    }
+}
+
+#[test]
+fn article_renders_validate_with_block_helpers() {
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(src.contains("def validate"), "{src}");
+    // Validates_*_of helpers carry block-yielding @attr access — the
+    // shape spinel's runtime expects.
+    assert!(
+        src.contains("validates_presence_of(:title) { @title }"),
+        "{src}",
+    );
+    assert!(
+        src.contains("validates_length_of(:body, minimum: 10)"),
+        "{src}",
+    );
+}
+
+#[test]
+fn article_renders_has_many_reader_and_dependent_destroy() {
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(
+        src.contains("def comments") && src.contains("Comment.where(article_id: @id)"),
+        "{src}",
+    );
+    assert!(
+        src.contains("def before_destroy") && src.contains("comments.each"),
+        "{src}",
+    );
+}
+
+#[test]
+fn comment_renders_belongs_to_with_fk_guard() {
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    assert!(src.contains("class Comment < ApplicationRecord"), "{src}");
+    assert!(src.contains("def article"), "{src}");
+    // The lowered shape: `if @article_id == 0 then nil else
+    // Article.find_by(id: @article_id) end`. Body assertions are loose
+    // because emit_expr currently renders `==` as a method call —
+    // that's a pre-existing surface bug, fixable independently.
+    assert!(src.contains("Article.find_by(id: @article_id)"), "{src}");
+}

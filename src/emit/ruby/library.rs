@@ -22,7 +22,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
-fn emit_library_class_decl(lc: &LibraryClass) -> EmittedFile {
+pub(super) fn emit_library_class_decl(lc: &LibraryClass) -> EmittedFile {
     let name = lc.name.0.as_str();
     let file_stem = snake_case(name);
     let mut s = String::new();

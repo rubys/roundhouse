@@ -69,6 +69,28 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     library::emit_library_class_decls(app)
 }
 
+/// Lower each `app.models` entry through `model_to_library` and emit
+/// the resulting `LibraryClass` as a Ruby source file. The output is
+/// the universal post-lowering shape — explicit per-attr accessors,
+/// explicit `validate` / `before_destroy` bodies, no Rails DSL.
+///
+/// Spinel is the natural validation target for the lowering pipeline:
+/// the lowered IR shape *is* spinel-blog shape (per
+/// `project_universal_post_lowering_ir.md`), so a Ruby render is the
+/// shortest path from lowerer output to a runnable artifact. Use this
+/// while accumulating lowerers; the per-target collapse decisions for
+/// TS / Rust / etc. are deferred until enough lowerers exist for
+/// natural groupings to surface.
+pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
+    app.models
+        .iter()
+        .map(|m| {
+            let lc = crate::lower::lower_model_to_library_class(m, &app.schema);
+            library::emit_library_class_decl(&lc)
+        })
+        .collect()
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {
