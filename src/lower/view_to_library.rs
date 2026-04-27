@@ -97,6 +97,7 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         form_records: Vec::new(),
+        nullable_locals: extra_params.iter().cloned().collect(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -242,11 +243,15 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
 ///   `recv.present?` / `recv.any?`  →  `!recv.empty?`
 ///   `recv.blank?`   / `recv.empty?` / `recv.none?`  →  `recv.empty?`
 /// Recursive through `BoolOp` so `a.present? && b.any?` rewrites both
-/// sides; other shapes pass through unchanged. Note this does NOT
-/// generate the `!recv.nil? && !recv.empty?` nil-safe form — that
-/// requires receiver-nullability info from the analyzer that the
-/// lowerer doesn't have today (tracked as a follow-on slice).
-fn rewrite_predicates(cond: &Expr) -> Expr {
+/// sides; other shapes pass through unchanged.
+///
+/// When `recv` is a known-nullable local (a view's extra_param with a
+/// `nil` default), the nil-safe form is generated instead:
+///   `notice.present?`  →  `!notice.nil? && !notice.empty?`
+///   `notice.empty?`    →  `notice.nil? || notice.empty?`
+/// matching spinel-blog's hand-written guards. Without the nil check
+/// the body NoMethodErrors when the controller omits the flash kwarg.
+fn rewrite_predicates(cond: &Expr, nullable: &std::collections::HashSet<String>) -> Expr {
     let new_node = match &*cond.node {
         ExprNode::Send {
             recv: Some(r),
@@ -255,30 +260,79 @@ fn rewrite_predicates(cond: &Expr) -> Expr {
             block: None,
             ..
         } if args.is_empty() => {
-            let rewritten_recv = rewrite_predicates(r);
+            let rewritten_recv = rewrite_predicates(r, nullable);
+            // Bareword references (Rails flash helpers like `notice`) are
+            // parsed as `Send { recv: None, method: <name>, args: [] }`
+            // until something binds them as Vars; accept either shape.
+            let recv_is_nullable = match &*rewritten_recv.node {
+                ExprNode::Var { name, .. } => nullable.contains(name.as_str()),
+                ExprNode::Send {
+                    recv: None,
+                    method,
+                    args,
+                    block: None,
+                    ..
+                } if args.is_empty() => nullable.contains(method.as_str()),
+                _ => false,
+            };
             match method.as_str() {
                 "present?" | "any?" => {
-                    // Unary `!`: emit as `Send { recv: None, method:
-                    // "!", args: [empty_call] }` so the Ruby emitter
-                    // produces `! recv.empty?` instead of the
-                    // `recv.empty?.!` method-call form.
                     let empty_call = send(
-                        Some(rewritten_recv),
+                        Some(rewritten_recv.clone()),
                         "empty?",
                         Vec::new(),
                         None,
                         false,
                     );
-                    return send(None, "!", vec![empty_call], None, false);
+                    let not_empty = send(None, "!", vec![empty_call], None, false);
+                    if recv_is_nullable {
+                        let nil_call = send(
+                            Some(rewritten_recv),
+                            "nil?",
+                            Vec::new(),
+                            None,
+                            false,
+                        );
+                        let not_nil = send(None, "!", vec![nil_call], None, false);
+                        return Expr::new(
+                            cond.span,
+                            ExprNode::BoolOp {
+                                op: crate::expr::BoolOpKind::And,
+                                surface: crate::expr::BoolOpSurface::Symbol,
+                                left: not_nil,
+                                right: not_empty,
+                            },
+                        );
+                    }
+                    return not_empty;
                 }
                 "blank?" | "empty?" | "none?" => {
-                    return send(
-                        Some(rewritten_recv),
+                    let empty_call = send(
+                        Some(rewritten_recv.clone()),
                         "empty?",
                         Vec::new(),
                         None,
                         false,
                     );
+                    if recv_is_nullable {
+                        let nil_call = send(
+                            Some(rewritten_recv),
+                            "nil?",
+                            Vec::new(),
+                            None,
+                            false,
+                        );
+                        return Expr::new(
+                            cond.span,
+                            ExprNode::BoolOp {
+                                op: crate::expr::BoolOpKind::Or,
+                                surface: crate::expr::BoolOpSurface::Symbol,
+                                left: nil_call,
+                                right: empty_call,
+                            },
+                        );
+                    }
+                    return empty_call;
                 }
                 _ => ExprNode::Send {
                     recv: Some(rewritten_recv),
@@ -292,14 +346,14 @@ fn rewrite_predicates(cond: &Expr) -> Expr {
         ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
             op: *op,
             surface: *surface,
-            left: rewrite_predicates(left),
-            right: rewrite_predicates(right),
+            left: rewrite_predicates(left, nullable),
+            right: rewrite_predicates(right, nullable),
         },
         ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_predicates),
+            recv: recv.as_ref().map(|r| rewrite_predicates(r, nullable)),
             method: method.clone(),
-            args: args.iter().map(rewrite_predicates).collect(),
-            block: block.as_ref().map(rewrite_predicates),
+            args: args.iter().map(|a| rewrite_predicates(a, nullable)).collect(),
+            block: block.as_ref().map(|b| rewrite_predicates(b, nullable)),
             parenthesized: *parenthesized,
         },
         other => other.clone(),
@@ -446,6 +500,12 @@ struct ViewCtx {
     /// `form.text_field :title` resolves to the bound record's
     /// model. Cleared on block exit.
     form_records: Vec<(String, String)>,
+    /// Locals known to be nullable — the view's extra_params with a
+    /// `nil` default (`notice`, `alert`, …). When a predicate
+    /// (`recv.present?`, `recv.empty?`, …) targets one of these,
+    /// rewrite to the nil-safe form `!recv.nil? && !recv.empty?` so
+    /// the body doesn't NoMethodError when callers omit the kwarg.
+    nullable_locals: std::collections::HashSet<String>,
 }
 
 impl ViewCtx {
@@ -536,7 +596,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
-                    cond: rewrite_predicates(cond),
+                    cond: rewrite_predicates(cond, &ctx.nullable_locals),
                     then_branch: then_body,
                     else_branch: else_body,
                 },
