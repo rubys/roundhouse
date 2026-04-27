@@ -1066,8 +1066,8 @@ fn lowered_index_view_renders_module_and_method() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/index.rb");
     assert!(
-        src.contains("module Views::Articles"),
-        "expected `module Views::Articles`; got:\n{src}",
+        src.contains("module Views\n  module Articles"),
+        "expected nested `module Views; module Articles`; got:\n{src}",
     );
     assert!(
         src.contains("def self.index("),
@@ -1167,8 +1167,8 @@ fn lowered_article_partial_emits_module_method_signature() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
     assert!(
-        src.contains("module Views::Articles"),
-        "expected `module Views::Articles`; got:\n{src}",
+        src.contains("module Views\n  module Articles"),
+        "expected nested `module Views; module Articles`; got:\n{src}",
     );
     // Partial methods take the singular form of the directory.
     assert!(
@@ -1267,8 +1267,8 @@ fn lowered_form_partial_emits_module_method() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
     assert!(
-        src.contains("module Views::Articles"),
-        "expected `module Views::Articles`; got:\n{src}",
+        src.contains("module Views\n  module Articles"),
+        "expected nested `module Views; module Articles`; got:\n{src}",
     );
     assert!(
         src.contains("def self.form(article)"),
@@ -1394,8 +1394,8 @@ fn lowered_comment_partial_emits_module_method() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/comments/_comment.rb");
     assert!(
-        src.contains("module Views::Comments"),
-        "expected `module Views::Comments`; got:\n{src}",
+        src.contains("module Views\n  module Comments"),
+        "expected nested `module Views; module Comments`; got:\n{src}",
     );
     assert!(
         src.contains("def self.comment(comment)"),
@@ -1443,8 +1443,8 @@ fn lowered_show_view_emits_module_method() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("module Views::Articles"),
-        "expected `module Views::Articles`; got:\n{src}",
+        src.contains("module Views\n  module Articles"),
+        "expected nested `module Views; module Articles`; got:\n{src}",
     );
     assert!(
         src.contains("def self.show(article"),
@@ -1529,8 +1529,8 @@ fn lowered_layout_view_emits_module_method() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("module Views::Layouts"),
-        "expected `module Views::Layouts`; got:\n{src}",
+        src.contains("module Views\n  module Layouts"),
+        "expected nested `module Views; module Layouts`; got:\n{src}",
     );
     // Layouts take an explicit `body` parameter — bare `<%= yield %>`
     // in the source resolves to this local.

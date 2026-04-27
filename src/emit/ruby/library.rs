@@ -58,19 +58,36 @@ pub(super) fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFi
         writeln!(s).unwrap();
     }
 
-    let header = if lc.is_module {
+    // Compound names like `Views::Articles` emit as nested
+    // `module Views\n  module Articles` rather than `module Views::Articles`.
+    // Compound-form headers blow up at load time when the outer namespace
+    // isn't already defined (Ruby looks up `Views` as a constant); nested
+    // headers create the chain on the fly. Spinel-blog's hand-written
+    // views use the nested form for the same reason.
+    let segments: Vec<&str> = name.split("::").collect();
+    let depth = segments.len();
+    let body_pad = "  ".repeat(depth);
+
+    if lc.is_module {
         // Modules don't take a parent; ingest already enforces this.
-        format!("module {name}")
-    } else {
-        match lc.parent.as_ref() {
-            Some(p) => format!("class {name} < {}", p.0.as_str()),
-            None => format!("class {name}"),
+        for (i, seg) in segments.iter().enumerate() {
+            writeln!(s, "{}module {seg}", "  ".repeat(i)).unwrap();
         }
-    };
-    writeln!(s, "{header}").unwrap();
+    } else {
+        // Outer segments (if any) are namespace modules; the last is the class.
+        for (i, seg) in segments.iter().take(depth - 1).enumerate() {
+            writeln!(s, "{}module {seg}", "  ".repeat(i)).unwrap();
+        }
+        let last = segments[depth - 1];
+        let pad = "  ".repeat(depth - 1);
+        match lc.parent.as_ref() {
+            Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            None => writeln!(s, "{pad}class {last}").unwrap(),
+        }
+    }
 
     for inc in &lc.includes {
-        writeln!(s, "  include {}", inc.0.as_str()).unwrap();
+        writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
     }
     if !lc.includes.is_empty() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
@@ -87,12 +104,14 @@ pub(super) fn emit_library_class_decl(lc: &LibraryClass, app: &App) -> EmittedFi
             if line.is_empty() {
                 writeln!(s).unwrap();
             } else {
-                writeln!(s, "  {line}").unwrap();
+                writeln!(s, "{body_pad}{line}").unwrap();
             }
         }
     }
 
-    writeln!(s, "end").unwrap();
+    for i in (0..depth).rev() {
+        writeln!(s, "{}end", "  ".repeat(i)).unwrap();
+    }
 
     EmittedFile {
         path: PathBuf::from(format!("app/models/{file_stem}.rb")),
