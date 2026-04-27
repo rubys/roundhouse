@@ -604,6 +604,42 @@ fn controllers_articles_requires_referenced_models_from_models_dir() {
 }
 
 #[test]
+fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
+    // `params.expect(:id)` (Rails 8 single-symbol form) lowers to
+    // `@params[:id].to_i`. Spinel doesn't have Rails' magic `params`
+    // method; request params are a plain Hash on `@params` whose
+    // values are strings, so the path :id needs `.to_i` for AR's
+    // integer PK.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("Article.find(@params[:id].to_i)"),
+        "expected `@params[:id].to_i` lowering; got:\n{src}",
+    );
+    assert!(
+        !src.contains("params.expect(:id)"),
+        "params.expect(:id) should be lowered, not preserved:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_article_params_lowers_expect_hash_to_require_permit() {
+    // `params.expect(article: [:title, :body])` lowers to
+    // `@params.require(:article).permit(:title, :body)` — the
+    // strong-params chain spinel's runtime implements.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("@params.require(:article).permit(:title, :body)"),
+        "expected require/permit lowering; got:\n{src}",
+    );
+    assert!(
+        !src.contains("params.expect(article:"),
+        "params.expect(article: ...) should be lowered:\n{src}",
+    );
+}
+
+#[test]
 fn controllers_application_controller_has_no_dispatcher() {
     // ApplicationController has no actions and no filters in real-blog,
     // so process_action shouldn't be synthesized at all — just the
