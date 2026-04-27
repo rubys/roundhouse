@@ -147,6 +147,84 @@ fn article_lowers_has_many_to_collection_reader() {
 }
 
 #[test]
+fn article_lowers_validate_method() {
+    let lc = lower("Article");
+    let validate = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "validate")
+        .expect("validate method present (article has presence/length validations)");
+
+    assert!(matches!(validate.receiver, MethodReceiver::Instance));
+    assert!(validate.params.is_empty());
+
+    // Body is a Seq of one Send per (attr, rule) pair. Article has:
+    //   validates :title, presence: true              → 1 call
+    //   validates :body,  presence: true, length: {…} → 2 calls
+    let body = &*validate.body.node;
+    let exprs = match body {
+        roundhouse::ExprNode::Seq { exprs } => exprs,
+        other => panic!("validate body is not Seq: {other:?}"),
+    };
+    assert!(
+        exprs.len() >= 3,
+        "expected >=3 validates_* calls (presence on title, presence+length on body); got {}: {exprs:?}",
+        exprs.len(),
+    );
+
+    // Each call carries a block with `@attr` body. Spot-check the first.
+    let first = exprs.first().unwrap();
+    let (method_name, block) = match &*first.node {
+        roundhouse::ExprNode::Send { method, block, .. } => (method.as_str(), block),
+        other => panic!("first validate stmt is not Send: {other:?}"),
+    };
+    assert!(
+        method_name.starts_with("validates_"),
+        "first stmt should be a validates_* helper; got {method_name}",
+    );
+    let block = block.as_ref().expect("validates_* helper carries a block");
+    let block_body = match &*block.node {
+        roundhouse::ExprNode::Lambda { body, .. } => body,
+        other => panic!("validates_* block is not Lambda: {other:?}"),
+    };
+    match &*block_body.node {
+        roundhouse::ExprNode::Ivar { .. } => {}
+        other => panic!(
+            "validates_* block body should be `@attr` (Ivar); got {other:?}",
+        ),
+    }
+}
+
+#[test]
+fn comment_lowers_validate_with_two_presence_calls() {
+    let lc = lower("Comment");
+    let validate = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "validate")
+        .expect("validate method present");
+
+    let exprs = match &*validate.body.node {
+        roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
+        other => panic!("validate body should be Seq; got {other:?}"),
+    };
+    assert_eq!(
+        exprs.len(),
+        2,
+        "Comment has presence on commenter + body → 2 calls; got {}",
+        exprs.len(),
+    );
+    for e in &exprs {
+        match &*e.node {
+            roundhouse::ExprNode::Send { method, .. } => {
+                assert_eq!(method.as_str(), "validates_presence_of");
+            }
+            other => panic!("validate stmt should be Send; got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn comment_lowers_belongs_to_reader() {
     let lc = lower("Comment");
     assert_eq!(lc.name.0.as_str(), "Comment");
