@@ -39,6 +39,15 @@ use crate::ty::Ty;
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    /// Inferred parameter types per (class, method). Empty after
+    /// `Analyzer::new`; populated by `unify_params_from_call_sites`
+    /// during the fixpoint loop in `analyze`. Consulted when seeding
+    /// a method body's `Ctx::local_bindings` so subsequent typing
+    /// passes resolve `Var { name }` against the discovered type
+    /// instead of falling back to `Ty::Var` (the unknown sentinel).
+    /// The Symbol key is the method name; the Vec aligns positionally
+    /// with `MethodDef.params`.
+    inferred_params: HashMap<(ClassId, Symbol), Vec<Ty>>,
     /// Backend-specific effect classification. The analyzer consults
     /// this when deciding whether a Send on an AR model carries
     /// `DbRead` or `DbWrite`. Defaults to `SqliteAdapter` via
@@ -329,7 +338,7 @@ impl Analyzer {
             classes.entry(lc.name.clone()).or_default();
         }
 
-        Self { classes, adapter }
+        Self { classes, inferred_params: HashMap::new(), adapter }
     }
 
     /// Build a body-typer borrowing this analyzer's dispatch tables.
@@ -340,7 +349,43 @@ impl Analyzer {
 
     /// Walk the app, annotating every expression's `ty` field, then
     /// populating the owning construct's `effects` by visiting the typed tree.
-    pub fn analyze(&self, app: &mut App) {
+    ///
+    /// Two-phase: an initial typing pass over the whole app, then a
+    /// whole-program fixpoint loop that (a) harvests inferred return
+    /// types from method bodies into the dispatch registry, (b) unifies
+    /// parameter types across call sites, and (c) re-runs typing with
+    /// the refined registry. Iterates to a fixed point (cap of 4 like
+    /// Spinel) using a signature fingerprint to detect convergence.
+    pub fn analyze(&mut self, app: &mut App) {
+        self.run_typing_passes(app);
+
+        // Whole-program fixpoint: harvest returns + unify params, re-type,
+        // repeat until the registry signature stabilizes. Cap matches
+        // Spinel's empirically-observed "1-2 iterations typically; 4 is a
+        // safety net" — see `~/git/spinel/spinel_codegen.rb:7459-7492`.
+        let mut prev_sig = self.inference_signature();
+        for _ in 0..4 {
+            self.harvest_returns_to_registry(app);
+            self.unify_params_from_call_sites(app);
+            let cur_sig = self.inference_signature();
+            if cur_sig == prev_sig {
+                break;
+            }
+            prev_sig = cur_sig;
+            // Re-type the whole app with the refined registry. Idempotent
+            // BodyTyper means a second pass simply resolves dispatches
+            // and Var bindings the first pass couldn't.
+            self.run_typing_passes(app);
+        }
+    }
+
+    /// One full typing pass over the whole app. Extracted from
+    /// `analyze` so the fixpoint loop above can re-invoke it after
+    /// each registry refinement. The Rails-aware orchestration
+    /// (controller→view ivar channel, before_action seeding,
+    /// per-model two-pass ivar discovery, partial locals threading)
+    /// stays internal to this method; the fixpoint just calls it.
+    fn run_typing_passes(&self, app: &mut App) {
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
@@ -474,8 +519,10 @@ impl Analyzer {
             for scope in model.scopes_mut() {
                 self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
             }
+            let model_name = model.name.clone();
             for method in model.methods_mut() {
-                self.body_typer().analyze_expr(&mut method.body, &class_ctx);
+                let mctx = self.seed_method_params(&class_ctx, &model_name, method);
+                self.body_typer().analyze_expr(&mut method.body, &mctx);
             }
 
             // Pass B: gather every ivar assignment across the model's
@@ -511,12 +558,14 @@ impl Analyzer {
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
                 }
                 for method in model.methods_mut() {
-                    self.body_typer().analyze_expr(&mut method.body, &reseeded_ctx);
-                    method.effects = self.collect_effects(&mut method.body, &reseeded_ctx);
+                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method);
+                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             } else {
                 for method in model.methods_mut() {
-                    method.effects = self.collect_effects(&mut method.body, &class_ctx);
+                    let mctx = self.seed_method_params(&class_ctx, &model_name, method);
+                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             }
         }
@@ -534,8 +583,10 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
             };
 
+            let lc_name = lc.name.clone();
             for method in &mut lc.methods {
-                self.body_typer().analyze_expr(&mut method.body, &class_ctx);
+                let mctx = self.seed_method_params(&class_ctx, &lc_name, method);
+                self.body_typer().analyze_expr(&mut method.body, &mctx);
             }
 
             let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
@@ -549,17 +600,19 @@ impl Analyzer {
                     reseeded.insert(name, Ty::Union { variants: vec![ty, Ty::Nil] });
                 }
                 let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+                    self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                 };
                 for method in &mut lc.methods {
-                    self.body_typer().analyze_expr(&mut method.body, &reseeded_ctx);
-                    method.effects = self.collect_effects(&mut method.body, &reseeded_ctx);
+                    let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);
+                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             } else {
                 for method in &mut lc.methods {
-                    method.effects = self.collect_effects(&mut method.body, &class_ctx);
+                    let mctx = self.seed_method_params(&class_ctx, &lc_name, method);
+                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             }
         }
@@ -617,6 +670,306 @@ impl Analyzer {
         let mut set = BTreeSet::new();
         self.visit_effects(expr, ctx, &mut set);
         EffectSet { effects: set }
+    }
+
+    /// Build a per-method `Ctx` by cloning `base` and seeding
+    /// `local_bindings` with parameter types harvested from
+    /// `inferred_params`. When no entry exists for the (class, method)
+    /// pair, the params stay unbound and the body-typer falls back to
+    /// `Ty::Var` for `Var { name }` reads — same as before any
+    /// inference ran. Each fixpoint iteration that refines a param's
+    /// type makes the next typing pass see a more concrete binding.
+    fn seed_method_params(
+        &self,
+        base: &Ctx,
+        class_id: &ClassId,
+        method: &crate::dialect::MethodDef,
+    ) -> Ctx {
+        let key = (class_id.clone(), method.name.clone());
+        let Some(types) = self.inferred_params.get(&key) else {
+            return base.clone();
+        };
+        let mut ctx = base.clone();
+        for (name, ty) in method.params.iter().zip(types.iter()) {
+            if !matches!(ty, Ty::Var { .. }) {
+                ctx.local_bindings.insert(name.clone(), ty.clone());
+            }
+        }
+        ctx
+    }
+
+    /// Fingerprint of the data the fixpoint refines: per-class
+    /// instance/class method return types in `self.classes` plus the
+    /// parameter-type table in `self.inferred_params`. The fixpoint
+    /// loop in `analyze` compares fingerprints between iterations and
+    /// stops when they match. Order-independent so HashMap iteration
+    /// order doesn't perturb results: keys are sorted before
+    /// stringification.
+    fn inference_signature(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut class_keys: Vec<&ClassId> = self.classes.keys().collect();
+        class_keys.sort_by_key(|k| k.0.as_str().to_string());
+        for cid in class_keys {
+            let cls = &self.classes[cid];
+            let mut method_keys: Vec<&Symbol> = cls.instance_methods.keys().collect();
+            method_keys.sort_by_key(|k| k.as_str().to_string());
+            for m in method_keys {
+                parts.push(format!("{}#{}={:?}", cid.0.as_str(), m.as_str(), cls.instance_methods[m]));
+            }
+            let mut cmethod_keys: Vec<&Symbol> = cls.class_methods.keys().collect();
+            cmethod_keys.sort_by_key(|k| k.as_str().to_string());
+            for m in cmethod_keys {
+                parts.push(format!("{}.{}={:?}", cid.0.as_str(), m.as_str(), cls.class_methods[m]));
+            }
+        }
+        let mut param_keys: Vec<&(ClassId, Symbol)> = self.inferred_params.keys().collect();
+        param_keys.sort_by_key(|(c, m)| (c.0.as_str().to_string(), m.as_str().to_string()));
+        for k in param_keys {
+            parts.push(format!("{}#{}~{:?}", k.0.0.as_str(), k.1.as_str(), self.inferred_params[k]));
+        }
+        parts.join("|")
+    }
+
+    /// Walk every model + library_class method body and write its
+    /// inferred body type into `self.classes[class].instance_methods`
+    /// (or `class_methods` for `def self.x`). Conservative on widening:
+    /// only updates the registry when the harvested type is more
+    /// specific than what's already there (concrete > Ty::Var; existing
+    /// RBS-derived `Ty::Fn` is preserved — its return is already what
+    /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
+    /// body is `Ty::Var` (no information gained).
+    fn harvest_returns_to_registry(&mut self, app: &App) {
+        for model in &app.models {
+            let class_id = &model.name;
+            for method in model.methods() {
+                let Some(body_ty) = method.body.ty.clone() else { continue };
+                if matches!(body_ty, Ty::Var { .. }) {
+                    continue;
+                }
+                let target = match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => {
+                        &mut self.classes.entry(class_id.clone()).or_default().instance_methods
+                    }
+                    crate::dialect::MethodReceiver::Class => {
+                        &mut self.classes.entry(class_id.clone()).or_default().class_methods
+                    }
+                };
+                Self::insert_inferred_return(target, &method.name, body_ty);
+            }
+        }
+        for lc in &app.library_classes {
+            let class_id = &lc.name;
+            for method in &lc.methods {
+                let Some(body_ty) = method.body.ty.clone() else { continue };
+                if matches!(body_ty, Ty::Var { .. }) {
+                    continue;
+                }
+                let target = match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => {
+                        &mut self.classes.entry(class_id.clone()).or_default().instance_methods
+                    }
+                    crate::dialect::MethodReceiver::Class => {
+                        &mut self.classes.entry(class_id.clone()).or_default().class_methods
+                    }
+                };
+                Self::insert_inferred_return(target, &method.name, body_ty);
+            }
+        }
+    }
+
+    /// Conservative insertion: don't overwrite a `Ty::Fn` (RBS-sourced
+    /// signature whose return is what dispatch already returns). Don't
+    /// overwrite a more-concrete type with `Ty::Var`. Otherwise replace
+    /// or insert. This is the join rule that keeps RBS-declared
+    /// signatures authoritative while letting inference fill the rest.
+    fn insert_inferred_return(
+        table: &mut HashMap<Symbol, Ty>,
+        method: &Symbol,
+        ty: Ty,
+    ) {
+        match table.get(method) {
+            Some(Ty::Fn { .. }) => return,
+            Some(existing) if !matches!(existing, Ty::Var { .. }) && existing == &ty => return,
+            _ => {}
+        }
+        table.insert(method.clone(), ty);
+    }
+
+    /// Walk every Send across the app, look up each call's target
+    /// method, and unify the argument types into
+    /// `self.inferred_params` for that (class, method). Mirrors
+    /// Spinel's `detect_poly_params` (`spinel_codegen.rb:6928-7052`)
+    /// at a higher level — we work with structured `Ty` values rather
+    /// than string fingerprints, so unification is direct: same type →
+    /// keep; nil + T → T?; otherwise → union widen.
+    fn unify_params_from_call_sites(&mut self, app: &App) {
+        let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
+        for model in &app.models {
+            for method in model.methods() {
+                self.collect_send_sites(&method.body, &mut sites);
+            }
+            for scope in model.scopes() {
+                self.collect_send_sites(&scope.body, &mut sites);
+            }
+        }
+        for lc in &app.library_classes {
+            for method in &lc.methods {
+                self.collect_send_sites(&method.body, &mut sites);
+            }
+        }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                self.collect_send_sites(&action.body, &mut sites);
+            }
+        }
+        for view in &app.views {
+            self.collect_send_sites(&view.body, &mut sites);
+        }
+        if let Some(seeds) = &app.seeds {
+            self.collect_send_sites(seeds, &mut sites);
+        }
+
+        for (class_id, method, arg_tys) in sites {
+            // Cross-reference against MethodDef.params to know the
+            // arity. If the called method's params can't be located,
+            // still accumulate up to arg count under the same key —
+            // RBS-only methods don't have a MethodDef but do have an
+            // Fn signature, and inferred_params can extend either way.
+            let arity = arg_tys.len();
+            let entry = self
+                .inferred_params
+                .entry((class_id.clone(), method.clone()))
+                .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
+            if entry.len() < arity {
+                entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
+            }
+            for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
+                *slot = unify_param_ty(slot.clone(), observed);
+            }
+        }
+    }
+
+    /// Walk one expression tree, collecting (class_id, method, arg_tys)
+    /// for every Send whose receiver type is known. Used by
+    /// `unify_params_from_call_sites`. The receiver's type was set by
+    /// the most recent typing pass, so call sites whose receivers
+    /// resolve to a class flow their args back here; bare-name Sends
+    /// against implicit-self use the enclosing class.
+    fn collect_send_sites(
+        &self,
+        expr: &Expr,
+        out: &mut Vec<(ClassId, Symbol, Vec<Ty>)>,
+    ) {
+        match &*expr.node {
+            ExprNode::Send { recv, method, args, block, .. } => {
+                let recv_class = match recv {
+                    Some(r) => match r.ty.as_ref() {
+                        Some(Ty::Class { id, .. }) => Some(id.clone()),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let Some(class_id) = recv_class {
+                    let arg_tys: Vec<Ty> = args
+                        .iter()
+                        .map(|a| a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) }))
+                        .collect();
+                    out.push((class_id, method.clone(), arg_tys));
+                }
+                if let Some(r) = recv { self.collect_send_sites(r, out); }
+                for a in args { self.collect_send_sites(a, out); }
+                if let Some(b) = block { self.collect_send_sites(b, out); }
+            }
+            ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+                for e in exprs { self.collect_send_sites(e, out); }
+            }
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    self.collect_send_sites(k, out);
+                    self.collect_send_sites(v, out);
+                }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                self.collect_send_sites(cond, out);
+                self.collect_send_sites(then_branch, out);
+                self.collect_send_sites(else_branch, out);
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                self.collect_send_sites(scrutinee, out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard { self.collect_send_sites(g, out); }
+                    self.collect_send_sites(&arm.body, out);
+                }
+            }
+            ExprNode::BoolOp { left, right, .. }
+            | ExprNode::RescueModifier { expr: left, fallback: right } => {
+                self.collect_send_sites(left, out);
+                self.collect_send_sites(right, out);
+            }
+            ExprNode::Let { value, body, .. } => {
+                self.collect_send_sites(value, out);
+                self.collect_send_sites(body, out);
+            }
+            ExprNode::Lambda { body, .. } => self.collect_send_sites(body, out),
+            ExprNode::Apply { fun, args, block } => {
+                self.collect_send_sites(fun, out);
+                for a in args { self.collect_send_sites(a, out); }
+                if let Some(b) = block { self.collect_send_sites(b, out); }
+            }
+            ExprNode::Assign { target, value } => {
+                self.collect_send_sites(value, out);
+                if let LValue::Attr { recv, .. } = target {
+                    self.collect_send_sites(recv, out);
+                }
+                if let LValue::Index { recv, index } = target {
+                    self.collect_send_sites(recv, out);
+                    self.collect_send_sites(index, out);
+                }
+            }
+            ExprNode::StringInterp { parts } => {
+                for p in parts {
+                    if let crate::expr::InterpPart::Expr { expr } = p {
+                        self.collect_send_sites(expr, out);
+                    }
+                }
+            }
+            ExprNode::Yield { args } => {
+                for a in args { self.collect_send_sites(a, out); }
+            }
+            ExprNode::Raise { value } => self.collect_send_sites(value, out),
+            ExprNode::Return { value } => self.collect_send_sites(value, out),
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args { self.collect_send_sites(a, out); }
+                }
+            }
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                self.collect_send_sites(body, out);
+                for rc in rescues {
+                    for c in &rc.classes { self.collect_send_sites(c, out); }
+                    self.collect_send_sites(&rc.body, out);
+                }
+                if let Some(e) = else_branch { self.collect_send_sites(e, out); }
+                if let Some(e) = ensure { self.collect_send_sites(e, out); }
+            }
+            ExprNode::Next { value } => {
+                if let Some(v) = value { self.collect_send_sites(v, out); }
+            }
+            ExprNode::MultiAssign { value, .. } => self.collect_send_sites(value, out),
+            ExprNode::While { cond, body, .. } => {
+                self.collect_send_sites(cond, out);
+                self.collect_send_sites(body, out);
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin { self.collect_send_sites(b, out); }
+                if let Some(e) = end { self.collect_send_sites(e, out); }
+            }
+            ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef => {}
+        }
     }
 
     /// Walk a typed expression tree computing each node's *local* effects
@@ -905,6 +1258,47 @@ fn merged_before_seed(
         }
     }
     seed
+}
+
+/// Unify a stored param type with a freshly observed argument type.
+/// Mirrors Spinel's `detect_poly_in_node` (`spinel_codegen.rb:6961-7000`)
+/// joinrules at a higher level — we operate on `Ty` directly, so the
+/// rules are:
+/// - same type → keep
+/// - one side is `Ty::Var` (no info yet) → take the other
+/// - one side is `Nil` and the other is concrete → nullable union (T?)
+/// - already a Union containing `observed` → keep
+/// - otherwise → widen via `union_of`
+fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
+    if stored == observed {
+        return stored;
+    }
+    if matches!(stored, Ty::Var { .. }) {
+        return observed;
+    }
+    if matches!(observed, Ty::Var { .. }) {
+        return stored;
+    }
+    // T + Nil → Union<T, Nil>; same for the symmetric case. Skip
+    // double-wrapping if `stored` already encodes the nullable form.
+    if matches!(observed, Ty::Nil) {
+        if let Ty::Union { variants } = &stored {
+            if variants.contains(&Ty::Nil) {
+                return stored;
+            }
+        }
+        return crate::analyze::body::union_of(stored, Ty::Nil);
+    }
+    if matches!(stored, Ty::Nil) {
+        return crate::analyze::body::union_of(observed, Ty::Nil);
+    }
+    // Union<T, ...> already containing observed → keep stored.
+    if let Ty::Union { variants } = &stored {
+        if variants.contains(&observed) {
+            return stored;
+        }
+    }
+    crate::analyze::body::union_of(stored, observed)
 }
 
 /// A view name identifies a partial when any path segment starts with `_`

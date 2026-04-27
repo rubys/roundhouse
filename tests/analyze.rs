@@ -432,7 +432,7 @@ fn actions_without_db_calls_stay_pure() {
         renders: RenderTarget::Inferred,
         effects: EffectSet::singleton(Effect::Io), // seed a bogus effect
     };
-    let analyzer = Analyzer::new(&analyzed_app());
+    let mut analyzer = Analyzer::new(&analyzed_app());
     analyzer.analyze(&mut roundhouse::App::new()); // warm up is a no-op
     let body_ctx_effects = {
         // Simulate direct effect collection
@@ -733,7 +733,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
             leading_blank_line: false,
         }],
     });
-    let analyzer = Analyzer::new(&app);
+    let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
     let ctrl = app.controllers.pop().unwrap();
     let item = ctrl.body.into_iter().next().unwrap();
