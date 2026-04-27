@@ -18,6 +18,11 @@ fn lowered_real_blog() -> Vec<EmittedFile> {
     ruby::emit_lowered_models(&app)
 }
 
+fn lowered_real_blog_schema() -> String {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    ruby::emit_lowered_schema(&app).content
+}
+
 fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
     files
         .iter()
@@ -276,6 +281,76 @@ fn comment_block_callbacks_render_as_methods() {
     assert!(
         src.contains("article.broadcast_replace_to(\"articles\") rescue nil"),
         "expected RescueModifier surface form; got:\n{src}",
+    );
+}
+
+#[test]
+fn schema_emits_module_wrapper_at_config_path() {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let f = ruby::emit_lowered_schema(&app);
+    assert_eq!(f.path.to_string_lossy(), "config/schema.rb");
+    assert!(f.content.starts_with("module Schema\n"), "{}", f.content);
+    assert!(f.content.contains("STATEMENTS = ["), "{}", f.content);
+    assert!(f.content.contains("].freeze"), "{}", f.content);
+    assert!(f.content.contains("def self.load!(adapter)"), "{}", f.content);
+    assert!(
+        f.content.contains("STATEMENTS.each { |sql| adapter.execute_ddl(sql) }"),
+        "{}",
+        f.content,
+    );
+}
+
+#[test]
+fn schema_emits_one_create_table_heredoc_per_table() {
+    let src = lowered_real_blog_schema();
+    // Each table renders as a `<<~SQL,` heredoc with the canonical
+    // SQLite scaffold: id INTEGER PRIMARY KEY AUTOINCREMENT, then
+    // each non-PK column with its SQL type and NOT NULL marker.
+    assert!(src.contains("CREATE TABLE IF NOT EXISTS articles ("), "{src}");
+    assert!(src.contains("CREATE TABLE IF NOT EXISTS comments ("), "{src}");
+    let heredoc_count = src.matches("<<~SQL,").count();
+    assert_eq!(heredoc_count, 2, "expected one heredoc per table; got:\n{src}");
+}
+
+#[test]
+fn schema_renders_pk_and_typed_columns() {
+    let src = lowered_real_blog_schema();
+    // Every table starts with the synthesized id PK line.
+    assert!(src.contains("id INTEGER PRIMARY KEY AUTOINCREMENT,"), "{src}");
+    // Real-blog's articles table: title (string) → TEXT, body (text)
+    // → TEXT, created_at/updated_at (datetime, NOT NULL) → TEXT NOT NULL.
+    assert!(src.contains("title TEXT"), "{src}");
+    assert!(src.contains("body TEXT"), "{src}");
+    assert!(src.contains("created_at TEXT NOT NULL"), "{src}");
+    assert!(src.contains("updated_at TEXT NOT NULL"), "{src}");
+    // comments.article_id is a NOT NULL integer FK.
+    assert!(src.contains("article_id INTEGER NOT NULL"), "{src}");
+    assert!(src.contains("commenter TEXT"), "{src}");
+}
+
+#[test]
+fn schema_emits_create_index_lines_for_table_indexes() {
+    let src = lowered_real_blog_schema();
+    // comments has `t.index ["article_id"], name: "index_comments_on_article_id"`.
+    assert!(
+        src.contains(
+            "\"CREATE INDEX IF NOT EXISTS index_comments_on_article_id ON comments (article_id)\","
+        ),
+        "{src}",
+    );
+}
+
+#[test]
+fn schema_drops_foreign_key_constraints() {
+    // Real-blog has `add_foreign_key "comments", "articles"` — but the
+    // spinel runtime models relationships at the app layer (e.g.
+    // belongs_to lowers to `Article.find_by(id: @article_id)`), so the
+    // DB-level constraint is dropped per yagni-on-round-trip:
+    // structural compile-equivalence, not source-equivalence.
+    let src = lowered_real_blog_schema();
+    assert!(
+        !src.contains("FOREIGN KEY") && !src.contains("REFERENCES"),
+        "spinel schema should not emit FK constraints; got:\n{src}",
     );
 }
 

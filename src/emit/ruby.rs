@@ -91,6 +91,15 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
+/// Emit `config/schema.rb` in spinel-blog shape — a `Schema` module
+/// wrapping raw SQL `CREATE TABLE` / `CREATE INDEX` statements as a
+/// frozen array, plus `self.load!(adapter)` to drive them through the
+/// adapter. Companion to `emit_lowered_models` for the spinel emit
+/// pipeline.
+pub fn emit_lowered_schema(app: &App) -> EmittedFile {
+    schema::emit_lowered_schema(&app.schema)
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {

@@ -5,7 +5,7 @@
 
 use ruby_prism::parse;
 
-use crate::schema::{Column, ColumnType, Schema, Table};
+use crate::schema::{Column, ColumnType, Index, Schema, Table};
 use crate::{Symbol, TableRef};
 
 use super::IngestResult;
@@ -47,6 +47,7 @@ pub fn ingest_schema(source: &[u8], _file: &str) -> IngestResult<Schema> {
         }
 
         let mut columns = Vec::new();
+        let mut indexes: Vec<Index> = Vec::new();
         if has_id {
             columns.push(Column {
                 name: Symbol::from("id"),
@@ -61,7 +62,12 @@ pub fn ingest_schema(source: &[u8], _file: &str) -> IngestResult<Schema> {
                 if let Some(body) = block.body() {
                     for stmt in flatten_statements(body) {
                         if let Some(call) = stmt.as_call_node() {
-                            if let Some(col) = column_from_call(&call) {
+                            let call_name = constant_id_str(&call.name()).to_string();
+                            if call_name == "index" {
+                                if let Some(idx) = index_from_call(&call, &table_name) {
+                                    indexes.push(idx);
+                                }
+                            } else if let Some(col) = column_from_call(&call) {
                                 columns.push(col);
                             }
                         }
@@ -75,7 +81,7 @@ pub fn ingest_schema(source: &[u8], _file: &str) -> IngestResult<Schema> {
             Table {
                 name: Symbol::from(table_name),
                 columns,
-                indexes: vec![],
+                indexes,
                 foreign_keys: vec![],
             },
         );
@@ -144,5 +150,53 @@ fn column_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Column> {
         nullable,
         default,
         primary_key: false,
+    })
+}
+
+fn index_from_call(call: &ruby_prism::CallNode<'_>, table_name: &str) -> Option<Index> {
+    // Expected: t.index ["article_id"], name: "...", unique: true
+    let recv = call.receiver()?;
+    recv.as_local_variable_read_node()?;
+
+    let args_node = call.arguments()?;
+    let first = args_node.arguments().iter().next()?;
+    let arr = first.as_array_node()?;
+
+    let mut columns: Vec<Symbol> = Vec::new();
+    for el in arr.elements().iter() {
+        if let Some(name) = string_value(&el) {
+            columns.push(Symbol::from(name));
+        }
+    }
+    if columns.is_empty() {
+        return None;
+    }
+
+    let mut explicit_name: Option<String> = None;
+    let mut unique = false;
+    for arg in args_node.arguments().iter().skip(1) {
+        if let Some(kh) = arg.as_keyword_hash_node() {
+            for el in kh.elements().iter() {
+                let Some(assoc) = el.as_assoc_node() else { continue };
+                let Some(key) = symbol_value(&assoc.key()) else { continue };
+                let value = &assoc.value();
+                match key.as_str() {
+                    "name" => explicit_name = string_value(value),
+                    "unique" => unique = bool_value(value).unwrap_or(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let name = explicit_name.unwrap_or_else(|| {
+        let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
+        format!("index_{}_on_{}", table_name, cols.join("_and_"))
+    });
+
+    Some(Index {
+        name: Symbol::from(name),
+        columns,
+        unique,
     })
 }
