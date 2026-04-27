@@ -117,9 +117,40 @@ fn comment_renders_belongs_to_with_fk_guard() {
     let src = find(&files, "comment.rb");
     assert!(src.contains("class Comment < ApplicationRecord"), "{src}");
     assert!(src.contains("def article"), "{src}");
-    // The lowered shape: `if @article_id == 0 then nil else
-    // Article.find_by(id: @article_id) end`. Body assertions are loose
-    // because emit_expr currently renders `==` as a method call —
-    // that's a pre-existing surface bug, fixable independently.
     assert!(src.contains("Article.find_by(id: @article_id)"), "{src}");
+}
+
+#[test]
+fn equality_send_renders_as_infix() {
+    // belongs_to lowering produces `if @article_id == 0` as an If
+    // whose cond is a Send `==`. emit_send_base renders Send's
+    // operator-named methods as infix syntax.
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    assert!(
+        src.contains("@article_id == 0"),
+        "expected infix `==`; emit_send_base regression?\n{src}",
+    );
+    assert!(
+        !src.contains("@article_id.=="),
+        "infix should not render as method-call form; got:\n{src}",
+    );
+}
+
+#[test]
+fn setter_send_renders_with_space_around_equals() {
+    // The lowered initialize/update bodies call setters via
+    // `Send { method: "x=", args: [v] }` (since attr_writer methods
+    // are named `x=`). emit_send_base rewrites these to
+    // `recv.x = v` form.
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(
+        src.contains("self.title = attrs[:title]"),
+        "expected `self.title = ...` setter form; got:\n{src}",
+    );
+    assert!(
+        !src.contains("self.title= "),
+        "setter should not render as fused `x= ` form; got:\n{src}",
+    );
 }

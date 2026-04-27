@@ -319,8 +319,24 @@ pub(super) fn emit_send_base(
     parenthesized: bool,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-    match (recv, method.as_str()) {
+    let m = method.as_str();
+    match (recv, m) {
         (Some(r), "[]") => format!("{}[{}]", emit_expr(r), args_s.join(", ")),
+        // Binary operator methods (`@x == 0`, `a + b`) round-trip as
+        // infix syntax — Ruby parses them as `Send` with method names
+        // like `==`, `+`, etc., but emitting `recv.== 0` is technically
+        // valid yet ugly enough to be a bug. Single-arg only; chained
+        // patterns parenthesize naturally via `Send.parenthesized`.
+        (Some(r), op) if is_binary_operator(op) && args_s.len() == 1 => {
+            format!("{} {op} {}", emit_expr(r), args_s[0])
+        }
+        // Setter calls (`self.id = value`). Method names ending in `=`
+        // that aren't on the operator list are attribute setters; the
+        // surface form is `recv.attr = value`, not `recv.attr= value`.
+        (Some(r), name) if is_setter_method(name) && args_s.len() == 1 => {
+            let attr = &name[..name.len() - 1];
+            format!("{}.{attr} = {}", emit_expr(r), args_s[0])
+        }
         (None, _) => {
             if args_s.is_empty() {
                 method.to_string()
@@ -341,6 +357,53 @@ pub(super) fn emit_send_base(
             }
         }
     }
+}
+
+/// Ruby's binary infix operators, as method names. Excludes `[]` and
+/// `[]=` (handled separately as index access) and unary operators
+/// (`-@`, `+@`, `!`, `~`) which don't have a stable two-arg infix shape.
+fn is_binary_operator(m: &str) -> bool {
+    matches!(
+        m,
+        "==" | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "<=>"
+            | "==="
+            | "=~"
+            | "!~"
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "**"
+            | "<<"
+            | ">>"
+            | "&"
+            | "|"
+            | "^"
+    )
+}
+
+/// True if the method name is an attribute setter — ends in `=` but
+/// isn't one of the comparison operators that also end in `=`.
+fn is_setter_method(m: &str) -> bool {
+    if !m.ends_with('=') || m.len() < 2 {
+        return false;
+    }
+    if matches!(m, "==" | "!=" | "<=" | ">=" | "<=>" | "===" | "=~") {
+        return false;
+    }
+    // `[]=` is handled by callers via LValue::Index, not here. The
+    // lowerer can still send `[]=` literally; reject it so we don't
+    // mangle `recv[].x = value` into something weird.
+    if m == "[]=" {
+        return false;
+    }
+    true
 }
 
 /// Emit a `Send + block` in plain Ruby form. Honors the Lambda's
