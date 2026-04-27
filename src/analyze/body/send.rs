@@ -456,6 +456,17 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // resolves against `id`'s registry entry).
         "hash" | "object_id" => Some(Ty::Int),
         "inspect" | "to_s" => Some(Ty::Str),
+        // `raise` and `throw` are divergent — control transfers, the
+        // call doesn't return a value. Surface them universally so a
+        // bare `raise X, msg` Send (recv=None, method="raise") in any
+        // method body resolves to a known type instead of falling
+        // through dispatch to `Ty::Var`. Returning `Ty::Nil` here
+        // matches `ExprNode::Raise`'s analyzer arm and is harmless
+        // for callers (raise's "result" is never observed at run
+        // time). Without this, methods that end with `raise ...`
+        // harvest as `Ty::Var` and the dispatch registry never
+        // learns their declared return type from the RBS contract.
+        "raise" | "throw" => Some(Ty::Nil),
         _ => None,
     }
 }
