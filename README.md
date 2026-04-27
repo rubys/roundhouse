@@ -15,6 +15,10 @@ A roundhouse is the circular hub in a rail yard where engines rotate and
 route onto different tracks. That's the pipeline shape: one Ruby source
 at the center, analyzed and dispatched to one of N target tracks.
 
+*For the case for doing this at all — the constraints that push
+successful Rails apps off CRuby, and the option value of preserving
+the choice — see [WHY.md](WHY.md).*
+
 ## Pipeline
 
 ```
