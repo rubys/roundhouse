@@ -23,6 +23,7 @@ use roundhouse::ingest::ingest_library_classes;
 const ERRORS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/errors.rb";
 const INFLECTOR_RB_PATH: &str = "fixtures/spinel-blog/runtime/inflector.rb";
 const VALIDATIONS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/validations.rb";
+const BASE_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/base.rb";
 
 #[test]
 fn errors_rb_ingests_and_emits_via_library_path() {
@@ -220,4 +221,116 @@ fn validations_rb_ingests_mixin_module() {
     assert!(content.contains("def errors"), "emitted: {content}");
     assert!(content.contains("def validates_presence_of(attr_name)"), "emitted: {content}");
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
+}
+
+/// `runtime/active_record/base.rb`: the heaviest file. Three patterns
+/// to verify here:
+///   - Top-level `require` directives are silently dropped (not
+///     captured by ingest; not emitted).
+///   - `module ActiveRecord` with `class << self; attr_accessor :adapter; end`
+///     surfaces as a LibraryClass with class-level `adapter` /
+///     `adapter=` methods.
+///   - `class Base` with include + attr_accessor + ~30 def/`def self.*`
+///     ingests with all methods captured and the right receiver kind.
+#[test]
+fn base_rb_ingests_module_with_singleton_class_and_class() {
+    let path = PathBuf::from(BASE_RB_PATH);
+    let source = std::fs::read(&path).expect("read base.rb");
+    let path_str = path.display().to_string();
+
+    let classes = ingest_library_classes(&source, &path_str)
+        .expect("ingest_library_classes returned Err");
+
+    let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
+    assert!(names.contains(&"ActiveRecord"), "expected ActiveRecord module; got {names:?}");
+    assert!(names.contains(&"Base"), "expected Base class; got {names:?}");
+
+    // ActiveRecord module surfaces because of the class << self block.
+    let ar = classes.iter().find(|c| c.name.0.as_str() == "ActiveRecord").unwrap();
+    assert!(ar.is_module);
+    let ar_method_names: Vec<&str> = ar.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(ar_method_names.contains(&"adapter"), "ActiveRecord methods: {ar_method_names:?}");
+    assert!(ar_method_names.contains(&"adapter="), "ActiveRecord methods: {ar_method_names:?}");
+    // Singleton-class attr_accessor → class receiver on both pair members.
+    for m in &ar.methods {
+        assert!(
+            matches!(m.receiver, roundhouse::dialect::MethodReceiver::Class),
+            "ActiveRecord.{} should be class method",
+            m.name.as_str(),
+        );
+    }
+
+    // Base class assertions.
+    let base = classes.iter().find(|c| c.name.0.as_str() == "Base").unwrap();
+    assert!(!base.is_module);
+    assert!(base.parent.is_none(), "Base has no explicit superclass");
+    assert!(
+        base.includes.iter().any(|i| i.0.as_str() == "Validations"),
+        "Base should include Validations; got {:?}",
+        base.includes,
+    );
+
+    let base_methods: Vec<&str> = base.methods.iter().map(|m| m.name.as_str()).collect();
+    // attr_accessor :id lowered → id reader + id= writer.
+    assert!(base_methods.contains(&"id"), "expected id getter; methods: {base_methods:?}");
+    assert!(base_methods.contains(&"id="), "expected id= setter; methods: {base_methods:?}");
+    // A few key class methods.
+    for cm in ["table_name", "all", "find", "where", "count"] {
+        assert!(
+            base_methods.contains(&cm),
+            "expected class method `{cm}`; methods: {base_methods:?}",
+        );
+    }
+    // A few key instance methods.
+    for im in ["save", "save!", "destroy", "valid?", "==", "hash"] {
+        assert!(
+            base_methods.contains(&im),
+            "expected instance method `{im}`; methods: {base_methods:?}",
+        );
+    }
+
+    // Receiver checks: def self.* land as Class, def x as Instance.
+    let class_methods = ["table_name", "all", "find", "where", "count", "exists?"];
+    let instance_methods = ["save", "destroy", "persisted?", "==", "hash"];
+    for m in &base.methods {
+        let n = m.name.as_str();
+        if class_methods.contains(&n) {
+            assert!(
+                matches!(m.receiver, roundhouse::dialect::MethodReceiver::Class),
+                "{n} should be class method, got {:?}",
+                m.receiver,
+            );
+        } else if instance_methods.contains(&n) {
+            assert!(
+                matches!(m.receiver, roundhouse::dialect::MethodReceiver::Instance),
+                "{n} should be instance method, got {:?}",
+                m.receiver,
+            );
+        }
+    }
+
+    // Emit + spot-check structural shape.
+    let mut app = App::new();
+    for lc in classes {
+        app.library_classes.push(lc);
+    }
+    let files = emit_library(&app);
+    let base_file = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("base.rb"))
+        .expect("base.rb emitted");
+    let bc = &base_file.content;
+    assert!(bc.contains("class Base"), "base.rb: {bc}");
+    assert!(bc.contains("include Validations"), "base.rb: {bc}");
+    assert!(bc.contains("def self.find(id)"), "base.rb: {bc}");
+    assert!(bc.contains("def save"), "base.rb: {bc}");
+
+    let ar_file = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("active_record.rb"))
+        .expect("active_record.rb emitted");
+    let arc = &ar_file.content;
+    assert!(arc.contains("module ActiveRecord"), "active_record.rb: {arc}");
+    assert!(arc.contains("def self.adapter"), "active_record.rb: {arc}");
+    assert!(arc.contains("def self.adapter=(value)"), "active_record.rb: {arc}");
 }

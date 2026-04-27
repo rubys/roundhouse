@@ -307,7 +307,7 @@ pub struct MethodDef {
     pub enclosing_class: Option<Symbol>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MethodReceiver {
     Instance,

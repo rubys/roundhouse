@@ -161,10 +161,31 @@ fn collect_modules<'pr>(node: &Node<'pr>, out: &mut Vec<ruby_prism::ModuleNode<'
 }
 
 fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
-    let Some(body) = m.body() else { return false };
+    body_has_direct_method_decl(m.body())
+}
+
+/// Whether the body has anything that lowers to a method on the
+/// enclosing scope: a direct `def`, an `attr_*` call, or a
+/// `class << self` block whose body contains the same. Used to decide
+/// whether a module is worth surfacing as a `LibraryClass`.
+fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
     for stmt in flatten_statements(body) {
         if stmt.as_def_node().is_some() {
             return true;
+        }
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none() {
+                let kw = constant_id_str(&call.name());
+                if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor") {
+                    return true;
+                }
+            }
+        }
+        if let Some(sc) = stmt.as_singleton_class_node() {
+            if body_has_direct_method_decl(sc.body()) {
+                return true;
+            }
         }
     }
     false

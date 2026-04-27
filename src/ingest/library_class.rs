@@ -77,7 +77,7 @@ fn library_class_from_node(
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
-    let (includes, methods) = walk_decl_body(class.body(), &owner, file)?;
+    let (includes, methods) = walk_decl_body(class.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: false,
@@ -103,7 +103,7 @@ fn library_class_from_module_node(
     })?;
     let owner = ClassId(Symbol::from(name_path.join("::")));
 
-    let (includes, methods) = walk_decl_body(module.body(), &owner, file)?;
+    let (includes, methods) = walk_decl_body(module.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: true,
@@ -118,10 +118,16 @@ fn library_class_from_module_node(
 /// Other top-level calls (alias_method, etc.) and nested class/module
 /// declarations are dropped — those surface separately via the plural
 /// ingest entry points.
+///
+/// `force_class_receiver` is true when we're recursing into a
+/// `class << self` block; it overrides every synthesized method's
+/// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
+/// `class << self` produces class-level getter/setter pairs.
 fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
+    force_class_receiver: bool,
 ) -> IngestResult<(Vec<ClassId>, Vec<MethodDef>)> {
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
@@ -132,7 +138,20 @@ fn walk_decl_body<'pr>(
 
     for stmt in flatten_statements(b) {
         if let Some(def) = stmt.as_def_node() {
-            methods.push(ingest_library_method(&def, owner, file)?);
+            let mut m = ingest_library_method(&def, owner, file)?;
+            if force_class_receiver {
+                m.receiver = MethodReceiver::Class;
+            }
+            methods.push(m);
+            continue;
+        }
+        // `class << self ... end` — singleton class block. Body
+        // defines class-level methods on the enclosing scope.
+        if let Some(sc) = stmt.as_singleton_class_node() {
+            let (inner_includes, inner_methods) =
+                walk_decl_body(sc.body(), owner, file, true)?;
+            includes.extend(inner_includes);
+            methods.extend(inner_methods);
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
@@ -162,14 +181,19 @@ fn walk_decl_body<'pr>(
                                 }
                             }
                         }
+                        let recv = if force_class_receiver {
+                            MethodReceiver::Class
+                        } else {
+                            MethodReceiver::Instance
+                        };
                         for name in &names {
                             let want_reader = matches!(kw, "attr_reader" | "attr_accessor");
                             let want_writer = matches!(kw, "attr_writer" | "attr_accessor");
                             if want_reader {
-                                methods.push(synth_attr_reader(owner, name));
+                                methods.push(synth_attr_reader(owner, name, recv));
                             }
                             if want_writer {
-                                methods.push(synth_attr_writer(owner, name));
+                                methods.push(synth_attr_writer(owner, name, recv));
                             }
                         }
                     }
@@ -187,15 +211,16 @@ fn walk_decl_body<'pr>(
     Ok((includes, methods))
 }
 
-/// Synthesize `def <name>; @<name>; end`.
-fn synth_attr_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
+/// Synthesize `def <name>; @<name>; end` (instance receiver) or
+/// `def self.<name>; @<name>; end` (class receiver).
+fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -> MethodDef {
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
         name: name.clone(),
-        receiver: MethodReceiver::Instance,
+        receiver,
         params: Vec::new(),
         body,
         signature: None,
@@ -204,8 +229,9 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
     }
 }
 
-/// Synthesize `def <name>=(value); @<name> = value; end`.
-fn synth_attr_writer(owner: &ClassId, name: &Symbol) -> MethodDef {
+/// Synthesize the writer pair for `attr_writer` / `attr_accessor`,
+/// honoring the receiver (Instance vs Class).
+fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -> MethodDef {
     let value_param = Symbol::from("value");
     let rhs = Expr::new(
         Span::synthetic(),
@@ -224,7 +250,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol) -> MethodDef {
     let setter_name = Symbol::from(format!("{}=", name.as_str()));
     MethodDef {
         name: setter_name,
-        receiver: MethodReceiver::Instance,
+        receiver,
         params: vec![value_param],
         body,
         signature: None,
