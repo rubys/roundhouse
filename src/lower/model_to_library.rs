@@ -460,8 +460,15 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
 fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let owner = &model.name;
     for assoc in model.associations() {
-        if let Association::HasMany { name, target, foreign_key, .. } = assoc {
-            methods.push(synth_has_many_reader(owner, name, target, foreign_key));
+        match assoc {
+            Association::HasMany { name, target, foreign_key, .. } => {
+                methods.push(synth_has_many_reader(owner, name, target, foreign_key));
+            }
+            Association::BelongsTo { name, target, foreign_key, .. } => {
+                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
+            }
+            // has_one and HABTM land when a fixture demands them.
+            _ => {}
         }
     }
 }
@@ -495,6 +502,72 @@ fn synth_has_many_reader(
             args: where_args,
             block: None,
             parenthesized: true,
+        },
+    );
+
+    MethodDef {
+        name: name.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+    }
+}
+
+fn synth_belongs_to_reader(
+    owner: &ClassId,
+    name: &Symbol,
+    target: &ClassId,
+    foreign_key: &Symbol,
+) -> MethodDef {
+    // def article
+    //   @article_id == 0 ? nil : Article.find_by(id: @article_id)
+    // end
+    let cond = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: foreign_key.clone() },
+            )),
+            method: Symbol::from("=="),
+            args: vec![lit_int(0)],
+            block: None,
+            parenthesized: false,
+        },
+    );
+
+    let find_by = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(target)),
+            method: Symbol::from("find_by"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![(
+                        lit_sym(Symbol::from("id")),
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Ivar { name: foreign_key.clone() },
+                        ),
+                    )],
+                    braced: false,
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond,
+            then_branch: nil_lit(),
+            else_branch: find_by,
         },
     );
 

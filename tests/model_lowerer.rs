@@ -147,6 +147,32 @@ fn article_lowers_has_many_to_collection_reader() {
 }
 
 #[test]
+fn comment_lowers_belongs_to_reader() {
+    let lc = lower("Comment");
+    assert_eq!(lc.name.0.as_str(), "Comment");
+
+    let article = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "article")
+        .expect("article method present (belongs_to :article)");
+
+    assert!(matches!(article.receiver, MethodReceiver::Instance));
+    assert!(article.params.is_empty());
+
+    // Shape: `if @article_id == 0 then nil else Article.find_by(id: @article_id) end`.
+    match &*article.body.node {
+        roundhouse::ExprNode::If { cond, .. } => match &*cond.node {
+            roundhouse::ExprNode::Send { method, .. } => {
+                assert_eq!(method.as_str(), "==", "guard should be ==");
+            }
+            other => panic!("if-cond should be Send `==`; got {other:?}"),
+        },
+        other => panic!("article body should be If; got {other:?}"),
+    }
+}
+
+#[test]
 fn article_lowers_dependent_destroy_to_before_destroy() {
     let lc = lower("Article");
     let cb = lc
