@@ -111,6 +111,20 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     route::emit_lowered_routes(app)
 }
 
+/// Emit each controller in spinel-blog shape: a `process_action(action_name)`
+/// dispatcher (synthesizing before-action filters as conditional calls
+/// and case-dispatching to per-action methods) plus the public actions
+/// and private filter targets as ordinary methods. Output is one
+/// `app/controllers/<name>.rb` per controller.
+///
+/// What this pass DOESN'T cover (each is a follow-on lowerer): action-
+/// body rewrites such as `params` → `@params`, polymorphic
+/// `redirect_to @x` → `RouteHelpers.x_path(@x.id)`, and
+/// `Article.includes(:foo).order(...)` → `.all` + in-memory sort.
+pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
+    controller::emit_lowered_controllers(app)
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {

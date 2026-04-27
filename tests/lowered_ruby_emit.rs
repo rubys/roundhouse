@@ -28,6 +28,11 @@ fn lowered_real_blog_routes() -> String {
     ruby::emit_lowered_routes(&app).content
 }
 
+fn lowered_real_blog_controllers() -> Vec<EmittedFile> {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    ruby::emit_lowered_controllers(&app)
+}
+
 fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
     files
         .iter()
@@ -468,6 +473,144 @@ fn routes_order_literal_segments_before_id_patterns() {
     let pos_show = src.find(r#"pattern: "/articles/:id", controller: :articles, action: :show"#)
         .expect("/articles/:id show missing");
     assert!(pos_new < pos_show, "literal segment must precede :id pattern");
+}
+
+#[test]
+fn controllers_one_file_per_controller_at_app_controllers_path() {
+    let files = lowered_real_blog_controllers();
+    let names: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
+    for stem in ["application_controller", "articles_controller", "comments_controller"] {
+        assert!(
+            names.iter().any(|n| n == &format!("app/controllers/{stem}.rb")),
+            "missing {stem}; got {names:?}",
+        );
+    }
+}
+
+#[test]
+fn controllers_application_requires_runtime_action_controller() {
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "application_controller.rb");
+    // Parent is ActionController::Base, which lives in runtime/.
+    assert!(src.contains("class ApplicationController < ActionController::Base"), "{src}");
+    assert!(
+        src.contains("require_relative \"../../runtime/action_controller\""),
+        "{src}",
+    );
+}
+
+#[test]
+fn controllers_application_drops_unknown_class_body_calls() {
+    // real-blog's ApplicationController has `allow_browser versions: :modern`
+    // and `stale_when_importmap_changes` — class-level Sends with no
+    // spinel semantics. They get dropped (the lowering only carries
+    // filters and actions through; Unknown items disappear).
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "application_controller.rb");
+    assert!(!src.contains("allow_browser"), "{src}");
+    assert!(!src.contains("stale_when_importmap_changes"), "{src}");
+}
+
+#[test]
+fn controllers_articles_extends_application_controller_in_same_dir() {
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(src.contains("class ArticlesController < ApplicationController"), "{src}");
+    // Same-dir parent: bare snake_case, no leading "../" or "./".
+    assert!(src.contains("require_relative \"application_controller\""), "{src}");
+    assert!(
+        !src.contains("require_relative \"../../runtime/action_controller\""),
+        "subclass should not directly require the base runtime; got:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_articles_synthesizes_process_action_dispatcher() {
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    // process_action(action_name) is the synthesized entry point —
+    // before_action filters become conditional set_X calls; the
+    // case dispatch maps action symbols to method calls.
+    assert!(src.contains("def process_action(action_name)"), "{src}");
+    assert!(src.contains("case action_name"), "{src}");
+    for arm in [
+        "when :index",
+        "when :show",
+        "when :new",
+        "when :edit",
+        "when :create",
+        "when :update",
+        "when :destroy",
+    ] {
+        assert!(src.contains(arm), "missing case arm `{arm}`:\n{src}");
+    }
+}
+
+#[test]
+fn controllers_articles_dispatch_renames_new_action_to_avoid_object_new_shadow() {
+    // `def new` would shadow Object#new; spinel renames the action method
+    // to `new_action` and the case arm dispatches `:new` to that name.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(src.contains("when :new"), "{src}");
+    assert!(src.contains("new_action"), "{src}");
+    // The action method itself is `def new_action`, not `def new`.
+    assert!(src.contains("def new_action"), "{src}");
+    assert!(
+        !src.contains("def new\n") && !src.contains("def new ") && !src.contains("def new("),
+        "should not emit `def new` — Object#new shadowing risk:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_articles_filter_dispatch_uses_include_check() {
+    // `before_action :set_article, only: %i[show edit update destroy]`
+    // lowers to `set_article if [:show, :edit, :update, :destroy].include?(action_name)`
+    // inside process_action.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    // The conditional is an if-modifier wrapping the call. Don't assert
+    // exact whitespace — just that the structural pieces line up.
+    assert!(
+        src.contains("set_article if") || src.contains("set_article  if"),
+        "expected set_article conditional dispatch; got:\n{src}",
+    );
+    assert!(src.contains(".include?(action_name)"), "{src}");
+    for sym in [":show", ":edit", ":update", ":destroy"] {
+        assert!(src.contains(sym), "missing filter sym {sym}:\n{src}");
+    }
+}
+
+#[test]
+fn controllers_articles_keeps_filter_target_as_private_method() {
+    // set_article and article_params (the private methods after `private`)
+    // pass through to the LibraryClass as ordinary methods. They're
+    // referenced by process_action's filter dispatch and by action bodies
+    // that touch params; keeping them as methods preserves callsites.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(src.contains("def set_article"), "{src}");
+    assert!(src.contains("def article_params"), "{src}");
+}
+
+#[test]
+fn controllers_articles_requires_referenced_models_from_models_dir() {
+    // ArticlesController references the `Article` model in action bodies
+    // (`Article.includes(...)`, `Article.new`, `Article.find(...)`).
+    // Spinel requires it explicitly from `../models/article`.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(src.contains("require_relative \"../models/article\""), "{src}");
+}
+
+#[test]
+fn controllers_application_controller_has_no_dispatcher() {
+    // ApplicationController has no actions and no filters in real-blog,
+    // so process_action shouldn't be synthesized at all — just the
+    // empty class declaration.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "application_controller.rb");
+    assert!(!src.contains("def process_action"), "{src}");
 }
 
 #[test]

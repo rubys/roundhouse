@@ -13,6 +13,14 @@ pub fn emit_expr(e: &Expr) -> String {
     emit_node(&e.node)
 }
 
+/// True when an If's else-branch carries no statements: an empty `Seq`
+/// or `nil`. The two surface forms `if cond; expr; end` (no else) and
+/// `expr if cond` (modifier) both rely on this predicate.
+fn is_empty_branch(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+        || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
@@ -53,12 +61,29 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            format!(
-                "if {}\n{}\nelse\n{}\nend",
-                emit_expr(cond),
-                indent_lines(&emit_expr(then_branch), 1),
-                indent_lines(&emit_expr(else_branch), 1),
-            )
+            // Empty `else` branch — render without the else clause. If the
+            // then-branch is also a single short expression, prefer the
+            // modifier form `expr if cond` (matches the surface form
+            // synthesized lowerings expect, e.g. controller before-action
+            // dispatch). Empty here means `Seq{[]}` or `Lit::Nil`, the two
+            // shapes lowerings produce for "no-op."
+            let cond_s = emit_expr(cond);
+            let then_s = emit_expr(then_branch);
+            let else_empty = is_empty_branch(else_branch);
+            if else_empty
+                && !matches!(&*then_branch.node, ExprNode::Seq { .. })
+                && !then_s.contains('\n')
+            {
+                format!("{then_s} if {cond_s}")
+            } else if else_empty {
+                format!("if {cond_s}\n{}\nend", indent_lines(&then_s, 1))
+            } else {
+                format!(
+                    "if {cond_s}\n{}\nelse\n{}\nend",
+                    indent_lines(&then_s, 1),
+                    indent_lines(&emit_expr(else_branch), 1),
+                )
+            }
         }
         ExprNode::Case { scrutinee, arms } => {
             let mut s = format!("case {}\n", emit_expr(scrutinee));

@@ -156,7 +156,7 @@ fn require_path_for_body_const(
     }
 }
 
-fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
+pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
     match &*e.node {
         ExprNode::Const { path } => {
             out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
