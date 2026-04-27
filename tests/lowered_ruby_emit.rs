@@ -191,6 +191,54 @@ fn comment_broadcasts_rewrite_lambda_param_to_ivar() {
 }
 
 #[test]
+fn application_record_requires_active_record_runtime() {
+    // ApplicationRecord's parent is `ActiveRecord::Base`, which lives
+    // in `runtime/active_record.rb`. The require_relative path resolves
+    // from `app/models/application_record.rb` up two levels.
+    let files = lowered_real_blog();
+    let src = find(&files, "application_record.rb");
+    assert!(
+        src.contains("require_relative \"../../runtime/active_record\""),
+        "{src}",
+    );
+    assert!(!src.contains("require_relative \"application_record\""), "{src}");
+}
+
+#[test]
+fn article_emits_parent_runtime_and_view_requires() {
+    // Article needs:
+    //   - parent: ApplicationRecord (same dir)
+    //   - Broadcasts (runtime module)
+    //   - Views::Articles (view partial)
+    // Sibling `Comment` is autoloaded; no require for it.
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    assert!(src.contains("require_relative \"application_record\""), "{src}");
+    assert!(src.contains("require_relative \"../../runtime/broadcasts\""), "{src}");
+    assert!(src.contains("require_relative \"../views/articles/_article\""), "{src}");
+    assert!(!src.contains("require_relative \"comment\""), "{src}");
+}
+
+#[test]
+fn comment_emits_view_require_for_own_partial() {
+    // Comment references `Views::Comments` (own partial) via the
+    // broadcasts_to expansion's `html:` payload. The cascade-render
+    // for the parent Article uses real-blog's literal
+    // `article.broadcast_replace_to("articles")` form, which has no
+    // Views::Articles reference — so only the comments partial gets
+    // a require here. (Spinel-blog rewrites the cascade into an
+    // explicit Views::Articles call; per yagni-on-round-trip we keep
+    // the literal form, which is compile-equivalent.)
+    let files = lowered_real_blog();
+    let src = find(&files, "comment.rb");
+    assert!(src.contains("require_relative \"../views/comments/_comment\""), "{src}");
+    assert!(
+        !src.contains("require_relative \"../views/articles/_article\""),
+        "Views::Articles isn't referenced in Comment's lowered body; should not require:\n{src}",
+    );
+}
+
+#[test]
 fn comment_broadcasts_compose_with_block_form_callback() {
     // Comment has both `broadcasts_to` AND
     // `after_create_commit { article.broadcast_replace_to(...) rescue nil }`.

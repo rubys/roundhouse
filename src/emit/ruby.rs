@@ -86,7 +86,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         .iter()
         .map(|m| {
             let lc = crate::lower::lower_model_to_library_class(m, &app.schema);
-            library::emit_library_class_decl(&lc)
+            library::emit_library_class_decl(&lc, app)
         })
         .collect()
 }
