@@ -1365,11 +1365,16 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
         src.contains("article.errors.each do |error|"),
         "expected article.errors.each block; got:\n{src}",
     );
-    // `<%= error.full_message %>` is a bareword interpolation —
-    // auto-escaped via html_escape.
+    // `<%= error.full_message %>` becomes just `error` after the
+    // errors-each adapter rewrite (spinel-runtime errors are plain
+    // Strings, no `full_message` method). Auto-escape still applies.
     assert!(
-        src.contains("body << ViewHelpers.html_escape(error.full_message)"),
-        "expected html_escape on bare error.full_message interpolation; got:\n{src}",
+        src.contains("body << ViewHelpers.html_escape(error)"),
+        "expected html_escape on bare `error` (full_message stripped); got:\n{src}",
+    );
+    assert!(
+        !src.contains("error.full_message"),
+        "Rails-side `.full_message` should be rewritten away; got:\n{src}",
     );
 }
 

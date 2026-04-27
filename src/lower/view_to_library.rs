@@ -637,8 +637,17 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 .first()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_else(|| "item".into());
+            // Spinel's `errors` is a `Vec<String>`, not a Vec of error
+            // objects. Real Rails templates iterate via `e.full_message`;
+            // rewrite that bareword projection back to the local so it
+            // type-checks against spinel's runtime.
+            let body = if is_errors_each(recv) {
+                rewrite_errors_each_body(body, &var_name)
+            } else {
+                body.clone()
+            };
             let inner_ctx = ctx.with_locals([var_name.clone()]);
-            let inner_stmts = walk_body(body, &inner_ctx);
+            let inner_stmts = walk_body(&body, &inner_ctx);
             let inner_body = if inner_stmts.len() == 1 {
                 inner_stmts.into_iter().next().unwrap()
             } else {
@@ -1460,6 +1469,120 @@ fn nested_resource_form(
     );
 
     Some((child.clone(), child_singular, action))
+}
+
+/// True when the receiver is a `<x>.errors` Send — i.e. the iterable
+/// of an errors-each loop. Spinel surfaces errors as `Vec<String>`,
+/// which is what triggers the `full_message` rewrite below.
+fn is_errors_each(recv: &Expr) -> bool {
+    matches!(
+        &*recv.node,
+        ExprNode::Send { method, args, block: None, .. }
+            if method.as_str() == "errors" && args.is_empty()
+    )
+}
+
+/// Substitute `<var>.full_message` (with no args, no block) with a bare
+/// `<var>` reference, recursively through the body. Other `<var>.*`
+/// projections pass through — only `full_message` is the Rails-side
+/// adapter Spinel-runtime errors don't expose.
+fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
+    let new_node = match &*body.node {
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            block,
+            parenthesized,
+        } => {
+            let r_is_var = matches!(
+                &*r.node,
+                ExprNode::Var { name, .. } if name.as_str() == var_name
+            ) || matches!(
+                &*r.node,
+                ExprNode::Send { recv: None, method: m, args: a, block: None, .. }
+                    if m.as_str() == var_name && a.is_empty()
+            );
+            if r_is_var && method.as_str() == "full_message" && args.is_empty() && block.is_none() {
+                return r.clone();
+            }
+            ExprNode::Send {
+                recv: Some(rewrite_errors_each_body(r, var_name)),
+                method: method.clone(),
+                args: args.iter().map(|a| rewrite_errors_each_body(a, var_name)).collect(),
+                block: block.as_ref().map(|b| rewrite_errors_each_body(b, var_name)),
+                parenthesized: *parenthesized,
+            }
+        }
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => ExprNode::Send {
+            recv: None,
+            method: method.clone(),
+            args: args.iter().map(|a| rewrite_errors_each_body(a, var_name)).collect(),
+            block: block.as_ref().map(|b| rewrite_errors_each_body(b, var_name)),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rewrite_errors_each_body(k, var_name),
+                        rewrite_errors_each_body(v, var_name),
+                    )
+                })
+                .collect(),
+            braced: *braced,
+        },
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements
+                .iter()
+                .map(|e| rewrite_errors_each_body(e, var_name))
+                .collect(),
+            style: *style,
+        },
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(|e| rewrite_errors_each_body(e, var_name)).collect(),
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite_errors_each_body(cond, var_name),
+            then_branch: rewrite_errors_each_body(then_branch, var_name),
+            else_branch: rewrite_errors_each_body(else_branch, var_name),
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Expr { expr } => InterpPart::Expr {
+                        expr: rewrite_errors_each_body(expr, var_name),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite_errors_each_body(body, var_name),
+            block_style: *block_style,
+        },
+        ExprNode::Assign { target, value } => ExprNode::Assign {
+            target: target.clone(),
+            value: rewrite_errors_each_body(value, var_name),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: rewrite_errors_each_body(left, var_name),
+            right: rewrite_errors_each_body(right, var_name),
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: rewrite_errors_each_body(fun, var_name),
+            args: args.iter().map(|a| rewrite_errors_each_body(a, var_name)).collect(),
+            block: block.as_ref().map(|b| rewrite_errors_each_body(b, var_name)),
+        },
+        other => other.clone(),
+    };
+    Expr::new(body.span, new_node)
 }
 
 /// Find the `model:` kwarg in a Hash arg of a form_with call and
