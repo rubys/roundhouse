@@ -259,7 +259,12 @@ fn action_to_method(
 ///    3-statement `attrs = …; attrs[:fk] = @parent.id; @x = Class.new(attrs)`.
 ///    `@parent.assoc.find(args)` → `@x = Class.find(args); if @x.fk !=
 ///    @parent.id; head(:not_found); return; end`.
-/// 7. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
+/// 7. `rewrite_params_helpers_to_h` — wrap bare `<x>_params` calls with
+///    `.to_h`. Spinel's strong-params chain returns a Parameters-like
+///    object; model constructors expect a plain Hash.
+/// 8. `rewrite_destroy_bang` — `<recv>.destroy!` → `<recv>.destroy`.
+///    Spinel's runtime model has only one destroy variant.
+/// 9. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
 ///    (covers `articles_path` and the like that appear outside
 ///    redirect_to's first arg).
 ///
@@ -287,7 +292,9 @@ fn lower_action_body(
     let with_params = rewrite_params(&with_render);
     let with_redirects = rewrite_redirect_to(&with_params);
     let with_assoc = rewrite_assoc_through_parent(&with_redirects);
-    rewrite_route_helpers(&with_assoc)
+    let with_params_to_h = rewrite_params_helpers_to_h(&with_assoc, privs);
+    let with_destroy = rewrite_destroy_bang(&with_params_to_h);
+    rewrite_route_helpers(&with_destroy)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,22 +447,15 @@ fn expand_build(
     arg: &Expr,
     span: Span,
 ) -> Expr {
-    // attrs = <arg>.to_h
-    let to_h = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(arg.clone()),
-            method: Symbol::from("to_h"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    );
+    // attrs = <arg>
+    // The `.to_h` wrap is added by the params-helpers pass when <arg>
+    // is a `<x>_params` call — keeping the two concerns separate avoids
+    // double-wrapping if <arg> already has `.to_h` for some reason.
     let attrs_assign = Expr::new(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from("attrs") },
-            value: to_h,
+            value: arg.clone(),
         },
     );
 
@@ -602,6 +602,74 @@ fn expand_find(
     );
 
     Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, if_stmt] })
+}
+
+// ---------------------------------------------------------------------------
+// `<x>_params` to-h wrap. Spinel's strong-params chain
+// (`@params.require(:resource).permit(:f, …)`) returns a Parameters-like
+// object; model constructors and `update` expect a plain Hash. Every
+// no-recv call to a controller-defined `<x>_params` helper gets `.to_h`
+// appended at the use site.
+//
+// Scoped to private actions whose name ends in `_params` — narrow
+// enough to avoid catching unrelated method names, broad enough to
+// cover the `article_params` / `comment_params` convention without
+// inspecting body shape.
+// ---------------------------------------------------------------------------
+
+fn rewrite_params_helpers_to_h(expr: &Expr, privs: &[Action]) -> Expr {
+    let helper_names: Vec<Symbol> = privs
+        .iter()
+        .map(|p| p.name.clone())
+        .filter(|n| n.as_str().ends_with("_params"))
+        .collect();
+    if helper_names.is_empty() {
+        return expr.clone();
+    }
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && helper_names.iter().any(|h| h == method) =>
+        {
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(e.clone()),
+                    method: Symbol::from("to_h"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ))
+        }
+        _ => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `destroy!` → `destroy`. Spinel's runtime model exposes one destroy
+// method (raise-on-failure semantics); the bang form has no separate
+// behavior to preserve, so the surface gets normalized here. Applies to
+// any Send (any recv shape) whose method name is exactly `destroy!`.
+// ---------------------------------------------------------------------------
+
+fn rewrite_destroy_bang(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv, method, args, block, parenthesized }
+            if method.as_str() == "destroy!" =>
+        {
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: recv.as_ref().map(rewrite_destroy_bang),
+                    method: Symbol::from("destroy"),
+                    args: args.iter().map(rewrite_destroy_bang).collect(),
+                    block: block.as_ref().map(rewrite_destroy_bang),
+                    parenthesized: *parenthesized,
+                },
+            ))
+        }
+        _ => None,
+    })
 }
 
 /// Derive the `Views::*` submodule name from a controller's class name.

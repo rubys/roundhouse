@@ -822,6 +822,82 @@ fn controllers_application_controller_has_no_views_require() {
 }
 
 #[test]
+fn controllers_destroy_bang_lowers_to_destroy() {
+    // `@article.destroy!` lowers to `@article.destroy`. Spinel's runtime
+    // model has only one destroy variant (raise-on-failure semantics);
+    // the bang form has no separate behavior to preserve.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(src.contains("@article.destroy"), "{src}");
+    assert!(
+        !src.contains("@article.destroy!"),
+        "destroy! should be lowered to destroy:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_params_helper_calls_get_to_h_at_use_sites() {
+    // `Article.new(article_params)` → `Article.new(article_params.to_h)`.
+    // Spinel's strong-params chain returns a Parameters-like object;
+    // model constructors expect a plain Hash.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    assert!(
+        src.contains("Article.new(article_params.to_h)"),
+        "expected `article_params.to_h` in Article.new call; got:\n{src}",
+    );
+    assert!(
+        src.contains("@article.update(article_params.to_h)"),
+        "expected `article_params.to_h` in update call; got:\n{src}",
+    );
+    // The bare form should not appear as a positional arg anywhere in
+    // the action bodies.
+    assert!(
+        !src.contains("Article.new(article_params)"),
+        "bare article_params should be wrapped:\n{src}",
+    );
+    assert!(
+        !src.contains(".update(article_params)"),
+        "bare article_params should be wrapped:\n{src}",
+    );
+}
+
+#[test]
+fn controllers_params_helper_body_does_not_self_wrap() {
+    // The `def article_params` body itself should not get `.to_h` —
+    // its body is `@params.require(:article).permit(:title, :body)`
+    // with no `<x>_params` Send to rewrite.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "articles_controller.rb");
+    let body = src
+        .split("def article_params").nth(1).unwrap()
+        .split("end").next().unwrap();
+    assert!(
+        !body.contains("article_params.to_h"),
+        "article_params helper body should not call itself:\n{body}",
+    );
+    assert!(
+        body.contains("@params.require(:article).permit(:title, :body)"),
+        "expected unchanged permit chain in helper body:\n{body}",
+    );
+}
+
+#[test]
+fn comments_build_expansion_composes_with_params_to_h_rewrite() {
+    // `attrs = comment_params.to_h` should appear exactly once — the
+    // build expansion drops `.to_h` from its synthesized form, and the
+    // params-to-h rewrite adds it back. Verifying composition order so
+    // a regression to `.to_h.to_h` would be caught.
+    let files = lowered_real_blog_controllers();
+    let src = find(&files, "comments_controller.rb");
+    assert!(src.contains("attrs = comment_params.to_h"), "{src}");
+    assert!(
+        !src.contains("comment_params.to_h.to_h"),
+        "double to_h regression — params rewrite should not re-wrap:\n{src}",
+    );
+}
+
+#[test]
 fn comments_create_expands_assoc_build_to_three_statements() {
     // `@comment = @article.comments.build(comment_params)` lowers to
     // three statements: build the attrs hash, set the FK, then call
