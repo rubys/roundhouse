@@ -1,7 +1,7 @@
 // Roundhouse output browser. Loads one manifest per language from
 // this directory and renders a tabbed file tree + code viewer.
 (function () {
-  const LANGS = ["ruby", "crystal", "elixir", "go", "python", "rust", "typescript"];
+  const LANGS = ["ruby", "spinel", "crystal", "elixir", "go", "python", "rust", "typescript"];
   const manifests = {};
   let currentLang = "ruby";
   let currentFile = null;
