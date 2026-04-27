@@ -23,6 +23,11 @@ fn lowered_real_blog_schema() -> String {
     ruby::emit_lowered_schema(&app).content
 }
 
+fn lowered_real_blog_routes() -> String {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    ruby::emit_lowered_routes(&app).content
+}
+
 fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
     files
         .iter()
@@ -352,6 +357,117 @@ fn schema_drops_foreign_key_constraints() {
         !src.contains("FOREIGN KEY") && !src.contains("REFERENCES"),
         "spinel schema should not emit FK constraints; got:\n{src}",
     );
+}
+
+#[test]
+fn routes_emits_module_wrapper_at_config_path() {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let f = ruby::emit_lowered_routes(&app);
+    assert_eq!(f.path.to_string_lossy(), "config/routes.rb");
+    assert!(f.content.contains("module Routes"), "{}", f.content);
+    assert!(f.content.contains("TABLE = ["), "{}", f.content);
+    assert!(f.content.contains("].freeze"), "{}", f.content);
+}
+
+#[test]
+fn routes_require_application_controller_plus_each_referenced_controller() {
+    let src = lowered_real_blog_routes();
+    // application_controller is always required at the top — main.rb's
+    // dispatch base, included even when no controller in the route table
+    // happens to reference it.
+    assert!(
+        src.contains("require_relative \"../app/controllers/application_controller\""),
+        "{src}",
+    );
+    // Each unique controller used by the table is required exactly once.
+    assert!(
+        src.contains("require_relative \"../app/controllers/articles_controller\""),
+        "{src}",
+    );
+    assert!(
+        src.contains("require_relative \"../app/controllers/comments_controller\""),
+        "{src}",
+    );
+    let articles_count = src.matches("articles_controller\"").count();
+    assert_eq!(articles_count, 1, "duplicate require:\n{src}");
+}
+
+#[test]
+fn routes_table_expands_resources_block_into_concrete_entries() {
+    // `resources :articles` expands to 7 entries (index, new, create,
+    // show, edit, update, destroy). The spinel TABLE hash form is
+    // `{ method: "VERB", pattern: "/path", controller: :sym, action: :sym }`.
+    let src = lowered_real_blog_routes();
+    for line in [
+        r#"{ method: "GET", pattern: "/articles", controller: :articles, action: :index }"#,
+        r#"{ method: "GET", pattern: "/articles/new", controller: :articles, action: :new }"#,
+        r#"{ method: "POST", pattern: "/articles", controller: :articles, action: :create }"#,
+        r#"{ method: "GET", pattern: "/articles/:id", controller: :articles, action: :show }"#,
+        r#"{ method: "GET", pattern: "/articles/:id/edit", controller: :articles, action: :edit }"#,
+        r#"{ method: "PATCH", pattern: "/articles/:id", controller: :articles, action: :update }"#,
+        r#"{ method: "DELETE", pattern: "/articles/:id", controller: :articles, action: :destroy }"#,
+    ] {
+        assert!(src.contains(line), "missing route entry:\n  {line}\nin:\n{src}");
+    }
+}
+
+#[test]
+fn routes_nest_child_resource_under_parent_id_scope() {
+    // `resources :articles do resources :comments, only: [:create, :destroy]`
+    // nests under `/articles/:article_id/comments`. only:[] filters to
+    // create + destroy; index/new/show/edit/update are dropped.
+    let src = lowered_real_blog_routes();
+    assert!(
+        src.contains(r#"{ method: "POST", pattern: "/articles/:article_id/comments", controller: :comments, action: :create }"#),
+        "{src}",
+    );
+    assert!(
+        src.contains(r#"{ method: "DELETE", pattern: "/articles/:article_id/comments/:id", controller: :comments, action: :destroy }"#),
+        "{src}",
+    );
+    // Filtered actions must not appear.
+    assert!(
+        !src.contains(r#"controller: :comments, action: :index"#),
+        "only:[:create, :destroy] should drop :index; got:\n{src}",
+    );
+    assert!(
+        !src.contains(r#"controller: :comments, action: :show"#),
+        "{src}",
+    );
+}
+
+#[test]
+fn routes_extract_root_into_separate_constant() {
+    // `root "articles#index"` becomes a top-level `ROOT` constant, not
+    // a TABLE entry — the spinel router checks ROOT separately so the
+    // dispatch loop doesn't have to special-case "/".
+    let src = lowered_real_blog_routes();
+    assert!(
+        src.contains(
+            r#"ROOT = { method: "GET", pattern: "/", controller: :articles, action: :index }.freeze"#
+        ),
+        "{src}",
+    );
+    // ROOT must NOT also be in TABLE — extracting it is the whole point.
+    let table_section = src.split("TABLE = [").nth(1).unwrap()
+        .split("].freeze").next().unwrap();
+    assert!(
+        !table_section.contains("pattern: \"/\""),
+        "root should be hoisted out of TABLE; got table:\n{table_section}",
+    );
+}
+
+#[test]
+fn routes_order_literal_segments_before_id_patterns() {
+    // Matching semantics: `/articles/new` must appear before
+    // `/articles/:id` so the literal-segment match wins. flatten_routes
+    // already orders this way (standard_resource_actions has new before
+    // show); regression test against future reordering.
+    let src = lowered_real_blog_routes();
+    let pos_new = src.find(r#"pattern: "/articles/new""#).expect("/articles/new missing");
+    let pos_show = src.find(r#"pattern: "/articles/:id", controller: :articles, action: :show"#)
+        .expect("/articles/:id show missing");
+    assert!(pos_new < pos_show, "literal segment must precede :id pattern");
 }
 
 #[test]

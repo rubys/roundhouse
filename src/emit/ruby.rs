@@ -100,6 +100,17 @@ pub fn emit_lowered_schema(app: &App) -> EmittedFile {
     schema::emit_lowered_schema(&app.schema)
 }
 
+/// Emit `config/routes.rb` in spinel-blog shape — a `Routes` module
+/// with a frozen `TABLE` of `{method:, pattern:, controller:, action:}`
+/// hashes (one entry per concrete verb+path) plus a separate `ROOT`
+/// constant. `resources` blocks expand to the standard 7 actions via
+/// `flatten_routes`; nested scopes thread `/:parent_id/` into child
+/// paths. Companion to `emit_lowered_models` and `emit_lowered_schema`
+/// for the spinel emit pipeline.
+pub fn emit_lowered_routes(app: &App) -> EmittedFile {
+    route::emit_lowered_routes(app)
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.schema.tables.is_empty() {
