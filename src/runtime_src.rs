@@ -14,7 +14,7 @@ use ruby_prism::{Node, parse};
 
 use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
 use crate::ingest::ingest_expr;
 use crate::rbs::parse_signatures;
@@ -83,12 +83,25 @@ pub fn parse_methods_with_rbs_in_ctx(
         })?;
 
         if let Ty::Fn { params, .. } = &ty {
-            if params.len() != m.params.len() {
+            // RBS injects a synthetic Block-kind param into Ty::Fn
+            // when the signature declares `{ ... } -> T`. Ruby's flat
+            // param list collects an `&block` only when explicitly
+            // declared — implicit `yield` produces no Ruby-side
+            // param. Filter the RBS Block param out of the arity
+            // comparison: blocks are a separate axis from positionals
+            // and keywords, and Ruby code that yields without
+            // declaring `&block` is the common case (validates_*_of
+            // is the canonical example).
+            let rbs_arity = params
+                .iter()
+                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                .count();
+            if rbs_arity != m.params.len() {
                 return Err(format!(
                     "method `{}`: Ruby has {} positional param(s), RBS has {}",
                     m.name,
                     m.params.len(),
-                    params.len()
+                    rbs_arity
                 ));
             }
         } else {
@@ -199,6 +212,43 @@ fn collect_from_stmt(
         out.push(method_def_from(&def, enclosing)?);
         return Ok(());
     }
+    // attr_reader / attr_writer / attr_accessor lower at parse time
+    // to synthetic getter/setter MethodDef pairs. The RBS sidecar
+    // declares the per-attr signatures (`def id: () -> Integer`); the
+    // synthetic body here exists to satisfy the orphan check and to
+    // give the body-typer something concrete to type. Body shape:
+    //   def attr; @attr; end           (reader)
+    //   def attr=(v); @attr = v; end   (writer)
+    if let Some(call) = node.as_call_node() {
+        if call.receiver().is_none() {
+            let name_bytes = call.name().as_slice();
+            if let Ok(name_str) = std::str::from_utf8(name_bytes) {
+                let (mk_reader, mk_writer) = match name_str {
+                    "attr_reader" => (true, false),
+                    "attr_writer" => (false, true),
+                    "attr_accessor" => (true, true),
+                    _ => (false, false),
+                };
+                if mk_reader || mk_writer {
+                    if let Some(args) = call.arguments() {
+                        for arg in args.arguments().iter() {
+                            let Some(sym) = arg.as_symbol_node() else { continue };
+                            let Some(loc) = sym.value_loc() else { continue };
+                            let attr_name = std::str::from_utf8(loc.as_slice())
+                                .map_err(|_| "attr name not UTF-8".to_string())?;
+                            if mk_reader {
+                                out.push(synthesize_reader(attr_name, enclosing));
+                            }
+                            if mk_writer {
+                                out.push(synthesize_writer(attr_name, enclosing));
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
     if let Some(module) = node.as_module_node() {
         let name_bytes = module.name().as_slice();
         let name_str = std::str::from_utf8(name_bytes)
@@ -218,6 +268,57 @@ fn collect_from_stmt(
         return Ok(());
     }
     Ok(())
+}
+
+/// Synthesize `def <attr>; @<attr>; end`. Body is a single Ivar
+/// read; the RBS sidecar's `def <attr>: () -> T` provides the type.
+fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
+    let name = Symbol::new(attr);
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Ivar { name: name.clone() },
+    );
+    MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: EffectSet::pure(),
+        enclosing_class: enclosing.map(Symbol::new),
+    }
+}
+
+/// Synthesize `def <attr>=(value); @<attr> = value; end`. Body is
+/// `Assign { target: Ivar(attr), value: Var(value) }`. The RBS
+/// sidecar's `def <attr>=: (T) -> T` provides the type.
+fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
+    let attr_sym = Symbol::new(attr);
+    let setter_name = Symbol::new(&format!("{attr}="));
+    let value_param = Symbol::new("value");
+    let value_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var {
+            id: crate::ident::VarId(0),
+            name: value_param.clone(),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: attr_sym },
+            value: value_read,
+        },
+    );
+    MethodDef {
+        name: setter_name,
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value_param)],
+        body,
+        signature: None,
+        effects: EffectSet::pure(),
+        enclosing_class: enclosing.map(Symbol::new),
+    }
 }
 
 fn method_def_from(
@@ -467,6 +568,48 @@ mod tests {
                 value: Literal::Int { value: 42 }
             }
         ));
+    }
+
+    #[test]
+    fn attr_reader_lowers_to_getter() {
+        let src = "class C\n  attr_reader :name\nend\n";
+        let methods = parse_methods(src).expect("parses");
+        assert_eq!(methods.len(), 1);
+        let m = &methods[0];
+        assert_eq!(m.name.as_str(), "name");
+        assert!(m.params.is_empty());
+        assert!(matches!(
+            &*m.body.node,
+            ExprNode::Ivar { name } if name.as_str() == "name"
+        ));
+    }
+
+    #[test]
+    fn attr_writer_lowers_to_setter() {
+        let src = "class C\n  attr_writer :name\nend\n";
+        let methods = parse_methods(src).expect("parses");
+        assert_eq!(methods.len(), 1);
+        let m = &methods[0];
+        assert_eq!(m.name.as_str(), "name=");
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name.as_str(), "value");
+    }
+
+    #[test]
+    fn attr_accessor_lowers_to_getter_and_setter() {
+        let src = "class C\n  attr_accessor :name\nend\n";
+        let methods = parse_methods(src).expect("parses");
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0].name.as_str(), "name");
+        assert_eq!(methods[1].name.as_str(), "name=");
+    }
+
+    #[test]
+    fn attr_accessor_multi_arg_lowers_per_attr() {
+        let src = "class C\n  attr_accessor :a, :b\nend\n";
+        let methods = parse_methods(src).expect("parses");
+        let names: Vec<_> = methods.iter().map(|m| m.name.as_str().to_string()).collect();
+        assert_eq!(names, vec!["a", "a=", "b", "b="]);
     }
 
     #[test]
