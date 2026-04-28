@@ -62,6 +62,15 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog
 	  end' \
 	  $(SPINEL_OUT)/.emit/browse/spinel.json $(SPINEL_OUT)
 	rm -rf $(SPINEL_OUT)/.emit
+	# Seed the demo DB from real-blog's Rails-populated SQLite. The
+	# Rails-generated schema (varchar/text/datetime affinities) reads
+	# fine through spinel's SqliteAdapter; main.rb's Schema.load! is
+	# idempotent (CREATE TABLE IF NOT EXISTS) so it no-ops over the
+	# existing tables. Copy gives the demo three articles + comments
+	# out of the box; mutations land on the demo's copy, so real-blog
+	# stays pristine. `make clean-spinel` resets to seeded state.
+	mkdir -p $(SPINEL_OUT)/tmp
+	cp fixtures/real-blog/storage/development.sqlite3 $(SPINEL_OUT)/tmp/blog.sqlite3
 	touch $(SPINEL_OUT)/.stamp
 
 .PHONY: spinel-transpile
