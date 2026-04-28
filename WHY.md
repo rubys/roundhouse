@@ -146,11 +146,27 @@ not a fork of the compiler.
 
 Targets in flight — Rust, TypeScript, Crystal, Elixir, Go, Python,
 and Spinel (Matz's Ruby-to-C compiler, used as a stay-in-Ruby
-native-binary path) — share that pipeline. The Phase-1 Rails 8 MVC
-fixture transpiles end-to-end through analyze, lower, and emit; a
-DOM-diff harness compares emitted runtimes against the original
-Rails app, so a template that renders differently in any target is
-a bug. Per-target runtime integration is the work that remains.
+native-binary path) — share that pipeline. A DOM-diff harness
+compares emitted runtimes against the original Rails app, so a
+template that renders differently in any target is a bug.
+
+The Ruby (Spinel-shape) emitter is far enough along to drive a
+working demo. `make spinel-dev` from the repo root transpiles the
+Phase-1 Rails 8 MVC fixture, builds Tailwind + Turbo assets, and
+starts a dev server on `:3000`. The transpiled output runs end to
+end in a browser — create + destroy flows with `data-turbo-confirm`
+and `_method` override, real-time Turbo Stream broadcasts over
+WebSocket, SQLite persistence — through code Roundhouse generated
+mechanically from the original Rails source.
+
+The Spinel side is converging in parallel. The first issue surfaced
+by validating the lowered output against Spinel's compiler
+([matz/spinel#49](https://github.com/matz/spinel/issues/49)) was
+filed and closed by Matz within minutes. The feedback loop runs in
+both directions: Roundhouse's emit shape forces concrete Spinel
+coverage decisions; Spinel maturing enlarges the set of patterns
+the lowerer can confidently emit. Per-target runtime integration
+is the work that remains for the other six targets.
 
 The point of this page isn't to claim the work is done. It's to
 argue that the work is worth doing — that "Rails is great for time
