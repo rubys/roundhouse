@@ -1,20 +1,28 @@
 # Bytecode
 
-An experimental seventh emission target: instead of emitting
-target-language source code, emit a typed stack-based bytecode and
+An experimental additional emission target alongside the seven
+source-code targets (Ruby, Rust, TypeScript, Go, Crystal, Elixir,
+Python, Spinel — all DOM-equivalent in CI). Instead of emitting
+target-language source, emit a typed stack-based bytecode and
 execute it in a VM that reuses the existing Rust runtime.
 
-**Source:** `src/bytecode/` (format types, VM),
-`tests/bytecode_format.rs`, `tests/bytecode_vm.rs`.
+**Source:** `src/bytecode/` (format types, VM, IR→bytecode walker),
+`tests/bytecode_format.rs`, `tests/bytecode_vm.rs`, `tests/bytecode_emit.rs`.
 
-Status: experimental. M1 (format) and M2 (minimal VM) have landed on
-`main`; M3 onward (the bytecode emitter and integration with the
-runtime) is deliberately parked until all six source-code targets reach
-5/5 DOM equivalence on real-blog. See [the plan](#the-plan) below.
+Status: experimental. M1 (format), M2 (minimal VM), and M3a
+(IR→bytecode walker, `src/bytecode/walker.rs`) have landed on `main`.
+M3a covers the subset of `ExprNode` whose lowering maps cleanly to the
+M2 VM's opcodes: `Lit`, `Var`, `Let`, `Seq`, `If`, `Assign` to
+`LValue::Var`, and `Send` for arithmetic/comparison on `Ty::Int`
+receivers. Everything else returns `WalkError::NotYetSupported` until
+the corresponding M3b+ work lands. Full integration with the runtime
+(execution against the real-blog fixture) is the remaining piece —
+the source-code-target gate that was previously cited as a
+prerequisite has been met. See [the plan](#the-plan) below.
 
 ## Why a bytecode target
 
-The six existing emitters each produce source code compiled or
+The seven existing emitters each produce source code compiled or
 interpreted by the target language's toolchain. A bytecode target
 changes shape in three ways:
 
@@ -39,12 +47,12 @@ What that buys, if it works end-to-end:
 
 ## The plan
 
-Phase A (framework) and Phase C (emitter + integration) are separated
-by Phase B (**complete the six existing targets first**), because any
-lifts from bringing Python, Crystal, Elixir, Go, and Ruby to 5/5 parity
-benefit the bytecode emitter the same way they benefit each other.
-Starting M3 before Phase B closes would mean re-implementing walker
-logic the other targets later push into shared lowerings.
+Phase A (framework) and Phase C (emitter + integration) were originally
+separated by Phase B (**complete the existing targets first**), so
+that lifts from bringing each target to 5/5 parity could benefit the
+bytecode emitter the same way they benefit each other. Phase B is now
+met — all seven runnable targets are DOM-equivalent in CI — so Phase C
+work (M3a walker landed; M3b+ in flight) is unblocked.
 
 | # | Milestone | Phase | Status |
 |---|---|---|---|
@@ -178,7 +186,7 @@ roundhouse, hour-long runs, pinned-governor Hetzner host).
 
 ## See also
 
-- [`emit.md`](emit.md) — the six source-code emitters that share the
+- [`emit.md`](emit.md) — the seven source-code emitters that share the
   analyzer, lower, and runtime integration this target will consume.
 - [`lower.md`](lower.md) — target-neutral IR. The bytecode emitter
   will consume the same `LoweredAction`, `LoweredPersistence`,

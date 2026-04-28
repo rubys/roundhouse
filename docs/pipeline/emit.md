@@ -28,15 +28,21 @@ lowered forms it computes on demand (`lower_action`,
 
 ## Current target status
 
+All seven runnable targets pass the DOM-equivalence compare against
+Rails on real-blog as a CI invariant — `.github/workflows/ci.yml`'s
+`compare-<target>` jobs gate the Pages deploy, so any drift fails
+the build.
+
 | Target | Status | Notes |
 |--------|--------|-------|
 | **Ruby** | Source-equivalent for tiny-blog + most of real-blog | The round-trip identity partner; paired with ingest |
-| **Rust** | Runnable end-to-end | Boots axum HTTP + Action Cable stub, forms, validation, Turbo, Tailwind |
-| **TypeScript** | Runnable end-to-end | Node HTTP + Action Cable over WebSockets, better-sqlite3, Juntos-shape |
-| **Go** | Controller walker complete, runtime glue in flight | Pass-2 HTTP router; end-to-end boot pending |
-| **Crystal** | Controller walker complete, runtime glue in flight | Same shape as Go |
-| **Elixir** | Controller walker complete, runtime glue in flight | Module-function conversion happens inside the emitter |
-| **Python** | Controller walker complete, runtime glue in flight | Async emission uses `SqliteAsyncAdapter` |
+| **Rust** | Runnable end-to-end; DOM-equivalent | Boots axum HTTP + Action Cable stub, forms, validation, Turbo, Tailwind |
+| **TypeScript** | Runnable end-to-end; DOM-equivalent | Node HTTP + Action Cable over WebSockets, better-sqlite3, Juntos-shape |
+| **Go** | Runnable end-to-end; DOM-equivalent | Pass-2 HTTP router |
+| **Crystal** | Runnable end-to-end; DOM-equivalent | Same shape as Go |
+| **Elixir** | Runnable end-to-end; DOM-equivalent | Module-function conversion happens inside the emitter |
+| **Python** | Runnable end-to-end; DOM-equivalent | Async emission uses `SqliteAsyncAdapter` |
+| **Spinel** | Runnable end-to-end via CRuby; DOM-equivalent | Spinel-subset Ruby executed by CRuby until Spinel grows the surface roundhouse emits (test asymmetry: emit-app-only, run hand-written tests; see `project_spinel_test_asymmetry`) |
 
 ## Emitter anatomy
 
@@ -137,6 +143,28 @@ target's suspension marker.
 Sync emitters (Ruby, Crystal, Elixir, Go) implement
 `suspending_prefix()` returning `""` — nothing suspends in their
 emission model, regardless of adapter.
+
+## Per-target type rendering
+
+Each emitter has a `ty.rs` (`src/emit/<target>/ty.rs`) that lowers
+analyzer-produced `Ty` values to target syntax. The interesting
+rows are the "special" variants:
+
+| `Ty` | Rust | TypeScript | Python | Crystal | Go |
+|------|------|------------|--------|---------|----|
+| `Var` | `()` | `unknown` | `object` | `_` | `interface{}` |
+| `Untyped` (RBS gradual) | `()` | `any` | `Any` | `_` | `interface{}` |
+| `Bottom` (raise/return) | `!` | `never` | `Never` | `NoReturn` | `interface{}` |
+
+`Var` represents an inference gap; an emitter rendering it implies
+the analyzer didn't fully resolve a type. `Untyped` is an
+author-signed gradual escape (RBS `untyped`); permissive targets
+(TS `any`, Python `Any`) accept it cleanly while strict targets
+(Rust, Go) are expected to elevate `GradualUntyped` warnings to
+emit-time errors via the diagnostic pipeline. `Bottom` is filtered
+out of unions during analysis (`union_of` / `union_many`), so
+emitters typically only see it in fully-divergent positions — Rust's
+`!` and TS's `never` are the natural targets.
 
 ## Keeping emitters honest
 

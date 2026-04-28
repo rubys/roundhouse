@@ -3,7 +3,7 @@
 The lowering layer sits between analyze and emit. Its job: take
 Rails-dialect IR (validations, associations, routes, controller
 bodies) plus the analyzer's annotations, and produce **target-
-neutral** forms that all six emitters can consume.
+neutral** forms that all seven emitters can consume.
 
 **Source:** `src/lower/` — one file per lowering concern.
 
@@ -13,10 +13,10 @@ Before this layer existed, each target emitter independently
 re-implemented the same analysis: "what are the SQL strings for this
 model's persistence?", "how do I walk a controller body deciding
 what's a render vs. a Send?", "how do I translate a validation rule
-to a runtime check?". Six copies, slight drift, large maintenance
-surface.
+to a runtime check?". Per-target copies, slight drift, large
+maintenance surface.
 
-The architectural bet in Phase 4 is: **lower once, render six ways**.
+The architectural bet in Phase 4 is: **lower once, render N ways**.
 Extract the logic that's identical across targets (SQL generation,
 validation evaluation, route dispatch tables, controller-body walk
 skeleton) as IR-level lowerings. Each emitter consumes the lowered
@@ -44,7 +44,7 @@ types; re-exports live in `src/lower/mod.rs`.
 
 Three passes rewrite the controller-body `Expr` tree to a
 normalized form every emitter sees. Lifted into `src/lower/` so the
-six emitters don't each re-discover the same rewrites:
+emitters don't each re-discover the same rewrites:
 
 ### `synthesize_implicit_render`
 

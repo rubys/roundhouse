@@ -3,8 +3,8 @@
 The analyzer annotates every expression in the IR with a type and an
 effect set. Two walks, one result.
 
-**Source:** `src/analyze.rs` (`Analyzer`, `compute`, `visit_effects`,
-`diagnose`).
+**Source:** `src/analyze/` (`Analyzer`, `compute`, `visit_effects`,
+`diagnose`); body-typer in `src/analyze/body/`.
 
 ## The two walks
 
@@ -30,14 +30,40 @@ registries:
 
 **What isn't (yet) inferred:**
 
-- Cross-branch unification (`if`/`case` merging types).
-- Row-polymorphic parameter types.
-- Generic instantiation beyond `Array<Post>`-style.
-- Instance method dispatch on ivars/locals whose types aren't
-  trivially known.
+- Block-return generics — `def f { () -> T } -> T` style. The
+  body-typer doesn't thread the block's return type through `yield`
+  in the method body; `yield` types as `Ty::Untyped` (the gradual
+  escape) instead of `T`.
+- `super(...)` parent-method tracking — typed `Ty::Untyped`.
+- Module-level frozen Hash/Array constants are tracked
+  (`parse_module_constants` in `src/runtime_src.rs`); other constant
+  shapes still fall through.
 
 Each gap lands when a fixture forces it; the analyzer never fails, it
-just leaves a `Ty::Var(n)` placeholder where it couldn't resolve.
+either leaves a `Ty::Var(n)` placeholder (inference gap, surfaced as
+an Error diagnostic) or a `Ty::Untyped` (RBS-declared gradual escape,
+surfaced as a Warning).
+
+### Type variants worth knowing about
+
+Beyond the obvious primitives (`Int`, `Str`, `Array<T>`, etc.), the
+type system has three special variants:
+
+- **`Ty::Var`** — inference gap. The analyzer couldn't determine a
+  type at this position. Counts as an Error in the diagnostic
+  pipeline; failing to close means `roundhouse-check` fails.
+- **`Ty::Untyped`** — gradual escape. RBS-declared `untyped`, or
+  unwrapped propagation through gradual dispatch. Author-signed
+  opt-out from checking. Counts as a Warning. Per-target rendering:
+  TS `any`, Python `Any`, Rust `()` (fallback; strict targets are
+  expected to elevate to Error at emit time), Crystal `_`, Go
+  `interface{}`.
+- **`Ty::Bottom`** — divergent expression (`raise`, `return`,
+  `next`). Subtype of every other type; filtered out in
+  `union_of` / `union_many` so `if cond then raise else x end`
+  types as `typeof(x)` instead of `typeof(x) | Nil`. Per-target
+  rendering: Rust `!`, TS `never`, Python `Never`, Crystal
+  `NoReturn`, Go fallback to `interface{}`.
 
 ### Effect walk — `Analyzer::visit_effects`
 
@@ -76,25 +102,36 @@ load-bearing:
 These are the conventions ruby2js and railcar also leaned on; they're
 what make zero-annotation typing viable.
 
-## The zero-diagnostics contract
+## The diagnostic pipeline
 
 The predicate "this app ingests and every expression has a known
 type" is the subset of programs roundhouse can transpile. Enforced
-by `analyze::diagnose` and gated in tests:
+by `analyze::diagnose` and gated in tests via the error/warning
+severity split:
 
 ```rust
 let diagnostics = roundhouse::analyze::diagnose(&app);
-assert!(diagnostics.is_empty(), "...");
+let errors: Vec<_> = diagnostics.iter()
+    .filter(|d| d.severity == Severity::Error)
+    .collect();
+assert!(errors.is_empty(), "...");
 ```
 
-**What produces a diagnostic:**
+**Each diagnostic carries:**
+- `kind: DiagnosticKind` — the structured variant (`ivar_unresolved`,
+  `send_dispatch_failed`, `incompatible_binop`, `gradual_untyped`)
+- `severity: Severity` — `Error` (gates emission) or `Warning`
+  (informational; per-target emitters may elevate to Error)
+- `span: Span` and `message: String`
 
-- `IvarUnresolved` — an `@ivar` read with no binding in scope and no
-  type the analyzer could derive.
-- `SendDispatchFailed` — a `Send` whose receiver's type is *known*
-  but the method doesn't resolve against that type's registries.
-- `LValueUnknown` — an assignment target with an unresolvable kind.
-- `LiteralUnknown` — a literal the type walk couldn't classify.
+**Diagnostic kinds and their default severities:**
+
+| Kind | Severity | When |
+|------|----------|------|
+| `IvarUnresolved` | Error | `@ivar` read with no binding in scope |
+| `SendDispatchFailed` | Error | `Send` on a typed receiver where the method doesn't resolve |
+| `IncompatibleBinop` | Error | `a OP b` where Ruby would raise at runtime (`Int + Str`, `Hash + Hash`, `1 < "x"`) — annotated by the body-typer at the Send |
+| `GradualUntyped` | Warning | An expression resolved to `Ty::Untyped` (RBS gradual escape). Strict-target emitters (Rust, Go) are expected to elevate to Error at emit time |
 
 **What doesn't produce a diagnostic:**
 
@@ -102,6 +139,10 @@ assert!(diagnostics.is_empty(), "...");
   upstream, and reporting both sites duplicates the signal. Fix the
   upstream site and the downstream one usually resolves.
 - Anonymous blocks whose bodies never return to a typed context.
+
+**`roundhouse-check` CLI:** runs ingest + analyze + diagnose on a
+Rails app path, prints diagnostics to stderr, and exits non-zero if
+any *error* fired. Warnings print but don't gate.
 
 ## Why effects are their own walk
 
@@ -148,11 +189,15 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic>;
 
 | File | Role |
 |------|------|
-| `src/analyze.rs` | Both walks, registry seeding, `diagnose` |
+| `src/analyze/mod.rs` | Both walks, registry seeding, `diagnose` |
+| `src/analyze/body/` | Body-typer (recursive `analyze_expr`, dispatch tables, narrowing) |
+| `src/diagnostic.rs` | `Diagnostic`, `DiagnosticKind`, `Severity` |
 | `src/adapter.rs` | Backend seam — `classify_ar_method` |
 | `src/catalog/mod.rs` | AR method signatures the walks consume |
 | `src/effect.rs` | `Effect` enum + `EffectSet` |
-| `src/ty.rs` | `Ty`, `Row`, `Param` |
+| `src/ty.rs` | `Ty` (with `Untyped` and `Bottom`), `Row`, `Param` |
+| `src/runtime_src.rs` | Framework-Ruby ingestion (RBS-paired) + module-level constant tracking |
+| `src/rbs.rs` | RBS sidecar parsing — signatures, includes, `%a{abstract}` annotation |
 
 ## Related docs
 

@@ -45,8 +45,11 @@ project links a small hand-written `runtime/<target>/` library for the
 bits that don't belong in generated code (DB connection, HTTP server,
 Action Cable).
 
-Diagnostics surface anything the analyzer couldn't type — the subset
-of programs we can transpile is defined by "zero diagnostics."
+Diagnostics surface anything the analyzer couldn't type or
+intentionally left gradual — the subset of programs we can transpile
+is defined by "zero error diagnostics" (RBS-declared `untyped` sites
+surface as warnings; strict-target emitters elevate to errors at emit
+time).
 
 ## Current state
 
@@ -54,14 +57,18 @@ The analyzer fully types the Phase-1 Rails 8 MVC fixture
 (`fixtures/real-blog`) without annotations — schema-derived attributes,
 associations, controller actions, `before_action` flow, views,
 partials, and collection rendering all resolve to concrete types.
-A test enforces zero diagnostics on every commit.
+A test enforces zero error diagnostics on every commit. The framework
+runtime (`runtime/ruby/`) is held to the same bar via
+`every_runtime_method_body_is_fully_typed` — no inference gaps in any
+method body.
 
-Seven target emitters are live. **Rust**, **TypeScript**, and the
-**Ruby (Spinel-shape)** emitter produce runnable projects end-to-end —
-they boot an HTTP + Action Cable server, serve the generated blog with
-working forms, validation error display, Turbo streams, and Tailwind
-styling. Crystal, Elixir, Go, and Python share the same controller
-walker and pre-emit lowering passes; their runtime glue is in flight.
+Seven target emitters are live and DOM-equivalent against Rails on
+real-blog as a CI invariant — Rust, TypeScript, Crystal, Elixir, Go,
+Python, and Spinel-shape Ruby. Each boots an HTTP + Action Cable
+server, serves the generated blog with working forms, validation
+error display, Turbo streams, and Tailwind styling. The compare-X
+jobs in `.github/workflows/ci.yml` gate the Pages deploy, so any
+drift fails the build.
 
 Cross-runtime correctness is enforced by `tools/compare/`, which
 fetches the same URL from Rails and from any roundhouse-emitted runtime
