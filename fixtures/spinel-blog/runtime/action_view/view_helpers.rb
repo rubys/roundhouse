@@ -87,8 +87,11 @@ module ViewHelpers
       # `dom_id(article)` — pass a record
       "#{record_dom_prefix(prefix)}_#{prefix.id}"
     elsif id_or_suffix.is_a?(Symbol) || id_or_suffix.is_a?(String)
-      # `dom_id(article, :comments_count)` — record + suffix
-      "#{record_dom_prefix(prefix)}_#{prefix.id}_#{id_or_suffix}"
+      # `dom_id(article, :comments_count)` — record + suffix.
+      # Rails puts the suffix BEFORE the model_name in the resulting
+      # id (e.g. `comments_count_article_3`), not after — match that
+      # order so cross-target compare passes.
+      "#{id_or_suffix}_#{record_dom_prefix(prefix)}_#{prefix.id}"
     else
       # `dom_id("article", 42)` — explicit prefix + integer id
       "#{prefix}_#{id_or_suffix}"
@@ -114,14 +117,23 @@ module ViewHelpers
     inner_opts.delete(:method)
     inner_opts.delete(:form_class)
     form_attrs = { "action" => href, "method" => "post" }
-    form_attrs["class"] = form_class if form_class
+    # Rails' `button_to` defaults the form class to `button_to` when
+    # the caller doesn't pass one — match that so the cross-target
+    # compare sees the same `class` attribute set.
+    form_attrs["class"] = form_class || "button_to"
     button_attrs = render_attrs({ "type" => "submit" }.merge(stringify_keys(inner_opts)))
     method_input = if !method.nil? && method.to_s != "post"
                      %(<input type="hidden" name="_method" value="#{method}">)
                    else
                      ""
                    end
-    %(<form#{render_attrs(form_attrs)}>#{method_input}<button#{button_attrs}>#{html_escape(text)}</button></form>)
+    # Rails appends a CSRF authenticity_token hidden input AFTER the
+    # button. The compare harness blanks the value via an existing
+    # AttributeRule, so emitting an empty value here is sufficient
+    # for parity. Keeps the element in the DOM tree at the same
+    # position Rails puts it.
+    auth_token_input = %(<input type="hidden" name="authenticity_token" value="">)
+    %(<form#{render_attrs(form_attrs)}>#{method_input}<button#{button_attrs}>#{html_escape(text)}</button>#{auth_token_input}</form>)
   end
 
   # ── Asset / meta tag helpers (stubs for now) ─────────────────────
@@ -194,8 +206,18 @@ module ViewHelpers
     parts.join("\n")
   end
 
+  # Matches Rails' `turbo_stream_from` byte-output: the channel
+  # name travels base64-encoded-JSON through `signed-stream-name`
+  # so the Action Cable client can decode it server-side. Rails
+  # additionally HMAC-signs the value with a `--<sig>` suffix; we
+  # emit `--unsigned` (matches the other targets' runtimes), and
+  # the compare harness's existing ignore rule strips the suffix
+  # so the unsigned base64 value matches Rails' signed value.
   def turbo_stream_from(stream)
-    %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{html_escape(stream)}"></turbo-cable-stream-source>)
+    require "base64"
+    require "json"
+    encoded = Base64.strict_encode64(JSON.generate(stream))
+    %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
   end
 
   # ── form builder (used as `form_with` block-yielded value) ────────
@@ -217,14 +239,15 @@ module ViewHelpers
 
     def text_field(field, opts = {})
       value = @model[field]
-      attrs = ViewHelpers.render_attrs(
-        {
-          "type" => "text",
-          "name" => "#{@model_name}[#{field}]",
-          "id" => "#{@model_name}_#{field}",
-          "value" => value.nil? ? "" : value.to_s,
-        }.merge(ViewHelpers.stringify_keys(opts))
-      )
+      base = {
+        "type" => "text",
+        "name" => "#{@model_name}[#{field}]",
+        "id" => "#{@model_name}_#{field}",
+      }
+      # Rails omits the `value` attribute entirely when the field is
+      # nil/empty; only render it when there's a non-empty value.
+      base["value"] = value.to_s unless value.nil? || value.to_s.empty?
+      attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)))
       "<input#{attrs}>"
     end
 
@@ -241,7 +264,16 @@ module ViewHelpers
 
     def submit(label = nil, opts = {})
       text = label || (@method == :patch ? "Update #{@model_name.capitalize}" : "Create #{@model_name.capitalize}")
-      attrs = ViewHelpers.render_attrs({ "type" => "submit", "name" => "commit", "value" => text }.merge(ViewHelpers.stringify_keys(opts)))
+      # Rails appends `data-disable-with="<value>"` to submit inputs so
+      # turbo prevents a double-submit while the request is in flight.
+      attrs = ViewHelpers.render_attrs(
+        {
+          "type" => "submit",
+          "name" => "commit",
+          "value" => text,
+          "data-disable-with" => text,
+        }.merge(ViewHelpers.stringify_keys(opts))
+      )
       "<input#{attrs}>"
     end
   end
@@ -258,9 +290,20 @@ module ViewHelpers
                    else
                      ""
                    end
+    # Rails' `form_with` injects a CSRF authenticity_token hidden
+    # input as the first child of the form (after `_method` for
+    # PATCH/DELETE forms). The compare harness blanks the value via
+    # an existing AttributeRule.
+    auth_token_input = %(<input type="hidden" name="authenticity_token" value="">)
     form_method = method_str == "get" ? "get" : "post"
-    attrs = render_attrs({ "action" => action, "method" => form_method }.merge(stringify_keys(opts)))
-    "<form#{attrs}>#{method_input}#{body}</form>"
+    # Rails' default `accept-charset="UTF-8"` lands on every
+    # form_with output; mirror it so cross-target compare sees the
+    # same attribute set.
+    attrs = render_attrs(
+      { "action" => action, "accept-charset" => "UTF-8", "method" => form_method }
+        .merge(stringify_keys(opts))
+    )
+    "<form#{attrs}>#{method_input}#{auth_token_input}#{body}</form>"
   end
 
   # ── attribute rendering ──────────────────────────────────────────

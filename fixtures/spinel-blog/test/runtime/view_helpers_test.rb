@@ -56,7 +56,9 @@ class ViewHelpersTest < Minitest::Test
   def test_dom_id_with_record_and_suffix
     article = Article.new(title: "x", body: "long body content here.")
     article.save
-    assert_equal "article_#{article.id}_comments_count", ViewHelpers.dom_id(article, :comments_count)
+    # Rails' `dom_id(record, prefix)` puts the prefix BEFORE the
+    # record's class+id (e.g. `comments_count_article_3`), not after.
+    assert_equal "comments_count_article_#{article.id}", ViewHelpers.dom_id(article, :comments_count)
   end
 
   def test_dom_id_with_explicit_prefix_and_id
@@ -88,6 +90,11 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, %(<input type="hidden" name="_method" value="delete">)
     assert_includes out, %(<button type="submit")
     assert_includes out, ">Delete</button>"
+    # Default form class is `button_to` (Rails' convention) when the
+    # caller doesn't pass `form_class:`. CSRF authenticity_token input
+    # also lands inside the form (after the button).
+    assert_includes out, %(class="button_to")
+    assert_includes out, %(<input type="hidden" name="authenticity_token" value="">)
   end
 
   def test_button_to_post_method_omits_hidden_input
@@ -130,7 +137,10 @@ class ViewHelpersTest < Minitest::Test
   def test_turbo_stream_from
     out = ViewHelpers.turbo_stream_from("articles")
     assert_includes out, %(<turbo-cable-stream-source)
-    assert_includes out, %(signed-stream-name="articles")
+    # signed-stream-name carries base64(JSON("articles")) + `--unsigned`
+    # suffix; matches the other targets' runtimes and Rails after the
+    # compare harness strips the HMAC-signature suffix.
+    assert_includes out, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
   end
 
   # ── form builder ───────────────────────────────────────────────
@@ -168,7 +178,10 @@ class ViewHelpersTest < Minitest::Test
     article = Article.new
     builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
     out = builder.text_field(:title)
-    assert_includes out, %(value="")
+    # Rails omits the `value` attribute when the field is nil/empty
+    # rather than emitting `value=""`; spinel matches.
+    refute_includes out, %(value=)
+    assert_includes out, %(name="article[title]")
   end
 
   def test_form_with_patch_method_emits_method_override
@@ -181,6 +194,10 @@ class ViewHelpersTest < Minitest::Test
       method: :patch,
     ) { |_f| "" }
     assert_includes out, %(method="post")
+    # Rails-shape extras: form has `accept-charset="UTF-8"` and a
+    # CSRF authenticity_token hidden input lands as a form child.
     assert_includes out, %(<input type="hidden" name="_method" value="patch">)
+    assert_includes out, %(<input type="hidden" name="authenticity_token" value="">)
+    assert_includes out, %(accept-charset="UTF-8")
   end
 end

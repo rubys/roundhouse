@@ -99,7 +99,9 @@ class ViewsArticlesTest < Minitest::Test
   def test_index_subscribes_to_articles_stream
     html = Views::Articles.index([@article])
     assert_includes html, %(<turbo-cable-stream-source)
-    assert_includes html, %(signed-stream-name="articles")
+    # base64(JSON("articles")) — matches Rails' signed-stream-name shape
+    # after the compare harness strips the `--<sig>` suffix.
+    assert_includes html, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
   end
 
   # ── show.rb ─────────────────────────────────────────────────────
@@ -127,7 +129,9 @@ class ViewsArticlesTest < Minitest::Test
 
   def test_show_subscribes_to_comments_stream
     html = Views::Articles.show(@article)
-    assert_includes html, %(signed-stream-name="article_#{@article.id}_comments")
+    # base64(JSON("article_<id>_comments")); only id=1 is in test fixtures.
+    assert_equal 1, @article.id
+    assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--unsigned")
   end
 
   def test_show_renders_comments
