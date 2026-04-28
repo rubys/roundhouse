@@ -1,0 +1,59 @@
+module ActionController
+  # Strong-parameters analogue. Wraps a Hash with the small subset of
+  # Rails::ActionController::Parameters real-blog uses. Keys are
+  # symbolized at construction; access via `[]` / `key?` / `fetch`
+  # accepts either Symbol or String (each method `.to_sym`s the key).
+  class Parameters
+    # `hash` defaults to `{}` — typed as `Hash[Symbol, untyped]` for
+    # the typical-call shape. Real callers pass a request-body hash
+    # whose values are genuinely polymorphic (String/Integer/nested
+    # Hash/Parameters), so `untyped` is the deliberate value type.
+    def initialize: (?Hash[Symbol, untyped] hash) -> void
+
+    # `key.to_sym` is called inside, so callers may pass a Symbol or
+    # String. RBS type Symbol covers the common case; widen via union
+    # if a String-key fixture forces it.
+    def []: (Symbol key) -> untyped
+    def []=: (Symbol key, untyped value) -> untyped
+
+    def key?: (Symbol key) -> bool
+
+    # `default` is `nil` when omitted; returned as-is when the key is
+    # absent. The result type is the union of the stored value (untyped)
+    # and the default — we collapse to `untyped` since the caller's
+    # narrowing is at the use-site.
+    def fetch: (Symbol key, ?untyped default) -> untyped
+
+    def empty?: () -> bool
+
+    # Rebuilds a plain Hash with values walked: nested Parameters
+    # flatten back to Hashes, primitives pass through.
+    def to_h: () -> Hash[Symbol, untyped]
+
+    # `other` may be a Parameters or a Hash — `to_h` is called on the
+    # Parameters branch to homogenize. Returns a fresh Parameters.
+    def merge: (untyped other) -> Parameters
+
+    # `params.require(:article)` — raises ParameterMissing when the
+    # value is nil/empty. Returns the nested Parameters (or the raw
+    # value when the key holds a non-Hash scalar).
+    def require: (Symbol key) -> untyped
+
+    # `params.permit(:title, :body)` — returns a new Parameters
+    # containing only the listed keys. Splat receives Symbols.
+    def permit: (*Symbol allowed) -> Parameters
+
+    # Internal: walk the input hash recursively, converting String
+    # keys to Symbols and unwrapping nested Parameters to Hashes.
+    # `input` is genuinely polymorphic (Hash or Parameters); body
+    # narrows via `is_a?`. Returns a Hash[Symbol, untyped].
+    def symbolize_keys: (untyped input) -> Hash[Symbol, untyped]
+  end
+
+  # `ParameterMissing < StandardError; end` — a class declaration
+  # with no body. No methods to declare, but the class itself needs
+  # to exist for body-typer dispatch. Empty-body class declarations
+  # in RBS are legal.
+  class ParameterMissing < StandardError
+  end
+end

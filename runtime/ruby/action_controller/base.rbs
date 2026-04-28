@@ -1,0 +1,63 @@
+module ActionController
+  # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
+  # Ruby-level frozen Hash literal — module-level constant, not a
+  # method. RBS doesn't require declaring constants for the strict
+  # test (the test exercises method bodies); it's accessed inside
+  # `resolve_status` via `STATUS_CODES.fetch(s, 200)`.
+
+  # Base controller. Holds per-request state (params, session, flash)
+  # and response state (status, body, location). Subclasses define
+  # their actions and override process_action.
+  class Base
+    # `attr_accessor` produces getter+setter pairs for each name.
+    # `params` is initialized to a fresh Parameters; the others to
+    # plain Hashes / String / nil. `request_method` and `request_path`
+    # are populated by the dispatcher before invoking the action.
+    def params: () -> Parameters
+    def params=: (Parameters) -> Parameters
+    def session: () -> Hash[Symbol, untyped]
+    def session=: (Hash[Symbol, untyped]) -> Hash[Symbol, untyped]
+    def flash: () -> Hash[Symbol, untyped]
+    def flash=: (Hash[Symbol, untyped]) -> Hash[Symbol, untyped]
+    def request_method: () -> String
+    def request_method=: (String) -> String
+    def request_path: () -> String
+    def request_path=: (String) -> String
+
+    # `attr_reader` — getter only. Setters are internal (assigned via
+    # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
+    def status: () -> Integer
+    def body: () -> String
+    def location: () -> String?
+
+    def initialize: () -> void
+
+    # Subclasses override; base raises NotImplementedError. The
+    # contract is what subclasses MUST satisfy; declare the contract
+    # type even though the Base body itself never returns one — `raise`
+    # is divergent and doesn't contradict the declared return.
+    %a{abstract}
+    def process_action: (Symbol _action_name) -> void
+
+    # `render(html_string, status: 200)` — sets @body, @status. Returns
+    # nil per Rails convention (callers ignore the result).
+    def render: (String html, ?status: untyped) -> void
+
+    # `redirect_to(path, notice:, alert:, status:)` — sets @location,
+    # @status, @flash entries. `status` accepts Symbol or Integer
+    # (resolve_status handles both); declared `untyped` to match.
+    def redirect_to: (
+      String path,
+      ?notice: String?,
+      ?alert: String?,
+      ?status: untyped
+    ) -> void
+
+    # `head(:no_content)` — empty body, status only.
+    def head: (untyped status) -> void
+
+    # `s` may be Integer or Symbol. Body narrows via `is_a?(Integer)`;
+    # the Symbol branch reads STATUS_CODES.
+    def resolve_status: (untyped s) -> Integer
+  end
+end

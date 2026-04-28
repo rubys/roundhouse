@@ -298,7 +298,11 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
     )?;
 
     // `*rest` positional. Prism-rbs models this as a single optional
-    // FunctionParam; if present, it becomes one `Rest` param.
+    // FunctionParam; if present, it becomes one `Rest` param. The
+    // RBS-declared type names the *element* type (`*Symbol allowed`
+    // means each rest arg is a Symbol); the Ruby-side `allowed`
+    // variable is the collected `Array[Symbol]`. Wrap accordingly so
+    // body-typing on `allowed.each { |key| ... }` resolves.
     if let Some(rest_node) = fn_type.rest_positionals() {
         let Node::FunctionParam(fn_param) = rest_node else {
             return Err(format!(
@@ -309,7 +313,8 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("rest"));
-        let ty = ty_from_node(&fn_param.type_())?;
+        let elem_ty = ty_from_node(&fn_param.type_())?;
+        let ty = Ty::Array { elem: Box::new(elem_ty) };
         params.push(Param { name, ty, kind: ParamKind::Rest });
     }
 
@@ -355,7 +360,10 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
         });
     }
 
-    // `**rest_keywords` / `**opts`.
+    // `**rest_keywords` / `**opts`. The RBS-declared type names the
+    // *value* type of the kwargs (`**String opts` means each kwarg
+    // value is a String); the Ruby-side `opts` variable is the
+    // collected `Hash[Symbol, String]`. Wrap accordingly.
     if let Some(rest_node) = fn_type.rest_keywords() {
         let Node::FunctionParam(fn_param) = rest_node else {
             return Err(format!(
@@ -366,7 +374,11 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("opts"));
-        let ty = ty_from_node(&fn_param.type_())?;
+        let value_ty = ty_from_node(&fn_param.type_())?;
+        let ty = Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(value_ty),
+        };
         params.push(Param {
             name,
             ty,

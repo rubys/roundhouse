@@ -1,0 +1,19 @@
+# Route helpers — module functions returning path strings. One
+# function per route × singular/plural × member/collection × format.
+# Each takes plain typed args (Integer ids) and returns a String.
+module RouteHelpers
+  # ── articles ────────────────────────────────────────────────────
+  def self.articles_path: () -> String
+  def self.article_path: (Integer id) -> String
+  def self.new_article_path: () -> String
+  def self.edit_article_path: (Integer id) -> String
+
+  # ── comments (nested under article) ─────────────────────────────
+  def self.article_comments_path: (Integer article_id) -> String
+  def self.article_comment_path: (Integer article_id, Integer id) -> String
+  def self.new_article_comment_path: (Integer article_id) -> String
+  def self.edit_article_comment_path: (Integer article_id, Integer id) -> String
+
+  # ── root ────────────────────────────────────────────────────────
+  def self.root_path: () -> String
+end

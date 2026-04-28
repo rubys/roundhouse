@@ -1,0 +1,3 @@
+# Top-level require shim — action_view.rb just `require_relative`s its
+# child files (view_helpers, route_helpers). No method definitions of
+# its own, so no signatures to declare.

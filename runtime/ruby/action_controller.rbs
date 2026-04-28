@@ -1,0 +1,4 @@
+# Top-level require shim — action_controller.rb just `require_relative`s
+# its child files (parameters, base). No method definitions of its own,
+# so no signatures to declare. The .rbs exists to satisfy the strict
+# typing test's "every .rb has a paired .rbs" invariant.

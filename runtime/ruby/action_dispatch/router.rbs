@@ -1,0 +1,21 @@
+# Path router: matches (method, path) against a hand-written route
+# table and resolves to (controller_class, action, path_params).
+module Router
+  # Match a request against the route table. Returns a hash with
+  # :controller, :action, :path_params on success; nil otherwise.
+  # `table` is `Array[Hash[Symbol, untyped]]` — each route's :method,
+  # :pattern, :controller, :action keys hold mixed types (String for
+  # method/pattern, Class for controller, Symbol for action).
+  def self.match: (
+    String method,
+    String path,
+    Array[Hash[Symbol, untyped]] table
+  ) -> Hash[Symbol, untyped]?
+
+  # Match a path against a `:name`-segment pattern. Returns a hash of
+  # captured params, or nil if no match. No regex; segment-by-segment.
+  def self.match_pattern: (
+    String pattern,
+    String path
+  ) -> Hash[Symbol, String]?
+end

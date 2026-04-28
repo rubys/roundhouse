@@ -1,0 +1,3 @@
+# Top-level require shim — active_record.rb just `require_relative`s
+# its child files (errors, validations, base). No method definitions
+# of its own, so no signatures to declare.
