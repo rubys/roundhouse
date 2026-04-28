@@ -34,6 +34,9 @@ pub fn python_ty(ty: &Ty) -> String {
         // responsibility (typically already pulled in via `from typing
         // import Any` at the top of generated modules).
         Ty::Untyped => "Any".to_string(),
+        // Bottom type — Python's `typing.Never` (3.11+) or
+        // `NoReturn` (older). Used for divergent expressions.
+        Ty::Bottom => "Never".to_string(),
     }
 }
 

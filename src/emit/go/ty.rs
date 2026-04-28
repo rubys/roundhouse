@@ -37,6 +37,12 @@ pub fn go_ty(ty: &Ty) -> String {
         // distinction survives in the IR and via diagnostics; Go-side
         // codegen renders both identically.
         Ty::Untyped => "interface{}".to_string(),
+        // Go has no native bottom type. Functions that always
+        // panic/exit return no value (or `interface{}` if the
+        // surrounding context demands a value). Render as
+        // `interface{}` — same shape as Untyped — and rely on Go's
+        // unreachable-code analysis to catch missing returns.
+        Ty::Bottom => "interface{}".to_string(),
     }
 }
 

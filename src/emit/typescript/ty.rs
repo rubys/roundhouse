@@ -34,5 +34,9 @@ pub fn ts_ty(ty: &Ty) -> String {
         // author signed this opt-out, so the call-site doesn't have to
         // narrow before use.
         Ty::Untyped => "any".to_string(),
+        // Bottom type — TypeScript's `never`. Used for divergent
+        // expressions (raise/return/next). TS's narrowing benefits
+        // from `never` in exhaustiveness checks.
+        Ty::Bottom => "never".to_string(),
     }
 }

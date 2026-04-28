@@ -129,9 +129,15 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Return { value } => {
                 self.analyze_expr(value, ctx);
-                // `return x` diverges; represent as the value's type for
-                // now (downstream effects/typing handle control flow).
-                value.ty.clone().unwrap_or_else(unknown)
+                // `return x` diverges at the source position — control
+                // jumps out of the method, so the expression itself
+                // produces no value here. Type as `Bottom` so it drops
+                // out of joins (`if cond then return x else y end`
+                // types as `typeof(y)`, not `typeof(x) | typeof(y)`).
+                // The value's own type was already captured via
+                // analyze_expr above and contributes to the method's
+                // declared return-type reconciliation elsewhere.
+                Ty::Bottom
             }
 
             ExprNode::Super { args } => {
@@ -409,19 +415,20 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Raise { value } => {
                 self.analyze_expr(value, ctx);
-                Ty::Nil
+                // `raise` diverges — control transfers up the stack,
+                // the expression produces no value. `Ty::Bottom`
+                // drops out of unions so `if cond then raise else x
+                // end` types as `typeof(x)`.
+                Ty::Bottom
             }
 
             ExprNode::Next { value } => {
                 if let Some(v) = value { self.analyze_expr(v, ctx); }
-                // `next` is divergent — it doesn't return a value at
-                // its source position; the surrounding expression
-                // skips to the next iteration. Type as Nil so callers
-                // see a typed node rather than an inference gap.
-                // Refinement: a control-flow-aware analyzer would
-                // type this as Bottom/Never; Nil suffices here
-                // because no caller relies on the specific value.
-                Ty::Nil
+                // `next` is divergent at the source position — the
+                // surrounding expression skips to the next iteration.
+                // `Bottom` drops out of joins so `if cond then next
+                // else x end` types cleanly as `typeof(x)`.
+                Ty::Bottom
             }
 
             ExprNode::MultiAssign { targets, value } => {
@@ -487,6 +494,17 @@ pub(super) fn unknown() -> Ty {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    // Bottom is the divergent-expression type — the branch carrying
+    // it doesn't contribute a value, so it drops out of joins.
+    // Mirrors Crystal's `Type.merge` filter on `NoReturnType`.
+    // `if cond then raise else x end` types as `typeof(x)` instead
+    // of `typeof(x) | Nil`.
+    if matches!(a, Ty::Bottom) {
+        return b;
+    }
+    if matches!(b, Ty::Bottom) {
+        return a;
+    }
     if a == b {
         a
     } else {
@@ -495,8 +513,11 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
 }
 
 pub(super) fn union_many(mut tys: Vec<Ty>) -> Ty {
+    // Filter Bottom variants — same reasoning as `union_of`.
+    tys.retain(|t| !matches!(t, Ty::Bottom));
     match tys.len() {
-        0 => Ty::Nil,
+        // All branches diverged; the union itself is Bottom.
+        0 => Ty::Bottom,
         1 => tys.pop().unwrap(),
         _ => Ty::Union { variants: tys },
     }

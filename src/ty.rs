@@ -49,6 +49,22 @@ pub enum Ty {
     /// diagnostic pipeline — the gradual escape only survives
     /// emission for targets that explicitly accept it.
     Untyped,
+
+    /// The bottom type — values of this type don't exist at runtime
+    /// because the expression diverges (`raise`, `return`, `next`,
+    /// `exit`). Subtype of every other type, so `Bottom ≤ T` for
+    /// any T; in `union_of` / `union_many` the variant is filtered
+    /// out so `if cond then raise else x end` types as `typeof(x)`,
+    /// not `typeof(x) | Nil`.
+    ///
+    /// Maps to Rust `!`, TypeScript `never`, Python `typing.Never`,
+    /// Crystal `NoReturn`. Targets without a native bottom (Go,
+    /// Elixir) fall back to a target-appropriate stand-in.
+    ///
+    /// Mirrors Crystal's `NoReturnType` (compiler/crystal/types.cr);
+    /// the union filter is the analog of Crystal's `Type.merge`
+    /// dropping NoReturn variants during type joining.
+    Bottom,
 }
 
 /// A row-polymorphic record shape.

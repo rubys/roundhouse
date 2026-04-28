@@ -37,6 +37,10 @@ pub fn crystal_ty(ty: &Ty) -> String {
         // in the IR but invisible at emission. Future refinement:
         // emit-time elevation to error for strict-target pipelines.
         Ty::Untyped => "_".to_string(),
+        // Bottom type — Crystal's native `NoReturn`. The IR's
+        // Bottom maps directly to Crystal's NoReturnType (which is
+        // exactly the type-theoretic concept this variant models).
+        Ty::Bottom => "NoReturn".to_string(),
     }
 }
 

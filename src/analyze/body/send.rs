@@ -581,7 +581,7 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // time). Without this, methods that end with `raise ...`
         // harvest as `Ty::Var` and the dispatch registry never
         // learns their declared return type from the RBS contract.
-        "raise" | "throw" => Some(Ty::Nil),
+        "raise" | "throw" => Some(Ty::Bottom),
         _ => None,
     }
 }

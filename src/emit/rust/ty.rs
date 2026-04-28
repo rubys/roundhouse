@@ -46,6 +46,10 @@ pub fn rust_ty(ty: &Ty) -> String {
         // its interfaces — at which point this branch should be
         // unreachable.
         Ty::Untyped => "()".to_string(),
+        // The bottom type — Rust's `!` (never). Has special
+        // subtyping: coerces to any other type. `if cond { panic!() }
+        // else { x }` types as typeof(x) cleanly because of this.
+        Ty::Bottom => "!".to_string(),
     }
 }
 
