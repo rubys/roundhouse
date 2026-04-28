@@ -233,8 +233,20 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Lambda { body, .. } => {
-                self.analyze_expr(body, ctx);
-                unknown() // Fn type synthesis is future work
+                let body_ty = self.analyze_expr(body, ctx);
+                // Synthesize a `Fn` type from the body's type. Param
+                // types aren't tracked here (they were seeded into the
+                // outer Ctx by block_ctx_for from the receiver
+                // signature); the lambda's *own* type just records the
+                // body's return type so callers can walk past the
+                // Lambda node without seeing Var. Effects default to
+                // pure; full effect inference is future work.
+                Ty::Fn {
+                    params: Vec::new(),
+                    block: None,
+                    ret: Box::new(body_ty),
+                    effects: crate::effect::EffectSet::pure(),
+                }
             }
 
             ExprNode::Apply { fun, args, block } => {
@@ -359,7 +371,14 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Next { value } => {
                 if let Some(v) = value { self.analyze_expr(v, ctx); }
-                unknown()
+                // `next` is divergent — it doesn't return a value at
+                // its source position; the surrounding expression
+                // skips to the next iteration. Type as Nil so callers
+                // see a typed node rather than an inference gap.
+                // Refinement: a control-flow-aware analyzer would
+                // type this as Bottom/Never; Nil suffices here
+                // because no caller relies on the specific value.
+                Ty::Nil
             }
 
             ExprNode::MultiAssign { targets, value } => {

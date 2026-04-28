@@ -32,6 +32,16 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
+        // Untyped receiver: bind every block param to `Untyped` (the
+        // gradual choice extends to the destructured params). Without
+        // this, `untyped_hash.each { |k, v| ... }` would give k=Untyped
+        // and v=Var since block_params_for returns a single-Untyped vec.
+        if matches!(recv_ty, Some(Ty::Untyped)) {
+            for name in params {
+                new_ctx.local_bindings.insert(name.clone(), Ty::Untyped);
+            }
+            return new_ctx;
+        }
         let Some(param_tys) = self.block_params_for(recv_ty, method) else {
             return new_ctx;
         };
@@ -83,6 +93,37 @@ impl<'a> BodyTyper<'a> {
                     _ => None,
                 }
             }
+            // Union receivers (typically `T | Nil` from RBS optionals or
+            // flow-sensitive ivar reads). Unwrap to the first concrete
+            // container variant and recurse — `(Hash[K,V] | Nil).each
+            // { |k, v| ... }` should yield `[K, V]` to the block, not
+            // give up because the union confused dispatch. Skip Nil/Var
+            // variants; they don't carry block-shape information.
+            Ty::Union { variants } => {
+                for v in variants {
+                    if matches!(v, Ty::Nil | Ty::Var { .. }) {
+                        continue;
+                    }
+                    if let Some(params) = self.block_params_for(Some(v), method) {
+                        return Some(params);
+                    }
+                }
+                None
+            }
+            // RBS-declared `untyped` receiver: a method call like
+            // `untyped.each { |x| ... }` passes through with the block
+            // param also typed `Untyped`, propagating the gradual choice
+            // through the block body. Without this case the block param
+            // would type as `Var` (inference gap), which is the wrong
+            // signal — the gradual escape was authored, not inferred.
+            // We don't know how many params the block takes (the
+            // receiver type doesn't tell us); return a single-Untyped
+            // shape, which covers the common `each { |x| }` case. Block
+            // bodies that destructure with `|k, v|` will see `v` typed
+            // as Untyped (right answer) but `k` will be missing
+            // (analyzer fallback to Var); that residual is acceptable
+            // — the caller has signed out of typing here.
+            Ty::Untyped => Some(vec![Ty::Untyped]),
             _ => None,
         }
     }
@@ -181,6 +222,25 @@ impl<'a> BodyTyper<'a> {
                         }),
                     },
                     _ => {}
+                }
+                // Time stdlib subset — `Time.now.utc.iso8601` is the
+                // canonical timestamp chain in `fill_timestamps`. We
+                // only track the methods this corpus actually calls;
+                // grow as new uses surface.
+                if id.0.as_str() == "Time" {
+                    let time_class = || Ty::Class {
+                        id: ClassId(Symbol::from("Time")),
+                        args: vec![],
+                    };
+                    match method.as_str() {
+                        "now" | "utc" | "local" | "at" => return time_class(),
+                        "iso8601" | "rfc2822" | "to_s" | "strftime" | "httpdate" => {
+                            return Ty::Str
+                        }
+                        "to_i" | "tv_sec" | "year" | "month" | "day"
+                        | "hour" | "min" | "sec" => return Ty::Int,
+                        _ => {}
+                    }
                 }
                 unknown()
             }
