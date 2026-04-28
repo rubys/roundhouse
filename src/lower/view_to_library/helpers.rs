@@ -6,6 +6,7 @@
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::naming::singularize;
+use crate::span::Span;
 
 use crate::lower::view::{
     classify_nested_url_element, classify_view_url_arg, NestedUrlElement, ViewHelperKind,
@@ -65,17 +66,53 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // Layout-`<head>` helpers — bare zero-arg ViewHelpers calls.
         CsrfMetaTags => Some(view_helpers_call("csrf_meta_tags", Vec::new())),
         CspMetaTag => Some(view_helpers_call("csp_meta_tag", Vec::new())),
+        // `javascript_importmap_tags` consumes per-app importmap data:
+        // emit `Importmap::PINS` (the frozen array from `config/importmap.rb`)
+        // and the entry name as args. The runtime helper iterates pins
+        // to emit modulepreload links + the importmap-script JSON,
+        // matching Rails' shape. Mirrors how the Rust target threads
+        // `crate::importmap::PINS` into its helper call.
         JavascriptImportmapTags => {
-            Some(view_helpers_call("javascript_importmap_tags", Vec::new()))
+            let pins = Expr::new(
+                Span::synthetic(),
+                ExprNode::Const {
+                    path: vec![Symbol::from("Importmap"), Symbol::from("PINS")],
+                },
+            );
+            let entry = lit_str("application".to_string());
+            Some(view_helpers_call("javascript_importmap_tags", vec![pins, entry]))
         }
         // `<%= stylesheet_link_tag :app, "data-turbo-track":
-        // "reload" %>` — first arg is the stylesheet group; spinel-
-        // blog converts the `:app` symbol form to the `"app"` string
-        // form (the runtime expects the string key). Trailing opts
-        // hash threads through unchanged; non-symbol keys
-        // (`"data-turbo-track":`) emit in rocket form via the Ruby
-        // emitter's hash printer.
+        // "reload" %>` — first arg is the stylesheet group. When the
+        // arg is the `:app` symbol AND the app has multiple stylesheets
+        // ingested from `app/assets/stylesheets/` + `app/assets/builds/`,
+        // expand to one call per stylesheet (matching Rails' Propshaft
+        // resolution). Otherwise pass through with the symbol→string
+        // conversion the runtime expects.
         StylesheetLinkTag { name, opts } => {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*name.node {
+                if value.as_str() == "app" && !ctx.stylesheets.is_empty() {
+                    let mut calls: Vec<Expr> = Vec::new();
+                    for sheet in &ctx.stylesheets {
+                        let mut args = vec![lit_str(sheet.clone())];
+                        if let Some(o) = opts {
+                            args.push((*o).clone());
+                        }
+                        calls.push(view_helpers_call("stylesheet_link_tag", args));
+                    }
+                    // Chain calls with " + \"\\n    \" + " so the rendered
+                    // strings concatenate at runtime, matching Rails'
+                    // newline-separated multi-link emit. Single-call case
+                    // would fall to the else-branch below.
+                    let sep = lit_str("\n    ".to_string());
+                    let mut chain = calls.remove(0);
+                    for call in calls {
+                        chain = send(Some(chain), "+", vec![sep.clone()], None, false);
+                        chain = send(Some(chain), "+", vec![call], None, false);
+                    }
+                    return Some(chain);
+                }
+            }
             let name_expr = match &*name.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => {
                     lit_str(value.as_str().to_string())

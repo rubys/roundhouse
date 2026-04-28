@@ -170,6 +170,9 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(emit_lowered_schema(app));
     files.push(emit_lowered_routes(app));
+    if app.importmap.is_some() {
+        files.push(importmap::emit_lowered_importmap(app));
+    }
     files.extend(emit_lowered_models(app));
     files.extend(emit_lowered_controllers(app));
     files.extend(emit_lowered_views(app));

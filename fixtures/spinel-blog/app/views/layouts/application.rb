@@ -30,7 +30,9 @@ module Views
       io << %(    <link rel="icon" href="/icon.png" type="image/png">\n)
       io << %(    <link rel="icon" href="/icon.svg" type="image/svg+xml">\n)
       io << %(    <link rel="apple-touch-icon" href="/icon.png">\n\n    )
-      io << ViewHelpers.stylesheet_link_tag("app", "data-turbo-track" => "reload")
+      io << ViewHelpers.stylesheet_link_tag("application", "data-turbo-track" => "reload")
+      io << "\n    "
+      io << ViewHelpers.stylesheet_link_tag("tailwind", "data-turbo-track" => "reload")
       io << "\n    "
       io << ViewHelpers.javascript_importmap_tags
       io << "\n  </head>\n\n  <body>\n"

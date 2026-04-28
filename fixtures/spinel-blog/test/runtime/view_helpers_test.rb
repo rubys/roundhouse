@@ -104,7 +104,10 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_javascript_importmap_tags_has_importmap_script
-    assert_includes ViewHelpers.javascript_importmap_tags, %(<script type="importmap">)
+    # Helper emits the importmap script with `data-turbo-track="reload"`
+    # (matching Rails' shape); assert on the opening fragment without
+    # the closing `>` so the attribute can be present.
+    assert_includes ViewHelpers.javascript_importmap_tags, %(<script type="importmap")
   end
 
   def test_javascript_importmap_tags_pins_turbo

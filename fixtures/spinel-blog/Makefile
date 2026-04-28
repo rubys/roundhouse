@@ -2,7 +2,7 @@
 #
 # Targets:
 #   make             — assets + tests + lint (default)
-#   make assets      — build static/app.css and static/turbo.min.js
+#   make assets      — build static/{application,tailwind}.css and static/turbo.min.js
 #   make build       — spinel main.rb → build/blog (requires spinel on PATH)
 #   make test        — bundle exec rake test
 #   make lint        — bundle exec rake lint (spinel-subset linter)
@@ -30,14 +30,22 @@ all: assets test lint
 
 # ── Static assets ────────────────────────────────────────────────
 
-assets: $(STATIC)/app.css $(STATIC)/turbo.min.js
+assets: $(STATIC)/application.css $(STATIC)/tailwind.css $(STATIC)/turbo.min.js
 
-# CSS: scan view + helper sources for utility classes; emit minified.
-# Tailwind v4 needs both `tailwindcss` (the engine) and
-# `@tailwindcss/cli` (the binary) resolvable in node_modules — npx
-# alone fetches only the CLI. Sentinel file gates the install so it
-# runs once per checkout, not on every build.
-$(STATIC)/app.css: app/assets/tailwind.css $(RUBY_SRC) node_modules/.installed
+# Two stylesheet outputs to match Rails' Propshaft asset shape:
+#   - application.css: empty placeholder, mirrors a Rails app's
+#     app/assets/stylesheets/application.css (typically just a
+#     manifest comment with no rules of its own).
+#   - tailwind.css: the Tailwind v4 build, scanning views + helpers
+#     for utility classes. Tailwind needs both `tailwindcss` (engine)
+#     and `@tailwindcss/cli` (binary) resolvable in node_modules — npx
+#     alone fetches only the CLI. Sentinel file gates the install so
+#     it runs once per checkout, not on every build.
+$(STATIC)/application.css:
+	@mkdir -p $(STATIC)
+	@touch $@
+
+$(STATIC)/tailwind.css: app/assets/tailwind.css $(RUBY_SRC) node_modules/.installed
 	@mkdir -p $(STATIC)
 	npx @tailwindcss/cli \
 	  --input app/assets/tailwind.css \

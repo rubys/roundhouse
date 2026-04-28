@@ -73,7 +73,7 @@ refresh.
 | target | what |
 |---|---|
 | `make` | `make assets test lint` |
-| `make assets` | `static/app.css` (Tailwind, ~13.5KB minified) + `static/turbo.min.js` (105KB, copied from turbo-rails gem) |
+| `make assets` | `static/application.css` (empty manifest) + `static/tailwind.css` (Tailwind, ~13.5KB minified) + `static/turbo.min.js` (105KB, copied from turbo-rails gem) |
 | `make build` | `spinel main.rb -o build/blog` (requires `spinel` on PATH; not used by the rest) |
 | `make test` | 224 minitest runs / 577 assertions |
 | `make lint` | the spinel-subset rule scanner over production code |

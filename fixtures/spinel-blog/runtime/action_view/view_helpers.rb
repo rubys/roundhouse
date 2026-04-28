@@ -143,18 +143,33 @@ module ViewHelpers
     "<link#{attrs}>"
   end
 
-  # Emit an importmap pointing at the bundled Turbo JS, plus a
-  # module-script that imports it (Turbo registers itself on import,
-  # so no further bootstrap is needed).
+  # Emit the importmap script + per-pin modulepreload hints + a
+  # module-script that imports the entry point. Mirrors Rails'
+  # `javascript_importmap_tags` shape so the cross-target comparison
+  # harness sees equivalent head structure.
   #
-  # The Makefile copies turbo.min.js out of the turbo-rails gem into
-  # static/turbo.min.js; deployment maps `/assets/` → `static/`.
-  # Hardcoded path here; an iteration that needs cache-busting digests
-  # would inject the manifest at compile time.
-  def javascript_importmap_tags(_pins = nil, _entry = "application")
-    %(<script type="importmap">{"imports":{"@hotwired/turbo":"/assets/turbo.min.js"}}</script>) +
-      "\n    " +
-      %(<script type="module">import "@hotwired/turbo"</script>)
+  # `pins` is the frozen array Roundhouse emits to `config/importmap.rb`
+  # as `Importmap::PINS` (one `{ name:, path: }` hash per pin in the
+  # source `config/importmap.rb`). When pins is nil/empty — the case
+  # for the hand-written standalone specimen, before Roundhouse ingests
+  # an importmap — fall back to a Turbo-only shape so the fixture stays
+  # runnable on its own.
+  def javascript_importmap_tags(pins = nil, entry = "application")
+    if pins.nil? || pins.empty?
+      return %(<script type="importmap" data-turbo-track="reload">{"imports":{"@hotwired/turbo":"/assets/turbo.min.js"}}</script>) +
+        "\n    " +
+        %(<link rel="modulepreload" href="/assets/turbo.min.js">) +
+        "\n    " +
+        %(<script type="module">import "@hotwired/turbo"</script>)
+    end
+    imports = pins.map { |p| %("#{p[:name]}":"#{p[:path]}") }.join(",")
+    parts = []
+    parts << %(<script type="importmap" data-turbo-track="reload">{"imports":{#{imports}}}</script>)
+    pins.each do |p|
+      parts << %(<link rel="modulepreload" href="#{p[:path]}">)
+    end
+    parts << %(<script type="module">import "#{entry}"</script>)
+    parts.join("\n    ")
   end
 
   def turbo_stream_from(stream)

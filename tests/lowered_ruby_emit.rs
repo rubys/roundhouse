@@ -1612,20 +1612,30 @@ fn lowered_layout_view_head_helpers() {
 }
 
 #[test]
-fn lowered_layout_view_stylesheet_link_tag_converts_sym_arg() {
+fn lowered_layout_view_stylesheet_link_tag_expands_app_sym() {
     // `<%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>`
-    // → `ViewHelpers.stylesheet_link_tag("app", "data-turbo-track":
-    // "reload")`. Spinel-runtime convention: the stylesheet group
-    // arg is a string, not a symbol; opts hash threads through.
+    // expands to one call per ingested stylesheet (real-blog has
+    // `application` from app/assets/stylesheets/ + `tailwind` from
+    // app/assets/builds/), joined by "\n    " so they render as two
+    // adjacent <link> tags. Mirrors Rails' Propshaft `:app` resolution
+    // and the per-target view emitters' :app expansion.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << ViewHelpers.stylesheet_link_tag(\"app\""),
-        "expected stylesheet_link_tag with `:app` symbol → \"app\" string; got:\n{src}",
+        src.contains("ViewHelpers.stylesheet_link_tag(\"application\""),
+        "expected `application` stylesheet link; got:\n{src}",
+    );
+    assert!(
+        src.contains("ViewHelpers.stylesheet_link_tag(\"tailwind\""),
+        "expected `tailwind` stylesheet link; got:\n{src}",
     );
     assert!(
         src.contains("\"data-turbo-track\""),
         "expected `data-turbo-track` opts entry preserved; got:\n{src}",
+    );
+    assert!(
+        !src.contains("stylesheet_link_tag(\"app\""),
+        "the literal `\"app\"` arg should have been expanded away; got:\n{src}",
     );
 }
 

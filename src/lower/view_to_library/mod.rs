@@ -103,6 +103,7 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
         accumulator: "io".to_string(),
         form_records: Vec::new(),
         nullable_locals: extra_params.iter().cloned().collect(),
+        stylesheets: app.stylesheets.clone(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -284,6 +285,11 @@ pub(super) struct ViewCtx {
     /// rewrite to the nil-safe form `!recv.nil? && !recv.empty?` so
     /// the body doesn't NoMethodError when callers omit the kwarg.
     pub(super) nullable_locals: std::collections::HashSet<String>,
+    /// Stylesheet logical names ingested from `app/assets/stylesheets/`
+    /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
+    /// ...)` expansion: a `:app` symbol arg fans out to one call per
+    /// stylesheet, mirroring how Rails' Propshaft resolves `:app`.
+    pub(super) stylesheets: Vec<String>,
 }
 
 impl ViewCtx {
