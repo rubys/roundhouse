@@ -38,6 +38,12 @@ pub struct Ctx {
     /// assignments accumulated through a `Seq`, and block parameters
     /// seeded from a receiver-aware dispatch.
     pub local_bindings: HashMap<Symbol, Ty>,
+    /// Module/class-level constants: `STATUS_CODES = { ok: 200, ... }.freeze`.
+    /// Populated by the registry-builder from parsed module bodies; read
+    /// by the `ExprNode::Const` arm so subsequent dispatch on the constant
+    /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
+    /// table instead of falling through to the user-class registry.
+    pub constants: HashMap<Symbol, Ty>,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -94,8 +100,18 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Lit { value } => lit_ty(value),
 
             ExprNode::Const { path } => {
-                // `Post` as an expression refers to the class.
                 let name = path.last().cloned().unwrap_or_else(|| Symbol::from("?"));
+                // Module/class-level constants seeded by the registry
+                // builder. `STATUS_CODES = { ok: 200, ... }` lands here
+                // typed `Hash[Sym, Int]` (not `Class { STATUS_CODES }`),
+                // so subsequent dispatch on `STATUS_CODES.fetch(...)`
+                // resolves through hash_method.
+                if let Some(ty) = ctx.constants.get(&name) {
+                    return ty.clone();
+                }
+                // Fall back to class-by-name (Const refers to a class
+                // or module the registry knows about). Most user-class
+                // references land here.
                 Ty::Class { id: ClassId(name), args: vec![] }
             }
 

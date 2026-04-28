@@ -278,21 +278,21 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 /// enforced by `tests/real_blog.rs::type_analysis_coverage`. New
 /// runtime files are picked up automatically.
 ///
-/// Currently `#[ignore]`'d. Two error categories still gate:
-///  1. `.rb` files without a paired `.rbs` (action_view/,
-///     action_controller/, action_dispatch/, top-level
-///     active_record) — needs RBS authoring.
-///  2. RBS↔Ruby orphan/arity mismatches in active_record/ — needs
-///     compiler-side `attr_*`-lowering, follow-include into the
-///     class registry, and block-arity correction in
-///     `parse_methods_with_rbs_in_ctx`.
+/// **Active** as of 2026-04-28: residual driven from 104 → 0
+/// across one session via the three-path approach (path 1: analyzer
+/// extensions for block_params_for/Lambda/Next/Yield/Super/Range,
+/// stdlib coverage, Hash/Array narrowing→Untyped, constant tracking;
+/// path 2: 9 RBS sidecars + splat fix + abstract pragma; path 3:
+/// validates_*_of rewrite from block-yield to positional value).
+/// Holds the typed-runtime promise: every framework Ruby method
+/// body types end-to-end with no Var residual.
 ///
-/// Once those land, this test re-enables. The
+/// `Ty::Untyped` (RBS-declared gradual escape) is allowed and
+/// counts as fully-typed (Bar A semantics). Bar B (zero
+/// `Untyped`) is a separate, stricter goal tracked by the
 /// `inference_on_spinel_blog_runtime_with_rbs::untyped_subexpressions_with_rbs_baseline`
-/// CEILING continues as the Bar A→Bar B residual tracker, plus the
-/// `GradualUntyped` warning count from the diagnostic pipeline.
+/// probe and the GradualUntyped diagnostic pipeline.
 #[test]
-#[ignore]
 fn every_runtime_method_body_is_fully_typed() {
     let stems = runtime_ruby_stems();
     assert!(!stems.is_empty(), "runtime/ruby/ should have at least one .rb file");

@@ -404,6 +404,7 @@ impl Analyzer {
                 }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
+                constants: HashMap::new(),
             };
             let ctrl_name = controller.name.clone();
 
@@ -448,6 +449,7 @@ impl Analyzer {
                             self_ty: ctx.self_ty.clone(),
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
+                            constants: HashMap::new(),
                         };
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                         action.effects = self.collect_effects(&mut action.body, &inner_ctx);
@@ -510,6 +512,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
+                constants: HashMap::new(),
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -552,6 +555,7 @@ impl Analyzer {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
+                    constants: HashMap::new(),
                 };
 
                 for scope in model.scopes_mut() {
@@ -581,6 +585,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
+                constants: HashMap::new(),
             };
 
             let lc_name = lc.name.clone();
@@ -603,6 +608,7 @@ impl Analyzer {
                     self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
+                    constants: HashMap::new(),
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);

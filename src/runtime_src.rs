@@ -23,6 +23,122 @@ use crate::ty::Ty;
 
 const VIRTUAL_FILE: &str = "<runtime>";
 
+/// Parse Ruby source and collect module/class-level constant
+/// assignments whose value is a typeable literal. Patterns recognized:
+///   `CONST = { k: v, ... }`
+///   `CONST = { k: v, ... }.freeze`
+///   `CONST = [a, b, ...]`
+///   `CONST = [a, b, ...].freeze`
+/// The returned map keys are the constant's last-segment name; values
+/// are the inferred Ty (Hash[K, V] / Array[T] / etc.). Used by the
+/// body-typer's `ExprNode::Const` arm so dispatch on a constant
+/// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
+/// table.
+pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<Symbol, Ty>, String> {
+    let result = parse(source.as_bytes());
+    let mut out = std::collections::HashMap::new();
+    if result.errors().count() > 0 {
+        // Errors will surface elsewhere; return empty here so the caller
+        // doesn't double-report.
+        return Ok(out);
+    }
+    let root = result.node();
+    walk_constants(&root, &mut out);
+    Ok(out)
+}
+
+fn walk_constants(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
+    if let Some(program) = node.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            collect_constant_from_stmt(&stmt, out);
+        }
+    } else if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_constant_from_stmt(&stmt, out);
+        }
+    }
+}
+
+fn collect_constant_from_stmt(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
+    // Recurse into module/class bodies. Constants commonly live one
+    // level inside `module Foo ... end` or `class Bar ... end`.
+    if let Some(module) = node.as_module_node() {
+        if let Some(body) = module.body() {
+            walk_constants(&body, out);
+        }
+        return;
+    }
+    if let Some(class) = node.as_class_node() {
+        if let Some(body) = class.body() {
+            walk_constants(&body, out);
+        }
+        return;
+    }
+    // Top-level constant assignment: `CONST = literal[.freeze]?`.
+    if let Some(write) = node.as_constant_write_node() {
+        let name_bytes = write.name().as_slice();
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
+        let value = write.value();
+        if let Some(ty) = type_of_const_literal(&value) {
+            out.insert(Symbol::new(name_str), ty);
+        }
+    }
+}
+
+/// Best-effort type inference for the right-hand side of a constant
+/// assignment. Recognizes Hash and Array literals (typing element
+/// types from the first key/value or first array element), with an
+/// optional trailing `.freeze`. Falls back to None for unsupported
+/// shapes — the body-typer's existing fallback still applies.
+fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
+    // Strip `.freeze` if present — it's a no-op for typing.
+    if let Some(call) = node.as_call_node() {
+        let name = std::str::from_utf8(call.name().as_slice()).ok()?;
+        if name == "freeze" {
+            let inner = call.receiver()?;
+            return type_of_const_literal(&inner);
+        }
+        return None;
+    }
+    if let Some(hash) = node.as_hash_node() {
+        let first = hash.elements().iter().next();
+        let Some(first) = first else {
+            return Some(Ty::Hash {
+                key: Box::new(Ty::Untyped),
+                value: Box::new(Ty::Untyped),
+            });
+        };
+        let assoc = first.as_assoc_node()?;
+        let key_ty = type_of_literal_node(&assoc.key())?;
+        let value_ty = type_of_literal_node(&assoc.value())?;
+        return Some(Ty::Hash {
+            key: Box::new(key_ty),
+            value: Box::new(value_ty),
+        });
+    }
+    if let Some(array) = node.as_array_node() {
+        let first = array.elements().iter().next();
+        let Some(first) = first else {
+            return Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        };
+        let elem_ty = type_of_literal_node(&first)?;
+        return Some(Ty::Array { elem: Box::new(elem_ty) });
+    }
+    None
+}
+
+fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {
+    if node.as_integer_node().is_some() { return Some(Ty::Int); }
+    if node.as_float_node().is_some() { return Some(Ty::Float); }
+    if node.as_string_node().is_some() { return Some(Ty::Str); }
+    if node.as_symbol_node().is_some() { return Some(Ty::Sym); }
+    if node.as_true_node().is_some() || node.as_false_node().is_some() {
+        return Some(Ty::Bool);
+    }
+    if node.as_nil_node().is_some() { return Some(Ty::Nil); }
+    None
+}
+
 /// Parse Ruby source and extract every `def` it finds (at top level
 /// and one level inside module/class bodies) as a `MethodDef`.
 pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
@@ -151,6 +267,12 @@ pub fn parse_methods_with_rbs_in_ctx(
     // primitive method tables for everything.
     let typer = crate::analyze::BodyTyper::new(classes);
 
+    // Extract module-level constants from the .rb so dispatch on
+    // `STATUS_CODES.fetch(...)` etc. resolves through the constant's
+    // typed value (Hash[Sym, Int]) rather than falling through as
+    // `Ty::Class { STATUS_CODES }` to unknown.
+    let constants = parse_module_constants(ruby_src).unwrap_or_default();
+
     let build_ctx = |m: &MethodDef,
                      ivars: &std::collections::HashMap<Symbol, Ty>|
      -> crate::analyze::Ctx {
@@ -167,6 +289,7 @@ pub fn parse_methods_with_rbs_in_ctx(
             });
         }
         ctx.ivar_bindings = ivars.clone();
+        ctx.constants = constants.clone();
         ctx
     };
 
