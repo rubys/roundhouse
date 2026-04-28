@@ -29,6 +29,11 @@ pub fn python_ty(ty: &Ty) -> String {
         },
         Ty::Fn { .. } => "object".to_string(),
         Ty::Var { .. } => "object".to_string(),
+        // RBS-declared `untyped` — Python's gradual escape is
+        // `typing.Any`. Importing `Any` is the emitter caller's
+        // responsibility (typically already pulled in via `from typing
+        // import Any` at the top of generated modules).
+        Ty::Untyped => "Any".to_string(),
     }
 }
 

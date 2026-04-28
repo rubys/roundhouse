@@ -29,5 +29,10 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Class { id, .. } => id.0.to_string(),
         Ty::Fn { .. } => "(...args: unknown[]) => unknown".to_string(),
         Ty::Var { .. } => "unknown".to_string(),
+        // RBS-declared `untyped` — TS's explicit gradual escape is `any`.
+        // Distinct from `Ty::Var` (rendered `unknown`, must-narrow): the
+        // author signed this opt-out, so the call-site doesn't have to
+        // narrow before use.
+        Ty::Untyped => "any".to_string(),
     }
 }

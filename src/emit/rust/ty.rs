@@ -36,6 +36,16 @@ pub fn rust_ty(ty: &Ty) -> String {
         },
         Ty::Fn { .. } => "Box<dyn Fn()>".to_string(),
         Ty::Var { .. } => "()".to_string(),
+        // RBS-declared `untyped`. Rust has no native gradual escape;
+        // any node carrying `Ty::Untyped` that reaches an emit-relevant
+        // position is a fail-stop (the diagnostic pipeline elevates it
+        // to Error before this renderer runs in a strict pipeline).
+        // For surfaces that *can* tolerate it (debug renderings,
+        // exploratory emits), fall back to `()` to mirror Var. Real
+        // path forward is `Box<dyn _Adapter>` once the corpus declares
+        // its interfaces — at which point this branch should be
+        // unreachable.
+        Ty::Untyped => "()".to_string(),
     }
 }
 

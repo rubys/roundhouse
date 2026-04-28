@@ -31,6 +31,24 @@ pub enum Ty {
     },
 
     Var { var: TyVar },
+
+    /// RBS `untyped` — gradual-typing escape hatch. Distinct from
+    /// `Ty::Var` (inference gap) in intent: `Untyped` is an
+    /// author-signed declaration that this position opts out of
+    /// checking, while `Var` means the analyzer couldn't determine a
+    /// type.
+    ///
+    /// Propagation: dispatching a method on `Untyped` returns
+    /// `Untyped`, so the gradual choice flows through the IR
+    /// unconditionally.
+    ///
+    /// Targets that admit a gradual escape hatch (TypeScript `any`,
+    /// Python no-annotation, Elixir dynamic dispatch) emit `Untyped`
+    /// nodes cleanly. Strict targets (Rust, Go) are expected to
+    /// elevate any reachable `Untyped` to an emit-time error via the
+    /// diagnostic pipeline — the gradual escape only survives
+    /// emission for targets that explicitly accept it.
+    Untyped,
 }
 
 /// A row-polymorphic record shape.

@@ -21,7 +21,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use roundhouse::analyze::{diagnose, Analyzer};
+use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::ingest_app;
 
 fn main() -> ExitCode {
@@ -40,6 +40,9 @@ fn main() -> ExitCode {
     Analyzer::new(&app).analyze(&mut app);
     let diags = diagnose(&app);
 
+    let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+    let warnings = diags.iter().filter(|d| d.severity == Severity::Warning).count();
+
     if diags.is_empty() {
         eprintln!("roundhouse-check: {} — 0 diagnostics", fixture);
         return ExitCode::SUCCESS;
@@ -50,9 +53,16 @@ fn main() -> ExitCode {
     }
     eprintln!();
     eprintln!(
-        "roundhouse-check: {} — {} diagnostic(s)",
-        fixture,
-        diags.len()
+        "roundhouse-check: {} — {} error(s), {} warning(s)",
+        fixture, errors, warnings,
     );
-    ExitCode::FAILURE
+
+    // Gate only on errors; warnings (e.g., GradualUntyped) report
+    // without blocking. Strict-target emit pipelines elevate at their
+    // own gate.
+    if errors > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

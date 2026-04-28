@@ -32,6 +32,11 @@ pub fn go_ty(ty: &Ty) -> String {
         },
         Ty::Fn { .. } => "func()".to_string(),
         Ty::Var { .. } => "interface{}".to_string(),
+        // Go has no syntactic distinction between "must narrow" and
+        // "gradual" — both collapse to `interface{}`. The Var/Untyped
+        // distinction survives in the IR and via diagnostics; Go-side
+        // codegen renders both identically.
+        Ty::Untyped => "interface{}".to_string(),
     }
 }
 

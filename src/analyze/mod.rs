@@ -1638,7 +1638,7 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
 /// so the body-typer can annotate `Expr.diagnostic` without a
 /// dependency cycle. External callers (tests, future CLIs) continue
 /// to import them from `roundhouse::analyze` as before.
-pub use crate::diagnostic::{Diagnostic, DiagnosticKind};
+pub use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
@@ -1680,12 +1680,30 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
 }
 
 /// A type is "unknown" if it's `None` or `Ty::Var(n)` (a placeholder the
-/// analyzer set for positions it couldn't resolve).
+/// analyzer set for positions it couldn't resolve). `Ty::Untyped` —
+/// the gradual escape — counts as *known*: the author signed that
+/// position out of checking.
 fn is_unknown_ty(ty: Option<&Ty>) -> bool {
     match ty {
         None => true,
         Some(Ty::Var { .. }) => true,
         _ => false,
+    }
+}
+
+/// Short label for what shape of expression resolved to `Untyped`.
+/// Used for the `GradualUntyped` diagnostic message so a single
+/// kind can name the syntactic position without each callsite
+/// recomputing. Lowercase, grep-friendly.
+fn expr_kind_label(expr: &Expr) -> &'static str {
+    match &*expr.node {
+        ExprNode::Send { .. } => "method call",
+        ExprNode::Ivar { .. } => "ivar read",
+        ExprNode::Var { .. } => "local read",
+        ExprNode::Const { .. } => "constant read",
+        ExprNode::Apply { .. } => "function call",
+        ExprNode::Yield { .. } => "yield",
+        _ => "expression",
     }
 }
 
@@ -1709,20 +1727,47 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             DiagnosticKind::SendDispatchFailed { method, recv_ty } => {
                 format!("no known method `{}` on {recv_ty:?}", method.as_str())
             }
+            DiagnosticKind::GradualUntyped { expr_kind } => {
+                format!("{} resolves to RBS `untyped` (gradual escape)", expr_kind.as_str())
+            }
         };
         out.push(Diagnostic {
             span: expr.span,
             kind: kind.clone(),
+            severity: Diagnostic::default_severity(kind),
             message,
+        });
+    }
+
+    // RBS-declared `untyped` reaches this site. Emit a GradualUntyped
+    // warning so consumers can track gradual-escape coverage and so
+    // strict-target emitters can elevate to Error at emit time. The
+    // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
+    // walker is the natural place since every node's `.ty` already
+    // carries the signal.
+    if matches!(expr.ty.as_ref(), Some(Ty::Untyped)) {
+        let kind = DiagnosticKind::GradualUntyped {
+            expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
+        };
+        out.push(Diagnostic {
+            span: expr.span,
+            severity: Diagnostic::default_severity(&kind),
+            kind,
+            message: format!(
+                "{} resolves to RBS `untyped` (gradual escape)",
+                expr_kind_label(expr)
+            ),
         });
     }
 
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {
+                let kind = DiagnosticKind::IvarUnresolved { name: name.clone() };
                 out.push(Diagnostic {
                     span: expr.span,
-                    kind: DiagnosticKind::IvarUnresolved { name: name.clone() },
+                    severity: Diagnostic::default_severity(&kind),
+                    kind,
                     message: format!("@{} has no known type", name.as_str()),
                 });
             }
@@ -1730,12 +1775,14 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
         ExprNode::Send { recv: Some(r), method, .. } => {
             if !is_unknown_ty(r.ty.as_ref()) && is_unknown_ty(expr.ty.as_ref()) {
                 let recv_ty = r.ty.clone().unwrap_or_else(|| Ty::Var { var: crate::ident::TyVar(0) });
+                let kind = DiagnosticKind::SendDispatchFailed {
+                    method: method.clone(),
+                    recv_ty: recv_ty.clone(),
+                };
                 out.push(Diagnostic {
                     span: expr.span,
-                    kind: DiagnosticKind::SendDispatchFailed {
-                        method: method.clone(),
-                        recv_ty: recv_ty.clone(),
-                    },
+                    severity: Diagnostic::default_severity(&kind),
+                    kind,
                     message: format!(
                         "no known method `{}` on {:?}",
                         method.as_str(),

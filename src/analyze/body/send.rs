@@ -121,6 +121,12 @@ impl<'a> BodyTyper<'a> {
         }
         match recv_ty {
             None => unknown(),
+            // RBS-declared gradual receiver. Method dispatch on
+            // `Untyped` returns `Untyped` — the gradual choice
+            // propagates unconditionally through the IR. Author-signed
+            // opt-out, distinct from `Var` (inference gap, returns
+            // `unknown()`).
+            Some(Ty::Untyped) => Ty::Untyped,
             Some(Ty::Class { id, args }) => {
                 if let Some(cls) = self.classes().get(id) {
                     if let Some(ty) = cls.class_methods.get(method) {
@@ -190,6 +196,12 @@ impl<'a> BodyTyper<'a> {
             // relation) where the method is valid on `T` and the Nil case
             // is handled elsewhere at run time.
             Some(Ty::Union { variants }) => {
+                // Gradual absorption: any `Untyped` variant in the
+                // union absorbs the dispatch — the result is `Untyped`.
+                // Mirrors TypeScript's `any | T → any` semantics.
+                if variants.iter().any(|v| matches!(v, Ty::Untyped)) {
+                    return Ty::Untyped;
+                }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {

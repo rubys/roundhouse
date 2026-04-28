@@ -32,6 +32,11 @@ pub fn crystal_ty(ty: &Ty) -> String {
         Ty::Class { id, .. } => id.0.to_string(),
         Ty::Fn { .. } => "Proc(Nil)".to_string(),
         Ty::Var { .. } => "_".to_string(),
+        // RBS-declared `untyped`. Crystal's gradual escape is the
+        // wildcard `_`; same rendering as Var keeps the distinction
+        // in the IR but invisible at emission. Future refinement:
+        // emit-time elevation to error for strict-target pipelines.
+        Ty::Untyped => "_".to_string(),
     }
 }
 

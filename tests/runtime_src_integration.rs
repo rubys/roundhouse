@@ -271,23 +271,26 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 }
 
 /// Every method body across every `runtime/ruby/*.rb` must be fully
-/// typed — no None, no `Ty::Var` sentinels. Mirrors the Rails-side
-/// promise enforced by `tests/real_blog.rs::type_analysis_coverage`:
-/// our runtime source of truth is held to the same standard as a
-/// real Rails app. New runtime files are picked up automatically.
+/// typed — no None, no `Ty::Var` sentinels. `Ty::Untyped`
+/// (RBS-declared gradual escape) is *allowed*: this is Bar A
+/// (gradual-typed cleanly), separate from Bar B (concretely typed,
+/// required for Rust emission). Mirrors the Rails-side promise
+/// enforced by `tests/real_blog.rs::type_analysis_coverage`. New
+/// runtime files are picked up automatically.
 ///
-/// Currently `#[ignore]`'d. The corpus expanded from `inflector.rb`
-/// alone to the full framework Ruby (active_record/, action_view/,
-/// action_controller/, action_dispatch/) when that code moved out
-/// of `fixtures/spinel-blog/runtime/` into `runtime/ruby/`. The
-/// framework corpus has a residual untyped count (~500 sub-expressions
-/// per the `inference_on_spinel_blog_runtime_with_rbs` baseline) that
-/// closing requires combined RBS-extension + compiler-side work
-/// (ingest completeness, flow-sensitive ivar typing in non-model
-/// classes). This test stays the strict bar — when the residual
-/// closes we drop the `#[ignore]`. Until then, the
+/// Currently `#[ignore]`'d. Two error categories still gate:
+///  1. `.rb` files without a paired `.rbs` (action_view/,
+///     action_controller/, action_dispatch/, top-level
+///     active_record) — needs RBS authoring.
+///  2. RBS↔Ruby orphan/arity mismatches in active_record/ — needs
+///     compiler-side `attr_*`-lowering, follow-include into the
+///     class registry, and block-arity correction in
+///     `parse_methods_with_rbs_in_ctx`.
+///
+/// Once those land, this test re-enables. The
 /// `inference_on_spinel_blog_runtime_with_rbs::untyped_subexpressions_with_rbs_baseline`
-/// CEILING is the project tracker.
+/// CEILING continues as the Bar A→Bar B residual tracker, plus the
+/// `GradualUntyped` warning count from the diagnostic pipeline.
 #[test]
 #[ignore]
 fn every_runtime_method_body_is_fully_typed() {

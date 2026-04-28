@@ -269,6 +269,10 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             "IncompatibleBinop".into(),
             format!("{lhs_ty:?} {} {rhs_ty:?}", op.as_str()),
         ),
+        DiagnosticKind::GradualUntyped { expr_kind } => (
+            "GradualUntyped".into(),
+            expr_kind.as_str().to_string(),
+        ),
     }
 }
 
@@ -286,11 +290,15 @@ fn type_analysis_coverage() {
     let mut app = ingest_app(fixture_path()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let diags = diagnose(&app);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .collect();
     assert!(
-        diags.is_empty(),
-        "real-blog has {} diagnostics (expected zero):\n{}",
-        diags.len(),
-        diags
+        errors.is_empty(),
+        "real-blog has {} error diagnostic(s) (expected zero):\n{}",
+        errors.len(),
+        errors
             .iter()
             .map(|d| {
                 let (kind, detail) = diagnostic_signature(d);

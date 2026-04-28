@@ -284,11 +284,14 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
     // Block signature: `{ (...) -> T }` — captured on method_type, not
     // fn_type. For now we only surface its presence via the block
     // param in `Ty::Fn`; full block-signature typing is a future step.
-    let block = method_type.block().map(|_| Box::new(Ty::Var { var: crate::ident::TyVar(0) }));
+    // Use `Ty::Untyped` (not `Var`) for the placeholder: it's an
+    // author-signed declaration that the block exists with a yet-to-be-
+    // typed signature, not an inference gap.
+    let block = method_type.block().map(|_| Box::new(Ty::Untyped));
     if block.is_some() {
         params.push(Param {
             name: Symbol::new("block"),
-            ty: Ty::Var { var: crate::ident::TyVar(0) },
+            ty: Ty::Untyped,
             kind: ParamKind::Block,
         });
     }
@@ -352,13 +355,15 @@ fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {
         Node::BoolType(_) => Ok(Ty::Bool),
         Node::NilType(_) => Ok(Ty::Nil),
         Node::VoidType(_) => Ok(Ty::Nil),
-        // `untyped` is RBS's escape hatch for genuinely polymorphic
-        // positions (block-yielded values whose type depends on the
-        // calling class, etc.). Maps to the analyzer's unknown
-        // sentinel — body-typing then narrows via `is_a?` / `nil?`
-        // checks where present, otherwise leaves a Var that the
-        // residual report categorizes as RBS-expressiveness.
-        Node::AnyType(_) => Ok(Ty::Var { var: crate::ident::TyVar(0) }),
+        // `untyped` is RBS's gradual escape hatch — explicit
+        // author-signed opt-out from checking. Maps to `Ty::Untyped`
+        // (distinct from `Ty::Var`, which is the analyzer's "I don't
+        // know yet" sentinel for inference gaps). Untyped propagates
+        // through dispatch unconditionally; targets that admit a
+        // gradual escape (TS `any`, Python `Any`) emit it cleanly,
+        // strict targets (Rust, Go) elevate it to a Diagnostic::Error
+        // at emit time.
+        Node::AnyType(_) => Ok(Ty::Untyped),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_())?;
             Ok(union_of(vec![inner, Ty::Nil]))
