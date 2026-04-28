@@ -48,7 +48,7 @@ compare-ts:
 
 SPINEL_OUT ?= build/transpiled-blog
 
-$(SPINEL_OUT)/.stamp: fixtures/real-blog
+$(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog
 	rm -rf $(SPINEL_OUT)
 	mkdir -p $(SPINEL_OUT)
 	cp -r fixtures/spinel-blog/. $(SPINEL_OUT)/

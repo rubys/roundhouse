@@ -37,7 +37,12 @@ module Main
     Broadcasts.reset_log!
 
     request = CgiIo.parse_request(env, stdin)
-    matched = Router.match(request[:method], request[:path], Routes::TABLE)
+    # Prepend ROOT so a GET / request matches before falling through
+    # to TABLE. ROOT is kept as a separate constant in routes.rb for
+    # legibility (it's the only literal-pattern entry); the dispatch
+    # composes them here so Router.match stays a flat-table walk.
+    matched = Router.match(request[:method], request[:path],
+                           [Routes::ROOT] + Routes::TABLE)
     if matched.nil?
       CgiIo.write_response(stdout, 404, "<h1>404 Not Found</h1>")
       return
