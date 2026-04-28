@@ -110,13 +110,31 @@ module Main
 
   # First-time setup. Idempotent: skips when already configured (so
   # tests that load main.rb don't conflict with their own test_helper
-  # setup). The Spinel-target build uses InMemoryAdapter (no FFI
-  # required); CRuby tests configure SqliteAdapter via test_helper.
+  # setup).
+  #
+  # When `BLOG_DB` env var names a path, configure SqliteAdapter
+  # against that file — required for the dev server, which forks a
+  # fresh CGI process per request and would otherwise lose all data
+  # between requests if every fork got its own InMemoryAdapter. CRuby
+  # tests bypass this entirely (they configure SqliteAdapter via
+  # test_helper before main.rb loads).
+  #
+  # The eventual Spinel-target build uses InMemoryAdapter (no FFI
+  # required); leave that as the unset-env fallback so the
+  # Spinel-compiled binary still has a working default.
   def configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
-    InMemoryAdapter.configure
-    ActiveRecord.adapter = InMemoryAdapter
-    Schema.load!(InMemoryAdapter)
+    db_path = ENV["BLOG_DB"]
+    if !db_path.nil? && !db_path.empty?
+      require_relative "runtime/sqlite_adapter"
+      SqliteAdapter.configure(db_path)
+      ActiveRecord.adapter = SqliteAdapter
+      Schema.load!(SqliteAdapter)
+    else
+      InMemoryAdapter.configure
+      ActiveRecord.adapter = InMemoryAdapter
+      Schema.load!(InMemoryAdapter)
+    end
   end
 end
 
