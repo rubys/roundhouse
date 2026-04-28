@@ -112,6 +112,14 @@ pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &
             continue;
         };
 
+        // Translate Rails-API broadcast calls (`assoc.broadcast_replace_to(...)`
+        // etc.) inside the block body to spinel-shape `Broadcasts.<action>(...)`
+        // calls. Other content passes through unchanged.
+        let lambda_body = super::broadcasts::rewrite_rails_broadcast_calls(
+            lambda_body.clone(),
+            model,
+        );
+
         let hook_sym = method.clone();
         if let Some(existing) = methods.iter_mut().find(|m| m.name == hook_sym) {
             // Fold this block's body into the existing method, preserving
@@ -130,7 +138,7 @@ pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &
                 name: hook_sym,
                 receiver: MethodReceiver::Instance,
                 params: Vec::new(),
-                body: lambda_body.clone(),
+                body: lambda_body,
                 signature: None,
                 effects: EffectSet::default(),
                 enclosing_class: Some(model.name.0.clone()),

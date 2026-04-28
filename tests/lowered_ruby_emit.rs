@@ -240,22 +240,17 @@ fn article_emits_parent_runtime_and_view_requires() {
 }
 
 #[test]
-fn comment_emits_view_require_for_own_partial() {
+fn comment_emits_view_require_for_own_partial_and_parent() {
     // Comment references `Views::Comments` (own partial) via the
-    // broadcasts_to expansion's `html:` payload. The cascade-render
-    // for the parent Article uses real-blog's literal
-    // `article.broadcast_replace_to("articles")` form, which has no
-    // Views::Articles reference — so only the comments partial gets
-    // a require here. (Spinel-blog rewrites the cascade into an
-    // explicit Views::Articles call; per yagni-on-round-trip we keep
-    // the literal form, which is compile-equivalent.)
+    // broadcasts_to expansion's `html:` payload. It also references
+    // `Views::Articles` via the rewritten parent-cascade in
+    // `after_<x>_commit` (Rails-side `article.broadcast_replace_to(...)`
+    // → spinel `Broadcasts.replace(stream:, target:, html: Views::Articles.article(parent))`).
+    // Both partial requires are present.
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
     assert!(src.contains("require_relative \"../views/comments/_comment\""), "{src}");
-    assert!(
-        !src.contains("require_relative \"../views/articles/_article\""),
-        "Views::Articles isn't referenced in Comment's lowered body; should not require:\n{src}",
-    );
+    assert!(src.contains("require_relative \"../views/articles/_article\""), "{src}");
 }
 
 #[test]
@@ -264,6 +259,7 @@ fn comment_broadcasts_compose_with_block_form_callback() {
     // `after_create_commit { article.broadcast_replace_to(...) rescue nil }`.
     // The two sources fold into one method body; broadcasts_to runs
     // first (source order in the lowering), block-form follows.
+    // The block-form's Rails-API call is rewritten to spinel-shape.
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
     let create_block = src
@@ -271,14 +267,16 @@ fn comment_broadcasts_compose_with_block_form_callback() {
         .split("def ").next().unwrap();
     assert!(
         create_block.contains("Broadcasts.append")
-            && create_block.contains("article.broadcast_replace_to(\"articles\") rescue nil"),
+            && create_block.contains("parent = article")
+            && create_block.contains("Broadcasts.replace(stream: \"articles\""),
         "expected composed body; got:\n{create_block}",
     );
-    // The Broadcasts.append call appears BEFORE the rescue line —
-    // composition order matches the expected source-order semantics.
-    let pos_broadcasts = create_block.find("Broadcasts.append").unwrap();
-    let pos_rescue = create_block.find("rescue nil").unwrap();
-    assert!(pos_broadcasts < pos_rescue, "{create_block}");
+    // The original broadcasts_to-derived Broadcasts.append appears
+    // BEFORE the rewritten parent-cascade — composition order matches
+    // source-order semantics.
+    let pos_append = create_block.find("Broadcasts.append").unwrap();
+    let pos_parent = create_block.find("parent = article").unwrap();
+    assert!(pos_append < pos_parent, "{create_block}");
 }
 
 #[test]
@@ -286,16 +284,30 @@ fn comment_block_callbacks_render_as_methods() {
     // real-blog's Comment has:
     //   after_create_commit { article.broadcast_replace_to("articles") rescue nil }
     //   after_destroy_commit { article.broadcast_replace_to("articles") rescue nil }
-    // Lowered to `def after_create_commit; …; end` etc.
+    // Lowered to `def after_create_commit; …; end` etc., with the
+    // Rails-API broadcast call rewritten to spinel-shape:
+    //   parent = article
+    //   return if parent.nil?
+    //   Broadcasts.replace(stream:, target:, html: Views::Articles.article(parent))
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
     assert!(src.contains("def after_create_commit"), "{src}");
     assert!(src.contains("def after_destroy_commit"), "{src}");
-    // The block body uses `... rescue nil` — RescueModifier must render
-    // surface-form as `expr rescue nil`.
+    // Rewrite produced the spinel-shape sequence; original `rescue nil`
+    // wrapper is dropped (the explicit `return if parent.nil?` covers it).
+    assert!(src.contains("parent = article"), "{src}");
+    assert!(src.contains("return if parent.nil?"), "{src}");
     assert!(
-        src.contains("article.broadcast_replace_to(\"articles\") rescue nil"),
-        "expected RescueModifier surface form; got:\n{src}",
+        src.contains("Broadcasts.replace(stream: \"articles\", target: \"article_#{parent.id}\", html: Views::Articles.article(parent))"),
+        "expected spinel-shape parent-cascade; got:\n{src}",
+    );
+    assert!(
+        !src.contains("broadcast_replace_to"),
+        "Rails-side broadcast_replace_to should be rewritten away; got:\n{src}",
+    );
+    assert!(
+        !src.contains("rescue nil"),
+        "rescue nil should be unwrapped after rewrite; got:\n{src}",
     );
 }
 
