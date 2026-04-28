@@ -1,8 +1,0 @@
-module ActiveRecord
-  # Log-holder class. Instance broadcast methods (broadcast_*_to)
-  # live on Base and are declared in base.rbs.
-  class Broadcasts
-    def self.log: () -> Array[Hash[Symbol, String]]
-    def self.reset_log: () -> Array[Hash[Symbol, String]]
-  end
-end

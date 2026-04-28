@@ -1,5 +1,0 @@
-module ActiveRecord
-  def self.adapter: () -> AbstractAdapter
-  def self.adapter=: (AbstractAdapter a) -> AbstractAdapter
-  def self.reset_adapter: () -> AbstractAdapter
-end

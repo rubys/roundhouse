@@ -1,5 +1,0 @@
-# ActiveRecord namespace. The top-level file is a loader — it just
-# `require_relative`s sibling files under `active_record/`. Module
-# methods and class bodies live in those sub-files.
-module ActiveRecord
-end

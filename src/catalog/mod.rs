@@ -637,16 +637,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveModel::Errors")),
     },
-    // ---- Per-model accessors (currently in `Base` via reflection) ----
-    // These methods exist on every model. Today their bodies live in
-    // `runtime/ruby/active_record/base.rb` and rely on
-    // `instance_variable_get/set("@#{col}")`. The plan (see step 1 of
-    // the metaprogramming-removal sketch) is to lower them per-model
-    // — each emitted model class gets a typed body, and `Base` sheds
-    // the reflective versions. Cataloguing the contract here keeps
-    // the analyzer's per-model registry honest both before and after
-    // that move: callers like `article[:title]` resolve regardless
-    // of where the body lives.
+    // ---- Per-model accessors ----
+    // These methods exist on every model. The lowerer emits typed
+    // per-column bodies into each model class (no reflective base
+    // implementation in scope today; see `fixtures/spinel-blog/`).
+    // Cataloguing the contract here keeps the analyzer's per-model
+    // registry honest: callers like `article[:title]` resolve
+    // regardless of which model class the body lives on.
     CatalogedMethod {
         name: "instantiate",
         receiver: ReceiverContext::Class,

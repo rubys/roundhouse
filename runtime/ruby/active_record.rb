@@ -1,6 +1,0 @@
-require_relative "active_record/errors"
-require_relative "active_record/abstract_adapter"
-require_relative "active_record/adapter_registry"
-require_relative "active_record/broadcasts"
-require_relative "active_record/base"
-require_relative "active_record/migration"

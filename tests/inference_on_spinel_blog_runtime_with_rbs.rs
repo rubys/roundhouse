@@ -8,10 +8,10 @@
 //! close the framework-typing gap for strict targets?"
 //!
 //! Distinct from `runtime_src_integration::every_runtime_method_body_is_fully_typed`,
-//! which exercises the *reflective* `runtime/ruby/active_record/`
-//! corpus (different runtime shape, 34-untyped baseline). This test
-//! probes the metaprogramming-free spinel-blog corpus — the shape
-//! the universal-post-lowering-IR plan actually targets.
+//! which now covers only `runtime/ruby/inflector.rb` (the
+//! cross-target source-of-truth corpus). This test probes the
+//! metaprogramming-free spinel-blog framework corpus — the shape the
+//! universal-post-lowering-IR plan actually targets.
 //!
 //! Test structure mirrors the no-RBS probe (registry build, per-file
 //! body-typing, walk untyped expressions) but seeds method-body Ctx

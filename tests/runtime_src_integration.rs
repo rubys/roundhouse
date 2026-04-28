@@ -275,25 +275,14 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 /// promise enforced by `tests/real_blog.rs::type_analysis_coverage`:
 /// our runtime source of truth is held to the same standard as a
 /// real Rails app. New runtime files are picked up automatically.
-/// Currently `#[ignore]`: the recursive sweep catches framework
-/// library code under `runtime/ruby/active_record/`, and RBS is
-/// written for all 8 files, but deeper gaps remain:
 ///
-/// 1. **Ingest-level**: `IndexOperatorWriteNode` (`@h[k] += 1`) and
-///    block-param forwarding (`foo(&block)`) aren't yet handled in
-///    `src/ingest/expr.rs`.
-/// 2. **Flow-sensitive ivar typing** exists for models but not for
-///    runtime_src; `@adapter`, `@errors`, `@log` etc. surface as
-///    `Ty::Var` on first read.
-/// 3. **RBS arity refinements**: a few TableBuilder and Base methods
-///    need their `**opts` param added to the RBS signatures (the
-///    Ruby body takes them, RBS currently doesn't).
-///
-/// Un-ignore when those land. Until then:
-///   `cargo test --test runtime_src_integration -- --ignored`
-/// runs it to show the current gap inventory.
+/// Today the corpus is just `inflector.rb` + `inflector.rbs`. The
+/// previous broader `active_record/` corpus that lived here was an
+/// exploratory effort scoped before the spinel-target reframing took
+/// hold; deleted alongside its `#[ignore]`d gap-inventory wrapper.
+/// New entries land here as additional cross-target source-of-truth
+/// functions get factored out of per-target runtimes.
 #[test]
-#[ignore = "framework library body-typing has known gaps; see doc"]
 fn every_runtime_method_body_is_fully_typed() {
     let stems = runtime_ruby_stems();
     assert!(!stems.is_empty(), "runtime/ruby/ should have at least one .rb file");
