@@ -129,12 +129,24 @@ module ViewHelpers
   # The shapes here match what the layout consumes; iteration ≥3 will
   # fill them in when the Phase-1 lowerer surfaces the asset metadata.
 
+  # Two `<meta>` tags joined by `\n`, matching Rails' tag-helper output
+  # shape — Rails renders them on separate lines with the second tag's
+  # leading indent stripped. Compare drops both metas via ignore rule;
+  # the inter-element newline survives the drop and contributes to the
+  # merged whitespace text content. (Without the newline, head-content
+  # diff appears against Rails for purely formatting reasons.) The
+  # `authenticity_token` value is the form-field name; the token value
+  # is empty here because spinel-blog doesn't sign sessions.
   def csrf_meta_tags
-    %(<meta name="csrf-param" content="authenticity_token"><meta name="csrf-token" content="">)
+    %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />)
   end
 
+  # Empty in dev mode without a CSP nonce configured, mirroring Rails'
+  # behavior and the other targets' runtimes (Rust / Python / Elixir
+  # all return "" here). Production deployment with CSP wired would
+  # plug a real nonce in.
   def csp_meta_tag
-    %(<meta name="csp-nonce" content="">)
+    ""
   end
 
   def stylesheet_link_tag(name, opts = {})
@@ -155,21 +167,31 @@ module ViewHelpers
   # an importmap — fall back to a Turbo-only shape so the fixture stays
   # runnable on its own.
   def javascript_importmap_tags(pins = nil, entry = "application")
+    # Lines joined by `\n` only (no indent) — matches Rails' helper
+    # output where each preload link / bootstrap script is flush left
+    # in the source. The first line lands at the layout's source-indent
+    # column; subsequent lines start at column 0.
+    #
+    # The importmap-script's JSON is pretty-printed with 2-space indent
+    # to match Rails' `:pretty` JSON output. Both sides are semantically
+    # identical; the text comparison checks character-for-character.
     if pins.nil? || pins.empty?
-      return %(<script type="importmap" data-turbo-track="reload">{"imports":{"@hotwired/turbo":"/assets/turbo.min.js"}}</script>) +
-        "\n    " +
+      json = %({\n  "imports": {\n    "@hotwired/turbo": "/assets/turbo.min.js"\n  }\n})
+      return %(<script type="importmap" data-turbo-track="reload">) + json + %(</script>) +
+        "\n" +
         %(<link rel="modulepreload" href="/assets/turbo.min.js">) +
-        "\n    " +
+        "\n" +
         %(<script type="module">import "@hotwired/turbo"</script>)
     end
-    imports = pins.map { |p| %("#{p[:name]}":"#{p[:path]}") }.join(",")
+    import_lines = pins.map { |p| %(    "#{p[:name]}": "#{p[:path]}") }.join(",\n")
+    json = %({\n  "imports": {\n#{import_lines}\n  }\n})
     parts = []
-    parts << %(<script type="importmap" data-turbo-track="reload">{"imports":{#{imports}}}</script>)
+    parts << %(<script type="importmap" data-turbo-track="reload">) + json + %(</script>)
     pins.each do |p|
       parts << %(<link rel="modulepreload" href="#{p[:path]}">)
     end
     parts << %(<script type="module">import "#{entry}"</script>)
-    parts.join("\n    ")
+    parts.join("\n")
   end
 
   def turbo_stream_from(stream)

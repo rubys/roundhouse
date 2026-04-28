@@ -112,7 +112,7 @@ class ViewHelpersTest < Minitest::Test
 
   def test_javascript_importmap_tags_pins_turbo
     out = ViewHelpers.javascript_importmap_tags
-    assert_includes out, %("@hotwired/turbo":"/assets/turbo.min.js")
+    assert_includes out, %("@hotwired/turbo": "/assets/turbo.min.js")
   end
 
   def test_javascript_importmap_tags_imports_turbo_module
@@ -122,7 +122,9 @@ class ViewHelpersTest < Minitest::Test
 
   def test_csrf_and_csp_meta_tags
     assert_includes ViewHelpers.csrf_meta_tags, %(name="csrf-token")
-    assert_includes ViewHelpers.csp_meta_tag, %(name="csp-nonce")
+    # `csp_meta_tag` returns empty when no CSP nonce is configured —
+    # matches Rails' dev-mode behavior and the other targets' runtimes.
+    assert_equal "", ViewHelpers.csp_meta_tag
   end
 
   def test_turbo_stream_from

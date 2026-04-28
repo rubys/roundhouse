@@ -100,11 +100,12 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         }
                         calls.push(view_helpers_call("stylesheet_link_tag", args));
                     }
-                    // Chain calls with " + \"\\n    \" + " so the rendered
-                    // strings concatenate at runtime, matching Rails'
-                    // newline-separated multi-link emit. Single-call case
-                    // would fall to the else-branch below.
-                    let sep = lit_str("\n    ".to_string());
+                    // Chain calls with " + \"\\n\" + " so subsequent links
+                    // render flush-left — matches Rails' helper output where
+                    // only the first stylesheet gets the source indent and
+                    // the rest are at column 0. (Same shape as Rails'
+                    // `javascript_importmap_tags` modulepreload list.)
+                    let sep = lit_str("\n".to_string());
                     let mut chain = calls.remove(0);
                     for call in calls {
                         chain = send(Some(chain), "+", vec![sep.clone()], None, false);
