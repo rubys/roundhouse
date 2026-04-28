@@ -128,6 +128,103 @@ fn walk_ruby_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// Walk the typed IR and count every sub-expression whose type is
+/// `Ty::Untyped` (RBS-declared gradual escape). Bar B tracker —
+/// these nodes pass the strict Bar A test but block strict-target
+/// emission (Rust). Non-recursive in itself; calls
+/// `count_gradual_recurse` to descend.
+fn count_gradual(e: &Expr) -> usize {
+    let mut total = 0usize;
+    count_gradual_recurse(e, &mut total);
+    total
+}
+
+fn count_gradual_recurse(e: &Expr, total: &mut usize) {
+    if matches!(&e.ty, Some(Ty::Untyped)) {
+        *total += 1;
+    }
+    use ExprNode as N;
+    match &*e.node {
+        N::Lit { .. } | N::Var { .. } | N::Ivar { .. } | N::Const { .. } | N::SelfRef => {}
+        N::If { cond, then_branch, else_branch } => {
+            count_gradual_recurse(cond, total);
+            count_gradual_recurse(then_branch, total);
+            count_gradual_recurse(else_branch, total);
+        }
+        N::Send { recv, args, block, .. } => {
+            if let Some(r) = recv { count_gradual_recurse(r, total); }
+            for a in args { count_gradual_recurse(a, total); }
+            if let Some(b) = block { count_gradual_recurse(b, total); }
+        }
+        N::StringInterp { parts } => {
+            for p in parts {
+                if let InterpPart::Expr { expr } = p { count_gradual_recurse(expr, total); }
+            }
+        }
+        N::Seq { exprs } | N::Array { elements: exprs, .. } => {
+            for x in exprs { count_gradual_recurse(x, total); }
+        }
+        N::BoolOp { left, right, .. } => {
+            count_gradual_recurse(left, total);
+            count_gradual_recurse(right, total);
+        }
+        N::RescueModifier { expr, fallback } => {
+            count_gradual_recurse(expr, total);
+            count_gradual_recurse(fallback, total);
+        }
+        N::Let { value, body, .. } => {
+            count_gradual_recurse(value, total);
+            count_gradual_recurse(body, total);
+        }
+        N::Lambda { body, .. } => count_gradual_recurse(body, total),
+        N::Apply { fun, args, block } => {
+            count_gradual_recurse(fun, total);
+            for a in args { count_gradual_recurse(a, total); }
+            if let Some(b) = block { count_gradual_recurse(b, total); }
+        }
+        N::Hash { entries, .. } => {
+            for (k, v) in entries {
+                count_gradual_recurse(k, total);
+                count_gradual_recurse(v, total);
+            }
+        }
+        N::Case { scrutinee, arms } => {
+            count_gradual_recurse(scrutinee, total);
+            for arm in arms {
+                if let Some(g) = &arm.guard { count_gradual_recurse(g, total); }
+                count_gradual_recurse(&arm.body, total);
+            }
+        }
+        N::Assign { value, .. } => count_gradual_recurse(value, total),
+        N::Yield { args } => for a in args { count_gradual_recurse(a, total); },
+        N::Raise { value } | N::Return { value } => count_gradual_recurse(value, total),
+        N::Super { args } => {
+            if let Some(args) = args {
+                for a in args { count_gradual_recurse(a, total); }
+            }
+        }
+        N::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            count_gradual_recurse(body, total);
+            for r in rescues {
+                for c in &r.classes { count_gradual_recurse(c, total); }
+                count_gradual_recurse(&r.body, total);
+            }
+            if let Some(eb) = else_branch { count_gradual_recurse(eb, total); }
+            if let Some(en) = ensure { count_gradual_recurse(en, total); }
+        }
+        N::Next { value } => if let Some(v) = value { count_gradual_recurse(v, total); },
+        N::MultiAssign { value, .. } => count_gradual_recurse(value, total),
+        N::While { cond, body, .. } => {
+            count_gradual_recurse(cond, total);
+            count_gradual_recurse(body, total);
+        }
+        N::Range { begin, end, .. } => {
+            if let Some(b) = begin { count_gradual_recurse(b, total); }
+            if let Some(eb) = end { count_gradual_recurse(eb, total); }
+        }
+    }
+}
+
 fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
     let ty_ok = matches!(&e.ty, Some(t) if !matches!(t, Ty::Var { .. }));
     if !ty_ok {
@@ -455,4 +552,118 @@ fn every_runtime_method_body_is_fully_typed() {
     }
 
     assert!(report.is_empty(), "{}", report.join("\n\n"));
+}
+
+/// **Bar B tracker** — counts `Ty::Untyped` sub-expressions across
+/// the framework runtime corpus. These pass the strict Bar A test
+/// (`every_runtime_method_body_is_fully_typed`) but represent
+/// RBS-declared gradual escapes that block strict-target emission
+/// (Rust). The CEILING is a soft tracker; assertion fires only if
+/// the count *exceeds* it (so closures lower the ceiling, never
+/// raise it without a code change).
+///
+/// The gap between Bar A (zero Var, currently passing) and Bar B
+/// (zero Untyped, currently CEILING) is the work remaining for
+/// Rust-emit-readiness: each Untyped site is either Pattern A
+/// (per-model specialization), Pattern B (interface declaration),
+/// Pattern C (narrowing inference), or Pattern D (block generics) —
+/// per `project_ty_untyped_target_dependent`.
+#[test]
+fn every_runtime_method_body_concretely_typed() {
+    let stems = runtime_ruby_stems();
+    let mut class_registry: std::collections::HashMap<ClassId, ClassInfo> =
+        std::collections::HashMap::new();
+    let mut includes_by_class: std::collections::HashMap<ClassId, Vec<ClassId>> =
+        std::collections::HashMap::new();
+
+    let short_id = |class_id: &ClassId| {
+        let last = class_id
+            .0
+            .as_str()
+            .rsplit("::")
+            .next()
+            .unwrap_or(class_id.0.as_str())
+            .to_string();
+        ClassId(roundhouse::ident::Symbol::new(&last))
+    };
+
+    for stem in &stems {
+        let rbs_path = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
+        if !rbs_path.exists() { continue; }
+        let rbs = fs::read_to_string(&rbs_path).unwrap();
+        let Ok(per_file) = parse_app_signatures(&rbs) else { continue };
+        for (class_id, methods) in per_file {
+            let entry = class_registry.entry(short_id(&class_id)).or_default();
+            for (name, ty) in methods {
+                let ret_ty = match ty {
+                    Ty::Fn { ret, .. } => *ret,
+                    other => other,
+                };
+                entry.instance_methods.insert(name, ret_ty);
+            }
+        }
+        if let Ok(includes) = parse_app_includes(&rbs) {
+            for (class_id, included) in includes {
+                let short = short_id(&class_id);
+                let included_short: Vec<ClassId> = included.iter().map(short_id).collect();
+                includes_by_class.entry(short).or_default().extend(included_short);
+            }
+        }
+    }
+    for (class_id, includes) in &includes_by_class {
+        for included in includes {
+            let included_methods: Vec<(roundhouse::ident::Symbol, Ty)> =
+                match class_registry.get(included) {
+                    Some(info) => info
+                        .instance_methods
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    None => continue,
+                };
+            let entry = class_registry.entry(class_id.clone()).or_default();
+            for (name, ty) in included_methods {
+                entry.instance_methods.entry(name).or_insert(ty);
+            }
+        }
+    }
+
+    let mut total_gradual: usize = 0;
+    let mut by_file: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for stem in &stems {
+        let ruby_path = Path::new("runtime/ruby").join(format!("{stem}.rb"));
+        let rbs_path = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
+        if !rbs_path.exists() { continue; }
+        let ruby = fs::read_to_string(&ruby_path).unwrap();
+        let rbs = fs::read_to_string(&rbs_path).unwrap();
+        let Ok(methods) = parse_methods_with_rbs_in_ctx(&ruby, &rbs, &class_registry)
+            else { continue };
+        for m in &methods {
+            let n = count_gradual(&m.body);
+            if n > 0 {
+                *by_file.entry(stem.clone()).or_insert(0) += n;
+                total_gradual += n;
+            }
+        }
+    }
+
+    eprintln!(
+        "framework runtime Bar B residual (Ty::Untyped sites): {total_gradual} \
+         across {} files",
+        by_file.len(),
+    );
+    let mut breakdown: Vec<(String, usize)> = by_file.into_iter().collect();
+    breakdown.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (stem, count) in &breakdown {
+        eprintln!("  {stem}.rb: {count}");
+    }
+
+    // Ceiling — soft tracker. Tighten as Pattern A/B/C/D closures
+    // land. Failing low is good (lower the ceiling and record).
+    const CEILING: usize = 200;
+    assert!(
+        total_gradual <= CEILING,
+        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+    );
 }
