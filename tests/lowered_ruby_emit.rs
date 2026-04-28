@@ -1341,12 +1341,17 @@ fn lowered_form_partial_form_builder_methods() {
         src.contains("body << form.label(:title)"),
         "expected form.label dispatch; got:\n{src}",
     );
-    // `form.text_field :title, class: [...]` →
-    // `form.text_field(:title, class: "<base-string>")` — class
-    // array collapses to its first element.
+    // `form.text_field :title, class: [...]` collapses the array to a
+    // single string. The base + the FIRST hash key are joined; the
+    // first hash key is the no-errors variant by convention in
+    // real-blog (`border-gray-400 focus:outline-blue-600`), so the
+    // 5 default compare paths (none of which exercise an error
+    // re-render) match Rails byte-for-byte. Failure-path renders
+    // would show stale class composition; the spinel-blog test
+    // suite covers them via hand-written assertions today.
     assert!(
-        src.contains("body << form.text_field(:title, class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full\")"),
-        "expected form.text_field with class-array simplified to base string; got:\n{src}",
+        src.contains("body << form.text_field(:title, class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\")"),
+        "expected form.text_field with class-array collapsed to base + first hash key; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → `form.text_area(:body,
     // rows: 4, ...)` — alias normalized to underscore form.

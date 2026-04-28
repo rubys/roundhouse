@@ -62,6 +62,16 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
     // emitted body. Mirrors the controller-side ivar-to-local pass.
     let rewritten = rewrite_ivars_to_locals(&view.body);
 
+    // Apply erubi's `<% %>`-on-its-own-line trim before walking, so the
+    // text-chunk literals that survive into the spinel-shape body
+    // already match Rails' rendered whitespace. Other targets call
+    // `trim_view` from their per-target view emitter; the spinel emit
+    // path goes through this lowerer directly, so the trim has to
+    // happen here too. (Compare-spinel's `<main>` whitespace diff
+    // surfaced this gap: untrimmed bodies left an extra `\n` after
+    // every non-output ERB tag.)
+    let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
+
     // Collect free names other than the inferred arg → those become
     // additional positional params. Today this picks up `notice`,
     // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars).

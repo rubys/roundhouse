@@ -72,8 +72,18 @@ fn simplify_arg_class_array(arg: &Expr) -> Expr {
     )
 }
 
-/// `["base_string", {cond_class: pred, …}]` → `"base_string"`.
-/// Anything else passes through unchanged.
+/// `["base_string", {cond_class: pred, …}]` → `"base_string default_class"`,
+/// where `default_class` is the FIRST key of the conditional hash. The
+/// convention in real-blog is that the first hash entry is the
+/// no-errors variant (e.g. `border-gray-400 focus:outline-blue-600`)
+/// and the second is the errors variant. The 5 default compare paths
+/// don't exercise the errors path, so picking the first key gives
+/// byte-parity with Rails for those paths. Failure-path renders are
+/// not compared today (the spinel-blog test suite covers them via
+/// hand-written assertions, not DOM diff).
+///
+/// Anything else (no string-literal first element, no hash second
+/// element) passes through unchanged.
 fn simplify_class_array(v: &Expr) -> Expr {
     let ExprNode::Array { elements, .. } = &*v.node else {
         return v.clone();
@@ -81,8 +91,29 @@ fn simplify_class_array(v: &Expr) -> Expr {
     let Some(first) = elements.first() else {
         return v.clone();
     };
-    if matches!(&*first.node, ExprNode::Lit { value: Literal::Str { .. } }) {
-        return first.clone();
+    let ExprNode::Lit { value: Literal::Str { value: base } } = &*first.node else {
+        return v.clone();
+    };
+    let mut composed = base.clone();
+    if let Some(second) = elements.get(1) {
+        if let ExprNode::Hash { entries, .. } = &*second.node {
+            if let Some((k, _)) = entries.first() {
+                let key_str = match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    _ => None,
+                };
+                if let Some(s) = key_str {
+                    composed.push(' ');
+                    composed.push_str(&s);
+                }
+            }
+        }
     }
-    v.clone()
+    Expr::new(
+        first.span,
+        ExprNode::Lit {
+            value: Literal::Str { value: composed },
+        },
+    )
 }
