@@ -294,6 +294,15 @@ fn type_analysis_coverage() {
         .iter()
         .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
         .collect();
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Warning)
+        .collect();
+    eprintln!(
+        "real-blog: {} error(s), {} warning(s) (GradualUntyped sites)",
+        errors.len(),
+        warnings.len()
+    );
     assert!(
         errors.is_empty(),
         "real-blog has {} error diagnostic(s) (expected zero):\n{}",
