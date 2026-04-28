@@ -56,17 +56,39 @@ associations, controller actions, `before_action` flow, views,
 partials, and collection rendering all resolve to concrete types.
 A test enforces zero diagnostics on every commit.
 
-Seven target emitters are live: **Rust** and **TypeScript** now produce
-runnable projects end-to-end — they boot an HTTP + Action Cable server,
-serve the generated blog with working forms, validation error display,
-Turbo streams, and Tailwind styling. Crystal, Elixir, Go, Python, and
-the Spinel-targeted Ruby emitter share the same controller walker and
-pre-emit lowering passes; their runtime glue is in flight.
+Seven target emitters are live. **Rust**, **TypeScript**, and the
+**Ruby (Spinel-shape)** emitter produce runnable projects end-to-end —
+they boot an HTTP + Action Cable server, serve the generated blog with
+working forms, validation error display, Turbo streams, and Tailwind
+styling. Crystal, Elixir, Go, and Python share the same controller
+walker and pre-emit lowering passes; their runtime glue is in flight.
 
 Cross-runtime correctness is enforced by `tools/compare/`, which
 fetches the same URL from Rails and from any roundhouse-emitted runtime
 and diffs the canonicalized DOM trees. A new ERB pattern that renders
 differently between Rails and a target is a bug.
+
+## See it for yourself
+
+**Browse the emitted outputs.** [rubys.github.io/roundhouse/browse](https://rubys.github.io/roundhouse/browse/)
+shows what every target emitter produces from `fixtures/real-blog`,
+updated on each push to `main` — Rust, TypeScript, Crystal, Elixir,
+Go, Python, plus Ruby (the original source) and Spinel (the lowered
+output that runs as the demo below).
+
+**Run the demo.** A working transpiled blog — articles, comments,
+real-time Turbo Stream broadcasts over WebSocket, SQLite persistence,
+Tailwind styling, create + destroy flows — in two `make` commands:
+
+```sh
+git clone https://github.com/rubys/roundhouse
+cd roundhouse
+make real-blog            # generate the Rails fixture (~60s)
+make spinel-dev           # transpile + assets + serve on :3000 (~3-5min cold)
+```
+
+Prerequisites and the architecture of what gets generated:
+[`fixtures/spinel-blog/README.md`](fixtures/spinel-blog/README.md).
 
 ## Supporting pieces worth knowing
 
