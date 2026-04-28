@@ -1,6 +1,7 @@
 /target
 /tools/compare/target
 /_site
+/build
 *.swp
 
 # Real-blog fixture is regenerated from scripts/create-blog on
