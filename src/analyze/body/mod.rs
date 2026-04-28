@@ -124,9 +124,15 @@ impl<'a> BodyTyper<'a> {
                         self.analyze_expr(a, ctx);
                     }
                 }
-                // Return type of super is the parent's method return type;
-                // catalog-driven resolution is future work.
-                unknown()
+                // `super` invokes the parent's same-name method;
+                // tracking which method we're inside (and looking up
+                // its parent in the registry) is future work. Until
+                // then, type as `Untyped` — `super` is an
+                // intentional jump out of the typed envelope, similar
+                // in spirit to RBS's `untyped` declaration. Distinct
+                // from `Var` (analyzer gap) so the gradual diagnostic
+                // shape is right.
+                Ty::Untyped
             }
 
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
@@ -269,6 +275,21 @@ impl<'a> BodyTyper<'a> {
                         return ty.clone();
                     }
                 }
+                // Bare-name Kernel calls (no explicit receiver). `require`,
+                // `require_relative`, etc. — Ruby treats these as private
+                // module methods, but the body-typer otherwise resolves
+                // `recv=None` against `self_ty`, which would dispatch
+                // them as instance methods on the enclosing class (and
+                // miss). Catch them here before the recv_ty fall-through.
+                if recv.is_none() {
+                    if matches!(
+                        method.as_str(),
+                        "require" | "require_relative" | "load" | "autoload"
+                    ) {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Bool;
+                    }
+                }
                 let recv_ty = match recv.as_mut() {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
@@ -361,7 +382,13 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Yield { args } => {
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
-                unknown()
+                // The block's return type isn't tracked through the
+                // method's signature today (would require generics
+                // — `def f<T> { () -> T } -> ...`). Type as Untyped:
+                // the call site signed for an opaque block return,
+                // and propagating Untyped lets downstream dispatch
+                // resolve cleanly instead of bottoming out at Var.
+                Ty::Untyped
             }
 
             ExprNode::Raise { value } => {
@@ -402,9 +429,22 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Range { begin, end, .. } => {
-                if let Some(b) = begin { self.analyze_expr(b, ctx); }
-                if let Some(e) = end { self.analyze_expr(e, ctx); }
-                unknown()
+                let begin_ty = begin.as_mut().map(|b| self.analyze_expr(b, ctx));
+                let end_ty = end.as_mut().map(|e| self.analyze_expr(e, ctx));
+                // Type as Class { Range } parameterized by the
+                // bound's element type. Both endpoints share a type
+                // in well-formed Ruby (`1..10`, `"a".."z"`); when
+                // either endpoint is missing (`1..` / `..10`), use
+                // the available one. Falls back to Untyped if neither
+                // endpoint is known — a beginless+endless range has
+                // no element-type signal.
+                let elem = begin_ty
+                    .or(end_ty)
+                    .unwrap_or(Ty::Untyped);
+                Ty::Class {
+                    id: ClassId(Symbol::from("Range")),
+                    args: vec![elem],
+                }
             }
         }
     }

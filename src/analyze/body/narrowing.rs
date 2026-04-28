@@ -113,11 +113,15 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // `Array` and `Hash` must narrow to their parameterized IR
         // forms — `Ty::Class { id: Array }` falls through dispatch
         // (which goes through array_method only on `Ty::Array { .. }`).
-        // Element type unknown at narrowing time → `Ty::Var`.
-        "Array" => Ty::Array { elem: Box::new(Ty::Var { var: TyVar(0) }) },
+        // Element type at narrowing time is `Ty::Untyped` (gradual
+        // escape), not `Ty::Var` (inference gap): `is_a?(Hash)` only
+        // tells us "this is a Hash of *some* shape," and downstream
+        // dispatch should propagate that gradualness rather than
+        // leave block params as Var.
+        "Array" => Ty::Array { elem: Box::new(Ty::Untyped) },
         "Hash" => Ty::Hash {
-            key: Box::new(Ty::Var { var: TyVar(0) }),
-            value: Box::new(Ty::Var { var: TyVar(0) }),
+            key: Box::new(Ty::Untyped),
+            value: Box::new(Ty::Untyped),
         },
         other => Ty::Class {
             id: ClassId(Symbol::from(other)),

@@ -242,6 +242,43 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
+                // Base64 stdlib — `Base64.strict_encode64(JSON.generate(x))`
+                // appears in turbo_stream_from. All Base64 module-level
+                // encoders/decoders return String.
+                if id.0.as_str() == "Base64" {
+                    match method.as_str() {
+                        "encode64" | "decode64"
+                        | "strict_encode64" | "strict_decode64"
+                        | "urlsafe_encode64" | "urlsafe_decode64" => return Ty::Str,
+                        _ => {}
+                    }
+                }
+                // JSON stdlib — `JSON.generate` and `JSON.dump` return
+                // String; `JSON.parse` / `JSON.load` return parsed
+                // structure (untyped — the body is genuinely
+                // polymorphic). `pretty_generate` is also String.
+                if id.0.as_str() == "JSON" {
+                    match method.as_str() {
+                        "generate" | "dump" | "pretty_generate" | "fast_generate" => {
+                            return Ty::Str
+                        }
+                        "parse" | "load" => return Ty::Untyped,
+                        _ => {}
+                    }
+                }
+                // Regexp instance methods — `pattern.match?(s)`,
+                // `pattern.match(s)`, `pattern =~ s` are the common
+                // matchers. `match?` returns Bool; `match` returns
+                // MatchData (or nil). `source` returns the pattern
+                // String.
+                if id.0.as_str() == "Regexp" {
+                    match method.as_str() {
+                        "match?" | "===" => return Ty::Bool,
+                        "source" | "to_s" | "inspect" => return Ty::Str,
+                        "options" | "casefold?" => return Ty::Int,
+                        _ => {}
+                    }
+                }
                 unknown()
             }
             Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
@@ -456,13 +493,19 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
     match method.as_str() {
         "length" | "size" | "bytesize" => Ty::Int,
         "upcase" | "downcase" | "strip" | "chomp" | "chop" | "reverse" | "to_s"
-        | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone" => Ty::Str,
+        | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone"
+        | "tr" | "tr_s" | "delete" | "gsub" | "sub" | "lstrip" | "rstrip"
+        | "succ" | "next" | "swapcase!" | "+@" | "-@" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,
-        "chars" | "lines" | "split" => Ty::Array { elem: Box::new(Ty::Str) },
+        "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
+        // String slicing — `s[0, 4]`, `s[1..]`, `s[/regex/]` all
+        // return String? (nil if out-of-range). Keep as Str for
+        // simplicity; the nil-or-Str distinction can refine later.
+        "[]" | "slice" => Ty::Str,
         // Operators. `+` concats; `<<` mutates in place but still returns self.
         // `*` is repetition ("a" * 3); `%` is sprintf (returns Str). Comparisons
         // uniformly return Bool.
