@@ -59,6 +59,20 @@ module CgiIo
       end
     end
 
+    # Rails-style method override: a POST with hidden `_method=delete` (or
+    # patch / put) is treated as that verb for routing purposes. Browsers
+    # can't emit DELETE/PATCH directly from a form, so Rails renders these
+    # forms as method="post" with a hidden input; the dispatch layer
+    # rewrites the verb here. Only honored from POST → {PATCH,PUT,DELETE};
+    # GETs ignore the override.
+    if method == "POST"
+      override = params.delete(:_method)
+      if !override.nil?
+        upcased = override.to_s.upcase
+        method = upcased if upcased == "PATCH" || upcased == "PUT" || upcased == "DELETE"
+      end
+    end
+
     cookies = parse_cookies(env["HTTP_COOKIE"])
 
     { method: method, path: path, params: params, cookies: cookies }

@@ -229,12 +229,26 @@ module ViewHelpers
   # ── attribute rendering ──────────────────────────────────────────
   # Public so FormBuilder can call them; not the user-facing surface.
 
+  # Render an HTML attribute list. Hash-valued attrs (`data: { turbo_confirm:
+  # "..." }`, `aria: { labelledby: "..." }`) flatten with a kebab-prefixed
+  # key — so `data: { turbo_confirm: "x" }` emits `data-turbo-confirm="x"`,
+  # matching Rails ActionView's tag helper. Underscores in the inner key
+  # become hyphens (turbo_confirm → turbo-confirm). Non-hash values render
+  # as-is via html_escape.
   def render_attrs(attrs)
     return "" if attrs.empty?
     pairs = []
     attrs.each do |k, v|
       next if v.nil?
-      pairs << " #{k}=\"#{html_escape(v)}\""
+      if v.is_a?(Hash)
+        v.each do |inner_k, inner_v|
+          next if inner_v.nil?
+          inner_name = inner_k.to_s.tr("_", "-")
+          pairs << " #{k}-#{inner_name}=\"#{html_escape(inner_v)}\""
+        end
+      else
+        pairs << " #{k}=\"#{html_escape(v)}\""
+      end
     end
     pairs.join
   end
