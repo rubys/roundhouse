@@ -219,7 +219,7 @@ fn validations_rb_ingests_mixin_module() {
     assert!(content.contains("module Validations"), "emitted: {content}");
     assert!(!content.contains("class Validations"), "must not emit as class: {content}");
     assert!(content.contains("def errors"), "emitted: {content}");
-    assert!(content.contains("def validates_presence_of(attr_name)"), "emitted: {content}");
+    assert!(content.contains("def validates_presence_of(attr_name, value)"), "emitted: {content}");
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
 }
 

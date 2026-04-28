@@ -100,18 +100,19 @@ fn article_renders_schema_scaffold_methods() {
 }
 
 #[test]
-fn article_renders_validate_with_block_helpers() {
+fn article_renders_validate_with_positional_helpers() {
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
     assert!(src.contains("def validate"), "{src}");
-    // Validates_*_of helpers carry block-yielding @attr access — the
-    // shape spinel's runtime expects.
+    // Validates_*_of helpers carry the positional `(attr_name, value)`
+    // shape — value passed directly from the matching ivar; no block
+    // yield. Eliminates the generic-block-return type-inference cost.
     assert!(
-        src.contains("validates_presence_of(:title) { @title }"),
+        src.contains("validates_presence_of(:title, @title)"),
         "{src}",
     );
     assert!(
-        src.contains("validates_length_of(:body, minimum: 10)"),
+        src.contains("validates_length_of(:body, @body, minimum: 10)"),
         "{src}",
     );
 }

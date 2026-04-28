@@ -80,8 +80,8 @@ class Comment < ApplicationRecord
   end
 
   def validate
-    validates_presence_of(:commenter) { @commenter }
-    validates_presence_of(:body)      { @body }
+    validates_presence_of(:commenter, @commenter)
+    validates_presence_of(:body, @body)
   end
 
   # belongs_to :article  → typed accessor; nil when FK doesn't resolve.

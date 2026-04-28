@@ -76,9 +76,9 @@ class Article < ApplicationRecord
   end
 
   def validate
-    validates_presence_of(:title) { @title }
-    validates_presence_of(:body)  { @body }
-    validates_length_of(:body, minimum: 10) { @body }
+    validates_presence_of(:title, @title)
+    validates_presence_of(:body, @body)
+    validates_length_of(:body, @body, minimum: 10)
   end
 
   # has_many :comments  → typed accessor returning Array<Comment>.

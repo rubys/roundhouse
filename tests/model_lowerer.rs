@@ -172,25 +172,26 @@ fn article_lowers_validate_method() {
         exprs.len(),
     );
 
-    // Each call carries a block with `@attr` body. Spot-check the first.
+    // Each call passes the value as a positional `@attr` Ivar arg
+    // (no block). Spot-check the first.
     let first = exprs.first().unwrap();
-    let (method_name, block) = match &*first.node {
-        roundhouse::ExprNode::Send { method, block, .. } => (method.as_str(), block),
+    let (method_name, args, block) = match &*first.node {
+        roundhouse::ExprNode::Send { method, args, block, .. } => {
+            (method.as_str(), args, block)
+        }
         other => panic!("first validate stmt is not Send: {other:?}"),
     };
     assert!(
         method_name.starts_with("validates_"),
         "first stmt should be a validates_* helper; got {method_name}",
     );
-    let block = block.as_ref().expect("validates_* helper carries a block");
-    let block_body = match &*block.node {
-        roundhouse::ExprNode::Lambda { body, .. } => body,
-        other => panic!("validates_* block is not Lambda: {other:?}"),
-    };
-    match &*block_body.node {
+    assert!(block.is_none(), "validates_* helper should not carry a block");
+    assert!(args.len() >= 2, "expected >=2 args (attr + value); got {}", args.len());
+    // Second positional arg is the @attr Ivar.
+    match &*args[1].node {
         roundhouse::ExprNode::Ivar { .. } => {}
         other => panic!(
-            "validates_* block body should be `@attr` (Ivar); got {other:?}",
+            "validates_* second arg should be `@attr` (Ivar); got {other:?}",
         ),
     }
 }
