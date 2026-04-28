@@ -363,6 +363,42 @@ jobs:
         run: scripts/compare python
 
   # -------------------------------------------------------------------
+  # compare-spinel: same DOM-diff harness as the other compare-* jobs,
+  # but the spinel target uses CRuby + the spinel-blog dev server (no
+  # native compile yet — that's gated on Spinel itself growing the
+  # surface area roundhouse emits). Two ruby/setup-ruby steps run:
+  # the first sets up the Rails-side bundle for the reference server,
+  # the second sets up the spinel-blog bundle the dev server uses.
+  # -------------------------------------------------------------------
+  compare-spinel:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/spinel-blog
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: scripts/compare spinel
+        run: scripts/compare spinel
+
+  # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Gated on every toolchain and
   # compare job so a broken target never publishes a misleading
@@ -384,6 +420,7 @@ jobs:
       - compare-go
       - compare-elixir
       - compare-python
+      - compare-spinel
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
