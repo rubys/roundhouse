@@ -71,6 +71,11 @@ pub fn parse_methods_with_rbs_in_ctx(
     let mut methods = parse_methods(ruby_src)?;
     let sigs = parse_signatures(rbs_src)?;
 
+    let abstract_methods: std::collections::HashSet<String> = sigs
+        .abstract_methods
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
     let mut sig_map: std::collections::HashMap<String, Ty> = sigs
         .methods
         .into_iter()
@@ -111,6 +116,12 @@ pub fn parse_methods_with_rbs_in_ctx(
         m.signature = Some(ty);
     }
 
+    // Drop signatures marked `%a{abstract}` from the orphan check.
+    // Abstract methods declare a contract that subclasses fulfill;
+    // the base class's .rb intentionally has no body for them.
+    for name in &abstract_methods {
+        sig_map.remove(name);
+    }
     if !sig_map.is_empty() {
         let mut orphaned: Vec<String> = sig_map.keys().cloned().collect();
         orphaned.sort();

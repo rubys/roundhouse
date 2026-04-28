@@ -19,7 +19,7 @@ use roundhouse::analyze::ClassInfo;
 use roundhouse::dialect::MethodDef;
 use roundhouse::expr::{Expr, ExprNode, InterpPart};
 use roundhouse::ident::ClassId;
-use roundhouse::rbs::parse_app_signatures;
+use roundhouse::rbs::{parse_app_includes, parse_app_signatures};
 use roundhouse::runtime_src::{parse_methods_with_rbs, parse_methods_with_rbs_in_ctx};
 use roundhouse::ty::Ty;
 
@@ -303,7 +303,23 @@ fn every_runtime_method_body_is_fully_typed() {
     // requires Base#errors to be known).
     let mut class_registry: std::collections::HashMap<ClassId, ClassInfo> =
         std::collections::HashMap::new();
+    // Per-class include lists, accumulated across all .rbs files.
+    // Key: short class id (last segment); Value: list of short module
+    // ids the class includes.
+    let mut includes_by_class: std::collections::HashMap<ClassId, Vec<ClassId>> =
+        std::collections::HashMap::new();
     let mut missing_rbs: Vec<String> = Vec::new();
+
+    let short_id = |class_id: &ClassId| {
+        let last = class_id
+            .0
+            .as_str()
+            .rsplit("::")
+            .next()
+            .unwrap_or(class_id.0.as_str())
+            .to_string();
+        ClassId(roundhouse::ident::Symbol::new(&last))
+    };
 
     for stem in &stems {
         let rbs_path = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
@@ -322,15 +338,7 @@ fn every_runtime_method_body_is_fully_typed() {
             // (`ActiveRecord::Broadcasts`), but the body-typer builds
             // `Ty::Class { id }` using just the last segment of a
             // Const path. Strip to the last segment so lookups match.
-            let last = class_id
-                .0
-                .as_str()
-                .rsplit("::")
-                .next()
-                .unwrap_or(class_id.0.as_str())
-                .to_string();
-            let short_id = ClassId(roundhouse::ident::Symbol::new(&last));
-            let entry = class_registry.entry(short_id).or_default();
+            let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 // The dispatch table's value is the call's *result* type,
                 // not the method's signature object. parse_app_signatures
@@ -342,6 +350,47 @@ fn every_runtime_method_body_is_fully_typed() {
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
+            }
+        }
+
+        // Capture the include relationships so we can flatten
+        // included-module methods into the including class. Body
+        // dispatch resolves via per-class instance_methods only;
+        // without the merge, `record.errors` (record: Base) wouldn't
+        // find `errors` declared on Validations.
+        if let Ok(includes) = parse_app_includes(&rbs) {
+            for (class_id, included) in includes {
+                let short = short_id(&class_id);
+                let included_short: Vec<ClassId> = included.iter().map(short_id).collect();
+                includes_by_class
+                    .entry(short)
+                    .or_default()
+                    .extend(included_short);
+            }
+        }
+    }
+
+    // Phase 1.5: flatten includes. For each class C with `include M`,
+    // copy M's instance_methods into C (existing entries on C win;
+    // include only fills gaps). One pass is sufficient for the
+    // current corpus (no transitive include chains); a fixed-point
+    // loop becomes warranted only if a future RBS chain demands it.
+    for (class_id, includes) in &includes_by_class {
+        for included in includes {
+            // Clone just the instance_methods map (ClassInfo as a
+            // whole isn't Clone, and we only need the methods here).
+            let included_methods: Vec<(roundhouse::ident::Symbol, Ty)> =
+                match class_registry.get(included) {
+                    Some(info) => info
+                        .instance_methods
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    None => continue,
+                };
+            let entry = class_registry.entry(class_id.clone()).or_default();
+            for (name, ty) in included_methods {
+                entry.instance_methods.entry(name).or_insert(ty);
             }
         }
     }

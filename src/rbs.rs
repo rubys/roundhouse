@@ -22,6 +22,12 @@ use crate::ty::{Param, ParamKind, Ty};
 pub struct Signatures {
     /// Method name → signature (`Ty::Fn`). Order matches RBS source order.
     pub methods: Vec<(Symbol, Ty)>,
+    /// Methods declared with the `%a{abstract}` annotation. These
+    /// have an RBS signature but no Ruby body — subclasses are
+    /// expected to provide the implementation. The orphan check
+    /// skips them so a base-class RBS can carry the contract
+    /// without an empty `def` shim on the Ruby side.
+    pub abstract_methods: std::collections::HashSet<Symbol>,
 }
 
 /// Parse RBS source and extract method signatures.
@@ -65,6 +71,76 @@ pub fn parse_app_signatures(
     }
 
     Ok(out)
+}
+
+/// Extract `include X` declarations from each class/module in an RBS
+/// source. Pairs with `parse_app_signatures` for callers that need
+/// to flatten included-module methods into the including class
+/// (the body-typer dispatches against per-class instance_methods, so
+/// inheritance via include only resolves when the registry-builder
+/// has merged the included module's methods up).
+///
+/// Returned map keys are fully-qualified (`ActiveRecord::Base`); the
+/// value `Vec<ClassId>` holds the included module names as written
+/// in the RBS (`Validations`, not `ActiveRecord::Validations`),
+/// since RBS resolves them lexically.
+pub fn parse_app_includes(
+    source: &str,
+) -> Result<std::collections::HashMap<ClassId, Vec<ClassId>>, String> {
+    let signature = parse(source)?;
+    let mut out: std::collections::HashMap<ClassId, Vec<ClassId>> =
+        std::collections::HashMap::new();
+    for decl in signature.declarations().iter() {
+        walk_includes(&decl, None, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn walk_includes(
+    decl: &Node<'_>,
+    parent: Option<&str>,
+    out: &mut std::collections::HashMap<ClassId, Vec<ClassId>>,
+) -> Result<(), String> {
+    match decl {
+        Node::Class(class) => {
+            let name = namespace_join(parent, class.name().name().as_str());
+            collect_class_includes(class.members().iter(), &name, out)?;
+        }
+        Node::Module(module) => {
+            let name = namespace_join(parent, module.name().name().as_str());
+            collect_class_includes(module.members().iter(), &name, out)?;
+        }
+        Node::Interface(iface) => {
+            let name = namespace_join(parent, iface.name().name().as_str());
+            collect_class_includes(iface.members().iter(), &name, out)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_class_includes<'a, I: Iterator<Item = Node<'a>>>(
+    members: I,
+    class_name: &str,
+    out: &mut std::collections::HashMap<ClassId, Vec<ClassId>>,
+) -> Result<(), String> {
+    let class_id = ClassId(Symbol::new(class_name));
+    for member in members {
+        match member {
+            Node::Include(inc) => {
+                let included = inc.name().name();
+                let included_id = ClassId(Symbol::new(included.as_str()));
+                out.entry(class_id.clone())
+                    .or_default()
+                    .push(included_id);
+            }
+            Node::Class(_) | Node::Module(_) | Node::Interface(_) => {
+                walk_includes(&member, Some(class_name), out)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn walk_decl(
@@ -129,6 +205,9 @@ fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
         match member {
             Node::MethodDefinition(method) => {
                 let name = Symbol::new(method.name().as_str());
+                if method_is_abstract(&method) {
+                    out.abstract_methods.insert(name.clone());
+                }
                 let ty = method_signature_ty(&method)?;
                 out.methods.push((name, ty));
             }
@@ -149,6 +228,22 @@ fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
         }
     }
     Ok(())
+}
+
+/// Detect the `%a{abstract}` annotation on a method declaration.
+/// RBS annotation syntax is `%a{...}`; the inner string is what
+/// `string()` returns. We accept exact `"abstract"` for now —
+/// future variants (`abstract_method`, namespaced `roundhouse:abstract`)
+/// can extend this matcher.
+fn method_is_abstract(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> bool {
+    for ann in method.annotations().iter() {
+        if let Node::Annotation(a) = ann {
+            if a.string().as_str() == "abstract" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Result<Ty, String> {
@@ -703,6 +798,54 @@ end
     #[test]
     fn app_sigs_empty_source_is_empty_result() {
         let out = parse_app_signatures("").expect("parses");
+        assert!(out.is_empty());
+    }
+
+    // ── parse_app_includes ──────────────────────────────────────────
+
+    #[test]
+    fn includes_capture_each_class_includes() {
+        let src = "\
+module M
+  module Validations
+    def errors: () -> Array[String]
+  end
+
+  class Base
+    include Validations
+    def save: () -> bool
+  end
+end
+";
+        let out = parse_app_includes(src).expect("parses");
+        let base_id = ClassId(Symbol::from("M::Base"));
+        let included = out.get(&base_id).expect("Base has includes");
+        assert_eq!(included.len(), 1);
+        assert_eq!(included[0].0.as_str(), "Validations");
+    }
+
+    #[test]
+    fn abstract_annotation_marks_method() {
+        let src = "\
+class Base
+  %a{abstract}
+  def []: (Symbol) -> untyped
+  def save: () -> bool
+end
+";
+        let sigs = parse_signatures(src).expect("parses");
+        assert!(sigs.abstract_methods.contains(&Symbol::from("[]")));
+        assert!(!sigs.abstract_methods.contains(&Symbol::from("save")));
+    }
+
+    #[test]
+    fn includes_empty_when_no_include_present() {
+        let src = "\
+class Article
+  def title: () -> String
+end
+";
+        let out = parse_app_includes(src).expect("parses");
         assert!(out.is_empty());
     }
 }

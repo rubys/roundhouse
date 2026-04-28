@@ -47,9 +47,13 @@ module ActiveRecord
     # contract so `fill_timestamps`'s `self[:updated_at] = now` /
     # `self[:created_at].nil?` resolve through dispatch. Value
     # type is `untyped` because columns hold any type (String,
-    # Integer, Float, …). Note: the .rb has no body for these;
-    # the orphan check is skipped in the new test path.
+    # Integer, Float, …). The `%a{abstract}` annotation tells the
+    # orphan check that base.rb intentionally has no body for these
+    # — subclasses (per-model emitted classes) supply the concrete
+    # column-specific indexer.
+    %a{abstract}
     def []: (Symbol name) -> untyped
+    %a{abstract}
     def []=: (Symbol name, untyped value) -> untyped
 
     # Persistence state — backed by `@persisted` / `@destroyed`.
@@ -106,14 +110,10 @@ module ActiveRecord
     def valid?: () -> bool
 
     # `Base` inlines the `Validations` module via `include`. The
-    # body-typer doesn't follow include relationships into the
-    # registry today, so methods Base inherits via include must be
-    # restated here for dispatch through `Ty::Class { Base }` to
-    # resolve. `errors` is the only Validations method the Base
-    # body itself calls (in `valid?` via `@errors.empty?`); the
-    # `validates_*_of` family is invoked from per-model subclass
-    # bodies, where dispatch goes through the subclass's registry.
-    def errors: () -> Array[String]
+    # registry-builder flattens included-module methods into the
+    # including class (see `tests/runtime_src_integration.rs` Phase
+    # 1.5), so `errors` and the `validates_*_of` family resolve
+    # through Base's dispatch without needing to be restated here.
 
     # Equality. `other` is genuinely polymorphic — the body
     # narrows via `is_a?(self.class)` before reading `other.id`.
