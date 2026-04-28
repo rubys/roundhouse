@@ -52,10 +52,25 @@ compare-spinel:
 
 SPINEL_OUT ?= build/transpiled-blog
 
-$(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog
+$(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog runtime/ruby
 	rm -rf $(SPINEL_OUT)
 	mkdir -p $(SPINEL_OUT)
 	cp -r fixtures/spinel-blog/. $(SPINEL_OUT)/
+	# Replace the bridge `.rb` files in $(SPINEL_OUT)/runtime/ with
+	# the canonical framework Ruby from runtime/ruby/. The bridges in
+	# fixtures/spinel-blog/runtime/ exist so the standalone fixture's
+	# main.rb / test_helper.rb find framework code via the same
+	# `require_relative "runtime/X"` shape; in the emitted demo the
+	# framework code lives in a flat `runtime/` tree (the eventual
+	# Spinel-target layout) so we overwrite the bridges here.
+	# Selective: framework subdirs + their .rb shims + inflector —
+	# runtime/ruby/test/ is roundhouse-side test fixturing, not target
+	# runtime.
+	cp -r runtime/ruby/active_record runtime/ruby/action_view \
+	      runtime/ruby/action_controller runtime/ruby/action_dispatch \
+	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
+	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
+	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
 	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \

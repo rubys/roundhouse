@@ -2,7 +2,7 @@
 //! inference reach on framework-runtime code with NO RBS?
 //!
 //! The spinel-blog fixture is a metaprogramming-free Ruby blog whose
-//! `runtime/active_record/*.rb` files are hand-shaped specimens of
+//! `runtime/ruby/active_record/*.rb` files are hand-shaped specimens of
 //! framework code that fits Spinel's documented subset (no eval, no
 //! send, no method_missing). They ship without RBS sidecars on
 //! purpose: spinel uses pure inference. Running the same files
@@ -19,8 +19,8 @@
 //!
 //! Distinct from `runtime_src_integration::every_runtime_method_body_is_fully_typed`,
 //! which gates on RBS-paired typing (different path, different
-//! contract). That test stays `#[ignore]`'d at its 34-untyped
-//! baseline. This test runs by default and tracks the inference-only
+//! contract) and is `#[ignore]`'d while the framework-typing residual
+//! closes. This test runs by default and tracks the inference-only
 //! number — same fixture surface, different machinery.
 
 use std::fs;
@@ -32,7 +32,7 @@ use roundhouse::ingest::ingest_library_classes;
 use roundhouse::ty::Ty;
 use roundhouse::App;
 
-const RUNTIME_DIR: &str = "fixtures/spinel-blog/runtime/active_record";
+const RUNTIME_DIR: &str = "runtime/ruby/active_record";
 
 fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
     let ty_ok = matches!(&e.ty, Some(t) if !matches!(t, Ty::Var { .. }));

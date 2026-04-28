@@ -1,1 +1,1 @@
-require_relative "action_dispatch/router"
+require_relative "../../../runtime/ruby/action_dispatch"

@@ -3,15 +3,16 @@
 //!
 //! Same fixture surface as `tests/inference_on_spinel_blog_runtime.rs`
 //! (the no-RBS probe), but consults the `.rbs` files alongside the
-//! `.rb` files in `fixtures/spinel-blog/runtime/active_record/`.
+//! `.rb` files in `runtime/ruby/active_record/`.
 //! The residual count is the empirical answer to "would narrow RBS
 //! close the framework-typing gap for strict targets?"
 //!
 //! Distinct from `runtime_src_integration::every_runtime_method_body_is_fully_typed`,
-//! which now covers only `runtime/ruby/inflector.rb` (the
-//! cross-target source-of-truth corpus). This test probes the
-//! metaprogramming-free spinel-blog framework corpus — the shape the
-//! universal-post-lowering-IR plan actually targets.
+//! which sweeps the same framework Ruby (now at `runtime/ruby/*`) but
+//! enforces strict zero-untyped — currently `#[ignore]`'d while the
+//! residual closes. This test probes the same metaprogramming-free
+//! corpus and tracks the residual count via CEILING; it's the project
+//! tracker that demonstrates progress as the strict bar approaches.
 //!
 //! Test structure mirrors the no-RBS probe (registry build, per-file
 //! body-typing, walk untyped expressions) but seeds method-body Ctx
@@ -32,7 +33,7 @@ use roundhouse::ingest::ingest_library_classes;
 use roundhouse::rbs::parse_app_signatures;
 use roundhouse::ty::Ty;
 
-const RUNTIME_DIR: &str = "fixtures/spinel-blog/runtime/active_record";
+const RUNTIME_DIR: &str = "runtime/ruby/active_record";
 
 /// Walk a typed expression tree, collecting every node whose `ty` is
 /// missing or `Ty::Var`. Same shape as the no-RBS probe so the two

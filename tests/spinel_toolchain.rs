@@ -86,6 +86,38 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
     )
     .expect("copy app/views.rb");
 
+    // Replace the bridge `.rb` files in scratch/runtime/ with the
+    // canonical framework Ruby from runtime/ruby/. The bridges in
+    // fixtures/spinel-blog/runtime/ route to ../../../runtime/ruby/
+    // — which doesn't resolve from the scratch dir. The scratch
+    // simulates the eventual Spinel-target layout where runtime/
+    // is a flat tree of all the framework code.
+    let runtime_ruby = Path::new("runtime/ruby");
+    for entry in [
+        "active_record",
+        "action_view",
+        "action_controller",
+        "action_dispatch",
+    ] {
+        let src = runtime_ruby.join(entry);
+        if src.exists() {
+            copy_tree(&src, &scratch.join("runtime").join(entry));
+        }
+    }
+    for entry in [
+        "active_record.rb",
+        "action_view.rb",
+        "action_controller.rb",
+        "action_dispatch.rb",
+        "inflector.rb",
+    ] {
+        std::fs::copy(
+            runtime_ruby.join(entry),
+            scratch.join("runtime").join(entry),
+        )
+        .unwrap_or_else(|_| panic!("copy {entry}"));
+    }
+
     // Emit the spinel-shape app/ from real-blog and write into scratch.
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);

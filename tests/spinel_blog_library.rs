@@ -20,10 +20,10 @@ use roundhouse::App;
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 
-const ERRORS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/errors.rb";
-const INFLECTOR_RB_PATH: &str = "fixtures/spinel-blog/runtime/inflector.rb";
-const VALIDATIONS_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/validations.rb";
-const BASE_RB_PATH: &str = "fixtures/spinel-blog/runtime/active_record/base.rb";
+const ERRORS_RB_PATH: &str = "runtime/ruby/active_record/errors.rb";
+const INFLECTOR_RB_PATH: &str = "runtime/ruby/inflector.rb";
+const VALIDATIONS_RB_PATH: &str = "runtime/ruby/active_record/validations.rb";
+const BASE_RB_PATH: &str = "runtime/ruby/active_record/base.rb";
 
 #[test]
 fn errors_rb_ingests_and_emits_via_library_path() {
@@ -335,14 +335,14 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
     assert!(arc.contains("def self.adapter=(value)"), "active_record.rb: {arc}");
 }
 
-/// Sweep every `.rb` file under `fixtures/spinel-blog/runtime/` through
+/// Sweep every `.rb` file under `runtime/ruby/` through
 /// `ingest_library_classes` and `emit_library`. Doesn't make per-file
 /// shape assertions — just confirms each file ingests without error
 /// and the resulting LibraryClasses serialize to non-empty Ruby (when
 /// they contain anything). Whatever fails here next is the next gap.
 #[test]
 fn all_spinel_blog_runtime_files_ingest_and_emit() {
-    let runtime_dir = PathBuf::from("fixtures/spinel-blog/runtime");
+    let runtime_dir = PathBuf::from("runtime/ruby");
 
     let mut walked = 0usize;
     let mut walk_errors: Vec<String> = Vec::new();

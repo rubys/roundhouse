@@ -1,2 +1,1 @@
-require_relative "action_controller/parameters"
-require_relative "action_controller/base"
+require_relative "../../../runtime/ruby/action_controller"
