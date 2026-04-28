@@ -32,6 +32,10 @@ compare-rust:
 compare-ts:
 	scripts/compare typescript
 
+.PHONY: compare-spinel
+compare-spinel:
+	scripts/compare spinel
+
 # ── Spinel demo: transpile real-blog to a runnable spinel-shape app ──
 #
 # Produces $(SPINEL_OUT) by overlaying lowered output from real-blog

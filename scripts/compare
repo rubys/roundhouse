@@ -9,9 +9,12 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr | elixir | ex }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr | elixir | ex | spinel | sp }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
+#
+#   The `spinel` target produces Spinel-subset Ruby; the dev server
+#   uses CRuby until Spinel itself can compile the output.
 #
 # Options:
 #   --path PATH           URL path to compare (repeatable). Default:
@@ -101,8 +104,9 @@ case "$TARGET" in
     go)            TARGET=go ;;
     crystal|cr)    TARGET=crystal ;;
     elixir|ex)     TARGET=elixir ;;
+    spinel|sp)     TARGET=spinel ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, or elixir)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, or spinel)" >&2
         exit 2
         ;;
 esac
@@ -145,6 +149,14 @@ case "$TARGET" in
     elixir)
         BUILD_DIR="/tmp/rh-ex-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    spinel)
+        # Spinel reuses the demo's transpile output (Makefile target
+        # `spinel-transpile`), which lives under build/transpiled-blog/.
+        # The dev server reads BLOG_DB; the staged DB lands at
+        # tmp/blog.sqlite3 inside that tree.
+        BUILD_DIR="$REPO_ROOT/build/transpiled-blog"
+        DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
         ;;
 esac
 
@@ -237,7 +249,18 @@ ok "compare tool ready"
 
 if (( SKIP_EMIT == 0 )); then
     step "regenerating target ($TARGET) → $BUILD_DIR"
-    (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
+    case "$TARGET" in
+        spinel)
+            # Spinel uses the workspace Makefile's spinel-transpile rule
+            # (cargo build-site + scaffold overlay + DB seed), which is
+            # the same path the demo uses. Force a fresh stamp so changes
+            # to fixtures/spinel-blog/ pick up.
+            (cd "$REPO_ROOT" && rm -rf "$BUILD_DIR" && make spinel-transpile >/dev/null)
+            ;;
+        *)
+            (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
+            ;;
+    esac
 fi
 ok "target emit at $BUILD_DIR"
 
@@ -275,6 +298,13 @@ case "$TARGET" in
     elixir)
         step "building elixir target"
         (cd "$BUILD_DIR" && mix deps.get && MIX_ENV=prod mix compile)
+        ;;
+    spinel)
+        # Tailwind + turbo.min.js. The inner Makefile (copied from
+        # fixtures/spinel-blog/Makefile by spinel-transpile) handles
+        # both: tailwindcss CLI for app.css, gem-dir copy for turbo JS.
+        step "building spinel assets (tailwind + turbo.min.js)"
+        (cd "$BUILD_DIR" && BUNDLE_GEMFILE="$REPO_ROOT/fixtures/spinel-blog/Gemfile" make assets >/dev/null)
         ;;
 esac
 ok "target built"
@@ -328,6 +358,18 @@ case "$TARGET" in
         ;;
     rust)
         (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./target/release/app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    spinel)
+        # Spinel-shape Ruby runs through CRuby's dev server. BLOG_DB
+        # points at the staged seeded SQLite (relative to BUILD_DIR);
+        # BUNDLE_GEMFILE points at the source spinel-blog Gemfile so
+        # bundler-cache from CI's ruby/setup-ruby step is reused.
+        (cd "$BUILD_DIR" && \
+            PORT="$TARGET_PORT" \
+            BLOG_DB=tmp/blog.sqlite3 \
+            BUNDLE_GEMFILE="$REPO_ROOT/fixtures/spinel-blog/Gemfile" \
+            bundle exec ruby server/dev_server.rb >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
 esac
