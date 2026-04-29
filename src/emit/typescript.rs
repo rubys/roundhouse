@@ -8,19 +8,29 @@
 //! Slice 1 (this revision): package.json + main.ts.
 
 use std::fmt::Write;
+use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
 use crate::ty::Ty;
 
+const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
+const HTTP_STUB_SOURCE: &str = include_str!("../../runtime/typescript/http.ts");
+const TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/typescript/test_support.ts");
+const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/typescript/view_helpers.ts");
+const SERVER_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
+
 mod controller;
 mod expr;
+mod fixture;
 mod main_ts;
 mod model;
 mod naming;
 mod package;
 mod route;
 mod route_helpers;
+mod schema_sql;
+mod spec;
 mod ty;
 mod view;
 
@@ -41,8 +51,31 @@ pub fn emit_with_adapter(
     let mut files = Vec::new();
     files.push(package::emit_package_json());
     files.push(main_ts::emit_main_ts(app));
+    files.push(EmittedFile {
+        path: PathBuf::from("src/juntos.ts"),
+        content: JUNTOS_STUB_SOURCE.to_string(),
+    });
+    if !app.models.is_empty() {
+        files.push(schema_sql::emit_schema_sql(app));
+    }
     files.extend(model::emit_models(app));
     if !app.controllers.is_empty() {
+        files.push(EmittedFile {
+            path: PathBuf::from("src/http.ts"),
+            content: HTTP_STUB_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("src/test_support.ts"),
+            content: TEST_SUPPORT_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("src/view_helpers.ts"),
+            content: VIEW_HELPERS_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("src/server.ts"),
+            content: SERVER_SOURCE.to_string(),
+        });
         files.push(controller::emit_ts_importmap(app));
         files.extend(controller::emit_controllers(app, adapter));
     }
@@ -51,6 +84,18 @@ pub fn emit_with_adapter(
         files.push(route_helpers::emit_route_helpers(app));
     }
     files.extend(view::emit_views(app));
+    if !app.fixtures.is_empty() {
+        let lowered = crate::lower::lower_fixtures(app);
+        files.push(fixture::emit_ts_fixtures_helper(&lowered));
+        for f in &lowered.fixtures {
+            files.push(fixture::emit_ts_fixture(f));
+        }
+    }
+    if !app.test_modules.is_empty() {
+        for tm in &app.test_modules {
+            files.push(spec::emit_ts_spec(tm, app));
+        }
+    }
     files
 }
 
