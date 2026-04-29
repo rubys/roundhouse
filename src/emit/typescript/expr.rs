@@ -303,14 +303,15 @@ fn emit_stmt_with_state(
             // → `let`. First occurrence of a name assigned exactly once
             // → `const`. Subsequent occurrences (only possible for
             // reassigned names) → bare `name = value`.
+            let escaped = escape_reserved_word(name.as_str());
             if reassigned.contains(name) {
                 if declared.insert(name.clone()) {
-                    format!("let {} = {};", name, emit_expr(value))
+                    format!("let {} = {};", escaped, emit_expr(value))
                 } else {
-                    format!("{} = {};", name, emit_expr(value))
+                    format!("{} = {};", escaped, emit_expr(value))
                 }
             } else {
-                format!("const {} = {};", name, emit_expr(value))
+                format!("const {} = {};", escaped, emit_expr(value))
             }
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
@@ -448,6 +449,45 @@ fn emit_branch_block(
     }
 }
 
+/// Suffix `_` to JS reserved words used as identifiers. Mirrors the
+/// `escape_reserved` in the parent module that's applied to method
+/// parameter names; here we apply it to local-variable references so
+/// `params.fetch(:k, default)`'s body sees `default_` (matching the
+/// param-name escape) instead of bare `default` (a JS keyword).
+fn escape_reserved_word(name: &str) -> String {
+    matches!(
+        name,
+        "default"
+            | "with"
+            | "function"
+            | "class"
+            | "for"
+            | "let"
+            | "const"
+            | "var"
+            | "return"
+            | "switch"
+            | "case"
+            | "if"
+            | "else"
+            | "while"
+            | "do"
+            | "yield"
+            | "delete"
+            | "new"
+            | "this"
+            | "super"
+            | "true"
+            | "false"
+            | "null"
+            | "void"
+            | "typeof"
+            | "instanceof"
+    )
+    .then(|| format!("{name}_"))
+    .unwrap_or_else(|| name.to_string())
+}
+
 /// `!x` parses tighter than `===`, `==`, `||`, `&&`, etc. — without
 /// parentheses, `!x === y` reads as `(!x) === y`. Heuristic: if the
 /// emitted operand contains a binary operator at top level, wrap it.
@@ -504,7 +544,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
-        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Var { name, .. } => escape_reserved_word(name.as_str()),
         ExprNode::Ivar { name } => format!("this.{}", ts_field_name(name.as_str())),
         ExprNode::Send { recv, method, args, block, parenthesized } => {
             emit_send_with_block(
@@ -791,6 +831,34 @@ pub(super) fn emit_send_with_parens(
                     } else {
                         format!("{recv_s}.forEach({})", args_s.join(", "))
                     };
+                }
+                "size" | "length" if args.is_empty() => {
+                    return format!("{}.length", emit_expr(r));
+                }
+                "empty?" if args.is_empty() => {
+                    return format!("{}.length === 0", emit_expr(r));
+                }
+                "any?" if args.is_empty() => {
+                    return format!("{}.length > 0", emit_expr(r));
+                }
+                "first" if args.is_empty() => {
+                    return format!("{}[0]", emit_expr(r));
+                }
+                "last" if args.is_empty() => {
+                    let recv_s = emit_expr(r);
+                    return format!("{recv_s}[{recv_s}.length - 1]");
+                }
+                _ => {}
+            }
+        }
+        // String-typed receiver: the same `.empty?` predicate has the
+        // same JS spelling (length-zero), and `.length` carries through.
+        // Keep the arms parallel with Array so further per-type
+        // additions land in obvious neighborhoods.
+        if let Some(Ty::Str) = &r.ty {
+            match method {
+                "empty?" if args.is_empty() => {
+                    return format!("{}.length === 0", emit_expr(r));
                 }
                 "size" if args.is_empty() => {
                     return format!("{}.length", emit_expr(r));

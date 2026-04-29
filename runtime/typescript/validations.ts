@@ -9,13 +9,13 @@ export class Validations {
 
   validates_presence_of(attr_name: string, value: any): null {
     let blank = false;
-    if (value === null) { blank = true; } else if (value instanceof String && value.empty) { blank = true; } else if (value instanceof Array && value.empty) { blank = true; }
+    if (value === null) { blank = true; } else if (value instanceof String && value.length === 0) { blank = true; } else if (value instanceof Array && value.length === 0) { blank = true; }
     if (blank) this.errors.push(`${attr_name} can't be blank`);
   }
 
   validates_absence_of(attr_name: string, value: any): null {
     let present = false;
-    if (!(value === null)) if (value instanceof String) { present = !value.empty; } else if (value instanceof Array) { present = !value.empty; } else { present = true; }
+    if (!(value === null)) if (value instanceof String) { present = !(value.length === 0); } else if (value instanceof Array) { present = !(value.length === 0); } else { present = true; }
     if (present) this.errors.push(`${attr_name} must be blank`);
   }
 
@@ -40,7 +40,7 @@ export class Validations {
   }
 
   validates_format_of(attr_name: string, value: any, with_: Regexp): null {
-    const ok = value instanceof String && with.match(value);
+    const ok = value instanceof String && with_.match(value);
     if (ok) { null; } else { this.errors.push(`${attr_name} is invalid`); }
   }
 }

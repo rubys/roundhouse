@@ -220,6 +220,17 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         .methods
         .iter()
         .filter(|m| !is_attr_reader(m) && !is_attr_writer(m))
+        .filter(|m| {
+            // Operator-method names (`[]`, `[]=`) aren't valid TS
+            // method identifiers. Real fix: rewrite call sites to
+            // call `.get(...)` / `.set(...)` AND emit the method
+            // bodies under those names. Until both halves land,
+            // skipping prevents the file from being syntactically
+            // invalid TypeScript. The bodies are lost on the
+            // generated side but are still readable in the
+            // source `.rb`.
+            !matches!(m.name.as_str(), "[]" | "[]=")
+        })
         .collect();
 
     if wrote_fields && !methods_to_emit.is_empty() {

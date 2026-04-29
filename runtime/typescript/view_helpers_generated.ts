@@ -21,7 +21,7 @@ export class FormBuilder {
   text_field(field: string, opts: any): string {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
-    if (value === null || value.to_s.empty) { null; } else { base["value"] = value.to_s; }
+    if (value === null || value.to_s.length === 0) { null; } else { base["value"] = value.to_s; }
     const attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)));
     return `<input${attrs}>`;
   }
@@ -122,7 +122,7 @@ export class ViewHelpers {
   }
 
   javascript_importmap_tags(pins: any, entry: string): string {
-    if (pins === null || pins.empty) "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })();
+    if (pins === null || pins.length === 0) "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })();
     const import_lines = pins.map(p => `    "${p["name"]}": "${p["path"]}"`).join(",\n");
     let json = `{
       "imports": {

@@ -203,7 +203,7 @@ export class Base {
   valid(): boolean {
     this.errors = [];
     this.validate;
-    return this.errors.empty;
+    return this.errors.length === 0;
   }
 
   ==(other: any): boolean {

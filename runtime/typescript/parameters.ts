@@ -9,14 +9,6 @@ export class Parameters {
     this.hash = this.symbolize_keys(hash);
   }
 
-  [](key: string): any {
-    return this.hash[key.to_sym];
-  }
-
-  []=(key: string, value: any): any {
-    return this.hash[key.to_sym] = value;
-  }
-
   key(key: string): boolean {
     return this.hash.key(key.to_sym);
   }
@@ -24,7 +16,7 @@ export class Parameters {
   fetch(key: string, default_: any): any {
     const sym = key.to_sym;
     if (this.hash.key(sym)) return this.hash[sym];
-    return default;
+    return default_;
   }
 
   empty(): boolean {
