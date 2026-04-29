@@ -13,6 +13,8 @@ use crate::App;
 mod main_ts;
 mod model;
 mod package;
+mod route;
+mod route_helpers;
 mod ty;
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
@@ -20,6 +22,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(package::emit_package_json());
     files.push(main_ts::emit_main_ts(app));
     files.extend(model::emit_models(app));
+    if !app.routes.entries.is_empty() {
+        files.push(route::emit_routes(app));
+        files.push(route_helpers::emit_route_helpers(app));
+    }
     files
 }
 
