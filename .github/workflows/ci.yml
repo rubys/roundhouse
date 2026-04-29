@@ -106,25 +106,24 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  # ── DISABLED: TS rip-and-replace migration in progress ──
-  # toolchain-typescript:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - name: Install Node
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - name: cargo test --test typescript_toolchain -- --ignored
-  #       run: cargo test --test typescript_toolchain -- --ignored --nocapture
+  toolchain-typescript:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: cargo test --test typescript_toolchain -- --ignored
+        run: cargo test --test typescript_toolchain -- --ignored --nocapture
 
   toolchain-go:
     needs: generate-fixture
@@ -264,30 +263,29 @@ jobs:
       - name: scripts/compare crystal
         run: scripts/compare crystal
 
-  # ── DISABLED: TS rip-and-replace migration in progress ──
-  # compare-typescript:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - uses: ruby/setup-ruby@v1
-  #       with:
-  #         ruby-version: '3.4'
-  #         bundler-cache: true
-  #         working-directory: ./fixtures/real-blog
-  #     - name: Install Node
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - name: scripts/compare typescript
-  #       run: scripts/compare typescript
+  compare-typescript:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: scripts/compare typescript
+        run: scripts/compare typescript
 
   compare-go:
     needs: generate-fixture
@@ -411,14 +409,14 @@ jobs:
       - unit
       - toolchain-rust
       - toolchain-crystal
-      # - toolchain-typescript  # DISABLED: TS rip-and-replace migration in progress
+      - toolchain-typescript
       - toolchain-go
       - toolchain-elixir
       - toolchain-python
       - toolchain-spinel
       - compare-rust
       - compare-crystal
-      # - compare-typescript  # DISABLED: TS rip-and-replace migration in progress
+      - compare-typescript
       - compare-go
       - compare-elixir
       - compare-python
