@@ -112,6 +112,251 @@ pub fn emit_with_adapter(
     files
 }
 
+/// Emit a `LibraryClass` (a single class or mixin module from a
+/// `runtime/ruby/*` file, with method signatures attached) as a
+/// TypeScript class declaration — trailing newline included.
+///
+/// Surface choices:
+///   * `parent: Some(StandardError)` → `extends Error` (TS's
+///     equivalent). Other parents pass through verbatim.
+///   * `parent: None` on a non-module → bare `class Foo`.
+///   * `is_module: true` → bare `class Foo` for now (mixin semantics
+///     are handled at the include site, not the definition site).
+///   * Synthesized attr_reader pattern (zero-param method whose body
+///     is `Ivar { name }` matching the method's own name) → emit as a
+///     class field declaration; the read still works because callers
+///     write `obj.foo` and TS resolves it to the field. Drops the
+///     synthetic getter, which would have collided with the field.
+///   * Synthesized attr_writer pattern (`name=` method that just
+///     assigns the matching ivar) → drops likewise; the field
+///     declaration above already supports `obj.foo = x`.
+///   * `initialize` → `constructor`. Body uses TS's `this.x` for
+///     ivars (already what `expr::emit_body` produces).
+///   * `Class`-receiver methods → `static`.
+///   * `include`s → emitted as a leading `// include: <Name>` comment;
+///     real mixin support is deferred.
+pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String, String> {
+    use crate::dialect::MethodReceiver;
+    use crate::expr::ExprNode;
+
+    let class_name = class.name.0.as_str();
+    let mut out = String::new();
+
+    // Identify synthesized attr_reader/writer pairs. The reader pattern:
+    // `def foo; @foo; end` — zero params, body is `Ivar { name: foo }`.
+    // The writer pattern: `def foo=(value); @foo = value; end`.
+    let is_attr_reader = |m: &crate::dialect::MethodDef| -> bool {
+        if !matches!(m.receiver, MethodReceiver::Instance) || !m.params.is_empty() {
+            return false;
+        }
+        match &*m.body.node {
+            ExprNode::Ivar { name } => name.as_str() == m.name.as_str(),
+            _ => false,
+        }
+    };
+    let is_attr_writer = |m: &crate::dialect::MethodDef| -> bool {
+        if !matches!(m.receiver, MethodReceiver::Instance) || m.params.len() != 1 {
+            return false;
+        }
+        let mname = m.name.as_str();
+        if !mname.ends_with('=') {
+            return false;
+        }
+        let attr = &mname[..mname.len() - 1];
+        match &*m.body.node {
+            ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } => {
+                if name.as_str() != attr {
+                    return false;
+                }
+                matches!(
+                    &*value.node,
+                    ExprNode::Var { name, .. } if name.as_str() == m.params[0].name.as_str()
+                )
+            }
+            _ => false,
+        }
+    };
+
+    // Collect field declarations (from synthesized attr_readers — the
+    // reader carries the type via its `() -> T` signature).
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for m in &class.methods {
+        if is_attr_reader(m) {
+            let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() else {
+                return Err(format!(
+                    "class `{}` field `{}`: signature missing or not Ty::Fn",
+                    class_name, m.name
+                ));
+            };
+            fields.push((m.name.as_str().to_string(), ts_ty(ret)));
+        }
+    }
+
+    // Class header. Parent: StandardError → Error special-case;
+    // everything else passes through. Modules emit as classes for now;
+    // include-as-mixin is deferred.
+    let parent = class.parent.as_ref().map(|p| match p.0.as_str() {
+        "StandardError" => "Error".to_string(),
+        other => other.to_string(),
+    });
+    match &parent {
+        Some(p) => writeln!(out, "export class {class_name} extends {p} {{").unwrap(),
+        None => writeln!(out, "export class {class_name} {{").unwrap(),
+    }
+
+    if !class.includes.is_empty() {
+        for inc in &class.includes {
+            writeln!(out, "  // include: {}", inc.0.as_str()).unwrap();
+        }
+    }
+
+    let mut wrote_fields = false;
+    for (name, ty) in &fields {
+        writeln!(out, "  {name}: {ty};").unwrap();
+        wrote_fields = true;
+    }
+
+    let methods_to_emit: Vec<&crate::dialect::MethodDef> = class
+        .methods
+        .iter()
+        .filter(|m| !is_attr_reader(m) && !is_attr_writer(m))
+        .collect();
+
+    if wrote_fields && !methods_to_emit.is_empty() {
+        writeln!(out).unwrap();
+    }
+
+    let mut first = true;
+    for m in methods_to_emit {
+        if !first {
+            writeln!(out).unwrap();
+        }
+        first = false;
+        let body_str = emit_class_member(m)?;
+        for line in body_str.lines() {
+            if line.is_empty() {
+                writeln!(out).unwrap();
+            } else {
+                writeln!(out, "  {line}").unwrap();
+            }
+        }
+    }
+
+    out.push_str("}\n");
+    Ok(out)
+}
+
+/// Emit the body of a `constructor` from an `initialize` method's
+/// `Expr`. Floats top-level `super(...)` calls to the front so TS's
+/// strict-derived-class rule (no `this` access before super) holds
+/// even when the source Ruby wrote `@x = arg; super(...)`.
+///
+/// Only top-level Seq elements are reordered; super calls nested
+/// inside conditionals or other expressions stay where they are.
+/// Framework Ruby's constructors use the simple `seq with super at
+/// some position` shape; deeper nesting hasn't appeared yet.
+fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
+    use crate::expr::{Expr, ExprNode};
+
+    let exprs: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+
+    let (supers, rest): (Vec<&Expr>, Vec<&Expr>) = exprs
+        .into_iter()
+        .partition(|e| matches!(*e.node, ExprNode::Super { .. }));
+
+    if supers.is_empty() {
+        return expr::emit_body(body, return_ty);
+    }
+
+    let mut reordered_exprs: Vec<Expr> = Vec::new();
+    for s in supers {
+        reordered_exprs.push((*s).clone());
+    }
+    for r in rest {
+        reordered_exprs.push((*r).clone());
+    }
+    let reordered = Expr::new(body.span, ExprNode::Seq { exprs: reordered_exprs });
+    expr::emit_body(&reordered, return_ty)
+}
+
+/// Emit one `MethodDef` as a class member (instance method, static,
+/// or constructor). Mirrors `emit_method` but without the `export
+/// function` wrapper. Used by `emit_library_class`.
+fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
+    use crate::dialect::MethodReceiver;
+
+    let sig = m.signature.as_ref().ok_or_else(|| {
+        format!("emit_class_member: method `{}` has no signature", m.name)
+    })?;
+    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+        return Err(format!("method `{}`: signature is not Ty::Fn", m.name));
+    };
+    if sig_params
+        .iter()
+        .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+        .count()
+        != m.params.len()
+    {
+        return Err(format!(
+            "method `{}`: signature/param arity mismatch",
+            m.name
+        ));
+    }
+
+    let param_list: Vec<String> = m
+        .params
+        .iter()
+        .zip(sig_params.iter().filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block)))
+        .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
+        .collect();
+
+    let mut out = String::new();
+    let mname = m.name.as_str();
+    let is_constructor = mname == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
+
+    // initialize → constructor (no return annotation; TS forbids one).
+    // TS strict mode also requires `super(...)` to precede any `this.x`
+    // access in derived-class constructors. The Ruby source typically
+    // writes `@x = arg; super(msg)` (Ruby allows either order); we
+    // reorder so super-calls float to the top of the constructor body.
+    let body = if is_constructor {
+        emit_constructor_body(&m.body, ret)
+    } else {
+        expr::emit_body(&m.body, ret)
+    };
+
+    if is_constructor {
+        writeln!(out, "constructor({}) {{", param_list.join(", ")).unwrap();
+    } else {
+        let prefix = if matches!(m.receiver, MethodReceiver::Class) {
+            "static "
+        } else {
+            ""
+        };
+        let ret_s = ts_ty(ret);
+        writeln!(
+            out,
+            "{prefix}{}({}): {} {{",
+            mname,
+            param_list.join(", "),
+            ret_s
+        )
+        .unwrap();
+    }
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
 /// Emit a list of typed `MethodDef`s — produced by
 /// `parse_methods_with_rbs` from a whole `.rb` + `.rbs` pair — as a
 /// single TypeScript module file (trailing newline included).

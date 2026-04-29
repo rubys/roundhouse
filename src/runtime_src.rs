@@ -174,6 +174,169 @@ pub fn parse_methods_with_rbs(
     )
 }
 
+/// Class-shape variant of `parse_methods_with_rbs`: ingest a whole
+/// `.rb` file into per-class `LibraryClass` records (preserving parent,
+/// includes, and is_module), attach the per-class RBS signatures from
+/// the sidecar, and run the body-typer on each class's methods.
+///
+/// Class identity matching: `ingest_library_classes` keys by syntactic
+/// last-segment (e.g. `RecordInvalid`); `parse_app_signatures` keys by
+/// fully-qualified path (e.g. `ActiveRecord::RecordInvalid`). The match
+/// here normalizes both sides to the last segment, which is sufficient
+/// for the framework-runtime corpus (no name collisions across
+/// runtime/ruby/).
+///
+/// Empty RBS for a class — including a class whose entire signature
+/// comes from inheritance (e.g. `class RecordNotFound < StandardError`
+/// with no body) — is allowed; methods that DO exist still need
+/// matching signatures.
+pub fn parse_library_with_rbs(
+    ruby_src: &[u8],
+    rbs_src: &str,
+    file: &str,
+) -> Result<Vec<crate::dialect::LibraryClass>, String> {
+    use crate::ingest::ingest_library_classes;
+
+    let mut library_classes = ingest_library_classes(ruby_src, file)
+        .map_err(|e| format!("ingest_library_classes: {e:?}"))?;
+    let sigs_by_class = crate::rbs::parse_app_signatures(rbs_src)?;
+
+    // The class-grouped sig parser doesn't carry the `%a{abstract}`
+    // annotation; the flat parser does. Use the flat result purely as
+    // an abstract-name filter so per-class orphan checks skip
+    // contract-only methods (e.g. base.rb's `[]` / `[]=`).
+    let abstract_method_names: std::collections::HashSet<Symbol> =
+        crate::rbs::parse_signatures(rbs_src)
+            .map(|s| s.abstract_methods)
+            .unwrap_or_default();
+
+    // Normalize RBS sig keys to last-segment so they line up with
+    // `ingest_library_classes`'s last-segment names.
+    let sigs_by_last_seg: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
+        sigs_by_class
+            .into_iter()
+            .map(|(cid, m)| {
+                let last = cid
+                    .0
+                    .as_str()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                (last, m)
+            })
+            .collect();
+
+    let empty_classes: std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> =
+        std::collections::HashMap::new();
+    let typer = crate::analyze::BodyTyper::new(&empty_classes);
+    let constants = parse_module_constants(
+        std::str::from_utf8(ruby_src).unwrap_or(""),
+    )
+    .unwrap_or_default();
+
+    for lc in &mut library_classes {
+        let class_name = lc.name.0.as_str().to_string();
+        let mut class_sigs = sigs_by_last_seg
+            .get(&class_name)
+            .cloned()
+            .unwrap_or_default();
+
+        for m in &mut lc.methods {
+            let sig = class_sigs.remove(&m.name).ok_or_else(|| {
+                format!(
+                    "class `{}` method `{}` has no matching RBS signature",
+                    class_name, m.name
+                )
+            })?;
+            if let Ty::Fn { params, .. } = &sig {
+                let rbs_arity = params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                    .count();
+                if rbs_arity != m.params.len() {
+                    return Err(format!(
+                        "class `{}` method `{}`: Ruby has {} positional param(s), RBS has {}",
+                        class_name,
+                        m.name,
+                        m.params.len(),
+                        rbs_arity
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "class `{}` method `{}`: signature is not Ty::Fn",
+                    class_name, m.name
+                ));
+            }
+            m.signature = Some(sig);
+        }
+
+        // Drop abstract sigs from the orphan check. Subclass-overridden
+        // contract methods declared `%a{abstract}` in the RBS have no
+        // Ruby body in the base class by design (per the same convention
+        // `parse_methods_with_rbs` already honors).
+        for name in &abstract_method_names {
+            class_sigs.remove(name);
+        }
+        if !class_sigs.is_empty() {
+            let mut orphaned: Vec<String> = class_sigs.keys().map(|s| s.as_str().to_string()).collect();
+            orphaned.sort();
+            return Err(format!(
+                "class `{}`: RBS signature(s) with no matching Ruby method: {}",
+                class_name,
+                orphaned.join(", "),
+            ));
+        }
+
+        // Body-type each method. Two-pass ivar typing mirroring the
+        // module-flat path: pass A seeds nothing, pass B seeds ivar
+        // bindings observed during pass A.
+        let build_ctx = |m: &MethodDef,
+                         ivars: &std::collections::HashMap<Symbol, Ty>|
+         -> crate::analyze::Ctx {
+            let mut ctx = crate::analyze::Ctx::default();
+            if let Some(Ty::Fn { params, .. }) = &m.signature {
+                for (param, p) in m.params.iter().zip(params.iter()) {
+                    ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
+                }
+            }
+            ctx.self_ty = Some(Ty::Class {
+                id: lc.name.clone(),
+                args: vec![],
+            });
+            ctx.ivar_bindings = ivars.clone();
+            ctx.constants = constants.clone();
+            ctx
+        };
+
+        let empty_ivars: std::collections::HashMap<Symbol, Ty> =
+            std::collections::HashMap::new();
+        for m in &mut lc.methods {
+            let ctx = build_ctx(m, &empty_ivars);
+            typer.analyze_expr(&mut m.body, &ctx);
+        }
+
+        let mut flow_ivars: std::collections::HashMap<Symbol, Ty> =
+            std::collections::HashMap::new();
+        for m in &lc.methods {
+            crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
+        }
+        if !flow_ivars.is_empty() {
+            let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
+                .into_iter()
+                .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil] }))
+                .collect();
+            for m in &mut lc.methods {
+                let ctx = build_ctx(m, &reseeded);
+                typer.analyze_expr(&mut m.body, &ctx);
+            }
+        }
+    }
+
+    Ok(library_classes)
+}
+
 /// Same as `parse_methods_with_rbs` but takes a pre-built class
 /// registry — so cross-class method dispatch during body-typing can
 /// resolve. Used by the runtime-sweep test, which builds a unified
