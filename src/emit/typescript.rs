@@ -11,12 +11,15 @@ use super::EmittedFile;
 use crate::App;
 
 mod main_ts;
+mod model;
 mod package;
+mod ty;
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(package::emit_package_json());
     files.push(main_ts::emit_main_ts(app));
+    files.extend(model::emit_models(app));
     files
 }
 
