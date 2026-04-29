@@ -1447,6 +1447,36 @@ fn collect_ivars_into(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
+// ── Public shims for the thin emitter (`view_thin.rs`) ──
+// The thin emitter wants to reuse the file-name conversion, the
+// signature builder, and the barrel/stubs file producers without
+// duplicating them. Expose them under `__*_for_thin` names so the
+// parent module finds them but the underscore-prefix marks them as
+// transitional plumbing — drop when the thin emitter replaces this
+// file entirely.
+
+pub(super) fn __view_function_name_for_thin(name: &str) -> String {
+    view_function_name(name)
+}
+
+pub(super) fn __ts_view_signature_for_thin(
+    view_name: &str,
+    known_models: &[Symbol],
+) -> (String, String, Option<String>) {
+    ts_view_signature(view_name, known_models)
+}
+
+pub(super) fn __emit_ts_views_barrel_for_thin(app: &App) -> EmittedFile {
+    emit_ts_views_barrel(app)
+}
+
+pub(super) fn __emit_ts_missing_view_stubs_for_thin(
+    app: &App,
+    known_models: &[Symbol],
+) -> Option<EmittedFile> {
+    emit_ts_missing_view_stubs(app, known_models)
+}
+
 /// `articles/index` → `renderArticlesIndex`. Slashes become PascalCase
 /// separators; partial-prefix underscores stay lowercased at the head
 /// of the segment (`_article` → `Article` — underscore dropped).

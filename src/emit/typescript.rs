@@ -36,6 +36,7 @@ mod schema_sql;
 mod spec;
 mod ty;
 mod view;
+mod view_thin;
 
 pub use ty::ts_ty;
 
@@ -108,7 +109,19 @@ pub fn emit_with_adapter(
         files.push(route::emit_routes(app));
         files.push(route_helpers::emit_route_helpers(app));
     }
-    files.extend(view::emit_views(app));
+    // Phase 1 convergence: the thin TS view emitter (view_thin.rs)
+    // is the convergence target for the per-target redundancy
+    // reduction. Behind a flag while it shakes out fixture-by-
+    // fixture against the DOM-compare gate; once green, the
+    // current ~1500-LOC view.rs derivation can be deleted.
+    let use_thin_views = std::env::var("ROUNDHOUSE_TS_VIEW_THIN")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    if use_thin_views {
+        files.extend(view_thin::emit_views_thin(app));
+    } else {
+        files.extend(view::emit_views(app));
+    }
     if !app.fixtures.is_empty() {
         let lowered = crate::lower::lower_fixtures(app);
         files.push(fixture::emit_ts_fixtures_helper(&lowered));
