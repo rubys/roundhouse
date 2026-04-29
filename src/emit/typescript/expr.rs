@@ -936,13 +936,26 @@ pub(super) fn emit_send_with_parens(
     // `!x.nil?` (which lowers `nil?` to `x === null`) emits as
     // `!(x === null)` not `!x === null` — the latter parses as
     // `(!x) === null` and inverts the meaning.
-    if method == "!" && recv.is_some() && args.is_empty() {
-        let inner = emit_expr(recv.unwrap());
-        return if needs_parens_for_unary_not(&inner) {
-            format!("!({inner})")
-        } else {
-            format!("!{inner}")
+    //
+    // Two surface forms reach here, both meaning "logical not":
+    //   Send { recv: Some(x), method: "!", args: [] }   — Ruby's x.!()
+    //   Send { recv: None,    method: "!", args: [x] }  — view_to_library's
+    //                                                     `not_x = send(None, "!", [x])`
+    // Handle both with the same prefix-`!` emission.
+    if method == "!" {
+        let inner_expr: Option<&Expr> = match (recv, args) {
+            (Some(r), []) => Some(r),
+            (None, [a]) => Some(a),
+            _ => None,
         };
+        if let Some(inner) = inner_expr {
+            let inner_s = emit_expr(inner);
+            return if needs_parens_for_unary_not(&inner_s) {
+                format!("!({inner_s})")
+            } else {
+                format!("!{inner_s}")
+            };
+        }
     }
     // Type-aware per-receiver dispatch. The receiver type may be
     // nullable (an ivar's flow-sensitive type is `Union<T, Nil>` since
