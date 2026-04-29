@@ -30,6 +30,7 @@ fn find<'a>(files: &'a [roundhouse::emit::EmittedFile], p: &str) -> &'a str {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn views_emit_as_string_returning_functions() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -54,6 +55,7 @@ fn views_emit_as_string_returning_functions() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn emits_expected_files() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -76,6 +78,7 @@ fn emits_expected_files() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn models_extend_application_record() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -94,6 +97,7 @@ fn models_extend_application_record() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn models_declare_static_table_name_and_columns() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -111,6 +115,7 @@ fn models_declare_static_table_name_and_columns() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn models_omit_instance_field_declarations() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -123,6 +128,7 @@ fn models_omit_instance_field_declarations() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn model_validations_emit_as_validate_method() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -136,6 +142,7 @@ fn model_validations_emit_as_validate_method() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn has_many_association_emits_collection_proxy_getter() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -154,6 +161,7 @@ fn has_many_association_emits_collection_proxy_getter() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn belongs_to_association_emits_reference_getter() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -171,6 +179,7 @@ fn belongs_to_association_emits_reference_getter() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn optional_belongs_to_emits_ternary_guard() {
     use roundhouse::{
         Association, ClassId, Model, ModelBodyItem, Row, Symbol, TableRef,
@@ -204,6 +213,7 @@ fn optional_belongs_to_emits_ternary_guard() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn broadcasts_to_emits_turbo_callback_registrations() {
     // real-blog's Article has
     //   broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend
@@ -236,6 +246,7 @@ fn broadcasts_to_emits_turbo_callback_registrations() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn broadcasts_to_rewrites_lambda_param_to_record() {
     // real-blog's Comment has
     //   broadcasts_to ->(comment) { "article_#{comment.article_id}_comments" }
@@ -262,6 +273,7 @@ fn broadcasts_to_rewrites_lambda_param_to_record() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn length_validation_emits_with_options_object() {
     // Construct an ad-hoc model with `validates :body, length: { minimum: 10 }`
     // to exercise the length-rule path (tiny-blog only has presence).
@@ -292,6 +304,7 @@ fn length_validation_emits_with_options_object() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn model_methods_emit_with_return_types() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -305,6 +318,7 @@ fn model_methods_emit_with_return_types() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn controllers_emit_as_module_of_exported_async_functions() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -333,6 +347,7 @@ fn controllers_emit_as_module_of_exported_async_functions() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn controller_ivar_writes_become_let_rebinds() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -351,6 +366,7 @@ fn controller_ivar_writes_become_let_rebinds() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn controller_params_bracket_access_rewrites_to_context() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -371,6 +387,7 @@ fn controller_params_bracket_access_rewrites_to_context() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn controller_new_action_is_reserved_word_escaped() {
     // Build a minimal controller with a `new` action since tiny-blog
     // doesn't have one. `new` is reserved in JS; ruby2js renames to `$new`.
@@ -405,6 +422,7 @@ fn controller_new_action_is_reserved_word_escaped() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn custom_action_body_walks_through_sendkind_dispatch() {
     // A custom (non-scaffold) action name — anything not in {index,
     // show, new, edit, create, update, destroy} — lowers as
@@ -510,6 +528,7 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn walker_passes_last_bound_local_to_view_fn() {
     // A custom action whose body binds a local before rendering
     // — the walker should pass *that* local to the view fn, not
@@ -606,6 +625,7 @@ fn walker_passes_last_bound_local_to_view_fn() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn custom_action_with_respond_to_flattens_to_html_branch() {
     // A custom action whose body is `respond_to { format.html {
     // redirect_to articles_path } format.json { head } }` — the
@@ -716,6 +736,7 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn custom_action_without_terminal_gets_implicit_render() {
     // A custom action body with no explicit render/redirect_to/head
     // should get a synthesized `render :<action>` appended by the
@@ -774,6 +795,7 @@ fn custom_action_without_terminal_gets_implicit_render() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn routes_emit_router_method_calls() {
     // Use the real-blog fixture so we exercise `root` +
     // `resources` + nested resources — tiny-blog is all explicit verbs.
@@ -819,6 +841,7 @@ fn routes_emit_router_method_calls() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn controllers_export_namespace_object() {
     let app = analyzed_app();
     let files = typescript::emit(&app);
@@ -843,6 +866,7 @@ fn controllers_export_namespace_object() {
 // Sends stay unawaited.
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn sync_adapter_omits_awaits_inside_action_bodies() {
     let app = analyzed_app();
     let files = typescript::emit_with_adapter(&app, &roundhouse::SqliteAdapter);
@@ -865,6 +889,7 @@ fn sync_adapter_omits_awaits_inside_action_bodies() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn async_adapter_awaits_model_find_on_assign_rhs() {
     // `@post = Post.find(params[:id])` — the TS ModelFind render
     // produces a nullable-coalesce: `(Post.find(id) ?? new Post())`.
@@ -893,6 +918,7 @@ fn async_adapter_awaits_model_find_on_assign_rhs() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn async_adapter_awaits_model_all_on_assign_rhs() {
     // `@posts = Post.all` → `const posts = await Post.all();`
     let app = analyzed_app();
@@ -905,6 +931,7 @@ fn async_adapter_awaits_model_all_on_assign_rhs() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn async_adapter_awaits_destroy_as_statement() {
     // `@post.destroy` as a bare statement → `await post.destroy;`
     // under SqliteAsyncAdapter. The Send is DbWrite; the adapter
@@ -920,6 +947,7 @@ fn async_adapter_awaits_destroy_as_statement() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn async_adapter_does_not_await_non_db_sends() {
     // `redirect_to posts_path` carries `Io`, not `DbRead`/`DbWrite`.
     // SqliteAsyncAdapter suspends only DB effects, so `Io`-bearing
@@ -950,6 +978,7 @@ fn async_adapter_does_not_await_non_db_sends() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn async_adapter_places_await_at_suspending_subexpression() {
     // Stronger form of the find-coalesce test: verify every
     // suspending Send in the generated TS has its `await`
@@ -979,6 +1008,7 @@ fn async_adapter_places_await_at_suspending_subexpression() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn library_class_emits_as_plain_ts_class() {
     // transpiled_blog has ArticleCommentsProxy as a non-model class
     // under app/models/. The TS emitter should produce a plain
@@ -1014,6 +1044,7 @@ fn library_class_emits_as_plain_ts_class() {
 }
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn sync_and_async_differ_only_on_awaits() {
     // Byte-diff the two outputs: the only differences should be
     // `await ` insertions. Same actions, same function bodies

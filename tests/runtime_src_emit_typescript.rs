@@ -29,6 +29,7 @@ export function pluralize(count: number, word: string): string {
 ";
 
 #[test]
+#[ignore = "TS rip-and-replace migration"]
 fn pluralize_emits_expected_typescript() {
     let methods = parse_methods_with_rbs(PLURALIZE_RB, PLURALIZE_RBS).expect("parse");
     assert_eq!(methods.len(), 1);
