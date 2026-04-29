@@ -380,10 +380,11 @@ export function domId(record: any, prefix?: string): string {
   return prefix ? `${prefix}_${base}` : base;
 }
 
-/** Naive pluralization — append `s` when count != 1. */
-export function pluralize(count: number, word: string): string {
-  return count === 1 ? `1 ${word}` : `${count} ${word}s`;
-}
+// `pluralize` is generated from `runtime/ruby/inflector.rb` and
+// shipped at `src/inflector.ts`. Re-export here so existing
+// `Helpers.pluralize(...)` call sites continue to resolve via the
+// view_helpers namespace.
+export { pluralize } from "./inflector.js";
 
 /** `truncate(text, length: N, omission: "…")` — shorten a string
  *  to at most `length` chars (default 30), appending `omission`

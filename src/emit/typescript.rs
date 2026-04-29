@@ -19,6 +19,7 @@ const HTTP_STUB_SOURCE: &str = include_str!("../../runtime/typescript/http.ts");
 const TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/typescript/test_support.ts");
 const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/typescript/view_helpers.ts");
 const SERVER_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
+const INFLECTOR_SOURCE: &str = include_str!("../../runtime/typescript/inflector.ts");
 
 mod controller;
 mod expr;
@@ -80,6 +81,17 @@ pub fn emit_with_adapter(
         files.push(EmittedFile {
             path: PathBuf::from("src/test_support.ts"),
             content: TEST_SUPPORT_SOURCE.to_string(),
+        });
+        // Phase 1 first integration step: `inflector.ts` is generated
+        // from `runtime/ruby/inflector.rb` via the runtime_src pipeline
+        // (`cargo run --bin runtime_transpile_ts` writes it). The
+        // hand-written `view_helpers.ts` re-exports `pluralize` from
+        // here so existing call sites keep working unchanged. As more
+        // generated files prove tsc-clean, this pattern extends to
+        // them and the hand-written runtime shrinks.
+        files.push(EmittedFile {
+            path: PathBuf::from("src/inflector.ts"),
+            content: INFLECTOR_SOURCE.to_string(),
         });
         files.push(EmittedFile {
             path: PathBuf::from("src/view_helpers.ts"),
