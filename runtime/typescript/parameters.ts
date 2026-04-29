@@ -6,7 +6,7 @@ export class ParameterMissing extends Error {
 
 export class Parameters {
   constructor(hash: any) {
-    this.hash = symbolize_keys(hash);
+    this.hash = this.symbolize_keys(hash);
   }
 
   [](key: string): any {
@@ -17,17 +17,17 @@ export class Parameters {
     return this.hash[key.to_sym] = value;
   }
 
-  key?(key: string): boolean {
+  key(key: string): boolean {
     return this.hash.key(key.to_sym);
   }
 
-  fetch(key: string, default: any): any {
+  fetch(key: string, default_: any): any {
     const sym = key.to_sym;
     if (this.hash.key(sym)) return this.hash[sym];
     return default;
   }
 
-  empty?(): boolean {
+  empty(): boolean {
     return this.hash.empty;
   }
 
@@ -39,14 +39,14 @@ export class Parameters {
 
   merge(other: any): Parameters {
     const other_hash = other.is_a(Parameters) ? other.to_h : other;
-    return new Parameters(this.hash.merge(symbolize_keys(other_hash)));
+    return new Parameters(this.hash.merge(this.symbolize_keys(other_hash)));
   }
 
   require(key: string): any {
     const val = this.hash[key.to_sym];
-    val === null ? raise(ParameterMissing, `param is missing or the value is empty: ${key}`) : null;
-    val.is_a(Hash) && val.empty ? raise(ParameterMissing, `param is missing or the value is empty: ${key}`) : null;
-    val.is_a(Parameters) && val.empty ? raise(ParameterMissing, `param is missing or the value is empty: ${key}`) : null;
+    if (val === null) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
+    if (val.is_a(Hash) && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
+    if (val.is_a(Parameters) && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
     return val.is_a(Parameters) ? val : val.is_a(Hash) ? new Parameters(val) : val;
   }
 
@@ -59,7 +59,7 @@ export class Parameters {
   symbolize_keys(input: any): any {
     if (input.is_a(Parameters)) return input.to_h;
     const out = {  };
-    input.each((k, v) => k.is_a(Symbol) ? k : k.to_s.to_sym; out[sym] = v.is_a(Hash) ? symbolize_keys(v) : v.is_a(Parameters) ? v.to_h : v);
+    input.each((k, v) => k.is_a(Symbol) ? k : k.to_s.to_sym; out[sym] = v.is_a(Hash) ? this.symbolize_keys(v) : v.is_a(Parameters) ? v.to_h : v);
     return out;
   }
 }

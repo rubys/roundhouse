@@ -13,15 +13,15 @@ export class Base {
   }
 
   static table_name(): string {
-    return raise(NotImplementedError, `${name}.table_name must be overridden`);
+    return this.raise(NotImplementedError, `${this.name}.table_name must be overridden`);
   }
 
   static schema_columns(): string[] {
-    return raise(NotImplementedError, `${name}.schema_columns must be overridden`);
+    return this.raise(NotImplementedError, `${this.name}.schema_columns must be overridden`);
   }
 
   static instantiate(_row: any): Base {
-    return raise(NotImplementedError, `${name}.instantiate must be overridden`);
+    return this.raise(NotImplementedError, `${this.name}.instantiate must be overridden`);
   }
 
   attributes(): any {
@@ -29,86 +29,86 @@ export class Base {
   }
 
   assign_from_row(_row: any): null {
-    raise(NotImplementedError, `${this.class.name}#assign_from_row must be overridden`);
+    this.raise(NotImplementedError, `${this.class.name}#assign_from_row must be overridden`);
   }
 
-  persisted?(): boolean {
+  persisted(): boolean {
     return this.persisted;
   }
 
-  new_record?(): boolean {
+  new_record(): boolean {
     return !this.persisted;
   }
 
-  destroyed?(): boolean {
+  destroyed(): boolean {
     return this.destroyed;
   }
 
-  mark_persisted!(): boolean {
+  mark_persisted(): boolean {
     this.persisted = true;
     this.destroyed = false;
   }
 
   static all(): Base[] {
-    return ActiveRecord.adapter.all(table_name).map(row => instantiate(row));
+    return ActiveRecord.adapter.all(this.table_name).map(row => this.instantiate(row));
   }
 
   static find(id: number): Base {
-    const row = ActiveRecord.adapter.find(table_name, id);
-    row === null ? raise(RecordNotFound, `Couldn't find ${name} with id=${id}`) : null;
-    return instantiate(row);
+    const row = ActiveRecord.adapter.find(this.table_name, id);
+    if (row === null) this.raise(RecordNotFound, `Couldn't find ${this.name} with id=${id}`);
+    return this.instantiate(row);
   }
 
   static find_by(conditions: any): any {
-    const rows = ActiveRecord.adapter.where(table_name, conditions);
-    return rows.empty ? null : instantiate(rows.first);
+    const rows = ActiveRecord.adapter.where(this.table_name, conditions);
+    return rows.empty ? null : this.instantiate(rows.first);
   }
 
   static where(conditions: any): Base[] {
-    return ActiveRecord.adapter.where(table_name, conditions).map(row => instantiate(row));
+    return ActiveRecord.adapter.where(this.table_name, conditions).map(row => this.instantiate(row));
   }
 
   static count(): number {
-    return ActiveRecord.adapter.count(table_name);
+    return ActiveRecord.adapter.count(this.table_name);
   }
 
-  static exists?(id: number): boolean {
-    return ActiveRecord.adapter.exists(table_name, id);
+  static exists(id: number): boolean {
+    return ActiveRecord.adapter.exists(this.table_name, id);
   }
 
   static destroy_all(): Base[] {
-    const records = all;
+    const records = this.all;
     records.each(r => r.destroy);
     return records;
   }
 
   save(): boolean {
-    before_validation;
-    const ok = valid;
-    after_validation;
+    this.before_validation;
+    const ok = this.valid;
+    this.after_validation;
     ok ? null : (() => { return false; })();
-    before_save;
-    new_record ? before_create; fill_timestamps({ "creating": true }); ActiveRecord.adapter.insert(this.class.table_name, attributes); true; after_create; after_create_commit : before_update; fill_timestamps({ "creating": false }); ActiveRecord.adapter.update(this.class.table_name, this.id, attributes); after_update; after_update_commit;
-    after_save;
-    after_save_commit;
-    after_commit;
+    this.before_save;
+    this.new_record ? this.before_create; this.fill_timestamps({ "creating": true }); ActiveRecord.adapter.insert(this.class.table_name, this.attributes); true; this.after_create; this.after_create_commit : this.before_update; this.fill_timestamps({ "creating": false }); ActiveRecord.adapter.update(this.class.table_name, this.id, this.attributes); this.after_update; this.after_update_commit;
+    this.after_save;
+    this.after_save_commit;
+    this.after_commit;
     return true;
   }
 
-  save!(): Base {
-    save ? null : raise(RecordInvalid, this);
+  save(): Base {
+    this.save ? null : this.raise(RecordInvalid, this);
     return this;
   }
 
   destroy(): Base {
-    persisted ? null : (() => { return this; })();
-    before_destroy;
+    this.persisted ? null : (() => { return this; })();
+    this.before_destroy;
     ActiveRecord.adapter.delete(this.class.table_name, this.id);
     this.persisted = false;
     this.destroyed = true;
-    after_destroy;
-    after_destroy_commit;
-    after_commit;
+    this.after_destroy;
+    this.after_destroy_commit;
+    this.after_commit;
     return this;
   }
 
@@ -183,13 +183,13 @@ export class Base {
   fill_timestamps(creating: boolean): null {
     const cols = this.class.schema_columns;
     const now = Time.now.utc.iso8601;
-    cols.include("updated_at") ? this["updated_at"] = now : null;
-    creating && cols.include("created_at") && this["created_at"] === null ? this["created_at"] = now : null;
+    if (cols.include("updated_at")) this["updated_at"] = now;
+    if (creating && cols.include("created_at") && this["created_at"] === null) this["created_at"] = now;
   }
 
-  valid?(): boolean {
+  valid(): boolean {
     this.errors = [];
-    validate;
+    this.validate;
     return this.errors.empty;
   }
 
@@ -197,7 +197,7 @@ export class Base {
     return other.is_a(this.class) && this.id !== 0 && this.id === other.id;
   }
 
-  eql?(other: any): boolean {
+  eql(other: any): boolean {
     return this === other;
   }
 

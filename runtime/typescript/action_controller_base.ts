@@ -21,25 +21,25 @@ export class Base {
   }
 
   process_action(_action_name: string): null {
-    raise(NotImplementedError, `${this.class.name} must override process_action`);
+    this.raise(NotImplementedError, `${this.class.name} must override process_action`);
   }
 
   render(html: string, status: any): null {
     this.body = html;
-    this.status = resolve_status(status);
+    this.status = this.resolve_status(status);
     null;
   }
 
   redirect_to(path: string, notice: any, alert: any, status: any): null {
     this.location = path;
-    this.status = resolve_status(status);
+    this.status = this.resolve_status(status);
     notice === null ? null : this.flash["notice"] = notice;
     alert === null ? null : this.flash["alert"] = alert;
     null;
   }
 
   head(status: any): null {
-    this.status = resolve_status(status);
+    this.status = this.resolve_status(status);
     this.body = "";
     null;
   }

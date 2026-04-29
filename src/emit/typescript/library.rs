@@ -666,7 +666,7 @@ fn body_uses_yield(e: &Expr) -> bool {
 /// Ruby allows `?` and `!` suffixes on method names; TS does not.
 /// Strip them for the output identifier. Juntos's runtime drops them
 /// too (`Article.exists(id)` not `Article.exists?(id)`).
-fn sanitize_identifier(ruby_name: &str) -> String {
+pub(super) fn sanitize_identifier(ruby_name: &str) -> String {
     ruby_name
         .trim_end_matches('?')
         .trim_end_matches('!')
@@ -687,10 +687,18 @@ fn sanitize_identifier(ruby_name: &str) -> String {
 /// method name is a valid TS identifier.
 pub(super) fn rewrite_for_class_method(e: &Expr, enclosing_method: &str) -> Expr {
     let method_for_super = enclosing_method.trim_end_matches('=').to_string();
-    rewrite(e, &method_for_super)
+    rewrite(e, Some(&method_for_super))
 }
 
-fn rewrite(e: &Expr, super_method: &str) -> Expr {
+/// Variant of `rewrite_for_class_method` that leaves `Super { args }`
+/// nodes intact instead of rewriting them to `super.<method>(args)`.
+/// Constructors use this: TS spells the parent-constructor call as
+/// `super(args)`, not `super.initialize(args)`.
+pub(super) fn rewrite_for_constructor(e: &Expr) -> Expr {
+    rewrite(e, None)
+}
+
+fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized } => ExprNode::Send {
             recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
@@ -706,30 +714,48 @@ fn rewrite(e: &Expr, super_method: &str) -> Expr {
             block: block.as_ref().map(|b| rewrite(b, super_method)),
             parenthesized: *parenthesized,
         },
-        ExprNode::Super { args } => {
-            let super_recv = Expr::new(
-                Span::synthetic(),
-                ExprNode::Const { path: vec![Symbol::from("super")] },
-            );
-            let args_vec: Vec<Expr> = match args {
-                Some(v) => v.iter().map(|a| rewrite(a, super_method)).collect(),
-                None => vec![],
-            };
-            // Bare `super` (no args) calling a method that's a getter
-            // in the base class needs property-access form, not method
-            // call. Mirrors the per-name allowlist used for emit-time
-            // getter-vs-method choice. With args, always method form.
-            let is_base_getter =
-                matches!(super_method, "save" | "destroy" | "errors" | "attributes");
-            let parenthesized = !args_vec.is_empty() || !is_base_getter;
-            ExprNode::Send {
-                recv: Some(super_recv),
-                method: Symbol::from(super_method.to_string()),
-                args: args_vec,
-                block: None,
-                parenthesized,
+        ExprNode::Super { args } => match super_method {
+            None => {
+                // Constructor mode: rewrite args (so bare-Send→self
+                // applies inside super-args) but keep `Super` itself
+                // intact — TS spells the parent-constructor call as
+                // `super(args)`, not `super.initialize(args)`.
+                let rewritten_args: Option<Vec<Expr>> = args
+                    .as_ref()
+                    .map(|v| v.iter().map(|a| rewrite(a, None)).collect());
+                ExprNode::Super { args: rewritten_args }
             }
-        }
+            Some(super_method) => {
+                let super_recv = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("super")] },
+                );
+                let args_vec: Vec<Expr> = match args {
+                    Some(v) => v
+                        .iter()
+                        .map(|a| rewrite(a, Some(super_method)))
+                        .collect(),
+                    None => vec![],
+                };
+                // Bare `super` (no args) calling a method that's a
+                // getter in the base class needs property-access form,
+                // not method call. Mirrors the per-name allowlist used
+                // for emit-time getter-vs-method choice. With args,
+                // always method form.
+                let is_base_getter = matches!(
+                    super_method,
+                    "save" | "destroy" | "errors" | "attributes"
+                );
+                let parenthesized = !args_vec.is_empty() || !is_base_getter;
+                ExprNode::Send {
+                    recv: Some(super_recv),
+                    method: Symbol::from(super_method.to_string()),
+                    args: args_vec,
+                    block: None,
+                    parenthesized,
+                }
+            }
+        },
         ExprNode::Seq { exprs } => ExprNode::Seq {
             exprs: exprs.iter().map(|c| rewrite(c, super_method)).collect(),
         },

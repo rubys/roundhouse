@@ -40,7 +40,7 @@ export class FormBuilder {
 }
 
 export class ViewHelpers {
-  reset_slots!(): null {
+  reset_slots(): null {
     this.slots = {  };
   }
 
@@ -76,12 +76,12 @@ export class ViewHelpers {
     const str = s.to_s;
     if (str.length <= length) return str;
     const cutoff = length - omission.length;
-    cutoff < 0 ? 0 : null;
+    if (cutoff < 0) const cutoff = 0;
     return `${str[0, cutoff]}${omission}`;
   }
 
   dom_id(prefix: any, id_or_suffix: any): string {
-    return id_or_suffix === null ? `${record_dom_prefix(prefix)}_${prefix.id}` : id_or_suffix.is_a(Symbol) || id_or_suffix.is_a(String) ? `${id_or_suffix}_${record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
+    return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : id_or_suffix.is_a(Symbol) || id_or_suffix.is_a(String) ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
   }
 
   record_dom_prefix(record: any): string {
@@ -89,8 +89,8 @@ export class ViewHelpers {
   }
 
   link_to(text: any, href: string, opts: any): string {
-    const attrs = render_attrs({ "href": href }.merge(stringify_keys(opts)));
-    return `<a${attrs}>${html_escape(text)}</a>`;
+    const attrs = this.render_attrs({ "href": href }.merge(this.stringify_keys(opts)));
+    return `<a${attrs}>${this.html_escape(text)}</a>`;
   }
 
   button_to(text: any, href: string, opts: any): string {
@@ -101,10 +101,10 @@ export class ViewHelpers {
     inner_opts.delete("form_class");
     const form_attrs = { "action": href, "method": "post" };
     form_attrs["class"] = form_class || "button_to";
-    const button_attrs = render_attrs({ "type": "submit" }.merge(stringify_keys(inner_opts)));
+    const button_attrs = this.render_attrs({ "type": "submit" }.merge(this.stringify_keys(inner_opts)));
     const method_input = !method === null && method.to_s !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
-    return `<form${render_attrs(form_attrs)}>${method_input}<button${button_attrs}>${html_escape(text)}</button>${auth_token_input}</form>`;
+    return `<form${this.render_attrs(form_attrs)}>${method_input}<button${button_attrs}>${this.html_escape(text)}</button>${auth_token_input}</form>`;
   }
 
   csrf_meta_tags(): string {
@@ -117,12 +117,12 @@ export class ViewHelpers {
 
   stylesheet_link_tag(name: string, opts: any): string {
     const href = `/assets/${name}.css`;
-    const attrs = render_attrs({ "rel": "stylesheet", "href": href }.merge(stringify_keys(opts)));
+    const attrs = this.render_attrs({ "rel": "stylesheet", "href": href }.merge(this.stringify_keys(opts)));
     return `<link${attrs}>`;
   }
 
   javascript_importmap_tags(pins: any, entry: string): string {
-    pins === null || pins.empty ? "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })() : null;
+    if (pins === null || pins.empty) "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })();
     const import_lines = pins.map(p => `    "${p["name"]}": "${p["path"]}"`).join(",\n");
     const json = `{
       "imports": {
@@ -137,8 +137,8 @@ export class ViewHelpers {
   }
 
   turbo_stream_from(stream: any): string {
-    require("base64");
-    require("json");
+    this.require("base64");
+    this.require("json");
     const encoded = Base64.strict_encode64(JSON.generate(stream));
     return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
   }
@@ -150,14 +150,14 @@ export class ViewHelpers {
     const method_input = method_str !== "get" && method_str !== "post" ? `<input type="hidden" name="_method" value="${method_str}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     const form_method = method_str === "get" ? "get" : "post";
-    const attrs = render_attrs({ "action": action, "accept-charset": "UTF-8", "method": form_method }.merge(stringify_keys(opts)));
+    const attrs = this.render_attrs({ "action": action, "accept-charset": "UTF-8", "method": form_method }.merge(this.stringify_keys(opts)));
     return `<form${attrs}>${method_input}${auth_token_input}${body}</form>`;
   }
 
   render_attrs(attrs: any): string {
     if (attrs.empty) return "";
     const pairs = [];
-    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v.is_a(Hash) ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; inner_k.to_s.tr("_", "-"); pairs.push(` ${k}-${inner_name}="${html_escape(inner_v)}"`)) : pairs.push(` ${k}="${html_escape(v)}"`));
+    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v.is_a(Hash) ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; inner_k.to_s.tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
     return pairs.join;
   }
 

@@ -310,12 +310,28 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
         .params
         .iter()
         .zip(sig_params.iter().filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block)))
-        .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
+        .map(|(name, p)| {
+            format!("{}: {}", escape_reserved(name.as_str()), ts_ty(&p.ty))
+        })
         .collect();
 
     let mut out = String::new();
-    let mname = m.name.as_str();
-    let is_constructor = mname == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
+    let raw_name = m.name.as_str();
+    let mname = crate::emit::typescript::library::sanitize_identifier(raw_name);
+    let is_constructor =
+        raw_name == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
+
+    // Rewrite the body for class context: bare `Send { recv: None }`
+    // gets `SelfRef` so it emits as `this.method(...)` instead of a
+    // dangling `method(...)`. Constructors keep `Super { args }` as-is
+    // (TS spells parent-constructor calls as `super(args)`, not
+    // `super.initialize(args)`); other methods get the
+    // `super.<method>(...)` rewrite.
+    let rewritten = if is_constructor {
+        crate::emit::typescript::library::rewrite_for_constructor(&m.body)
+    } else {
+        crate::emit::typescript::library::rewrite_for_class_method(&m.body, raw_name)
+    };
 
     // initialize → constructor (no return annotation; TS forbids one).
     // TS strict mode also requires `super(...)` to precede any `this.x`
@@ -323,9 +339,9 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     // writes `@x = arg; super(msg)` (Ruby allows either order); we
     // reorder so super-calls float to the top of the constructor body.
     let body = if is_constructor {
-        emit_constructor_body(&m.body, ret)
+        emit_constructor_body(&rewritten, ret)
     } else {
-        expr::emit_body(&m.body, ret)
+        expr::emit_body(&rewritten, ret)
     };
 
     if is_constructor {
@@ -398,6 +414,47 @@ pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, Stri
         out.push_str(&emit_method(m));
     }
     Ok(out)
+}
+
+/// Map a Ruby identifier to a safe TS parameter name. Ruby and TS
+/// both allow most snake_case names verbatim; the divergence is
+/// keywords. Each name in the list below is reserved in TS but
+/// commonly used as a Rails-side method/keyword arg (`default` in
+/// `params.fetch(:k, default)`, `with` in `validates_format_of(... with:)`).
+/// Suffix with `_` rather than rename — preserves the original word
+/// while clearing the reserved-word collision.
+fn escape_reserved(name: &str) -> String {
+    matches!(
+        name,
+        "default"
+            | "with"
+            | "function"
+            | "class"
+            | "for"
+            | "let"
+            | "const"
+            | "var"
+            | "return"
+            | "switch"
+            | "case"
+            | "if"
+            | "else"
+            | "while"
+            | "do"
+            | "yield"
+            | "delete"
+            | "new"
+            | "this"
+            | "super"
+            | "true"
+            | "false"
+            | "null"
+            | "void"
+            | "typeof"
+            | "instanceof"
+    )
+    .then(|| format!("{name}_"))
+    .unwrap_or_else(|| name.to_string())
 }
 
 /// Emit a typed `MethodDef` as a standalone exported TypeScript

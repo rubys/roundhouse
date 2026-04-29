@@ -169,6 +169,21 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 unreachable!()
             }
         }
+        // Postfix-`if` at statement position with no else branch.
+        // Ruby's `x = [] if x.nil?` lowers to `If { cond, then=Assign,
+        // else=nil }`. The default arm below would route through
+        // `emit_expr` (a ternary), which drops the assignment's LHS
+        // (`Assign` in expression position emits only the rhs). Emit
+        // a native `if (cond) <stmt>;` instead — preserves the side
+        // effect.
+        ExprNode::If { cond, then_branch, else_branch } if is_nil_or_empty(else_branch) => {
+            let cond_s = emit_expr(cond);
+            let then_stmt = emit_stmt(then_branch, false, true);
+            // emit_stmt with void_return=true gives a side-effect-only
+            // form (no `return` wrapping). Already includes its own
+            // trailing semicolon.
+            format!("if ({cond_s}) {then_stmt}")
+        }
         _ => {
             if is_last && !void_return {
                 format!("return {};", emit_expr(e))

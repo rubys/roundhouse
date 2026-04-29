@@ -3,39 +3,39 @@
 
 export class Validations {
   errors(): string[] {
-    this.errors === null ? [] : null;
+    if (this.errors === null) this.errors = [];
     return this.errors;
   }
 
   validates_presence_of(attr_name: string, value: any): null {
     const blank = false;
     value === null ? true : value.is_a(String) && value.empty ? true : value.is_a(Array) && value.empty ? true : null;
-    blank ? errors << `${attr_name} can't be blank` : null;
+    if (blank) this.errors << `${attr_name} can't be blank`;
   }
 
   validates_absence_of(attr_name: string, value: any): null {
     const present = false;
-    !value === null ? value.is_a(String) ? !value.empty : value.is_a(Array) ? !value.empty : true : null;
-    present ? errors << `${attr_name} must be blank` : null;
+    if (!value === null) value.is_a(String) ? !value.empty : value.is_a(Array) ? !value.empty : true;
+    if (present) this.errors << `${attr_name} must be blank`;
   }
 
   validates_length_of(attr_name: string, value: any, minimum: any, maximum: any, is: any): null {
-    value === null ? null : value.is_a(String) || value.is_a(Array) ? value.length : 0; !minimum === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? errors << `${attr_name} is too short (minimum is ${minimum})` : null; !maximum === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? errors << `${attr_name} is too long (maximum is ${maximum})` : null; !is === null && len !== is ? errors << `${attr_name} is the wrong length (should be ${is})` : null;
+    value === null ? null : value.is_a(String) || value.is_a(Array) ? value.length : 0; !minimum === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? this.errors << `${attr_name} is too short (minimum is ${minimum})` : null; !maximum === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? this.errors << `${attr_name} is too long (maximum is ${maximum})` : null; !is === null && len !== is ? this.errors << `${attr_name} is the wrong length (should be ${is})` : null;
   }
 
   validates_numericality_of(attr_name: string, value: any, greater_than: any, less_than: any, only_integer: boolean): null {
-    value === null || !value.is_a(Numeric) ? errors << `${attr_name} is not a number`; (() => { return null; })() : null;
-    !greater_than === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? errors << `${attr_name} must be greater than ${greater_than}` : null;
-    !less_than === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })() ? errors << `${attr_name} must be less than ${less_than}` : null;
-    only_integer && !value.is_a(Integer) ? errors << `${attr_name} must be an integer` : null;
+    if (value === null || !value.is_a(Numeric)) this.errors << `${attr_name} is not a number`; (() => { return null; })();
+    if (!greater_than === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors << `${attr_name} must be greater than ${greater_than}`;
+    if (!less_than === null && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors << `${attr_name} must be less than ${less_than}`;
+    if (only_integer && !value.is_a(Integer)) this.errors << `${attr_name} must be an integer`;
   }
 
   validates_inclusion_of(attr_name: string, value: any, within: string[]): null {
-    within.include(value) ? null : errors << `${attr_name} is not included in the list`;
+    within.include(value) ? null : this.errors << `${attr_name} is not included in the list`;
   }
 
-  validates_format_of(attr_name: string, value: any, with: Regexp): null {
+  validates_format_of(attr_name: string, value: any, with_: Regexp): null {
     const ok = value.is_a(String) && with.match(value);
-    ok ? null : errors << `${attr_name} is invalid`;
+    ok ? null : this.errors << `${attr_name} is invalid`;
   }
 }
