@@ -227,14 +227,17 @@ pub fn parse_library_with_rbs(
             })
             .collect();
 
-    let empty_classes: std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
-    let typer = crate::analyze::BodyTyper::new(&empty_classes);
+    // Step 1: marry signatures to methods (with arity check + abstract-
+    // method orphan filter). Done up front so the class registry below
+    // can be built from typed methods.
+    // (Done inside the per-class loop below.)
     let constants = parse_module_constants(
         std::str::from_utf8(ruby_src).unwrap_or(""),
     )
     .unwrap_or_default();
 
+    // Step 1: attach RBS signatures to each method, with arity check.
+    // After this loop every method has its `signature` populated.
     for lc in &mut library_classes {
         let class_name = lc.name.0.as_str().to_string();
         let mut class_sigs = sigs_by_last_seg
@@ -288,10 +291,54 @@ pub fn parse_library_with_rbs(
                 orphaned.join(", "),
             ));
         }
+    }
 
-        // Body-type each method. Two-pass ivar typing mirroring the
-        // module-flat path: pass A seeds nothing, pass B seeds ivar
-        // bindings observed during pass A.
+    // Step 2: build a class registry from the now-typed methods. The
+    // body-typer dispatches `Send { recv: SelfRef, method: m }` against
+    // self_ty's class entry, so without this registry self-method
+    // calls resolve to `Ty::Untyped`.
+    let mut class_registry: std::collections::HashMap<
+        crate::ident::ClassId,
+        crate::analyze::ClassInfo,
+    > = std::collections::HashMap::new();
+    for lc in &library_classes {
+        let mut ci = crate::analyze::ClassInfo::default();
+        for m in &lc.methods {
+            let Some(sig) = &m.signature else { continue };
+            match m.receiver {
+                crate::dialect::MethodReceiver::Class => {
+                    ci.class_methods.insert(m.name.clone(), sig.clone());
+                }
+                crate::dialect::MethodReceiver::Instance => {
+                    ci.instance_methods.insert(m.name.clone(), sig.clone());
+                }
+            }
+        }
+        class_registry.insert(lc.name.clone(), ci);
+    }
+
+    // Step 3: rewrite bare `Send { recv: None }` to `Send { recv:
+    // SelfRef, ... }` in every method body. Ruby's bare-name method
+    // dispatch within a class body is implicit-self; making it explicit
+    // (a) lets the body-typer resolve it via the class registry above
+    // and (b) lets the per-target emitter render it as `this.method(...)`
+    // / `self.method(...)` without each emitter re-deriving the rule.
+    for lc in &mut library_classes {
+        for m in &mut lc.methods {
+            m.body = rewrite_bare_sends_to_self(&m.body);
+        }
+    }
+
+    // Step 4: body-type each method. Two-pass ivar typing mirroring the
+    // module-flat path: pass A seeds nothing, pass B seeds ivar
+    // bindings observed during pass A. Now that bare sends carry an
+    // explicit SelfRef receiver, the typer dispatches them against
+    // `class_registry[lc.name].instance_methods` / `class_methods` and
+    // their return types flow into outer expressions (e.g. `errors`'s
+    // `Array[String]` reaches `errors << "..."` so `<<` resolves to
+    // `.push()` per the type-aware operator dispatch).
+    let typer = crate::analyze::BodyTyper::new(&class_registry);
+    for lc in &mut library_classes {
         let build_ctx = |m: &MethodDef,
                          ivars: &std::collections::HashMap<Symbol, Ty>|
          -> crate::analyze::Ctx {
@@ -335,6 +382,204 @@ pub fn parse_library_with_rbs(
     }
 
     Ok(library_classes)
+}
+
+/// Walk an `Expr` rewriting every `Send { recv: None }` to
+/// `Send { recv: Some(SelfRef) }`. Other nodes pass through with
+/// children rewritten. Idempotent — a Send that already has a
+/// receiver is left alone, so calling this twice is safe.
+///
+/// Lives in `runtime_src.rs` (target-agnostic) rather than under
+/// `emit/<target>/` because the explicit-self rewrite is a property
+/// of Ruby class-body semantics, not of any one target language. Both
+/// the body-typer (so it can dispatch self-method calls) and every
+/// per-target emitter (so it can render `this.x` / `self.x` / etc.)
+/// need the rewrite applied uniformly.
+fn rewrite_bare_sends_to_self(e: &Expr) -> Expr {
+    use crate::expr::{InterpPart, LValue, RescueClause};
+
+    let new_node = match &*e.node {
+        // `raise X, msg` is a Kernel-level call, not a method on the
+        // current class. Leaving it as Send-no-recv lets target
+        // emitters render it as `throw new X(msg)` (TS),
+        // `raise X.new(msg)` (Ruby), etc. — they wouldn't be able to
+        // recover the throw shape from `this.raise(...)`. Other Kernel
+        // methods (puts, print, …) don't appear in the framework
+        // runtime today; if they do, extend this list.
+        ExprNode::Send { recv: None, method, args, block, parenthesized }
+            if method.as_str() == "raise" =>
+        {
+            ExprNode::Send {
+                recv: None,
+                method: method.clone(),
+                args: args.iter().map(rewrite_bare_sends_to_self).collect(),
+                block: block.as_ref().map(rewrite_bare_sends_to_self),
+                parenthesized: *parenthesized,
+            }
+        }
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: method.clone(),
+            args: args.iter().map(rewrite_bare_sends_to_self).collect(),
+            block: block.as_ref().map(rewrite_bare_sends_to_self),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Send { recv: Some(r), method, args, block, parenthesized } => ExprNode::Send {
+            recv: Some(rewrite_bare_sends_to_self(r)),
+            method: method.clone(),
+            args: args.iter().map(rewrite_bare_sends_to_self).collect(),
+            block: block.as_ref().map(rewrite_bare_sends_to_self),
+            parenthesized: *parenthesized,
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: rewrite_bare_sends_to_self(fun),
+            args: args.iter().map(rewrite_bare_sends_to_self).collect(),
+            block: block.as_ref().map(rewrite_bare_sends_to_self),
+        },
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(rewrite_bare_sends_to_self).collect(),
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite_bare_sends_to_self(cond),
+            then_branch: rewrite_bare_sends_to_self(then_branch),
+            else_branch: rewrite_bare_sends_to_self(else_branch),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: rewrite_bare_sends_to_self(left),
+            right: rewrite_bare_sends_to_self(right),
+        },
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements.iter().map(rewrite_bare_sends_to_self).collect(),
+            style: *style,
+        },
+        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rewrite_bare_sends_to_self(k), rewrite_bare_sends_to_self(v)))
+                .collect(),
+            braced: *braced,
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
+                    InterpPart::Expr { expr } => InterpPart::Expr {
+                        expr: rewrite_bare_sends_to_self(expr),
+                    },
+                })
+                .collect(),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite_bare_sends_to_self(body),
+            block_style: *block_style,
+        },
+        ExprNode::Assign { target, value } => {
+            let new_target = match target {
+                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: rewrite_bare_sends_to_self(recv),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: rewrite_bare_sends_to_self(recv),
+                    index: rewrite_bare_sends_to_self(index),
+                },
+            };
+            ExprNode::Assign {
+                target: new_target,
+                value: rewrite_bare_sends_to_self(value),
+            }
+        }
+        ExprNode::Yield { args } => ExprNode::Yield {
+            args: args.iter().map(rewrite_bare_sends_to_self).collect(),
+        },
+        ExprNode::Raise { value } => ExprNode::Raise {
+            value: rewrite_bare_sends_to_self(value),
+        },
+        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
+            expr: rewrite_bare_sends_to_self(expr),
+            fallback: rewrite_bare_sends_to_self(fallback),
+        },
+        ExprNode::Return { value } => ExprNode::Return {
+            value: rewrite_bare_sends_to_self(value),
+        },
+        ExprNode::Super { args } => ExprNode::Super {
+            args: args
+                .as_ref()
+                .map(|v| v.iter().map(rewrite_bare_sends_to_self).collect()),
+        },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: rewrite_bare_sends_to_self(body),
+                rescues: rescues
+                    .iter()
+                    .map(|rc| RescueClause {
+                        classes: rc
+                            .classes
+                            .iter()
+                            .map(rewrite_bare_sends_to_self)
+                            .collect(),
+                        binding: rc.binding.clone(),
+                        body: rewrite_bare_sends_to_self(&rc.body),
+                    })
+                    .collect(),
+                else_branch: else_branch.as_ref().map(rewrite_bare_sends_to_self),
+                ensure: ensure.as_ref().map(rewrite_bare_sends_to_self),
+                implicit: *implicit,
+            }
+        }
+        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
+            scrutinee: rewrite_bare_sends_to_self(scrutinee),
+            arms: arms
+                .iter()
+                .map(|arm| crate::expr::Arm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(rewrite_bare_sends_to_self),
+                    body: rewrite_bare_sends_to_self(&arm.body),
+                })
+                .collect(),
+        },
+        ExprNode::Let { id, name, value, body } => ExprNode::Let {
+            id: *id,
+            name: name.clone(),
+            value: rewrite_bare_sends_to_self(value),
+            body: rewrite_bare_sends_to_self(body),
+        },
+        ExprNode::Next { value } => ExprNode::Next {
+            value: value.as_ref().map(rewrite_bare_sends_to_self),
+        },
+        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
+            targets: targets.clone(),
+            value: rewrite_bare_sends_to_self(value),
+        },
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: rewrite_bare_sends_to_self(cond),
+            body: rewrite_bare_sends_to_self(body),
+            until_form: *until_form,
+        },
+        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
+            begin: begin.as_ref().map(rewrite_bare_sends_to_self),
+            end: end.as_ref().map(rewrite_bare_sends_to_self),
+            exclusive: *exclusive,
+        },
+        // Leaves and uninteresting nodes pass through.
+        other => other.clone(),
+    };
+
+    Expr {
+        span: e.span,
+        node: Box::new(new_node),
+        ty: e.ty.clone(),
+        effects: e.effects.clone(),
+        leading_blank_line: e.leading_blank_line,
+        diagnostic: e.diagnostic.clone(),
+    }
 }
 
 /// Same as `parse_methods_with_rbs` but takes a pre-built class

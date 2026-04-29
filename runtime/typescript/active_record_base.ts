@@ -13,15 +13,15 @@ export class Base {
   }
 
   static table_name(): string {
-    return this.raise(NotImplementedError, `${this.name}.table_name must be overridden`);
+    return (() => { throw new NotImplementedError(`${this.name}.table_name must be overridden`); })();
   }
 
   static schema_columns(): string[] {
-    return this.raise(NotImplementedError, `${this.name}.schema_columns must be overridden`);
+    return (() => { throw new NotImplementedError(`${this.name}.schema_columns must be overridden`); })();
   }
 
   static instantiate(_row: any): Base {
-    return this.raise(NotImplementedError, `${this.name}.instantiate must be overridden`);
+    return (() => { throw new NotImplementedError(`${this.name}.instantiate must be overridden`); })();
   }
 
   attributes(): any {
@@ -29,7 +29,7 @@ export class Base {
   }
 
   assign_from_row(_row: any): null {
-    this.raise(NotImplementedError, `${this.class.name}#assign_from_row must be overridden`);
+    (() => { throw new NotImplementedError(`${this.class.name}#assign_from_row must be overridden`); })();
   }
 
   persisted(): boolean {
@@ -55,7 +55,7 @@ export class Base {
 
   static find(id: number): Base {
     const row = ActiveRecord.adapter.find(this.table_name, id);
-    if (row === null) this.raise(RecordNotFound, `Couldn't find ${this.name} with id=${id}`);
+    if (row === null) (() => { throw new RecordNotFound(`Couldn't find ${this.name} with id=${id}`); })();
     return this.instantiate(row);
   }
 
@@ -78,7 +78,7 @@ export class Base {
 
   static destroy_all(): Base[] {
     const records = this.all;
-    records.each(r => r.destroy);
+    records.forEach(r => r.destroy);
     return records;
   }
 
@@ -109,7 +109,7 @@ export class Base {
   }
 
   save(): Base {
-    if (this.save) { null; } else { this.raise(RecordInvalid, this); }
+    if (this.save) { null; } else { (() => { throw new RecordInvalid(this); })(); }
     return this;
   }
 

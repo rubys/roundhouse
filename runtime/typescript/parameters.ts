@@ -44,9 +44,9 @@ export class Parameters {
 
   require(key: string): any {
     const val = this.hash[key.to_sym];
-    if (val === null) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
-    if (val instanceof Hash && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
-    if (val instanceof Parameters && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
+    if (val === null) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
+    if (val instanceof Hash && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
+    if (val instanceof Parameters && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
     return val instanceof Parameters ? val : val instanceof Hash ? new Parameters(val) : val;
   }
 

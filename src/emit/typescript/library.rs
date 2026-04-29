@@ -700,6 +700,24 @@ pub(super) fn rewrite_for_constructor(e: &Expr) -> Expr {
 
 fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
     let new_node = match &*e.node {
+        // `raise X, msg` is a Kernel-level call that target emitters
+        // render as `throw new X(msg)`. Leaving it as Send-no-recv (no
+        // SelfRef rewrite) lets the emit_send_with_parens special-case
+        // for `raise` fire. Mirrors the parse-side carve-out in
+        // `runtime_src::rewrite_bare_sends_to_self`; both are needed
+        // because this function is also called from the app-level
+        // emit path which doesn't go through the parse-side rewrite.
+        ExprNode::Send { recv: None, method, args, block, parenthesized }
+            if method.as_str() == "raise" =>
+        {
+            ExprNode::Send {
+                recv: None,
+                method: method.clone(),
+                args: args.iter().map(|a| rewrite(a, super_method)).collect(),
+                block: block.as_ref().map(|b| rewrite(b, super_method)),
+                parenthesized: *parenthesized,
+            }
+        }
         ExprNode::Send { recv: None, method, args, block, parenthesized } => ExprNode::Send {
             recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
             method: method.clone(),

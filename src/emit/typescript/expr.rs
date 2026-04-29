@@ -743,6 +743,27 @@ pub(super) fn emit_send_with_parens(
             args_s[0],
         );
     }
+    // Kernel `raise` — the runtime_src self-rewrite leaves it as
+    // Send-no-recv. Two source surfaces:
+    //   `raise X, "msg"`  → `throw new X("msg")`
+    //   `raise X.new("msg")` → `throw new X("msg")` (already a Send)
+    //   `raise "msg"`     → `throw new Error("msg")`
+    // The bare-error form (`raise "msg"`) hasn't been observed in the
+    // framework runtime yet; add a case if it appears.
+    if method == "raise" && recv.is_none() {
+        match args.len() {
+            2 => {
+                return format!(
+                    "(() => {{ throw new {}({}); }})()",
+                    args_s[0], args_s[1],
+                );
+            }
+            1 => {
+                return format!("(() => {{ throw {}; }})()", args_s[0]);
+            }
+            _ => {}
+        }
+    }
     // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
     // to `cond.!`). Emit TS's prefix `!`. Parenthesize the operand so
     // `!x.nil?` (which lowers `nil?` to `x === null`) emits as
