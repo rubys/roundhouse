@@ -23,8 +23,10 @@ const SERVER_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
 mod controller;
 mod expr;
 mod fixture;
+mod library;
 mod main_ts;
 mod model;
+mod model_from_library;
 mod naming;
 mod package;
 mod route;
@@ -40,8 +42,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     emit_with_adapter(app, &crate::adapter::SqliteAdapter)
 }
 
-pub fn emit_library(_app: &App) -> Vec<EmittedFile> {
-    Vec::new()
+pub fn emit_library(app: &App) -> Vec<EmittedFile> {
+    let mut files = Vec::new();
+    files.push(package::emit_package_json());
+    files.push(package::emit_tsconfig_json(app));
+    files.push(EmittedFile {
+        path: PathBuf::from("src/juntos.ts"),
+        content: JUNTOS_STUB_SOURCE.to_string(),
+    });
+    files.extend(library::emit_library_classes(app));
+    files.extend(library::emit_library_class_decls(app));
+    files
 }
 
 pub fn emit_with_adapter(
@@ -60,6 +71,7 @@ pub fn emit_with_adapter(
         files.push(schema_sql::emit_schema_sql(app));
     }
     files.extend(model::emit_models(app));
+    files.extend(library::emit_library_class_decls(app));
     if !app.controllers.is_empty() {
         files.push(EmittedFile {
             path: PathBuf::from("src/http.ts"),
