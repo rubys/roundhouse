@@ -22,6 +22,7 @@ mod package;
 mod route;
 mod route_helpers;
 mod ty;
+mod view;
 
 pub use ty::ts_ty;
 
@@ -49,6 +50,7 @@ pub fn emit_with_adapter(
         files.push(route::emit_routes(app));
         files.push(route_helpers::emit_route_helpers(app));
     }
+    files.extend(view::emit_views(app));
     files
 }
 
