@@ -660,12 +660,31 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::SelfRef => "this".to_string(),
         ExprNode::Lambda { params, body, .. } => {
             let params_s: Vec<String> = params.iter().map(|p| p.as_str().to_string()).collect();
-            let body_s = emit_expr(body);
-            match params.len() {
-                0 => format!("() => {body_s}"),
-                1 => format!("{} => {body_s}", params_s[0]),
-                _ => format!("({}) => {body_s}", params_s.join(", ")),
+            let header = match params.len() {
+                0 => "()".to_string(),
+                1 => params_s[0].clone(),
+                _ => format!("({})", params_s.join(", ")),
+            };
+            // Multi-statement bodies need a block form so each
+            // statement separates cleanly. Single-expression bodies
+            // stay in the concise `args => expr` form. The body-
+            // typer's return-flow tracking gives us the value of the
+            // last statement; emit a `return` for that one.
+            if let ExprNode::Seq { exprs } = &*body.node {
+                if exprs.len() > 1 {
+                    let mut out = format!("{header} => {{ ");
+                    for (i, e) in exprs.iter().enumerate() {
+                        let stmt = emit_stmt(e, i == exprs.len() - 1, false);
+                        out.push_str(&stmt);
+                        if i + 1 < exprs.len() {
+                            out.push(' ');
+                        }
+                    }
+                    out.push_str(" }");
+                    return out;
+                }
             }
+            format!("{header} => {}", emit_expr(body))
         }
         ExprNode::Return { value } => {
             // Expression-position return is rare — typically the
@@ -804,6 +823,31 @@ pub(super) fn emit_send_with_parens(
     parenthesized: bool,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    if method == "[]" && recv.is_some() && args.len() == 1 {
+        // Ruby's `x[i..j]` slice form — when the indexer's argument is
+        // a Range, lower to `.slice(i, j+1)` (or `.slice(i)` for an
+        // open-ended range, or `.slice(i, j)` for an exclusive range).
+        // Works for Str AND Array receivers; both have `.slice` with
+        // matching JS semantics.
+        if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+            let begin_s = begin
+                .as_ref()
+                .map(|e| emit_expr(e))
+                .unwrap_or_else(|| "0".to_string());
+            let recv_s = emit_expr(recv.unwrap());
+            return match end {
+                None => format!("{recv_s}.slice({begin_s})"),
+                Some(e) => {
+                    let end_s = emit_expr(e);
+                    if *exclusive {
+                        format!("{recv_s}.slice({begin_s}, {end_s})")
+                    } else {
+                        format!("{recv_s}.slice({begin_s}, {end_s} + 1)")
+                    }
+                }
+            };
+        }
+    }
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }

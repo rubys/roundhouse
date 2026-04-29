@@ -157,7 +157,7 @@ export class ViewHelpers {
   render_attrs(attrs: any): string {
     if (Object.keys(attrs).length === 0) return "";
     const pairs = [];
-    Object.entries(attrs).forEach(__p => ((k, v) => v === null ? (() => { return; })() : null; v instanceof Hash ? Object.entries(v).forEach(__p => ((inner_k, inner_v) => inner_v === null ? (() => { return; })() : null; String(inner_k).tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`))(__p[0], __p[1])) : pairs.push(` ${k}="${this.html_escape(v)}"`))(__p[0], __p[1]));
+    Object.entries(attrs).forEach(__p => ((k, v) => { if (v === null) return; return v instanceof Hash ? Object.entries(v).forEach(__p => ((inner_k, inner_v) => { if (inner_v === null) return; const inner_name = String(inner_k).tr("_", "-"); return pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`); })(__p[0], __p[1])) : pairs.push(` ${k}="${this.html_escape(v)}"`); })(__p[0], __p[1]));
     return pairs.join;
   }
 

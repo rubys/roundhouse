@@ -4,7 +4,7 @@
 export class Router {
   match(method: string, path: string, table: any[]): any {
     const method_upcase = String(method).toUpperCase();
-    table.forEach(route => route["method"] === method_upcase ? null : (() => { return; })(); this.match_pattern(route["pattern"], path); params === null ? (() => { return; })() : null; (() => { return { "controller": route["controller"], "action": route["action"], "path_params": params }; })());
+    table.forEach(route => { if (route["method"] === method_upcase) { null; } else { return; } const params = this.match_pattern(route["pattern"], path); if (params === null) return; return { "controller": route["controller"], "action": route["action"], "path_params": params }; });
     return null;
   }
 
@@ -17,7 +17,7 @@ export class Router {
     while (i < pattern_parts.length) {
       const pp = pattern_parts[i];
       const ap = path_parts[i];
-      if (pp.start_with(":")) { params[pp[/* TODO: emit Discriminant(25) */]] = ap; } else if (pp !== ap) { return null; }
+      if (pp.startsWith(":")) { params[pp.slice(1)] = ap; } else if (pp !== ap) { return null; }
       i = i + 1;
     }
     return params;
