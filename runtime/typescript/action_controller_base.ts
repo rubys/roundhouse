@@ -21,7 +21,7 @@ export class Base {
   }
 
   process_action(_action_name: string): null {
-    (() => { throw new NotImplementedError(`${this.class.name} must override process_action`); })();
+    (() => { throw new NotImplementedError("process_action must be overridden by subclass"); })();
   }
 
   render(html: string, status: any): null {

@@ -40,9 +40,11 @@ module ActionController
       @location = nil
     end
 
-    # Subclasses override.
+    # Subclasses override. Error message omits `self.class.name` —
+    # `.name`-style reflection forks across targets and the runtime
+    # stack trace already identifies the receiver's class.
     def process_action(_action_name)
-      raise NotImplementedError, "#{self.class.name} must override process_action"
+      raise NotImplementedError, "process_action must be overridden by subclass"
     end
 
     # Render an HTML response. Two argument shapes accepted:

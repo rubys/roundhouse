@@ -12,16 +12,35 @@ module ActionController
       @hash = symbolize_keys(hash)
     end
 
-    def [](key)
+    # `get` / `set` / `has?` are the primary cross-target API. `[]`
+    # / `[]=` / `key?` stay as one-line delegators so Ruby idiom
+    # (`params[:title]`, `params.key?(:title)`) keeps working under
+    # CRuby, while non-Ruby targets that can't express operator
+    # methods (TS, Python, Elixir, Go, Rust) emit `get`/`set`/`has?`
+    # directly. A future caller-side lowerer will rewrite Ruby
+    # `params[k]` Send nodes to `params.get(k)` for those targets.
+    def get(key)
       @hash[key.to_sym]
     end
 
-    def []=(key, value)
+    def set(key, value)
       @hash[key.to_sym] = value
     end
 
-    def key?(key)
+    def has?(key)
       @hash.key?(key.to_sym)
+    end
+
+    def [](key)
+      get(key)
+    end
+
+    def []=(key, value)
+      set(key, value)
+    end
+
+    def key?(key)
+      has?(key)
     end
 
     def fetch(key, default = nil)

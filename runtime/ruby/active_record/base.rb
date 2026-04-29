@@ -54,9 +54,13 @@ module ActiveRecord
       {}
     end
 
-    # Subclasses override to mutate state from a row hash.
+    # Subclasses override to mutate state from a row hash. Error
+    # message intentionally omits `self.class.name` — `.name`-style
+    # reflection diverges across the 7 targets (`this.constructor.name`
+    # vs `__MODULE__` vs `std::any::type_name`); the runtime stack
+    # trace already identifies the receiver's class.
     def assign_from_row(_row)
-      raise NotImplementedError, "#{self.class.name}#assign_from_row must be overridden"
+      raise NotImplementedError, "assign_from_row must be overridden by subclass"
     end
 
     # ---- Persistence state ------------------------------------------

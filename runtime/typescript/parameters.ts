@@ -9,8 +9,20 @@ export class Parameters {
     this.hash = this.symbolize_keys(hash);
   }
 
-  key(key: string): boolean {
+  get(key: string): any {
+    return this.hash[key];
+  }
+
+  set(key: string, value: any): any {
+    return this.hash[key] = value;
+  }
+
+  has(key: string): boolean {
     return key in this.hash;
+  }
+
+  key(key: string): boolean {
+    return this.has(key);
   }
 
   fetch(key: string, default_: any): any {

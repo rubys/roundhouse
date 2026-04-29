@@ -10,6 +10,13 @@ module ActionController
     # Hash/Parameters), so `untyped` is the deliberate value type.
     def initialize: (?Hash[Symbol, untyped] hash) -> void
 
+    # `get` / `set` / `has?` are the cross-target named-method API.
+    # `[]` / `[]=` / `key?` are one-line delegators kept for Ruby
+    # idiom under CRuby; non-Ruby emits use the named forms.
+    def get: (Symbol key) -> untyped
+    def set: (Symbol key, untyped value) -> untyped
+    def has?: (Symbol key) -> bool
+
     # `key.to_sym` is called inside, so callers may pass a Symbol or
     # String. RBS type Symbol covers the common case; widen via union
     # if a String-key fixture forces it.

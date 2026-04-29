@@ -29,7 +29,7 @@ export class Base {
   }
 
   assign_from_row(_row: any): null {
-    (() => { throw new NotImplementedError(`${this.class.name}#assign_from_row must be overridden`); })();
+    (() => { throw new NotImplementedError("assign_from_row must be overridden by subclass"); })();
   }
 
   persisted(): boolean {
