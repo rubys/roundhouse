@@ -488,6 +488,27 @@ fn escape_reserved_word(name: &str) -> String {
     .unwrap_or_else(|| name.to_string())
 }
 
+/// Unwrap a `Union<T, Nil>` to `T` for type-aware dispatch. The
+/// flow-sensitive ivar typer wraps every ivar's type in
+/// `Union<T, Nil>` because a first read can observe nil before any
+/// assignment runs (see `parse_library_with_rbs`'s flow_ivars
+/// reseed). The actual value is still `T` everywhere except the
+/// possibly-nil first-read window, so dispatch on `T` is correct
+/// for emit purposes. `Union<Nil>` and other shapes pass through
+/// unchanged.
+fn strip_nullable(ty: Option<&Ty>) -> Option<&Ty> {
+    let ty = ty?;
+    if let Ty::Union { variants } = ty {
+        if variants.len() == 2 {
+            let nil_idx = variants.iter().position(|v| matches!(v, Ty::Nil));
+            if let Some(idx) = nil_idx {
+                return Some(&variants[1 - idx]);
+            }
+        }
+    }
+    Some(ty)
+}
+
 /// `!x` parses tighter than `===`, `==`, `||`, `&&`, etc. — without
 /// parentheses, `!x === y` reads as `(!x) === y`. Heuristic: if the
 /// emitted operand contains a binary operator at top level, wrap it.
@@ -839,13 +860,16 @@ pub(super) fn emit_send_with_parens(
             format!("!{inner}")
         };
     }
-    // Type-aware Ruby Enumerable → JS Array method rename. JS arrays
-    // don't have `.each` (they have `.forEach`) and use `.length` not
-    // `.size`. When the analyzer has typed the receiver as Array, emit
-    // the JS-native form.
+    // Type-aware per-receiver dispatch. The receiver type may be
+    // nullable (an ivar's flow-sensitive type is `Union<T, Nil>` since
+    // a first read can observe nil before any assignment); strip the
+    // nullable wrapper so dispatch fires on the inner type.
     if let Some(r) = recv {
-        if let Some(Ty::Array { .. }) = &r.ty {
-            match method {
+        let recv_ty = strip_nullable(r.ty.as_ref());
+        match recv_ty {
+            // Ruby Array → JS Array (with native method renames where
+            // they diverge: `.each` → `.forEach`, `.size` → `.length`).
+            Some(Ty::Array { .. }) => match method {
                 "each" => {
                     let recv_s = emit_expr(r);
                     return if args_s.is_empty() {
@@ -871,14 +895,9 @@ pub(super) fn emit_send_with_parens(
                     return format!("{recv_s}[{recv_s}.length - 1]");
                 }
                 _ => {}
-            }
-        }
-        // String-typed receiver: the same `.empty?` predicate has the
-        // same JS spelling (length-zero), and `.length` carries through.
-        // Keep the arms parallel with Array so further per-type
-        // additions land in obvious neighborhoods.
-        if let Some(Ty::Str) = &r.ty {
-            match method {
+            },
+            // String receiver: predicate forms parallel Array's.
+            Some(Ty::Str) => match method {
                 "empty?" if args.is_empty() => {
                     return format!("{}.length === 0", emit_expr(r));
                 }
@@ -886,7 +905,56 @@ pub(super) fn emit_send_with_parens(
                     return format!("{}.length", emit_expr(r));
                 }
                 _ => {}
+            },
+            // Hash → JS plain-object. `.merge` becomes object spread;
+            // `.key?` becomes the `in` operator; `.empty?` counts keys;
+            // `.each |k, v|` iterates entries.
+            Some(Ty::Hash { .. }) => {
+                let recv_s = emit_expr(r);
+                match method {
+                    "key?" | "has_key?" | "include?" if args.len() == 1 => {
+                        return format!("{} in {recv_s}", args_s[0]);
+                    }
+                    "empty?" if args.is_empty() => {
+                        return format!("Object.keys({recv_s}).length === 0");
+                    }
+                    "any?" if args.is_empty() => {
+                        return format!("Object.keys({recv_s}).length > 0");
+                    }
+                    "size" | "length" if args.is_empty() => {
+                        return format!("Object.keys({recv_s}).length");
+                    }
+                    "merge" if args.len() == 1 => {
+                        return format!("{{ ...{recv_s}, ...{} }}", args_s[0]);
+                    }
+                    "keys" if args.is_empty() => {
+                        return format!("Object.keys({recv_s})");
+                    }
+                    "values" if args.is_empty() => {
+                        return format!("Object.values({recv_s})");
+                    }
+                    "each" if args_s.len() <= 1 => {
+                        // `hash.each |k, v| { ... }` lowers to a
+                        // 2-arg block. JS's `Object.entries(o).forEach`
+                        // passes a single `[k, v]` tuple; wrap the
+                        // block in a forwarder that pulls the pair
+                        // apart so the caller-supplied 2-arg lambda
+                        // sees `(k, v)` as Ruby intended. Without the
+                        // forwarder, a `(k, v) =>` block would receive
+                        // `[k, v], index, _arr` instead.
+                        return if args_s.is_empty() {
+                            format!("Object.entries({recv_s})")
+                        } else {
+                            format!(
+                                "Object.entries({recv_s}).forEach(__p => ({})(__p[0], __p[1]))",
+                                args_s[0],
+                            )
+                        };
+                    }
+                    _ => {}
+                }
             }
+            _ => {}
         }
     }
 

@@ -10,41 +10,41 @@ export class Parameters {
   }
 
   key(key: string): boolean {
-    return this.hash.key(key);
+    return key in this.hash;
   }
 
   fetch(key: string, default_: any): any {
     const sym = key;
-    if (this.hash.key(sym)) return this.hash[sym];
+    if (sym in this.hash) return this.hash[sym];
     return default_;
   }
 
   empty(): boolean {
-    return this.hash.empty;
+    return Object.keys(this.hash).length === 0;
   }
 
   to_h(): any {
     const copy = {  };
-    this.hash.each((k, v) => copy[k] = v instanceof Parameters ? v.to_h : v);
+    Object.entries(this.hash).forEach(__p => ((k, v) => copy[k] = v instanceof Parameters ? v.to_h : v)(__p[0], __p[1]));
     return copy;
   }
 
   merge(other: any): Parameters {
     const other_hash = other instanceof Parameters ? other.to_h : other;
-    return new Parameters(this.hash.merge(this.symbolize_keys(other_hash)));
+    return new Parameters({ ...this.hash, ...this.symbolize_keys(other_hash) });
   }
 
   require(key: string): any {
     const val = this.hash[key];
     if (val === null) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
-    if (val instanceof Hash && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
+    if (val instanceof Hash && Object.keys(val).length === 0) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
     if (val instanceof Parameters && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
     return val instanceof Parameters ? val : val instanceof Hash ? new Parameters(val) : val;
   }
 
   permit(allowed: string[]): Parameters {
     const filtered = {  };
-    allowed.forEach(key => key; this.hash.key(sym) ? filtered[sym] = this.hash[sym] : null);
+    allowed.forEach(key => key; sym in this.hash ? filtered[sym] = this.hash[sym] : null);
     return new Parameters(filtered);
   }
 

@@ -14,7 +14,7 @@ export class FormBuilder {
   }
 
   label(field: string, opts: any): string {
-    const attrs = ViewHelpers.render_attrs({ "for": `${this.model_name}_${field}` }.merge(ViewHelpers.stringify_keys(opts)));
+    const attrs = ViewHelpers.render_attrs({ ...{ "for": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<label${attrs}>${ViewHelpers.html_escape(String(field).capitalize)}</label>`;
   }
 
@@ -22,19 +22,19 @@ export class FormBuilder {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
     if (value === null || String(value).length === 0) { null; } else { base["value"] = String(value); }
-    const attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)));
+    const attrs = ViewHelpers.render_attrs({ ...base, ...ViewHelpers.stringify_keys(opts) });
     return `<input${attrs}>`;
   }
 
   text_area(field: string, opts: any): string {
     const value = this.model[field];
-    const attrs = ViewHelpers.render_attrs({ "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` }.merge(ViewHelpers.stringify_keys(opts)));
+    const attrs = ViewHelpers.render_attrs({ ...{ "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<textarea${attrs}>${ViewHelpers.html_escape(value)}</textarea>`;
   }
 
   submit(label: any, opts: any): string {
     const text = label || this.method === "patch" ? `Update ${this.model_name.capitalize}` : `Create ${this.model_name.capitalize}`;
-    const attrs = ViewHelpers.render_attrs({ "type": "submit", "name": "commit", "value": text, "data-disable-with": text }.merge(ViewHelpers.stringify_keys(opts)));
+    const attrs = ViewHelpers.render_attrs({ ...{ "type": "submit", "name": "commit", "value": text, "data-disable-with": text }, ...ViewHelpers.stringify_keys(opts) });
     return `<input${attrs}>`;
   }
 }
@@ -89,7 +89,7 @@ export class ViewHelpers {
   }
 
   link_to(text: any, href: string, opts: any): string {
-    const attrs = this.render_attrs({ "href": href }.merge(this.stringify_keys(opts)));
+    const attrs = this.render_attrs({ ...{ "href": href }, ...this.stringify_keys(opts) });
     return `<a${attrs}>${this.html_escape(text)}</a>`;
   }
 
@@ -101,7 +101,7 @@ export class ViewHelpers {
     inner_opts.delete("form_class");
     const form_attrs = { "action": href, "method": "post" };
     form_attrs["class"] = form_class || "button_to";
-    const button_attrs = this.render_attrs({ "type": "submit" }.merge(this.stringify_keys(inner_opts)));
+    const button_attrs = this.render_attrs({ ...{ "type": "submit" }, ...this.stringify_keys(inner_opts) });
     const method_input = !(method === null) && String(method) !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     return `<form${this.render_attrs(form_attrs)}>${method_input}<button${button_attrs}>${this.html_escape(text)}</button>${auth_token_input}</form>`;
@@ -117,7 +117,7 @@ export class ViewHelpers {
 
   stylesheet_link_tag(name: string, opts: any): string {
     const href = `/assets/${name}.css`;
-    const attrs = this.render_attrs({ "rel": "stylesheet", "href": href }.merge(this.stringify_keys(opts)));
+    const attrs = this.render_attrs({ ...{ "rel": "stylesheet", "href": href }, ...this.stringify_keys(opts) });
     return `<link${attrs}>`;
   }
 
@@ -131,7 +131,7 @@ export class ViewHelpers {
     }`;
     const parts = [];
     parts.push("<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>");
-    pins.each(p => parts.push(`<link rel="modulepreload" href="${p["path"]}">`));
+    pins.forEach(p => parts.push(`<link rel="modulepreload" href="${p["path"]}">`));
     parts.push(`<script type="module">import "${entry}"</script>`);
     return parts.join("\n");
   }
@@ -150,20 +150,20 @@ export class ViewHelpers {
     const method_input = method_str !== "get" && method_str !== "post" ? `<input type="hidden" name="_method" value="${method_str}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     const form_method = method_str === "get" ? "get" : "post";
-    const attrs = this.render_attrs({ "action": action, "accept-charset": "UTF-8", "method": form_method }.merge(this.stringify_keys(opts)));
+    const attrs = this.render_attrs({ ...{ "action": action, "accept-charset": "UTF-8", "method": form_method }, ...this.stringify_keys(opts) });
     return `<form${attrs}>${method_input}${auth_token_input}${body}</form>`;
   }
 
   render_attrs(attrs: any): string {
-    if (attrs.empty) return "";
+    if (Object.keys(attrs).length === 0) return "";
     const pairs = [];
-    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v instanceof Hash ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; String(inner_k).tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
+    Object.entries(attrs).forEach(__p => ((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v instanceof Hash ? Object.entries(v).forEach(__p => ((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; String(inner_k).tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`))(__p[0], __p[1])) : pairs.push(` ${k}="${this.html_escape(v)}"`))(__p[0], __p[1]));
     return pairs.join;
   }
 
   stringify_keys(h: any): any {
     const out = {  };
-    h.each((k, v) => out[String(k)] = v);
+    Object.entries(h).forEach(__p => ((k, v) => out[String(k)] = v)(__p[0], __p[1]));
     return out;
   }
 }
