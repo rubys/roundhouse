@@ -896,13 +896,39 @@ pub(super) fn emit_send_with_parens(
                 }
                 _ => {}
             },
-            // String receiver: predicate forms parallel Array's.
+            // String receiver: predicate forms parallel Array's; the
+            // case-shift helpers map to JS String methods.
             Some(Ty::Str) => match method {
                 "empty?" if args.is_empty() => {
                     return format!("{}.length === 0", emit_expr(r));
                 }
                 "size" if args.is_empty() => {
                     return format!("{}.length", emit_expr(r));
+                }
+                "upcase" if args.is_empty() => {
+                    return format!("{}.toUpperCase()", emit_expr(r));
+                }
+                "downcase" if args.is_empty() => {
+                    return format!("{}.toLowerCase()", emit_expr(r));
+                }
+                "capitalize" if args.is_empty() => {
+                    // JS has no built-in capitalize. Match Ruby's
+                    // semantics: uppercase the first char, lowercase
+                    // the rest. Wrap in IIFE so the receiver expr is
+                    // evaluated once even when we reference it twice.
+                    let recv_s = emit_expr(r);
+                    return format!(
+                        "(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())({recv_s})"
+                    );
+                }
+                "strip" if args.is_empty() => {
+                    return format!("{}.trim()", emit_expr(r));
+                }
+                "reverse" if args.is_empty() => {
+                    return format!("{}.split(\"\").reverse().join(\"\")", emit_expr(r));
+                }
+                "chars" if args.is_empty() => {
+                    return format!("{}.split(\"\")", emit_expr(r));
                 }
                 _ => {}
             },

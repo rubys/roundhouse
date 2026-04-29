@@ -15,7 +15,7 @@ export class FormBuilder {
 
   label(field: string, opts: any): string {
     const attrs = ViewHelpers.render_attrs({ ...{ "for": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
-    return `<label${attrs}>${ViewHelpers.html_escape(String(field).capitalize)}</label>`;
+    return `<label${attrs}>${ViewHelpers.html_escape((__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(String(field)))}</label>`;
   }
 
   text_field(field: string, opts: any): string {
@@ -33,7 +33,7 @@ export class FormBuilder {
   }
 
   submit(label: any, opts: any): string {
-    const text = label || this.method === "patch" ? `Update ${this.model_name.capitalize}` : `Create ${this.model_name.capitalize}`;
+    const text = label || this.method === "patch" ? `Update ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}` : `Create ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}`;
     const attrs = ViewHelpers.render_attrs({ ...{ "type": "submit", "name": "commit", "value": text, "data-disable-with": text }, ...ViewHelpers.stringify_keys(opts) });
     return `<input${attrs}>`;
   }
@@ -85,7 +85,7 @@ export class ViewHelpers {
   }
 
   record_dom_prefix(record: any): string {
-    return record.class.name.downcase;
+    return record.class.name.toLowerCase();
   }
 
   link_to(text: any, href: string, opts: any): string {
