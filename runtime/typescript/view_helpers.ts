@@ -6,6 +6,7 @@
 // `buttonTo`, `formWrap`, FormBuilder methods, `turboStreamFrom`,
 // `domId`, `pluralize`, plus a `RenderCtx` for layout slots
 // (notice / alert / title).
+import * as Inflector from "./inflector.js";
 //
 // Mirrors `runtime/rust/view_helpers.rs` in intent + method
 // signatures. Implementations are deliberately minimal — enough
@@ -438,3 +439,166 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+// ── Convergence shim: ViewHelpers class with snake_case methods ──
+//
+// Spinel emits `ViewHelpers.link_to(...)` / `ViewHelpers.html_escape(...)`
+// as the canonical view-helper call shape — same names as the
+// framework Ruby (runtime/ruby/action_view/view_helpers.rb) and the
+// generated runtime/typescript/view_helpers_generated.ts. The TS view
+// emitter is being converged to that shape so per-target name
+// translation (snake_case → camelCase, ViewHelpers → Helpers) drops
+// out, shrinking emit/typescript/view.rs from ~1500 LOC toward
+// ~250 LOC.
+//
+// This class is the additive transition shim: each static method
+// delegates to the existing camelCase free function. Once the view
+// emitter calls `ViewHelpers.x` instead of free functions, the
+// camelCase exports can shrink to whatever's still externally
+// referenced (currently the controller and main bootstrap import a
+// few; the long tail goes away).
+
+export class ViewHelpers {
+  static html_escape(s: string | null | undefined): string {
+    return s == null ? "" : escapeHtml(String(s));
+  }
+
+  static link_to(text: string, url: string, opts: Record<string, any> = {}): string {
+    // The free-function form takes Record<string, string>; widen to
+    // any so `class:` / `data-turbo-confirm:` etc. can carry through.
+    return linkTo(text, url, normalizeAttrs(opts));
+  }
+
+  static button_to(text: string, url: string, opts: Record<string, any> = {}): string {
+    return buttonTo(text, url, opts);
+  }
+
+  static content_for_set(slot: string | symbol, body: string): string {
+    return contentFor(String(slot), body);
+  }
+
+  static content_for_get(slot: string | symbol): string {
+    return contentFor(String(slot));
+  }
+
+  static get_slot(slot: string | symbol): string {
+    return getSlot(String(slot));
+  }
+
+  static get_yield(): string {
+    return getYield();
+  }
+
+  static set_yield(content: string): void {
+    setYield(content);
+  }
+
+  static csrf_meta_tags(): string {
+    return csrfMetaTags();
+  }
+
+  static csp_meta_tag(): string {
+    return cspMetaTag();
+  }
+
+  static stylesheet_link_tag(name: string, opts: Record<string, string> = {}): string {
+    return stylesheetLinkTag(name, opts);
+  }
+
+  static javascript_importmap_tags(
+    pins: Array<{ name: string; path: string }> | null | undefined,
+    entry: string = "application",
+  ): string {
+    // Framework Ruby produces `Array<{ name:, path: }>` (a hash per
+    // pin); the existing free-function helper takes the older
+    // tuple-form `Array<[name, path]>`. Convert here.
+    const tuples: Array<readonly [string, string]> = (pins ?? []).map(
+      (p) => [p.name, p.path] as const,
+    );
+    return javascriptImportmapTags(tuples, entry);
+  }
+
+  static turbo_stream_from(channel: string): string {
+    return turboStreamFrom(channel);
+  }
+
+  static dom_id(record: any, prefix?: string): string {
+    return domId(record, prefix);
+  }
+
+  static pluralize(count: number, word: string): string {
+    // `pluralize` is the re-export from `./inflector.js` at file top;
+    // reference it through that import to dodge the static-name
+    // shadowing inside the class body.
+    return Inflector.pluralize(count, word);
+  }
+
+  static truncate(
+    s: string | null | undefined,
+    opts: { length?: number; omission?: string } = {},
+  ): string {
+    return truncate(s, opts);
+  }
+
+  static field_has_error(record: any, field: string): boolean {
+    return fieldHasError(record, field);
+  }
+
+  static error_messages_for(record: any, noun: string): string {
+    return errorMessagesFor(record, noun);
+  }
+
+  static reset_render_state(): void {
+    resetRenderState();
+  }
+
+  /** Block-form `form_with(opts) { |f| ... }` — TS callback receives
+   *  the FormBuilder and returns the body string; this wraps the body
+   *  with a `<form>` element via the existing formWrap helper. The
+   *  `opts` shape mirrors Ruby kwargs: `model`, `model_name`, `action`,
+   *  `method`, plus an inner `opts` for HTML attributes. */
+  static form_with(
+    opts: {
+      model?: any;
+      model_name?: string;
+      action?: string;
+      method?: string | symbol;
+      opts?: Record<string, any>;
+    },
+    callback: (form: FormBuilder) => string,
+  ): string {
+    const model = opts.model ?? null;
+    const prefix = opts.model_name ?? "";
+    const form = new FormBuilder(model, prefix);
+    const body = callback(form);
+    const action = opts.action ?? "";
+    const formClass = (opts.opts && (opts.opts.class as string | undefined)) ?? "";
+    return formWrap(model, action, formClass, body);
+  }
+
+  // FormBuilder is referenced by both the converged thin emitter
+  // (`new ViewHelpers.FormBuilder(...)`) and external scaffolds; expose
+  // the existing class through this namespace too.
+  static FormBuilder = FormBuilder;
+}
+
+/** Coerce Ruby-symbol-shaped attribute keys to strings so the
+ *  underlying free-function helpers (which assume Record<string, …>)
+ *  consume them uniformly. */
+function normalizeAttrs(opts: Record<string, any>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(opts)) {
+    if (v == null) continue;
+    out[String(k)] = typeof v === "string" ? v : String(v);
+  }
+  return out;
+}
+
+// ── FormBuilder snake_case method aliases ──
+//
+// Same convergence: `form.text_field(...)` is the Ruby/Spinel form;
+// `form.textField(...)` is the existing TS form. Add the snake_case
+// aliases so call sites can use either while the emitter migrates.
+
+(FormBuilder.prototype as any).text_field = FormBuilder.prototype.textField;
+(FormBuilder.prototype as any).text_area = FormBuilder.prototype.textArea;
