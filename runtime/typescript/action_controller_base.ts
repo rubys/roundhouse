@@ -33,8 +33,8 @@ export class Base {
   redirect_to(path: string, notice: any, alert: any, status: any): null {
     this.location = path;
     this.status = this.resolve_status(status);
-    notice === null ? null : this.flash["notice"] = notice;
-    alert === null ? null : this.flash["alert"] = alert;
+    if (notice === null) { null; } else { this.flash["notice"] = notice; }
+    if (alert === null) { null; } else { this.flash["alert"] = alert; }
     null;
   }
 
@@ -45,7 +45,7 @@ export class Base {
   }
 
   resolve_status(s: any): number {
-    if (s.is_a(Integer)) return s;
+    if (s instanceof Integer) return s;
     return STATUS_CODES.fetch(s, 200);
   }
 }

@@ -10,8 +10,52 @@ use crate::ty::Ty;
 // Body + expressions ---------------------------------------------------
 
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
+    // Pre-walk: find local-var names assigned more than once in this
+    // method body. They'll emit as `let` at first occurrence and bare
+    // `name = value` thereafter. Names assigned exactly once still
+    // emit as `const`. The `declared` set tracks which reassigned names
+    // have already had their declaration emitted as we walk in source
+    // order.
+    let mut reassigned: std::collections::HashMap<crate::ident::Symbol, usize> =
+        std::collections::HashMap::new();
+    count_var_assignments(body, &mut reassigned);
+    let reassigned: std::collections::HashSet<crate::ident::Symbol> = reassigned
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(s, _)| s)
+        .collect();
+    let mut declared: std::collections::HashSet<crate::ident::Symbol> =
+        std::collections::HashSet::new();
+    emit_body_with_state(body, return_ty, &reassigned, &mut declared)
+}
+
+fn emit_body_with_state(
+    body: &Expr,
+    return_ty: &Ty,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> String {
     let is_void = matches!(return_ty, Ty::Nil);
     match &*body.node {
+        // Guard-clause: ingest rewrites `return if cond; rest...` to
+        // `If { cond, then: nil, else: <rest> }` (see ingest/expr.rs's
+        // "Guard-clause rewrite"). Reverse it on the way out so we
+        // emit `if (cond) return; <rest>` instead of nesting the
+        // whole method body inside the else branch. Only applies when
+        // the then branch is the literal nil placeholder the rewrite
+        // synthesizes.
+        ExprNode::If { cond, then_branch, else_branch }
+            if matches!(&*then_branch.node, ExprNode::Lit { value: Literal::Nil })
+                && !is_nil_or_empty(else_branch) =>
+        {
+            let guard = format!(
+                "if ({}) return{};",
+                emit_expr(cond),
+                if is_void { "" } else { " null" },
+            );
+            let rest = emit_body_with_state(else_branch, return_ty, reassigned, declared);
+            format!("{guard}\n{rest}")
+        }
         // `def initialize(owner); @owner = owner; end` — the assignment
         // is the whole body. Emit the assignment as a statement, then
         // return its value if non-void. Without this, the side-effect
@@ -29,7 +73,13 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let mut lines: Vec<String> = Vec::new();
             for (i, e) in exprs.iter().enumerate() {
-                lines.push(emit_stmt(e, i == exprs.len() - 1, is_void));
+                lines.push(emit_stmt_with_state(
+                    e,
+                    i == exprs.len() - 1,
+                    is_void,
+                    reassigned,
+                    declared,
+                ));
             }
             lines.join("\n")
         }
@@ -47,6 +97,99 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
                 format!("return {};", emit_expr(body))
             }
         }
+    }
+}
+
+/// Walk an expression tree counting `Assign { LValue::Var { name } }`
+/// occurrences per name. Used to identify locals that need `let`
+/// declarations (mutated more than once) versus locals that fit
+/// `const` (single-assignment). The traversal visits all children so
+/// reassignments inside nested if/while/case branches are counted.
+fn count_var_assignments(
+    e: &Expr,
+    out: &mut std::collections::HashMap<crate::ident::Symbol, usize>,
+) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            *out.entry(name.clone()).or_insert(0) += 1;
+            count_var_assignments(value, out);
+        }
+        ExprNode::Assign { value, .. } => count_var_assignments(value, out),
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                count_var_assignments(e, out);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            count_var_assignments(cond, out);
+            count_var_assignments(then_branch, out);
+            count_var_assignments(else_branch, out);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            count_var_assignments(left, out);
+            count_var_assignments(right, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                count_var_assignments(r, out);
+            }
+            for a in args {
+                count_var_assignments(a, out);
+            }
+            if let Some(b) = block {
+                count_var_assignments(b, out);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            count_var_assignments(fun, out);
+            for a in args {
+                count_var_assignments(a, out);
+            }
+            if let Some(b) = block {
+                count_var_assignments(b, out);
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            count_var_assignments(cond, out);
+            count_var_assignments(body, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            count_var_assignments(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    count_var_assignments(g, out);
+                }
+                count_var_assignments(&arm.body, out);
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            count_var_assignments(body, out);
+            for r in rescues {
+                count_var_assignments(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                count_var_assignments(e, out);
+            }
+            if let Some(e) = ensure {
+                count_var_assignments(e, out);
+            }
+        }
+        ExprNode::Lambda { body, .. } => count_var_assignments(body, out),
+        ExprNode::Let { value, body, .. } => {
+            count_var_assignments(value, out);
+            count_var_assignments(body, out);
+        }
+        ExprNode::Return { value }
+        | ExprNode::Raise { value }
+        | ExprNode::RescueModifier { expr: value, .. } => count_var_assignments(value, out),
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    count_var_assignments(expr, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -141,9 +284,34 @@ fn indent_block(s: &str, spaces: usize) -> String {
 }
 
 fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
+    let empty: std::collections::HashSet<crate::ident::Symbol> =
+        std::collections::HashSet::new();
+    let mut declared = empty.clone();
+    emit_stmt_with_state(e, is_last, void_return, &empty, &mut declared)
+}
+
+fn emit_stmt_with_state(
+    e: &Expr,
+    is_last: bool,
+    void_return: bool,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> String {
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            format!("const {} = {};", name, emit_expr(value))
+            // First occurrence of a name that we know will be reassigned
+            // → `let`. First occurrence of a name assigned exactly once
+            // → `const`. Subsequent occurrences (only possible for
+            // reassigned names) → bare `name = value`.
+            if reassigned.contains(name) {
+                if declared.insert(name.clone()) {
+                    format!("let {} = {};", name, emit_expr(value))
+                } else {
+                    format!("{} = {};", name, emit_expr(value))
+                }
+            } else {
+                format!("const {} = {};", name, emit_expr(value))
+            }
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("this.{} = {};", ts_field_name(name.as_str()), emit_expr(value))
@@ -178,11 +346,23 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         // effect.
         ExprNode::If { cond, then_branch, else_branch } if is_nil_or_empty(else_branch) => {
             let cond_s = emit_expr(cond);
-            let then_stmt = emit_stmt(then_branch, false, true);
+            let then_stmt = emit_stmt_with_state(then_branch, false, true, reassigned, declared);
             // emit_stmt with void_return=true gives a side-effect-only
             // form (no `return` wrapping). Already includes its own
             // trailing semicolon.
             format!("if ({cond_s}) {then_stmt}")
+        }
+        // Two-branch (or chained-elsif) `if` at statement position
+        // when the value isn't being returned. The default arm would
+        // emit a ternary (correct for value-position) but Ruby's
+        // `if cond; @x = 1 elsif ...` is mutating local/ivar state —
+        // a ternary discards the side effect. Block-form `if/else`
+        // preserves it. When `is_last && !void_return`, fall through
+        // to ternary so the value still flows out.
+        ExprNode::If { cond, then_branch, else_branch }
+            if !is_last || void_return =>
+        {
+            emit_if_block(cond, then_branch, else_branch, reassigned, declared)
         }
         _ => {
             if is_last && !void_return {
@@ -192,6 +372,107 @@ fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             }
         }
     }
+}
+
+/// Emit a multi-branch `if/else if/.../else` block at statement
+/// position. Recurses on the else-branch when it's another `If`,
+/// producing a flat `else if` chain instead of nested `else { if ... }`.
+fn emit_if_block(
+    cond: &Expr,
+    then_branch: &Expr,
+    else_branch: &Expr,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("if (");
+    out.push_str(&emit_expr(cond));
+    out.push_str(") ");
+    out.push_str(&emit_branch_block(then_branch, reassigned, declared));
+
+    let mut current = else_branch;
+    loop {
+        if is_nil_or_empty(current) {
+            return out;
+        }
+        match &*current.node {
+            ExprNode::If { cond, then_branch, else_branch } => {
+                out.push_str(" else if (");
+                out.push_str(&emit_expr(cond));
+                out.push_str(") ");
+                out.push_str(&emit_branch_block(then_branch, reassigned, declared));
+                current = else_branch;
+            }
+            _ => {
+                out.push_str(" else ");
+                out.push_str(&emit_branch_block(current, reassigned, declared));
+                return out;
+            }
+        }
+    }
+}
+
+/// Emit a single branch of an `if` block. Always-braced; multi-stmt
+/// `Seq` indents naturally; single-stmt branches fit on one line
+/// inside the braces. Branches inside `if/else` are statements (no
+/// implicit return), so void_return = true.
+fn emit_branch_block(
+    e: &Expr,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> String {
+    match &*e.node {
+        ExprNode::Seq { exprs } if exprs.len() > 1 => {
+            let mut s = String::from("{\n");
+            for (i, sub) in exprs.iter().enumerate() {
+                let stmt = emit_stmt_with_state(
+                    sub,
+                    i == exprs.len() - 1,
+                    true,
+                    reassigned,
+                    declared,
+                );
+                for line in stmt.lines() {
+                    s.push_str("  ");
+                    s.push_str(line);
+                    s.push('\n');
+                }
+            }
+            s.push('}');
+            s
+        }
+        _ => {
+            let stmt = emit_stmt_with_state(e, true, true, reassigned, declared);
+            format!("{{ {stmt} }}")
+        }
+    }
+}
+
+/// `!x` parses tighter than `===`, `==`, `||`, `&&`, etc. — without
+/// parentheses, `!x === y` reads as `(!x) === y`. Heuristic: if the
+/// emitted operand contains a binary operator at top level, wrap it.
+/// False positives (over-parenthesizing) are harmless; false negatives
+/// invert the meaning. Skip parens on already-paren'd, identifier, or
+/// member-access forms.
+fn needs_parens_for_unary_not(s: &str) -> bool {
+    if s.starts_with('(') && s.ends_with(')') {
+        return false;
+    }
+    // Conservative: any space-separated infix operator triggers parens.
+    s.contains(" === ")
+        || s.contains(" !== ")
+        || s.contains(" == ")
+        || s.contains(" != ")
+        || s.contains(" && ")
+        || s.contains(" || ")
+        || s.contains(" < ")
+        || s.contains(" > ")
+        || s.contains(" <= ")
+        || s.contains(" >= ")
+        || s.contains(" + ")
+        || s.contains(" - ")
+        || s.contains(" * ")
+        || s.contains(" / ")
 }
 
 fn is_nil_or_empty(e: &Expr) -> bool {
@@ -450,10 +731,30 @@ pub(super) fn emit_send_with_parens(
     if method == "nil?" && recv.is_some() && args.is_empty() {
         return format!("{} === null", emit_expr(recv.unwrap()));
     }
+    // `x.is_a?(ClassRef)` → `x instanceof ClassRef`. Ruby's predicate
+    // form vs TS's binary operator. Cross-target classes that don't
+    // exist in JS (`String`, `Numeric`, `Integer`, `Symbol`) need a
+    // different mapping but produce TS that's at least syntactically
+    // valid; per-class lowering is a follow-on.
+    if method == "is_a?" && recv.is_some() && args.len() == 1 {
+        return format!(
+            "{} instanceof {}",
+            emit_expr(recv.unwrap()),
+            args_s[0],
+        );
+    }
     // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
-    // to `cond.!`). Emit TS's prefix `!`.
+    // to `cond.!`). Emit TS's prefix `!`. Parenthesize the operand so
+    // `!x.nil?` (which lowers `nil?` to `x === null`) emits as
+    // `!(x === null)` not `!x === null` — the latter parses as
+    // `(!x) === null` and inverts the meaning.
     if method == "!" && recv.is_some() && args.is_empty() {
-        return format!("!{}", emit_expr(recv.unwrap()));
+        let inner = emit_expr(recv.unwrap());
+        return if needs_parens_for_unary_not(&inner) {
+            format!("!({inner})")
+        } else {
+            format!("!{inner}")
+        };
     }
     // Type-aware Ruby Enumerable → JS Array method rename. JS arrays
     // don't have `.each` (they have `.forEach`) and use `.length` not

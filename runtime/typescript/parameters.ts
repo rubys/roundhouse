@@ -33,21 +33,21 @@ export class Parameters {
 
   to_h(): any {
     const copy = {  };
-    this.hash.each((k, v) => copy[k] = v.is_a(Parameters) ? v.to_h : v);
+    this.hash.each((k, v) => copy[k] = v instanceof Parameters ? v.to_h : v);
     return copy;
   }
 
   merge(other: any): Parameters {
-    const other_hash = other.is_a(Parameters) ? other.to_h : other;
+    const other_hash = other instanceof Parameters ? other.to_h : other;
     return new Parameters(this.hash.merge(this.symbolize_keys(other_hash)));
   }
 
   require(key: string): any {
     const val = this.hash[key.to_sym];
     if (val === null) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
-    if (val.is_a(Hash) && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
-    if (val.is_a(Parameters) && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
-    return val.is_a(Parameters) ? val : val.is_a(Hash) ? new Parameters(val) : val;
+    if (val instanceof Hash && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
+    if (val instanceof Parameters && val.empty) this.raise(ParameterMissing, `param is missing or the value is empty: ${key}`);
+    return val instanceof Parameters ? val : val instanceof Hash ? new Parameters(val) : val;
   }
 
   permit(allowed: string[]): Parameters {
@@ -57,9 +57,9 @@ export class Parameters {
   }
 
   symbolize_keys(input: any): any {
-    if (input.is_a(Parameters)) return input.to_h;
+    if (input instanceof Parameters) return input.to_h;
     const out = {  };
-    input.each((k, v) => k.is_a(Symbol) ? k : k.to_s.to_sym; out[sym] = v.is_a(Hash) ? this.symbolize_keys(v) : v.is_a(Parameters) ? v.to_h : v);
+    input.each((k, v) => k instanceof Symbol ? k : k.to_s.to_sym; out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v instanceof Parameters ? v.to_h : v);
     return out;
   }
 }

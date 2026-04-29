@@ -13,7 +13,7 @@ export class Router {
     const path_parts = path.split("/");
     if (pattern_parts.length !== path_parts.length) return null;
     const params = {  };
-    const i = 0;
+    let i = 0;
     /* TODO: emit Discriminant(24) */;
     return params;
   }

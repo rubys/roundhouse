@@ -86,9 +86,22 @@ export class Base {
     this.before_validation;
     const ok = this.valid;
     this.after_validation;
-    ok ? null : (() => { return false; })();
+    if (ok) { null; } else { return false; }
     this.before_save;
-    this.new_record ? this.before_create; this.fill_timestamps({ "creating": true }); ActiveRecord.adapter.insert(this.class.table_name, this.attributes); true; this.after_create; this.after_create_commit : this.before_update; this.fill_timestamps({ "creating": false }); ActiveRecord.adapter.update(this.class.table_name, this.id, this.attributes); this.after_update; this.after_update_commit;
+    if (this.new_record) {
+      this.before_create;
+      this.fill_timestamps({ "creating": true });
+      this.id = ActiveRecord.adapter.insert(this.class.table_name, this.attributes);
+      this.persisted = true;
+      this.after_create;
+      this.after_create_commit;
+    } else {
+      this.before_update;
+      this.fill_timestamps({ "creating": false });
+      ActiveRecord.adapter.update(this.class.table_name, this.id, this.attributes);
+      this.after_update;
+      this.after_update_commit;
+    }
     this.after_save;
     this.after_save_commit;
     this.after_commit;
@@ -96,12 +109,12 @@ export class Base {
   }
 
   save(): Base {
-    this.save ? null : this.raise(RecordInvalid, this);
+    if (this.save) { null; } else { this.raise(RecordInvalid, this); }
     return this;
   }
 
   destroy(): Base {
-    this.persisted ? null : (() => { return this; })();
+    if (this.persisted) { null; } else { return this; }
     this.before_destroy;
     ActiveRecord.adapter.delete(this.class.table_name, this.id);
     this.persisted = false;
@@ -194,7 +207,7 @@ export class Base {
   }
 
   ==(other: any): boolean {
-    return other.is_a(this.class) && this.id !== 0 && this.id === other.id;
+    return other instanceof this.class && this.id !== 0 && this.id === other.id;
   }
 
   eql(other: any): boolean {

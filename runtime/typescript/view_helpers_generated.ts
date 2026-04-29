@@ -21,7 +21,7 @@ export class FormBuilder {
   text_field(field: string, opts: any): string {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
-    value === null || value.to_s.empty ? null : base["value"] = value.to_s;
+    if (value === null || value.to_s.empty) { null; } else { base["value"] = value.to_s; }
     const attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)));
     return `<input${attrs}>`;
   }
@@ -75,13 +75,13 @@ export class ViewHelpers {
     if (s === null) return "";
     const str = s.to_s;
     if (str.length <= length) return str;
-    const cutoff = length - omission.length;
-    if (cutoff < 0) const cutoff = 0;
+    let cutoff = length - omission.length;
+    if (cutoff < 0) cutoff = 0;
     return `${str[0, cutoff]}${omission}`;
   }
 
   dom_id(prefix: any, id_or_suffix: any): string {
-    return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : id_or_suffix.is_a(Symbol) || id_or_suffix.is_a(String) ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
+    return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : id_or_suffix instanceof Symbol || id_or_suffix instanceof String ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
   }
 
   record_dom_prefix(record: any): string {
@@ -102,7 +102,7 @@ export class ViewHelpers {
     const form_attrs = { "action": href, "method": "post" };
     form_attrs["class"] = form_class || "button_to";
     const button_attrs = this.render_attrs({ "type": "submit" }.merge(this.stringify_keys(inner_opts)));
-    const method_input = !method === null && method.to_s !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
+    const method_input = !(method === null) && method.to_s !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     return `<form${this.render_attrs(form_attrs)}>${method_input}<button${button_attrs}>${this.html_escape(text)}</button>${auth_token_input}</form>`;
   }
@@ -124,7 +124,7 @@ export class ViewHelpers {
   javascript_importmap_tags(pins: any, entry: string): string {
     if (pins === null || pins.empty) "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })();
     const import_lines = pins.map(p => `    "${p["name"]}": "${p["path"]}"`).join(",\n");
-    const json = `{
+    let json = `{
       "imports": {
     ${import_lines}
       }
@@ -157,7 +157,7 @@ export class ViewHelpers {
   render_attrs(attrs: any): string {
     if (attrs.empty) return "";
     const pairs = [];
-    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v.is_a(Hash) ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; inner_k.to_s.tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
+    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v instanceof Hash ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; inner_k.to_s.tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
     return pairs.join;
   }
 
