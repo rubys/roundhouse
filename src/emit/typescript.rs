@@ -112,6 +112,49 @@ pub fn emit_with_adapter(
     files
 }
 
+/// Emit a list of typed `MethodDef`s — produced by
+/// `parse_methods_with_rbs` from a whole `.rb` + `.rbs` pair — as a
+/// single TypeScript module file (trailing newline included).
+///
+/// Surface choice: when every method is `MethodReceiver::Class` (i.e.
+/// the source was a module of `def self.*` helpers, like
+/// `runtime/ruby/inflector.rb`), each method emits as a standalone
+/// `export function`. The Ruby module name is absorbed into the import
+/// path on the calling side. This matches the existing hand-written
+/// shape (e.g. `export function pluralize` in
+/// `runtime/typescript/view_helpers.ts`).
+///
+/// Other surface forms (mixin module → class with instance methods,
+/// concrete class with state) are deferred to follow-up work; the
+/// helper rejects them rather than emit half-correctly.
+pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, String> {
+    use crate::dialect::MethodReceiver;
+
+    if methods.is_empty() {
+        return Ok(String::new());
+    }
+    if !methods.iter().all(|m| matches!(m.receiver, MethodReceiver::Class)) {
+        return Err(format!(
+            "emit_module: only all-class-method modules supported so far; \
+             saw mixed/instance methods (first instance: `{}`)",
+            methods
+                .iter()
+                .find(|m| matches!(m.receiver, MethodReceiver::Instance))
+                .map(|m| m.name.as_str())
+                .unwrap_or("<none>"),
+        ));
+    }
+
+    let mut out = String::new();
+    for (i, m) in methods.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&emit_method(m));
+    }
+    Ok(out)
+}
+
 /// Emit a typed `MethodDef` as a standalone exported TypeScript
 /// function (trailing newline included). Requires `signature` to be
 /// populated — `parse_methods_with_rbs` does this. Used by the
