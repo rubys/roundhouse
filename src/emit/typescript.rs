@@ -50,6 +50,7 @@ pub fn emit_with_adapter(
 ) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(package::emit_package_json());
+    files.push(package::emit_tsconfig_json(app));
     files.push(main_ts::emit_main_ts(app));
     files.push(EmittedFile {
         path: PathBuf::from("src/juntos.ts"),
