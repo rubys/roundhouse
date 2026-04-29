@@ -15,13 +15,13 @@ export class FormBuilder {
 
   label(field: string, opts: any): string {
     const attrs = ViewHelpers.render_attrs({ "for": `${this.model_name}_${field}` }.merge(ViewHelpers.stringify_keys(opts)));
-    return `<label${attrs}>${ViewHelpers.html_escape(field.to_s.capitalize)}</label>`;
+    return `<label${attrs}>${ViewHelpers.html_escape(String(field).capitalize)}</label>`;
   }
 
   text_field(field: string, opts: any): string {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
-    if (value === null || value.to_s.length === 0) { null; } else { base["value"] = value.to_s; }
+    if (value === null || String(value).length === 0) { null; } else { base["value"] = String(value); }
     const attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)));
     return `<input${attrs}>`;
   }
@@ -68,12 +68,12 @@ export class ViewHelpers {
 
   html_escape(s: any): string {
     if (s === null) return "";
-    return s.to_s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES);
+    return String(s).gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES);
   }
 
   truncate(s: any, length: number, omission: string): string {
     if (s === null) return "";
-    const str = s.to_s;
+    const str = String(s);
     if (str.length <= length) return str;
     let cutoff = length - omission.length;
     if (cutoff < 0) cutoff = 0;
@@ -81,7 +81,7 @@ export class ViewHelpers {
   }
 
   dom_id(prefix: any, id_or_suffix: any): string {
-    return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : id_or_suffix instanceof Symbol || id_or_suffix instanceof String ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
+    return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : typeof id_or_suffix === "symbol" || typeof id_or_suffix === "string" ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
   }
 
   record_dom_prefix(record: any): string {
@@ -102,7 +102,7 @@ export class ViewHelpers {
     const form_attrs = { "action": href, "method": "post" };
     form_attrs["class"] = form_class || "button_to";
     const button_attrs = this.render_attrs({ "type": "submit" }.merge(this.stringify_keys(inner_opts)));
-    const method_input = !(method === null) && method.to_s !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
+    const method_input = !(method === null) && String(method) !== "post" ? `<input type="hidden" name="_method" value="${method}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     return `<form${this.render_attrs(form_attrs)}>${method_input}<button${button_attrs}>${this.html_escape(text)}</button>${auth_token_input}</form>`;
   }
@@ -146,7 +146,7 @@ export class ViewHelpers {
   form_with(model: any, model_name: string, action: string, method: string, opts: any): string {
     const builder = new FormBuilder(model, model_name, action, method);
     const body = __block(builder);
-    const method_str = method.to_s;
+    const method_str = String(method);
     const method_input = method_str !== "get" && method_str !== "post" ? `<input type="hidden" name="_method" value="${method_str}">` : "";
     const auth_token_input = "<input type=\"hidden\" name=\"authenticity_token\" value=\"\">";
     const form_method = method_str === "get" ? "get" : "post";
@@ -157,13 +157,13 @@ export class ViewHelpers {
   render_attrs(attrs: any): string {
     if (attrs.empty) return "";
     const pairs = [];
-    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v instanceof Hash ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; inner_k.to_s.tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
+    attrs.each((k, v) => v === null ? /* TODO: emit Discriminant(22) */ : null; v instanceof Hash ? v.each((inner_k, inner_v) => inner_v === null ? /* TODO: emit Discriminant(22) */ : null; String(inner_k).tr("_", "-"); pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`)) : pairs.push(` ${k}="${this.html_escape(v)}"`));
     return pairs.join;
   }
 
   stringify_keys(h: any): any {
     const out = {  };
-    h.each((k, v) => out[k.to_s] = v);
+    h.each((k, v) => out[String(k)] = v);
     return out;
   }
 }

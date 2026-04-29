@@ -10,11 +10,11 @@ export class Parameters {
   }
 
   key(key: string): boolean {
-    return this.hash.key(key.to_sym);
+    return this.hash.key(key);
   }
 
   fetch(key: string, default_: any): any {
-    const sym = key.to_sym;
+    const sym = key;
     if (this.hash.key(sym)) return this.hash[sym];
     return default_;
   }
@@ -35,7 +35,7 @@ export class Parameters {
   }
 
   require(key: string): any {
-    const val = this.hash[key.to_sym];
+    const val = this.hash[key];
     if (val === null) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
     if (val instanceof Hash && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
     if (val instanceof Parameters && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
@@ -44,14 +44,14 @@ export class Parameters {
 
   permit(allowed: string[]): Parameters {
     const filtered = {  };
-    allowed.forEach(key => key.to_sym; this.hash.key(sym) ? filtered[sym] = this.hash[sym] : null);
+    allowed.forEach(key => key; this.hash.key(sym) ? filtered[sym] = this.hash[sym] : null);
     return new Parameters(filtered);
   }
 
   symbolize_keys(input: any): any {
     if (input instanceof Parameters) return input.to_h;
     const out = {  };
-    input.each((k, v) => k instanceof Symbol ? k : k.to_s.to_sym; out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v instanceof Parameters ? v.to_h : v);
+    input.each((k, v) => typeof k === "symbol" ? k : String(k); out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v instanceof Parameters ? v.to_h : v);
     return out;
   }
 }

@@ -771,17 +771,39 @@ pub(super) fn emit_send_with_parens(
     if method == "nil?" && recv.is_some() && args.is_empty() {
         return format!("{} === null", emit_expr(recv.unwrap()));
     }
-    // `x.is_a?(ClassRef)` → `x instanceof ClassRef`. Ruby's predicate
-    // form vs TS's binary operator. Cross-target classes that don't
-    // exist in JS (`String`, `Numeric`, `Integer`, `Symbol`) need a
-    // different mapping but produce TS that's at least syntactically
-    // valid; per-class lowering is a follow-on.
+    // Ruby coercions: `.to_s` / `.to_i` / `.to_sym` map to JS
+    // equivalents. `.to_sym` is a no-op in JS (use the string as
+    // the hash key) — emit just the receiver. The nil case
+    // diverges from Ruby (Ruby's nil.to_s is "" but JS String(null)
+    // is "null"); call sites that care should narrow first.
+    if recv.is_some() && args.is_empty() {
+        match method {
+            "to_s" => return format!("String({})", emit_expr(recv.unwrap())),
+            "to_i" => return format!("Number({})", emit_expr(recv.unwrap())),
+            "to_sym" => return emit_expr(recv.unwrap()),
+            _ => {}
+        }
+    }
+    // `x.is_a?(ClassRef)` → JS form. Most Ruby classes are
+    // user-defined and translate to `x instanceof ClassRef`, but
+    // primitives in Ruby (String, Integer, Float, Numeric, Symbol)
+    // are JS primitives, not class instances — `"abc" instanceof
+    // String` is false in JS. Map those to their `typeof` form.
+    // Array gets `Array.isArray(x)` (cross-realm safe) instead of
+    // `instanceof Array`.
     if method == "is_a?" && recv.is_some() && args.len() == 1 {
-        return format!(
-            "{} instanceof {}",
-            emit_expr(recv.unwrap()),
-            args_s[0],
-        );
+        let recv_s = emit_expr(recv.unwrap());
+        let class_s = &args_s[0];
+        return match class_s.as_str() {
+            "String" => format!("typeof {recv_s} === \"string\""),
+            "Integer" => format!("Number.isInteger({recv_s})"),
+            "Float" => format!("typeof {recv_s} === \"number\" && !Number.isInteger({recv_s})"),
+            "Numeric" => format!("typeof {recv_s} === \"number\""),
+            "Symbol" => format!("typeof {recv_s} === \"symbol\""),
+            "Array" => format!("Array.isArray({recv_s})"),
+            "TrueClass" | "FalseClass" => format!("typeof {recv_s} === \"boolean\""),
+            _ => format!("{recv_s} instanceof {class_s}"),
+        };
     }
     // Kernel `raise` — the runtime_src self-rewrite leaves it as
     // Send-no-recv. Two source surfaces:

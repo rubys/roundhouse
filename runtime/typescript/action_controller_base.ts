@@ -45,7 +45,7 @@ export class Base {
   }
 
   resolve_status(s: any): number {
-    if (s instanceof Integer) return s;
+    if (Number.isInteger(s)) return s;
     return STATUS_CODES.fetch(s, 200);
   }
 }

@@ -3,7 +3,7 @@
 
 export class Router {
   match(method: string, path: string, table: any[]): any {
-    const method_upcase = method.to_s.upcase;
+    const method_upcase = String(method).upcase;
     table.forEach(route => route["method"] === method_upcase ? null : /* TODO: emit Discriminant(22) */; this.match_pattern(route["pattern"], path); params === null ? /* TODO: emit Discriminant(22) */ : null; (() => { return { "controller": route["controller"], "action": route["action"], "path_params": params }; })());
     return null;
   }
