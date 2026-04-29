@@ -365,6 +365,28 @@ fn emit_stmt_with_state(
         {
             emit_if_block(cond, then_branch, else_branch, reassigned, declared)
         }
+        // `while cond; body; end` and `until cond; body; end` at
+        // statement position emit as native loops. The until form
+        // negates the condition (TS has no `until` keyword).
+        ExprNode::While { cond, body, until_form } => {
+            let cond_s = emit_expr(cond);
+            let cond_s = if *until_form {
+                format!("!({cond_s})")
+            } else {
+                cond_s
+            };
+            let body_stmt = emit_branch_block(body, reassigned, declared);
+            format!("while ({cond_s}) {body_stmt}")
+        }
+        // `next` inside a Ruby block lowers to `return` from the JS
+        // callback (since blocks become arrow functions). `next` with
+        // a value (rare) returns that value; bare `next` returns
+        // undefined. The synthesized lambda carries no value out, so
+        // bare-return is fine.
+        ExprNode::Next { value } => match value {
+            Some(v) => format!("return {};", emit_expr(v)),
+            None => "return;".to_string(),
+        },
         _ => {
             if is_last && !void_return {
                 format!("return {};", emit_expr(e))
@@ -696,6 +718,24 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("__block({})", args_s.join(", "))
         }
+        ExprNode::While { cond, body, until_form } => {
+            // `while`/`until` at expression position is unusual —
+            // wrap in IIFE so the syntactic position works. Statement-
+            // position uses are handled in emit_stmt with a flat
+            // form.
+            let cond_s = emit_expr(cond);
+            let cond_s = if *until_form {
+                format!("!({cond_s})")
+            } else {
+                cond_s
+            };
+            let body_s = emit_expr(body);
+            format!("(() => {{ while ({cond_s}) {{ {body_s}; }} }})()")
+        }
+        ExprNode::Next { value } => match value {
+            Some(v) => format!("(() => {{ return {}; }})()", emit_expr(v)),
+            None => "(() => { return; })()".to_string(),
+        },
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }
@@ -929,6 +969,15 @@ pub(super) fn emit_send_with_parens(
                 }
                 "chars" if args.is_empty() => {
                     return format!("{}.split(\"\")", emit_expr(r));
+                }
+                "start_with?" if args.len() == 1 => {
+                    return format!("{}.startsWith({})", emit_expr(r), args_s[0]);
+                }
+                "end_with?" if args.len() == 1 => {
+                    return format!("{}.endsWith({})", emit_expr(r), args_s[0]);
+                }
+                "include?" if args.len() == 1 => {
+                    return format!("{}.includes({})", emit_expr(r), args_s[0]);
                 }
                 _ => {}
             },
