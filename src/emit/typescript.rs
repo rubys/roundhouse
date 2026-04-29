@@ -13,6 +13,7 @@ use super::EmittedFile;
 use crate::App;
 use crate::ty::Ty;
 
+mod controller;
 mod expr;
 mod main_ts;
 mod model;
@@ -25,15 +26,7 @@ mod ty;
 pub use ty::ts_ty;
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
-    let mut files = Vec::new();
-    files.push(package::emit_package_json());
-    files.push(main_ts::emit_main_ts(app));
-    files.extend(model::emit_models(app));
-    if !app.routes.entries.is_empty() {
-        files.push(route::emit_routes(app));
-        files.push(route_helpers::emit_route_helpers(app));
-    }
-    files
+    emit_with_adapter(app, &crate::adapter::SqliteAdapter)
 }
 
 pub fn emit_library(_app: &App) -> Vec<EmittedFile> {
@@ -42,9 +35,21 @@ pub fn emit_library(_app: &App) -> Vec<EmittedFile> {
 
 pub fn emit_with_adapter(
     app: &App,
-    _adapter: &dyn crate::adapter::DatabaseAdapter,
+    adapter: &dyn crate::adapter::DatabaseAdapter,
 ) -> Vec<EmittedFile> {
-    emit(app)
+    let mut files = Vec::new();
+    files.push(package::emit_package_json());
+    files.push(main_ts::emit_main_ts(app));
+    files.extend(model::emit_models(app));
+    if !app.controllers.is_empty() {
+        files.push(controller::emit_ts_importmap(app));
+        files.extend(controller::emit_controllers(app, adapter));
+    }
+    if !app.routes.entries.is_empty() {
+        files.push(route::emit_routes(app));
+        files.push(route_helpers::emit_route_helpers(app));
+    }
+    files
 }
 
 /// Emit a typed `MethodDef` as a standalone exported TypeScript
