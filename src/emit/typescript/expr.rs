@@ -115,6 +115,23 @@ fn count_var_assignments(
             count_var_assignments(value, out);
         }
         ExprNode::Assign { value, .. } => count_var_assignments(value, out),
+        // Buffer-accumulate `var << X` is rewritten by `emit_stmt` to
+        // `var += X;` — i.e., an assignment for declaration purposes.
+        // Count it so the var gets `let` (mutable) instead of `const`.
+        ExprNode::Send { recv: Some(recv), method, args, block, .. }
+            if method.as_str() == "<<" && args.len() == 1 =>
+        {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                *out.entry(name.clone()).or_insert(0) += 1;
+            }
+            count_var_assignments(recv, out);
+            for a in args {
+                count_var_assignments(a, out);
+            }
+            if let Some(b) = block {
+                count_var_assignments(b, out);
+            }
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 count_var_assignments(e, out);
@@ -283,14 +300,26 @@ fn indent_block(s: &str, spaces: usize) -> String {
         .join("\n")
 }
 
-fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
+pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
     let empty: std::collections::HashSet<crate::ident::Symbol> =
         std::collections::HashSet::new();
     let mut declared = empty.clone();
     emit_stmt_with_state(e, is_last, void_return, &empty, &mut declared)
 }
 
-fn emit_stmt_with_state(
+/// Pre-walk a body to identify reassigned local-variable names.
+/// Public for `view_thin.rs`'s use; the result feeds
+/// `emit_stmt_with_state` so multi-statement bodies emit `let`
+/// (mutable) for names assigned more than once and `const` for
+/// names assigned exactly once.
+pub(super) fn collect_reassigned(body: &Expr) -> std::collections::HashSet<crate::ident::Symbol> {
+    let mut counts: std::collections::HashMap<crate::ident::Symbol, usize> =
+        std::collections::HashMap::new();
+    count_var_assignments(body, &mut counts);
+    counts.into_iter().filter(|(_, n)| *n > 1).map(|(s, _)| s).collect()
+}
+
+pub(super) fn emit_stmt_with_state(
     e: &Expr,
     is_last: bool,
     void_return: bool,
@@ -316,6 +345,31 @@ fn emit_stmt_with_state(
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("this.{} = {};", ts_field_name(name.as_str()), emit_expr(value))
+        }
+        // Buffer-accumulate idiom at statement position:
+        // `buf << X` (Ruby) → `buf += X;` (TS), where `buf` is any
+        // local-variable receiver. The lowered view body uses this
+        // shape (`io << ViewHelpers.x(...)`); form_with's inner
+        // capture uses `body << ...` with a different name. Same
+        // rewrite applies — the receiver just needs to be an
+        // `ExprNode::Var`. At expression position the type-aware
+        // dispatch in `emit_send_with_parens` still handles
+        // typed-Array `.push()` etc.
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "<<" && args.len() == 1 =>
+        {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                let val_s = emit_expr(&args[0]);
+                return format!("{} += {val_s};", escape_reserved_word(name.as_str()));
+            }
+            // Receiver isn't a bare local — fall through to the default
+            // arm, which routes through `emit_expr` (and its type-aware
+            // `<<` dispatch for arrays / class-with-add).
+            if is_last && !void_return {
+                format!("return {};", emit_expr(e))
+            } else {
+                format!("{};", emit_expr(e))
+            }
         }
         // Return at statement position: emit as a native `return`
         // rather than wrapping in an IIFE. Ruby's `return nil` returns
@@ -347,11 +401,16 @@ fn emit_stmt_with_state(
         // effect.
         ExprNode::If { cond, then_branch, else_branch } if is_nil_or_empty(else_branch) => {
             let cond_s = emit_expr(cond);
-            let then_stmt = emit_stmt_with_state(then_branch, false, true, reassigned, declared);
-            // emit_stmt with void_return=true gives a side-effect-only
-            // form (no `return` wrapping). Already includes its own
-            // trailing semicolon.
-            format!("if ({cond_s}) {then_stmt}")
+            // Use emit_branch_block so multi-statement (or single-elem
+            // Seq) then-branches recurse through the proper stmt path
+            // — without this, a Seq then-branch falls to emit_stmt's
+            // default arm which routes through emit_expr (losing the
+            // `<<` → `+=` rewrite, the `let`/`const` declaration, etc.).
+            // Single non-Seq stmts emit as `if (cond) { stmt }` —
+            // technically braced where Ruby's postfix-if is brace-less,
+            // but the brace form is universally valid TS.
+            let then_block = emit_branch_block(then_branch, reassigned, declared);
+            format!("if ({cond_s}) {then_block}")
         }
         // Two-branch (or chained-elsif) `if` at statement position
         // when the value isn't being returned. The default arm would
@@ -445,7 +504,21 @@ fn emit_branch_block(
     declared: &mut std::collections::HashSet<crate::ident::Symbol>,
 ) -> String {
     match &*e.node {
-        ExprNode::Seq { exprs } if exprs.len() > 1 => {
+        // Multi-stmt Seq → indented block. Single-stmt Seq is also
+        // walked here (rather than falling through to the default,
+        // which would route a Seq node through emit_expr) so its one
+        // child stmt gets the proper emit_stmt treatment.
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            if exprs.len() == 1 {
+                let stmt = emit_stmt_with_state(
+                    &exprs[0],
+                    true,
+                    true,
+                    reassigned,
+                    declared,
+                );
+                return format!("{{ {stmt} }}");
+            }
             let mut s = String::from("{\n");
             for (i, sub) in exprs.iter().enumerate() {
                 let stmt = emit_stmt_with_state(
@@ -672,9 +745,23 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // last statement; emit a `return` for that one.
             if let ExprNode::Seq { exprs } = &*body.node {
                 if exprs.len() > 1 {
+                    // Lambdas open a fresh scope. Pre-walk the body to
+                    // identify reassigned locals (so e.g. an inner
+                    // capture buffer `body = String.new` followed by
+                    // `body << X` rewrites emits as `let body = ""`
+                    // not `const body = ""`).
+                    let reassigned = collect_reassigned(body);
+                    let mut declared: std::collections::HashSet<crate::ident::Symbol> =
+                        std::collections::HashSet::new();
                     let mut out = format!("{header} => {{ ");
                     for (i, e) in exprs.iter().enumerate() {
-                        let stmt = emit_stmt(e, i == exprs.len() - 1, false);
+                        let stmt = emit_stmt_with_state(
+                            e,
+                            i == exprs.len() - 1,
+                            false,
+                            &reassigned,
+                            &mut declared,
+                        );
                         out.push_str(&stmt);
                         if i + 1 < exprs.len() {
                             out.push(' ');
@@ -863,9 +950,23 @@ pub(super) fn emit_send_with_parens(
     }
     // `Target.new(args)` → `new Target(args)`. Ruby's standard constructor
     // call convention; Juntos-side classes use the JS `new` keyword.
+    // Special cases for built-in types whose JS-side construction
+    // syntax diverges:
+    //   `String.new` → `""` (JS `new String()` produces a String
+    //     OBJECT, not a primitive — different semantics for `+=`,
+    //     equality, etc. Plain string literal is the correct mapping
+    //     for buffer-accumulate idioms in lowered view bodies.)
+    //   `Array.new` → `[]`
+    //   `Hash.new` → `{}`
     if method == "new" && recv.is_some() {
         let recv_s = emit_expr(recv.unwrap());
         if args_s.is_empty() {
+            match recv_s.as_str() {
+                "String" => return "\"\"".to_string(),
+                "Array" => return "[]".to_string(),
+                "Hash" => return "{}".to_string(),
+                _ => {}
+            }
             return format!("new {recv_s}()");
         }
         return format!("new {recv_s}({})", args_s.join(", "));
@@ -1222,10 +1323,20 @@ pub(super) fn emit_send_with_parens(
         }
         Some(r) => {
             let recv_s = emit_expr(r);
-            if args_s.is_empty() && !parenthesized && !force_parens {
-                // Ruby's `obj.name` without parens is typically a
-                // reader; Juntos mirrors that with a property
-                // accessor / getter, so emit without parens.
+            // Ruby's `obj.name` without parens is typically a reader;
+            // Juntos mirrors that with a property accessor / getter,
+            // so emit without parens for instance receivers.
+            //
+            // EXCEPTION: when the receiver is a `Const` (a namespace
+            // import like `ViewHelpers`, `RouteHelpers`, `Inflector`,
+            // `Array`, `String`, `Math`, …), zero-arg sends are
+            // function CALLS, not property reads — those namespaces
+            // expose callable functions, not getters. Always emit
+            // parens for Const-receiver sends so `RouteHelpers.articles_path`
+            // becomes `RouteHelpers.articles_path()` instead of leaking
+            // the function reference.
+            let is_const_recv = matches!(&*r.node, ExprNode::Const { .. });
+            if args_s.is_empty() && !parenthesized && !force_parens && !is_const_recv {
                 format!("{recv_s}.{ts_m}")
             } else {
                 format!("{recv_s}.{ts_m}({})", args_s.join(", "))

@@ -368,8 +368,23 @@ export class ErrorCollection {
     return this._errors.length;
   }
 
+  // Ruby's `errors.empty?` predicate. Used by the lowered view
+  // bodies (`record.errors.empty?` lowers to `record.errors.empty`
+  // after `?` strip). Same semantics as `none`.
+  get empty(): boolean {
+    return this._errors.length === 0;
+  }
+
   add(field: string, message: string): void {
     this._errors.push({ field, message });
+  }
+
+  // Ruby's `errors.each { |e| ... }` lowers to `errors.each(e => ...)`
+  // — call form, not for-of iteration. The `Symbol.iterator` below
+  // covers the for-of form; this method covers the explicit-callback
+  // form that `view_to_library`'s lowered bodies use.
+  each(fn: (e: { field: string; message: string; full_message: string }) => void): void {
+    for (const e of this) fn(e);
   }
 
   // `<% article.errors.each do |e| %>` lowers to `for (const e of

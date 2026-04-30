@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use crate::App;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
@@ -54,6 +54,7 @@ fn emit_view_class_thin(
     writeln!(s).unwrap();
     writeln!(s, "import {{ ViewHelpers }} from \"../../../src/view_helpers.js\";").unwrap();
     writeln!(s, "import {{ RouteHelpers }} from \"../../../src/route_helpers.js\";").unwrap();
+    writeln!(s, "import * as Inflector from \"../../../src/inflector.js\";").unwrap();
     writeln!(s, "import * as Views from \"../all.js\";").unwrap();
     writeln!(s, "import * as Importmap from \"../../../src/importmap.js\";").unwrap();
     for m in known_models {
@@ -145,61 +146,53 @@ fn render_params(m: &MethodDef, known_models: &[Symbol]) -> String {
 /// content_for_set side effects) route through the standard expr
 /// emitter via `super::expr::emit_expr`.
 fn render_view_body(body: &Expr) -> Vec<String> {
+    let reassigned = super::expr::collect_reassigned(body);
+    let mut declared: std::collections::HashSet<crate::ident::Symbol> =
+        std::collections::HashSet::new();
+    render_view_body_with_state(body, &reassigned, &mut declared)
+}
+
+fn render_view_body_with_state(
+    body: &Expr,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> Vec<String> {
     let stmts: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
     let mut out: Vec<String> = Vec::new();
-    let mut emitted_init = false;
     for (i, stmt) in stmts.iter().enumerate() {
         let is_last = i + 1 == stmts.len();
-        out.extend(render_view_stmt(stmt, is_last, &mut emitted_init));
+        out.extend(render_view_stmt(stmt, is_last, reassigned, declared));
     }
     out
 }
 
-fn render_view_stmt(stmt: &Expr, is_last: bool, emitted_init: &mut bool) -> Vec<String> {
-    // `io = String.new` → `let io = "";`. The lowerer always uses
-    // `io` as the buffer name; matching it here keeps the output
-    // readable.
-    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*stmt.node {
-        if name.as_str() == "io" {
-            // Recognize `String.new` (Send on String const) as the
-            // initializer; treat any other init as the same empty
-            // string for simplicity — bodies always start fresh.
-            *emitted_init = true;
-            return vec![format!("let io = \"\";")];
-        }
-    }
-
-    // Trailing `io` (the method's return value) → `return io;`. Only
-    // happens at the last statement.
+fn render_view_stmt(
+    stmt: &Expr,
+    is_last: bool,
+    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> Vec<String> {
+    // Trailing `io` (or any bare-Var) at the last statement position
+    // → `return <var>;`. View bodies end with the accumulated buffer
+    // as their value-position last statement; this is the view-shape
+    // analog of Ruby's "the last expression is the return value."
     if let ExprNode::Var { name, .. } = &*stmt.node {
-        if name.as_str() == "io" && is_last {
-            return vec![format!("return io;")];
-        }
-    }
-
-    // `io << X` → `io += <emit X>;`. The lowerer emits these as the
-    // primary append form.
-    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*stmt.node {
-        if method.as_str() == "<<" && args.len() == 1 {
-            if let ExprNode::Var { name, .. } = &*recv.node {
-                if name.as_str() == "io" {
-                    let val = super::expr::emit_expr(&args[0]);
-                    return vec![format!("io += {val};")];
-                }
-            }
+        if is_last {
+            return vec![format!("return {};", name.as_str())];
         }
     }
 
     // `if cond ... else ... end` at statement position — block form,
-    // recursing into each branch via render_view_body so nested
-    // `io << x` stmts get the same treatment.
+    // recursing into each branch with shared reassigned/declared
+    // state so nested `io << x` stmts emit as mutations of the
+    // outer-scope `io` (no redeclaration).
     if let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node {
         let cond_s = super::expr::emit_expr(cond);
         let mut out = vec![format!("if ({cond_s}) {{")];
-        for line in render_view_body(then_branch) {
+        for line in render_view_body_with_state(then_branch, reassigned, declared) {
             out.push(format!("  {line}"));
         }
         let has_else = !matches!(
@@ -208,19 +201,16 @@ fn render_view_stmt(stmt: &Expr, is_last: bool, emitted_init: &mut bool) -> Vec<
         );
         if has_else {
             out.push("} else {".to_string());
-            for line in render_view_body(else_branch) {
+            for line in render_view_body_with_state(else_branch, reassigned, declared) {
                 out.push(format!("  {line}"));
             }
         }
         out.push("}".to_string());
-        let _ = emitted_init;
         return out;
     }
 
     // `coll.each { |x| io << ... }` at statement position — for-of
-    // loop. Other Send-with-block shapes (like form_with) appear
-    // inside `io << ...`, not as standalone statements, so they
-    // route through the value-position path.
+    // loop. Inner body shares the outer declared/reassigned state.
     if let ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. } = &*stmt.node {
         if method.as_str() == "each" && args.is_empty() {
             let coll_s = super::expr::emit_expr(recv);
@@ -230,7 +220,7 @@ fn render_view_stmt(stmt: &Expr, is_last: bool, emitted_init: &mut bool) -> Vec<
                     .map(|p| p.as_str().to_string())
                     .unwrap_or_else(|| "item".to_string());
                 let mut out = vec![format!("for (const {var} of {coll_s}) {{")];
-                for line in render_view_body(body) {
+                for line in render_view_body_with_state(body, reassigned, declared) {
                     out.push(format!("  {line}"));
                 }
                 out.push("}".to_string());
@@ -239,20 +229,19 @@ fn render_view_stmt(stmt: &Expr, is_last: bool, emitted_init: &mut bool) -> Vec<
         }
     }
 
-    // Anything else: side-effect statement (e.g. `ViewHelpers.content_for_set(:title, "x")`).
-    // Route through the standard expr emitter and append a `;`.
-    let val = super::expr::emit_expr(stmt);
-    let val = if is_last && !val.starts_with("return ") {
-        // Last statement that isn't already a return: when the body's
-        // final expression is value-producing, treat it as the return
-        // value. Common case is `io` (handled above) but defensive
-        // here too.
-        let _ = val;
-        format!("return {};", super::expr::emit_expr(stmt))
-    } else {
-        format!("{val};")
-    };
-    vec![val]
+    // Anything else (Assign-Var with `let/const`, generalized
+    // `buf << X` → `buf += X;`, side-effect helper calls, etc.):
+    // delegate to `emit_stmt_with_state`. It handles the full
+    // catalog of statement-form patterns (postfix-if, multi-branch
+    // if-elsif-else block form, guard-return, let/const declarations,
+    // buffer-accumulate `<<` for any local-var receiver, raise as
+    // throw, etc.) consistently with everywhere else in the TS
+    // emitter — and shares the reassigned/declared state across
+    // statements within the same body.
+    super::expr::emit_stmt_with_state(stmt, is_last, true, reassigned, declared)
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
 }
 
 #[allow(dead_code)]
