@@ -34,6 +34,19 @@ pub(super) fn emit_stmt(e: &Expr) -> String {
     }
 }
 
+/// True when `s` is a valid Crystal bare identifier — starts with
+/// a lowercase letter or underscore, followed only by letters,
+/// digits, or underscores. Used to decide between NamedTuple
+/// `key: value` and quoted-key `"key": value` forms in Hash literals.
+fn is_bare_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub(super) fn emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
@@ -106,7 +119,18 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 .iter()
                 .map(|(k, v)| {
                     if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                        format!("{value}: {}", emit_expr(v))
+                        // Crystal NamedTuple-style `key:` requires the
+                        // key to be a valid bare identifier. Symbols
+                        // produced by `view_to_library`'s kebab-attribute
+                        // flattening (e.g. `data-turbo-confirm`) contain
+                        // hyphens that aren't valid in bare idents;
+                        // those render with quoted-string keys instead
+                        // (also valid Crystal NamedTuple syntax).
+                        if is_bare_ident(value.as_str()) {
+                            format!("{value}: {}", emit_expr(v))
+                        } else {
+                            format!("{:?}: {}", value.as_str(), emit_expr(v))
+                        }
                     } else {
                         format!("{} => {}", emit_expr(k), emit_expr(v))
                     }

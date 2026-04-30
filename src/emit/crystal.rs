@@ -48,6 +48,7 @@ mod shared;
 mod spec;
 mod ty;
 mod view;
+mod view_thin;
 
 // External API: kept for `bin/build-site` and tests that key off
 // `crystal_ty` directly.
@@ -174,7 +175,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             content: CABLE_SOURCE.to_string(),
         });
         files.push(controller::emit_controllers(app));
-        files.extend(view::emit_views_cr(app));
+        // Phase 4 convergence (in progress): view_thin consumes
+        // `view_to_library`-lowered IR; thinner per-target emit.
+        // Behind a flag while it shakes out fixture-by-fixture.
+        let use_thin_views = std::env::var("ROUNDHOUSE_CR_VIEW_THIN")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        if use_thin_views {
+            files.extend(view_thin::emit_views_thin(app));
+        } else {
+            files.extend(view::emit_views_cr(app));
+        }
         files.push(route::emit_route_helpers_cr(app));
         files.push(importmap::emit_cr_importmap(app));
         files.push(main::emit_cr_main(app));
