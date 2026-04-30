@@ -109,19 +109,14 @@ pub fn emit_with_adapter(
         files.push(route::emit_routes(app));
         files.push(route_helpers::emit_route_helpers(app));
     }
-    // Phase 1 convergence: the thin TS view emitter (view_thin.rs)
-    // is the convergence target for the per-target redundancy
-    // reduction. Behind a flag while it shakes out fixture-by-
-    // fixture against the DOM-compare gate; once green, the
-    // current ~1500-LOC view.rs derivation can be deleted.
-    let use_thin_views = std::env::var("ROUNDHOUSE_TS_VIEW_THIN")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
-    if use_thin_views {
-        files.extend(view_thin::emit_views_thin(app));
-    } else {
-        files.extend(view::emit_views(app));
-    }
+    // Views: thin emitter consuming `view_to_library`-lowered
+    // LibraryClasses. Replaces the prior per-helper derivation in
+    // `view.rs` (~1280 LOC eliminated). The remaining `view.rs`
+    // exposes barrel + stubs + signature helpers shared between
+    // both paths during the transition; once those are inlined
+    // here or moved to `view_thin.rs`, `view.rs` can come out
+    // entirely.
+    files.extend(view_thin::emit_views_thin(app));
     if !app.fixtures.is_empty() {
         let lowered = crate::lower::lower_fixtures(app);
         files.push(fixture::emit_ts_fixtures_helper(&lowered));

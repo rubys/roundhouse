@@ -42,15 +42,19 @@ fn views_emit_as_string_returning_functions() {
         content.contains("export function renderPostsIndex(posts: Post[]): string {"),
         "got:\n{content}"
     );
-    // Text chunks append as string literals.
+    // Text chunks append as string literals. Buffer name is `io`
+    // — matches the lowered-IR shape (`io = String.new ; io << ...`)
+    // that view_to_library produces, which the thin TS view emitter
+    // renders verbatim. The prior `_buf` name was a TS-specific
+    // rename in the deleted derivation path.
     assert!(
-        content.contains("_buf += \"<h1>Posts</h1>\\n\";"),
+        content.contains("io += \"<h1>Posts</h1>\\n\";"),
         "got:\n{content}"
     );
     // `<% @posts.each do |post| %>` → JS `for…of`.
     assert!(content.contains("for (const post of posts) {"), "got:\n{content}");
-    // Tail is a `return _buf;`.
-    assert!(content.contains("return _buf;"), "got:\n{content}");
+    // Tail is a `return io;`.
+    assert!(content.contains("return io;"), "got:\n{content}");
 }
 
 #[test]
