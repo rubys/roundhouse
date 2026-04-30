@@ -38,13 +38,13 @@ class ParametersTest < Minitest::Test
 
   def test_permit_filters_to_listed_keys
     p = ActionController::Parameters.new(title: "x", body: "y", evil: "z")
-    permitted = p.permit(:title, :body)
+    permitted = p.permit([:title, :body])
     assert_equal({ title: "x", body: "y" }, permitted.to_h)
   end
 
   def test_permit_omits_missing_keys
     p = ActionController::Parameters.new(title: "x")
-    permitted = p.permit(:title, :body)
+    permitted = p.permit([:title, :body])
     assert_equal({ title: "x" }, permitted.to_h)
   end
 

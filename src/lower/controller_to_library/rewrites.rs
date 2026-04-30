@@ -5,7 +5,7 @@
 //! shows up here as a plain `Send`.
 
 use crate::dialect::Action;
-use crate::expr::{BlockStyle, Expr, ExprNode, LValue, Literal};
+use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -811,16 +811,26 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             parenthesized: true,
         },
     );
-    let permit_args: Vec<Expr> = fields
+    // Emit `permit([:f1, :f2, ...])` — single Array arg, not splat.
+    // Monomorphic parameter slot for spinel + type-strict targets;
+    // every per-target Parameters runtime takes Array[Symbol] here.
+    let permit_array_elems: Vec<Expr> = fields
         .into_iter()
         .map(|f| Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: f } }))
         .collect();
+    let permit_array = Expr::new(
+        span,
+        ExprNode::Array {
+            elements: permit_array_elems,
+            style: ArrayStyle::Brackets,
+        },
+    );
     Expr::new(
         span,
         ExprNode::Send {
             recv: Some(require_call),
             method: Symbol::from("permit"),
-            args: permit_args,
+            args: vec![permit_array],
             block: None,
             parenthesized: true,
         },

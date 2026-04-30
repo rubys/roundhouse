@@ -643,12 +643,14 @@ fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
 #[test]
 fn controllers_article_params_lowers_expect_hash_to_require_permit() {
     // `params.expect(article: [:title, :body])` lowers to
-    // `@params.require(:article).permit(:title, :body)` — the
-    // strong-params chain spinel's runtime implements.
+    // `@params.require(:article).permit([:title, :body])` — the
+    // strong-params chain. `permit` takes Array[Symbol] (not splat)
+    // so the parameter slot is monomorphic for spinel + type-strict
+    // emit targets.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("@params.require(:article).permit(:title, :body)"),
+        src.contains("@params.require(:article).permit([:title, :body])"),
         "expected require/permit lowering; got:\n{src}",
     );
     assert!(
@@ -928,7 +930,7 @@ fn controllers_params_helper_calls_get_to_h_at_use_sites() {
 #[test]
 fn controllers_params_helper_body_does_not_self_wrap() {
     // The `def article_params` body itself should not get `.to_h` —
-    // its body is `@params.require(:article).permit(:title, :body)`
+    // its body is `@params.require(:article).permit([:title, :body])`
     // with no `<x>_params` Send to rewrite.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
@@ -940,7 +942,7 @@ fn controllers_params_helper_body_does_not_self_wrap() {
         "article_params helper body should not call itself:\n{body}",
     );
     assert!(
-        body.contains("@params.require(:article).permit(:title, :body)"),
+        body.contains("@params.require(:article).permit([:title, :body])"),
         "expected unchanged permit chain in helper body:\n{body}",
     );
 }

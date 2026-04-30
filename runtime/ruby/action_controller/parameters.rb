@@ -55,49 +55,52 @@ module ActionController
 
     def to_h
       copy = {}
-      @hash.each { |k, v| copy[k] = v.is_a?(Parameters) ? v.to_h : v }
+      @hash.each { |k, v| copy[k] = v }
       copy
     end
 
-    def merge(other)
-      other_hash = other.is_a?(Parameters) ? other.to_h : other
+    # Accepts a Hash. Callers holding a Parameters call `.to_h` first.
+    # Monomorphic param type keeps the slot one-shape for spinel and
+    # for type-strict targets (Rust, Crystal, Go).
+    def merge(other_hash)
       Parameters.new(@hash.merge(symbolize_keys(other_hash)))
     end
 
     # `params.require(:article)` — returns the nested Parameters for
-    # the given key; raises ParameterMissing when the value is nil or
-    # an empty hash.
+    # the given key; raises ParameterMissing when the value is nil,
+    # not a Hash, or an empty Hash. Real-blog only requires keys whose
+    # values are Hashes (request-body nested data).
     def require(key)
       val = @hash[key.to_sym]
       raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.nil?
-      raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.is_a?(Hash) && val.empty?
-      raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.is_a?(Parameters) && val.empty?
-      val.is_a?(Parameters) ? val : (val.is_a?(Hash) ? Parameters.new(val) : val)
+      raise ParameterMissing, "param is missing or the value is empty: #{key}" unless val.is_a?(Hash)
+      raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.empty?
+      Parameters.new(val)
     end
 
-    # `params.permit(:title, :body)` — returns a new Parameters with
-    # only the listed keys.
-    def permit(*allowed)
+    # `params.permit([:title, :body])` — returns a new Parameters
+    # with only the listed keys. Takes an Array[Symbol] (no splat) so
+    # the parameter shape is monomorphic for spinel + type-strict
+    # targets; callers used to writing `params.permit(:title, :body)`
+    # in Rails idiom go through the controller lowerer, which emits
+    # the Array form.
+    def permit(allowed_keys)
       filtered = {}
-      allowed.each do |key|
+      allowed_keys.each do |key|
         sym = key.to_sym
         filtered[sym] = @hash[sym] if @hash.key?(sym)
       end
       Parameters.new(filtered)
     end
 
-    def symbolize_keys(input)
-      return input.to_h if input.is_a?(Parameters)
+    # Internal: walk a Hash recursively, symbolizing String keys and
+    # recursing into nested Hashes. Values that aren't Hashes pass
+    # through unchanged.
+    def symbolize_keys(hash)
       out = {}
-      input.each do |k, v|
+      hash.each do |k, v|
         sym = k.is_a?(Symbol) ? k : k.to_s.to_sym
-        out[sym] = if v.is_a?(Hash)
-                     symbolize_keys(v)
-                   elsif v.is_a?(Parameters)
-                     v.to_h
-                   else
-                     v
-                   end
+        out[sym] = v.is_a?(Hash) ? symbolize_keys(v) : v
       end
       out
     end

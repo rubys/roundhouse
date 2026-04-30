@@ -33,28 +33,32 @@ module ActionController
 
     def empty?: () -> bool
 
-    # Rebuilds a plain Hash with values walked: nested Parameters
-    # flatten back to Hashes, primitives pass through.
+    # Rebuilds a plain Hash. Values pass through unchanged (no nested
+    # Parameters in @hash today; symbolize_keys never produces them).
     def to_h: () -> Hash[Symbol, untyped]
 
-    # `other` may be a Parameters or a Hash — `to_h` is called on the
-    # Parameters branch to homogenize. Returns a fresh Parameters.
-    def merge: (untyped other) -> Parameters
+    # Accepts a Hash. Callers holding a Parameters pre-convert via
+    # `.to_h`. Monomorphic param keeps the slot one-shape for spinel
+    # and for type-strict emit targets (Rust, Crystal, Go).
+    def merge: (Hash[Symbol, untyped] other_hash) -> Parameters
 
-    # `params.require(:article)` — raises ParameterMissing when the
-    # value is nil/empty. Returns the nested Parameters (or the raw
-    # value when the key holds a non-Hash scalar).
-    def require: (Symbol key) -> untyped
+    # `params.require(:article)` — returns the nested Parameters.
+    # Raises ParameterMissing when the value is nil, not a Hash, or
+    # an empty Hash. Always Parameters on success — no bare-value
+    # passthrough.
+    def require: (Symbol key) -> Parameters
 
-    # `params.permit(:title, :body)` — returns a new Parameters
-    # containing only the listed keys. Splat receives Symbols.
-    def permit: (*Symbol allowed) -> Parameters
+    # `params.permit([:title, :body])` — returns a new Parameters
+    # containing only the listed keys. Takes an Array[Symbol] for a
+    # monomorphic param slot (spinel + type-strict-target friendly);
+    # the controller lowerer emits this form from the Rails-idiom
+    # `params.expect(article: [:title, :body])` source shape.
+    def permit: (Array[Symbol] allowed_keys) -> Parameters
 
-    # Internal: walk the input hash recursively, converting String
-    # keys to Symbols and unwrapping nested Parameters to Hashes.
-    # `input` is genuinely polymorphic (Hash or Parameters); body
-    # narrows via `is_a?`. Returns a Hash[Symbol, untyped].
-    def symbolize_keys: (untyped input) -> Hash[Symbol, untyped]
+    # Internal: walk a Hash recursively, symbolizing String keys and
+    # recursing into nested Hashes. Values that aren't Hashes pass
+    # through.
+    def symbolize_keys: (Hash[Symbol, untyped] hash) -> Hash[Symbol, untyped]
   end
 
   # `ParameterMissing < StandardError; end` — a class declaration
