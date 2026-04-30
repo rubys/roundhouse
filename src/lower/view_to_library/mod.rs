@@ -100,6 +100,20 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
         ));
     }
 
+    // Build the method signature: typed param list so the body-typer
+    // (and downstream emitters' type-aware dispatch) can resolve
+    // `articles.empty?` to Array dispatch, `article.title` to a
+    // model-attribute access, etc. Without this, params come through
+    // as `Ty::Untyped` and emit-side dispatch falls through.
+    //
+    // Type rules:
+    //   - Index views (`articles/index`): main arg is `Array[Model]`
+    //     for the singularize-camelize-matches-known-model case.
+    //   - Show / edit / new / partial: main arg is the model itself.
+    //   - Layout: main arg is String (the rendered body HTML).
+    //   - Extra params (notice, alert, …): String? (nullable).
+    let signature = build_view_signature(stem, dir, base.starts_with('_'), &arg_name, &extra_params, &known_models);
+
     let mut locals: Vec<String> = Vec::new();
     if !arg_name.is_empty() {
         locals.push(arg_name.clone());
@@ -123,15 +137,25 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
 
     let body = seq(body_stmts);
 
-    let method = MethodDef {
+    let mut method = MethodDef {
         name: method_name,
         receiver: MethodReceiver::Class,
         params,
         body,
-        signature: None,
+        signature,
         effects: EffectSet::default(),
         enclosing_class: Some(module_id.0.clone()),
     };
+
+    // Run the body-typer over the lowered body so per-target emitters
+    // get typed Sends (e.g. `articles.empty?` with recv typed as
+    // `Ty::Array<Article>` so the Array dispatch resolves correctly).
+    // Empty class registry — Array / String / Hash dispatch lives in
+    // the primitive method tables, not the registry, so this is
+    // sufficient for the most common view-body patterns. Model-class
+    // method calls (`article.title`) fall through to Ty::Untyped
+    // propagation; targets handle gradual typing themselves.
+    type_method_body(&mut method);
 
     LibraryClass {
         name: module_id,
@@ -166,6 +190,110 @@ fn view_module_id(dir: &str) -> ClassId {
 /// bare `yield` in the layout source resolves to this local). Top-
 /// level views with no resource directory fall back to an empty arg
 /// name (no positional param).
+/// Run the body-typer over a method's body so Send dispatch sees
+/// typed receivers. Per-method (no cross-method registry) since
+/// view methods are independent and view-body Send patterns
+/// resolve through primitive method tables (Array / String / Hash)
+/// that don't need a class registry.
+fn type_method_body(method: &mut MethodDef) {
+    let empty_classes: std::collections::HashMap<
+        crate::ident::ClassId,
+        crate::analyze::ClassInfo,
+    > = std::collections::HashMap::new();
+    let typer = crate::analyze::BodyTyper::new(&empty_classes);
+    let mut ctx = crate::analyze::Ctx::default();
+    if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
+        for (param, sig) in method.params.iter().zip(params.iter()) {
+            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+        }
+    }
+    if let Some(enclosing) = &method.enclosing_class {
+        ctx.self_ty = Some(crate::ty::Ty::Class {
+            id: crate::ident::ClassId(enclosing.clone()),
+            args: vec![],
+        });
+    }
+    typer.analyze_expr(&mut method.body, &ctx);
+}
+
+/// Build a `Ty::Fn` signature for the synthesized view method.
+/// Lets the body-typer propagate types through the body (so e.g.
+/// `articles.empty?` resolves to Array's `.empty?` dispatch and
+/// renders correctly per-target). Without this, params come through
+/// as `Ty::Untyped` and emit-side type-aware dispatch falls through.
+fn build_view_signature(
+    stem: &str,
+    dir: &str,
+    is_partial: bool,
+    arg_name: &str,
+    extra_params: &[String],
+    known_models: &[String],
+) -> Option<crate::ty::Ty> {
+    use crate::ty::{Param as TyParam, ParamKind, Ty};
+
+    if arg_name.is_empty() && extra_params.is_empty() {
+        return None;
+    }
+
+    let model_class = crate::naming::singularize_camelize(dir);
+    let model_known = known_models.iter().any(|m| m == &model_class);
+
+    // Type for the main arg (when present).
+    let arg_ty = if arg_name.is_empty() {
+        None
+    } else if dir == "layouts" {
+        // `body` arg of a layout — the rendered inner HTML.
+        Some(Ty::Str)
+    } else if !is_partial && stem == "index" {
+        // `articles` — Array<Article> when the model is known,
+        // otherwise Array<Untyped>.
+        if model_known {
+            Some(Ty::Array {
+                elem: Box::new(Ty::Class {
+                    id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
+                    args: vec![],
+                }),
+            })
+        } else {
+            Some(Ty::Array { elem: Box::new(Ty::Untyped) })
+        }
+    } else {
+        // Show / edit / new / partial: arg is the model itself.
+        if model_known {
+            Some(Ty::Class {
+                id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
+                args: vec![],
+            })
+        } else {
+            Some(Ty::Untyped)
+        }
+    };
+
+    let mut sig_params: Vec<TyParam> = Vec::new();
+    if let Some(t) = arg_ty {
+        sig_params.push(TyParam {
+            name: crate::ident::Symbol::from(arg_name),
+            ty: t,
+            kind: ParamKind::Required,
+        });
+    }
+    // Extra params (`notice`, `alert`, …) — nullable strings.
+    for n in extra_params {
+        sig_params.push(TyParam {
+            name: crate::ident::Symbol::from(n.as_str()),
+            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            kind: ParamKind::Optional,
+        });
+    }
+
+    Some(Ty::Fn {
+        params: sig_params,
+        block: None,
+        ret: Box::new(Ty::Str),
+        effects: crate::effect::EffectSet::default(),
+    })
+}
+
 fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
     if dir.is_empty() {
         return String::new();

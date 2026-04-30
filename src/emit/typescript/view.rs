@@ -121,12 +121,25 @@ fn emit_ts_views_barrel(app: &App) -> EmittedFile {
     }
     if !by_dir.is_empty() {
         writeln!(s).unwrap();
+        // Each Views::Dir.action takes its model arg as `any` at the
+        // namespace boundary. The per-render-fn import retains its
+        // typed signature for direct callers; the namespace shape
+        // exists to be called from lowered view bodies where the
+        // iter var (e.g. `c` in `comments.each |c| ...`) is typed
+        // through CollectionProxy / Array<T> as ApplicationRecord
+        // or similar broader type. Casting at the export decouples
+        // call-site type narrowing from the underlying fn signature.
+        writeln!(
+            s,
+            "type _ViewFn = (...args: unknown[]) => string;",
+        )
+        .unwrap();
     }
     for (dir, actions) in &by_dir {
         let ns = crate::naming::camelize(dir);
         writeln!(s, "export const {ns} = {{").unwrap();
         for (action, render_fn) in actions {
-            writeln!(s, "  {action}: _{render_fn},").unwrap();
+            writeln!(s, "  {action}: _{render_fn} as _ViewFn,").unwrap();
         }
         writeln!(s, "}};").unwrap();
     }

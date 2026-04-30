@@ -379,12 +379,15 @@ export class ErrorCollection {
     this._errors.push({ field, message });
   }
 
-  // Ruby's `errors.each { |e| ... }` lowers to `errors.each(e => ...)`
-  // — call form, not for-of iteration. The `Symbol.iterator` below
-  // covers the for-of form; this method covers the explicit-callback
-  // form that `view_to_library`'s lowered bodies use.
-  each(fn: (e: { field: string; message: string; full_message: string }) => void): void {
-    for (const e of this) fn(e);
+  // Ruby's `errors.each { |e| ... }` — framework Ruby treats `errors`
+  // as `Array[String]` (literal full-message strings), so the block's
+  // iter var is a String. Match that semantics: the callback receives
+  // a string (the humanized full message). The Symbol.iterator below
+  // still yields the rich `{field, message, full_message}` form for
+  // existing call sites in the old TS view emitter; once that
+  // emitter goes away the rich form can also collapse to strings.
+  each(fn: (full_message: string) => void): void {
+    for (const e of this) fn(e.full_message);
   }
 
   // `<% article.errors.each do |e| %>` lowers to `for (const e of
