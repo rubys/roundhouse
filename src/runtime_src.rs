@@ -791,6 +791,22 @@ fn collect_from_stmt(
             }
         }
     }
+    // `class << self ... end` — singleton-class block. Recurse into
+    // its body in the same enclosing scope, then promote every method
+    // collected inside to `MethodReceiver::Class`. Covers both
+    // `def self.x` (already Class) and `attr_*` lowerings (default
+    // Instance), so e.g. `class << self; attr_accessor :adapter; end`
+    // produces module-level `adapter` / `adapter=` class methods.
+    if let Some(sc) = node.as_singleton_class_node() {
+        if let Some(body) = sc.body() {
+            let before = out.len();
+            walk_scope(&body, out, enclosing)?;
+            for m in &mut out[before..] {
+                m.receiver = MethodReceiver::Class;
+            }
+        }
+        return Ok(());
+    }
     if let Some(module) = node.as_module_node() {
         let name_bytes = module.name().as_slice();
         let name_str = std::str::from_utf8(name_bytes)
