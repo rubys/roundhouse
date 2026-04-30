@@ -35,7 +35,6 @@ mod route_helpers;
 mod schema_sql;
 mod spec;
 mod ty;
-mod view;
 mod view_thin;
 
 pub use ty::ts_ty;
