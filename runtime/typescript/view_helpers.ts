@@ -322,10 +322,17 @@ export class FormBuilder {
   /// (label as positional). Accept both: when arg 0 is a string, treat
   /// as label; when it's an object, treat as opts.
   submit(labelOrOpts?: string | Record<string, any> | null, opts: Record<string, any> = {}): string {
+    // Three call-shapes accepted (Rails idiom + lowered-IR shape):
+    //   submit({ class: "x" })            — old TS emit, label kwarg
+    //   submit("Add Comment", { class })  — lowered IR, label positional
+    //   submit(null, { class })           — lowered IR with no explicit
+    //                                       label (use default from
+    //                                       record's persistence state)
     const label = typeof labelOrOpts === "string" ? labelOrOpts : null;
-    const optsResolved: Record<string, any> = label !== null
-      ? opts
-      : (labelOrOpts && typeof labelOrOpts === "object" ? labelOrOpts : {});
+    const optsResolved: Record<string, any> =
+      typeof labelOrOpts === "string" || labelOrOpts == null
+        ? opts // arg 1 is label-or-null → arg 2 (opts) is the options dict
+        : labelOrOpts; // arg 1 is the options dict (1-arg form)
     const cls = optsResolved.class ? ` class="${escapeHtml(String(optsResolved.class))}"` : "";
     const humanPrefix = this.prefix.charAt(0).toUpperCase() + this.prefix.slice(1);
     const labelResolved =

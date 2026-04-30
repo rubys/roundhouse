@@ -91,6 +91,23 @@ export class ApplicationRecord {
   id: number = 0;
   errors: ErrorCollection = new ErrorCollection();
 
+  /** `record.persisted?` — has this record been saved (i.e. has it
+   *  been INSERTed and gotten back a row id)? Mirrors framework
+   *  Ruby's `def persisted?; @persisted; end` semantics; here we
+   *  derive from `id !== 0` since `save` assigns the new id from
+   *  the INSERT result. Used by `form_with` to choose between
+   *  `articles_path` (POST/create) and `article_path(id)`
+   *  (PATCH/update) action targets. */
+  get persisted(): boolean {
+    return this.id !== 0;
+  }
+
+  /** Inverse of `persisted` — used by Rails-side `new_record?`
+   *  predicate. Same id-based derivation. */
+  get new_record(): boolean {
+    return this.id === 0;
+  }
+
   /** Rails-semantics `save`: runs validations (and belongs_to
    *  existence checks) first; on success, INSERTs when `id === 0`
    *  otherwise UPDATEs. Fires afterCreate (for new records) or

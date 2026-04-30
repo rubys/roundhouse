@@ -41,7 +41,11 @@ pub fn emit_main_ts(app: &App) -> EmittedFile {
         content.push_str("    schemaSql: \"\",\n");
     }
     if has_app_layout {
-        content.push_str("    layout: () => renderLayoutsApplication(undefined as any),\n");
+        // Layout takes the inner body as its first arg; matches the
+        // lowered-IR shape from `view_to_library` where layout views
+        // are `def self.application(body)` with `io << body` in the
+        // body. Server passes the inner-view HTML through this arg.
+        content.push_str("    layout: (body: string) => renderLayoutsApplication(body),\n");
     }
     content.push_str("  });\n");
     content.push_str("}\n\n");

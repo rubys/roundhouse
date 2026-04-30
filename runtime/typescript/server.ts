@@ -163,8 +163,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   res.statusCode = response.status ?? 200;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   if (layoutRenderer) {
+    // Pass body explicitly to the layout — matches the lowered-IR
+    // shape (`def self.application(body) ... io << body ... end`).
+    // The slot-store `setYield` is still populated for layouts that
+    // also need `<% yield :head %>` / `<% yield :alt %>` style
+    // named-yield reads.
     Helpers.setYield(response.body ?? "");
-    res.end(layoutRenderer());
+    res.end(layoutRenderer(response.body ?? ""));
   } else {
     res.end(renderLayout(response.body ?? ""));
   }
@@ -177,7 +182,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
  *  `content_for` slots via the module-level state in
  *  view_helpers). When unset, `renderLayout` below provides a
  *  minimal fallback so the server still renders in isolation. */
-let layoutRenderer: (() => string) | null = null;
+let layoutRenderer: ((body: string) => string) | null = null;
 
 // ── Layout wrapping ────────────────────────────────────────────
 
@@ -353,10 +358,13 @@ export interface StartOptions {
   shouldSeed?: () => boolean;
   /** Layout renderer — the emitted `renderLayoutsApplication`
    *  (or equivalent). Called after each non-redirect response
-   *  with the inner view body already stashed via
-   *  `Helpers.setYield`. When omitted, the server falls back to
+   *  with the inner view body as the first arg (matches the
+   *  lowered-IR shape `def self.application(body) ... io << body
+   *  ... end`); the slot store is also populated via
+   *  `Helpers.setYield` for named-yield reads. When omitted, the
+   *  server falls back to
    *  the minimal `renderLayout` shell below. */
-  layout?: () => string;
+  layout?: (body: string) => string;
 }
 
 /** Start the server. Returns a promise that resolves once the
