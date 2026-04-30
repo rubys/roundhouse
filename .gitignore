@@ -4,6 +4,12 @@
 /build
 *.swp
 
+# Local debug/repro binaries — produced ad-hoc during development
+# (e.g. one-off compiled reproductions for analyzer issues). Not
+# tracked; recreatable on demand.
+/repro_*
+/probe_*
+
 # Real-blog fixture is regenerated from scripts/create-blog on
 # developer machines (`make real-blog`) and in CI. Committing the
 # output would mean the repo carries a ~50MB Rails scaffold that
