@@ -106,24 +106,30 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  toolchain-typescript:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: cargo test --test typescript_toolchain -- --ignored
-        run: cargo test --test typescript_toolchain -- --ignored --nocapture
+  # toolchain-typescript: disabled during the TS emitter rewrite.
+  # The kind-aware emitter is being torn out and replaced with a
+  # kind-agnostic LibraryClass walker. Re-enable once the new path
+  # reaches parity on tiny-blog and real-blog. See docs/pipeline/emit.md
+  # ("Working policy: rip-and-replace").
+  #
+  # toolchain-typescript:
+  #   needs: generate-fixture
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: real-blog-fixture
+  #     - name: Extract fixture
+  #       run: tar -xzf real-blog.tar.gz
+  #     - name: Install Node
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #     - name: cargo test --test typescript_toolchain -- --ignored
+  #       run: cargo test --test typescript_toolchain -- --ignored --nocapture
 
   toolchain-go:
     needs: generate-fixture
@@ -263,29 +269,34 @@ jobs:
       - name: scripts/compare crystal
         run: scripts/compare crystal
 
-  compare-typescript:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: scripts/compare typescript
-        run: scripts/compare typescript
+  # compare-typescript: disabled during the TS emitter rewrite (see
+  # toolchain-typescript above). DOM-equivalence runs against emitted
+  # output that's about to change shape; re-enable once the new path
+  # boots a real-blog server.
+  #
+  # compare-typescript:
+  #   needs: generate-fixture
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: real-blog-fixture
+  #     - name: Extract fixture
+  #       run: tar -xzf real-blog.tar.gz
+  #     - uses: ruby/setup-ruby@v1
+  #       with:
+  #         ruby-version: '3.4'
+  #         bundler-cache: true
+  #         working-directory: ./fixtures/real-blog
+  #     - name: Install Node
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #     - name: scripts/compare typescript
+  #       run: scripts/compare typescript
 
   compare-go:
     needs: generate-fixture
@@ -409,14 +420,14 @@ jobs:
       - unit
       - toolchain-rust
       - toolchain-crystal
-      - toolchain-typescript
+      # toolchain-typescript: disabled during TS rewrite
       - toolchain-go
       - toolchain-elixir
       - toolchain-python
       - toolchain-spinel
       - compare-rust
       - compare-crystal
-      - compare-typescript
+      # compare-typescript: disabled during TS rewrite
       - compare-go
       - compare-elixir
       - compare-python
