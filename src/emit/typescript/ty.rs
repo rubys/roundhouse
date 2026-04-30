@@ -17,18 +17,6 @@ pub fn ts_ty(ty: &Ty) -> String {
     }
 }
 
-/// Default value literal for a TS-typed field — used in `field: T = <default>;`.
-pub fn ts_default(ty: &Ty) -> String {
-    match ty {
-        Ty::Int | Ty::Float => "0".into(),
-        Ty::Bool => "false".into(),
-        Ty::Str | Ty::Sym => "\"\"".into(),
-        Ty::Nil => "null".into(),
-        Ty::Class { id, .. } if class_is_temporal(id) => "\"\"".into(),
-        _ => "null as any".into(),
-    }
-}
-
 fn ts_class_ty(id: &ClassId) -> String {
     if class_is_temporal(id) {
         "string".into()

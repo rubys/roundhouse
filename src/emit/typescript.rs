@@ -1,11 +1,18 @@
-//! TypeScript emitter — rebuild in progress.
+//! TypeScript emitter — kind-agnostic LibraryClass walker.
 //!
-//! Being rebuilt slice-by-slice against the spinel-blog canonical
-//! output shape (see project_emitter_rip_and_replace memory). Each
-//! commit lands one slice; the 32 ignored TS tests under tests/ are
-//! the re-entry gate.
+//! Phase B of the rewrite (2026-04-30): the emitter no longer knows
+//! about views, controllers, models, schema, routes, or fixtures as
+//! distinct output kinds. Every input flows through the lowerer
+//! pipeline into `LibraryClass` and is rendered by
+//! `library::emit_class_file`. Per-target surface = `expr.rs` (Expr →
+//! TS syntax) + `ty.rs` (Ty → TS type) + `library.rs` (LibraryClass
+//! walker) + ecosystem files (`package.json`, `tsconfig.json`,
+//! `juntos.ts` runtime stub).
 //!
-//! Slice 1 (this revision): package.json + main.ts.
+//! Outputs not yet covered: controllers, schema, routes, importmap,
+//! fixtures, specs. Each is a missing `*_to_library` lowerer (see
+//! `project_universal_post_lowering_ir`); when the lowerer lands the
+//! output joins the walker without changes here.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -15,120 +22,54 @@ use crate::App;
 use crate::ty::Ty;
 
 const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
-const HTTP_STUB_SOURCE: &str = include_str!("../../runtime/typescript/http.ts");
-const TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/typescript/test_support.ts");
-const VIEW_HELPERS_SOURCE: &str = include_str!("../../runtime/typescript/view_helpers.ts");
-const SERVER_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
-const INFLECTOR_SOURCE: &str = include_str!("../../runtime/typescript/inflector.ts");
 
-mod controller;
 mod expr;
-mod fixture;
 mod library;
-mod main_ts;
-mod model;
-mod model_from_library;
 mod naming;
 mod package;
-mod route;
-mod route_helpers;
-mod schema_sql;
-mod spec;
 mod ty;
-mod view_thin;
 
 pub use ty::ts_ty;
 
+/// Emit a TypeScript project for `app`. The kind-agnostic walker:
+/// every model and view is lowered to `LibraryClass`, joined with
+/// `app.library_classes`, and rendered through `library::emit_class_file`.
 pub fn emit(app: &App) -> Vec<EmittedFile> {
-    emit_with_adapter(app, &crate::adapter::SqliteAdapter)
-}
-
-pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
+
     files.push(package::emit_package_json());
     files.push(package::emit_tsconfig_json(app));
     files.push(EmittedFile {
         path: PathBuf::from("src/juntos.ts"),
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
-    files.extend(library::emit_library_classes(app));
-    files.extend(library::emit_library_class_decls(app));
+
+    for model in &app.models {
+        let lc = crate::lower::lower_model_to_library_class(model, &app.schema);
+        let stem = crate::naming::snake_case(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
+        files.push(library::emit_class_file(&lc, app, out_path));
+    }
+
+    for view in &app.views {
+        let lc = crate::lower::lower_view_to_library_class(view, app);
+        let out_path = view_output_path(view.name.as_str());
+        files.push(library::emit_class_file(&lc, app, out_path));
+    }
+
+    for lc in &app.library_classes {
+        let stem = crate::naming::snake_case(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
+        files.push(library::emit_class_file(lc, app, out_path));
+    }
+
     files
 }
 
-pub fn emit_with_adapter(
-    app: &App,
-    adapter: &dyn crate::adapter::DatabaseAdapter,
-) -> Vec<EmittedFile> {
-    let mut files = Vec::new();
-    files.push(package::emit_package_json());
-    files.push(package::emit_tsconfig_json(app));
-    files.push(main_ts::emit_main_ts(app));
-    files.push(EmittedFile {
-        path: PathBuf::from("src/juntos.ts"),
-        content: JUNTOS_STUB_SOURCE.to_string(),
-    });
-    if !app.models.is_empty() {
-        files.push(schema_sql::emit_schema_sql(app));
-    }
-    files.extend(model::emit_models(app));
-    files.extend(library::emit_library_class_decls(app));
-    if !app.controllers.is_empty() {
-        files.push(EmittedFile {
-            path: PathBuf::from("src/http.ts"),
-            content: HTTP_STUB_SOURCE.to_string(),
-        });
-        files.push(EmittedFile {
-            path: PathBuf::from("src/test_support.ts"),
-            content: TEST_SUPPORT_SOURCE.to_string(),
-        });
-        // Phase 1 first integration step: `inflector.ts` is generated
-        // from `runtime/ruby/inflector.rb` via the runtime_src pipeline
-        // (`cargo run --bin runtime_transpile_ts` writes it). The
-        // hand-written `view_helpers.ts` re-exports `pluralize` from
-        // here so existing call sites keep working unchanged. As more
-        // generated files prove tsc-clean, this pattern extends to
-        // them and the hand-written runtime shrinks.
-        files.push(EmittedFile {
-            path: PathBuf::from("src/inflector.ts"),
-            content: INFLECTOR_SOURCE.to_string(),
-        });
-        files.push(EmittedFile {
-            path: PathBuf::from("src/view_helpers.ts"),
-            content: VIEW_HELPERS_SOURCE.to_string(),
-        });
-        files.push(EmittedFile {
-            path: PathBuf::from("src/server.ts"),
-            content: SERVER_SOURCE.to_string(),
-        });
-        files.push(controller::emit_ts_importmap(app));
-        files.extend(controller::emit_controllers(app, adapter));
-    }
-    if !app.routes.entries.is_empty() {
-        files.push(route::emit_routes(app));
-        files.push(route_helpers::emit_route_helpers(app));
-    }
-    // Views: thin emitter consuming `view_to_library`-lowered
-    // LibraryClasses. Replaces the prior per-helper derivation in
-    // `view.rs` (~1280 LOC eliminated). The remaining `view.rs`
-    // exposes barrel + stubs + signature helpers shared between
-    // both paths during the transition; once those are inlined
-    // here or moved to `view_thin.rs`, `view.rs` can come out
-    // entirely.
-    files.extend(view_thin::emit_views_thin(app));
-    if !app.fixtures.is_empty() {
-        let lowered = crate::lower::lower_fixtures(app);
-        files.push(fixture::emit_ts_fixtures_helper(&lowered));
-        for f in &lowered.fixtures {
-            files.push(fixture::emit_ts_fixture(f));
-        }
-    }
-    if !app.test_modules.is_empty() {
-        for tm in &app.test_modules {
-            files.push(spec::emit_ts_spec(tm, app));
-        }
-    }
-    files
+/// Map a view name (`articles/index`, `articles/_article`,
+/// `layouts/application`) to the output path under `app/views/`.
+fn view_output_path(view_name: &str) -> PathBuf {
+    PathBuf::from(format!("app/views/{view_name}.ts"))
 }
 
 /// Emit a `LibraryClass` (a single class or mixin module from a
@@ -280,11 +221,6 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
 /// `Expr`. Floats top-level `super(...)` calls to the front so TS's
 /// strict-derived-class rule (no `this` access before super) holds
 /// even when the source Ruby wrote `@x = arg; super(...)`.
-///
-/// Only top-level Seq elements are reordered; super calls nested
-/// inside conditionals or other expressions stay where they are.
-/// Framework Ruby's constructors use the simple `seq with super at
-/// some position` shape; deeper nesting hasn't appeared yet.
 fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
     use crate::expr::{Expr, ExprNode};
 
@@ -351,23 +287,12 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     let is_constructor =
         raw_name == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
 
-    // Rewrite the body for class context: bare `Send { recv: None }`
-    // gets `SelfRef` so it emits as `this.method(...)` instead of a
-    // dangling `method(...)`. Constructors keep `Super { args }` as-is
-    // (TS spells parent-constructor calls as `super(args)`, not
-    // `super.initialize(args)`); other methods get the
-    // `super.<method>(...)` rewrite.
     let rewritten = if is_constructor {
         crate::emit::typescript::library::rewrite_for_constructor(&m.body)
     } else {
         crate::emit::typescript::library::rewrite_for_class_method(&m.body, raw_name)
     };
 
-    // initialize → constructor (no return annotation; TS forbids one).
-    // TS strict mode also requires `super(...)` to precede any `this.x`
-    // access in derived-class constructors. The Ruby source typically
-    // writes `@x = arg; super(msg)` (Ruby allows either order); we
-    // reorder so super-calls float to the top of the constructor body.
     let body = if is_constructor {
         emit_constructor_body(&rewritten, ret)
     } else {
@@ -406,18 +331,6 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
 /// Emit a list of typed `MethodDef`s — produced by
 /// `parse_methods_with_rbs` from a whole `.rb` + `.rbs` pair — as a
 /// single TypeScript module file (trailing newline included).
-///
-/// Surface choice: when every method is `MethodReceiver::Class` (i.e.
-/// the source was a module of `def self.*` helpers, like
-/// `runtime/ruby/inflector.rb`), each method emits as a standalone
-/// `export function`. The Ruby module name is absorbed into the import
-/// path on the calling side. This matches the existing hand-written
-/// shape (e.g. `export function pluralize` in
-/// `runtime/typescript/view_helpers.ts`).
-///
-/// Other surface forms (mixin module → class with instance methods,
-/// concrete class with state) are deferred to follow-up work; the
-/// helper rejects them rather than emit half-correctly.
 pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, String> {
     use crate::dialect::MethodReceiver;
 
@@ -446,13 +359,9 @@ pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, Stri
     Ok(out)
 }
 
-/// Map a Ruby identifier to a safe TS parameter name. Ruby and TS
-/// both allow most snake_case names verbatim; the divergence is
-/// keywords. Each name in the list below is reserved in TS but
-/// commonly used as a Rails-side method/keyword arg (`default` in
-/// `params.fetch(:k, default)`, `with` in `validates_format_of(... with:)`).
-/// Suffix with `_` rather than rename — preserves the original word
-/// while clearing the reserved-word collision.
+/// Map a Ruby identifier to a safe TS parameter name. Each name in
+/// the list below is reserved in TS but commonly used as a Rails-side
+/// method/keyword arg.
 fn escape_reserved(name: &str) -> String {
     matches!(
         name,
@@ -488,8 +397,7 @@ fn escape_reserved(name: &str) -> String {
 }
 
 /// Emit a typed `MethodDef` as a standalone exported TypeScript
-/// function (trailing newline included). Requires `signature` to be
-/// populated — `parse_methods_with_rbs` does this. Used by the
+/// function (trailing newline included). Used by the
 /// runtime-extraction pipeline.
 pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
     let sig = m

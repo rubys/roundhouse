@@ -300,13 +300,6 @@ fn indent_block(s: &str, spaces: usize) -> String {
         .join("\n")
 }
 
-pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
-    let empty: std::collections::HashSet<crate::ident::Symbol> =
-        std::collections::HashSet::new();
-    let mut declared = empty.clone();
-    emit_stmt_with_state(e, is_last, void_return, &empty, &mut declared)
-}
-
 /// Pre-walk a body to identify reassigned local-variable names.
 /// Public for `view_thin.rs`'s use; the result feeds
 /// `emit_stmt_with_state` so multi-statement bodies emit `let`
