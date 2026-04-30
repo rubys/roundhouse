@@ -349,6 +349,24 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     let m = method.as_str();
+    // SelfRef receivers come from the body-typer's self-dispatch
+    // annotation. Ruby's idiomatic surface for self-dispatch is
+    // implicit (`foo` not `self.foo`) for getters/methods — but
+    // setters MUST keep the explicit `self.x =` form because Ruby
+    // parses `x = value` as a local-variable creation, not a method
+    // call. Fall through to the standard `(Some(r), _)` path for
+    // setter sends so emit_send_base's setter arm picks it up.
+    if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
+        && !is_setter_method(m)
+    {
+        if args_s.is_empty() {
+            return method.to_string();
+        }
+        if parenthesized {
+            return format!("{method}({})", args_s.join(", "));
+        }
+        return format!("{method} {}", args_s.join(", "));
+    }
     match (recv, m) {
         (Some(r), "[]") => format!("{}[{}]", emit_expr(r), args_s.join(", ")),
         // Binary operator methods (`@x == 0`, `a + b`) round-trip as

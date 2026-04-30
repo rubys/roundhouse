@@ -44,6 +44,17 @@ pub struct Ctx {
     /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
     /// table instead of falling through to the user-class registry.
     pub constants: HashMap<Symbol, Ty>,
+    /// When set, the body-typer writes back `Some(SelfRef)` on the
+    /// recv slot of bare Sends that resolve via `self_ty`'s dispatch
+    /// table. Off by default — opt-in per call site so targets that
+    /// model self differently (e.g. Crystal's module-of-self-actions
+    /// controller shape, Python/Elixir/Go's similar) aren't forced to
+    /// recognize a new IR shape across every existing per-target
+    /// rewriter at once. Enable for paths that consume the
+    /// LibraryClass directly as instance methods (runtime/ruby/* via
+    /// parse_library_with_rbs, view_to_library's body-typer pass,
+    /// the upcoming TS controller_thin path).
+    pub annotate_self_dispatch: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -96,6 +107,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let expr_span = expr.span;
         match &mut *expr.node {
             ExprNode::Lit { value } => lit_ty(value),
 
@@ -312,6 +324,39 @@ impl<'a> BodyTyper<'a> {
                         return Ty::Bool;
                     }
                 }
+
+                // Self-dispatch annotation. When `recv == None` and the
+                // typer's dispatch through `self_ty` finds the method on
+                // the enclosing class (instance or class methods), write
+                // back `recv = Some(SelfRef)` so emitters consume already-
+                // explicit self-receivers without a per-emitter rewrite
+                // pass. Bare calls that don't resolve (Kernel methods,
+                // undefined names, names not in the class registry) stay
+                // `recv = None` — those route through each target's
+                // free-function code path. Targets that don't model self
+                // as an instance (e.g., Crystal's module-shape controller
+                // emit) render `SelfRef` as appropriate for their shape;
+                // see the per-target SelfRef arms in each emit_expr.
+                let resolves_through_self = ctx.annotate_self_dispatch
+                    && recv.is_none()
+                    && matches!(
+                        ctx.self_ty.as_ref(),
+                        Some(Ty::Class { id, .. })
+                            if self.classes().get(id).is_some_and(|cls|
+                                cls.class_methods.contains_key(method)
+                                    || cls.instance_methods.contains_key(method))
+                    );
+                if resolves_through_self {
+                    *recv = Some(crate::expr::Expr {
+                        span: expr_span,
+                        node: Box::new(ExprNode::SelfRef),
+                        ty: ctx.self_ty.clone(),
+                        effects: crate::effect::EffectSet::default(),
+                        leading_blank_line: false,
+                        diagnostic: None,
+                    });
+                }
+
                 let recv_ty = match recv.as_mut() {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),

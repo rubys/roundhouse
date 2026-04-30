@@ -47,6 +47,17 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => format!("@{name}"),
+        // Body-typer's self-dispatch annotation: every bare Send
+        // resolved through `self_ty` carries a synthesized SelfRef
+        // recv. Crystal's surface for self-dispatch matches Ruby's
+        // implicit form; render the same as `Var` would be — no
+        // `self.` prefix. Crystal's controller-emit shape (module of
+        // `self.x` static methods) doesn't model Rails-style instance
+        // dispatch, so per-target shape rewriters (in
+        // controller.rs / view.rs) treat `Send { Some(SelfRef), ... }`
+        // the same as the legacy `Send { None, ... }` and
+        // `Ivar { @x }` patterns when matching for context-derivation.
+        ExprNode::SelfRef => "self".to_string(),
         ExprNode::Send { recv, method, args, .. } => {
             emit_send(recv.as_ref(), method.as_str(), args)
         }
@@ -144,6 +155,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 
 pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // Body-typer SelfRef-annotated Sends. Crystal's idiomatic surface
+    // for self-dispatch is implicit (same as Ruby) — render as if
+    // recv were None.
+    if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef)) {
+        if args_s.is_empty() {
+            return method.to_string();
+        }
+        return format!("{method}({})", args_s.join(", "));
+    }
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
