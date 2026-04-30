@@ -2,23 +2,29 @@
 
 An experimental additional emission target alongside the seven
 source-code targets (Ruby, Rust, TypeScript, Go, Crystal, Elixir,
-Python, Spinel — all DOM-equivalent in CI). Instead of emitting
-target-language source, emit a typed stack-based bytecode and
-execute it in a VM that reuses the existing Rust runtime.
+Python, Spinel). Instead of emitting target-language source, emit a
+typed stack-based bytecode and execute it in a VM that reuses the
+existing Rust runtime.
 
 **Source:** `src/bytecode/` (format types, VM, IR→bytecode walker),
 `tests/bytecode_format.rs`, `tests/bytecode_vm.rs`, `tests/bytecode_emit.rs`.
 
-Status: experimental. M1 (format), M2 (minimal VM), and M3a
+Status: experimental, parked. M1 (format), M2 (minimal VM), and M3a
 (IR→bytecode walker, `src/bytecode/walker.rs`) have landed on `main`.
 M3a covers the subset of `ExprNode` whose lowering maps cleanly to the
 M2 VM's opcodes: `Lit`, `Var`, `Let`, `Seq`, `If`, `Assign` to
 `LValue::Var`, and `Send` for arithmetic/comparison on `Ty::Int`
 receivers. Everything else returns `WalkError::NotYetSupported` until
-the corresponding M3b+ work lands. Full integration with the runtime
-(execution against the real-blog fixture) is the remaining piece —
-the source-code-target gate that was previously cited as a
-prerequisite has been met. See [the plan](#the-plan) below.
+the corresponding M3b+ work lands.
+
+Phase B (source-code targets at parity) was the originally-cited gate
+for resuming Phase C work. That gate is no longer simply met —
+roundhouse is mid-migration to a universal post-lowering IR
+(`LibraryClass`); TypeScript was rip-and-replaced and the remaining
+targets are in flight (see [`emit.md`](emit.md)). The bytecode emitter
+will consume the same `LibraryClass` shape every other thin emitter
+sees, so resuming Phase C is best deferred until that shape stabilizes
+across two or three more targets.
 
 ## Why a bytecode target
 
@@ -50,16 +56,18 @@ What that buys, if it works end-to-end:
 Phase A (framework) and Phase C (emitter + integration) were originally
 separated by Phase B (**complete the existing targets first**), so
 that lifts from bringing each target to 5/5 parity could benefit the
-bytecode emitter the same way they benefit each other. Phase B is now
-met — all seven runnable targets are DOM-equivalent in CI — so Phase C
-work (M3a walker landed; M3b+ in flight) is unblocked.
+bytecode emitter the same way they benefit each other. Phase B
+remains in flight — the LibraryClass-shape migration is rolling
+through the source-code targets one at a time. Phase C is parked
+until that migration produces a stable shape; M3a walker is landed,
+M3b+ deferred.
 
 | # | Milestone | Phase | Status |
 |---|---|---|---|
 | M1 | Bytecode format + roundtrip tests | A | ✅ landed |
 | M2 | Minimal VM: arithmetic, locals, branches | A | ✅ landed |
 | — | Variant experiments (stack vs register, dispatch strategies) | A | ⏳ parked |
-| — | Python / Crystal / Elixir / Go / Ruby round-trip at 5/5 | B | ⏳ in flight |
+| — | All targets migrated to LibraryClass-shape thin emitters | B | ⏳ in flight |
 | M3 | Bytecode emitter for tiny-blog | C | ⏳ parked |
 | M4 | VM runs one controller action end-to-end | C | ⏳ parked |
 | M5 | tiny-blog controller tests pass through VM | C | ⏳ parked |

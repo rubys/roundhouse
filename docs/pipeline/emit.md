@@ -1,13 +1,132 @@
 # Emit
 
-Emitters turn the analyzed + lowered IR into target-language source
-files. Each emitter is pure: `fn emit(app: &App) -> Vec<EmittedFile>`.
-The caller (test harness, CLI, site builder) decides where to write
-the result.
+Each emitter takes the analyzed, lowered IR and produces a complete,
+runnable project for one target language. The current architecture
+follows a **lower-once, render N-ways** bet: most logic moves into
+target-neutral lowerings that produce a universal IR; per-target
+emitters render that IR into idiomatic source.
 
-**Source:** `src/emit/` — one file per target.
+**Source:** `src/emit/<target>/`, one directory per target (Ruby,
+TypeScript, Crystal, Rust, Go, Python, Elixir, Spinel). Generic
+`Expr` walkers live as `<target>/expr.rs`. Cross-cutting helpers live
+in `src/emit/shared/`.
 
-## The contract
+## Status
+
+Roundhouse is mid-migration from per-target derivation to thin
+emitters that consume a universal post-lowering IR (`LibraryClass`).
+TypeScript is the proving ground; Crystal is in flight; the remaining
+five targets follow.
+
+| Target | Models | Views | Controllers | Notes |
+|--------|--------|-------|-------------|-------|
+| Ruby | n/a | n/a | n/a | Round-trip identity partner — see `data/ruby-and-erb.md` |
+| Spinel | thin | thin | thin | Reference shape — defines the universal IR contract |
+| TypeScript | thin | thin | per-target | Controller emitter still derived; thin variant in flight |
+| Crystal | per-target | thin (flag) | per-target | View thin scaffold landed; not yet default |
+| Rust, Go, Python, Elixir | per-target | per-target | per-target | Migration deferred; rip-and-replace once shape stabilizes |
+
+"thin" = consumes `LibraryClass` from a `*_to_library` lowerer.
+"per-target" = derives from Rails-shape IR directly (the form being
+torn down).
+
+## The universal IR contract
+
+The bet (see `project_universal_post_lowering_ir` in auto-memory):
+**after lowering, every emitter sees the same shape — a collection of
+plain classes with explicit method bodies.** No Rails DSL surfaces
+past the lowerer boundary.
+
+```
+ingest → analyze → lower → LibraryClass → emit
+                              │
+                              ▼
+                      classes : Vec<LibraryClass>
+                      methods : Vec<MethodDef>
+                      bodies  : Expr (typed)
+```
+
+Three lowerers produce this shape:
+
+- `src/lower/model_to_library/` — model dialect → `LibraryClass`.
+  Validations, persistence, associations all expand into method
+  bodies on a plain class.
+- `src/lower/view_to_library/` — ERB-derived view → `LibraryClass`.
+  Each template becomes a typed method; helpers + form builders
+  resolve through library shapes, not per-target machinery.
+- `src/lower/controller_to_library/` — controller dialect →
+  `LibraryClass`. Actions become methods; before-actions inline;
+  render/redirect resolve to runtime calls.
+
+## Per-target emitter shape
+
+A thin emitter has three files per output kind:
+
+```
+src/emit/<target>/
+  expr.rs              — generic Expr → target syntax (the heavy lifter)
+  ty.rs                — Ty → target type rendering
+  model_from_library.rs — LibraryClass → model file
+  view_thin.rs         — LibraryClass → view file
+  controller_thin.rs   — LibraryClass → controller file (in flight)
+  ...                  — schema, routes, importmap, project shell
+```
+
+`expr.rs` is the substantive per-target work — it embodies the target
+language's expression-level semantics (operator dispatch, string vs.
+symbol literals, hash key syntax, async suspension points). Even
+under the rip-and-replace policy, expr.rs is **the notable exception
+worth incremental investment** — it already encodes hard-won
+target-specific knowledge that no lowerer can absorb.
+
+The other files mostly walk a `LibraryClass` and emit class/method
+syntax. They're small and replaceable.
+
+## Two-layer runtime
+
+Each target ships with two layers of runtime (see `runtime/<target>/`
+plus the transpiled framework runtime):
+
+1. **Target primitives** (hand-written, small): DB connection
+   lifecycle, HTTP server glue, WebSocket plumbing — anything genuinely
+   target-idiomatic that no IR-level lowering can capture.
+2. **Framework runtime** (transpiled from `runtime/ruby/`): Rails-shape
+   surface that emitted apps call into — `ApplicationRecord`,
+   `ActionController::Parameters`, `FormBuilder`, `link_to`, etc.
+   Authored once in Ruby; transpiled per target via the same
+   roundhouse pipeline that compiles user apps.
+
+This split is the architectural commitment behind the unified-IR Phase
+1 plan: framework Ruby is a forcing function that any new target must
+support. If your emitter can transpile `runtime/ruby/`, it can
+transpile a real Rails app.
+
+See `runtime.md` for the per-target file inventory.
+
+## Working policy: rip-and-replace
+
+When an emitter's shape is wrong relative to the universal IR, the
+working policy is **rebuild from a clean design**, not refactor in
+place. Experience: a fresh emitter against the LibraryClass shape
+takes ~1 week; incrementally evolving the existing one takes
+considerably longer because every step must keep the existing
+toolchain test green.
+
+Practical consequences:
+
+- Disable the target's CI gate during migration.
+- Land the new emitter behind an env-flag fork
+  (`ROUNDHOUSE_<TARGET>_VIEW_THIN=1`) so the old path keeps working
+  for other targets that haven't migrated yet.
+- Flip the default once the new path is green; delete the old.
+- `expr.rs` is the exception — port forward, don't rewrite from
+  scratch.
+
+Ecosystem files (`Cargo.toml`, `package.json`, `shard.yml`,
+`mix.exs`, `pyproject.toml`) carry no semantic divergence; they're
+copied/templated and don't need rip-and-replace treatment.
+
+## How emit reaches the file system
 
 ```rust
 pub struct EmittedFile {
@@ -15,186 +134,67 @@ pub struct EmittedFile {
     pub content: String,
 }
 
-// Each target exposes:
 pub fn emit(app: &App) -> Vec<EmittedFile>;
 ```
 
-No I/O, no filesystem touching, no target-specific config threading
-through the IR. The emitter reads `app.models`, `app.controllers`,
-`app.views`, `app.routes`, `app.fixtures`, `app.seeds`, plus the
-lowered forms it computes on demand (`lower_action`,
-`lower_persistence`, `flatten_routes`, etc.), and produces a
-`Vec<EmittedFile>` ready to drop onto disk.
+Each `src/emit/<target>.rs` exposes `emit(app)` returning a flat list.
+Callers (`bin/roundhouse`, `bin/build-site`, the toolchain tests)
+write each `EmittedFile` to disk.
 
-## Current target status
+## Public surface re-exported from `src/emit/<target>.rs`
 
-All seven runnable targets pass the DOM-equivalence compare against
-Rails on real-blog as a CI invariant — `.github/workflows/ci.yml`'s
-`compare-<target>` jobs gate the Pages deploy, so any drift fails
-the build.
-
-| Target | Status | Notes |
-|--------|--------|-------|
-| **Ruby** | Source-equivalent for tiny-blog + most of real-blog | The round-trip identity partner; paired with ingest |
-| **Rust** | Runnable end-to-end; DOM-equivalent | Boots axum HTTP + Action Cable stub, forms, validation, Turbo, Tailwind |
-| **TypeScript** | Runnable end-to-end; DOM-equivalent | Node HTTP + Action Cable over WebSockets, better-sqlite3, Juntos-shape |
-| **Go** | Runnable end-to-end; DOM-equivalent | Pass-2 HTTP router |
-| **Crystal** | Runnable end-to-end; DOM-equivalent | Same shape as Go |
-| **Elixir** | Runnable end-to-end; DOM-equivalent | Module-function conversion happens inside the emitter |
-| **Python** | Runnable end-to-end; DOM-equivalent | Async emission uses `SqliteAsyncAdapter` |
-| **Spinel** | Runnable end-to-end via CRuby; DOM-equivalent | Spinel-subset Ruby executed by CRuby until Spinel grows the surface roundhouse emits (test asymmetry: emit-app-only, run hand-written tests; see `project_spinel_test_asymmetry`) |
-
-## Emitter anatomy
-
-Every non-Ruby emitter follows the same shape:
-
-1. **Embed the per-target runtime.** Hand-written files under
-   `runtime/<target>/` get `include_str!`-copied (Rust) or
-   equivalent into the output. Covers: DB connection, HTTP server,
-   view helpers, Action Cable glue, test support. See
-   [`runtime.md`](runtime.md).
-
-2. **Emit per-model files.** Model class/struct declarations,
-   validation render (one `if Check... { errors.push(...) }` per
-   lowered `Check`), per-model persistence methods
-   (`find`/`all`/`save`/`destroy`), association methods.
-
-3. **Emit per-controller files.** For each controller:
-   - Implement `CtrlWalker` as a small struct holding `WalkCtx` +
-     `WalkState`.
-   - Provide leaf `write_*` / `render_*` methods in the target's
-     idiomatic syntax.
-   - Call `walk_action_body` for each action and splice the result
-     into a function body.
-
-4. **Emit the router.** `flatten_routes(app)` → flat dispatch table
-   in target syntax.
-
-5. **Emit views.** Each ERB template's already-compiled Ruby IR gets
-   re-rendered as a target-language function that builds a string.
-   Static text becomes literal fragments; `<%= expr %>` interpolation
-   becomes `render_expr(...)` calls.
-
-6. **Emit the schema DDL.** `lower_schema(app.schema)` as a string
-   constant the target's DB init reads.
-
-7. **Emit the project shell.** `Cargo.toml` / `package.json` /
-   `mix.exs` / `go.mod` / `requirements.txt` / `shard.yml`, plus
-   `main.rs` / `main.ts` / `application.ex` / `main.go` / …
-
-## The Ruby emitter is different
-
-`src/emit/ruby.rs` pairs with `src/ingest.rs` as the round-trip
-forcing function. Its job is to produce source byte-for-byte
-identical to the ingest input — that's what validates no information
-was lost. It skips all the runtime/server/shell machinery the other
-emitters do: no DDL emission, no router, no project shell. Just
-"re-emit the Ruby that went in."
-
-This is why `src/emit/ruby.rs` is small and the other emitters are
-large: they're doing different jobs.
-
-## Each emitter implements `CtrlWalker`
-
-The controller walker (`src/lower/controller_walk.rs::CtrlWalker`)
-is where ~60% of per-target emitter work lives. The trait's default
-`walk_stmt` provides the dispatch tree; each emitter's impl fills in
-the leaves:
-
-```rust
-pub struct RsEmitter<'a> { /* ... */ }
-
-impl<'a> CtrlWalker<'a> for RsEmitter<'a> {
-    fn ctx(&self) -> &WalkCtx<'a> { &self.ctx }
-    fn state_mut(&mut self) -> &mut WalkState { &mut self.state }
-    fn indent_unit(&self) -> &'static str { "    " }
-
-    fn write_assign(&mut self, name: &str, value: &Expr, indent: &str, out: &mut String) {
-        let rendered = self.render_expr(value);
-        writeln!(out, "{indent}let {name} = {rendered};").unwrap();
-    }
-    // ...and so on.
-}
-```
-
-Adding a new target becomes: write the seven leaf methods, plus the
-per-model and router rendering. The walker's shared dispatch handles
-control flow.
-
-## Async emission
-
-Emitters that support async receive the active `DatabaseAdapter`
-through `WalkCtx::adapter`. At each Send site,
-`WalkCtx::expr_suspends(expr)` checks the expression's effect set
-against `adapter.is_suspending_effect`. If any effect suspends, the
-emitter prepends (TS: `"await "`) or appends (Rust: `".await"`) the
-target's suspension marker.
-
-- **TypeScript** emits `await` prefixes under `SqliteAsyncAdapter`.
-  Emitted awaits are no-ops against `better-sqlite3` (sync) but
-  validate the plumbing for real async backends later.
-- **Rust** doesn't yet consume suspension — today's Rust emit is
-  synchronous even under the async adapter. When rusqlite grows an
-  async wrapper (or a Neon/Postgres-tokio adapter lands), the
-  emitter will need a `.await` postfix hook; today's `CtrlWalker`
-  trait would grow either `suspending_postfix` or
-  `wrap_suspending(String) -> String` to accommodate.
-
-Sync emitters (Ruby, Crystal, Elixir, Go) implement
-`suspending_prefix()` returning `""` — nothing suspends in their
-emission model, regardless of adapter.
+| Symbol | Role |
+|--------|------|
+| `emit(&App) -> Vec<EmittedFile>` | Main entry — full project emission |
+| `emit_method(&MethodDef) -> String` | Standalone typed-method renderer (used by `bin/build-site` and runtime extraction) |
+| `<target>_ty(&Ty) -> String` | Type renderer — public for tests + cross-target tooling |
 
 ## Per-target type rendering
 
-Each emitter has a `ty.rs` (`src/emit/<target>/ty.rs`) that lowers
-analyzer-produced `Ty` values to target syntax. The interesting
-rows are the "special" variants:
+The three special `Ty` variants render differently per target:
 
-| `Ty` | Rust | TypeScript | Python | Crystal | Go |
-|------|------|------------|--------|---------|----|
-| `Var` | `()` | `unknown` | `object` | `_` | `interface{}` |
-| `Untyped` (RBS gradual) | `()` | `any` | `Any` | `_` | `interface{}` |
-| `Bottom` (raise/return) | `!` | `never` | `Never` | `NoReturn` | `interface{}` |
+| Variant | TS | Rust | Go | Crystal | Python | Elixir | Ruby |
+|---------|----|------|----|---------|--------|--------|------|
+| `Ty::Var(_)` | error at emit | error | error | error | error | error | inferred |
+| `Ty::Untyped` | `any` | `()` (forces commit) | `interface{}` | `_` | `Any` | `term()` | n/a |
+| `Ty::Bottom` | `never` | `!` | `interface{}` | `NoReturn` | `Never` | `none()` | n/a |
 
-`Var` represents an inference gap; an emitter rendering it implies
-the analyzer didn't fully resolve a type. `Untyped` is an
-author-signed gradual escape (RBS `untyped`); permissive targets
-(TS `any`, Python `Any`) accept it cleanly while strict targets
-(Rust, Go) are expected to elevate `GradualUntyped` warnings to
-emit-time errors via the diagnostic pipeline. `Bottom` is filtered
-out of unions during analysis (`union_of` / `union_many`), so
-emitters typically only see it in fully-divergent positions — Rust's
-`!` and TS's `never` are the natural targets.
+Strict targets (Rust, Go) elevate `Untyped` to a compile error rather
+than rendering a permissive type — the three-bar test discipline (see
+`project_ty_untyped_target_dependent`).
 
-## Keeping emitters honest
+## Adding a new target
 
-Several forcing functions gate emitter correctness:
+The lowerers-first bet says: most of the work has already been done.
+A new target needs:
 
-| Test | What it catches |
-|------|-----------------|
-| `tests/emit_<target>.rs` (default) | Snapshot tests per emit pathway — catches accidental output drift |
-| `tests/real_blog.rs::expected_files_round_trip_byte_for_byte` (Ruby) | Ingest → emit-ruby → inputs match |
-| `tests/<target>_toolchain.rs` (`--ignored`) | Actually invoke `cargo build` / `tsc` / `go build` / `mix compile` on the emitted project |
-| `tests/emit_rust.rs::boots_real_blog_server` | For Rust: start the emitted binary, issue HTTP requests, check responses |
-| `roundhouse-compare` | Cross-runtime DOM equivalence (see [`verification.md`](verification.md)) |
+1. `src/emit/<new>/expr.rs` — the per-target expression renderer.
+2. `src/emit/<new>/ty.rs` — type rendering.
+3. Thin emitters (`model_from_library.rs`, `view_thin.rs`,
+   `controller_thin.rs`) — mostly mechanical walks over `LibraryClass`.
+4. `runtime/<new>/` — target primitives only (DB, HTTP). Framework
+   runtime comes free via transpiling `runtime/ruby/`.
+5. `tests/<new>_toolchain.rs` — the verification gate.
+
+Models-first within a target: models are independent and exercise
+most of the type-system surface. Web trio (controllers + views +
+routes) is coordinated and should land together.
 
 ## Key files
 
 | File | Role |
 |------|------|
-| `src/emit/mod.rs` | `EmittedFile` + module layout |
-| `src/emit/ruby.rs` | Round-trip identity partner |
-| `src/emit/rust.rs` | Rust emitter — runs axum + rusqlite |
-| `src/emit/typescript.rs` | TypeScript emitter — Juntos-shape, node http |
-| `src/emit/go.rs` | Go emitter |
-| `src/emit/crystal.rs` | Crystal emitter |
-| `src/emit/elixir.rs` | Elixir emitter |
-| `src/emit/python.rs` | Python emitter |
+| `src/emit/mod.rs` | `EmittedFile`, target dispatch |
+| `src/emit/<target>.rs` | Per-target entry + module list |
+| `src/emit/<target>/expr.rs` | Generic Expr walker (the heavy lifter) |
+| `src/emit/<target>/ty.rs` | Ty rendering |
+| `src/emit/<target>/{model,view,controller}*.rs` | Output-kind emitters |
+| `src/emit/shared/` | Cross-cutting helpers (binop classifiers, etc.) |
+| `src/lower/{model,view,controller}_to_library/` | The producers of the universal IR |
 
 ## Related docs
 
-- [`lower.md`](lower.md) — the lowered forms emitters consume.
-- [`runtime.md`](runtime.md) — the per-target glue libraries emitters
-  embed.
-- [`verification.md`](verification.md) — how we validate the emitted
-  output is correct.
+- `analyze.md` — typed IR that lowering consumes.
+- `lower.md` — target-neutral lowerings; the producers of `LibraryClass`.
+- `runtime.md` — per-target runtime layer.
+- `verification.md` — toolchain tests + DOM equivalence gate.

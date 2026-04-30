@@ -2,49 +2,69 @@
 
 The lowering layer sits between analyze and emit. Its job: take
 Rails-dialect IR (validations, associations, routes, controller
-bodies) plus the analyzer's annotations, and produce **target-
-neutral** forms that all seven emitters can consume.
+actions, view templates) plus the analyzer's annotations, and produce
+**target-neutral** forms that all emitters consume.
 
-**Source:** `src/lower/` — one file per lowering concern.
+**Source:** `src/lower/` — one file or subdirectory per concern.
 
 ## Why lower?
 
 Before this layer existed, each target emitter independently
-re-implemented the same analysis: "what are the SQL strings for this
-model's persistence?", "how do I walk a controller body deciding
-what's a render vs. a Send?", "how do I translate a validation rule
-to a runtime check?". Per-target copies, slight drift, large
-maintenance surface.
+re-implemented the same analysis: SQL strings for persistence, view
+helper rewrites, validation rule evaluation, router dispatch tables.
+Per-target copies, slight drift, large maintenance surface.
 
-The architectural bet in Phase 4 is: **lower once, render N ways**.
-Extract the logic that's identical across targets (SQL generation,
-validation evaluation, route dispatch tables, controller-body walk
-skeleton) as IR-level lowerings. Each emitter consumes the lowered
-form and renders it in target-specific code. Adding a new target
-becomes "write renders" rather than "re-implement the logic."
+The architectural bet: **lower once, render N ways.** Extract the
+logic that's identical across targets as IR-level lowerings; each
+emitter consumes the lowered form. Adding a new target becomes "write
+renders" rather than "re-implement the logic."
 
-## The lowering passes
+## The library-shape lowerers (current bet)
+
+Three lowerers produce a single canonical IR — `LibraryClass` — that
+every emitter reads. After the lowerer boundary, no Rails DSL
+remains: just plain classes with explicit method bodies.
+
+| Lowerer | Input | Output | Entry point |
+|---------|-------|--------|-------------|
+| `model_to_library` | `Model` (validations, associations, scopes) | `LibraryClass` with method bodies | `lower_model_to_library_class` |
+| `view_to_library` | ERB-lowered view template | `LibraryClass` with one method per template + helper rewrites | `lower_view_to_library_class` |
+| `controller_to_library` | `Controller` (actions, before-actions, callbacks) | `LibraryClass` with one method per action | `lower_controller_to_library_class` |
+
+Each lowerer:
+
+- Expands DSL surface into method bodies (e.g. `validates :title,
+  presence: true` becomes a `validate` method that pushes
+  `ValidationError`s).
+- Rewrites helpers and form builders into runtime calls (e.g.
+  `link_to` → `Roundhouse::ViewHelpers.link_to(...)`).
+- Runs the body-typer over the rewritten bodies so emitters get
+  fully-typed `Expr` trees.
+
+The thin emitters that consume `LibraryClass` are small — they walk a
+list of methods and emit class/method syntax. See `emit.md`.
+
+## Other lowering passes
+
+Lowerings that produce target-neutral forms other than `LibraryClass`:
 
 | Pass | Source | Output |
 |------|--------|--------|
 | `lower_validations` | Model validations | `Vec<LoweredValidation>` — each attribute with its expanded `Check` enum list |
-| `lower_schema` | Schema | Single `String` of CREATE TABLE DDL (SQLite today) |
 | `lower_persistence` | Model + Schema | `LoweredPersistence` with INSERT/UPDATE/DELETE/SELECT strings, `belongs_to` checks, dependent-destroy cascades |
-| `resolve_has_many` | Model associations | `HasManyRef` (target class + foreign key) |
 | `flatten_routes` | `RouteTable` | `Vec<FlatRoute>` (one entry per `(method, path, controller, action)`) |
-| `lower_fixtures` | YAML fixtures | `LoweredFixtureSet` (per-record plan) |
-| `lower_action` | Controller action | `LoweredAction` (classified, normalized body) |
-| Pre-emit passes | Controller body | Rewritten `Expr` (see below) |
+| `lower_fixtures` | YAML fixtures | `LoweredFixtureSet` (per-record load plan) |
+| `lower_broadcasts` | Model `broadcasts_to` declarations | `LoweredBroadcasts` (turbo-stream actions per association edge) |
+| `resolve_has_many` | Model associations | `HasManyRef` (target class + foreign key) |
 
 Each pass is pure: same input → same output, no side effects, no
-target awareness. Emitters consume them via their public return
-types; re-exports live in `src/lower/mod.rs`.
+target awareness. Re-exports live in `src/lower/mod.rs`.
 
 ## Pre-emit lowering passes
 
-Three passes rewrite the controller-body `Expr` tree to a
-normalized form every emitter sees. Lifted into `src/lower/` so the
-emitters don't each re-discover the same rewrites:
+Three passes rewrite the controller-body `Expr` tree to a normalized
+form. They run inside `lower_action` (or directly when older
+per-target emitters consume them):
 
 ### `synthesize_implicit_render`
 
@@ -58,112 +78,28 @@ downstream pass sees a uniform "body ends with a response" shape.
 
 `respond_to do |format| format.html; format.json end` blocks get
 collapsed to the HTML branch (the only format every target emits
-today). Keeps the controller walker from needing to special-case
-format dispatch; JSON/Turbo Stream formats will re-enter as
-separate rendered outputs once a second format matters.
+today). JSON / Turbo Stream formats will re-enter as separate
+rendered outputs once a second format matters.
 
 ### `resolve_before_actions`
 
-`before_action :set_article` doesn't produce any IR of its own in
-the action body — it runs a method that assigns an ivar. This pass
-inlines the before-action's effect (typically `@article =
-Article.find(params[:id])`) at the top of each action it covers, so
-the action body becomes self-contained: every ivar it reads has a
-visible assign in the body.
+`before_action :set_article` doesn't produce any IR of its own in the
+action body — it runs a method that assigns an ivar. This pass inlines
+the before-action's effect at the top of each action it covers, so
+the action body becomes self-contained.
 
-## The controller walker
+## Legacy: per-target controller derivation
 
-**Source:** `src/lower/controller_walk.rs`.
+The older shape — `CtrlWalker` trait, `WalkCtx` / `WalkState`,
+`SendKind` classifier in `src/lower/controller.rs` — is still in
+place for emitters that haven't migrated to `LibraryClass`. It walks
+controller bodies through a target-implemented dispatch trait, with
+each target overriding leaf `write_*` / `render_*` methods.
 
-The controller walker is the single largest piece of lift-into-lower
-work. Every target's emitter used to have its own parallel
-implementation of "walk a controller body, classify each statement,
-emit target syntax." The ten-line dispatch tree (Seq / Assign with
-Create-pattern or default / If with Update-pattern or default / Send
-via render table / other via expr) was structurally identical across
-all six targets; only the emitted syntax differed.
-
-### The `CtrlWalker` trait
-
-```rust
-pub trait CtrlWalker<'a>: Sized {
-    fn ctx(&self) -> &WalkCtx<'a>;
-    fn state_mut(&mut self) -> &mut WalkState;
-    fn indent_unit(&self) -> &'static str;
-
-    // Leaf rendering — per-target syntax:
-    fn write_assign(...);
-    fn write_create_expansion(...);
-    fn write_if(...);
-    fn write_update_if(...);
-    fn write_response_stmt(...);
-    fn write_expr_stmt(...);
-    fn render_expr(...) -> String;
-    fn render_send_stmt(...) -> Option<Stmt>;
-    fn suspending_prefix(&self) -> &'static str { "" }
-
-    // Shared dispatch — provided by default impl:
-    fn walk_action_body(&mut self, body: &Expr) -> String;
-    fn walk_stmt(&mut self, expr: &Expr, out: &mut String, depth: usize, is_tail: bool);
-}
-```
-
-The default `walk_stmt` provides the entire dispatch — targets don't
-override it. They only implement the leaf `write_*` / `render_*`
-methods for their idiomatic syntax.
-
-### `WalkCtx` and `WalkState`
-
-- **`WalkCtx`** is the target-neutral context bundle: known models,
-  model class name, resource name, nested-parent (for nested
-  resources), permitted strong-param fields, the active
-  `DatabaseAdapter`. Borrowed from the enclosing `LoweredAction`.
-- **`WalkState`** is mutable walker state: whether the render table
-  touched `context.*`, the last-bound local's name, and whether it
-  came from a Create expansion (Elixir's post-save id rebind gates
-  on this).
-
-### `WalkCtx::expr_suspends`
-
-Async-capable emitters call this at each Send site. It checks the
-expression's effect set against `adapter.is_suspending_effect`. If
-any effect suspends, the emitter emits the target's suspending
-prefix (`"await "` / `"await "` / `".await"`) at that site.
-
-Sync emitters simply ignore the adapter — their
-`suspending_prefix()` override returns `""` unconditionally.
-
-## `SendKind` — the shared send classifier
-
-**Source:** `src/lower/controller.rs::classify_controller_send`.
-
-Controller bodies are dominated by `Send` expressions:
-`redirect_to(...)`, `render(...)`, `params.require(:x)`,
-`Article.find(id)`, `@article.update(article_params)`. Each emitter
-needs to match these same shapes; `SendKind` classifies them once.
-
-```rust
-pub enum SendKind<'a> {
-    Render { ... },
-    RedirectTo { ... },
-    Head { ... },
-    StrongParams { ... },
-    ModelFind { ... },
-    ModelAll,
-    ResourceParams { ... },
-    Save { ... },
-    Destroy { ... },
-    Update { ... },
-    // ...plus more
-    Unknown,  // falls through to generic expr render
-}
-```
-
-Variants live here when the shape appears in at least three of the
-four Phase-4c emitters (Rust, Crystal, Go, Elixir) — validation that
-they're shape-shaped, not target-shaped. Target-specific rewrites
-(Elixir's struct-method-to-Module-function conversion) stay in the
-emitter.
+This shape is being torn down as `controller_to_library` lands per
+target. New work shouldn't extend it; existing per-target emitters
+either migrate to thin or get rip-and-replaced (see `emit.md`'s
+working policy section).
 
 ## Other lowering modules
 
@@ -172,9 +108,7 @@ emitter.
 Expands surface `Validation` rules into flat `Check` entries. A
 source `Length { min: 10, max: 100 }` lowers to two checks
 (`MinLength` then `MaxLength`), so the per-target render doesn't
-carry optional-bound logic. Each check has a default error message
-plus emitter-specific render forms — see the render table in the
-module doc.
+carry optional-bound logic.
 
 ### `src/lower/routes.rs`
 
@@ -191,11 +125,11 @@ existence checks, and dependent-destroy cascade targets. SQLite-
 specific today; a `Dialect` enum can later render Postgres/MySQL
 without changing the consumer shape.
 
-### `src/lower/schema_sql.rs`
+### `src/lower/broadcasts.rs`
 
-Schema → CREATE TABLE DDL (one call; all tables; joined with blank
-lines). Primary keys use SQLite's `INTEGER PRIMARY KEY
-AUTOINCREMENT` so rowids stay stable across inserts.
+Model `broadcasts_to` declarations → `LoweredBroadcasts`. Each
+declaration produces a list of turbo-stream actions to emit on
+create/update/destroy, scoped by the broadcast association.
 
 ### `src/lower/associations.rs`
 
@@ -210,46 +144,39 @@ columns get literals vs. cross-fixture references; cross-fixture FK
 references resolve through runtime lookup keyed on
 `(target_fixture, target_label)`.
 
+### `src/lower/erb_trim.rs`
+
+ERB whitespace normalization — runs before `view_to_library` so the
+view lowerer sees a stable-shaped template tree regardless of which
+ERB trim style the source used.
+
 ### `src/lower/controller_test.rs`
 
-Same lift pattern as `controller.rs`, applied to controller-test
-bodies. Classifies `get`/`post`/`assert_select`/`assert_response`
-shapes into a `ControllerTestSend` enum; per-target emitters render
-each variant.
-
-## How emitters consume the lowered form
-
-Each target emitter is structured as:
-
-1. Run the lowering passes once per app (or per model/controller).
-2. Implement `CtrlWalker` to render each action body.
-3. Render each `LoweredValidation` using the target's syntax for the
-   `Check` variants.
-4. Render each `FlatRoute` as an entry in the target's router table.
-5. Embed `lower_schema(...)` and per-model `LoweredPersistence` SQL
-   strings as constants in the generated project.
-
-The emitter file size is now dominated by *rendering* — the
-analysis it used to carry has mostly moved to `lower/`.
+Same lift pattern as legacy controller lowering, applied to
+controller-test bodies. Classifies `get`/`post`/`assert_select`/
+`assert_response` shapes into a `ControllerTestSend` enum.
 
 ## Key files
 
 | File | Role |
 |------|------|
 | `src/lower/mod.rs` | Module layout + re-exports |
-| `src/lower/controller.rs` | `SendKind`, `lower_action`, `LoweredAction`, pre-emit passes |
-| `src/lower/controller_walk.rs` | `CtrlWalker` trait + shared dispatch |
-| `src/lower/controller_test.rs` | Test-body walker |
+| `src/lower/model_to_library/` | Model dialect → `LibraryClass` |
+| `src/lower/view_to_library/` | ERB view → `LibraryClass` |
+| `src/lower/controller_to_library/` | Controller dialect → `LibraryClass` |
+| `src/lower/controller.rs`, `controller_walk.rs` | Legacy per-target derivation (being torn down) |
 | `src/lower/validations.rs` | `LoweredValidation`, `Check` enum |
 | `src/lower/routes.rs` | `flatten_routes`, `FlatRoute` |
 | `src/lower/persistence.rs` | `LoweredPersistence` |
-| `src/lower/schema_sql.rs` | DDL generator |
+| `src/lower/broadcasts.rs` | `LoweredBroadcasts` |
 | `src/lower/fixtures.rs` | Fixture load plan |
 | `src/lower/associations.rs` | has_many resolution |
+| `src/lower/controller_test.rs` | Test-body classification |
 
 ## Related docs
 
 - [`analyze.md`](analyze.md) — the typed IR that lowering consumes.
-- [`emit.md`](emit.md) — the per-target consumers of lowered forms.
+- [`emit.md`](emit.md) — the universal IR contract + per-target
+  emitter shape that consumes `LibraryClass`.
 - [`../data/catalog.md`](../data/catalog.md) — the AR method
   classification that some lowerings consult.
