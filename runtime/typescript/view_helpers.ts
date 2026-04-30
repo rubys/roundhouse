@@ -125,12 +125,12 @@ export function stylesheetLinkTag(name: string, opts: Record<string, string> = {
  *  the module imported by the bootstrap script (usually
  *  `application`; overridable per the importmap config). */
 export function javascriptImportmapTags(
-  pins: ReadonlyArray<readonly [string, string]>,
+  pins: ReadonlyArray<{ name: string; path: string }>,
   main_entry: string = "application",
 ): string {
   const imports: Record<string, string> = {};
-  for (const [name, path] of pins) {
-    imports[name] = path;
+  for (const pin of pins) {
+    imports[pin.name] = pin.path;
   }
   const mapJson = JSON.stringify({ imports }, null, 2);
   let out = `<script type="importmap" data-turbo-track="reload">${mapJson}</script>`;
@@ -272,7 +272,13 @@ export class FormBuilder {
     return `<label for="${escapeHtml(this._id(field))}"${cls}>${escapeHtml(humanize(field))}</label>`;
   }
 
-  textField(field: string, opts: Record<string, any> = {}): string {
+  // Snake_case is the primary form (matches the input source naming
+  // policy: lowered IR uses Ruby's `text_field` / `text_area`; the
+  // emitter renders identifiers verbatim, no snake→camel mapping).
+  // The camelCase versions below alias to these for the duration of
+  // the old TS view emitter; both delete when the thin emitter goes
+  // live and the old derivation comes out.
+  text_field(field: string, opts: Record<string, any> = {}): string {
     const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
     // Rails omits `value=""` on empty text-fields — the attribute
     // only appears when there's something to render. Matching
@@ -282,7 +288,7 @@ export class FormBuilder {
     return `<input type="text"${cls} name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}"${valueAttr}>`;
   }
 
-  textArea(field: string, opts: Record<string, any> = {}): string {
+  text_area(field: string, opts: Record<string, any> = {}): string {
     const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
     const rows = opts.rows != null ? ` rows="${escapeHtml(String(opts.rows))}"` : "";
     // Rails' `text_area` always wraps the value in newlines —
@@ -296,27 +302,42 @@ export class FormBuilder {
     return `<textarea${rows}${cls} name="${escapeHtml(this._name(field))}" id="${escapeHtml(this._id(field))}">\n${escapeHtml(value)}</textarea>`;
   }
 
-  // Rails' Ruby form helper is `textarea` in newer versions,
-  // `text_area` historically. Support both identifier spellings.
+  // CamelCase aliases for the old TS view emitter. Delete when the
+  // thin emitter goes live.
+  textField(field: string, opts: Record<string, any> = {}): string {
+    return this.text_field(field, opts);
+  }
+  textArea(field: string, opts: Record<string, any> = {}): string {
+    return this.text_area(field, opts);
+  }
   textarea(field: string, opts: Record<string, any> = {}): string {
-    return this.textArea(field, opts);
+    return this.text_area(field, opts);
   }
 
-  submit(opts: Record<string, any> = {}): string {
-    const cls = opts.class ? ` class="${escapeHtml(String(opts.class))}"` : "";
-    // Rails capitalizes the resource name: `Update Article`,
-    // `Create Article`. Our prefix is the lowercase singular
-    // (`"article"`); capitalize the first letter to match.
+  /// Rails' `form.submit(label = nil, opts = {})` — first arg is an
+  /// optional label string (Ruby's `label = nil` default). When omitted
+  /// or null, derive from the record's persistence state. Old TS view
+  /// emitter calls `submit({ label: "X", class: "..." })` (label as
+  /// kwarg); thin/lowered IR calls `submit("X", { class: "..." })`
+  /// (label as positional). Accept both: when arg 0 is a string, treat
+  /// as label; when it's an object, treat as opts.
+  submit(labelOrOpts?: string | Record<string, any> | null, opts: Record<string, any> = {}): string {
+    const label = typeof labelOrOpts === "string" ? labelOrOpts : null;
+    const optsResolved: Record<string, any> = label !== null
+      ? opts
+      : (labelOrOpts && typeof labelOrOpts === "object" ? labelOrOpts : {});
+    const cls = optsResolved.class ? ` class="${escapeHtml(String(optsResolved.class))}"` : "";
     const humanPrefix = this.prefix.charAt(0).toUpperCase() + this.prefix.slice(1);
-    const label = typeof opts.label === "string"
-      ? opts.label
-      : (this.record && this.record.id ? `Update ${humanPrefix}` : `Create ${humanPrefix}`);
+    const labelResolved =
+      label !== null
+        ? label
+        : (typeof optsResolved.label === "string"
+          ? optsResolved.label
+          : (this.record && this.record.id ? `Update ${humanPrefix}` : `Create ${humanPrefix}`));
     // Rails' scaffold form.submit emits `name="commit"` and
     // `data-disable-with="<label>"` — both part of Rails UJS's
-    // double-submit protection. Matching the attribute set is
-    // what the compare tool checks; the data-* value stays in
-    // sync with the label.
-    const esc = escapeHtml(label);
+    // double-submit protection.
+    const esc = escapeHtml(labelResolved);
     return `<input type="submit" name="commit" value="${esc}"${cls} data-disable-with="${esc}">`;
   }
 }
@@ -506,16 +527,10 @@ export class ViewHelpers {
   }
 
   static javascript_importmap_tags(
-    pins: Array<{ name: string; path: string }> | null | undefined,
+    pins: ReadonlyArray<{ name: string; path: string }> | null | undefined,
     entry: string = "application",
   ): string {
-    // Framework Ruby produces `Array<{ name:, path: }>` (a hash per
-    // pin); the existing free-function helper takes the older
-    // tuple-form `Array<[name, path]>`. Convert here.
-    const tuples: Array<readonly [string, string]> = (pins ?? []).map(
-      (p) => [p.name, p.path] as const,
-    );
-    return javascriptImportmapTags(tuples, entry);
+    return javascriptImportmapTags(pins ?? [], entry);
   }
 
   static turbo_stream_from(channel: string): string {
@@ -594,11 +609,6 @@ function normalizeAttrs(opts: Record<string, any>): Record<string, string> {
   return out;
 }
 
-// ── FormBuilder snake_case method aliases ──
-//
-// Same convergence: `form.text_field(...)` is the Ruby/Spinel form;
-// `form.textField(...)` is the existing TS form. Add the snake_case
-// aliases so call sites can use either while the emitter migrates.
-
-(FormBuilder.prototype as any).text_field = FormBuilder.prototype.textField;
-(FormBuilder.prototype as any).text_area = FormBuilder.prototype.textArea;
+// FormBuilder snake_case methods (`text_field`, `text_area`) and
+// camelCase aliases (`textField`, `textArea`, `textarea`) are
+// declared directly on the class above.
