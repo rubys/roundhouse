@@ -120,7 +120,10 @@ const RUNTIME_PAIRS: &[(&str, &str)] = &[
     ("runtime/ruby/active_record/validations.rb", "runtime/ruby/active_record/validations.rbs"),
     ("runtime/ruby/active_record/base.rb", "runtime/ruby/active_record/base.rbs"),
     ("runtime/ruby/action_view/view_helpers.rb", "runtime/ruby/action_view/view_helpers.rbs"),
-    ("runtime/ruby/action_view/route_helpers.rb", "runtime/ruby/action_view/route_helpers.rbs"),
+    // route_helpers retired 2026-05-01: superseded by per-app
+    // generation via lower_routes_to_library_functions →
+    // app/route_helpers.rb. The hand-written version was a stand-in
+    // for what the lowerer now produces.
     ("runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"),
     ("runtime/ruby/action_controller/parameters.rb", "runtime/ruby/action_controller/parameters.rbs"),
     ("runtime/ruby/action_dispatch/router.rb", "runtime/ruby/action_dispatch/router.rbs"),

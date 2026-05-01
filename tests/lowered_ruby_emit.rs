@@ -356,9 +356,12 @@ fn schema_renders_pk_and_typed_columns() {
 fn schema_emits_create_index_lines_for_table_indexes() {
     let src = lowered_real_blog_schema();
     // comments has `t.index ["article_id"], name: "index_comments_on_article_id"`.
+    // New shape: indexes appear as bare strings in the statements
+    // array (no trailing comma — Ruby array element formatting is
+    // emitter-driven now, not heredoc-line-driven).
     assert!(
         src.contains(
-            "\"CREATE INDEX IF NOT EXISTS index_comments_on_article_id ON comments (article_id)\","
+            "\"CREATE INDEX IF NOT EXISTS index_comments_on_article_id ON comments (article_id)\""
         ),
         "{src}",
     );

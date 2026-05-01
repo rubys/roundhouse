@@ -244,13 +244,15 @@ fn require_path_for_body_const(
             let singular_snake = singularize(&plural_snake);
             Some(format!("app/views/{plural_snake}/_{singular_snake}"))
         }
-        // Runtime modules under `runtime/`. ViewHelpers and RouteHelpers
-        // both live under `runtime/action_view.rb` (it requires both
-        // submodules), so they share a target. Add entries as lowerings
-        // introduce new ones; unknown idents silently drop.
+        // Runtime modules under `runtime/`. ViewHelpers still ships
+        // hand-written; RouteHelpers is now generated into
+        // `app/route_helpers.rb` from `app.routes` so consumers
+        // resolve there. Add entries as lowerings introduce new ones;
+        // unknown idents silently drop.
         "Broadcasts" => Some("runtime/broadcasts".to_string()),
         "Inflector" => Some("runtime/inflector".to_string()),
-        "ViewHelpers" | "RouteHelpers" => Some("runtime/action_view".to_string()),
+        "ViewHelpers" => Some("runtime/action_view".to_string()),
+        "RouteHelpers" => Some("app/route_helpers".to_string()),
         _ => None,
     }
 }
