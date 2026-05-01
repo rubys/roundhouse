@@ -476,14 +476,23 @@ pub(super) fn rewrite_for_constructor(e: &Expr) -> Expr {
     rewrite(e, None)
 }
 
+/// Bare-Send method names that the emitter handles as Kernel-level
+/// (`raise` → `throw`, `puts`/`print`/`p`/`pp` → `console.log`).
+/// These keep `recv: None` through the rewrite so the
+/// `emit_send_with_parens` special-cases fire instead of producing a
+/// stray `this.method(...)`.
+fn is_kernel_call(method: &str) -> bool {
+    matches!(method, "raise" | "puts" | "print" | "p" | "pp")
+}
+
 fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
     let new_node = match &*e.node {
-        // `raise X, msg` is a Kernel-level call that target emitters
-        // render as `throw new X(msg)`. Leaving it as Send-no-recv (no
-        // SelfRef rewrite) lets the emit_send_with_parens special-case
-        // for `raise` fire.
+        // Kernel-level calls (raise, puts, …) stay receiver-less so
+        // the per-target Send rewriter can map them directly to the
+        // host equivalent. Adding SelfRef here would force the typer
+        // and emitter to invent a `this.puts` shim on every class.
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if method.as_str() == "raise" =>
+            if is_kernel_call(method.as_str()) =>
         {
             ExprNode::Send {
                 recv: None,

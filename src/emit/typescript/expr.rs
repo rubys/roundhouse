@@ -1081,6 +1081,16 @@ pub(super) fn emit_send_with_parens(
             _ => {}
         }
     }
+    // Kernel `puts` / `print` / `p` / `pp` — map to `console.log`.
+    // The rewrite pass leaves these as Send-no-recv (alongside `raise`)
+    // so they don't pick up an inappropriate `this.` prefix in static
+    // method bodies. Ruby's variants differ in inspect-vs-to_s formatting
+    // and trailing-newline handling; `console.log` is close enough for
+    // the diagnostic purpose these calls serve in seeds / generators,
+    // and avoids a per-variant runtime shim.
+    if recv.is_none() && matches!(method, "puts" | "print" | "p" | "pp") {
+        return format!("console.log({})", args_s.join(", "));
+    }
     // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
     // to `cond.!`). Emit TS's prefix `!`. Parenthesize the operand so
     // `!x.nil?` (which lowers `nil?` to `x === null`) emits as
@@ -1140,6 +1150,21 @@ pub(super) fn emit_send_with_parens(
                 "last" if args.is_empty() => {
                     let recv_s = emit_expr(r);
                     return format!("{recv_s}[{recv_s}.length - 1]");
+                }
+                // Ruby's `arr.reverse` returns a new array; JS Array
+                // has the same name but mutates in place. Pair it with
+                // a `[...arr]` spread so the receiver isn't clobbered.
+                // Also covers the bare-call form (`arr.reverse` without
+                // parens) — Ruby allows zero-arg method calls without
+                // parens, but TS requires `()` so we always emit them.
+                "reverse" if args.is_empty() => {
+                    return format!("[...{}].reverse()", emit_expr(r));
+                }
+                // `arr.to_a` is a no-op on arrays; arr.to_h converts
+                // a `[[k, v], ...]` array to an object via Object.fromEntries.
+                "to_a" if args.is_empty() => return emit_expr(r),
+                "to_h" if args.is_empty() => {
+                    return format!("Object.fromEntries({})", emit_expr(r));
                 }
                 _ => {}
             },
@@ -1214,6 +1239,14 @@ pub(super) fn emit_send_with_parens(
                     }
                     "values" if args.is_empty() => {
                         return format!("Object.values({recv_s})");
+                    }
+                    // `.to_h` on a Hash is a no-op in Ruby — emit the
+                    // receiver verbatim. The strong-params chain
+                    // (`params.require(:k).permit(:a, :b).to_h`) is
+                    // the common producer.
+                    "to_h" if args.is_empty() => return recv_s,
+                    "dup" | "clone" if args.is_empty() => {
+                        return format!("{{ ...{recv_s} }}");
                     }
                     "each" if args_s.len() <= 1 => {
                         // `hash.each |k, v| { ... }` lowers to a
