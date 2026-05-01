@@ -32,9 +32,12 @@ mod ty;
 
 pub use ty::{ts_return_ty, ts_ty};
 
-/// Emit a TypeScript project for `app`. The kind-agnostic walker:
-/// every model and view is lowered to `LibraryClass`, joined with
-/// `app.library_classes`, and rendered through `library::emit_class_file`.
+/// Emit a TypeScript project for `app`. Every artifact (models,
+/// views, controllers, fixtures, tests, schema) flows through the
+/// universal walker. A single shared class registry is threaded
+/// through all lowerings so cross-class dispatch (`Article.find(...)`
+/// from a controller body, `ArticlesFixtures.one()` from a test)
+/// types end-to-end.
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
@@ -45,6 +48,58 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
 
+    // ── Lowering pipeline ───────────────────────────────────────────
+    // Order matters because each step's output feeds the next's
+    // shared registry. Views are lowered twice — once preliminarily
+    // (without model knowledge) so models can dispatch on Views::*,
+    // then again with the full model registry so view bodies can
+    // dispatch on models.
+
+    let preliminary_views: Vec<crate::dialect::LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .collect();
+    let view_extras = library::extras_from_lcs(&preliminary_views);
+
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry(
+        &app.models,
+        &app.schema,
+        view_extras,
+    );
+
+    let view_lcs = crate::lower::lower_views_to_library_classes(
+        &app.views,
+        app,
+        model_registry.clone().into_iter().collect(),
+    );
+
+    let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    controller_extras.extend(library::extras_from_lcs(&view_lcs));
+    let controller_lcs = crate::lower::lower_controllers_to_library_classes(
+        &app.controllers,
+        controller_extras.clone(),
+    );
+
+    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+
+    let test_lcs = if app.test_modules.is_empty() {
+        Vec::new()
+    } else {
+        let mut test_extras = controller_extras;
+        test_extras.extend(library::extras_from_lcs(&controller_lcs));
+        test_extras.extend(library::extras_from_lcs(&fixture_lcs));
+        crate::lower::lower_test_modules_to_library_classes(
+            &app.test_modules,
+            &app.fixtures,
+            &app.models,
+            test_extras,
+        )
+    };
+
+    // ── Emit ────────────────────────────────────────────────────────
+
     if let Some(schema_lc) = crate::lower::lower_schema_to_library_class(&app.schema) {
         files.push(library::emit_class_file(
             &schema_lc,
@@ -53,17 +108,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
-    for model in &app.models {
-        let lc = crate::lower::lower_model_to_library_class(model, &app.schema);
+    for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.push(library::emit_class_file(&lc, app, out_path));
+        files.push(library::emit_class_file(lc, app, out_path));
     }
 
-    for view in &app.views {
-        let lc = crate::lower::lower_view_to_library_class(view, app);
+    // view_lcs is in the same order as app.views (the bulk lowerer
+    // preserves declaration order); pair them to recover the
+    // per-template output path.
+    for (view, lc) in app.views.iter().zip(view_lcs.iter()) {
         let out_path = view_output_path(view.name.as_str());
-        files.push(library::emit_class_file(&lc, app, out_path));
+        files.push(library::emit_class_file(lc, app, out_path));
+    }
+
+    for lc in &controller_lcs {
+        let stem = crate::naming::snake_case(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("app/controllers/{stem}.ts"));
+        files.push(library::emit_class_file(lc, app, out_path));
     }
 
     for lc in &app.library_classes {
@@ -72,37 +134,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc, app, out_path));
     }
 
-    // Fixtures — one `test/fixtures/<name>.ts` per fixture file.
-    // Each `<Plural>Fixtures` LibraryClass holds a `def self.<label>`
-    // per record returning a typed model instance. Test bodies'
-    // `articles(:one)` calls are rewritten by the test lowerer to
-    // `ArticlesFixtures.one()` so they dispatch through these
-    // classes directly.
-    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
     for lc in &fixture_lcs {
         let stem = fixture_file_stem(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("test/fixtures/{stem}.ts"));
         files.push(library::emit_class_file(lc, app, out_path));
     }
 
-    // Test modules — bulk lower with shared registry (model + view +
-    // controller + fixture extras + framework stubs) so test bodies
-    // dispatch correctly. Output one `test/<stem>.test.ts` per test
-    // class plus a per-file `discover_tests(Class)` registration so
-    // node:test picks up every `test_*` method.
-    if !app.test_modules.is_empty() {
+    if !test_lcs.is_empty() {
         files.push(EmittedFile {
             path: PathBuf::from("test/_runtime/minitest.ts"),
             content: MINITEST_RUNTIME_SOURCE.to_string(),
         });
-        let test_lcs = lower_test_modules_for_emit(app, &fixture_lcs);
         for lc in &test_lcs {
             let stem = test_file_stem(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("test/{stem}.test.ts"));
             let mut emitted = library::emit_class_file(lc, app, out_path.clone());
-            // Append the runtime registration. The walker emits the
-            // class declaration; node:test discovers tests via the
-            // discover_tests() call appended here.
             emitted.content.push('\n');
             emitted.content.push_str(&format!(
                 "import {{ discover_tests }} from \"./_runtime/minitest.js\";\n\
@@ -136,59 +182,6 @@ fn fixture_file_stem(class_name: &str) -> String {
     crate::naming::snake_case(stem)
 }
 
-/// Lower every test module against a shared registry that mirrors
-/// what `tests/model_lowerer.rs::lowered_real_blog_typing_residual`
-/// builds — model + view + controller registries merged, framework
-/// stubs added by `lower_views_to_library_classes` and the
-/// test-side `insert_minitest_test_baseline`.
-fn lower_test_modules_for_emit(
-    app: &App,
-    fixture_lcs: &[crate::dialect::LibraryClass],
-) -> Vec<crate::dialect::LibraryClass> {
-    use crate::dialect::LibraryClass;
-
-    let preliminary_views: Vec<LibraryClass> = app
-        .views
-        .iter()
-        .map(|v| crate::lower::lower_view_to_library_class(v, app))
-        .collect();
-    let view_extras = library::extras_from_lcs(&preliminary_views);
-
-    let (_model_lcs, model_registry) = crate::lower::lower_models_with_registry(
-        &app.models,
-        &app.schema,
-        view_extras,
-    );
-
-    // model_registry has the full ClassInfo per model (synthesized
-    // methods + ApplicationRecord baseline + kinds). Don't overlay
-    // `extras_from_lcs(&_model_lcs)` here — that path only sees the
-    // LibraryClass methods (no baseline `save`/`find`/etc.) and would
-    // overwrite the registry entries, losing the kind data the typer
-    // needs to force parens on Method dispatches.
-    let test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
-        model_registry.into_iter().collect();
-    // Lower controllers so their dispatch surface is in the registry
-    // for integration tests; pass through but don't emit yet (the TS
-    // controller-emit path is a separate ticket).
-    let controller_lcs = crate::lower::lower_controllers_to_library_classes(
-        &app.controllers,
-        test_extras.clone(),
-    );
-    let mut test_extras = test_extras;
-    test_extras.extend(library::extras_from_lcs(&controller_lcs));
-    // Fixture classes (`ArticlesFixtures`, etc.) need to be in the
-    // registry so the rewritten `ArticlesFixtures.one()` calls type
-    // through Const dispatch.
-    test_extras.extend(library::extras_from_lcs(fixture_lcs));
-
-    crate::lower::lower_test_modules_to_library_classes(
-        &app.test_modules,
-        &app.fixtures,
-        &app.models,
-        test_extras,
-    )
-}
 
 /// Emit a `LibraryClass` (a single class or mixin module from a
 /// `runtime/ruby/*` file, with method signatures attached) as a
@@ -262,6 +255,15 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         match raw {
             "StandardError" => "Error".to_string(),
             "ActiveRecord::Base" => "ActiveRecord".to_string(),
+            // Test parents — runtime adapter exports both names.
+            "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
+            "Minitest::Test" => "Test".to_string(),
+            // Controller base — runtime exports `Base`; the import is
+            // aliased in render_imports so the extends clause reads
+            // `extends ActionControllerBase`.
+            "ActionController::Base" | "ActionController::API" => {
+                "ActionControllerBase".to_string()
+            }
             _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
         }
     });

@@ -90,6 +90,13 @@ fn emit_body_with_state(
         ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
             emit_begin_rescue_stmt(inner, rescues, else_branch.as_ref(), ensure.as_ref(), return_ty)
         }
+        // Single-Case-as-whole-body (e.g., `process_action`'s synthesized
+        // dispatcher): route through emit_stmt so it emits as a `switch`
+        // rather than falling to the default arm that wraps the whole
+        // node in `emit_expr` (which has no Case handler).
+        ExprNode::Case { .. } => {
+            emit_stmt_with_state(body, true, is_void, reassigned, declared)
+        }
         _ => {
             if is_void {
                 format!("{};", emit_expr(body))
@@ -439,6 +446,36 @@ pub(super) fn emit_stmt_with_state(
             Some(v) => format!("return {};", emit_expr(v)),
             None => "return;".to_string(),
         },
+        // `case scrutinee; when X then body; ...; end` at statement
+        // position. Emit as a TS `switch` when every arm pattern is a
+        // single literal and the scrutinee is a simple value. Each arm
+        // body is emitted recursively as a stmt (so bare method calls
+        // become `this.method();`) followed by `break;`. Falls through
+        // to the default-arm rendering (a TODO comment via emit_expr)
+        // for non-literal patterns — the `process_action` dispatcher
+        // (the only producer here today) always uses literal-symbol
+        // arms.
+        ExprNode::Case { scrutinee, arms }
+            if arms.iter().all(|a| {
+                a.guard.is_none()
+                    && matches!(&a.pattern, crate::expr::Pattern::Lit { .. })
+            }) =>
+        {
+            let scr_s = emit_expr(scrutinee);
+            let mut out = format!("switch ({scr_s}) {{\n");
+            for arm in arms {
+                let pat_s = match &arm.pattern {
+                    crate::expr::Pattern::Lit { value } => emit_literal(value),
+                    _ => unreachable!(),
+                };
+                let body_stmt = emit_stmt_with_state(
+                    &arm.body, false, true, reassigned, declared,
+                );
+                out.push_str(&format!("  case {pat_s}: {body_stmt} break;\n"));
+            }
+            out.push('}');
+            out
+        }
         _ => {
             if is_last && !void_return {
                 format!("return {};", emit_expr(e))

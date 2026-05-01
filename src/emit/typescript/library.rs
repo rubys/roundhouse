@@ -159,6 +159,13 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             // path special-case below.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
+            // Controller base — runtime exports `Base` from
+            // `action_controller_base.ts`; we route through an aliased
+            // name (`ActionControllerBase`) so the `extends` clause
+            // reads clearly.
+            "ActionController::Base" | "ActionController::API" => {
+                "ActionControllerBase".to_string()
+            }
             _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
         };
         if !import_name.is_empty() {
@@ -171,6 +178,8 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
     let mut model_imports: Vec<(String, String)> = Vec::new();
     let mut runtime_imports: Vec<String> = Vec::new();
     let mut fixture_imports: Vec<(String, String)> = Vec::new();
+    let mut controller_imports: Vec<(String, String)> = Vec::new();
+    let mut controller_base_import: bool = false;
 
     for r in refs {
         let r_str: &str = &r;
@@ -178,12 +187,17 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             juntos_imports.push(r);
         } else if r == "Test" || r == "TestCase" {
             runtime_imports.push(r);
+        } else if r == "ActionControllerBase" {
+            controller_base_import = true;
         } else if app.models.iter().any(|m| m.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
         } else if app.library_classes.iter().any(|other| other.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
+        } else if app.controllers.iter().any(|c| c.name.0.as_str() == r) {
+            let stem = crate::naming::snake_case(&r);
+            controller_imports.push((r, stem));
         } else if let Some(fixture_stem) = r.strip_suffix("Fixtures") {
             // `<Plural>Fixtures` ↔ `test/fixtures/<plural>.ts`. The
             // fixture-call rewrite produces these Const references on
@@ -246,6 +260,28 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             relative_to_root(out_path, &format!("test/fixtures/{stem}.js"))
         };
         writeln!(s, "import {{ {n} }} from \"{import_path}\";").unwrap();
+    }
+    for (n, stem) in &controller_imports {
+        // Controllers live at app/controllers/<stem>.ts. Same-dir
+        // imports (controller → controller, e.g. ApplicationController)
+        // use `./<stem>.js`; otherwise root-relative.
+        let import_path = if out_path.starts_with("app/controllers") {
+            format!("./{stem}.js")
+        } else {
+            relative_to_root(out_path, &format!("app/controllers/{stem}.js"))
+        };
+        writeln!(s, "import {{ {n} }} from \"{import_path}\";").unwrap();
+    }
+    if controller_base_import {
+        // ActionController::Base lives in the runtime as `Base` from
+        // `_runtime/action_controller_base.ts`; import-as-rename so the
+        // emitted `extends ActionControllerBase` reads cleanly.
+        let runtime_path = relative_to_root(out_path, "src/_runtime/action_controller_base.js");
+        writeln!(
+            s,
+            "import {{ Base as ActionControllerBase }} from \"{runtime_path}\";",
+        )
+        .unwrap();
     }
     s
 }
