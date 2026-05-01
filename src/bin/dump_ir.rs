@@ -61,8 +61,9 @@ use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
 use roundhouse::lower::{
     class_info_from_library_class, lower_controllers_to_library_classes,
-    lower_models_with_registry, lower_test_modules_to_library_classes,
-    lower_view_to_library_class, lower_views_to_library_classes,
+    lower_fixtures_to_library_classes, lower_models_with_registry,
+    lower_test_modules_to_library_classes, lower_view_to_library_class,
+    lower_views_to_library_classes,
 };
 use roundhouse::ty::Ty;
 
@@ -275,10 +276,13 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
     // on models (`@article.title`), Comment.where(…), assertions on
     // self (Minitest::Test), so the registry needs all of: models +
     // views + controllers.
+    let fixture_lcs = lower_fixtures_to_library_classes(app);
+
     let mut test_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
     test_extras.extend(build_class_info_extras(&view_lcs));
     test_extras.extend(build_class_info_extras(&controller_lcs));
+    test_extras.extend(build_class_info_extras(&fixture_lcs));
     let test_lcs = lower_test_modules_to_library_classes(
         &app.test_modules,
         &app.fixtures,
@@ -290,6 +294,7 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
     all.extend(model_lcs);
     all.extend(view_lcs);
     all.extend(controller_lcs);
+    all.extend(fixture_lcs);
     all.extend(test_lcs);
     for lc in &app.library_classes {
         all.push(lc.clone());

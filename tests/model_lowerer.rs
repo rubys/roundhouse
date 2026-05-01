@@ -19,10 +19,10 @@ use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
 use roundhouse::lower::{
     class_info_from_library_class, lower_controller_to_library_class,
-    lower_controllers_to_library_classes, lower_model_to_library_class,
-    lower_models_to_library_classes, lower_models_with_registry,
-    lower_test_modules_to_library_classes, lower_view_to_library_class,
-    lower_views_to_library_classes,
+    lower_controllers_to_library_classes, lower_fixtures_to_library_classes,
+    lower_model_to_library_class, lower_models_to_library_classes,
+    lower_models_with_registry, lower_test_modules_to_library_classes,
+    lower_view_to_library_class, lower_views_to_library_classes,
 };
 
 fn fixture_path() -> &'static Path {
@@ -532,11 +532,18 @@ fn lowered_real_blog_typing_residual() {
     controller_extras.extend(build_class_info_extras(&view_lcs));
     let controller_lcs = lower_controllers_to_library_classes(&app.controllers, controller_extras);
 
+    // Fixtures lower to ArticlesFixtures / CommentsFixtures classes;
+    // test bodies' `articles(:one)` calls get rewritten to
+    // `ArticlesFixtures.one()` so fixture classes need to be in the
+    // shared registry.
+    let fixture_lcs = lower_fixtures_to_library_classes(&app);
+
     // Test modules — same shared-registry pattern.
     let mut test_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
     test_extras.extend(build_class_info_extras(&view_lcs));
     test_extras.extend(build_class_info_extras(&controller_lcs));
+    test_extras.extend(build_class_info_extras(&fixture_lcs));
     let test_lcs = lower_test_modules_to_library_classes(
         &app.test_modules,
         &app.fixtures,

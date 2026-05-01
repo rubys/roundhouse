@@ -51,10 +51,22 @@ pub fn lower_test_modules_to_library_classes(
     // `articles(:one)` returns.
     let fixture_helpers = build_fixture_helpers(fixtures, models);
 
+    // Rewrite fixture calls — `articles(:one)` → `ArticlesFixtures.one()` —
+    // so each call lands at concrete dispatch instead of relying on a
+    // runtime fixture-lookup helper. Done before typing so the body-typer
+    // sees the rewritten Const-receiver Sends.
+    let fixture_names: Vec<crate::ident::Symbol> =
+        fixtures.iter().map(|f| f.name.clone()).collect();
     let mut out: Vec<LibraryClass> = Vec::new();
     let mut all_lcs: Vec<LibraryClass> = test_modules
         .iter()
         .map(build_library_class)
+        .map(|mut lc| {
+            for m in &mut lc.methods {
+                m.body = crate::lower::rewrite_fixture_calls(&m.body, &fixture_names);
+            }
+            lc
+        })
         .collect();
 
     // Self-info for each test class — its own test_* methods +

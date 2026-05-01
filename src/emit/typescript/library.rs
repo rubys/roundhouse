@@ -170,6 +170,7 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
     let mut juntos_imports: Vec<String> = Vec::new();
     let mut model_imports: Vec<(String, String)> = Vec::new();
     let mut runtime_imports: Vec<String> = Vec::new();
+    let mut fixture_imports: Vec<(String, String)> = Vec::new();
 
     for r in refs {
         let r_str: &str = &r;
@@ -183,6 +184,14 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
         } else if app.library_classes.iter().any(|other| other.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
+        } else if let Some(fixture_stem) = r.strip_suffix("Fixtures") {
+            // `<Plural>Fixtures` ↔ `test/fixtures/<plural>.ts`. The
+            // fixture-call rewrite produces these Const references on
+            // every test body that uses `articles(:one)`-style helpers.
+            let plural = crate::naming::snake_case(fixture_stem);
+            if app.fixtures.iter().any(|f| f.name.as_str() == plural) {
+                fixture_imports.push((r, plural));
+            }
         }
     }
 
@@ -222,6 +231,19 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             format!("./{stem}.js")
         } else {
             relative_to_root(out_path, &format!("app/models/{stem}.js"))
+        };
+        writeln!(s, "import {{ {n} }} from \"{import_path}\";").unwrap();
+    }
+    for (n, stem) in &fixture_imports {
+        // Fixtures live at test/fixtures/<stem>.ts. Test files at
+        // test/<x>.test.ts use `./fixtures/<stem>.js`; nested test
+        // files (test/integration/<x>.test.ts) need root-relative.
+        let import_path = if out_path.starts_with("test")
+            && out_path.parent().map(|p| p.to_str() == Some("test")).unwrap_or(false)
+        {
+            format!("./fixtures/{stem}.js")
+        } else {
+            relative_to_root(out_path, &format!("test/fixtures/{stem}.js"))
         };
         writeln!(s, "import {{ {n} }} from \"{import_path}\";").unwrap();
     }

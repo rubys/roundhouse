@@ -72,17 +72,30 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc, app, out_path));
     }
 
+    // Fixtures — one `test/fixtures/<name>.ts` per fixture file.
+    // Each `<Plural>Fixtures` LibraryClass holds a `def self.<label>`
+    // per record returning a typed model instance. Test bodies'
+    // `articles(:one)` calls are rewritten by the test lowerer to
+    // `ArticlesFixtures.one()` so they dispatch through these
+    // classes directly.
+    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+    for lc in &fixture_lcs {
+        let stem = fixture_file_stem(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("test/fixtures/{stem}.ts"));
+        files.push(library::emit_class_file(lc, app, out_path));
+    }
+
     // Test modules — bulk lower with shared registry (model + view +
-    // controller extras + framework stubs) so test bodies dispatch
-    // correctly. Output one `test/<stem>.test.ts` per test class
-    // plus a per-file `discover_tests(Class)` registration so node:test
-    // picks up every `test_*` method.
+    // controller + fixture extras + framework stubs) so test bodies
+    // dispatch correctly. Output one `test/<stem>.test.ts` per test
+    // class plus a per-file `discover_tests(Class)` registration so
+    // node:test picks up every `test_*` method.
     if !app.test_modules.is_empty() {
         files.push(EmittedFile {
             path: PathBuf::from("test/_runtime/minitest.ts"),
             content: MINITEST_RUNTIME_SOURCE.to_string(),
         });
-        let test_lcs = lower_test_modules_for_emit(app);
+        let test_lcs = lower_test_modules_for_emit(app, &fixture_lcs);
         for lc in &test_lcs {
             let stem = test_file_stem(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("test/{stem}.test.ts"));
@@ -117,12 +130,21 @@ fn test_file_stem(class_name: &str) -> String {
     crate::naming::snake_case(stem)
 }
 
+/// `ArticlesFixtures` → `articles` (strip Fixtures suffix, snake_case).
+fn fixture_file_stem(class_name: &str) -> String {
+    let stem = class_name.strip_suffix("Fixtures").unwrap_or(class_name);
+    crate::naming::snake_case(stem)
+}
+
 /// Lower every test module against a shared registry that mirrors
 /// what `tests/model_lowerer.rs::lowered_real_blog_typing_residual`
 /// builds — model + view + controller registries merged, framework
 /// stubs added by `lower_views_to_library_classes` and the
 /// test-side `insert_minitest_test_baseline`.
-fn lower_test_modules_for_emit(app: &App) -> Vec<crate::dialect::LibraryClass> {
+fn lower_test_modules_for_emit(
+    app: &App,
+    fixture_lcs: &[crate::dialect::LibraryClass],
+) -> Vec<crate::dialect::LibraryClass> {
     use crate::dialect::LibraryClass;
 
     let preliminary_views: Vec<LibraryClass> = app
@@ -155,6 +177,10 @@ fn lower_test_modules_for_emit(app: &App) -> Vec<crate::dialect::LibraryClass> {
     );
     let mut test_extras = test_extras;
     test_extras.extend(library::extras_from_lcs(&controller_lcs));
+    // Fixture classes (`ArticlesFixtures`, etc.) need to be in the
+    // registry so the rewritten `ArticlesFixtures.one()` calls type
+    // through Const dispatch.
+    test_extras.extend(library::extras_from_lcs(fixture_lcs));
 
     crate::lower::lower_test_modules_to_library_classes(
         &app.test_modules,
