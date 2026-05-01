@@ -16,7 +16,7 @@ use std::path::Path;
 
 use roundhouse::dialect::{LibraryClass, MethodReceiver};
 use roundhouse::ingest::ingest_app;
-use roundhouse::lower::lower_model_to_library_class;
+use roundhouse::lower::{lower_model_to_library_class, lower_models_to_library_classes};
 
 fn fixture_path() -> &'static Path {
     Path::new("fixtures/real-blog")
@@ -443,16 +443,18 @@ fn collect_untyped_lowered(
 fn lowered_real_blog_models_typing_residual() {
     let app = ingest_app(fixture_path()).expect("ingest real-blog");
 
+    // Use the bulk entry so cross-model dispatch (Article calling
+    // Comment.where, etc.) resolves through the shared registry.
+    let lcs = lower_models_to_library_classes(&app.models, &app.schema);
+
     let mut all_untyped: Vec<String> = Vec::new();
-    let mut model_count = 0usize;
-    for model in &app.models {
-        let lc = lower_model_to_library_class(model, &app.schema);
+    for lc in &lcs {
         for method in &lc.methods {
             let path = format!("{}#{}", lc.name.0.as_str(), method.name.as_str());
             collect_untyped_lowered(&method.body, &path, &mut all_untyped);
         }
-        model_count += 1;
     }
+    let model_count = lcs.len();
 
     eprintln!(
         "lowered real-blog models: {} untyped sub-expressions across {} models",
@@ -465,12 +467,13 @@ fn lowered_real_blog_models_typing_residual() {
         }
     }
 
-    // Loose ceiling — the point is to scope the remaining work, not
-    // lock in today's number. Tighten as more inline typing lands or
-    // a body-typer over lowered output picks up the rest. Run with
-    // `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect the
-    // residual list.
-    const CEILING: usize = 500;
+    // Tracker, not a hard target — fail loud on regression, ratchet
+    // down as registry scope expands. Current floor: 6 sites, all
+    // `Views::*.<view_name>(...)` dispatch from broadcasts callbacks.
+    // Next bracket needs the lowerer to consume views too so view
+    // modules land in the class registry. Run with `DUMP_RESIDUAL=1
+    // cargo test ... -- --nocapture` to inspect the residual list.
+    const CEILING: usize = 20;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog models — \
