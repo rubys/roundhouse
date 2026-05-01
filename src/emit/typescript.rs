@@ -118,12 +118,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .collect();
     let view_extras = library::extras_from_lcs(&preliminary_views);
 
-    let route_helpers_lc = crate::lower::lower_routes_to_library_class(app);
-    let route_helper_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
-        route_helpers_lc
-            .as_ref()
-            .map(|lc| library::extras_from_lcs(std::slice::from_ref(lc)))
-            .unwrap_or_default();
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    let route_helper_extras = library::extras_from_funcs(&route_helper_funcs);
 
     let (model_lcs, model_registry) = crate::lower::lower_models_with_registry(
         &app.models,
@@ -167,34 +163,37 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     // ── Emit ────────────────────────────────────────────────────────
 
-    if let Some(schema_lc) = crate::lower::lower_schema_to_library_class(&app.schema) {
-        files.push(library::emit_class_file(
-            &schema_lc,
+    let schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+    if !schema_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &schema_funcs,
             app,
             PathBuf::from("src/schema.ts"),
         ));
     }
 
-    if let Some(lc) = &route_helpers_lc {
-        files.push(library::emit_class_file(
-            lc,
+    if !route_helper_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &route_helper_funcs,
             app,
             PathBuf::from("app/route_helpers.ts"),
         ));
     }
 
-    if let Some(lc) = crate::lower::lower_importmap_to_library_class(app) {
-        files.push(library::emit_class_file(
-            &lc,
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    if !importmap_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &importmap_funcs,
             app,
             PathBuf::from("app/importmap.ts"),
         ));
     }
 
     let has_seeds = app.seeds.is_some();
-    if let Some(lc) = crate::lower::lower_seeds_to_library_class(app) {
-        files.push(library::emit_class_file(
-            &lc,
+    let seeds_funcs = crate::lower::lower_seeds_to_library_functions(app);
+    if !seeds_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &seeds_funcs,
             app,
             PathBuf::from("db/seeds.ts"),
         ));
@@ -620,7 +619,7 @@ pub fn emit_library_function(
         .collect();
 
     let raw_name = func.name.as_str();
-    let mname = escape_reserved(&crate::emit::typescript::library::sanitize_identifier(raw_name));
+    let mname = escape_for_function_name(raw_name);
 
     // Free-function rewrite: no SelfRef injection, no super rewrite —
     // bare Sends emit as plain function calls (resolved against
@@ -681,6 +680,14 @@ pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, Stri
 }
 
 /// Map a Ruby identifier to a safe TS parameter name. Each name in
+/// Identifier escape applied to LibraryFunction names. Strips Ruby's
+/// `?`/`!` suffixes via `sanitize_identifier`, then maps reserved
+/// JS words (`new`, `default`, etc.) to a `name_` suffix form so the
+/// emitted `export function <x>` parses.
+pub(super) fn escape_for_function_name(raw: &str) -> String {
+    escape_reserved(&crate::emit::typescript::library::sanitize_identifier(raw))
+}
+
 /// the list below is reserved in TS but commonly used as a Rails-side
 /// method/keyword arg.
 fn escape_reserved(name: &str) -> String {

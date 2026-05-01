@@ -9,32 +9,26 @@
 //! in a MethodDef shell — no per-target string-shape decisions.
 
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::LibraryFunction;
 use crate::effect::EffectSet;
-use crate::ident::{ClassId, Symbol};
+use crate::ident::Symbol;
 use crate::lower::typing::fn_sig;
 use crate::ty::Ty;
 
-/// Build a `Seeds` LibraryClass from `app.seeds`. Returns `None`
-/// when the app has no seeds file.
-pub fn lower_seeds_to_library_class(app: &App) -> Option<LibraryClass> {
-    let body = app.seeds.as_ref()?.clone();
-    let owner = ClassId(Symbol::from("Seeds"));
-    let method = MethodDef {
+/// Build the `Seeds` module as a single LibraryFunction:
+/// `Seeds.run() -> nil` carrying the typed seeds Expr from
+/// `app.seeds` verbatim. Empty when the app has no seeds file.
+pub fn lower_seeds_to_library_functions(app: &App) -> Vec<LibraryFunction> {
+    let Some(body) = app.seeds.as_ref().cloned() else {
+        return Vec::new();
+    };
+    let module_path = vec![Symbol::from("Seeds")];
+    vec![LibraryFunction {
+        module_path,
         name: Symbol::from("run"),
-        receiver: MethodReceiver::Class,
         params: Vec::new(),
         body,
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-    };
-    Some(LibraryClass {
-        name: owner,
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods: vec![method],
-    })
+    }]
 }

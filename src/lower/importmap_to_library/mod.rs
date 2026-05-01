@@ -10,51 +10,45 @@
 //! time), so no per-target string-building logic is needed.
 
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::LibraryFunction;
 use crate::effect::EffectSet;
-use crate::ident::{ClassId, Symbol};
+use crate::ident::Symbol;
 use crate::lower::typing::{fn_sig, lit_str};
 use crate::ty::Ty;
 
-/// Build an `Importmap` LibraryClass. Returns `None` when the app
-/// has no importmap or the importmap is empty.
-pub fn lower_importmap_to_library_class(app: &App) -> Option<LibraryClass> {
-    let importmap = app.importmap.as_ref()?;
+/// Build the `Importmap` module as `LibraryFunction`s — `json()`
+/// returns the importmap JSON, `tags()` wraps it in the
+/// `<script type="importmap">` element. Empty when the app has no
+/// importmap.
+pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
+    let Some(importmap) = app.importmap.as_ref() else {
+        return Vec::new();
+    };
     if importmap.pins.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let owner = ClassId(Symbol::from("Importmap"));
+    let module_path = vec![Symbol::from("Importmap")];
     let json = render_importmap_json(&importmap.pins);
     let tags = format!("<script type=\"importmap\">{json}</script>");
 
-    let json_method = MethodDef {
-        name: Symbol::from("json"),
-        receiver: MethodReceiver::Class,
-        params: Vec::new(),
-        body: lit_str(json),
-        signature: Some(fn_sig(vec![], Ty::Str)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-    };
-    let tags_method = MethodDef {
-        name: Symbol::from("tags"),
-        receiver: MethodReceiver::Class,
-        params: Vec::new(),
-        body: lit_str(tags),
-        signature: Some(fn_sig(vec![], Ty::Str)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-    };
-
-    Some(LibraryClass {
-        name: owner,
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods: vec![json_method, tags_method],
-    })
+    vec![
+        LibraryFunction {
+            module_path: module_path.clone(),
+            name: Symbol::from("json"),
+            params: Vec::new(),
+            body: lit_str(json),
+            signature: Some(fn_sig(vec![], Ty::Str)),
+            effects: EffectSet::default(),
+        },
+        LibraryFunction {
+            module_path,
+            name: Symbol::from("tags"),
+            params: Vec::new(),
+            body: lit_str(tags),
+            signature: Some(fn_sig(vec![], Ty::Str)),
+            effects: EffectSet::default(),
+        },
+    ]
 }
 
 /// Render `{"imports": {<name>: <path>, ...}}` with stable ordering

@@ -11,39 +11,29 @@
 //! DDL — keeps DDL rendering in one place; per-dialect variants
 //! land here when other databases need support.
 
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::LibraryFunction;
 use crate::effect::EffectSet;
-use crate::ident::{ClassId, Symbol};
+use crate::ident::Symbol;
 use crate::lower::typing::{fn_sig, lit_str};
 use crate::schema::Schema;
 use crate::ty::Ty;
 
-/// Build a `Schema` LibraryClass from `schema`. Module-shaped (no
-/// inheritance), one `def self.create_tables` method body holding the
-/// rendered DDL string. Returns `None` when `schema.tables` is empty
-/// — apps without persisted models don't need a Schema artifact.
-pub fn lower_schema_to_library_class(schema: &Schema) -> Option<LibraryClass> {
+/// Build the `Schema` module as a single LibraryFunction:
+/// `Schema.create_tables() -> string` returning the rendered DDL.
+/// Empty when `schema.tables` is empty — apps without persisted
+/// models don't need a Schema artifact.
+pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction> {
     if schema.tables.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let owner = ClassId(Symbol::from("Schema"));
+    let module_path = vec![Symbol::from("Schema")];
     let ddl = crate::emit::shared::schema_sql::render_schema_sql(schema);
-    let body = lit_str(ddl);
-    let method = MethodDef {
+    vec![LibraryFunction {
+        module_path,
         name: Symbol::from("create_tables"),
-        receiver: MethodReceiver::Class,
         params: Vec::new(),
-        body,
+        body: lit_str(ddl),
         signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-    };
-    Some(LibraryClass {
-        name: owner,
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods: vec![method],
-    })
+    }]
 }

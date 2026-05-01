@@ -15,46 +15,45 @@
 //! same way under every target's class-vs-module distinction.
 
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param};
+use crate::dialect::{LibraryFunction, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
-use crate::ident::{ClassId, Symbol, VarId};
+use crate::ident::{Symbol, VarId};
 use crate::lower::routes::{flatten_routes, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
 
-/// Build a `RouteHelpers` LibraryClass from `app.routes`. Returns
-/// `None` when the app has no routes.
-pub fn lower_routes_to_library_class(app: &App) -> Option<LibraryClass> {
+/// Build the `RouteHelpers` module from `app.routes` as a list of
+/// `LibraryFunction`s, one per named route. Empty when the app has
+/// no routes.
+pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     let flat = flatten_routes(app);
     if flat.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let owner = ClassId(Symbol::from("RouteHelpers"));
+    let module_path = vec![Symbol::from("RouteHelpers")];
     // Dedupe: multiple HTTP verbs on the same path collapse to a
     // single helper (`articles` for both index/create — same URL).
     // First-occurrence wins; the as_name + path are identical so the
-    // method body is the same.
+    // function body is the same.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut methods: Vec<MethodDef> = Vec::new();
+    let mut funcs: Vec<LibraryFunction> = Vec::new();
     for route in &flat {
         let helper = format!("{}_path", route.as_name);
         if !seen.insert(helper.clone()) {
             continue;
         }
-        methods.push(build_helper_method(&owner, &helper, route));
+        funcs.push(build_helper_function(&module_path, &helper, route));
     }
-    Some(LibraryClass {
-        name: owner,
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods,
-    })
+    funcs
 }
 
-fn build_helper_method(owner: &ClassId, helper_name: &str, route: &FlatRoute) -> MethodDef {
+fn build_helper_function(
+    module_path: &[Symbol],
+    helper_name: &str,
+    route: &FlatRoute,
+) -> LibraryFunction {
     let params: Vec<Param> = route
         .path_params
         .iter()
@@ -66,15 +65,13 @@ fn build_helper_method(owner: &ClassId, helper_name: &str, route: &FlatRoute) ->
         .map(|p| (Symbol::from(p.clone()), param_ty(p)))
         .collect();
     let body = build_path_expr(&route.path, &route.path_params);
-    MethodDef {
+    LibraryFunction {
+        module_path: module_path.to_vec(),
         name: Symbol::from(helper_name),
-        receiver: MethodReceiver::Class,
         params,
         body,
         signature: Some(fn_sig(sig_params, Ty::Str)),
         effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
     }
 }
 
