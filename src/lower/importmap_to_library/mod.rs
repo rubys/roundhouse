@@ -21,7 +21,7 @@ use crate::dialect::LibraryFunction;
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode};
 use crate::ident::Symbol;
-use crate::lower::typing::{fn_sig, lit_str, with_ty};
+use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -38,8 +38,14 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("Importmap")];
+    // Symbol-keyed hash so Ruby callers can access via `p[:name]`
+    // (the spinel ViewHelpers.javascript_importmap_tags shape) AND
+    // TS callers via `p["name"]` / `p.name` (Sym renders as a quoted
+    // string in TS object literals). String keys would break the
+    // Ruby callers — `p[:name]` on a string-keyed hash returns nil
+    // and the importmap script renders empty entries.
     let pin_hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
+        key: Box::new(Ty::Sym),
         value: Box::new(Ty::Str),
     };
     let pins_ty = Ty::Array { elem: Box::new(pin_hash_ty.clone()) };
@@ -71,11 +77,11 @@ fn build_pins_array(pins: &[crate::app::ImportmapPin], hash_ty: &Ty) -> Expr {
         .map(|pin| {
             let entries = vec![
                 (
-                    lit_str("name".to_string()),
+                    lit_sym(Symbol::from("name")),
                     lit_str(pin.name.clone()),
                 ),
                 (
-                    lit_str("path".to_string()),
+                    lit_sym(Symbol::from("path")),
                     lit_str(pin.path.clone()),
                 ),
             ];

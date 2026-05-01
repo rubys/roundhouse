@@ -477,14 +477,17 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut bc);
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 
-    // Importmap — `Importmap.pins -> Array<Hash<Str,Str>>`,
+    // Importmap — `Importmap.pins -> Array<Hash<Sym,Str>>`,
     // `Importmap.entry -> Str`. The view lowerer's
     // `JavascriptImportmapTags` rewrite emits Send calls on
     // `Importmap` (used to be `Importmap::PINS` const access);
     // the typer needs to resolve them or the body has untyped
-    // sub-expressions and the residual ratchet trips.
+    // sub-expressions and the residual ratchet trips. Sym keys
+    // mirror the lowerer's emit so `p[:name]` access types
+    // correctly in the spinel ViewHelpers.javascript_importmap_tags
+    // helper that walks the array.
     let mut im = crate::analyze::ClassInfo::default();
-    let pin_hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let pin_hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
     im.class_methods.insert(
         Symbol::from("pins"),
         fn_sig(vec![], Ty::Array { elem: Box::new(pin_hash_ty) }),
