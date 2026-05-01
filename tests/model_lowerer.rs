@@ -548,18 +548,19 @@ fn lowered_real_blog_typing_residual() {
 
     // Current breakdown (real-blog, 15 classes):
     //   - models: 0 (typing arc complete)
-    //   - views: ~28 (mostly form_with block-param `form` — needs
-    //     FormBuilder registration + typer extension to read
-    //     Ty::Fn::block when binding block param types)
-    //   - controllers: ~50 (typer-feature gaps — block-param
-    //     inference for sort_by/each, ivar tracking through
-    //     filter targets that set @article etc.)
+    //   - views: ~4 (one-off layout/comments edge cases)
+    //   - controllers: ~31 (mostly nested-resource ivar typing —
+    //     CommentsController references @article without a set_*
+    //     filter target the lowerer can analyze; needs cross-resource
+    //     heuristic or filter-body propagation. Plus a few
+    //     `params.expect(...).to_h` chains where the inner
+    //     `params.expect` lowered to a self-Send by mistake.)
     //
     // Tracker, not a hard target — fail loud on regression. Headroom
-    // over the current measurement (78) so small organic growth
+    // over the current measurement (35) so small organic growth
     // doesn't fail before the next session.
     // Run `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect.
-    const CEILING: usize = 100;
+    const CEILING: usize = 50;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog — \

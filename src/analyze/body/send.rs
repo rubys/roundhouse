@@ -93,6 +93,25 @@ impl<'a> BodyTyper<'a> {
                     _ => None,
                 }
             }
+            // Generic class-registry lookup: when the method is
+            // registered with a Ty::Fn whose `block` field is set, use
+            // that as the block-param type. Lets framework stubs
+            // declare what their block yields (form_with → FormBuilder,
+            // ErrorCollection.each → Str) without hardcoding each one
+            // in this match. Single-param yield only — multi-param
+            // destructure isn't expressible in Ty::Fn::block today.
+            Ty::Class { id, .. } => {
+                let cls = self.classes().get(id)?;
+                let sig = cls
+                    .instance_methods
+                    .get(method)
+                    .or_else(|| cls.class_methods.get(method))?;
+                if let Ty::Fn { block: Some(block_ty), .. } = sig {
+                    Some(vec![(**block_ty).clone()])
+                } else {
+                    None
+                }
+            }
             // Union receivers (typically `T | Nil` from RBS optionals or
             // flow-sensitive ivar reads). Unwrap to the first concrete
             // container variant and recurse — `(Hash[K,V] | Nil).each

@@ -251,9 +251,16 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
 /// helpers like content_for_set). Args are mostly Untyped — refining
 /// per-helper is future work; the Str-typed return is what unblocks
 /// downstream typing.
-fn insert_framework_stubs(classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>) {
-    use crate::lower::typing::fn_sig;
+pub(crate) fn insert_framework_stubs(
+    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+) {
+    use crate::lower::typing::{fn_sig, fn_sig_with_block};
     use crate::ty::Ty;
+
+    let form_builder_ty = Ty::Class {
+        id: ClassId(Symbol::from("FormBuilder")),
+        args: vec![],
+    };
 
     // ViewHelpers — every output helper returns String; setters return Nil.
     let mut vh = crate::analyze::ClassInfo::default();
@@ -274,7 +281,6 @@ fn insert_framework_stubs(classes: &mut std::collections::HashMap<ClassId, crate
         "csrf_meta_tags",
         "csp_meta_tag",
         "yield_content",
-        "form_with",
         "fields_for",
         "label",
         "text_field",
@@ -302,6 +308,17 @@ fn insert_framework_stubs(classes: &mut std::collections::HashMap<ClassId, crate
             fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
         );
     }
+    // form_with yields a FormBuilder to its block — register with
+    // `block: Some(FormBuilder)` so the typer's block_params_for
+    // binds `|form|` to FormBuilder when encountered.
+    vh.class_methods.insert(
+        Symbol::from("form_with"),
+        fn_sig_with_block(
+            vec![(Symbol::from("opts"), untyped.clone())],
+            Some(form_builder_ty.clone()),
+            Ty::Str,
+        ),
+    );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(
@@ -368,6 +385,69 @@ fn insert_framework_stubs(classes: &mut std::collections::HashMap<ClassId, crate
         bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
     }
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
+
+    // FormBuilder — instance methods called on the block param `form`
+    // inside `form_with do |form| ... end`. Each helper renders one
+    // input/label/button and returns a string.
+    let mut fb = crate::analyze::ClassInfo::default();
+    let fb_inputs = [
+        "label",
+        "text_field",
+        "text_area",
+        "select",
+        "submit",
+        "hidden_field",
+        "checkbox",
+        "check_box",
+        "radio_button",
+        "number_field",
+        "email_field",
+        "password_field",
+        "date_field",
+        "datetime_field",
+        "file_field",
+        "url_field",
+        "color_field",
+        "range_field",
+        "phone_field",
+        "search_field",
+        "fields_for",
+        "object_name",
+    ];
+    for name in fb_inputs {
+        fb.instance_methods.insert(
+            Symbol::from(name),
+            fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
+        );
+    }
+    classes.insert(ClassId(Symbol::from("FormBuilder")), fb);
+
+    // ErrorCollection — what `record.errors` returns. `each` yields
+    // a String message (Spinel-shape: errors are stored as flat
+    // String messages, not ActiveModel::Error objects). `empty?`
+    // and `count` cover the common predicates view bodies use.
+    let mut ec = crate::analyze::ClassInfo::default();
+    ec.instance_methods.insert(
+        Symbol::from("each"),
+        fn_sig_with_block(vec![], Some(Ty::Str), Ty::Nil),
+    );
+    ec.instance_methods.insert(Symbol::from("empty?"), fn_sig(vec![], Ty::Bool));
+    ec.instance_methods.insert(Symbol::from("any?"), fn_sig(vec![], Ty::Bool));
+    ec.instance_methods.insert(Symbol::from("count"), fn_sig(vec![], Ty::Int));
+    ec.instance_methods.insert(Symbol::from("size"), fn_sig(vec![], Ty::Int));
+    ec.instance_methods.insert(Symbol::from("length"), fn_sig(vec![], Ty::Int));
+    ec.instance_methods.insert(
+        Symbol::from("full_messages"),
+        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+    );
+    ec.instance_methods.insert(
+        Symbol::from("[]"),
+        fn_sig(
+            vec![(Symbol::from("attr"), Ty::Sym)],
+            Ty::Array { elem: Box::new(Ty::Str) },
+        ),
+    );
+    classes.insert(ClassId(Symbol::from("ErrorCollection")), ec);
 }
 
 // ── view-name → module / arg / method helpers ────────────────────

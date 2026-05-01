@@ -66,6 +66,12 @@ pub fn lower_controllers_to_library_classes(
 
     let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
         std::collections::HashMap::new();
+    // Framework runtime stubs (ViewHelpers, RouteHelpers, Inflector,
+    // String, Broadcasts, FormBuilder, ErrorCollection). Same set
+    // the view lowerer registers — controller actions call into the
+    // same helpers (RouteHelpers.x_path from redirect_to rewrites,
+    // ErrorCollection from @article.errors checks).
+    crate::lower::view_to_library::insert_framework_stubs(&mut classes);
     // Self-info for each controller (its own synthesized methods).
     for (methods, controller) in &all_methods {
         let mut info = crate::analyze::ClassInfo::default();
@@ -91,12 +97,17 @@ pub fn lower_controllers_to_library_classes(
         classes.insert(id, info);
     }
 
-    let empty_ivars: std::collections::HashMap<Symbol, Ty> =
-        std::collections::HashMap::new();
     let mut out = Vec::new();
     for (mut methods, controller) in all_methods {
+        // Derive ivar bindings from Rails naming convention: an
+        // `XController` (e.g. ArticlesController) typically has a
+        // `set_x` before-action that assigns `@x = X.find(params[:id])`.
+        // Seed `@x: Class(X)` (singular) and `@xs: Array<Class(X)>`
+        // (plural) when a matching model is registered. Avoids
+        // analyzing filter-target bodies for ivar propagation.
+        let ivars = ivars_from_controller_naming(&controller.name, &classes);
         for method in &mut methods {
-            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            crate::lower::typing::type_method_body(method, &classes, &ivars);
         }
         out.push(LibraryClass {
             name: controller.name.clone(),
@@ -107,6 +118,32 @@ pub fn lower_controllers_to_library_classes(
         });
     }
     out
+}
+
+fn ivars_from_controller_naming(
+    controller_name: &ClassId,
+    classes: &std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+) -> std::collections::HashMap<Symbol, Ty> {
+    let mut ivars = std::collections::HashMap::new();
+    let raw = controller_name.0.as_str();
+    let Some(stem) = raw.strip_suffix("Controller") else {
+        return ivars;
+    };
+    // `Articles` → singular `Article`. Use the `singularize` helper
+    // (handles `Comments` → `Comment`, `Categories` → `Category`).
+    let plural_snake = crate::naming::snake_case(stem);
+    let singular_snake = crate::naming::singularize(&plural_snake);
+    let singular_class = crate::naming::camelize(&singular_snake);
+    let singular_id = ClassId(Symbol::from(singular_class.clone()));
+    if classes.contains_key(&singular_id) {
+        let owner_ty = Ty::Class { id: singular_id, args: vec![] };
+        ivars.insert(Symbol::from(singular_snake.clone()), owner_ty.clone());
+        ivars.insert(
+            Symbol::from(plural_snake),
+            Ty::Array { elem: Box::new(owner_ty) },
+        );
+    }
+    ivars
 }
 
 /// Single-controller entry point — kept for tests and call sites that
