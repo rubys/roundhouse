@@ -28,6 +28,7 @@ pub mod persistence;
 pub mod controller_to_library;
 pub mod controller_walk;
 pub mod fixture_to_library;
+pub mod importmap_to_library;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
@@ -52,6 +53,7 @@ pub use model_to_library::{
     lower_models_with_registry,
 };
 pub use fixture_to_library::{lower_fixtures_to_library_classes, rewrite_fixture_calls};
+pub use importmap_to_library::lower_importmap_to_library_class;
 pub use routes_to_library::lower_routes_to_library_class;
 pub use schema_to_library::lower_schema_to_library_class;
 pub use test_module_to_library::{

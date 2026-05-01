@@ -183,6 +183,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
+    if let Some(lc) = crate::lower::lower_importmap_to_library_class(app) {
+        files.push(library::emit_class_file(
+            &lc,
+            app,
+            PathBuf::from("app/importmap.ts"),
+        ));
+    }
+
     for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
