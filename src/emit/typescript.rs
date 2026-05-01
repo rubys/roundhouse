@@ -379,13 +379,35 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // reader carries the type via its `() -> T` signature; body type
     // is the next-best source; final fallback is `any`).
     let mut fields: Vec<(String, String)> = Vec::new();
+    let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
             let ty = match m.signature.as_ref() {
                 Some(Ty::Fn { ret, .. }) => ts_ty(ret),
                 _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
             };
+            field_names_seen.insert(m.name.as_str().to_string());
             fields.push((m.name.as_str().to_string(), ty));
+        }
+    }
+
+    // Pre-walk every instance-method body looking for `@ivar = …`
+    // assignments that aren't already declared as attr_readers.
+    // TypeScript strict-mode requires field declarations for
+    // `this.foo` writes; controllers (which assign action-locals like
+    // `@article` for the view to read) and tests (which assign
+    // fixture-helpers at setup time) are the producers. Type comes
+    // from the assignment RHS; falls back to `any` when the analyzer
+    // didn't infer one.
+    let mut ivar_assignments: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    for m in &class.methods {
+        if matches!(m.receiver, MethodReceiver::Instance) {
+            collect_ivar_assignments(&m.body, &mut ivar_assignments);
+        }
+    }
+    for (name, ty) in ivar_assignments {
+        if field_names_seen.insert(name.clone()) {
+            fields.push((name, ts_ty(&ty)));
         }
     }
 
@@ -690,6 +712,150 @@ pub fn emit_module(methods: &[crate::dialect::MethodDef]) -> Result<String, Stri
 /// emitted `export function <x>` parses.
 pub(super) fn escape_for_function_name(raw: &str) -> String {
     escape_reserved(&crate::emit::typescript::library::sanitize_identifier(raw))
+}
+
+/// Walk an Expr collecting every `@ivar = value` assignment, keyed
+/// by the ivar name. Later assignments overwrite earlier ones (keeps
+/// the most-narrowed type when the body assigns the same ivar
+/// multiple places). Used by `emit_library_class` to synthesize
+/// `name: type;` field declarations for ivars that aren't otherwise
+/// declared via attr_reader.
+fn collect_ivar_assignments(
+    e: &crate::expr::Expr,
+    out: &mut indexmap::IndexMap<String, Ty>,
+) {
+    use crate::expr::{ExprNode, InterpPart, LValue};
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            // Type from the RHS, falling back to `any` (Ty::Untyped)
+            // when the analyzer didn't infer one.
+            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            out.insert(name.as_str().to_string(), ty);
+            collect_ivar_assignments(value, out);
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_ivar_assignments(recv, out);
+            }
+            collect_ivar_assignments(value, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_ivar_assignments(r, out);
+            }
+            for a in args {
+                collect_ivar_assignments(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_assignments(b, out);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            collect_ivar_assignments(fun, out);
+            for a in args {
+                collect_ivar_assignments(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_assignments(b, out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                collect_ivar_assignments(k, out);
+                collect_ivar_assignments(v, out);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for el in elements {
+                collect_ivar_assignments(el, out);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let InterpPart::Expr { expr } = p {
+                    collect_ivar_assignments(expr, out);
+                }
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_ivar_assignments(left, out);
+            collect_ivar_assignments(right, out);
+        }
+        ExprNode::Let { value, body, .. } => {
+            collect_ivar_assignments(value, out);
+            collect_ivar_assignments(body, out);
+        }
+        ExprNode::Lambda { body, .. } => collect_ivar_assignments(body, out),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_ivar_assignments(cond, out);
+            collect_ivar_assignments(then_branch, out);
+            collect_ivar_assignments(else_branch, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_ivar_assignments(scrutinee, out);
+            for arm in arms {
+                collect_ivar_assignments(&arm.body, out);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for sub in exprs {
+                collect_ivar_assignments(sub, out);
+            }
+        }
+        ExprNode::Yield { args } => {
+            for a in args {
+                collect_ivar_assignments(a, out);
+            }
+        }
+        ExprNode::Raise { value } => collect_ivar_assignments(value, out),
+        ExprNode::RescueModifier { expr, fallback } => {
+            collect_ivar_assignments(expr, out);
+            collect_ivar_assignments(fallback, out);
+        }
+        ExprNode::Return { value } => collect_ivar_assignments(value, out),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_ivar_assignments(body, out);
+            for r in rescues {
+                collect_ivar_assignments(&r.body, out);
+            }
+            if let Some(eb) = else_branch {
+                collect_ivar_assignments(eb, out);
+            }
+            if let Some(ensure_b) = ensure {
+                collect_ivar_assignments(ensure_b, out);
+            }
+        }
+        ExprNode::Next { value } => {
+            if let Some(v) = value {
+                collect_ivar_assignments(v, out);
+            }
+        }
+        ExprNode::MultiAssign { value, .. } => collect_ivar_assignments(value, out),
+        ExprNode::While { cond, body, .. } => {
+            collect_ivar_assignments(cond, out);
+            collect_ivar_assignments(body, out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin {
+                collect_ivar_assignments(b, out);
+            }
+            if let Some(e2) = end {
+                collect_ivar_assignments(e2, out);
+            }
+        }
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for a in args {
+                    collect_ivar_assignments(a, out);
+                }
+            }
+        }
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
+    }
 }
 
 /// the list below is reserved in TS but commonly used as a Rails-side
