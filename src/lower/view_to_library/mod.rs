@@ -319,6 +319,14 @@ pub(crate) fn insert_framework_stubs(
             Ty::Str,
         ),
     );
+    // Layout slot helpers — `content_for_get(:title)` / `get_slot(:title)`
+    // return the previously-stored String; counterpart to content_for_set.
+    for name in ["content_for_get", "get_slot"] {
+        vh.class_methods.insert(
+            Symbol::from(name),
+            fn_sig(vec![(Symbol::from("name"), Ty::Sym)], Ty::Str),
+        );
+    }
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(
@@ -336,7 +344,13 @@ pub(crate) fn insert_framework_stubs(
     // catch-all "any method on RouteHelpers returns String" would
     // need typer support that doesn't exist yet.
     let mut rh = crate::analyze::ClassInfo::default();
-    for stem in ["article", "articles", "comment", "comments", "root", "new_article", "edit_article"] {
+    let route_stems = [
+        "article", "articles", "comment", "comments", "root",
+        "new_article", "edit_article", "new_comment", "edit_comment",
+        "article_comment", "article_comments", "new_article_comment",
+        "edit_article_comment",
+    ];
+    for stem in route_stems {
         for suffix in ["path", "url"] {
             let name = format!("{stem}_{suffix}");
             rh.class_methods.insert(

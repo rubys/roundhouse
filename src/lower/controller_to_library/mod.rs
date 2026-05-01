@@ -32,7 +32,7 @@ use crate::dialect::{
     Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass, MethodDef,
     MethodReceiver, Param,
 };
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_to};
@@ -97,17 +97,32 @@ pub fn lower_controllers_to_library_classes(
         classes.insert(id, info);
     }
 
+    // Ivar bindings: `@params` is framework-guaranteed (the lowerer
+    // itself rewrites bare `params` → `@params` in action bodies, so
+    // every controller has it; ActionController's runtime constructs
+    // a Hash-shaped Parameters object). This isn't a naming
+    // heuristic — it's a fact about the framework that the lowerer
+    // KNOWS because it produced the @params reference.
+    //
+    // Other ivars (`@article`, `@articles`, `@comment`, ...) come
+    // from inlined filter bodies: when `set_article` runs
+    // `@article = Article.find(@params[:id].to_i)` at the top of
+    // an action, the body-typer's Seq walk picks it up and
+    // propagates the type to downstream reads. No naming guess.
+    let mut framework_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    framework_ivars.insert(
+        Symbol::from("params"),
+        Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Untyped),
+        },
+    );
+
     let mut out = Vec::new();
     for (mut methods, controller) in all_methods {
-        // Derive ivar bindings from Rails naming convention: an
-        // `XController` (e.g. ArticlesController) typically has a
-        // `set_x` before-action that assigns `@x = X.find(params[:id])`.
-        // Seed `@x: Class(X)` (singular) and `@xs: Array<Class(X)>`
-        // (plural) when a matching model is registered. Avoids
-        // analyzing filter-target bodies for ivar propagation.
-        let ivars = ivars_from_controller_naming(&controller.name, &classes);
         for method in &mut methods {
-            crate::lower::typing::type_method_body(method, &classes, &ivars);
+            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
         }
         out.push(LibraryClass {
             name: controller.name.clone(),
@@ -118,32 +133,6 @@ pub fn lower_controllers_to_library_classes(
         });
     }
     out
-}
-
-fn ivars_from_controller_naming(
-    controller_name: &ClassId,
-    classes: &std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
-) -> std::collections::HashMap<Symbol, Ty> {
-    let mut ivars = std::collections::HashMap::new();
-    let raw = controller_name.0.as_str();
-    let Some(stem) = raw.strip_suffix("Controller") else {
-        return ivars;
-    };
-    // `Articles` → singular `Article`. Use the `singularize` helper
-    // (handles `Comments` → `Comment`, `Categories` → `Category`).
-    let plural_snake = crate::naming::snake_case(stem);
-    let singular_snake = crate::naming::singularize(&plural_snake);
-    let singular_class = crate::naming::camelize(&singular_snake);
-    let singular_id = ClassId(Symbol::from(singular_class.clone()));
-    if classes.contains_key(&singular_id) {
-        let owner_ty = Ty::Class { id: singular_id, args: vec![] };
-        ivars.insert(Symbol::from(singular_snake.clone()), owner_ty.clone());
-        ivars.insert(
-            Symbol::from(plural_snake),
-            Ty::Array { elem: Box::new(owner_ty) },
-        );
-    }
-    ivars
 }
 
 /// Single-controller entry point — kept for tests and call sites that
@@ -169,22 +158,97 @@ fn build_methods(controller: &Controller) -> Vec<MethodDef> {
         .filter(|f| matches!(f.kind, FilterKind::Before))
         .collect();
 
-    if !publics.is_empty() || !before_filters.is_empty() {
+    // Inline before_action filter bodies into each action that
+    // fires them. This pushes the assignment to `@article` (etc) into
+    // the action body, where the body-typer's Seq walk picks it up
+    // and types subsequent reads correctly. Self-describing IR — no
+    // convention-based ivar naming heuristic needed downstream.
+    let publics_inlined: Vec<Action> = publics
+        .iter()
+        .map(|a| inline_before_filters(a, &before_filters, &privs))
+        .collect();
+
+    // Filter targets that are PURELY filter targets (called only via
+    // before_action, never from an action body) are dead after
+    // inlining — drop them from the emitted methods. Filter targets
+    // that are also called from action bodies (e.g., `_params`
+    // helpers — actually those don't appear in before_filters, but
+    // be defensive) stay.
+    let filter_target_names: std::collections::HashSet<&Symbol> =
+        before_filters.iter().map(|f| &f.target).collect();
+    let privs_kept: Vec<Action> = privs
+        .iter()
+        .filter(|a| !filter_target_names.contains(&a.name))
+        .cloned()
+        .collect();
+
+    if !publics_inlined.is_empty() {
+        // Filter dispatch is removed from process_action since the
+        // filters are now inlined directly into the actions; emit
+        // an empty filter list so the dispatcher just routes by
+        // action_name.
         methods.push(synthesize_process_action(
-            &before_filters,
-            &publics,
+            &[],
+            &publics_inlined,
             controller.name.0.clone(),
         ));
     }
 
-    for a in &publics {
+    for a in &publics_inlined {
         methods.push(action_to_method(a, controller, &privs, /*is_public=*/ true));
     }
-    for a in &privs {
+    for a in &privs_kept {
         methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false));
     }
 
     methods
+}
+
+/// Return a copy of `action` with every applicable before_action
+/// filter target's body prepended to the action body. A filter
+/// applies when its `only:` includes the action name, or its
+/// `except:` doesn't, or it has neither (unconditional).
+fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action]) -> Action {
+    let action_name = &action.name;
+    let mut prepended: Vec<Expr> = Vec::new();
+    for f in filters {
+        let applies = if !f.only.is_empty() {
+            f.only.contains(action_name)
+        } else if !f.except.is_empty() {
+            !f.except.contains(action_name)
+        } else {
+            true
+        };
+        if !applies {
+            continue;
+        }
+        // Look up the filter's target action by name in privs.
+        // (Filter targets are conventionally private actions; if the
+        // target isn't found, skip — could be a built-in framework
+        // helper we don't model.)
+        let Some(target) = privs.iter().find(|a| &a.name == &f.target) else {
+            continue;
+        };
+        match &*target.body.node {
+            ExprNode::Seq { exprs } => prepended.extend(exprs.iter().cloned()),
+            _ => prepended.push(target.body.clone()),
+        }
+    }
+    if prepended.is_empty() {
+        return action.clone();
+    }
+    // Compose: prepended filter stmts + action body stmts → new Seq.
+    let mut combined: Vec<Expr> = prepended;
+    match &*action.body.node {
+        ExprNode::Seq { exprs } => combined.extend(exprs.iter().cloned()),
+        _ => combined.push(action.body.clone()),
+    }
+    let mut new_action = action.clone();
+    new_action.body = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Seq { exprs: combined },
+    );
+    new_action
 }
 
 /// ApplicationController baseline — methods every action body may
@@ -271,9 +335,24 @@ fn action_to_method(
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
     // refinement to per-route param types can ride on a later
-    // routing-table-aware pass. Return type Nil: every action body
-    // terminates in render/redirect (or is implicit-render-synthesized
-    // to do so), and both helpers return Nil after side-effects.
+    // routing-table-aware pass.
+    //
+    // Return type:
+    //   - Public actions terminate in render/redirect (synthesized or
+    //     explicit) → Nil.
+    //   - Private `_params` helpers return the permitted params hash
+    //     (callers do `Model.new(comment_params)`); type as
+    //     Hash<Sym, Untyped>.
+    //   - Other private actions default to Nil; refine when a
+    //     forcing fixture surfaces.
+    let ret_ty = if !is_public && method_name.ends_with("_params") {
+        Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Untyped),
+        }
+    } else {
+        Ty::Nil
+    };
     let sig_params: Vec<(Symbol, Ty)> = params
         .iter()
         .map(|p| (p.name.clone(), Ty::Untyped))
@@ -283,7 +362,7 @@ fn action_to_method(
         receiver: MethodReceiver::Instance,
         params,
         body,
-        signature: Some(crate::lower::typing::fn_sig(sig_params, Ty::Nil)),
+        signature: Some(crate::lower::typing::fn_sig(sig_params, ret_ty)),
         effects: a.effects.clone(),
         enclosing_class: Some(controller.name.0.clone()),
     }
@@ -349,5 +428,76 @@ fn lower_action_body(
     let with_order = rewrite_order_to_sort_by(&with_no_includes);
     let with_params_to_h = rewrite_params_helpers_to_h(&with_order, privs);
     let with_destroy = rewrite_destroy_bang(&with_params_to_h);
-    rewrite_route_helpers(&with_destroy)
+    let with_routes = rewrite_route_helpers(&with_destroy);
+    // Some rewrites (rewrite_assoc_through_parent in particular)
+    // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The
+    // body-typer's Seq walker only propagates ivar bindings from
+    // immediate-child Assigns; nested Seqs swallow their own
+    // bindings. Splice nested Seqs into their parent so each
+    // assignment is visible to subsequent siblings.
+    flatten_seqs(&with_routes)
+}
+
+/// Splice nested `Seq` nodes into their parent: `Seq { ..., Seq {
+/// stmts }, ... }` becomes `Seq { ..., stmts..., ... }`. Recursive
+/// so deeper nesting flattens too.
+fn flatten_seqs(expr: &Expr) -> Expr {
+    use crate::expr::ExprNode;
+    fn flatten(e: &Expr) -> Expr {
+        let new_node = match &*e.node {
+            ExprNode::Seq { exprs } => {
+                let mut flat: Vec<Expr> = Vec::new();
+                for child in exprs.iter().map(flatten) {
+                    if let ExprNode::Seq { exprs: inner } = &*child.node {
+                        flat.extend(inner.iter().cloned());
+                    } else {
+                        flat.push(child);
+                    }
+                }
+                ExprNode::Seq { exprs: flat }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+                cond: flatten(cond),
+                then_branch: flatten(then_branch),
+                else_branch: flatten(else_branch),
+            },
+            ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
+                recv: recv.as_ref().map(flatten),
+                method: method.clone(),
+                args: args.iter().map(flatten).collect(),
+                block: block.as_ref().map(flatten),
+                parenthesized: *parenthesized,
+            },
+            ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+                fun: flatten(fun),
+                args: args.iter().map(flatten).collect(),
+                block: block.as_ref().map(flatten),
+            },
+            ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+                params: params.clone(),
+                block_param: block_param.clone(),
+                body: flatten(body),
+                block_style: *block_style,
+            },
+            ExprNode::Assign { target, value } => ExprNode::Assign {
+                target: target.clone(),
+                value: flatten(value),
+            },
+            // Leaves and other composites pass through unchanged for now —
+            // nested Seqs only come from the assoc rewrite and live at
+            // top-level positions inside Seq/If/Lambda bodies. Extend
+            // this when other rewrites introduce inner Seqs in different
+            // positions.
+            _ => return e.clone(),
+        };
+        Expr {
+            span: e.span,
+            node: Box::new(new_node),
+            ty: e.ty.clone(),
+            effects: e.effects.clone(),
+            leading_blank_line: e.leading_blank_line,
+            diagnostic: e.diagnostic.clone(),
+        }
+    }
+    flatten(expr)
 }

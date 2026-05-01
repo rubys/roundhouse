@@ -483,6 +483,14 @@ pub(super) fn hash_method(
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
+        // `Hash#to_h` is identity (returns self when called without a
+        // block; with a block, transforms entries — same shape).
+        // Common in controller bodies: `params.expect(...).to_h` to
+        // strip the strong-params wrapper.
+        "to_h" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
         // `Hash#map` / `Hash#collect` returns an Array — block yields
         // (k, v) and returns some U; result is Array[U].
         "map" | "collect" => Ty::Array {

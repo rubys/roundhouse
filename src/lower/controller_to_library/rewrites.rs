@@ -473,7 +473,7 @@ pub(super) fn rewrite_params_helpers_to_h(expr: &Expr, privs: &[Action]) -> Expr
     if helper_names.is_empty() {
         return expr.clone();
     }
-    map_expr(expr, &|e| match &*e.node {
+    let wrapped = map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block: None, .. }
             if args.is_empty() && helper_names.iter().any(|h| h == method) =>
         {
@@ -487,6 +487,22 @@ pub(super) fn rewrite_params_helpers_to_h(expr: &Expr, privs: &[Action]) -> Expr
                     parenthesized: false,
                 },
             ))
+        }
+        _ => None,
+    });
+    // Collapse double `.to_h.to_h` — the wrapper above is unconditional;
+    // if the source already had `article_params.to_h`, the wrapper turns
+    // it into `article_params.to_h.to_h`. Strip the redundant outer call.
+    map_expr(&wrapped, &|e| match &*e.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
+            if method.as_str() == "to_h" && args.is_empty() =>
+        {
+            if let ExprNode::Send { method: inner_method, .. } = &*inner.node {
+                if inner_method.as_str() == "to_h" {
+                    return Some((*inner).clone());
+                }
+            }
+            None
         }
         _ => None,
     })
