@@ -45,6 +45,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
 
+    if let Some(schema_lc) = crate::lower::lower_schema_to_library_class(&app.schema) {
+        files.push(library::emit_class_file(
+            &schema_lc,
+            app,
+            PathBuf::from("src/schema.ts"),
+        ));
+    }
+
     for model in &app.models {
         let lc = crate::lower::lower_model_to_library_class(model, &app.schema);
         let stem = crate::naming::snake_case(lc.name.0.as_str());
