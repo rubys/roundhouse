@@ -15,8 +15,12 @@
 use std::path::Path;
 
 use roundhouse::dialect::{LibraryClass, MethodReceiver};
+use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
-use roundhouse::lower::{lower_model_to_library_class, lower_models_to_library_classes};
+use roundhouse::lower::{
+    class_info_from_library_class, lower_model_to_library_class,
+    lower_models_to_library_classes, lower_view_to_library_class,
+};
 
 fn fixture_path() -> &'static Path {
     Path::new("fixtures/real-blog")
@@ -443,9 +447,48 @@ fn collect_untyped_lowered(
 fn lowered_real_blog_models_typing_residual() {
     let app = ingest_app(fixture_path()).expect("ingest real-blog");
 
+    // Lower views first; build a ClassInfo registry entry for each
+    // distinct view module (e.g. Views::Articles), keyed by both the
+    // full ClassId and the last-segment alias the body-typer uses for
+    // Const-path dispatch (`Const { path: [Views, Articles] }` looks
+    // up "Articles", not "Views::Articles"). Folds methods across
+    // sibling view files into one info per module.
+    use std::collections::HashMap;
+    let mut view_infos: HashMap<ClassId, roundhouse::analyze::ClassInfo> = HashMap::new();
+    for view in &app.views {
+        let lc = lower_view_to_library_class(view, &app);
+        let info = view_infos.entry(lc.name.clone()).or_default();
+        for m in &lc.methods {
+            if let Some(sig) = &m.signature {
+                match m.receiver {
+                    MethodReceiver::Class => {
+                        info.class_methods.insert(m.name.clone(), sig.clone());
+                    }
+                    MethodReceiver::Instance => {
+                        info.instance_methods.insert(m.name.clone(), sig.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> = Vec::new();
+    for (full_id, info) in view_infos {
+        // Last-segment alias for the typer's Const-path resolver.
+        let raw = full_id.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        if last != raw {
+            let mut alias = roundhouse::analyze::ClassInfo::default();
+            alias.class_methods = info.class_methods.clone();
+            alias.instance_methods = info.instance_methods.clone();
+            extras.push((ClassId(Symbol::from(last)), alias));
+        }
+        extras.push((full_id, info));
+    }
+    let _ = class_info_from_library_class; // silence unused if later we only build inline
+
     // Use the bulk entry so cross-model dispatch (Article calling
     // Comment.where, etc.) resolves through the shared registry.
-    let lcs = lower_models_to_library_classes(&app.models, &app.schema);
+    let lcs = lower_models_to_library_classes(&app.models, &app.schema, extras);
 
     let mut all_untyped: Vec<String> = Vec::new();
     for lc in &lcs {
@@ -467,13 +510,12 @@ fn lowered_real_blog_models_typing_residual() {
         }
     }
 
-    // Tracker, not a hard target — fail loud on regression, ratchet
-    // down as registry scope expands. Current floor: 6 sites, all
-    // `Views::*.<view_name>(...)` dispatch from broadcasts callbacks.
-    // Next bracket needs the lowerer to consume views too so view
-    // modules land in the class registry. Run with `DUMP_RESIDUAL=1
-    // cargo test ... -- --nocapture` to inspect the residual list.
-    const CEILING: usize = 20;
+    // Floor reached on real-blog: 0 untyped sub-exprs across all 3
+    // lowered models when the registry includes view modules
+    // (Views::*) and the Broadcasts framework stub. Tracker, not a
+    // hard target — fail loud on regression. Run with
+    // `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect.
+    const CEILING: usize = 0;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog models — \

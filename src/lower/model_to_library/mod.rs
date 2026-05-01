@@ -44,7 +44,17 @@ use self::validations::push_validate_method;
 /// sharing one class registry so cross-model dispatch (`Article` calling
 /// `Comment.where(...)`) types correctly. Use this for whole-app emit;
 /// the single-model entry point below is for tests/probes.
-pub fn lower_models_to_library_classes(models: &[Model], schema: &Schema) -> Vec<LibraryClass> {
+///
+/// `extra_class_infos` lets callers register additional ClassInfo
+/// entries (e.g. lowered view modules so `Views::Articles.article(...)`
+/// dispatches type) — passed as flat `(ClassId, ClassInfo)` pairs;
+/// callers that want both the full path and a last-segment alias
+/// should insert both.
+pub fn lower_models_to_library_classes(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> Vec<LibraryClass> {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
         let methods = build_methods(model, schema);
@@ -61,6 +71,12 @@ pub fn lower_models_to_library_classes(models: &[Model], schema: &Schema) -> Vec
     // but not part of any model. Mirrors runtime/ruby/broadcasts.rb's
     // public surface (each takes a kwargs hash and returns Nil).
     classes.insert(ClassId(Symbol::from("Broadcasts")), broadcasts_class_info());
+    // Caller-supplied entries (typically the lowered view modules,
+    // registered under both their full ClassId and a last-segment
+    // alias for the typer's last-segment Const lookup).
+    for (id, info) in extra_class_infos {
+        classes.insert(id, info);
+    }
 
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
@@ -76,6 +92,28 @@ pub fn lower_models_to_library_classes(models: &[Model], schema: &Schema) -> Vec
         });
     }
     out
+}
+
+/// Build a `ClassInfo` for a lowered LibraryClass — used to feed
+/// view modules / runtime-class lowerings into the model lowerer's
+/// shared registry. Each `MethodDef.signature` becomes an entry in
+/// `class_methods` (for `MethodReceiver::Class`) or `instance_methods`
+/// (for `MethodReceiver::Instance`).
+pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::ClassInfo {
+    let mut info = crate::analyze::ClassInfo::default();
+    for m in &lc.methods {
+        if let Some(sig) = &m.signature {
+            match m.receiver {
+                MethodReceiver::Instance => {
+                    info.instance_methods.insert(m.name.clone(), sig.clone());
+                }
+                MethodReceiver::Class => {
+                    info.class_methods.insert(m.name.clone(), sig.clone());
+                }
+            }
+        }
+    }
+    info
 }
 
 /// Single-model entry point: lower one `Model` (Rails-shape, with DSL
