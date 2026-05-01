@@ -553,6 +553,15 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
     let mut refs: BTreeSet<String> = BTreeSet::new();
     for m in &lc.methods {
         collect_class_refs(&m.body, &mut refs);
+        // Also harvest class references from the method's signature
+        // (param types + return type). View functions like
+        // `function article(article: Article): string` mention
+        // `Article` only as a type annotation; without this, the
+        // body walker misses it and the file emits without an
+        // import → TS2304 Cannot find name 'Article'.
+        if let Some(sig) = &m.signature {
+            collect_ty_class_refs(sig, &mut refs);
+        }
     }
     if let Some(p) = &lc.parent {
         let raw = p.0.as_str();
@@ -769,6 +778,48 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
 /// the leading segment of a `path` is what gets imported (Ruby's
 /// `Foo::Bar` uses `Foo` as the resolved name; we don't import inner
 /// segments).
+/// Walk a Ty collecting `Ty::Class { id }` first-segment names and
+/// the same from any nested types. Used to surface model references
+/// that appear only in method signatures (param types, return types)
+/// — the body walker doesn't see these, so a view like
+/// `def self.article(article)` typed as `(Article) -> String`
+/// would have no Const ref to Article anywhere in the IR's body.
+fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Class { id, args } => {
+            // Take the first `::`-separated segment, matching how
+            // `collect_class_refs` handles Const paths.
+            let raw = id.0.as_str();
+            let first = raw.split("::").next().unwrap_or(raw);
+            out.insert(first.to_string());
+            for a in args {
+                collect_ty_class_refs(a, out);
+            }
+        }
+        Ty::Array { elem } => collect_ty_class_refs(elem, out),
+        Ty::Hash { key, value } => {
+            collect_ty_class_refs(key, out);
+            collect_ty_class_refs(value, out);
+        }
+        Ty::Union { variants } => {
+            for v in variants {
+                collect_ty_class_refs(v, out);
+            }
+        }
+        Ty::Fn { params, block, ret, .. } => {
+            for p in params {
+                collect_ty_class_refs(&p.ty, out);
+            }
+            if let Some(b) = block {
+                collect_ty_class_refs(b, out);
+            }
+            collect_ty_class_refs(ret, out);
+        }
+        _ => {}
+    }
+}
+
 fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
     use crate::expr::LValue;
     match &*e.node {
