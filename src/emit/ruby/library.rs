@@ -46,6 +46,13 @@ pub(super) fn emit_module_file(
     app: &App,
     out_path: PathBuf,
 ) -> EmittedFile {
+    if funcs.is_empty() {
+        // No functions in the module — emit a placeholder file with
+        // just the module wrapper. Callers can guard upstream by
+        // checking the lowerer's output and not calling this when
+        // they know the module would be empty.
+        return EmittedFile { path: out_path, content: String::new() };
+    }
     let lc = synthesize_module_lc(funcs);
     emit_library_class_decl(&lc, app, out_path)
 }
@@ -125,7 +132,7 @@ pub(super) fn emit_library_class_decl(
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for path in &const_paths {
         if let Some(anchor) = require_path_for_body_const(path, app, name) {
-            if anchor != self_anchor {
+            if anchor != self_anchor && !is_same_dir(&out_dir, &anchor) {
                 body_requires.insert(relpath(&out_dir, &anchor));
             }
         }
@@ -206,10 +213,16 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if raw == "ActiveRecord::Base" {
         return Some("runtime/active_record".to_string());
     }
+    if raw == "ActionController::Base" || raw == "ActionController::API" {
+        return Some("runtime/action_controller".to_string());
+    }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
     {
         return Some(format!("app/models/{}", snake_case(raw)));
+    }
+    if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
+        return Some(format!("app/controllers/{}", snake_case(raw)));
     }
     None
 }
@@ -235,15 +248,20 @@ fn require_path_for_body_const(
             .iter()
             .any(|lc| lc.name.0.as_str() == first.as_str())
     {
-        return None;
+        return Some(format!("app/models/{}", snake_case(first)));
+    }
+    if app.controllers.iter().any(|c| c.name.0.as_str() == first.as_str()) {
+        return Some(format!("app/controllers/{}", snake_case(first)));
     }
     match first.as_str() {
-        "Views" => {
-            let plural = path.get(1)?;
-            let plural_snake = snake_case(plural);
-            let singular_snake = singularize(&plural_snake);
-            Some(format!("app/views/{plural_snake}/_{singular_snake}"))
-        }
+        // `Views::*` refs always go through the per-app aggregator at
+        // `app/views.rb` (spinel-blog convention; loads all view
+        // modules so any `Views::X.method` resolves regardless of
+        // which template the method lives in). Per-template requires
+        // would be wrong because the same `Views::X` const can host
+        // methods from multiple files (`_article.rb`, `index.rb`,
+        // `show.rb` all re-open `module Views::Articles`).
+        "Views" => Some("app/views".to_string()),
         // Runtime modules under `runtime/`. ViewHelpers still ships
         // hand-written; RouteHelpers is now generated into
         // `app/route_helpers.rb` from `app.routes` so consumers
@@ -255,6 +273,20 @@ fn require_path_for_body_const(
         "RouteHelpers" => Some("app/route_helpers".to_string()),
         _ => None,
     }
+}
+
+/// True when `to_anchor` lives in `from_dir`. Used to drop body-ref
+/// requires for same-dir siblings — Ruby's `require_relative` for a
+/// bare-name target works, but the load order isn't guaranteed when
+/// the file just lazily references the sibling at call time. Same-
+/// dir body refs are skipped (loader picks them up); cross-dir refs
+/// emit an explicit require.
+fn is_same_dir(from_dir: &Path, to_anchor: &str) -> bool {
+    let to_dir: String = to_anchor
+        .rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default();
+    from_dir.to_str().unwrap_or("") == to_dir
 }
 
 /// Compute a `require_relative`-style relative path from `from_dir` to

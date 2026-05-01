@@ -108,10 +108,6 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
 /// every target.
 pub fn emit_lowered_schema(app: &App) -> EmittedFile {
     let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
-    if funcs.is_empty() {
-        // Empty schema → empty module file.
-        return schema::emit_lowered_schema(&app.schema);
-    }
     library::emit_module_file(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 

@@ -1,15 +1,8 @@
-//! `config/importmap.rb` emission. Two modes:
-//!
-//! - `emit_importmap`: round-trip Rails-shape — emits `pin "name"` /
-//!   `pin "name", to: "path"` DSL calls, the same form Rails parses.
-//!
-//! - `emit_lowered_importmap`: spinel-shape — emits a frozen
-//!   `Importmap::PINS` array of `{name:, path:}` hashes plus an
-//!   `ENTRY` constant. Mirrors `src/importmap.rs::PINS` on the Rust
-//!   target. The runtime's `ViewHelpers.javascript_importmap_tags`
-//!   reads PINS to render modulepreloads + the importmap script's
-//!   import map JSON. No DSL parsing at runtime; the lowerer is the
-//!   one that ingested `config/importmap.rb`.
+//! `config/importmap.rb` round-trip emission — emits `pin "name"` /
+//! `pin "name", to: "path"` DSL calls, the same form Rails parses.
+//! The lowered/spinel-shape variant retired 2026-05-01: superseded
+//! by `library::emit_module_file` consuming the universal
+//! `lower_importmap_to_library_functions` output.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -41,31 +34,9 @@ pub(super) fn emit_importmap(importmap: &crate::app::Importmap) -> EmittedFile {
     }
 }
 
-/// Spinel-shape importmap: emits a frozen array of `{name:, path:}`
-/// hashes plus the entry-point name as constants under `Importmap`.
-/// The runtime's `ViewHelpers.javascript_importmap_tags(pins, entry)`
-/// reads these to render modulepreloads + the `<script type="importmap">`
-/// JSON. Mirrors `src/emit/rust/importmap.rs::PINS`.
-pub(super) fn emit_lowered_importmap(app: &crate::App) -> EmittedFile {
-    let mut s = String::new();
-    writeln!(s, "module Importmap").unwrap();
-    writeln!(s, "  PINS = [").unwrap();
-    if let Some(importmap) = &app.importmap {
-        for pin in &importmap.pins {
-            writeln!(
-                s,
-                "    {{ name: {:?}, path: {:?} }},",
-                pin.name, pin.path
-            )
-            .unwrap();
-        }
-    }
-    writeln!(s, "  ].freeze").unwrap();
-    writeln!(s).unwrap();
-    writeln!(s, "  ENTRY = \"application\".freeze").unwrap();
-    writeln!(s, "end").unwrap();
-    EmittedFile {
-        path: PathBuf::from("config/importmap.rb"),
-        content: s,
-    }
-}
+// emit_lowered_importmap retired 2026-05-01 — superseded by the
+// universal `library::emit_module_file` consuming
+// `lower_importmap_to_library_functions`. The previous shape
+// (`Importmap::PINS` constant + `Importmap::ENTRY` constant) was
+// reconciled to the more general method-based form
+// (`Importmap.pins`, `Importmap.entry`) shared with TS.

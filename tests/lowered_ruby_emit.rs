@@ -230,13 +230,17 @@ fn article_emits_parent_runtime_and_view_requires() {
     // Article needs:
     //   - parent: ApplicationRecord (same dir)
     //   - Broadcasts (runtime module)
-    //   - Views::Articles (view partial)
+    //   - Views (per-app aggregator that loads every view module)
     // Sibling `Comment` is autoloaded; no require for it.
+    // The aggregator pattern (vs per-template requires) lets any
+    // `Views::X.method` call resolve regardless of which template
+    // file the method lives in — same as spinel-blog's hand-written
+    // `app/views.rb`.
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
     assert!(src.contains("require_relative \"application_record\""), "{src}");
     assert!(src.contains("require_relative \"../../runtime/broadcasts\""), "{src}");
-    assert!(src.contains("require_relative \"../views/articles/_article\""), "{src}");
+    assert!(src.contains("require_relative \"../views\""), "{src}");
     assert!(!src.contains("require_relative \"comment\""), "{src}");
 }
 
@@ -247,11 +251,10 @@ fn comment_emits_view_require_for_own_partial_and_parent() {
     // `Views::Articles` via the rewritten parent-cascade in
     // `after_<x>_commit` (Rails-side `article.broadcast_replace_to(...)`
     // → spinel `Broadcasts.replace(stream:, target:, html: Views::Articles.article(parent))`).
-    // Both partial requires are present.
+    // Both resolve through the per-app aggregator at `app/views.rb`.
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
-    assert!(src.contains("require_relative \"../views/comments/_comment\""), "{src}");
-    assert!(src.contains("require_relative \"../views/articles/_article\""), "{src}");
+    assert!(src.contains("require_relative \"../views\""), "{src}");
 }
 
 #[test]

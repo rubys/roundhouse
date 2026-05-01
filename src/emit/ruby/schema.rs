@@ -87,80 +87,10 @@ fn emit_column(col: &Column) -> String {
     }
 }
 
-/// Emit `config/schema.rb` in spinel-blog shape: a `Schema` module
-/// containing a frozen `STATEMENTS` array of raw `CREATE TABLE` /
-/// `CREATE INDEX` strings, plus a `self.load!` that walks them through
-/// the adapter. Foreign-key constraints are dropped — the framework
-/// enforces relationships at the app layer (e.g. `belongs_to`'s
-/// `Article.find_by(id: @article_id)` lookup), not at the DB layer.
-pub(super) fn emit_lowered_schema(schema: &Schema) -> EmittedFile {
-    let mut s = String::new();
-    writeln!(s, "module Schema").unwrap();
-    writeln!(s, "  STATEMENTS = [").unwrap();
-    for table in schema.tables.values() {
-        emit_create_table_heredoc(&mut s, table);
-    }
-    for table in schema.tables.values() {
-        for idx in &table.indexes {
-            emit_create_index_line(&mut s, table, idx);
-        }
-    }
-    writeln!(s, "  ].freeze").unwrap();
-    writeln!(s).unwrap();
-    writeln!(s, "  def self.load!(adapter)").unwrap();
-    writeln!(s, "    STATEMENTS.each {{ |sql| adapter.execute_ddl(sql) }}").unwrap();
-    writeln!(s, "  end").unwrap();
-    writeln!(s, "end").unwrap();
-    EmittedFile { path: PathBuf::from("config/schema.rb"), content: s }
-}
-
-fn emit_create_table_heredoc(out: &mut String, table: &Table) {
-    writeln!(out, "    <<~SQL,").unwrap();
-    writeln!(out, "      CREATE TABLE IF NOT EXISTS {} (", table.name.as_str()).unwrap();
-    writeln!(out, "        id INTEGER PRIMARY KEY AUTOINCREMENT,").unwrap();
-    let non_pk: Vec<&Column> = table.columns.iter().filter(|c| !c.primary_key).collect();
-    for (i, col) in non_pk.iter().enumerate() {
-        let comma = if i + 1 < non_pk.len() { "," } else { "" };
-        let null_clause = if col.nullable { "" } else { " NOT NULL" };
-        writeln!(
-            out,
-            "        {} {}{}{}",
-            col.name.as_str(),
-            sqlite_type(&col.col_type),
-            null_clause,
-            comma,
-        )
-        .unwrap();
-    }
-    writeln!(out, "      )").unwrap();
-    writeln!(out, "    SQL").unwrap();
-}
-
-fn emit_create_index_line(out: &mut String, table: &Table, idx: &Index) {
-    let cols: Vec<&str> = idx.columns.iter().map(|c| c.as_str()).collect();
-    let unique = if idx.unique { "UNIQUE " } else { "" };
-    writeln!(
-        out,
-        "    \"CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({})\",",
-        idx.name.as_str(),
-        table.name.as_str(),
-        cols.join(", "),
-    )
-    .unwrap();
-}
-
-fn sqlite_type(ct: &ColumnType) -> &'static str {
-    match ct {
-        ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => "INTEGER",
-        ColumnType::Float => "REAL",
-        ColumnType::Decimal { .. } => "NUMERIC",
-        ColumnType::Boolean => "INTEGER",
-        ColumnType::Binary => "BLOB",
-        ColumnType::String { .. }
-        | ColumnType::Text
-        | ColumnType::Date
-        | ColumnType::DateTime
-        | ColumnType::Time
-        | ColumnType::Json => "TEXT",
-    }
-}
+// emit_lowered_schema retired 2026-05-01 — superseded by the
+// universal `library::emit_module_file` consuming
+// `lower_schema_to_library_functions`. The previous shape
+// (`Schema::STATEMENTS` constant + `Schema.load!(adapter)` method)
+// was reconciled to the more general method-based form
+// (`Schema.statements` returning the DDL list; consumer iterates)
+// shared with TS.

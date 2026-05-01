@@ -1,17 +1,14 @@
 //! `app/controllers/*.rb` emission: controller class, before-actions,
 //! actions, render targets.
 
-use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::super::EmittedFile;
 use super::expr::emit_expr;
-use super::library::walk_const_paths;
 use super::shared::{emit_indented_body, emit_leading_comments};
 use crate::App;
-use crate::dialect::{Action, Controller, Filter, FilterKind, LibraryClass, RenderTarget};
-use crate::ident::ClassId;
+use crate::dialect::{Action, Controller, Filter, FilterKind, RenderTarget};
 use crate::ident::Symbol;
 use crate::lower::lower_controller_to_library_class;
 use crate::naming::snake_case;
@@ -155,97 +152,9 @@ pub(super) fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
         .iter()
         .map(|c| {
             let lc = lower_controller_to_library_class(c);
-            emit_lowered_controller_decl(&lc, app)
+            let file_stem = snake_case(lc.name.0.as_str());
+            let out_path = PathBuf::from(format!("app/controllers/{file_stem}.rb"));
+            super::library::emit_library_class_decl(&lc, app, out_path)
         })
         .collect()
-}
-
-fn emit_lowered_controller_decl(lc: &LibraryClass, app: &App) -> EmittedFile {
-    let name = lc.name.0.as_str();
-    let file_stem = snake_case(name);
-    let mut s = String::new();
-
-    // Parent require — same-dir (application_controller) or
-    // runtime/action_controller for the framework base.
-    let mut requires: Vec<String> = Vec::new();
-    if let Some(parent) = lc.parent.as_ref() {
-        if let Some(p) = require_path_for_parent(parent, app) {
-            requires.push(p);
-        }
-    }
-
-    // Body-derived requires: per-model from `../models/<stem>`, plus
-    // a single `../views` aggregate when any Views::* const appears.
-    let mut const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
-    for m in &lc.methods {
-        walk_const_paths(&m.body, &mut const_paths);
-    }
-    let mut body_requires: BTreeSet<String> = BTreeSet::new();
-    let mut needs_views = false;
-    for path in &const_paths {
-        let Some(first) = path.first() else { continue };
-        if first == "Views" {
-            needs_views = true;
-            continue;
-        }
-        if app.models.iter().any(|m| m.name.0.as_str() == first.as_str()) {
-            let stem = snake_case(first);
-            body_requires.insert(format!("../models/{stem}"));
-        }
-    }
-    requires.extend(body_requires);
-    if needs_views {
-        requires.push("../views".to_string());
-    }
-
-    for r in &requires {
-        writeln!(s, "require_relative {r:?}").unwrap();
-    }
-    if !requires.is_empty() {
-        writeln!(s).unwrap();
-    }
-
-    let header = match lc.parent.as_ref() {
-        Some(p) => format!("class {name} < {}", p.0.as_str()),
-        None => format!("class {name}"),
-    };
-    writeln!(s, "{header}").unwrap();
-
-    let mut first = true;
-    for m in &lc.methods {
-        if !first {
-            writeln!(s).unwrap();
-        }
-        first = false;
-        let body = super::emit_method(m);
-        for line in body.lines() {
-            if line.is_empty() {
-                writeln!(s).unwrap();
-            } else {
-                writeln!(s, "  {line}").unwrap();
-            }
-        }
-    }
-
-    writeln!(s, "end").unwrap();
-
-    EmittedFile {
-        path: PathBuf::from(format!("app/controllers/{file_stem}.rb")),
-        content: s,
-    }
-}
-
-/// Resolve a parent class reference into a `require_relative` path.
-/// `ApplicationController` and other same-dir controllers resolve to
-/// the snake_case file stem (no leading directory). `ActionController::Base`
-/// lives in the runtime tree.
-fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
-    let raw = parent.0.as_str();
-    if raw == "ActionController::Base" {
-        return Some("../../runtime/action_controller".to_string());
-    }
-    if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
-        return Some(snake_case(raw));
-    }
-    None
 }
