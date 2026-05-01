@@ -22,6 +22,7 @@ use crate::App;
 use crate::ty::Ty;
 
 const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
+const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 
 mod expr;
 mod library;
@@ -63,6 +64,34 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc, app, out_path));
     }
 
+    // Test modules — bulk lower with shared registry (model + view +
+    // controller extras + framework stubs) so test bodies dispatch
+    // correctly. Output one `test/<stem>.test.ts` per test class
+    // plus a per-file `discover_tests(Class)` registration so node:test
+    // picks up every `test_*` method.
+    if !app.test_modules.is_empty() {
+        files.push(EmittedFile {
+            path: PathBuf::from("test/_runtime/minitest.ts"),
+            content: MINITEST_RUNTIME_SOURCE.to_string(),
+        });
+        let test_lcs = lower_test_modules_for_emit(app);
+        for lc in &test_lcs {
+            let stem = test_file_stem(lc.name.0.as_str());
+            let out_path = PathBuf::from(format!("test/{stem}.test.ts"));
+            let mut emitted = library::emit_class_file(lc, app, out_path.clone());
+            // Append the runtime registration. The walker emits the
+            // class declaration; node:test discovers tests via the
+            // discover_tests() call appended here.
+            emitted.content.push('\n');
+            emitted.content.push_str(&format!(
+                "import {{ discover_tests }} from \"./_runtime/minitest.js\";\n\
+                 discover_tests({});\n",
+                lc.name.0.as_str(),
+            ));
+            files.push(emitted);
+        }
+    }
+
     files
 }
 
@@ -70,6 +99,61 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 /// `layouts/application`) to the output path under `app/views/`.
 fn view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("app/views/{view_name}.ts"))
+}
+
+/// `ArticleTest` → `article` (strip Test suffix, snake_case). Used
+/// for the `test/<stem>.test.ts` output path so the file name reads
+/// naturally without redundant `_test_test`.
+fn test_file_stem(class_name: &str) -> String {
+    let stem = class_name.strip_suffix("Test").unwrap_or(class_name);
+    crate::naming::snake_case(stem)
+}
+
+/// Lower every test module against a shared registry that mirrors
+/// what `tests/model_lowerer.rs::lowered_real_blog_typing_residual`
+/// builds — model + view + controller registries merged, framework
+/// stubs added by `lower_views_to_library_classes` and the
+/// test-side `insert_minitest_test_baseline`.
+fn lower_test_modules_for_emit(app: &App) -> Vec<crate::dialect::LibraryClass> {
+    use crate::dialect::LibraryClass;
+
+    let preliminary_views: Vec<LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .collect();
+    let view_extras = library::extras_from_lcs(&preliminary_views);
+
+    let (_model_lcs, model_registry) = crate::lower::lower_models_with_registry(
+        &app.models,
+        &app.schema,
+        view_extras,
+    );
+
+    // model_registry has the full ClassInfo per model (synthesized
+    // methods + ApplicationRecord baseline + kinds). Don't overlay
+    // `extras_from_lcs(&_model_lcs)` here — that path only sees the
+    // LibraryClass methods (no baseline `save`/`find`/etc.) and would
+    // overwrite the registry entries, losing the kind data the typer
+    // needs to force parens on Method dispatches.
+    let test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    // Lower controllers so their dispatch surface is in the registry
+    // for integration tests; pass through but don't emit yet (the TS
+    // controller-emit path is a separate ticket).
+    let controller_lcs = crate::lower::lower_controllers_to_library_classes(
+        &app.controllers,
+        test_extras.clone(),
+    );
+    let mut test_extras = test_extras;
+    test_extras.extend(library::extras_from_lcs(&controller_lcs));
+
+    crate::lower::lower_test_modules_to_library_classes(
+        &app.test_modules,
+        &app.fixtures,
+        &app.models,
+        test_extras,
+    )
 }
 
 /// Emit a `LibraryClass` (a single class or mixin module from a
