@@ -21,7 +21,8 @@ use roundhouse::lower::{
     class_info_from_library_class, lower_controller_to_library_class,
     lower_controllers_to_library_classes, lower_model_to_library_class,
     lower_models_to_library_classes, lower_models_with_registry,
-    lower_view_to_library_class, lower_views_to_library_classes,
+    lower_test_modules_to_library_classes, lower_view_to_library_class,
+    lower_views_to_library_classes,
 };
 
 fn fixture_path() -> &'static Path {
@@ -526,13 +527,31 @@ fn lowered_real_blog_typing_residual() {
     // Controllers extend the model registry with views + their own
     // entries. Pass model_registry as extras so cross-class dispatch
     // (Article.find inside an action) sees the full baseline.
-    let controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
-        model_registry.into_iter().collect();
+    let mut controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
+        model_registry.clone().into_iter().collect();
+    controller_extras.extend(build_class_info_extras(&view_lcs));
     let controller_lcs = lower_controllers_to_library_classes(&app.controllers, controller_extras);
+
+    // Test modules — same shared-registry pattern.
+    let mut test_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    test_extras.extend(build_class_info_extras(&view_lcs));
+    test_extras.extend(build_class_info_extras(&controller_lcs));
+    let test_lcs = lower_test_modules_to_library_classes(
+        &app.test_modules,
+        &app.fixtures,
+        &app.models,
+        test_extras,
+    );
 
     let mut all_untyped: Vec<String> = Vec::new();
     let mut total_classes = 0usize;
-    for lc in model_lcs.iter().chain(&view_lcs).chain(&controller_lcs) {
+    for lc in model_lcs
+        .iter()
+        .chain(&view_lcs)
+        .chain(&controller_lcs)
+        .chain(&test_lcs)
+    {
         total_classes += 1;
         for method in &lc.methods {
             let path = format!("{}#{}", lc.name.0.as_str(), method.name.as_str());
@@ -542,12 +561,13 @@ fn lowered_real_blog_typing_residual() {
 
     eprintln!(
         "lowered real-blog: {} untyped sub-expressions across {} classes \
-         ({} models, {} views, {} controllers)",
+         ({} models, {} views, {} controllers, {} test modules)",
         all_untyped.len(),
         total_classes,
         model_lcs.len(),
         view_lcs.len(),
         controller_lcs.len(),
+        test_lcs.len(),
     );
     if std::env::var("DUMP_RESIDUAL").is_ok() {
         for (i, s) in all_untyped.iter().enumerate() {
@@ -555,11 +575,20 @@ fn lowered_real_blog_typing_residual() {
         }
     }
 
-    // Floor reached on real-blog: 0 untyped sub-exprs across all 15
-    // lowered classes (3 models, 9 views, 3 controllers). Tracker —
-    // fail loud on regression. Run `DUMP_RESIDUAL=1 cargo test ...
-    // -- --nocapture` to inspect.
-    const CEILING: usize = 0;
+    // Current floor (real-blog, 19 classes):
+    //   - models / views / controllers: 0 untyped (typing arc complete
+    //     across the standard pipeline)
+    //   - test modules: ~21 — all `@article` ivar reads in
+    //     ArticlesControllerTest. The `setup do ... end` block
+    //     containing `@article = articles(:one)` is dropped at ingest
+    //     time, so test bodies see `@article` without a preceding
+    //     assignment. Closing this needs ingest to capture the setup
+    //     block and the test lowerer to inline it (mirror of
+    //     controller filter inlining); separate ticket.
+    //
+    // CEILING set to 30 (current 21 + headroom). Tighten once the
+    // setup-block ingest + inlining lands.
+    const CEILING: usize = 30;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog — \

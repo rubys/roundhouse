@@ -29,6 +29,7 @@ pub mod controller_to_library;
 pub mod controller_walk;
 pub mod model_to_library;
 pub mod routes;
+pub mod test_module_to_library;
 pub mod typing;
 pub mod validations;
 pub mod view;
@@ -46,6 +47,9 @@ pub use controller_to_library::{
 pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,
     lower_models_with_registry,
+};
+pub use test_module_to_library::{
+    lower_test_module_to_library_class, lower_test_modules_to_library_classes,
 };
 pub use view_to_library::{lower_view_to_library_class, lower_views_to_library_classes};
 pub use broadcasts::{

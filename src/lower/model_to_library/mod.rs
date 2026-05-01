@@ -359,6 +359,16 @@ fn build_class_info(
     );
     insert_default(
         &mut info.class_methods,
+        "first",
+        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] }),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "last",
+        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] }),
+    );
+    insert_default(
+        &mut info.class_methods,
         "new",
         fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty),
     );
