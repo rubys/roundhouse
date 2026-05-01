@@ -33,7 +33,8 @@ use crate::dialect::{
     MethodReceiver, Param,
 };
 use crate::expr::Expr;
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use crate::ty::Ty;
 use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_to};
 
 use self::process_action::synthesize_process_action;
@@ -44,9 +45,85 @@ use self::rewrites::{
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 
-/// Entry point: take a `Controller` (Rails-shape, with filters +
-/// actions in `body`) and produce the post-lowering `LibraryClass`.
+/// Bulk entry point: lower every controller against a shared class
+/// registry so cross-controller / model / view dispatch types
+/// correctly. Builds methods for each controller, constructs a
+/// per-controller ClassInfo, then runs the body-typer with the merged
+/// registry (caller-supplied `extras` plus self-derived entries).
+///
+/// `extras` typically carries the model + view ClassInfos so calls
+/// like `Article.find(...)` and `Views::Articles.index(...)` from
+/// action bodies type through the same path the model lowerer uses.
+pub fn lower_controllers_to_library_classes(
+    controllers: &[Controller],
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> Vec<LibraryClass> {
+    let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
+    for controller in controllers {
+        let methods = build_methods(controller);
+        all_methods.push((methods, controller));
+    }
+
+    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
+        std::collections::HashMap::new();
+    // Self-info for each controller (its own synthesized methods).
+    for (methods, controller) in &all_methods {
+        let mut info = crate::analyze::ClassInfo::default();
+        for m in methods {
+            if let Some(sig) = &m.signature {
+                match m.receiver {
+                    MethodReceiver::Instance => {
+                        info.instance_methods.insert(m.name.clone(), sig.clone());
+                    }
+                    MethodReceiver::Class => {
+                        info.class_methods.insert(m.name.clone(), sig.clone());
+                    }
+                }
+            }
+        }
+        // ApplicationController baseline — render/redirect_to/head/params
+        // surface in every action body, and the typer needs signatures
+        // to dispatch through SelfRef.
+        insert_baseline_controller_methods(&mut info);
+        classes.insert(controller.name.clone(), info);
+    }
+    for (id, info) in extras {
+        classes.insert(id, info);
+    }
+
+    let empty_ivars: std::collections::HashMap<Symbol, Ty> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (mut methods, controller) in all_methods {
+        for method in &mut methods {
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+        }
+        out.push(LibraryClass {
+            name: controller.name.clone(),
+            is_module: false,
+            parent: controller.parent.clone(),
+            includes: Vec::new(),
+            methods,
+        });
+    }
+    out
+}
+
+/// Single-controller entry point — kept for tests and call sites that
+/// don't need cross-class typing. For whole-app emit, use
+/// `lower_controllers_to_library_classes`.
 pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClass {
+    let methods = build_methods(controller);
+    LibraryClass {
+        name: controller.name.clone(),
+        is_module: false,
+        parent: controller.parent.clone(),
+        includes: Vec::new(),
+        methods,
+    }
+}
+
+fn build_methods(controller: &Controller) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
     let (publics, privs) = split_public_private_actions(controller);
@@ -56,7 +133,11 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         .collect();
 
     if !publics.is_empty() || !before_filters.is_empty() {
-        methods.push(synthesize_process_action(&before_filters, &publics));
+        methods.push(synthesize_process_action(
+            &before_filters,
+            &publics,
+            controller.name.0.clone(),
+        ));
     }
 
     for a in &publics {
@@ -66,13 +147,44 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false));
     }
 
-    LibraryClass {
-        name: controller.name.clone(),
-        is_module: false,
-        parent: controller.parent.clone(),
-        includes: Vec::new(),
-        methods,
-    }
+    methods
+}
+
+/// ApplicationController baseline — methods every action body may
+/// reference via implicit-self dispatch. Signatures are loose
+/// (`Untyped` for kwargs, return Nil for terminal helpers); refining
+/// per-arg types lands when a routing-table-aware typer surfaces.
+fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
+    use crate::lower::typing::fn_sig;
+    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let opts = vec![(Symbol::from("opts"), any_hash.clone())];
+
+    // Terminals — render/redirect/head/render_404 all return Nil.
+    info.instance_methods
+        .entry(Symbol::from("render"))
+        .or_insert_with(|| fn_sig(opts.clone(), Ty::Nil));
+    info.instance_methods
+        .entry(Symbol::from("redirect_to"))
+        .or_insert_with(|| {
+            fn_sig(
+                vec![
+                    (Symbol::from("location"), Ty::Untyped),
+                    (Symbol::from("opts"), any_hash.clone()),
+                ],
+                Ty::Nil,
+            )
+        });
+    info.instance_methods
+        .entry(Symbol::from("head"))
+        .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
+
+    // Implicit-`params` — actions read `@params` (the lowerer rewrote
+    // bare `params` → `@params`) which the typer should treat as a
+    // Hash-shaped object. The instance-method version is for cases
+    // the rewrite missed.
+    info.instance_methods
+        .entry(Symbol::from("params"))
+        .or_insert_with(|| fn_sig(vec![], any_hash));
 }
 
 /// Walk the controller body in source order, partitioning actions at
@@ -119,14 +231,24 @@ fn action_to_method(
         .map(|(n, _)| Param::positional(n.clone()))
         .collect();
     let body = lower_action_body(&a.body, controller, a.name.as_str(), privs, is_public);
+    // Action params type to Untyped for now — Rails action signatures
+    // are conventionally `def show(id)` with all-string CGI inputs;
+    // refinement to per-route param types can ride on a later
+    // routing-table-aware pass. Return type Nil: every action body
+    // terminates in render/redirect (or is implicit-render-synthesized
+    // to do so), and both helpers return Nil after side-effects.
+    let sig_params: Vec<(Symbol, Ty)> = params
+        .iter()
+        .map(|p| (p.name.clone(), Ty::Untyped))
+        .collect();
     MethodDef {
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
         params,
         body,
-        signature: None,
+        signature: Some(crate::lower::typing::fn_sig(sig_params, Ty::Nil)),
         effects: a.effects.clone(),
-        enclosing_class: None,
+        enclosing_class: Some(controller.name.0.clone()),
     }
 }
 

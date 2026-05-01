@@ -60,7 +60,7 @@ pub struct Ctx {
 /// User-class dispatch data: table name (if any), instance shape,
 /// class/instance method tables. Built by [`super::Analyzer`] from
 /// Rails schema + conventions; the body-typer reads it.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ClassInfo {
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,

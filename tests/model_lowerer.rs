@@ -19,7 +19,8 @@ use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
 use roundhouse::lower::{
     class_info_from_library_class, lower_controller_to_library_class,
-    lower_model_to_library_class, lower_models_to_library_classes,
+    lower_controllers_to_library_classes, lower_model_to_library_class,
+    lower_models_to_library_classes, lower_models_with_registry,
     lower_view_to_library_class,
 };
 
@@ -446,29 +447,17 @@ fn collect_untyped_lowered(
     }
 }
 
-#[test]
-fn lowered_real_blog_typing_residual() {
-    let app = ingest_app(fixture_path()).expect("ingest real-blog");
-
-    // Lower every kind first; collect outputs for the typing walk.
-    let view_lcs: Vec<LibraryClass> = app
-        .views
-        .iter()
-        .map(|v| lower_view_to_library_class(v, &app))
-        .collect();
-    let controller_lcs: Vec<LibraryClass> = app
-        .controllers
-        .iter()
-        .map(lower_controller_to_library_class)
-        .collect();
-
-    // Build view + controller ClassInfo entries for the model lowerer's
-    // shared registry — keyed by both the full ClassId and a
-    // last-segment alias, since the body-typer's Const-path resolver
-    // looks up by last-segment.
+/// Convert a slice of LibraryClasses into `(ClassId, ClassInfo)`
+/// pairs suitable for passing as `extras` to a bulk lowerer. Folds
+/// methods across same-named classes (e.g. `articles/index`,
+/// `articles/show`, `articles/_article` all share `Views::Articles`)
+/// before emitting. Each grouped entry is registered under both the
+/// full ClassId and a last-segment alias so the body-typer's
+/// Const-path resolver finds it.
+fn build_class_info_extras(lcs: &[LibraryClass]) -> Vec<(ClassId, roundhouse::analyze::ClassInfo)> {
     use std::collections::HashMap;
     let mut grouped: HashMap<ClassId, roundhouse::analyze::ClassInfo> = HashMap::new();
-    for lc in view_lcs.iter().chain(controller_lcs.iter()) {
+    for lc in lcs {
         let info = grouped.entry(lc.name.clone()).or_default();
         let from = class_info_from_library_class(lc);
         for (k, v) in from.class_methods {
@@ -478,7 +467,7 @@ fn lowered_real_blog_typing_residual() {
             info.instance_methods.insert(k, v);
         }
     }
-    let mut extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> = Vec::new();
+    let mut out: Vec<(ClassId, roundhouse::analyze::ClassInfo)> = Vec::new();
     for (full_id, info) in grouped {
         let raw = full_id.0.as_str();
         let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
@@ -486,14 +475,44 @@ fn lowered_real_blog_typing_residual() {
             let mut alias = roundhouse::analyze::ClassInfo::default();
             alias.class_methods = info.class_methods.clone();
             alias.instance_methods = info.instance_methods.clone();
-            extras.push((ClassId(Symbol::from(last)), alias));
+            out.push((ClassId(Symbol::from(last)), alias));
         }
-        extras.push((full_id, info));
+        out.push((full_id, info));
     }
+    out
+}
 
-    // Models go through the bulk entry so cross-model + view +
-    // controller dispatch resolves through the shared registry.
-    let model_lcs = lower_models_to_library_classes(&app.models, &app.schema, extras);
+#[test]
+fn lowered_real_blog_typing_residual() {
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+
+    // Lower views first; their (untyped at the wrapper layer)
+    // ClassInfo entries feed into the model + controller lowerers'
+    // shared registries.
+    let view_lcs: Vec<LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| lower_view_to_library_class(v, &app))
+        .collect();
+
+    // Build view ClassInfo entries — keyed by both the full ClassId
+    // (Views::Articles) and a last-segment alias (Articles), since
+    // the body-typer's Const-path resolver looks up by last-segment.
+    let view_extras = build_class_info_extras(&view_lcs);
+
+    // Models go through the registry-returning bulk entry so
+    // controllers can reuse the SAME registry — keeps the
+    // ApplicationRecord baseline (find/all/where/etc) visible to
+    // action bodies that dispatch on Article.find(...).
+    let (model_lcs, model_registry) =
+        lower_models_with_registry(&app.models, &app.schema, view_extras);
+
+    // Controllers extend the model registry with views + their own
+    // entries. Pass model_registry as extras so cross-class dispatch
+    // (Article.find inside an action) sees the full baseline.
+    let controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    let controller_lcs = lower_controllers_to_library_classes(&app.controllers, controller_extras);
 
     let mut all_untyped: Vec<String> = Vec::new();
     let mut total_classes = 0usize;
@@ -520,15 +539,22 @@ fn lowered_real_blog_typing_residual() {
         }
     }
 
-    // Models + views: 0 untyped (signatures populated, body-typer run,
-    // shared registry covers cross-class dispatch). Controllers: ~456
-    // — controller_to_library doesn't populate signatures or run the
-    // body-typer yet, so every Send / Var / Const / composite in
-    // controller bodies is untyped. Tighten as controller typing
-    // lands. Headroom over the current measurement so a small
-    // organic increase doesn't fail before the next session.
+    // Current breakdown (real-blog, 15 classes):
+    //   - models: 0 (typing arc complete, ApplicationRecord baseline,
+    //     bulk registry, view extras)
+    //   - controllers: ~50 (bulk registry + ApplicationController
+    //     baseline; remaining is typer-feature gaps — block-param
+    //     inference for sort_by/each, ivar tracking through filter
+    //     targets that set @article etc.)
+    //   - views: ~251 (view_to_library's internal body-typer runs
+    //     with an empty registry — separate ticket: thread shared
+    //     registry through view_to_library or run typing externally)
+    //
+    // Tracker, not a hard target — fail loud on regression. Headroom
+    // over the current measurement (301) so small organic growth
+    // doesn't fail before the next session.
     // Run `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect.
-    const CEILING: usize = 500;
+    const CEILING: usize = 350;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog — \

@@ -50,11 +50,32 @@ use self::validations::push_validate_method;
 /// dispatches type) — passed as flat `(ClassId, ClassInfo)` pairs;
 /// callers that want both the full path and a last-segment alias
 /// should insert both.
+/// Same as [`lower_models_to_library_classes`] but also returns the
+/// shared class registry the body-typer used. Callers (e.g. the
+/// controller lowerer) can extend that registry with their own
+/// entries to keep cross-class dispatch resolving consistently.
+pub fn lower_models_with_registry(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    let (lcs, classes) = lower_models_inner(models, schema, extra_class_infos);
+    (lcs, classes)
+}
+
 pub fn lower_models_to_library_classes(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
+    lower_models_inner(models, schema, extra_class_infos).0
+}
+
+fn lower_models_inner(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
         let methods = build_methods(model, schema);
@@ -91,7 +112,7 @@ pub fn lower_models_to_library_classes(
             methods,
         });
     }
-    out
+    (out, classes)
 }
 
 /// Build a `ClassInfo` for a lowered LibraryClass — used to feed

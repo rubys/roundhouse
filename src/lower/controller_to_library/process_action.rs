@@ -6,6 +6,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Arm, ArrayStyle, Expr, ExprNode, Literal, Pattern};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use super::util::method_name_for_action;
 
@@ -21,7 +22,11 @@ use super::util::method_name_for_action;
 ///   end
 /// end
 /// ```
-pub(super) fn synthesize_process_action(filters: &[&Filter], publics: &[Action]) -> MethodDef {
+pub(super) fn synthesize_process_action(
+    filters: &[&Filter],
+    publics: &[Action],
+    enclosing_class: Symbol,
+) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
     for f in filters {
@@ -38,14 +43,21 @@ pub(super) fn synthesize_process_action(filters: &[&Filter], publics: &[Action])
         _ => syn(ExprNode::Seq { exprs: stmts }),
     };
 
+    let action_name_param = Symbol::from("action_name");
     MethodDef {
         name: Symbol::from("process_action"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(Symbol::from("action_name"))],
+        params: vec![Param::positional(action_name_param.clone())],
         body,
-        signature: None,
+        // process_action dispatches to the named action and returns
+        // whatever it returns; concretely each action body terminates
+        // in render/redirect (returns Nil), so dispatch returns Nil.
+        signature: Some(crate::lower::typing::fn_sig(
+            vec![(action_name_param, Ty::Sym)],
+            Ty::Nil,
+        )),
         effects: EffectSet::default(),
-        enclosing_class: None,
+        enclosing_class: Some(enclosing_class),
     }
 }
 

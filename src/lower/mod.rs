@@ -29,6 +29,7 @@ pub mod controller_to_library;
 pub mod controller_walk;
 pub mod model_to_library;
 pub mod routes;
+pub mod typing;
 pub mod validations;
 pub mod view;
 pub mod view_to_library;
@@ -39,9 +40,12 @@ pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };
 pub use chain::{collect_chain_modifiers, ChainModifier};
-pub use controller_to_library::lower_controller_to_library_class;
+pub use controller_to_library::{
+    lower_controller_to_library_class, lower_controllers_to_library_classes,
+};
 pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,
+    lower_models_with_registry,
 };
 pub use view_to_library::lower_view_to_library_class;
 pub use broadcasts::{
