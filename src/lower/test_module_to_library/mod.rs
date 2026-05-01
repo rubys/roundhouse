@@ -15,8 +15,10 @@ use crate::dialect::{
     AccessorKind, Fixture, LibraryClass, MethodDef, MethodReceiver, Model, Test, TestModule,
 };
 use crate::effect::EffectSet;
+use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::naming::{camelize, singularize};
+use crate::span::Span;
 use crate::ty::Ty;
 
 /// Bulk entry. Lower every test module against a shared class
@@ -117,10 +119,15 @@ pub fn lower_test_module_to_library_class(tm: &TestModule) -> LibraryClass {
 }
 
 fn build_library_class(tm: &TestModule) -> LibraryClass {
+    // Inline setup body at the start of every test method. The
+    // body-typer's Seq walk picks up `@article = articles(:one)` and
+    // propagates the type to downstream reads. Self-describing IR —
+    // the assignment is materialized at every call site, just like
+    // controller before-action filter inlining (ticket 8).
     let methods: Vec<MethodDef> = tm
         .tests
         .iter()
-        .map(|t| test_to_method_def(&tm.name, t))
+        .map(|t| test_to_method_def(&tm.name, t, tm.setup.as_ref()))
         .collect();
     LibraryClass {
         name: tm.name.clone(),
@@ -132,22 +139,44 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
 }
 
 /// Convert one `test "<name>" do …; end` block into `def
-/// test_<snake_name>; …; end`. Sanitization: snake_case the
-/// description; replace any non-identifier char with `_`; squeeze
-/// repeats and strip leading underscores.
-fn test_to_method_def(owner: &ClassId, t: &Test) -> MethodDef {
+/// test_<snake_name>; <setup_body>; …; end`. The optional setup
+/// argument — when present — gets prepended to the test body so
+/// every test method is self-contained (no out-of-band setup
+/// dependency, no double-call risk vs runtime auto-discovery).
+fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> MethodDef {
     let snake = sanitize_test_name(&t.name);
     let method_name = Symbol::from(format!("test_{snake}"));
+    let body = match setup {
+        None => t.body.clone(),
+        Some(s) => prepend_setup(s, &t.body),
+    };
     MethodDef {
         name: method_name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
-        body: t.body.clone(),
+        body,
         signature: Some(crate::lower::typing::fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
     }
+}
+
+/// Concatenate setup statements + test body statements into one Seq.
+/// Both sides are flattened (Seq-of-stmts → just the stmts) so the
+/// resulting body has no nested Seqs that would block ivar
+/// propagation through the typer's Seq walker (same reason
+/// controller_to_library has flatten_seqs).
+fn prepend_setup(setup: &Expr, body: &Expr) -> Expr {
+    let mut stmts: Vec<Expr> = match &*setup.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![setup.clone()],
+    };
+    match &*body.node {
+        ExprNode::Seq { exprs } => stmts.extend(exprs.iter().cloned()),
+        _ => stmts.push(body.clone()),
+    }
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts })
 }
 
 /// Map fixture file names to (helper_name, signature) pairs.

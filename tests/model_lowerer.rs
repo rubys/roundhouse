@@ -575,20 +575,11 @@ fn lowered_real_blog_typing_residual() {
         }
     }
 
-    // Current floor (real-blog, 19 classes):
-    //   - models / views / controllers: 0 untyped (typing arc complete
-    //     across the standard pipeline)
-    //   - test modules: ~21 — all `@article` ivar reads in
-    //     ArticlesControllerTest. The `setup do ... end` block
-    //     containing `@article = articles(:one)` is dropped at ingest
-    //     time, so test bodies see `@article` without a preceding
-    //     assignment. Closing this needs ingest to capture the setup
-    //     block and the test lowerer to inline it (mirror of
-    //     controller filter inlining); separate ticket.
-    //
-    // CEILING set to 30 (current 21 + headroom). Tighten once the
-    // setup-block ingest + inlining lands.
-    const CEILING: usize = 30;
+    // Floor reached on real-blog: 0 untyped sub-exprs across all 19
+    // lowered classes (3 models, 9 views, 3 controllers, 4 test
+    // modules). Tracker — fail loud on regression. Run `DUMP_RESIDUAL=1
+    // cargo test ... -- --nocapture` to inspect.
+    const CEILING: usize = 0;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog — \

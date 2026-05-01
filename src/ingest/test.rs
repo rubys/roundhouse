@@ -46,15 +46,79 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         .map(|stem| ClassId(Symbol::from(stem)));
 
     let mut tests: Vec<Test> = Vec::new();
+    let mut setup: Option<Expr> = None;
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
                 tests.push(test);
+                continue;
+            }
+            if let Some(body) = ingest_setup_declaration(&stmt, file)? {
+                // Multiple setup hooks compose in source order — append
+                // by wrapping in a Seq. Rare in practice; first wins
+                // when stored as Option, so accumulate.
+                setup = Some(match setup.take() {
+                    None => body,
+                    Some(prev) => {
+                        let prev_stmts = match &*prev.node {
+                            ExprNode::Seq { exprs } => exprs.clone(),
+                            _ => vec![prev],
+                        };
+                        let body_stmts = match &*body.node {
+                            ExprNode::Seq { exprs } => exprs.clone(),
+                            _ => vec![body],
+                        };
+                        let mut all = prev_stmts;
+                        all.extend(body_stmts);
+                        Expr::new(Span::synthetic(), ExprNode::Seq { exprs: all })
+                    }
+                });
             }
         }
     }
 
-    Ok(Some(TestModule { name, parent, target, tests }))
+    Ok(Some(TestModule { name, parent, target, tests, setup }))
+}
+
+/// Recognize `setup do ... end` (Call with method=setup, block body)
+/// and `def setup; ...; end` (DefNode named setup). Returns the body
+/// expression in either case. Other shapes return Ok(None).
+fn ingest_setup_declaration(
+    stmt: &Node<'_>,
+    file: &str,
+) -> IngestResult<Option<Expr>> {
+    // `setup do ... end` form.
+    if let Some(call) = stmt.as_call_node() {
+        if call.receiver().is_some() {
+            return Ok(None);
+        }
+        if constant_id_str(&call.name()) != "setup" {
+            return Ok(None);
+        }
+        if let Some(block_ref) = call.block() {
+            if let Some(block) = block_ref.as_block_node() {
+                let body = match block.body() {
+                    Some(body_node) => ingest_expr(&body_node, file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+                };
+                return Ok(Some(body));
+            }
+        }
+        return Ok(None);
+    }
+    // `def setup; ...; end` form.
+    if let Some(def) = stmt.as_def_node() {
+        let name_bytes = def.name().as_slice();
+        if std::str::from_utf8(name_bytes).ok() != Some("setup") {
+            return Ok(None);
+        }
+        let body = match def.body() {
+            Some(body_node) => ingest_expr(&body_node, file)?,
+            None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+        };
+        return Ok(Some(body));
+    }
+    Ok(None)
 }
 
 /// Recognize a single `test "name" do ... end` call. Returns `None` for

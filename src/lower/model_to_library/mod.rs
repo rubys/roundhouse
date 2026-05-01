@@ -260,6 +260,11 @@ fn build_class_info(
         fn_sig(vec![], Ty::Class { id: ClassId(Symbol::from("ErrorCollection")), args: vec![] }),
     );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
+    insert_default(
+        &mut info.instance_methods,
+        "reload",
+        fn_sig(vec![], owner_ty.clone()),
+    );
 
     // Validations mixin — instance helpers expected on every record.
     insert_default(

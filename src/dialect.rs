@@ -669,6 +669,14 @@ pub struct TestModule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ClassId>,
     pub tests: Vec<Test>,
+    /// Body of `setup do ... end` or `def setup; ...; end`, if
+    /// present. The lowerer inlines this at the start of each test
+    /// method so the body-typer's Seq walk picks up ivar
+    /// assignments (`@article = articles(:one)`) before the test's
+    /// body runs. Mirror of the controller filter-inlining pattern.
+    /// `None` when the test class has no setup hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Expr>,
 }
 
 /// A single `test "name" do ... end` block. `name` is the literal

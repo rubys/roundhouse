@@ -581,33 +581,39 @@ fn controllers_articles_dispatch_renames_new_action_to_avoid_object_new_shadow()
 }
 
 #[test]
-fn controllers_articles_filter_dispatch_uses_include_check() {
+fn controllers_articles_inline_set_article_into_filtered_actions() {
     // `before_action :set_article, only: %i[show edit update destroy]`
-    // lowers to `set_article if [:show, :edit, :update, :destroy].include?(action_name)`
-    // inside process_action.
+    // — instead of a filter-dispatch in process_action, the set_article
+    // body is inlined at the top of every action that fires it (ticket 8).
+    // Self-describing IR: the assignment is materialized at every call
+    // site, the body-typer's Seq walk picks it up.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
-    // The conditional is an if-modifier wrapping the call. Don't assert
-    // exact whitespace — just that the structural pieces line up.
+    // process_action no longer contains the filter dispatch.
     assert!(
-        src.contains("set_article if") || src.contains("set_article  if"),
-        "expected set_article conditional dispatch; got:\n{src}",
+        !src.contains("set_article if"),
+        "set_article filter dispatch should be removed from process_action:\n{src}",
     );
-    assert!(src.contains(".include?(action_name)"), "{src}");
-    for sym in [":show", ":edit", ":update", ":destroy"] {
-        assert!(src.contains(sym), "missing filter sym {sym}:\n{src}");
-    }
+    // set_article body (`@article = Article.find(...)`) is inlined at
+    // the top of show, edit, update, destroy. Spot-check on show.
+    assert!(
+        src.contains("@article = Article.find"),
+        "expected inlined @article assignment from set_article:\n{src}",
+    );
 }
 
 #[test]
-fn controllers_articles_keeps_filter_target_as_private_method() {
-    // set_article and article_params (the private methods after `private`)
-    // pass through to the LibraryClass as ordinary methods. They're
-    // referenced by process_action's filter dispatch and by action bodies
-    // that touch params; keeping them as methods preserves callsites.
+fn controllers_articles_drops_pure_filter_targets() {
+    // set_article was solely a before_action target — after inlining
+    // (ticket 8), the method itself is dead and dropped from emit.
+    // article_params is still emitted because action bodies call it
+    // directly (it's not a before_action target).
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
-    assert!(src.contains("def set_article"), "{src}");
+    assert!(
+        !src.contains("def set_article"),
+        "set_article should be dropped after inlining; got:\n{src}",
+    );
     assert!(src.contains("def article_params"), "{src}");
 }
 

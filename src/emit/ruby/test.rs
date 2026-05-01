@@ -21,10 +21,18 @@ pub(super) fn emit_test_module(tm: &TestModule) -> EmittedFile {
         .map(|c| format!(" < {}", c.0))
         .unwrap_or_default();
     writeln!(s, "class {}{}", tm.name.0, superclass).unwrap();
-    for (i, test) in tm.tests.iter().enumerate() {
-        if i > 0 {
+    let mut emitted_anything = false;
+    if let Some(setup_body) = &tm.setup {
+        writeln!(s, "  setup do").unwrap();
+        emit_indented_body(&mut s, &emit_expr(setup_body), 2);
+        writeln!(s, "  end").unwrap();
+        emitted_anything = true;
+    }
+    for test in &tm.tests {
+        if emitted_anything {
             writeln!(s).unwrap();
         }
+        emitted_anything = true;
         writeln!(s, "  test {:?} do", test.name).unwrap();
         emit_indented_body(&mut s, &emit_expr(&test.body), 2);
         writeln!(s, "  end").unwrap();
