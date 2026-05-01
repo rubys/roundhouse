@@ -477,6 +477,25 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut bc);
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 
+    // Importmap — `Importmap.pins -> Array<Hash<Str,Str>>`,
+    // `Importmap.entry -> Str`. The view lowerer's
+    // `JavascriptImportmapTags` rewrite emits Send calls on
+    // `Importmap` (used to be `Importmap::PINS` const access);
+    // the typer needs to resolve them or the body has untyped
+    // sub-expressions and the residual ratchet trips.
+    let mut im = crate::analyze::ClassInfo::default();
+    let pin_hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    im.class_methods.insert(
+        Symbol::from("pins"),
+        fn_sig(vec![], Ty::Array { elem: Box::new(pin_hash_ty) }),
+    );
+    im.class_methods.insert(
+        Symbol::from("entry"),
+        fn_sig(vec![], Ty::Str),
+    );
+    tag_all_method(&mut im);
+    classes.insert(ClassId(Symbol::from("Importmap")), im);
+
     // FormBuilder — instance methods called on the block param `form`
     // inside `form_with do |form| ... end`. Each helper renders one
     // input/label/button and returns a string.

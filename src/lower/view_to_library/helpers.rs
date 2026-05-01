@@ -67,19 +67,36 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         CsrfMetaTags => Some(view_helpers_call("csrf_meta_tags", Vec::new())),
         CspMetaTag => Some(view_helpers_call("csp_meta_tag", Vec::new())),
         // `javascript_importmap_tags` consumes per-app importmap data:
-        // emit `Importmap::PINS` (the frozen array from `config/importmap.rb`)
-        // and the entry name as args. The runtime helper iterates pins
-        // to emit modulepreload links + the importmap-script JSON,
-        // matching Rails' shape. Mirrors how the Rust target threads
-        // `crate::importmap::PINS` into its helper call.
+        // emit `Importmap.pins` and `Importmap.entry` as args. Both
+        // are class methods on the generated `Importmap` module
+        // (lower_importmap_to_library_functions). The runtime helper
+        // iterates pins to emit modulepreload links + the importmap-
+        // script JSON, matching Rails' shape. Other targets (Rust /
+        // Python / Crystal / Go) still consume `Importmap::PINS` as
+        // a constant; their per-target emit will migrate to the
+        // method form when each target retires its lowered_importmap
+        // emitter.
         JavascriptImportmapTags => {
-            let pins = Expr::new(
-                Span::synthetic(),
-                ExprNode::Const {
-                    path: vec![Symbol::from("Importmap"), Symbol::from("PINS")],
-                },
+            let pins = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                "pins",
+                vec![],
+                None,
+                true,
             );
-            let entry = lit_str("application".to_string());
+            let entry = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                "entry",
+                vec![],
+                None,
+                true,
+            );
             Some(view_helpers_call("javascript_importmap_tags", vec![pins, entry]))
         }
         // `<%= stylesheet_link_tag :app, "data-turbo-track":
