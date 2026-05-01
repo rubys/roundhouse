@@ -51,7 +51,7 @@ pub(super) fn emit_tsconfig_json(app: &App) -> EmittedFile {
     // (`app/`, `src/`, `test/`); a top-level `**/*.ts` would also
     // sweep node_modules — instead enumerate the roots explicitly.
     let mut includes =
-        String::from("\"app/**/*.ts\", \"src/**/*.ts\"");
+        String::from("\"app/**/*.ts\", \"src/**/*.ts\", \"db/**/*.ts\", \"main.ts\"");
     if !app.test_modules.is_empty() || !app.fixtures.is_empty() {
         includes.push_str(", \"test/**/*.ts\"");
     }
