@@ -10,6 +10,7 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Str | Ty::Sym => "string".into(),
         Ty::Nil => "null".into(),
         Ty::Array { elem } => format!("{}[]", ts_ty(elem)),
+        Ty::Hash { key, value } => format!("Record<{}, {}>", ts_ty(key), ts_ty(value)),
         Ty::Class { id, .. } => ts_class_ty(id),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),

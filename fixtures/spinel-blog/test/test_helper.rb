@@ -17,7 +17,7 @@ require "action_controller"
 # called from each test class's `setup` block — which truncates the
 # tables but leaves the schema intact.
 SqliteAdapter.configure(":memory:")
-Schema.load!(SqliteAdapter)
+Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
 ActiveRecord.adapter = SqliteAdapter
 
 module SchemaSetup

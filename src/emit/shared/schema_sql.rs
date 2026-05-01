@@ -18,21 +18,30 @@ use std::fmt::Write;
 
 use crate::schema::{ColumnType, Schema};
 
-/// Render every table in `schema` as SQLite CREATE TABLE statements,
-/// joined with blank lines. Primary keys use
-/// `INTEGER PRIMARY KEY AUTOINCREMENT` so rowids stay stable and
-/// monotonic across inserts — matching what the Rails sqlite3 adapter
-/// emits for the default `id` column.
-pub fn render_schema_sql(schema: &Schema) -> String {
-    let mut s = String::new();
+/// Render every table + index in `schema` as a list of SQLite DDL
+/// statements — one CREATE TABLE per table, one CREATE INDEX per
+/// index. Idempotent (`IF NOT EXISTS`) so the runtime can re-run
+/// against an existing DB without erroring.
+///
+/// Statements-list shape (rather than one joined string) is the
+/// general form: portable across DB drivers that don't support
+/// multi-statement execution (Postgres' pg gem, MySQL drivers),
+/// and gives clearer per-statement error reporting in any adapter.
+/// Adapters that DO accept multi-statement (better-sqlite3) just
+/// `join("\n")` the list.
+///
+/// Primary keys use `INTEGER PRIMARY KEY AUTOINCREMENT` so rowids
+/// stay stable and monotonic across inserts — matching what the
+/// Rails sqlite3 adapter emits for the default `id` column.
+pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     for (_name, table) in &schema.tables {
-        writeln!(s, "CREATE TABLE {} (", table.name.as_str()).unwrap();
+        let mut s = String::new();
+        writeln!(s, "CREATE TABLE IF NOT EXISTS {} (", table.name.as_str()).unwrap();
         let mut lines: Vec<String> = Vec::new();
         for col in &table.columns {
             let mut line = String::new();
             if col.primary_key {
-                // SQLite rowid alias. `INTEGER PRIMARY KEY AUTOINCREMENT`
-                // matches Rails sqlite3 adapter output.
                 line.push_str(&format!(
                     "  {} INTEGER PRIMARY KEY AUTOINCREMENT",
                     col.name.as_str()
@@ -50,7 +59,35 @@ pub fn render_schema_sql(schema: &Schema) -> String {
             lines.push(line);
         }
         writeln!(s, "{}", lines.join(",\n")).unwrap();
-        writeln!(s, ");").unwrap();
+        s.push(')');
+        out.push(s);
+    }
+    for (_name, table) in &schema.tables {
+        for idx in &table.indexes {
+            let cols: Vec<&str> = idx.columns.iter().map(|c| c.as_str()).collect();
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            out.push(format!(
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({})",
+                idx.name.as_str(),
+                table.name.as_str(),
+                cols.join(", "),
+            ));
+        }
+    }
+    out
+}
+
+/// Joined-string form of `render_schema_statements` — kept for
+/// per-target emitters that embed schema as a single `const` /
+/// `let` declaration (Rust, Go, Python, Elixir, Crystal). Each
+/// statement is `;`-terminated and joined with newlines so a single
+/// `db.exec(joined)` call against a multi-statement-supporting
+/// adapter executes them all.
+pub fn render_schema_sql(schema: &Schema) -> String {
+    let mut s = String::new();
+    for stmt in render_schema_statements(schema) {
+        s.push_str(&stmt);
+        s.push_str(";\n");
     }
     s
 }

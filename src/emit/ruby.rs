@@ -101,12 +101,18 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
 }
 
 /// Emit `config/schema.rb` in spinel-blog shape — a `Schema` module
-/// wrapping raw SQL `CREATE TABLE` / `CREATE INDEX` statements as a
-/// frozen array, plus `self.load!(adapter)` to drive them through the
-/// adapter. Companion to `emit_lowered_models` for the spinel emit
-/// pipeline.
+/// with `def self.statements` returning the DDL list. Per-statement
+/// (rather than one joined string) so adapters that don't support
+/// multi-statement execution work too. Consumes the universal
+/// `lower_schema_to_library_functions` output, sharing shape across
+/// every target.
 pub fn emit_lowered_schema(app: &App) -> EmittedFile {
-    schema::emit_lowered_schema(&app.schema)
+    let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+    if funcs.is_empty() {
+        // Empty schema → empty module file.
+        return schema::emit_lowered_schema(&app.schema);
+    }
+    library::emit_module_file(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
 /// Emit `config/routes.rb` in spinel-blog shape — a `Routes` module

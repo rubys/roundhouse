@@ -318,26 +318,22 @@ fn schema_emits_module_wrapper_at_config_path() {
     let f = ruby::emit_lowered_schema(&app);
     assert_eq!(f.path.to_string_lossy(), "config/schema.rb");
     assert!(f.content.starts_with("module Schema\n"), "{}", f.content);
-    assert!(f.content.contains("STATEMENTS = ["), "{}", f.content);
-    assert!(f.content.contains("].freeze"), "{}", f.content);
-    assert!(f.content.contains("def self.load!(adapter)"), "{}", f.content);
-    assert!(
-        f.content.contains("STATEMENTS.each { |sql| adapter.execute_ddl(sql) }"),
-        "{}",
-        f.content,
-    );
+    // New shape: `def self.statements` returning the DDL list.
+    // Reconciled with TS's LibraryFunction shape so the lowerer
+    // produces structured data; consumers iterate per-statement.
+    assert!(f.content.contains("def self.statements"), "{}", f.content);
 }
 
 #[test]
-fn schema_emits_one_create_table_heredoc_per_table() {
+fn schema_emits_create_table_per_table() {
     let src = lowered_real_blog_schema();
-    // Each table renders as a `<<~SQL,` heredoc with the canonical
-    // SQLite scaffold: id INTEGER PRIMARY KEY AUTOINCREMENT, then
-    // each non-PK column with its SQL type and NOT NULL marker.
+    // Each table appears as a CREATE TABLE IF NOT EXISTS string in
+    // the statements array. Idempotent guard so re-opening an
+    // existing DB is a no-op.
     assert!(src.contains("CREATE TABLE IF NOT EXISTS articles ("), "{src}");
     assert!(src.contains("CREATE TABLE IF NOT EXISTS comments ("), "{src}");
-    let heredoc_count = src.matches("<<~SQL,").count();
-    assert_eq!(heredoc_count, 2, "expected one heredoc per table; got:\n{src}");
+    let table_count = src.matches("CREATE TABLE IF NOT EXISTS").count();
+    assert_eq!(table_count, 2, "expected one CREATE TABLE per table; got:\n{src}");
 }
 
 #[test]

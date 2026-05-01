@@ -29,6 +29,67 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
+/// Emit a group of LibraryFunctions sharing a `module_path` as a
+/// single Ruby file. Mirrors `typescript::library::emit_module_file`
+/// — converts the function group into a synthetic
+/// `LibraryClass{is_module:true}` with class-method (`def self.X`)
+/// declarations, then delegates to `emit_library_class_decl` so
+/// require resolution, nested-module rendering, and method body
+/// emission share one code path with class-shaped artifacts.
+///
+/// `module_function` would be the more idiomatic Ruby spelling,
+/// but `def self.X` is what the existing spinel-blog hand-written
+/// modules use AND what `emit_method` already produces — going
+/// through that path keeps shapes byte-identical.
+pub(super) fn emit_module_file(
+    funcs: &[crate::dialect::LibraryFunction],
+    app: &App,
+    out_path: PathBuf,
+) -> EmittedFile {
+    let lc = synthesize_module_lc(funcs);
+    emit_library_class_decl(&lc, app, out_path)
+}
+
+fn synthesize_module_lc(
+    funcs: &[crate::dialect::LibraryFunction],
+) -> LibraryClass {
+    use crate::dialect::{AccessorKind, MethodDef, MethodReceiver};
+    use crate::ident::Symbol;
+
+    let module_id = funcs
+        .first()
+        .map(|f| {
+            ClassId(Symbol::from(
+                f.module_path
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            ))
+        })
+        .unwrap_or_else(|| ClassId(Symbol::from("")));
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(module_id.0.clone()),
+            kind: AccessorKind::Method,
+        })
+        .collect();
+    LibraryClass {
+        name: module_id,
+        is_module: true,
+        parent: None,
+        includes: Vec::new(),
+        methods,
+    }
+}
+
 /// Emit a single library-shape file. `out_path` is the project-root-relative
 /// destination for the file; the require resolver computes paths relative to
 /// `out_path`'s parent, so files emitted to `app/views/<plural>/` get

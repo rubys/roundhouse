@@ -137,11 +137,11 @@ module Main
       require_relative "runtime/sqlite_adapter"
       SqliteAdapter.configure(db_path)
       ActiveRecord.adapter = SqliteAdapter
-      Schema.load!(SqliteAdapter)
+      Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
     else
       InMemoryAdapter.configure
       ActiveRecord.adapter = InMemoryAdapter
-      Schema.load!(InMemoryAdapter)
+      Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
     end
   end
 end

@@ -310,7 +310,7 @@ async function attachCable(
 
 // ── Database + schema bootstrap ────────────────────────────────
 
-function openDatabase(dbPath: string, schemaSql: string): void {
+function openDatabase(dbPath: string, schemaStatements: string[]): void {
   // better-sqlite3 creates the file if it doesn't exist, but
   // NOT the parent directory — if we're opening `./db/
   // development.sqlite3` and `./db/` doesn't exist, the
@@ -325,18 +325,18 @@ function openDatabase(dbPath: string, schemaSql: string): void {
   }
 
   // We open with WAL + foreign keys, apply the schema
-  // idempotently, and hand the connection to the juntos
-  // runtime via installDb. All subsequent AR queries run
-  // against this connection.
+  // statement-by-statement, and hand the connection to the juntos
+  // runtime via installDb. All subsequent AR queries run against
+  // this connection. Per-statement execution is the portable form;
+  // each statement is `IF NOT EXISTS`-guarded by the lowerer so
+  // re-opening an existing DB is a no-op.
   const db = new Database(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
-  // Apply schema. `IF NOT EXISTS` via a manual transform so
-  // re-opening an existing DB is idempotent — the emitter
-  // produces plain `CREATE TABLE` without the guard today.
-  const guarded = schemaSql.replace(/CREATE TABLE (\w+)/g, "CREATE TABLE IF NOT EXISTS $1");
-  db.exec(guarded);
+  for (const stmt of schemaStatements) {
+    db.exec(stmt);
+  }
 
   installDb(db);
 }
@@ -348,8 +348,11 @@ export interface StartOptions {
   dbPath?: string;
   /** HTTP port. Defaults to 3000 or `PORT` env var. */
   port?: number;
-  /** Schema SQL to apply on startup (from the generated schema_sql.ts). */
-  schemaSql: string;
+  /** Schema DDL statements to apply on startup, one per CREATE
+   *  TABLE / CREATE INDEX. The generated `Schema.statements()`
+   *  module returns this list. Each statement is `IF NOT EXISTS`-
+   *  guarded so re-opening an existing DB is a no-op. */
+  schemaStatements: string[];
   /** Optional seed function, run if `shouldSeed` returns true. */
   seeds?: () => void | Promise<void>;
   /** Predicate controlling whether to run seeds. Default: run if
@@ -375,7 +378,7 @@ export async function startServer(opts: StartOptions): Promise<void> {
 
   layoutRenderer = opts.layout ?? null;
 
-  openDatabase(dbPath, opts.schemaSql);
+  openDatabase(dbPath, opts.schemaStatements);
 
   if (opts.seeds && (opts.shouldSeed ?? (() => true))()) {
     await opts.seeds();

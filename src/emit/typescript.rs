@@ -293,9 +293,9 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
     s.push('\n');
     s.push_str("await startServer({\n");
     if app.schema.tables.is_empty() {
-        s.push_str("  schemaSql: \"\",\n");
+        s.push_str("  schemaStatements: [],\n");
     } else {
-        s.push_str("  schemaSql: Schema.create_tables(),\n");
+        s.push_str("  schemaStatements: Schema.statements(),\n");
     }
     if has_seeds {
         s.push_str("  seeds: () => Seeds.run(),\n");
