@@ -588,6 +588,9 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
     let mut controller_base_import: bool = false;
     let mut route_helpers_import: bool = false;
     let mut views_import: bool = false;
+    let mut view_helpers_import: bool = false;
+    let mut inflector_import: bool = false;
+    let mut broadcasts_import: bool = false;
 
     for r in refs {
         let r_str: &str = &r;
@@ -608,6 +611,22 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             // controller bodies that call `Views.Articles.index(...)`
             // resolve through this single namespace import.
             views_import = true;
+        } else if r == "ViewHelpers" {
+            // Framework view helpers — class with snake-cased static
+            // methods (`ViewHelpers.link_to(...)`) shipped at
+            // `src/view_helpers.ts`.
+            view_helpers_import = true;
+        } else if r == "Inflector" {
+            // Free-function module — view bodies use namespace access
+            // (`Inflector.pluralize(...)`); import as `* as Inflector`
+            // from `src/inflector.ts`.
+            inflector_import = true;
+        } else if r == "Broadcasts" {
+            // Broadcasts shim — model after_create/update/destroy
+            // bodies call `Broadcasts.prepend({...})` etc. The runtime
+            // file at `src/broadcasts.ts` adapts to the installed
+            // broadcaster.
+            broadcasts_import = true;
         } else if app.models.iter().any(|m| m.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
@@ -728,6 +747,20 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
             relative_to_root(out_path, "app/views.js")
         };
         writeln!(s, "import {{ Views }} from \"{import_path}\";").unwrap();
+    }
+    if view_helpers_import {
+        let import_path = relative_to_root(out_path, "src/view_helpers.js");
+        writeln!(s, "import {{ ViewHelpers }} from \"{import_path}\";").unwrap();
+    }
+    if inflector_import {
+        // Inflector is a module of free functions; namespace import
+        // so call sites stay `Inflector.pluralize(...)` etc.
+        let import_path = relative_to_root(out_path, "src/inflector.js");
+        writeln!(s, "import * as Inflector from \"{import_path}\";").unwrap();
+    }
+    if broadcasts_import {
+        let import_path = relative_to_root(out_path, "src/broadcasts.js");
+        writeln!(s, "import {{ Broadcasts }} from \"{import_path}\";").unwrap();
     }
     s
 }

@@ -39,6 +39,10 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         "src/active_record_base.ts",
         include_str!("../../runtime/typescript/active_record_base.ts"),
     ),
+    (
+        "src/broadcasts.ts",
+        include_str!("../../runtime/typescript/broadcasts.ts"),
+    ),
     ("src/errors.ts", include_str!("../../runtime/typescript/errors.ts")),
     ("src/http.ts", include_str!("../../runtime/typescript/http.ts")),
     (
