@@ -4,6 +4,9 @@
 //! serializable core with a Rails dialect layered on top. The IR is the
 //! deliverable; ingesters produce it, emitters consume it.
 
+#[cfg(target_arch = "wasm32")]
+extern crate ruby_rbs_local as ruby_rbs;
+
 pub mod adapter;
 pub mod analyze;
 pub mod app;
@@ -25,6 +28,7 @@ pub mod runtime_src;
 pub mod schema;
 pub mod span;
 pub mod ty;
+pub mod vfs;
 
 pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};
 pub use app::App;

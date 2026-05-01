@@ -2,17 +2,24 @@
 //! per-domain ingesters, and assembles an `App`. Also owns the small
 //! DSLs that don't warrant their own submodule — `config/importmap.rb`
 //! and the `.rb` / `.yml` / `.erb` file walkers.
+//!
+//! All filesystem access goes through the [`Vfs`] trait so that the
+//! ingest pipeline drives both the on-disk Rails app (CLI) and an
+//! in-memory tree (wasm transpile entry point). [`ingest_app`] is the
+//! convenience wrapper for the disk case.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use ruby_prism::{Node, parse};
 
 use crate::App;
+use crate::vfs::{FsVfs, MapVfs, Vfs};
 
 use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
-use super::library_class::{classify_class_file, ingest_library_class, ClassKind};
+use super::library_class::{ClassKind, classify_class_file, ingest_library_class};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::ingest_schema;
@@ -20,20 +27,34 @@ use super::test::ingest_test_file;
 use super::view::ingest_view;
 use super::{IngestError, IngestResult};
 
-/// Ingest an entire Rails app directory.
+/// Ingest an entire Rails app directory from disk.
 pub fn ingest_app(dir: &Path) -> IngestResult<App> {
+    ingest_app_with_vfs(&FsVfs::new(), dir)
+}
+
+/// Ingest a Rails app from an in-memory `path → bytes` tree. Path keys
+/// are interpreted relative to a virtual root (typically a single
+/// segment like `app/`); the tree itself defines the root layout, so
+/// callers usually pass `Path::new("")` for `root`.
+pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App> {
+    ingest_app_with_vfs(&MapVfs::new(tree), Path::new(""))
+}
+
+/// The actual whole-app walker. Generic over [`Vfs`] so it can read
+/// from disk or from an in-memory map without code duplication.
+pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
     let mut app = App::new();
 
     let schema_path = dir.join("db/schema.rb");
-    if schema_path.exists() {
-        let source = std::fs::read(&schema_path)?;
+    if vfs.exists(&schema_path) {
+        let source = vfs.read(&schema_path)?;
         app.schema = ingest_schema(&source, &schema_path.display().to_string())?;
     }
 
     let models_dir = dir.join("app/models");
-    if models_dir.is_dir() {
-        for entry in read_rb_files(&models_dir)? {
-            let source = std::fs::read(&entry)?;
+    if vfs.is_dir(&models_dir) {
+        for entry in read_rb_files(vfs, &models_dir)? {
+            let source = vfs.read(&entry)?;
             let path_str = entry.display().to_string();
             match classify_class_file(&source) {
                 Some(ClassKind::Model) | None => {
@@ -51,9 +72,9 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     }
 
     let controllers_dir = dir.join("app/controllers");
-    if controllers_dir.is_dir() {
-        for entry in read_rb_files(&controllers_dir)? {
-            let source = std::fs::read(&entry)?;
+    if vfs.is_dir(&controllers_dir) {
+        for entry in read_rb_files(vfs, &controllers_dir)? {
+            let source = vfs.read(&entry)?;
             if let Some(controller) = ingest_controller(&source, &entry.display().to_string())? {
                 app.controllers.push(controller);
             }
@@ -61,16 +82,16 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     }
 
     let routes_path = dir.join("config/routes.rb");
-    if routes_path.exists() {
-        let source = std::fs::read(&routes_path)?;
+    if vfs.exists(&routes_path) {
+        let source = vfs.read(&routes_path)?;
         app.routes = ingest_routes(&source, &routes_path.display().to_string())?;
     }
 
     let views_dir = dir.join("app/views");
-    if views_dir.is_dir() {
-        let erb_files = read_erb_files(&views_dir)?;
+    if vfs.is_dir(&views_dir) {
+        let erb_files = read_erb_files(vfs, &views_dir)?;
         for erb_path in erb_files {
-            let source = std::fs::read_to_string(&erb_path)?;
+            let source = vfs.read_to_string(&erb_path)?;
             let rel = erb_path
                 .strip_prefix(&views_dir)
                 .map_err(|_| IngestError::Unsupported {
@@ -90,12 +111,10 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // even if those tests all skip pending the HTTP runtime.
     for subdir in ["test/models", "test/controllers"] {
         let tests_dir = dir.join(subdir);
-        if tests_dir.is_dir() {
-            for entry in read_rb_files(&tests_dir)? {
-                let source = std::fs::read(&entry)?;
-                if let Some(tm) =
-                    ingest_test_file(&source, &entry.display().to_string())?
-                {
+        if vfs.is_dir(&tests_dir) {
+            for entry in read_rb_files(vfs, &tests_dir)? {
+                let source = vfs.read(&entry)?;
+                if let Some(tm) = ingest_test_file(&source, &entry.display().to_string())? {
                     app.test_modules.push(tm);
                 }
             }
@@ -107,9 +126,9 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // emitters interpret per column type and resolve Rails fixture-reference
     // shorthand (`article: one` → id of the `one` fixture in articles).
     let fixtures_dir = dir.join("test/fixtures");
-    if fixtures_dir.is_dir() {
-        for entry in read_yml_files(&fixtures_dir)? {
-            let source = std::fs::read(&entry)?;
+    if vfs.is_dir(&fixtures_dir) {
+        for entry in read_yml_files(vfs, &fixtures_dir)? {
+            let source = vfs.read(&entry)?;
             let fixture = ingest_fixture_file(&source, &entry)?;
             app.fixtures.push(fixture);
         }
@@ -122,8 +141,8 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // `async function run()` and main.ts invokes it if the DB is
     // fresh.
     let seeds_path = dir.join("db/seeds.rb");
-    if seeds_path.exists() {
-        let source = std::fs::read_to_string(&seeds_path)?;
+    if vfs.exists(&seeds_path) {
+        let source = vfs.read_to_string(&seeds_path)?;
         let expr = ingest_ruby_program(&source, &seeds_path.display().to_string())?;
         app.seeds = Some(expr);
     }
@@ -134,9 +153,9 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // referenced directory. Feeds the emitted
     // `javascript_importmap_tags` helper.
     let importmap_path = dir.join("config/importmap.rb");
-    if importmap_path.exists() {
-        let source = std::fs::read_to_string(&importmap_path)?;
-        let importmap = ingest_importmap(&source, dir, &importmap_path.display().to_string())?;
+    if vfs.exists(&importmap_path) {
+        let source = vfs.read_to_string(&importmap_path)?;
+        let importmap = ingest_importmap(vfs, &source, dir, &importmap_path.display().to_string())?;
         if !importmap.pins.is_empty() {
             app.importmap = Some(importmap);
         }
@@ -150,11 +169,12 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     let mut stylesheets: Vec<String> = Vec::new();
     for subdir in ["app/assets/stylesheets", "app/assets/builds"] {
         let css_dir = dir.join(subdir);
-        if !css_dir.is_dir() {
+        if !vfs.is_dir(&css_dir) {
             continue;
         }
-        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&css_dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
+        let mut entries: Vec<PathBuf> = vfs
+            .read_dir(&css_dir)?
+            .into_iter()
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("css"))
             .collect();
         entries.sort();
@@ -173,29 +193,28 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
     // walk the sig dir, parse each file, merge into app.rbs_signatures
     // keyed by the declared class/module's fully-qualified name.
     let sig_dir = dir.join("sig");
-    if sig_dir.is_dir() {
+    if vfs.is_dir(&sig_dir) {
         let mut stack = vec![sig_dir];
         while let Some(current) = stack.pop() {
-            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&current)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect();
+            let mut entries: Vec<PathBuf> = vfs.read_dir(&current)?;
             entries.sort();
             for entry in entries {
-                if entry.is_dir() {
+                if vfs.is_dir(&entry) {
                     stack.push(entry);
                     continue;
                 }
                 if entry.extension().and_then(|s| s.to_str()) != Some("rbs") {
                     continue;
                 }
-                let source = std::fs::read_to_string(&entry)?;
+                let source = vfs.read_to_string(&entry)?;
                 let path_str = entry.display().to_string();
-                let sigs = crate::rbs::parse_app_signatures(&source).map_err(|message| {
-                    IngestError::Parse {
-                        file: path_str.clone(),
-                        message,
-                    }
-                })?;
+                let sigs =
+                    crate::rbs::parse_app_signatures(&source).map_err(|message| {
+                        IngestError::Parse {
+                            file: path_str.clone(),
+                            message,
+                        }
+                    })?;
                 for (class_id, methods) in sigs {
                     app.rbs_signatures
                         .entry(class_id)
@@ -224,7 +243,8 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
 /// `ignore:` kwargs are accepted-and-skipped; they don't affect
 /// the rendered importmap tags' name→path entries for our
 /// current needs.
-fn ingest_importmap(
+fn ingest_importmap<V: Vfs + ?Sized>(
+    vfs: &V,
     source: &str,
     app_dir: &Path,
     file: &str,
@@ -261,14 +281,13 @@ fn ingest_importmap(
             "pin" => {
                 // First positional arg is the name (Str literal);
                 // optional `to:` kwarg overrides the derived path.
-                let Some(name_arg) = args.first() else { continue };
+                let Some(name_arg) = args.first() else {
+                    continue;
+                };
                 let Some(name) = string_literal_value(name_arg) else {
                     continue;
                 };
-                let to = args
-                    .iter()
-                    .skip(1)
-                    .find_map(|a| extract_kwarg_str(a, "to"));
+                let to = args.iter().skip(1).find_map(|a| extract_kwarg_str(a, "to"));
                 let path = match to {
                     Some(filename) => format!("/assets/{filename}"),
                     None => format!("/assets/{name}.js"),
@@ -279,7 +298,9 @@ fn ingest_importmap(
                 // `pin_all_from "dir", under: "ns"` — walk dir and
                 // add a pin per *.js file. Name is `ns/basename`;
                 // path is `/assets/ns/basename.js`.
-                let Some(dir_arg) = args.first() else { continue };
+                let Some(dir_arg) = args.first() else {
+                    continue;
+                };
                 let Some(dir_str) = string_literal_value(dir_arg) else {
                     continue;
                 };
@@ -288,19 +309,17 @@ fn ingest_importmap(
                     .skip(1)
                     .find_map(|a| extract_kwarg_str(a, "under"));
                 let walk_dir = app_dir.join(&dir_str);
-                if !walk_dir.is_dir() {
+                if !vfs.is_dir(&walk_dir) {
                     continue;
                 }
-                let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&walk_dir)?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
+                let mut entries: Vec<PathBuf> = vfs
+                    .read_dir(&walk_dir)?
+                    .into_iter()
                     .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("js"))
                     .collect();
                 entries.sort();
                 for entry in entries {
-                    let stem = entry
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
+                    let stem = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                     if stem.is_empty() {
                         continue;
                     }
@@ -349,33 +368,31 @@ fn extract_kwarg_str(arg: &Node<'_>, key: &str) -> Option<String> {
     None
 }
 
-fn read_yml_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("yml") | Some("yaml") => out.push(path),
-            _ => {}
-        }
-    }
+fn read_yml_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = vfs
+        .read_dir(dir)?
+        .into_iter()
+        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yml") | Some("yaml")))
+        .collect();
     out.sort();
     Ok(out)
 }
 
-fn read_erb_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
+fn read_erb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
     let mut out = Vec::new();
-    walk_erb(dir, &mut out)?;
+    walk_erb(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
 }
 
-fn walk_erb(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> IngestResult<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk_erb(&path, out)?;
+fn walk_erb<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> IngestResult<()> {
+    for path in vfs.read_dir(dir)? {
+        if vfs.is_dir(&path) {
+            walk_erb(vfs, &path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("erb") {
             // Only HTML templates — `.html.erb`. Mailer plain-text
             // templates (`.text.erb`) aren't part of the scaffold
@@ -390,15 +407,12 @@ fn walk_erb(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> IngestResult<()> {
     Ok(())
 }
 
-fn read_rb_files(dir: &Path) -> IngestResult<Vec<std::path::PathBuf>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rb") {
-            out.push(path);
-        }
-    }
+fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = vfs
+        .read_dir(dir)?
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rb"))
+        .collect();
     out.sort();
     Ok(out)
 }

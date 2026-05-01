@@ -27,7 +27,7 @@ pub mod test;
 pub mod util;
 pub mod view;
 
-pub use app::ingest_app;
+pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use controller::ingest_controller;
 pub use expr::ingest_expr;
 pub use fixture::ingest_fixture_file;
