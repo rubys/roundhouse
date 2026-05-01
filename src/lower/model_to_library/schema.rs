@@ -18,14 +18,18 @@ use super::{
 pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
     let owner = &model.name;
 
-    // Per-column getter+setter for every non-id column. The id column
-    // gets its accessors from ActiveRecord::Base; concrete models only
-    // declare the per-table additions. (Spinel-blog's article.rb uses
-    // `attr_accessor :title, :body, :created_at, :updated_at`.)
+    // Per-column getter+setter for every column INCLUDING id.
+    // Although ApplicationRecord declares `id`/`id=` in its baseline
+    // (so the typer's dispatch resolved them either way), per-target
+    // emitters need a concrete declaration on the subclass to emit a
+    // typed field — TS won't infer `id: number` on Article from a
+    // baseline registration alone. Tagging as AttributeReader/Writer
+    // (via synth_attr_reader/writer) lets the walker emit `id: number`
+    // as a field declaration. Spinel-blog's article.rb omits id from
+    // attr_accessor because the runtime mixes it in via `class << self`,
+    // but that's a Spinel-runtime convention; the universal IR
+    // declares per-class.
     for col in &table.columns {
-        if col.name.as_str() == "id" {
-            continue;
-        }
         methods.push(synth_attr_reader(owner, col));
         methods.push(synth_attr_writer(owner, col));
     }

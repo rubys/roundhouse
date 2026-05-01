@@ -77,10 +77,19 @@ fn article_lowers_with_schema_methods() {
             "missing writer `{writer}`: {names:?}",
         );
     }
-    // No id reader / writer (id comes from ActiveRecord::Base).
+    // id reader/writer ARE synthesized (per-class so target emitters
+    // can declare `id: number` as a typed field on the subclass; the
+    // ApplicationRecord baseline registration doesn't surface a
+    // declaration on Article in the lowered IR). Earlier shape skipped
+    // id with the rationale "ApplicationRecord owns it"; that worked
+    // for typer dispatch but left TS without a field declaration.
     assert!(
-        !names.contains(&"id"),
-        "id reader should not be synthesized; methods: {names:?}",
+        names.contains(&"id"),
+        "id reader should be synthesized: {names:?}",
+    );
+    assert!(
+        names.contains(&"id="),
+        "id writer should be synthesized: {names:?}",
     );
 
     // The non-attr scaffold: table_name, schema_columns, instantiate,
