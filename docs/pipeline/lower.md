@@ -19,17 +19,65 @@ logic that's identical across targets as IR-level lowerings; each
 emitter consumes the lowered form. Adding a new target becomes "write
 renders" rather than "re-implement the logic."
 
-## The library-shape lowerers (current bet)
+## The two-shape contract
 
-Three lowerers produce a single canonical IR — `LibraryClass` — that
-every emitter reads. After the lowerer boundary, no Rails DSL
-remains: just plain classes with explicit method bodies.
+After the lowerer boundary, every emitter sees the IR in one of two
+shapes. The choice depends on what the artifact *is*, not what
+language it'll render to:
 
-| Lowerer | Input | Output | Entry point |
-|---------|-------|--------|-------------|
-| `model_to_library` | `Model` (validations, associations, scopes) | `LibraryClass` with method bodies | `lower_model_to_library_class` |
-| `view_to_library` | ERB-lowered view template | `LibraryClass` with one method per template + helper rewrites | `lower_view_to_library_class` |
-| `controller_to_library` | `Controller` (actions, before-actions, callbacks) | `LibraryClass` with one method per action | `lower_controller_to_library_class` |
+### `LibraryClass` — class-shaped artifacts
+
+A user-defined class with instance state, optional inheritance, and a
+mix of class and instance methods. Models, controllers, and tests are
+the canonical producers. The IR carries:
+
+- `name: ClassId`
+- `parent: Option<ClassId>` (e.g. `ApplicationRecord`, `ActionController::Base`)
+- `is_module: bool` (Ruby's `module` vs `class` distinction — preserved
+  for surface-form fidelity)
+- `includes: Vec<ClassId>` (mixin modules)
+- `methods: Vec<MethodDef>` (each with `MethodReceiver::Instance | Class`)
+
+Per-target rendering: `class Foo extends Bar { … }` in TS, `pub struct
+Foo` + `impl Foo` in Rust, `class Foo < Bar` in Ruby/Spinel/Crystal,
+`defmodule Foo` in Elixir, etc.
+
+### `LibraryFunction` — module-of-functions artifacts
+
+A top-level callable: no instance state, no inheritance, fully
+resolvable at the call site as `<module_path>.<name>(args)`. Views,
+route helpers, importmap helpers, schema initializer, and seeds are
+the canonical producers. The IR carries:
+
+- `module_path: Vec<Symbol>` (e.g. `["Views", "Articles"]`, `["RouteHelpers"]`)
+- `name: Symbol`
+- `params: Vec<Param>`, `body: Expr`, `signature: Option<Ty>`, `effects: EffectSet`
+
+The IR commits to the semantics; per-target emitters pick the idiomatic
+surface form:
+
+| Target | Surface form |
+|--------|--------------|
+| Spinel / Crystal / Ruby | `module M::N; def self.f(x); …; end; end` |
+| TypeScript | `export function f(x: T): R { … }` in `m/n.ts` |
+| Python | `def f(x): …` in `m/n.py` |
+| Rust | `pub fn f(x: &T) -> R { … }` in `m/n.rs` |
+| Go | `func F(x *T) R { … }` in `m/n.go` |
+| Elixir | `defmodule M.N do; def f(x), do: …; end` in `m/n.ex` |
+
+The two shapes are exhaustive: every lowerer produces one or the
+other (or both — view lowerers run a flatten pass to expose the
+class-shape registry to the body-typer while emitting the function
+shape).
+
+## Lowerers that produce `LibraryClass`
+
+| Lowerer | Input | Output | Bulk entry point |
+|---------|-------|--------|------------------|
+| `model_to_library` | `Model` (validations, associations, scopes) | `LibraryClass` (one per model + per-association classes like `ArticleCommentsProxy`) | `lower_models_to_library_classes` / `lower_models_with_registry` |
+| `controller_to_library` | `Controller` (actions, before-actions, callbacks) | `LibraryClass` with one method per public action + synthesized `process_action` dispatcher | `lower_controllers_to_library_classes` |
+| `test_module_to_library` | `TestModule` (Minitest test class) | `LibraryClass` with one method per `test "…" do` + setup-inlined per test | `lower_test_modules_to_library_classes` |
+| `fixture_to_library` | `Fixture` (parsed YAML) | `LibraryClass` per fixture file (`<Plural>Fixtures` with one class method per label) | `lower_fixtures_to_library_classes` |
 
 Each lowerer:
 
@@ -41,29 +89,33 @@ Each lowerer:
 - Runs the body-typer over the rewritten bodies so emitters get
   fully-typed `Expr` trees.
 
-The thin emitters that consume `LibraryClass` are small — they walk a
-list of methods and emit class/method syntax. See `emit.md`.
+## Lowerers that produce `LibraryFunction`
 
-## Other lowering passes
+| Lowerer | Input | Output |
+|---------|-------|--------|
+| `view_to_library` (via `flatten_lcs_to_functions`) | ERB-lowered view template | One `LibraryFunction` per template; `module_path` derived from view directory (`["Views", "Articles"]`) |
+| `routes_to_library` | `app.routes` (after `flatten_routes`) | One `LibraryFunction` per named route under `module_path: ["RouteHelpers"]`; body is a typed `StringInterp` building the path from path-params |
+| `importmap_to_library` | `app.importmap` | Two `LibraryFunction`s (`json`, `tags`) under `module_path: ["Importmap"]` |
+| `schema_to_library` | `Schema` | One `LibraryFunction` (`create_tables`) under `module_path: ["Schema"]`; body is the rendered DDL as a `Lit::Str` |
+| `seeds_to_library` | `app.seeds` (typed Expr) | One `LibraryFunction` (`run`) under `module_path: ["Seeds"]`; body is the seeds Expr verbatim |
 
-Lowerings that produce target-neutral forms other than `LibraryClass`:
+Why this group: each is "module of functions" rather than "class with
+state." Forcing them through `LibraryClass{is_module:true}` with
+class methods worked but produced shape mismatches in TS (literal
+`::` in class headers, `new Views.X(...)` mis-emitted as a
+constructor call). `LibraryFunction` says exactly what these are.
 
-| Pass | Source | Output |
-|------|--------|--------|
-| `lower_validations` | Model validations | `Vec<LoweredValidation>` — each attribute with its expanded `Check` enum list |
-| `lower_persistence` | Model + Schema | `LoweredPersistence` with INSERT/UPDATE/DELETE/SELECT strings, `belongs_to` checks, dependent-destroy cascades |
-| `flatten_routes` | `RouteTable` | `Vec<FlatRoute>` (one entry per `(method, path, controller, action)`) |
-| `lower_fixtures` | YAML fixtures | `LoweredFixtureSet` (per-record load plan) |
-| `lower_broadcasts` | Model `broadcasts_to` declarations | `LoweredBroadcasts` (turbo-stream actions per association edge) |
-| `resolve_has_many` | Model associations | `HasManyRef` (target class + foreign key) |
-
-Each pass is pure: same input → same output, no side effects, no
-target awareness. Re-exports live in `src/lower/mod.rs`.
+The view lowerer is dual-shape: `lower_views_to_library_classes`
+returns the class-shape (consumed by the body-typer registry to type
+cross-class dispatch like `Views::Articles.article(x)`),
+`flatten_lcs_to_functions` pivots that output into per-template
+`LibraryFunction`s for emission. Both share the same body-typing
+work.
 
 ## Pre-emit lowering passes
 
 Three passes rewrite the controller-body `Expr` tree to a normalized
-form. They run inside `lower_action` (or directly when older
+form. They run inside `controller_to_library` (or directly when older
 per-target emitters consume them):
 
 ### `synthesize_implicit_render`
@@ -81,89 +133,83 @@ collapsed to the HTML branch (the only format every target emits
 today). JSON / Turbo Stream formats will re-enter as separate
 rendered outputs once a second format matters.
 
-### `resolve_before_actions`
+### `resolve_before_actions` + `inline_before_filters`
 
 `before_action :set_article` doesn't produce any IR of its own in the
-action body — it runs a method that assigns an ivar. This pass inlines
-the before-action's effect at the top of each action it covers, so
-the action body becomes self-contained.
+action body — it runs a method that assigns an ivar. The resolution
+pass identifies which actions a filter applies to;
+`controller_to_library` then inlines the filter body at the top of
+each action it covers, so the action body becomes self-contained
+without a runtime filter chain.
 
-## Legacy: per-target controller derivation
+## Support lowerings
+
+Lowerings that produce target-neutral forms other than `LibraryClass`
+or `LibraryFunction` — these feed *into* the shape-producing lowerers
+above:
+
+| Pass | Source | Output | Consumer |
+|------|--------|--------|----------|
+| `lower_validations` | Model validations | `Vec<LoweredValidation>` — each attribute with its expanded `Check` enum list | `model_to_library` |
+| `lower_persistence` | Model + Schema | `LoweredPersistence` with INSERT/UPDATE/DELETE/SELECT strings, `belongs_to` checks, dependent-destroy cascades | `model_to_library` |
+| `flatten_routes` | `RouteTable` | `Vec<FlatRoute>` (one entry per `(method, path, controller, action)`) | `routes_to_library`, controller-test dispatch |
+| `lower_broadcasts` | Model `broadcasts_to` declarations | `LoweredBroadcasts` (turbo-stream actions per association edge) | `model_to_library` |
+| `resolve_has_many` | Model associations | `HasManyRef` (target class + foreign key) | `model_to_library`, view-helper resolution |
+| `erb_trim::trim_view` | ERB-derived view tree | Whitespace-normalized view tree | `view_to_library` (runs first) |
+
+Each pass is pure: same input → same output, no side effects, no
+target awareness. Re-exports live in `src/lower/mod.rs`.
+
+## Self-describing IR
+
+The lowerer landed a working principle: **when the lowerer knows a
+fact, the IR records it.** Three concrete instances:
+
+- `MethodDef.kind: AccessorKind::{Method, AttributeReader, AttributeWriter}` —
+  attr_reader/writer/accessor are lowered to synthetic methods, but
+  the `kind` field tells emitters which collapse rules to apply
+  (e.g. fold matching reader+writer into a class field).
+- `LibraryFunction.signature` — every function ships with its full
+  `Ty::Fn` (param types + return + block + effects), set at lower
+  time, so the body-typer registry doesn't have to rediscover them.
+- `Send.parenthesized` — set during lowering for Method-kind
+  dispatches, so emitters know whether to add `()` without a
+  type-aware lookup.
+
+The contrast: pre-principle, emitters re-derived facts the lowerer
+already knew (was this a method or an attr? does this Send need
+parens? is this body's return Nil?). Each rediscovery was a place
+two emitters could disagree.
+
+## Status of legacy per-target derivation
 
 The older shape — `CtrlWalker` trait, `WalkCtx` / `WalkState`,
 `SendKind` classifier in `src/lower/controller.rs` — is still in
-place for emitters that haven't migrated to `LibraryClass`. It walks
-controller bodies through a target-implemented dispatch trait, with
-each target overriding leaf `write_*` / `render_*` methods.
+place for emitters that haven't migrated to the universal IR. It
+walks controller bodies through a target-implemented dispatch trait,
+with each target overriding leaf `write_*` / `render_*` methods.
 
 This shape is being torn down as `controller_to_library` lands per
 target. New work shouldn't extend it; existing per-target emitters
-either migrate to thin or get rip-and-replaced (see `emit.md`'s
-working policy section).
-
-## Other lowering modules
-
-### `src/lower/validations.rs`
-
-Expands surface `Validation` rules into flat `Check` entries. A
-source `Length { min: 10, max: 100 }` lowers to two checks
-(`MinLength` then `MaxLength`), so the per-target render doesn't
-carry optional-bound logic.
-
-### `src/lower/routes.rs`
-
-`RouteTable` → `Vec<FlatRoute>`. Expands `resources :articles` into
-the seven scaffold actions, composes nested paths
-(`articles/:article_id/comments/:id`), and computes the `as_name`
-helper (`edit_article` → `edit_article_path`).
-
-### `src/lower/persistence.rs`
-
-Per-model SQL generation: INSERT / UPDATE / DELETE / SELECT-by-id /
-SELECT-all / SELECT-last, column projection order, belongs_to
-existence checks, and dependent-destroy cascade targets. SQLite-
-specific today; a `Dialect` enum can later render Postgres/MySQL
-without changing the consumer shape.
-
-### `src/lower/broadcasts.rs`
-
-Model `broadcasts_to` declarations → `LoweredBroadcasts`. Each
-declaration produces a list of turbo-stream actions to emit on
-create/update/destroy, scoped by the broadcast association.
-
-### `src/lower/associations.rs`
-
-`resolve_has_many` — target class + foreign key for an owner's
-has_many reference. Prefers the owner's static type; falls back to
-cross-model scan by association name.
-
-### `src/lower/fixtures.rs`
-
-YAML fixtures → structured load plan. Each record carries which
-columns get literals vs. cross-fixture references; cross-fixture FK
-references resolve through runtime lookup keyed on
-`(target_fixture, target_label)`.
-
-### `src/lower/erb_trim.rs`
-
-ERB whitespace normalization — runs before `view_to_library` so the
-view lowerer sees a stable-shaped template tree regardless of which
-ERB trim style the source used.
-
-### `src/lower/controller_test.rs`
-
-Same lift pattern as legacy controller lowering, applied to
-controller-test bodies. Classifies `get`/`post`/`assert_select`/
-`assert_response` shapes into a `ControllerTestSend` enum.
+either migrate to the universal IR or get rip-and-replaced (see
+`emit.md`'s working policy section).
 
 ## Key files
 
 | File | Role |
 |------|------|
 | `src/lower/mod.rs` | Module layout + re-exports |
+| `src/dialect.rs` | `LibraryClass`, `LibraryFunction`, `MethodDef`, `AccessorKind` |
+| `src/lower/typing.rs` | `fn_sig`, `lit_str`, `type_method_body`, `with_ty` — shared typing helpers used by every shape-producing lowerer |
 | `src/lower/model_to_library/` | Model dialect → `LibraryClass` |
-| `src/lower/view_to_library/` | ERB view → `LibraryClass` |
+| `src/lower/view_to_library/` | ERB view → `LibraryClass` (registry) + `LibraryFunction` (emit, via `flatten_lcs_to_functions`) |
 | `src/lower/controller_to_library/` | Controller dialect → `LibraryClass` |
+| `src/lower/test_module_to_library/` | Minitest class → `LibraryClass` |
+| `src/lower/fixture_to_library/` | YAML fixtures → `LibraryClass` per fixture file |
+| `src/lower/routes_to_library/` | Routes → `LibraryFunction` (RouteHelpers) |
+| `src/lower/importmap_to_library/` | Importmap → `LibraryFunction` (Importmap module) |
+| `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.create_tables`) |
+| `src/lower/seeds_to_library/` | Seeds → `LibraryFunction` (`Seeds.run`) |
 | `src/lower/controller.rs`, `controller_walk.rs` | Legacy per-target derivation (being torn down) |
 | `src/lower/validations.rs` | `LoweredValidation`, `Check` enum |
 | `src/lower/routes.rs` | `flatten_routes`, `FlatRoute` |
@@ -172,11 +218,15 @@ controller-test bodies. Classifies `get`/`post`/`assert_select`/
 | `src/lower/fixtures.rs` | Fixture load plan |
 | `src/lower/associations.rs` | has_many resolution |
 | `src/lower/controller_test.rs` | Test-body classification |
+| `src/lower/erb_trim.rs` | ERB whitespace normalization |
 
 ## Related docs
 
 - [`analyze.md`](analyze.md) — the typed IR that lowering consumes.
 - [`emit.md`](emit.md) — the universal IR contract + per-target
-  emitter shape that consumes `LibraryClass`.
+  emitter shape that consumes `LibraryClass` and `LibraryFunction`.
 - [`../data/catalog.md`](../data/catalog.md) — the AR method
   classification that some lowerings consult.
+- [`../data/schema-routes-seeds.md`](../data/schema-routes-seeds.md) —
+  the ingest IR for schema/routes/seeds (input to the `*_to_library`
+  passes documented here).
