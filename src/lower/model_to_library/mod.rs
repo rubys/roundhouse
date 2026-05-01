@@ -28,8 +28,9 @@ mod markers;
 use crate::dialect::{LibraryClass, MethodDef, Model};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::schema::Schema;
+use crate::schema::{ColumnType, Schema};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use self::associations::{push_association_methods, push_dependent_destroy};
 use self::broadcasts::push_broadcasts_methods;
@@ -64,6 +65,16 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     push_broadcasts_methods(&mut methods, model);
     push_block_callback_methods(&mut methods, model);
 
+    // Run the body-typer over each lowered method so leaf nodes
+    // (Var, Ivar, SelfRef, Const) and composites (Send, Assign, Seq,
+    // BoolOp, Case) pick up types the synthesizers can't conveniently
+    // populate inline. Seeded by the signature populated above (params
+    // get types from sig_params; self_ty from enclosing_class). Mirrors
+    // `view_to_library::type_method_body`.
+    for method in &mut methods {
+        type_method_body(method);
+    }
+
     LibraryClass {
         name: model.name.clone(),
         is_module: false,
@@ -73,29 +84,109 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     }
 }
 
+fn type_method_body(method: &mut MethodDef) {
+    let empty_classes: std::collections::HashMap<
+        crate::ident::ClassId,
+        crate::analyze::ClassInfo,
+    > = std::collections::HashMap::new();
+    let typer = crate::analyze::BodyTyper::new(&empty_classes);
+    let mut ctx = crate::analyze::Ctx::default();
+    if let Some(Ty::Fn { params, .. }) = &method.signature {
+        for (param, sig) in method.params.iter().zip(params.iter()) {
+            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+        }
+    }
+    if let Some(enclosing) = &method.enclosing_class {
+        ctx.self_ty = Some(Ty::Class {
+            id: ClassId(enclosing.clone()),
+            args: vec![],
+        });
+    }
+    typer.analyze_expr(&mut method.body, &ctx);
+}
+
 // ---------------------------------------------------------------------------
 // Small ExprNode constructors used throughout. Each takes a synthetic span
 // since lowered methods don't correspond to a single source location.
 // ---------------------------------------------------------------------------
 
 pub(super) fn lit_str(s: String) -> Expr {
-    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: s } })
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: s } }),
+        Ty::Str,
+    )
 }
 
 pub(super) fn lit_sym(name: Symbol) -> Expr {
-    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: name } })
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: name } }),
+        Ty::Sym,
+    )
 }
 
 pub(super) fn lit_int(value: i64) -> Expr {
-    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value } })
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value } }),
+        Ty::Int,
+    )
 }
 
 pub(super) fn lit_float(value: f64) -> Expr {
-    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value } })
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value } }),
+        Ty::Float,
+    )
 }
 
 pub(super) fn nil_lit() -> Expr {
-    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        Ty::Nil,
+    )
+}
+
+/// Attach a known type to an Expr. Lowerers use this when the type is
+/// statically known by construction — avoiding a separate analyzer
+/// pass to rediscover what we already knew.
+pub(super) fn with_ty(mut e: Expr, ty: Ty) -> Expr {
+    e.ty = Some(ty);
+    e
+}
+
+/// Schema column type → roundhouse `Ty`. Mirrors `ingest::model::ty_of_column`
+/// — duplicated here to avoid making that internal helper public for one
+/// caller. Keep them in sync; the mapping is small and stable.
+pub(super) fn ty_of_column(t: &ColumnType) -> Ty {
+    match t {
+        ColumnType::Integer | ColumnType::BigInt => Ty::Int,
+        ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
+        ColumnType::String { .. } | ColumnType::Text => Ty::Str,
+        ColumnType::Boolean => Ty::Bool,
+        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => {
+            Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] }
+        }
+        ColumnType::Binary => Ty::Str,
+        ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        ColumnType::Reference { .. } => Ty::Int,
+    }
+}
+
+/// Build a `Ty::Fn` signature from positional (name, type) pairs and a return type.
+/// Effects default to pure — callers refine if needed (lifecycle hooks etc.).
+pub(super) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
+    Ty::Fn {
+        params: params
+            .into_iter()
+            .map(|(name, ty)| crate::ty::Param {
+                name,
+                ty,
+                kind: crate::ty::ParamKind::Required,
+            })
+            .collect(),
+        block: None,
+        ret: Box::new(ret),
+        effects: crate::effect::EffectSet::pure(),
+    }
 }
 
 pub(super) fn var_ref(name: Symbol) -> Expr {

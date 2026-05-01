@@ -6,11 +6,13 @@ use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::pluralize_snake;
-use crate::schema::Table;
+use crate::schema::{Column, Table};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use super::{
-    class_const, is_id_column, lit_int, lit_str, lit_sym, nil_lit, self_ref, seq, var_ref,
+    class_const, fn_sig, is_id_column, lit_int, lit_str, lit_sym, nil_lit, self_ref, seq,
+    ty_of_column, var_ref, with_ty,
 };
 
 pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
@@ -24,8 +26,8 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
         if col.name.as_str() == "id" {
             continue;
         }
-        methods.push(synth_attr_reader(owner, &col.name));
-        methods.push(synth_attr_writer(owner, &col.name));
+        methods.push(synth_attr_reader(owner, col));
+        methods.push(synth_attr_writer(owner, col));
     }
 
     // def self.table_name
@@ -34,29 +36,32 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
         receiver: MethodReceiver::Class,
         params: Vec::new(),
         body: lit_str(pluralize_snake(model.name.0.as_str())),
-        signature: None,
+        signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     });
 
     // def self.schema_columns
-    let column_array = Expr::new(
-        Span::synthetic(),
-        ExprNode::Array {
-            elements: table
-                .columns
-                .iter()
-                .map(|c| lit_sym(c.name.clone()))
-                .collect(),
-            style: ArrayStyle::Brackets,
-        },
+    let column_array = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: table
+                    .columns
+                    .iter()
+                    .map(|c| lit_sym(c.name.clone()))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        ),
+        Ty::Array { elem: Box::new(Ty::Sym) },
     );
     methods.push(MethodDef {
         name: Symbol::from("schema_columns"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),
         body: column_array,
-        signature: None,
+        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     });
@@ -80,38 +85,44 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
     methods.push(synth_update(owner, table));
 }
 
-fn synth_attr_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Ivar { name: name.clone() },
+fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
+    let col_ty = ty_of_column(&col.col_type);
+    let body = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
+        col_ty.clone(),
     );
     MethodDef {
-        name: name.clone(),
+        name: col.name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: None,
+        signature: Some(fn_sig(vec![], col_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
 }
 
-fn synth_attr_writer(owner: &ClassId, name: &Symbol) -> MethodDef {
+fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
-    let rhs = var_ref(value_param.clone());
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: LValue::Ivar { name: name.clone() },
-            value: rhs,
-        },
+    let col_ty = ty_of_column(&col.col_type);
+    let rhs = with_ty(var_ref(value_param.clone()), col_ty.clone());
+    // Assign expression evaluates to the RHS in Ruby; same in TS.
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col.name.clone() },
+                value: rhs,
+            },
+        ),
+        col_ty.clone(),
     );
     MethodDef {
-        name: Symbol::from(format!("{}=", name.as_str())),
+        name: Symbol::from(format!("{}=", col.name.as_str())),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(value_param)],
+        params: vec![Param::positional(value_param.clone())],
         body,
-        signature: None,
+        signature: Some(fn_sig(vec![(value_param, col_ty.clone())], col_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -153,12 +164,14 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
         var_ref(instance),
     ]);
 
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
-        params: vec![Param::positional(row)],
+        params: vec![Param::positional(row.clone())],
         body,
-        signature: None,
+        signature: Some(fn_sig(vec![(row, row_ty)], owner_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -223,12 +236,13 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         Span::synthetic(),
         ExprNode::Hash { entries: Vec::new(), braced: true },
     );
+    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::with_default(attrs, attrs_default)],
+        params: vec![Param::with_default(attrs.clone(), attrs_default)],
         body: seq(stmts),
-        signature: None,
+        signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -240,16 +254,27 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         .iter()
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
+            let col_ty = ty_of_column(&c.col_type);
             (
                 lit_sym(c.name.clone()),
-                Expr::new(Span::synthetic(), ExprNode::Ivar { name: c.name.clone() }),
+                with_ty(
+                    Expr::new(Span::synthetic(), ExprNode::Ivar { name: c.name.clone() }),
+                    col_ty,
+                ),
             )
         })
         .collect();
 
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Hash { entries, braced: true },
+    // Hash<Sym, ?> — value type is a union of column types; collapsing to
+    // Untyped is the conservative approximation. Refining to a Record
+    // (row-polymorphic) is a follow-up if downstream wants per-key types.
+    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries, braced: true },
+        ),
+        hash_ty.clone(),
     );
 
     MethodDef {
@@ -257,7 +282,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: None,
+        signature: Some(fn_sig(vec![], hash_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -289,9 +314,10 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
     MethodDef {
         name: Symbol::from("[]"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(name)],
+        params: vec![Param::positional(name.clone())],
         body,
-        signature: None,
+        // Heterogeneous return (per-column type union); approximate as Untyped.
+        signature: Some(fn_sig(vec![(name, Ty::Sym)], Ty::Untyped)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -330,9 +356,12 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
     MethodDef {
         name: Symbol::from("[]="),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(name), Param::positional(value)],
+        params: vec![Param::positional(name.clone()), Param::positional(value.clone())],
         body,
-        signature: None,
+        signature: Some(fn_sig(
+            vec![(name, Ty::Sym), (value, Ty::Untyped)],
+            Ty::Untyped,
+        )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -400,12 +429,14 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         },
     ));
 
+    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("update"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(attrs)],
+        params: vec![Param::positional(attrs.clone())],
         body: seq(stmts),
-        signature: None,
+        // save returns Bool.
+        signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }

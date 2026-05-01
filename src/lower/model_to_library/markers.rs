@@ -17,8 +17,9 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
+use crate::ty::Ty;
 
-use super::seq;
+use super::{fn_sig, seq, with_ty};
 
 /// `primary_abstract_class` marks a model as the abstract base of a Rails
 /// app. Lowered to `def self.abstract?; true; end` — the explicit form
@@ -32,11 +33,14 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
                         name: Symbol::from("abstract?"),
                         receiver: MethodReceiver::Class,
                         params: Vec::new(),
-                        body: Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Lit { value: Literal::Bool { value: true } },
+                        body: with_ty(
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit { value: Literal::Bool { value: true } },
+                            ),
+                            Ty::Bool,
                         ),
-                        signature: None,
+                        signature: Some(fn_sig(vec![], Ty::Bool)),
                         effects: EffectSet::default(),
                         enclosing_class: Some(model.name.0.clone()),
                     });
@@ -65,7 +69,7 @@ pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
             body: call,
-            signature: None,
+            signature: Some(fn_sig(vec![], Ty::Nil)),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
         });

@@ -7,8 +7,9 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
+use crate::ty::Ty;
 
-use super::{class_const, lit_int, lit_sym, nil_lit, seq, var_ref};
+use super::{class_const, fn_sig, lit_int, lit_sym, nil_lit, seq, var_ref};
 
 pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let owner = &model.name;
@@ -63,7 +64,10 @@ fn synth_has_many_reader(
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: None,
+        signature: Some(fn_sig(
+            vec![],
+            Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+        )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -124,12 +128,21 @@ fn synth_belongs_to_reader(
         },
     );
 
+    // belongs_to returns the target instance or nil when the FK is unset.
     MethodDef {
         name: name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: None,
+        signature: Some(fn_sig(
+            vec![],
+            Ty::Union {
+                variants: vec![
+                    Ty::Class { id: target.clone(), args: vec![] },
+                    Ty::Nil,
+                ],
+            },
+        )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
     }
@@ -197,7 +210,7 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body: seq(stmts),
-        signature: None,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
     });

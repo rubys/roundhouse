@@ -277,3 +277,210 @@ fn article_lowers_dependent_destroy_to_before_destroy() {
     assert_eq!(method, "each");
     assert!(block_present, "each call should carry a block");
 }
+
+// ---------------------------------------------------------------------------
+// Typing-coverage probe — sibling of
+// `inference_on_spinel_blog_runtime::untyped_subexpressions_baseline`,
+// pointed at the post-lowering output of model_to_library on real-blog.
+//
+// What's measured: count of Expr sub-expressions whose `ty` is None
+// (or Ty::Var{...}) after lowering, summed across every method body
+// in every lowered model. The number drops as lowerers populate more
+// type info inline (ticket-driven). The residual is the empirical
+// scope of what remains for a body-typer pass over lowered IR.
+// ---------------------------------------------------------------------------
+
+fn collect_untyped_lowered(
+    e: &roundhouse::expr::Expr,
+    path: &str,
+    out: &mut Vec<String>,
+) {
+    use roundhouse::expr::{ExprNode, InterpPart};
+    use roundhouse::ty::Ty;
+
+    let ty_ok = matches!(&e.ty, Some(t) if !matches!(t, Ty::Var { .. }));
+    if !ty_ok {
+        out.push(format!("{path}: {:?} has ty={:?}", &e.node, e.ty));
+    }
+    match &*e.node {
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_untyped_lowered(cond, &format!("{path}/if.cond"), out);
+            collect_untyped_lowered(then_branch, &format!("{path}/if.then"), out);
+            collect_untyped_lowered(else_branch, &format!("{path}/if.else"), out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_untyped_lowered(r, &format!("{path}/send.recv"), out);
+            }
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped_lowered(a, &format!("{path}/send.arg[{i}]"), out);
+            }
+            if let Some(b) = block {
+                collect_untyped_lowered(b, &format!("{path}/send.block"), out);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for (i, p) in parts.iter().enumerate() {
+                if let InterpPart::Expr { expr } = p {
+                    collect_untyped_lowered(expr, &format!("{path}/interp[{i}]"), out);
+                }
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for (i, e) in exprs.iter().enumerate() {
+                collect_untyped_lowered(e, &format!("{path}/seq[{i}]"), out);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_untyped_lowered(left, &format!("{path}/boolop.left"), out);
+            collect_untyped_lowered(right, &format!("{path}/boolop.right"), out);
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            collect_untyped_lowered(expr, &format!("{path}/rescue.expr"), out);
+            collect_untyped_lowered(fallback, &format!("{path}/rescue.fallback"), out);
+        }
+        ExprNode::Let { value, body, .. } => {
+            collect_untyped_lowered(value, &format!("{path}/let.value"), out);
+            collect_untyped_lowered(body, &format!("{path}/let.body"), out);
+        }
+        ExprNode::Lambda { body, .. } => {
+            collect_untyped_lowered(body, &format!("{path}/lambda.body"), out)
+        }
+        ExprNode::Apply { fun, args, block } => {
+            collect_untyped_lowered(fun, &format!("{path}/apply.fun"), out);
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped_lowered(a, &format!("{path}/apply.arg[{i}]"), out);
+            }
+            if let Some(b) = block {
+                collect_untyped_lowered(b, &format!("{path}/apply.block"), out);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (i, (k, v)) in entries.iter().enumerate() {
+                collect_untyped_lowered(k, &format!("{path}/hash[{i}].key"), out);
+                collect_untyped_lowered(v, &format!("{path}/hash[{i}].value"), out);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for (i, el) in elements.iter().enumerate() {
+                collect_untyped_lowered(el, &format!("{path}/array[{i}]"), out);
+            }
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_untyped_lowered(scrutinee, &format!("{path}/case.scrut"), out);
+            for (i, arm) in arms.iter().enumerate() {
+                if let Some(g) = &arm.guard {
+                    collect_untyped_lowered(g, &format!("{path}/case.arm[{i}].guard"), out);
+                }
+                collect_untyped_lowered(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
+            }
+        }
+        ExprNode::Assign { value, .. } => {
+            collect_untyped_lowered(value, &format!("{path}/assign.value"), out)
+        }
+        ExprNode::Yield { args } => {
+            for (i, a) in args.iter().enumerate() {
+                collect_untyped_lowered(a, &format!("{path}/yield.arg[{i}]"), out);
+            }
+        }
+        ExprNode::Raise { value } => {
+            collect_untyped_lowered(value, &format!("{path}/raise.value"), out)
+        }
+        ExprNode::Return { value } => {
+            collect_untyped_lowered(value, &format!("{path}/return.value"), out)
+        }
+        ExprNode::Super { args } => {
+            if let Some(args) = args {
+                for (i, a) in args.iter().enumerate() {
+                    collect_untyped_lowered(a, &format!("{path}/super.arg[{i}]"), out);
+                }
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_untyped_lowered(body, &format!("{path}/begin.body"), out);
+            for (i, r) in rescues.iter().enumerate() {
+                for (j, c) in r.classes.iter().enumerate() {
+                    collect_untyped_lowered(c, &format!("{path}/begin.rescue[{i}].class[{j}]"), out);
+                }
+                collect_untyped_lowered(&r.body, &format!("{path}/begin.rescue[{i}].body"), out);
+            }
+            if let Some(e) = else_branch {
+                collect_untyped_lowered(e, &format!("{path}/begin.else"), out);
+            }
+            if let Some(e) = ensure {
+                collect_untyped_lowered(e, &format!("{path}/begin.ensure"), out);
+            }
+        }
+        ExprNode::Next { value } => {
+            if let Some(v) = value {
+                collect_untyped_lowered(v, &format!("{path}/next.value"), out);
+            }
+        }
+        ExprNode::MultiAssign { value, .. } => {
+            collect_untyped_lowered(value, &format!("{path}/multi_assign.value"), out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_untyped_lowered(cond, &format!("{path}/while.cond"), out);
+            collect_untyped_lowered(body, &format!("{path}/while.body"), out);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin {
+                collect_untyped_lowered(b, &format!("{path}/range.begin"), out);
+            }
+            if let Some(e) = end {
+                collect_untyped_lowered(e, &format!("{path}/range.end"), out);
+            }
+        }
+    }
+}
+
+#[test]
+fn lowered_real_blog_models_typing_residual() {
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+
+    let mut all_untyped: Vec<String> = Vec::new();
+    let mut model_count = 0usize;
+    for model in &app.models {
+        let lc = lower_model_to_library_class(model, &app.schema);
+        for method in &lc.methods {
+            let path = format!("{}#{}", lc.name.0.as_str(), method.name.as_str());
+            collect_untyped_lowered(&method.body, &path, &mut all_untyped);
+        }
+        model_count += 1;
+    }
+
+    eprintln!(
+        "lowered real-blog models: {} untyped sub-expressions across {} models",
+        all_untyped.len(),
+        model_count
+    );
+    if std::env::var("DUMP_RESIDUAL").is_ok() {
+        for (i, s) in all_untyped.iter().enumerate() {
+            eprintln!("  {i}: {s}");
+        }
+    }
+
+    // Loose ceiling — the point is to scope the remaining work, not
+    // lock in today's number. Tighten as more inline typing lands or
+    // a body-typer over lowered output picks up the rest. Run with
+    // `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect the
+    // residual list.
+    const CEILING: usize = 500;
+    assert!(
+        all_untyped.len() <= CEILING,
+        "{} untyped sub-expressions on lowered real-blog models — \
+         exceeds ceiling of {CEILING}.\nFirst 20:\n  {}",
+        all_untyped.len(),
+        all_untyped
+            .iter()
+            .take(20)
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+}

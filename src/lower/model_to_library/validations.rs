@@ -11,8 +11,9 @@ use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
+use crate::ty::Ty;
 
-use super::{lit_float, lit_int, lit_sym, seq};
+use super::{fn_sig, lit_float, lit_int, lit_sym, seq};
 
 pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) {
     let mut stmts: Vec<Expr> = Vec::new();
@@ -32,7 +33,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body: seq(stmts),
-        signature: None,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
     });
