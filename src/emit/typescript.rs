@@ -30,7 +30,7 @@ mod naming;
 mod package;
 mod ty;
 
-pub use ty::ts_ty;
+pub use ty::{ts_return_ty, ts_ty};
 
 /// Emit a TypeScript project for `app`. The kind-agnostic walker:
 /// every model and view is lowered to `LibraryClass`, joined with
@@ -383,7 +383,7 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
         } else {
             ""
         };
-        let ret_s = ts_ty(&ret_ty);
+        let ret_s = ts_return_ty(&ret_ty);
         writeln!(
             out,
             "{prefix}{}({}): {} {{",
@@ -497,7 +497,7 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
         .collect();
 
-    let ret_s = ts_ty(ret);
+    let ret_s = ts_return_ty(ret);
     let body = expr::emit_body(&m.body, ret);
 
     let mut out = String::new();
