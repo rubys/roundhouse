@@ -138,26 +138,32 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     };
 
     // Collect field declarations (from synthesized attr_readers — the
-    // reader carries the type via its `() -> T` signature).
+    // reader carries the type via its `() -> T` signature; body type
+    // is the next-best source; final fallback is `any`).
     let mut fields: Vec<(String, String)> = Vec::new();
     for m in &class.methods {
         if is_attr_reader(m) {
-            let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() else {
-                return Err(format!(
-                    "class `{}` field `{}`: signature missing or not Ty::Fn",
-                    class_name, m.name
-                ));
+            let ty = match m.signature.as_ref() {
+                Some(Ty::Fn { ret, .. }) => ts_ty(ret),
+                _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
             };
-            fields.push((m.name.as_str().to_string(), ts_ty(ret)));
+            fields.push((m.name.as_str().to_string(), ty));
         }
     }
 
-    // Class header. Parent: StandardError → Error special-case;
-    // everything else passes through. Modules emit as classes for now;
-    // include-as-mixin is deferred.
-    let parent = class.parent.as_ref().map(|p| match p.0.as_str() {
-        "StandardError" => "Error".to_string(),
-        other => other.to_string(),
+    // Class header. Parent translation:
+    //   - `StandardError` → `Error` (TS builtin)
+    //   - `ActiveRecord::Base` → `ActiveRecord` (juntos export)
+    //   - Other qualified names: last segment (Ruby's `Foo::Bar` → TS
+    //     `Bar` after import)
+    // Modules emit as classes for now; include-as-mixin is deferred.
+    let parent = class.parent.as_ref().map(|p| {
+        let raw = p.0.as_str();
+        match raw {
+            "StandardError" => "Error".to_string(),
+            "ActiveRecord::Base" => "ActiveRecord".to_string(),
+            _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
+        }
     });
     match &parent {
         Some(p) => writeln!(out, "export class {class_name} extends {p} {{").unwrap(),
@@ -249,36 +255,40 @@ fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
 }
 
 /// Emit one `MethodDef` as a class member (instance method, static,
-/// or constructor). Mirrors `emit_method` but without the `export
-/// function` wrapper. Used by `emit_library_class`.
+/// or constructor). Uses signature when present (typed params + ret);
+/// falls back to body.ty for return and `any` for params when not
+/// (lowered models don't populate signatures yet).
 fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     use crate::dialect::MethodReceiver;
 
-    let sig = m.signature.as_ref().ok_or_else(|| {
-        format!("emit_class_member: method `{}` has no signature", m.name)
-    })?;
-    let Ty::Fn { params: sig_params, ret, .. } = sig else {
-        return Err(format!("method `{}`: signature is not Ty::Fn", m.name));
+    // Pull (param-types, return-type) from signature when available.
+    let (sig_param_tys, ret_ty): (Vec<Ty>, Ty) = match m.signature.as_ref() {
+        Some(Ty::Fn { params: sig_params, ret, .. }) => {
+            let non_block: Vec<&crate::ty::Param> = sig_params
+                .iter()
+                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                .collect();
+            if non_block.len() != m.params.len() {
+                return Err(format!(
+                    "method `{}`: signature/param arity mismatch ({} vs {})",
+                    m.name,
+                    non_block.len(),
+                    m.params.len(),
+                ));
+            }
+            (non_block.iter().map(|p| p.ty.clone()).collect(), (**ret).clone())
+        }
+        _ => (
+            m.params.iter().map(|_| Ty::Untyped).collect(),
+            m.body.ty.clone().unwrap_or(Ty::Nil),
+        ),
     };
-    if sig_params
-        .iter()
-        .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-        .count()
-        != m.params.len()
-    {
-        return Err(format!(
-            "method `{}`: signature/param arity mismatch",
-            m.name
-        ));
-    }
 
     let param_list: Vec<String> = m
         .params
         .iter()
-        .zip(sig_params.iter().filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block)))
-        .map(|(name, p)| {
-            format!("{}: {}", escape_reserved(name.as_str()), ts_ty(&p.ty))
-        })
+        .zip(sig_param_tys.iter())
+        .map(|(name, ty)| format!("{}: {}", escape_reserved(name.as_str()), ts_ty(ty)))
         .collect();
 
     let mut out = String::new();
@@ -294,9 +304,9 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     };
 
     let body = if is_constructor {
-        emit_constructor_body(&rewritten, ret)
+        emit_constructor_body(&rewritten, &ret_ty)
     } else {
-        expr::emit_body(&rewritten, ret)
+        expr::emit_body(&rewritten, &ret_ty)
     };
 
     if is_constructor {
@@ -307,7 +317,7 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
         } else {
             ""
         };
-        let ret_s = ts_ty(ret);
+        let ret_s = ts_ty(&ret_ty);
         writeln!(
             out,
             "{prefix}{}({}): {} {{",
