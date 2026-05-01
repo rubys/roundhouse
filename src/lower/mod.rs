@@ -47,7 +47,7 @@ pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,
     lower_models_with_registry,
 };
-pub use view_to_library::lower_view_to_library_class;
+pub use view_to_library::{lower_view_to_library_class, lower_views_to_library_classes};
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
 };

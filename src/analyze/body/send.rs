@@ -566,6 +566,10 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         | "frozen?" | "tainted?" | "untrusted?" => Some(Ty::Bool),
         // Value equality / comparison operators.
         "==" | "!=" | "eql?" | "equal?" => Some(Ty::Bool),
+        // Boolean negation — Ruby's `!x` desugars to `x.!()` and is
+        // also written as bare `!cond` (Send recv=None, method="!").
+        // Universally returns Bool regardless of receiver.
+        "!" => Some(Ty::Bool),
         // `class` is receiver-aware and handled in `dispatch` itself
         // (preserves `Ty::Class { id }` so chained `obj.class.foo`
         // resolves against `id`'s registry entry).

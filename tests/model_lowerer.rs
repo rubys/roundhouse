@@ -21,7 +21,7 @@ use roundhouse::lower::{
     class_info_from_library_class, lower_controller_to_library_class,
     lower_controllers_to_library_classes, lower_model_to_library_class,
     lower_models_to_library_classes, lower_models_with_registry,
-    lower_view_to_library_class,
+    lower_view_to_library_class, lower_views_to_library_classes,
 };
 
 fn fixture_path() -> &'static Path {
@@ -486,26 +486,33 @@ fn build_class_info_extras(lcs: &[LibraryClass]) -> Vec<(ClassId, roundhouse::an
 fn lowered_real_blog_typing_residual() {
     let app = ingest_app(fixture_path()).expect("ingest real-blog");
 
-    // Lower views first; their (untyped at the wrapper layer)
-    // ClassInfo entries feed into the model + controller lowerers'
-    // shared registries.
-    let view_lcs: Vec<LibraryClass> = app
+    // First pass: build view ClassInfo entries from per-view lowering
+    // (cheap — only need the method signatures for the registry, not
+    // typed bodies). Pass these as extras to the model lowerer.
+    let preliminary_views: Vec<LibraryClass> = app
         .views
         .iter()
         .map(|v| lower_view_to_library_class(v, &app))
         .collect();
-
-    // Build view ClassInfo entries — keyed by both the full ClassId
-    // (Views::Articles) and a last-segment alias (Articles), since
-    // the body-typer's Const-path resolver looks up by last-segment.
-    let view_extras = build_class_info_extras(&view_lcs);
+    let view_extras = build_class_info_extras(&preliminary_views);
 
     // Models go through the registry-returning bulk entry so
-    // controllers can reuse the SAME registry — keeps the
+    // controllers and views can reuse the SAME registry — keeps the
     // ApplicationRecord baseline (find/all/where/etc) visible to
-    // action bodies that dispatch on Article.find(...).
+    // dispatch on Article.find(...).
     let (model_lcs, model_registry) =
         lower_models_with_registry(&app.models, &app.schema, view_extras);
+
+    // Re-lower views via the bulk entry, passing the model registry
+    // as extras. The bulk entry adds framework stubs (ViewHelpers,
+    // RouteHelpers, Inflector, String) and runs body-typing with the
+    // merged map so view bodies dispatch correctly on helpers and
+    // sibling-view Sends.
+    let view_lcs = lower_views_to_library_classes(
+        &app.views,
+        &app,
+        model_registry.clone().into_iter().collect(),
+    );
 
     // Controllers extend the model registry with views + their own
     // entries. Pass model_registry as extras so cross-class dispatch
@@ -540,21 +547,19 @@ fn lowered_real_blog_typing_residual() {
     }
 
     // Current breakdown (real-blog, 15 classes):
-    //   - models: 0 (typing arc complete, ApplicationRecord baseline,
-    //     bulk registry, view extras)
-    //   - controllers: ~50 (bulk registry + ApplicationController
-    //     baseline; remaining is typer-feature gaps — block-param
-    //     inference for sort_by/each, ivar tracking through filter
-    //     targets that set @article etc.)
-    //   - views: ~251 (view_to_library's internal body-typer runs
-    //     with an empty registry — separate ticket: thread shared
-    //     registry through view_to_library or run typing externally)
+    //   - models: 0 (typing arc complete)
+    //   - views: ~28 (mostly form_with block-param `form` — needs
+    //     FormBuilder registration + typer extension to read
+    //     Ty::Fn::block when binding block param types)
+    //   - controllers: ~50 (typer-feature gaps — block-param
+    //     inference for sort_by/each, ivar tracking through
+    //     filter targets that set @article etc.)
     //
     // Tracker, not a hard target — fail loud on regression. Headroom
-    // over the current measurement (301) so small organic growth
+    // over the current measurement (78) so small organic growth
     // doesn't fail before the next session.
     // Run `DUMP_RESIDUAL=1 cargo test ... -- --nocapture` to inspect.
-    const CEILING: usize = 350;
+    const CEILING: usize = 100;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on lowered real-blog — \

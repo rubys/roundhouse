@@ -42,11 +42,91 @@ use crate::span::Span;
 use self::extra_params::collect_extra_params;
 use self::walker::walk_body;
 
-/// Entry point. Turn one `View` into a one-method `LibraryClass`.
+/// Bulk entry: lower every view, then type their bodies against a
+/// shared registry so dispatch on framework helpers (ViewHelpers,
+/// RouteHelpers, Inflector), sibling view modules, and model classes
+/// resolves end-to-end. `extras` typically carries the model + view
+/// ClassInfo entries the model lowerer built; this entry adds the
+/// framework runtime stubs (ViewHelpers/RouteHelpers/Inflector/String)
+/// before typing.
+///
+/// For per-view typing-isolated calls (tests/probes that don't have
+/// a registry to share), the single-view entry below still works
+/// and will run its own internal typing pass.
+pub fn lower_views_to_library_classes(
+    views: &[View],
+    app: &App,
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> Vec<LibraryClass> {
+    // Build LibraryClasses (with method signatures populated) but
+    // *skip* the per-view internal body-typing pass — we'll do it
+    // below with the merged registry.
+    let mut lcs: Vec<LibraryClass> = views
+        .iter()
+        .map(|v| build_library_class(v, app, /*type_body=*/ false))
+        .collect();
+
+    // Merge: caller extras + framework runtime stubs + view modules
+    // themselves (so cross-view dispatch like Views::Articles.article
+    // resolves from one view to another).
+    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
+        std::collections::HashMap::new();
+    for (id, info) in extras {
+        classes.insert(id, info);
+    }
+    insert_framework_stubs(&mut classes);
+    for lc in &lcs {
+        let info = classes.entry(lc.name.clone()).or_default();
+        for m in &lc.methods {
+            if let Some(sig) = &m.signature {
+                if matches!(m.receiver, MethodReceiver::Class) {
+                    info.class_methods.insert(m.name.clone(), sig.clone());
+                } else {
+                    info.instance_methods.insert(m.name.clone(), sig.clone());
+                }
+            }
+        }
+        // Also register a last-segment alias for the typer's
+        // Const-path resolver.
+        let raw = lc.name.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        if last != raw {
+            let alias_id = ClassId(Symbol::from(last));
+            let entry = classes.entry(alias_id).or_default();
+            for m in &lc.methods {
+                if let Some(sig) = &m.signature {
+                    if matches!(m.receiver, MethodReceiver::Class) {
+                        entry.class_methods.insert(m.name.clone(), sig.clone());
+                    } else {
+                        entry.instance_methods.insert(m.name.clone(), sig.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
+        std::collections::HashMap::new();
+    for lc in &mut lcs {
+        for method in &mut lc.methods {
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+        }
+    }
+    lcs
+}
+
+/// Single-view entry point — kept for tests/probes. Runs an internal
+/// body-typing pass with an empty registry; for whole-app emit where
+/// cross-class dispatch matters, use `lower_views_to_library_classes`.
+///
 /// `app` is consulted only for known model names (so view args can be
 /// typed implicitly downstream) and for FK resolution; the lowering is
 /// otherwise pure.
 pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
+    build_library_class(view, app, /*type_body=*/ true)
+}
+
+fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass {
     let (dir, base) = split_view_name(view.name.as_str());
     let stem = base.trim_start_matches('_');
 
@@ -150,12 +230,12 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
     // Run the body-typer over the lowered body so per-target emitters
     // get typed Sends (e.g. `articles.empty?` with recv typed as
     // `Ty::Array<Article>` so the Array dispatch resolves correctly).
-    // Empty class registry — Array / String / Hash dispatch lives in
-    // the primitive method tables, not the registry, so this is
-    // sufficient for the most common view-body patterns. Model-class
-    // method calls (`article.title`) fall through to Ty::Untyped
-    // propagation; targets handle gradual typing themselves.
-    type_method_body(&mut method);
+    // Single-view path uses an empty class registry (sufficient for
+    // primitive Array/String/Hash dispatch); the bulk entry above
+    // re-types with the merged registry for cross-class resolution.
+    if type_body {
+        type_method_body(&mut method);
+    }
 
     LibraryClass {
         name: module_id,
@@ -164,6 +244,130 @@ pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
         includes: Vec::new(),
         methods: vec![method],
     }
+}
+
+/// Framework runtime stubs the view bodies dispatch on. Each helper
+/// returns `Ty::Str` (HTML output) or `Ty::Nil` (side-effecting
+/// helpers like content_for_set). Args are mostly Untyped — refining
+/// per-helper is future work; the Str-typed return is what unblocks
+/// downstream typing.
+fn insert_framework_stubs(classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>) {
+    use crate::lower::typing::fn_sig;
+    use crate::ty::Ty;
+
+    // ViewHelpers — every output helper returns String; setters return Nil.
+    let mut vh = crate::analyze::ClassInfo::default();
+    let untyped = Ty::Untyped;
+    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let html_helpers = [
+        "turbo_stream_from",
+        "link_to",
+        "button_to",
+        "html_escape",
+        "truncate",
+        "dom_id",
+        "dom_class",
+        "image_tag",
+        "stylesheet_link_tag",
+        "javascript_include_tag",
+        "javascript_importmap_tags",
+        "csrf_meta_tags",
+        "csp_meta_tag",
+        "yield_content",
+        "form_with",
+        "fields_for",
+        "label",
+        "text_field",
+        "text_area",
+        "select",
+        "submit",
+        "hidden_field",
+        "render",
+        "time_ago_in_words",
+        "number_to_human",
+        "number_with_delimiter",
+        "pluralize",
+        "raw",
+        "safe_join",
+        "tag",
+        "content_tag",
+        "concat",
+    ];
+    for name in html_helpers {
+        // Loose signature: variadic kwargs (Untyped) → String. The
+        // precise per-helper arity isn't load-bearing for typing the
+        // call SITE; the body-typer just needs the return type.
+        vh.class_methods.insert(
+            Symbol::from(name),
+            fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
+        );
+    }
+    let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
+    for name in nil_helpers {
+        vh.class_methods.insert(
+            Symbol::from(name),
+            fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Nil),
+        );
+    }
+    classes.insert(ClassId(Symbol::from("ViewHelpers")), vh);
+
+    // RouteHelpers — every `_path` / `_url` helper returns String.
+    // Catch-all: the typer's `Class { id }` lookup returns Untyped if
+    // the method isn't in the table; we can't enumerate every
+    // `<resource>_path` here, so we register a single permissive entry
+    // that covers the most common ones used in real-blog. A
+    // catch-all "any method on RouteHelpers returns String" would
+    // need typer support that doesn't exist yet.
+    let mut rh = crate::analyze::ClassInfo::default();
+    for stem in ["article", "articles", "comment", "comments", "root", "new_article", "edit_article"] {
+        for suffix in ["path", "url"] {
+            let name = format!("{stem}_{suffix}");
+            rh.class_methods.insert(
+                Symbol::from(name),
+                fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
+            );
+        }
+    }
+    classes.insert(ClassId(Symbol::from("RouteHelpers")), rh);
+
+    // Inflector — pluralize/singularize.
+    let mut inf = crate::analyze::ClassInfo::default();
+    inf.class_methods.insert(
+        Symbol::from("pluralize"),
+        fn_sig(
+            vec![(Symbol::from("count"), Ty::Int), (Symbol::from("word"), Ty::Str)],
+            Ty::Str,
+        ),
+    );
+    inf.class_methods.insert(
+        Symbol::from("singularize"),
+        fn_sig(vec![(Symbol::from("word"), Ty::Str)], Ty::Str),
+    );
+    classes.insert(ClassId(Symbol::from("Inflector")), inf);
+
+    // String — register `new` returning Ty::Str so the lowered
+    // `io = String.new` produces a Str-typed local; downstream
+    // `io << X` then dispatches through the primitive str_method
+    // table (which already covers `<<`). Without this, `io` would
+    // type as Class(String) and `<<` falls through to unregistered-
+    // class behavior.
+    let mut str_class = crate::analyze::ClassInfo::default();
+    str_class.class_methods.insert(
+        Symbol::from("new"),
+        fn_sig(vec![], Ty::Str),
+    );
+    classes.insert(ClassId(Symbol::from("String")), str_class);
+
+    // Broadcasts — re-stub here so view-only callers don't need to
+    // remember to add it themselves.
+    let _ = any_hash; // captured by html_helpers above
+    let mut bc = crate::analyze::ClassInfo::default();
+    let kwargs = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let bc_sig = fn_sig(vec![(Symbol::from("opts"), kwargs)], Ty::Nil);
+    for name in ["prepend", "replace", "remove", "append"] {
+        bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
+    }
+    classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 }
 
 // ── view-name → module / arg / method helpers ────────────────────
