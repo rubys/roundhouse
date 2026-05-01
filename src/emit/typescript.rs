@@ -62,21 +62,32 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .collect();
     let view_extras = library::extras_from_lcs(&preliminary_views);
 
+    let route_helpers_lc = crate::lower::lower_routes_to_library_class(app);
+    let route_helper_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        route_helpers_lc
+            .as_ref()
+            .map(|lc| library::extras_from_lcs(std::slice::from_ref(lc)))
+            .unwrap_or_default();
+
     let (model_lcs, model_registry) = crate::lower::lower_models_with_registry(
         &app.models,
         &app.schema,
         view_extras,
     );
 
+    let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.clone().into_iter().collect();
+    view_lower_extras.extend(route_helper_extras.clone());
     let view_lcs = crate::lower::lower_views_to_library_classes(
         &app.views,
         app,
-        model_registry.clone().into_iter().collect(),
+        view_lower_extras,
     );
 
     let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
     controller_extras.extend(library::extras_from_lcs(&view_lcs));
+    controller_extras.extend(route_helper_extras);
     let controller_lcs = crate::lower::lower_controllers_to_library_classes(
         &app.controllers,
         controller_extras.clone(),
@@ -105,6 +116,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &schema_lc,
             app,
             PathBuf::from("src/schema.ts"),
+        ));
+    }
+
+    if let Some(lc) = &route_helpers_lc {
+        files.push(library::emit_class_file(
+            lc,
+            app,
+            PathBuf::from("app/route_helpers.ts"),
         ));
     }
 

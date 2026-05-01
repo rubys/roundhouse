@@ -30,6 +30,7 @@ pub mod controller_walk;
 pub mod fixture_to_library;
 pub mod model_to_library;
 pub mod routes;
+pub mod routes_to_library;
 pub mod schema_to_library;
 pub mod test_module_to_library;
 pub mod typing;
@@ -51,6 +52,7 @@ pub use model_to_library::{
     lower_models_with_registry,
 };
 pub use fixture_to_library::{lower_fixtures_to_library_classes, rewrite_fixture_calls};
+pub use routes_to_library::lower_routes_to_library_class;
 pub use schema_to_library::lower_schema_to_library_class;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
