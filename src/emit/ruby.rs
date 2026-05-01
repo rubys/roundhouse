@@ -176,12 +176,42 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(emit_lowered_schema(app));
     files.push(emit_lowered_routes(app));
-    if app.importmap.is_some() {
-        files.push(importmap::emit_lowered_importmap(app));
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    if !importmap_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &importmap_funcs,
+            app,
+            PathBuf::from("config/importmap.rb"),
+        ));
     }
     files.extend(emit_lowered_models(app));
     files.extend(emit_lowered_controllers(app));
     files.extend(emit_lowered_views(app));
+
+    // RouteHelpers — `app/route_helpers.rb` with `def self.<x>_path(args)`
+    // per named route. Generated from `app.routes`; supersedes the
+    // hand-written `runtime/ruby/action_view/route_helpers.rb` (which
+    // is being kept for backward compat until callers migrate).
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    if !route_helper_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &route_helper_funcs,
+            app,
+            PathBuf::from("app/route_helpers.rb"),
+        ));
+    }
+
+    // Seeds — `db/seeds.rb` as a `Seeds.run` module method. Mirrors
+    // the TS pipeline; was previously missing from spinel emit.
+    let seeds_funcs = crate::lower::lower_seeds_to_library_functions(app);
+    if !seeds_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &seeds_funcs,
+            app,
+            PathBuf::from("db/seeds.rb"),
+        ));
+    }
+
     files
 }
 
