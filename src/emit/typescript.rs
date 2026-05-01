@@ -24,6 +24,51 @@ use crate::ty::Ty;
 const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 
+/// Framework runtime files inlined at the canonical `src/<name>.ts`
+/// path. Internal cross-imports use `./<name>.js` so emitting all of
+/// them under the same flat directory satisfies module resolution.
+/// Excludes `juntos.ts` (mapped via tsconfig path alias) and
+/// `minitest.ts` (lives under `test/_runtime/`); both are handled
+/// separately by their own emit slots.
+const RUNTIME_FILES: &[(&str, &str)] = &[
+    (
+        "src/action_controller_base.ts",
+        include_str!("../../runtime/typescript/action_controller_base.ts"),
+    ),
+    (
+        "src/active_record_base.ts",
+        include_str!("../../runtime/typescript/active_record_base.ts"),
+    ),
+    ("src/errors.ts", include_str!("../../runtime/typescript/errors.ts")),
+    ("src/http.ts", include_str!("../../runtime/typescript/http.ts")),
+    (
+        "src/inflector.ts",
+        include_str!("../../runtime/typescript/inflector.ts"),
+    ),
+    (
+        "src/parameters.ts",
+        include_str!("../../runtime/typescript/parameters.ts"),
+    ),
+    ("src/router.ts", include_str!("../../runtime/typescript/router.ts")),
+    ("src/server.ts", include_str!("../../runtime/typescript/server.ts")),
+    (
+        "src/test_support.ts",
+        include_str!("../../runtime/typescript/test_support.ts"),
+    ),
+    (
+        "src/validations.ts",
+        include_str!("../../runtime/typescript/validations.ts"),
+    ),
+    (
+        "src/view_helpers.ts",
+        include_str!("../../runtime/typescript/view_helpers.ts"),
+    ),
+    (
+        "src/view_helpers_generated.ts",
+        include_str!("../../runtime/typescript/view_helpers_generated.ts"),
+    ),
+];
+
 mod expr;
 mod library;
 mod naming;
@@ -47,6 +92,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         path: PathBuf::from("src/juntos.ts"),
         content: JUNTOS_STUB_SOURCE.to_string(),
     });
+
+    // Framework runtime files. These are hand-written (or transpiled
+    // from runtime/ruby/) and inlined into the output so the emitted
+    // app has no external dependency on roundhouse itself. Layout:
+    // flat under `src/`; internal cross-imports use `./<name>.js`.
+    for (path, content) in RUNTIME_FILES {
+        files.push(EmittedFile {
+            path: PathBuf::from(*path),
+            content: (*content).to_string(),
+        });
+    }
 
     // ── Lowering pipeline ───────────────────────────────────────────
     // Order matters because each step's output feeds the next's

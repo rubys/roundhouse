@@ -281,9 +281,9 @@ fn render_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> S
     }
     if controller_base_import {
         // ActionController::Base lives in the runtime as `Base` from
-        // `_runtime/action_controller_base.ts`; import-as-rename so the
+        // `src/action_controller_base.ts`; import-as-rename so the
         // emitted `extends ActionControllerBase` reads cleanly.
-        let runtime_path = relative_to_root(out_path, "src/_runtime/action_controller_base.js");
+        let runtime_path = relative_to_root(out_path, "src/action_controller_base.js");
         writeln!(
             s,
             "import {{ Base as ActionControllerBase }} from \"{runtime_path}\";",

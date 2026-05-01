@@ -46,18 +46,16 @@ pub(super) fn emit_package_json() -> EmittedFile {
 /// since they compile against the `Roundhouse.Http` stubs; views and
 /// routes still wait for their own runtime.
 pub(super) fn emit_tsconfig_json(app: &App) -> EmittedFile {
-    let mut includes = String::from("\"app/models/**/*.ts\", \"src/juntos.ts\"");
-    if !app.models.is_empty() {
-        includes.push_str(", \"src/schema_sql.ts\"");
-    }
-    if !app.controllers.is_empty() {
-        includes.push_str(
-            ", \"app/controllers/**/*.ts\", \"app/views/**/*.ts\", \"src/http.ts\", \"src/test_support.ts\", \"src/view_helpers.ts\", \"src/route_helpers.ts\", \"src/routes.ts\", \"src/server.ts\", \"main.ts\"",
-        );
-    }
+    // Catch-all glob: every emitted .ts file is included. The
+    // generated app + framework runtime live under fixed roots
+    // (`app/`, `src/`, `test/`); a top-level `**/*.ts` would also
+    // sweep node_modules — instead enumerate the roots explicitly.
+    let mut includes =
+        String::from("\"app/**/*.ts\", \"src/**/*.ts\"");
     if !app.test_modules.is_empty() || !app.fixtures.is_empty() {
-        includes.push_str(", \"spec/**/*.ts\"");
+        includes.push_str(", \"test/**/*.ts\"");
     }
+    let _ = app; // app currently unused after the include simplification.
     let content = format!(
         "{{
   \"compilerOptions\": {{
