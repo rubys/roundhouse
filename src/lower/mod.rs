@@ -61,7 +61,10 @@ pub use seeds_to_library::lower_seeds_to_library_class;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
 };
-pub use view_to_library::{lower_view_to_library_class, lower_views_to_library_classes};
+pub use view_to_library::{
+    flatten_lcs_to_functions, lower_view_to_library_class, lower_views_to_library_classes,
+    lower_views_to_library_functions,
+};
 pub use broadcasts::{
     lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
 };

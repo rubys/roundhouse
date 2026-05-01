@@ -414,6 +414,43 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// A top-level callable: no instance state, no inheritance, fully
+/// resolvable at the call site as `<module_path>.<name>(args)`.
+/// Per-target emitters pick the idiomatic surface form:
+///
+/// - Spinel / Crystal / Ruby: class method on a module
+///   (`module Views::Articles; def self.article(a); …; end; end`)
+/// - TypeScript / Python: exported function in a module file
+///   (`export function article(a: Article): string { … }`)
+/// - Rust / Go: package-level function (`pub fn article(a: &Article) -> String`)
+/// - Elixir: `def` inside a `defmodule` (the file = module)
+///
+/// The IR commits to the semantics; the surface form is the
+/// emitter's call. Per-template view bodies are the canonical
+/// producer; `RouteHelpers` / `Importmap` / `Schema` / `Seeds` are
+/// future migrations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LibraryFunction {
+    /// Module path the function lives under, e.g.
+    /// `["Views", "Articles"]`. Empty for top-level (rare; views
+    /// always have at least one segment).
+    pub module_path: Vec<crate::ident::Symbol>,
+    /// The function's own name, e.g. `"article"`. Together with
+    /// `module_path` forms the dispatch key
+    /// (`Views::Articles.article`).
+    pub name: crate::ident::Symbol,
+    pub params: Vec<Param>,
+    pub body: Expr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<crate::ty::Ty>,
+    #[serde(default, skip_serializing_if = "is_pure_effects")]
+    pub effects: crate::effect::EffectSet,
+}
+
+fn is_pure_effects(e: &crate::effect::EffectSet) -> bool {
+    e.effects.is_empty()
+}
+
 // Controllers -----------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

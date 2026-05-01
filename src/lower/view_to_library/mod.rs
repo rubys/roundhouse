@@ -119,6 +119,58 @@ pub fn lower_views_to_library_classes(
     lcs
 }
 
+/// Migration entry point: lower views to `LibraryFunction`s, the
+/// canonical post-lowering shape for module-callable artifacts.
+/// Each template becomes one function whose `module_path` matches
+/// the view directory (`["Views", "Articles"]`) and whose `name` is
+/// the template's method name (`"article"`, `"index"`, etc.).
+///
+/// Implemented as a flattener over the existing class-shaped
+/// lowerer — typing, framework stubs, registry merging are all
+/// shared. The shape change happens at the boundary, not in the
+/// body-typing core.
+pub fn lower_views_to_library_functions(
+    views: &[View],
+    app: &App,
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) -> Vec<crate::dialect::LibraryFunction> {
+    let lcs = lower_views_to_library_classes(views, app, extras);
+    flatten_lcs_to_functions(&lcs)
+}
+
+/// Pivot LibraryClass methods into LibraryFunctions. Every method
+/// (always class-method on a view module) becomes a standalone
+/// function whose module_path is the LC name split on `::`.
+///
+/// Public so the TS emit can stage migration without changing the
+/// body-typer registry shape — `extras_from_lcs` keeps consuming the
+/// class form, while emit walks the function form.
+pub fn flatten_lcs_to_functions(
+    lcs: &[LibraryClass],
+) -> Vec<crate::dialect::LibraryFunction> {
+    let mut out = Vec::with_capacity(lcs.len());
+    for lc in lcs {
+        let module_path: Vec<Symbol> = lc
+            .name
+            .0
+            .as_str()
+            .split("::")
+            .map(Symbol::from)
+            .collect();
+        for m in &lc.methods {
+            out.push(crate::dialect::LibraryFunction {
+                module_path: module_path.clone(),
+                name: m.name.clone(),
+                params: m.params.clone(),
+                body: m.body.clone(),
+                signature: m.signature.clone(),
+                effects: m.effects.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// Single-view entry point — kept for tests/probes. Runs an internal
 /// body-typing pass with an empty registry; for whole-app emit where
 /// cross-class dispatch matters, use `lower_views_to_library_classes`.

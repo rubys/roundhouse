@@ -206,12 +206,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc, app, out_path));
     }
 
-    // view_lcs is in the same order as app.views (the bulk lowerer
-    // preserves declaration order); pair them to recover the
-    // per-template output path.
-    for (view, lc) in app.views.iter().zip(view_lcs.iter()) {
+    // Views: flatten the per-template LibraryClasses into
+    // LibraryFunctions and emit one function per file. The body-typer
+    // registry above (`view_extras` / `extras_from_lcs(&view_lcs)`)
+    // still uses the class shape so cross-class dispatch
+    // (`Views::Articles.article(x)`) types correctly without a
+    // parallel registry. The class-vs-function choice is purely an
+    // emit-side surface decision.
+    let view_funcs = crate::lower::flatten_lcs_to_functions(&view_lcs);
+    for (view, func) in app.views.iter().zip(view_funcs.iter()) {
         let out_path = view_output_path(view.name.as_str());
-        files.push(library::emit_class_file(lc, app, out_path));
+        files.push(library::emit_function_file(func, app, out_path));
+    }
+    if !view_funcs.is_empty() {
+        files.push(library::emit_views_aggregator(&app.views, &view_funcs));
     }
 
     for lc in &controller_lcs {
@@ -563,6 +571,73 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
         )
         .unwrap();
     }
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            writeln!(out, "  {line}").unwrap();
+        }
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+/// Emit a `LibraryFunction` as a top-level `export function` (no
+/// surrounding class). Body emission shares the param-typing /
+/// return-typing / body-typing machinery with `emit_class_member`,
+/// but the rewrite pass differs: free functions don't have `this`,
+/// so bare Sends and Ivar references aren't injected with SelfRef.
+pub fn emit_library_function(
+    func: &crate::dialect::LibraryFunction,
+) -> Result<String, String> {
+    let (sig_param_tys, ret_ty): (Vec<Ty>, Ty) = match func.signature.as_ref() {
+        Some(Ty::Fn { params: sig_params, ret, .. }) => {
+            let non_block: Vec<&crate::ty::Param> = sig_params
+                .iter()
+                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                .collect();
+            if non_block.len() != func.params.len() {
+                return Err(format!(
+                    "function `{}`: signature/param arity mismatch ({} vs {})",
+                    func.name,
+                    non_block.len(),
+                    func.params.len(),
+                ));
+            }
+            (non_block.iter().map(|p| p.ty.clone()).collect(), (**ret).clone())
+        }
+        _ => (
+            func.params.iter().map(|_| Ty::Untyped).collect(),
+            func.body.ty.clone().unwrap_or(Ty::Nil),
+        ),
+    };
+
+    let param_list: Vec<String> = func
+        .params
+        .iter()
+        .zip(sig_param_tys.iter())
+        .map(|(name, ty)| format!("{}: {}", escape_reserved(name.as_str()), ts_ty(ty)))
+        .collect();
+
+    let raw_name = func.name.as_str();
+    let mname = escape_reserved(&crate::emit::typescript::library::sanitize_identifier(raw_name));
+
+    // Free-function rewrite: no SelfRef injection, no super rewrite —
+    // bare Sends emit as plain function calls (resolved against
+    // imports), and `super` doesn't apply since there's no inheritance.
+    let rewritten = crate::emit::typescript::library::rewrite_for_free_function(&func.body);
+    let body = expr::emit_body(&rewritten, &ret_ty);
+
+    let ret_s = ts_return_ty(&ret_ty);
+    let mut out = String::new();
+    writeln!(
+        out,
+        "export function {}({}): {} {{",
+        mname,
+        param_list.join(", "),
+        ret_s
+    )
+    .unwrap();
     for line in body.lines() {
         if line.is_empty() {
             out.push('\n');

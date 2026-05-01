@@ -1009,16 +1009,26 @@ pub(super) fn emit_send_with_parens(
     //   `Hash.new` → `{}`
     if method == "new" && recv.is_some() {
         let recv_s = emit_expr(recv.unwrap());
-        if args_s.is_empty() {
-            match recv_s.as_str() {
-                "String" => return "\"\"".to_string(),
-                "Array" => return "[]".to_string(),
-                "Hash" => return "{}".to_string(),
-                _ => {}
+        // Heuristic: only treat `.new(...)` as a constructor call when
+        // the receiver is a bare class identifier (e.g. `Article`,
+        // `Comment`). Member-access receivers like `Views.Articles`
+        // refer to namespaced module-of-functions where `new` is just
+        // a method name (the `new` action's view function); emitting
+        // `new Views.Articles(...)` would invoke an object as a
+        // constructor, which TS rejects at runtime. Fall through to
+        // the regular member-call form for those.
+        if !recv_s.contains('.') {
+            if args_s.is_empty() {
+                match recv_s.as_str() {
+                    "String" => return "\"\"".to_string(),
+                    "Array" => return "[]".to_string(),
+                    "Hash" => return "{}".to_string(),
+                    _ => {}
+                }
+                return format!("new {recv_s}()");
             }
-            return format!("new {recv_s}()");
+            return format!("new {recv_s}({})", args_s.join(", "));
         }
-        return format!("new {recv_s}({})", args_s.join(", "));
     }
     // `x.nil?` → `x === null`. Ruby's `nil?` only matches nil (not
     // `false`, and TS equivalent must distinguish from `undefined`).
