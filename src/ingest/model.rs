@@ -215,6 +215,8 @@ fn ingest_method(
         // Rails model methods carry their owner on the surrounding
         // Model struct (model.name); no need to duplicate here.
         enclosing_class: None,
+        // Source-defined `def` in a Rails model — Method by default.
+        kind: crate::dialect::AccessorKind::Method,
     })
 }
 

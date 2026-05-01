@@ -32,7 +32,7 @@ mod form_with;
 mod form_builder;
 
 use crate::App;
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, View};
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -81,8 +81,10 @@ pub fn lower_views_to_library_classes(
             if let Some(sig) = &m.signature {
                 if matches!(m.receiver, MethodReceiver::Class) {
                     info.class_methods.insert(m.name.clone(), sig.clone());
+                    info.class_method_kinds.insert(m.name.clone(), m.kind);
                 } else {
                     info.instance_methods.insert(m.name.clone(), sig.clone());
+                    info.instance_method_kinds.insert(m.name.clone(), m.kind);
                 }
             }
         }
@@ -97,8 +99,10 @@ pub fn lower_views_to_library_classes(
                 if let Some(sig) = &m.signature {
                     if matches!(m.receiver, MethodReceiver::Class) {
                         entry.class_methods.insert(m.name.clone(), sig.clone());
+                        entry.class_method_kinds.insert(m.name.clone(), m.kind);
                     } else {
                         entry.instance_methods.insert(m.name.clone(), sig.clone());
+                        entry.instance_method_kinds.insert(m.name.clone(), m.kind);
                     }
                 }
             }
@@ -217,6 +221,8 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
 
     let body = seq(body_stmts);
 
+    // View methods render HTML — they're functions in the spinel
+    // sense (return String), so Method is the right kind.
     let mut method = MethodDef {
         name: method_name,
         receiver: MethodReceiver::Class,
@@ -225,6 +231,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         signature,
         effects: EffectSet::default(),
         enclosing_class: Some(module_id.0.clone()),
+        kind: AccessorKind::Method,
     };
 
     // Run the body-typer over the lowered body so per-target emitters
@@ -254,8 +261,21 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
 pub(crate) fn insert_framework_stubs(
     classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
+    use crate::dialect::AccessorKind;
     use crate::lower::typing::{fn_sig, fn_sig_with_block};
     use crate::ty::Ty;
+
+    // Helper: tag every method on a ClassInfo as `Method` (the
+    // default for framework calls — every helper, route generator,
+    // and runtime function takes parens). Called once per stub.
+    let tag_all_method = |info: &mut crate::analyze::ClassInfo| {
+        for name in info.instance_methods.keys().cloned().collect::<Vec<_>>() {
+            info.instance_method_kinds.entry(name).or_insert(AccessorKind::Method);
+        }
+        for name in info.class_methods.keys().cloned().collect::<Vec<_>>() {
+            info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
+        }
+    };
 
     let form_builder_ty = Ty::Class {
         id: ClassId(Symbol::from("FormBuilder")),
@@ -334,6 +354,7 @@ pub(crate) fn insert_framework_stubs(
             fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Nil),
         );
     }
+    tag_all_method(&mut vh);
     classes.insert(ClassId(Symbol::from("ViewHelpers")), vh);
 
     // RouteHelpers — every `_path` / `_url` helper returns String.
@@ -359,6 +380,7 @@ pub(crate) fn insert_framework_stubs(
             );
         }
     }
+    tag_all_method(&mut rh);
     classes.insert(ClassId(Symbol::from("RouteHelpers")), rh);
 
     // Inflector — pluralize/singularize.
@@ -374,6 +396,7 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("singularize"),
         fn_sig(vec![(Symbol::from("word"), Ty::Str)], Ty::Str),
     );
+    tag_all_method(&mut inf);
     classes.insert(ClassId(Symbol::from("Inflector")), inf);
 
     // String — register `new` returning Ty::Str so the lowered
@@ -387,6 +410,7 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("new"),
         fn_sig(vec![], Ty::Str),
     );
+    tag_all_method(&mut str_class);
     classes.insert(ClassId(Symbol::from("String")), str_class);
 
     // Broadcasts — re-stub here so view-only callers don't need to
@@ -398,6 +422,7 @@ pub(crate) fn insert_framework_stubs(
     for name in ["prepend", "replace", "remove", "append"] {
         bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
     }
+    tag_all_method(&mut bc);
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 
     // FormBuilder — instance methods called on the block param `form`
@@ -434,6 +459,7 @@ pub(crate) fn insert_framework_stubs(
             fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
         );
     }
+    tag_all_method(&mut fb);
     classes.insert(ClassId(Symbol::from("FormBuilder")), fb);
 
     // ErrorCollection — what `record.errors` returns. `each` yields
@@ -461,6 +487,7 @@ pub(crate) fn insert_framework_stubs(
             Ty::Array { elem: Box::new(Ty::Str) },
         ),
     );
+    tag_all_method(&mut ec);
     classes.insert(ClassId(Symbol::from("ErrorCollection")), ec);
 }
 

@@ -941,6 +941,25 @@ pub(super) fn emit_send_with_parens(
             args_s[1]
         );
     }
+    // Attribute-writer Send: `obj.foo=(v)` → `obj.foo = v`. Ruby's
+    // setter sugar dispatches as a method call on the `foo=` name;
+    // TS uses property-assignment syntax. Only fires when the method
+    // name ends in `=` (so `==` and `!=` aren't caught), excludes
+    // operator names (`<=`, `>=`, etc. are binops handled elsewhere).
+    if method.ends_with('=')
+        && method.len() >= 2
+        && method.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        && recv.is_some()
+        && args.len() == 1
+    {
+        let attr = &method[..method.len() - 1];
+        return format!(
+            "{}.{} = {}",
+            emit_expr(recv.unwrap()),
+            ts_field_name(attr),
+            args_s[0]
+        );
+    }
     // `Target.new(args)` → `new Target(args)`. Ruby's standard constructor
     // call convention; Juntos-side classes use the JS `new` keyword.
     // Special cases for built-in types whose JS-side construction

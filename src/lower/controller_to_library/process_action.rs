@@ -1,7 +1,7 @@
 //! Synthesize the `process_action(action_name)` dispatcher: conditionally
 //! invoke before-action filters and case-dispatch to per-action methods.
 
-use crate::dialect::{Action, Filter, MethodDef, MethodReceiver, Param};
+use crate::dialect::{AccessorKind, Action, Filter, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Arm, ArrayStyle, Expr, ExprNode, Literal, Pattern};
 use crate::ident::{Symbol, VarId};
@@ -58,6 +58,7 @@ pub(super) fn synthesize_process_action(
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(enclosing_class),
+        kind: AccessorKind::Method,
     }
 }
 

@@ -29,8 +29,8 @@ mod rewrites;
 mod util;
 
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass, MethodDef,
-    MethodReceiver, Param,
+    AccessorKind, Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass,
+    MethodDef, MethodReceiver, Param,
 };
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
@@ -80,9 +80,11 @@ pub fn lower_controllers_to_library_classes(
                 match m.receiver {
                     MethodReceiver::Instance => {
                         info.instance_methods.insert(m.name.clone(), sig.clone());
+                        info.instance_method_kinds.insert(m.name.clone(), m.kind);
                     }
                     MethodReceiver::Class => {
                         info.class_methods.insert(m.name.clone(), sig.clone());
+                        info.class_method_kinds.insert(m.name.clone(), m.kind);
                     }
                 }
             }
@@ -91,6 +93,14 @@ pub fn lower_controllers_to_library_classes(
         // surface in every action body, and the typer needs signatures
         // to dispatch through SelfRef.
         insert_baseline_controller_methods(&mut info);
+        // Tag baseline entries that lacked an explicit kind as Method
+        // (render/redirect_to/head/params are all real method calls).
+        for name in info.instance_methods.keys().cloned().collect::<Vec<_>>() {
+            info.instance_method_kinds.entry(name).or_insert(AccessorKind::Method);
+        }
+        for name in info.class_methods.keys().cloned().collect::<Vec<_>>() {
+            info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
+        }
         classes.insert(controller.name.clone(), info);
     }
     for (id, info) in extras {
@@ -357,6 +367,9 @@ fn action_to_method(
         .iter()
         .map(|p| (p.name.clone(), Ty::Untyped))
         .collect();
+    // All actions (public + private) are Method — bodies are
+    // imperative and computed. AttributeReader is reserved for
+    // pure ivar-backed reads that can lower to a TS field.
     MethodDef {
         name: Symbol::from(method_name),
         receiver: MethodReceiver::Instance,
@@ -365,6 +378,7 @@ fn action_to_method(
         signature: Some(crate::lower::typing::fn_sig(sig_params, ret_ty)),
         effects: a.effects.clone(),
         enclosing_class: Some(controller.name.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 

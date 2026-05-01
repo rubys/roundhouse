@@ -336,6 +336,38 @@ pub struct MethodDef {
     /// `ActiveRecord::Base`), matching how `Const { path }` types.
     #[serde(default)]
     pub enclosing_class: Option<Symbol>,
+    /// Calling-convention intent — Ruby blurs attribute access and
+    /// zero-arg method calls (`obj.foo` could be either), but TS,
+    /// Rust, Go, and Crystal need the distinction at emit time.
+    /// Lowerers and ingest record what they know by construction;
+    /// emitters consume to decide getter/field syntax vs method-call
+    /// parens. Defaults to `Method` for backward compatibility with
+    /// older serializations and for source-defined methods that
+    /// don't tag themselves.
+    #[serde(default)]
+    pub kind: AccessorKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessorKind {
+    /// Real method — call with parens (`obj.foo()` in TS, `obj.foo()`
+    /// in Rust, etc.). The default. Source-defined `def foo` lands here
+    /// unless it's recognized as an attr_reader/writer pattern.
+    #[default]
+    Method,
+    /// Reads as a field/property/getter. Zero-arg, no side effects,
+    /// body conceptually pure data access (an `@ivar`, a frozen
+    /// constant, a derived value). TS: `get foo()` or bare `foo: T`
+    /// field; Rust: a field read; Crystal: getter macro form.
+    /// Synthesized by `attr_reader`/`attr_accessor` lowering and by
+    /// has_many/belongs_to association readers.
+    AttributeReader,
+    /// Writes a field. Single param, body assigns to a field.
+    /// TS: `set foo(v)` or field assign; Rust: field write; Crystal:
+    /// setter macro. Synthesized by `attr_writer`/`attr_accessor`
+    /// lowering.
+    AttributeWriter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

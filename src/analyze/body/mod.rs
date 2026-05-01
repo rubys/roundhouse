@@ -70,6 +70,12 @@ pub struct ClassInfo {
     pub class_methods: HashMap<Symbol, Ty>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
+    /// AccessorKind per method — lets the body-typer flag Method
+    /// dispatches so emitters add parens. AttributeReader/Writer
+    /// dispatches keep `parenthesized` as ingested. Default `Method`
+    /// is assumed when a name isn't present.
+    pub class_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
+    pub instance_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
 }
 
 /// Reusable body-type walker. Holds a borrow of the dispatch table so
@@ -296,7 +302,7 @@ impl<'a> BodyTyper<'a> {
                 unknown()
             }
 
-            ExprNode::Send { recv, method, args, block, .. } => {
+            ExprNode::Send { recv, method, args, block, parenthesized } => {
                 // Bare-name implicit-self Send (no receiver, no args, no
                 // block) resolves to a local binding when one exists. Ruby
                 // parses `x` as `self.x()` when `x` wasn't assigned earlier
@@ -376,6 +382,31 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                // Force `parenthesized: true` when dispatch resolves
+                // to a `Method`-kind on a registered class. The TS
+                // emitter's bare-recv-Send fallback omits parens when
+                // `parenthesized` is false (matching Ruby's reader
+                // idiom); for real methods we want `obj.save()` not
+                // `obj.save`. AttributeReader/Writer dispatches keep
+                // the ingested value (already false for source-style
+                // reads, true if source had parens). Unresolved
+                // dispatches (recv unknown, method not in registry)
+                // also keep the ingested value to preserve source
+                // form for round-trip-through-emit.
+                if !*parenthesized {
+                    if let Some(Ty::Class { id, .. }) = &recv_ty {
+                        if let Some(cls) = self.classes().get(id) {
+                            use crate::dialect::AccessorKind;
+                            let resolved_kind = cls
+                                .instance_method_kinds
+                                .get(method)
+                                .or_else(|| cls.class_method_kinds.get(method));
+                            if matches!(resolved_kind, Some(AccessorKind::Method)) {
+                                *parenthesized = true;
+                            }
+                        }
+                    }
+                }
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref())
             }
 

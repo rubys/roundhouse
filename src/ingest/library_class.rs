@@ -226,6 +226,7 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         signature: None,
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::AttributeReader,
     }
 }
 
@@ -256,6 +257,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         signature: None,
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::AttributeWriter,
     }
 }
 
@@ -347,6 +349,12 @@ fn ingest_library_method(
         signature: None,
         effects: crate::effect::EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        // Source-defined `def` lands as Method by default; ingest
+        // for `attr_*` calls sets AttributeReader/Writer above. A
+        // future refinement could pattern-match on body shape
+        // (zero-arg `@ivar` body → AttributeReader) for source code
+        // that didn't use the attr_* sugar.
+        kind: crate::dialect::AccessorKind::Method,
     })
 }
 

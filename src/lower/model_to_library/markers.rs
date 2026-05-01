@@ -12,7 +12,7 @@
 //! it folds the block body into that method's Seq, preserving source
 //! order across sources.
 
-use crate::dialect::{MethodDef, MethodReceiver, Model, ModelBodyItem};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
@@ -43,6 +43,7 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
                         signature: Some(fn_sig(vec![], Ty::Bool)),
                         effects: EffectSet::default(),
                         enclosing_class: Some(model.name.0.clone()),
+                        kind: AccessorKind::AttributeReader,
                     });
                 }
             }
@@ -72,6 +73,7 @@ pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
             signature: Some(fn_sig(vec![], Ty::Nil)),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
         });
     }
 }
@@ -146,6 +148,7 @@ pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &
                 signature: None,
                 effects: EffectSet::default(),
                 enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::Method,
             });
         }
     }

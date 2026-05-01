@@ -2,7 +2,7 @@
 //! query. dependent: :destroy generates a `before_destroy` cascade that
 //! iterates and destroys each child.
 
-use crate::dialect::{Association, Dependent, MethodDef, MethodReceiver, Model};
+use crate::dialect::{AccessorKind, Association, Dependent, MethodDef, MethodReceiver, Model};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
@@ -59,6 +59,11 @@ fn synth_has_many_reader(
         },
     );
 
+    // has_many reader — body computes (`Comment.where(...)`), so it
+    // must remain a Method even though Ruby's `article.comments` reads
+    // like an attribute. Marking AttributeReader would cause the TS
+    // emitter to drop the body and emit a bare field, which would be
+    // assigned undefined at construction.
     MethodDef {
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -70,6 +75,7 @@ fn synth_has_many_reader(
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -128,7 +134,8 @@ fn synth_belongs_to_reader(
         },
     );
 
-    // belongs_to returns the target instance or nil when the FK is unset.
+    // belongs_to reader — same reasoning as has_many: body computes
+    // (`Article.find_by(...)`), Method not AttributeReader.
     MethodDef {
         name: name.clone(),
         receiver: MethodReceiver::Instance,
@@ -145,6 +152,7 @@ fn synth_belongs_to_reader(
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -213,5 +221,6 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
     });
 }

@@ -127,9 +127,11 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
             match m.receiver {
                 MethodReceiver::Instance => {
                     info.instance_methods.insert(m.name.clone(), sig.clone());
+                    info.instance_method_kinds.insert(m.name.clone(), m.kind);
                 }
                 MethodReceiver::Class => {
                     info.class_methods.insert(m.name.clone(), sig.clone());
+                    info.class_method_kinds.insert(m.name.clone(), m.kind);
                 }
             }
         }
@@ -207,15 +209,17 @@ fn build_class_info(
         info.attributes = row;
     }
 
-    // Synthesized method signatures.
+    // Synthesized method signatures + kinds.
     for m in methods {
         if let Some(sig) = &m.signature {
             match m.receiver {
                 MethodReceiver::Instance => {
                     info.instance_methods.insert(m.name.clone(), sig.clone());
+                    info.instance_method_kinds.insert(m.name.clone(), m.kind);
                 }
                 MethodReceiver::Class => {
                     info.class_methods.insert(m.name.clone(), sig.clone());
+                    info.class_method_kinds.insert(m.name.clone(), m.kind);
                 }
             }
         }
@@ -359,6 +363,19 @@ fn build_class_info(
         fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty),
     );
 
+    // Tag every entry the baseline added as Method (defaults match —
+    // ApplicationRecord's `save`, `find`, `where`, etc. are all real
+    // method calls with parens). The earlier loop over synthesized
+    // methods already populated `*_method_kinds` from the per-method
+    // `kind` field; this fills in any baseline names that weren't
+    // overridden.
+    use crate::dialect::AccessorKind;
+    for name in info.class_methods.keys().cloned().collect::<Vec<_>>() {
+        info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
+    }
+    for name in info.instance_methods.keys().cloned().collect::<Vec<_>>() {
+        info.instance_method_kinds.entry(name).or_insert(AccessorKind::Method);
+    }
     info
 }
 
@@ -374,10 +391,11 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     let kwargs = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     let sig = fn_sig(vec![(Symbol::from("opts"), kwargs)], Ty::Nil);
-    info.class_methods.insert(Symbol::from("prepend"), sig.clone());
-    info.class_methods.insert(Symbol::from("replace"), sig.clone());
-    info.class_methods.insert(Symbol::from("remove"), sig.clone());
-    info.class_methods.insert(Symbol::from("append"), sig);
+    use crate::dialect::AccessorKind;
+    for name in ["prepend", "replace", "remove", "append"] {
+        info.class_methods.insert(Symbol::from(name), sig.clone());
+        info.class_method_kinds.insert(Symbol::from(name), AccessorKind::Method);
+    }
     info
 }
 

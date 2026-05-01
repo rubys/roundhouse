@@ -1,7 +1,7 @@
 //! Schema-driven methods: attr accessors, table_name, schema_columns,
 //! instantiate, initialize, attributes, [], []=, update.
 
-use crate::dialect::{MethodDef, MethodReceiver, Model, Param};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -39,6 +39,7 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
         signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     });
 
     // def self.schema_columns
@@ -64,6 +65,7 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
         signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     });
 
     // def self.instantiate(row); instance = new(row); instance.mark_persisted!; instance; end
@@ -99,6 +101,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         signature: Some(fn_sig(vec![], col_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::AttributeReader,
     }
 }
 
@@ -125,6 +128,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         signature: Some(fn_sig(vec![(value_param, col_ty.clone())], col_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::AttributeWriter,
     }
 }
 
@@ -174,6 +178,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
         signature: Some(fn_sig(vec![(row, row_ty)], owner_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -245,6 +250,7 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -285,6 +291,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         signature: Some(fn_sig(vec![], hash_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -320,6 +327,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
         signature: Some(fn_sig(vec![(name, Ty::Sym)], Ty::Untyped)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -364,6 +372,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }
 
@@ -439,5 +448,6 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
     }
 }

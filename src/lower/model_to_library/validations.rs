@@ -6,7 +6,7 @@
 //! `def validate` per model; multiple rules across multiple attrs share the
 //! same method.
 
-use crate::dialect::{MethodDef, MethodReceiver, Model, ValidationRule};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ValidationRule};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, Literal};
 use crate::ident::Symbol;
@@ -36,6 +36,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
     });
 }
 

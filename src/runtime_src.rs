@@ -643,6 +643,7 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         signature: None,
         effects: EffectSet::pure(),
         enclosing_class: enclosing.map(Symbol::new),
+        kind: crate::dialect::AccessorKind::AttributeReader,
     }
 }
 
@@ -675,6 +676,7 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         signature: None,
         effects: EffectSet::pure(),
         enclosing_class: enclosing.map(Symbol::new),
+        kind: crate::dialect::AccessorKind::AttributeWriter,
     }
 }
 
@@ -709,6 +711,11 @@ fn method_def_from(
         signature: None,
         effects: EffectSet::pure(),
         enclosing_class: enclosing.map(Symbol::new),
+        // Source-defined `def` from runtime_src — Method by default.
+        // Pattern-matching for attr_reader-shaped bodies could refine
+        // this, but `attr_*` calls go through synthesize_reader/writer
+        // above with explicit kinds; bare `def` is overwhelmingly Method.
+        kind: crate::dialect::AccessorKind::Method,
     })
 }
 

@@ -96,45 +96,27 @@ fn view_output_path(view_name: &str) -> PathBuf {
 ///   * `include`s → emitted as a leading `// include: <Name>` comment;
 ///     real mixin support is deferred.
 pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String, String> {
-    use crate::dialect::MethodReceiver;
-    use crate::expr::ExprNode;
+    use crate::dialect::{AccessorKind, MethodReceiver};
 
     let class_name = class.name.0.as_str();
     let mut out = String::new();
 
-    // Identify synthesized attr_reader/writer pairs. The reader pattern:
-    // `def foo; @foo; end` — zero params, body is `Ivar { name: foo }`.
-    // The writer pattern: `def foo=(value); @foo = value; end`.
+    // Identify attribute readers/writers by the lowerer-recorded
+    // `kind` field rather than pattern-matching the body — the
+    // lowerer knows by construction (`synth_attr_reader`,
+    // `synth_attr_writer`, `attr_*` ingest), so the IR carries the
+    // fact directly. Restricted to instance receivers here because
+    // class-receiver attribute accessors don't have an established
+    // TS rendering pattern yet.
     let is_attr_reader = |m: &crate::dialect::MethodDef| -> bool {
-        if !matches!(m.receiver, MethodReceiver::Instance) || !m.params.is_empty() {
-            return false;
-        }
-        match &*m.body.node {
-            ExprNode::Ivar { name } => name.as_str() == m.name.as_str(),
-            _ => false,
-        }
+        matches!(m.kind, AccessorKind::AttributeReader)
+            && matches!(m.receiver, MethodReceiver::Instance)
+            && m.params.is_empty()
     };
     let is_attr_writer = |m: &crate::dialect::MethodDef| -> bool {
-        if !matches!(m.receiver, MethodReceiver::Instance) || m.params.len() != 1 {
-            return false;
-        }
-        let mname = m.name.as_str();
-        if !mname.ends_with('=') {
-            return false;
-        }
-        let attr = &mname[..mname.len() - 1];
-        match &*m.body.node {
-            ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } => {
-                if name.as_str() != attr {
-                    return false;
-                }
-                matches!(
-                    &*value.node,
-                    ExprNode::Var { name, .. } if name.as_str() == m.params[0].name.as_str()
-                )
-            }
-            _ => false,
-        }
+        matches!(m.kind, AccessorKind::AttributeWriter)
+            && matches!(m.receiver, MethodReceiver::Instance)
+            && m.params.len() == 1
     };
 
     // Collect field declarations (from synthesized attr_readers — the
