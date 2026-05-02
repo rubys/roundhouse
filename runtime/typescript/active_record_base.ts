@@ -16,15 +16,15 @@ export class Base {
   }
 
   static table_name(): string {
-    return (() => { throw new NotImplementedError(`${this.name}.table_name must be overridden`); })();
+    return (() => { throw new Error(`${this.name}.table_name must be overridden`); })();
   }
 
   static schema_columns(): string[] {
-    return (() => { throw new NotImplementedError(`${this.name}.schema_columns must be overridden`); })();
+    return (() => { throw new Error(`${this.name}.schema_columns must be overridden`); })();
   }
 
   static instantiate(_row: Record<string, any>): Base {
-    return (() => { throw new NotImplementedError(`${this.name}.instantiate must be overridden`); })();
+    return (() => { throw new Error(`${this.name}.instantiate must be overridden`); })();
   }
 
   attributes(): Record<string, any> {
@@ -32,7 +32,7 @@ export class Base {
   }
 
   assign_from_row(_row: Record<string, any>): void {
-    (() => { throw new NotImplementedError("assign_from_row must be overridden by subclass"); })();
+    (() => { throw new Error("assign_from_row must be overridden by subclass"); })();
   }
 
   new_record(): boolean {

@@ -1080,9 +1080,19 @@ pub(super) fn emit_send_with_parens(
     if method == "raise" && recv.is_none() {
         match args.len() {
             2 => {
+                // Ruby builtin error classes that have no TS analog
+                // collapse to `Error`. Without this, the emitted code
+                // references undeclared globals (`new NotImplementedError(...)`)
+                // and tsc bails out with TS2304.
+                let class_s = match args_s[0].as_str() {
+                    "NotImplementedError" | "ArgumentError" | "RuntimeError"
+                    | "TypeError" | "NameError" | "NoMethodError"
+                    | "StandardError" | "KeyError" | "IndexError" => "Error",
+                    other => other,
+                };
                 return format!(
                     "(() => {{ throw new {}({}); }})()",
-                    args_s[0], args_s[1],
+                    class_s, args_s[1],
                 );
             }
             1 => {
