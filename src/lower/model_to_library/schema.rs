@@ -436,19 +436,32 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
 
     // Spinel-blog's `def initialize(attrs = {})` — empty hash default
     // lets `Article.new` (no args) succeed, which the controller's
-    // `new_action` relies on. Without the default, callers hit
-    // `wrong number of arguments (given 0, expected 1)`.
+    // `new_action` relies on AND the synthesized `from_params` /
+    // `from_row` factories rely on. Mark the signature param as
+    // Optional so per-target emitters (TS specifically) emit
+    // `attrs?: ...` and zero-arg `new Article()` from the factories
+    // type-checks.
     let attrs_default = Expr::new(
         Span::synthetic(),
         ExprNode::Hash { entries: Vec::new(), braced: true },
     );
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let signature = Ty::Fn {
+        params: vec![crate::ty::Param {
+            name: attrs.clone(),
+            ty: attrs_ty,
+            kind: crate::ty::ParamKind::Optional,
+        }],
+        block: None,
+        ret: Box::new(Ty::Nil),
+        effects: EffectSet::default(),
+    };
     MethodDef {
         name: Symbol::from("initialize"),
         receiver: MethodReceiver::Instance,
         params: vec![Param::with_default(attrs.clone(), attrs_default)],
         body: seq(stmts),
-        signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Nil)),
+        signature: Some(signature),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

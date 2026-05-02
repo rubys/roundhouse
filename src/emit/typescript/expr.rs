@@ -1273,6 +1273,21 @@ pub(super) fn emit_send_with_parens(
                     // (`params.require(:k).permit(:a, :b).to_h`) is
                     // the common producer.
                     "to_h" if args.is_empty() => return recv_s,
+                    // `hash.fetch(key, default)` → `hash[key] ?? default`.
+                    // Spec lowering's `<Resource>Params.from_raw` body
+                    // emits `params.fetch("title", "")` for each
+                    // permitted field; without this rewrite the Send
+                    // emits literally and tsc rejects since
+                    // `Record<string, any>` has no `.fetch`. The
+                    // single-arg form falls through to a bracket
+                    // index — Ruby's KeyError on missing key isn't
+                    // modeled in TS.
+                    "fetch" if args.len() == 2 => {
+                        return format!("{recv_s}[{}] ?? {}", args_s[0], args_s[1]);
+                    }
+                    "fetch" if args.len() == 1 => {
+                        return format!("{recv_s}[{}]", args_s[0]);
+                    }
                     "dup" | "clone" if args.is_empty() => {
                         return format!("{{ ...{recv_s} }}");
                     }
