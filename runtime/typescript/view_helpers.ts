@@ -602,6 +602,39 @@ export class ViewHelpers {
   // (`new ViewHelpers.FormBuilder(...)`) and external scaffolds; expose
   // the existing class through this namespace too.
   static FormBuilder = FormBuilder;
+
+  // Internal helpers exposed because the generated FormBuilder
+  // (`view_helpers_generated.ts`) calls them as `ViewHelpers.render_attrs(...)`
+  // / `ViewHelpers.stringify_keys(...)`. Source of truth lives in
+  // `runtime/ruby/action_view/view_helpers.rb`; these delegates
+  // bridge until the transpile pipeline emits the full ViewHelpers
+  // module (currently it emits the FormBuilder class only).
+  static render_attrs(attrs: Record<string, any> | null | undefined): string {
+    if (!attrs || Object.keys(attrs).length === 0) return "";
+    let out = "";
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null) continue;
+      if (typeof v === "object" && !Array.isArray(v)) {
+        for (const [innerK, innerV] of Object.entries(v)) {
+          if (innerV == null) continue;
+          const innerName = String(innerK).replace(/_/g, "-");
+          out += ` ${k}-${innerName}="${escapeHtml(String(innerV))}"`;
+        }
+      } else {
+        out += ` ${k}="${escapeHtml(String(v))}"`;
+      }
+    }
+    return out;
+  }
+
+  static stringify_keys(h: Record<string | symbol, any> | null | undefined): Record<string, any> {
+    const out: Record<string, any> = {};
+    if (!h) return out;
+    for (const [k, v] of Object.entries(h)) {
+      out[String(k)] = v;
+    }
+    return out;
+  }
 }
 
 /** Coerce Ruby-symbol-shaped attribute keys to strings so the

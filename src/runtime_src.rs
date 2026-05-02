@@ -532,16 +532,61 @@ fn walk_scope(
     out: &mut Vec<MethodDef>,
     enclosing: Option<&str>,
 ) -> Result<(), String> {
+    // `module_function` (called bare in a module body) flips
+    // subsequent `def`s in the same body into module-functions:
+    // both an instance method AND a class method. For our targets
+    // we only need the class-method form (callers spell it
+    // `ViewHelpers.x(...)`), so promote those defs to
+    // `MethodReceiver::Class`. Only direct `def` children of the
+    // current scope get promoted — nested class bodies (e.g. a
+    // FormBuilder class inside the same module) carry their own
+    // method-receiver decisions through the recursive walk.
+    let mut module_function_active = false;
+    let mut visit = |stmt: &Node<'_>, out: &mut Vec<MethodDef>| -> Result<(), String> {
+        if is_module_function_marker(stmt) {
+            module_function_active = true;
+            return Ok(());
+        }
+        let is_direct_def = stmt.as_def_node().is_some();
+        let before = out.len();
+        collect_from_stmt(stmt, out, enclosing)?;
+        if module_function_active && is_direct_def {
+            for m in &mut out[before..] {
+                m.receiver = MethodReceiver::Class;
+            }
+        }
+        Ok(())
+    };
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_from_stmt(&stmt, out, enclosing)?;
+            visit(&stmt, out)?;
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_from_stmt(&stmt, out, enclosing)?;
+            visit(&stmt, out)?;
         }
     }
     Ok(())
+}
+
+/// True when `node` is a bare `module_function` call (no receiver,
+/// no args, no block) — the marker that flips subsequent defs in
+/// the same module body to module-functions.
+fn is_module_function_marker(node: &Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else { return false };
+    if call.receiver().is_some() {
+        return false;
+    }
+    if call.arguments().is_some() {
+        return false;
+    }
+    if call.block().is_some() {
+        return false;
+    }
+    let Ok(name) = std::str::from_utf8(call.name().as_slice()) else {
+        return false;
+    };
+    name == "module_function"
 }
 
 fn collect_from_stmt(

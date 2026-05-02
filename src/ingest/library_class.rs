@@ -133,6 +133,13 @@ fn walk_decl_body<'pr>(
 ) -> IngestResult<(Vec<ClassId>, Vec<MethodDef>)> {
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
+    // `module_function` (called bare inside a module body) marks every
+    // subsequent direct `def` as a module-function — both an instance
+    // method AND a class method. For our targets (which call these as
+    // `Mod.x(...)`), we only need the class-method form, so flip the
+    // receiver to Class. Doesn't affect nested `class`/`module` bodies
+    // — they get their own walk_decl_body recursion.
+    let mut module_function_active = false;
 
     let Some(b) = body else {
         return Ok((includes, methods));
@@ -141,7 +148,7 @@ fn walk_decl_body<'pr>(
     for stmt in flatten_statements(b) {
         if let Some(def) = stmt.as_def_node() {
             let mut m = ingest_library_method(&def, owner, file)?;
-            if force_class_receiver {
+            if force_class_receiver || module_function_active {
                 m.receiver = MethodReceiver::Class;
             }
             methods.push(m);
@@ -197,6 +204,16 @@ fn walk_decl_body<'pr>(
                             if want_writer {
                                 methods.push(synth_attr_writer(owner, name, recv));
                             }
+                        }
+                    }
+                    "module_function" => {
+                        // Bare `module_function` (no args) — flip the
+                        // flag for every subsequent direct `def` in
+                        // this body. The arg-bearing form
+                        // (`module_function :foo, :bar`) isn't yet
+                        // handled; add when a runtime file uses it.
+                        if call.arguments().is_none() {
+                            module_function_active = true;
                         }
                     }
                     _ => {

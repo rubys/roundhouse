@@ -2,13 +2,13 @@
 // Do not edit by hand — edit the source `.rb` and re-run.
 
 export class Router {
-  match(method: string, path: string, table: Record<string, any>[]): any {
+  static match(method: string, path: string, table: Record<string, any>[]): any {
     const method_upcase = String(method).toUpperCase();
     table.forEach(route => { if (route["method"] === method_upcase) { null; } else { return; } const params = this.match_pattern(route["pattern"], path); if (params === null) { return; } return { "controller": route["controller"], "action": route["action"], "path_params": params }; });
     return null;
   }
 
-  match_pattern(pattern: string, path: string): any {
+  static match_pattern(pattern: string, path: string): any {
     const pattern_parts = pattern.split("/");
     const path_parts = path.split("/");
     if (pattern_parts.length !== path_parts.length) return null;
