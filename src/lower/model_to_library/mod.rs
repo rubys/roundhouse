@@ -287,13 +287,14 @@ fn build_methods(
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
-        push_schema_methods(&mut methods, model, table);
+        let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
+        let permitted_fields = params_specs.get(&resource).map(|v| v.as_slice());
+        push_schema_methods(&mut methods, model, table, permitted_fields);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
         // controller.
-        let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
-        if let Some(fields) = params_specs.get(&resource) {
+        if let Some(fields) = permitted_fields {
             self::schema::push_from_params_method(&mut methods, model, fields);
         }
     }

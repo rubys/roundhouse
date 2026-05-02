@@ -93,7 +93,10 @@ fn article_renders_schema_scaffold_methods() {
         "def attributes",
         "def [](name)",
         "def []=(name, value)",
-        "def update(attrs)",
+        // `update` now takes the typed `<Resource>Params` (`p`) when a
+        // controller permits the model. Hash-shaped `update(attrs)`
+        // remains for models without a permit declaration.
+        "def update(p)",
     ] {
         assert!(src.contains(m), "missing `{m}`:\n{src}");
     }

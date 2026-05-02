@@ -16,7 +16,12 @@ use super::{
     ty_of_column, var_ref, with_ty,
 };
 
-pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
+pub(super) fn push_schema_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    table: &Table,
+    permitted_fields: Option<&[Symbol]>,
+) {
     let owner = &model.name;
 
     // Per-column getter+setter for every column INCLUDING id.
@@ -101,8 +106,18 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table));
 
-    // def update(attrs); per-non-id-column conditional setter; save; end
-    methods.push(synth_update(owner, table));
+    // def update(<arg>); per-permitted-field setter; save; end
+    //
+    // When a controller permits this model's resource, `update` takes the
+    // typed `<Resource>Params` and assigns each permitted field via
+    // `attr_writer` (no `.key?` check needed — `*Params` always carries
+    // every permitted field). When no spec applies (rare; model not
+    // exposed by any controller), falls back to the Hash-shaped variant
+    // for backward compatibility.
+    methods.push(match permitted_fields {
+        Some(fields) => synth_update_typed(owner, fields),
+        None => synth_update(owner, table),
+    });
 }
 
 fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
@@ -556,6 +571,66 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
             vec![(name, Ty::Sym), (value, Ty::Untyped)],
             Ty::Untyped,
         )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+    }
+}
+
+/// Typed-Params update: takes the per-resource `<Resource>Params`
+/// (typed slots for each permitted field) and assigns through the
+/// model's `attr_writer` per field. No `.key?` guard — `*Params` always
+/// carries every permitted field. Save, return Bool.
+fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    let p = Symbol::from("p");
+    let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
+    let params_class_id = ClassId(Symbol::from(format!(
+        "{}Params",
+        crate::naming::camelize(resource.as_str())
+    )));
+
+    let mut stmts: Vec<Expr> = Vec::new();
+    for field in fields {
+        let p_field = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(p.clone())),
+                method: field.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: Symbol::from(format!("{}=", field.as_str())),
+                args: vec![p_field],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("save"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    ));
+
+    let params_ty = Ty::Class { id: params_class_id, args: vec![] };
+    MethodDef {
+        name: Symbol::from("update"),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(p.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(p, params_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
