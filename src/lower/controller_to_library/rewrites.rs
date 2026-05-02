@@ -664,28 +664,40 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 }
 
 // ---------------------------------------------------------------------------
-// `<x>_path` route-helper prefix. Bare calls to route helpers (`Send`
-// with no recv whose method ends in `_path`) get the `RouteHelpers.`
-// receiver added. Spinel's runtime defines all path helpers as module
-// functions on `RouteHelpers`; controllers must call them through that
-// namespace, since the `xxx_path` magic Rails injects via include
-// doesn't exist here.
+// `<x>_path` / `<x>_url` route-helper prefix. Bare calls to route
+// helpers (`Send` with no recv whose method ends in `_path` or `_url`)
+// get the `RouteHelpers.` receiver added. Spinel's runtime defines
+// every helper as a module function on `RouteHelpers`; controllers
+// and tests must reach them through that namespace, since the
+// `xxx_path` / `xxx_url` magic Rails injects via include doesn't
+// exist here.
 //
 // This pass runs AFTER `rewrite_redirect_to` so the polymorphic
 // rewrite's freshly-synthesized `RouteHelpers.x_path(...)` calls (which
 // have a recv) are skipped — only original bare calls get the prefix.
 // ---------------------------------------------------------------------------
 
-pub(super) fn rewrite_route_helpers(expr: &Expr) -> Expr {
+pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if method.as_str().ends_with("_path") =>
+            if method.as_str().ends_with("_path")
+                || method.as_str().ends_with("_url") =>
         {
+            // `RouteHelpers` only emits `_path` helpers — Rails'
+            // `_url` form differs by host prefix, which we don't
+            // model. Fold `_url` onto its `_path` twin so test/
+            // controller bodies that use the URL form resolve.
+            let raw = method.as_str();
+            let dispatch_method = if let Some(stem) = raw.strip_suffix("_url") {
+                Symbol::from(format!("{stem}_path"))
+            } else {
+                method.clone()
+            };
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {
                     recv: Some(const_path(&["RouteHelpers"], e.span)),
-                    method: method.clone(),
+                    method: dispatch_method,
                     args: args.iter().map(rewrite_route_helpers).collect(),
                     block: block.as_ref().map(rewrite_route_helpers),
                     parenthesized: *parenthesized,

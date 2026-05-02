@@ -110,6 +110,34 @@ export class Test {
   flunk(msg?: string): void {
     assert.fail(msg ?? "flunked");
   }
+
+  // ── ActionDispatch::IntegrationTest surface ──────────────────
+  // Stub HTTP request methods. A real test rack-stack lives in the
+  // ts-spinel runtime; for now these accept any URL/options and
+  // record nothing — tests that depend on response state fail at
+  // assertion time, not at type-check time.
+  get(_url: any, _opts?: any): void {}
+  post(_url: any, _opts?: any): void {}
+  put(_url: any, _opts?: any): void {}
+  patch(_url: any, _opts?: any): void {}
+  delete(_url: any, _opts?: any): void {}
+  head(_url: any, _opts?: any): void {}
+
+  // Response-side assertions — same stub strategy. The arity
+  // matches Rails' Minitest assertions so emitted bodies type-check;
+  // bodies are no-ops until the test rack stack lands.
+  assert_response(_status: any, _msg?: string): void {}
+  assert_redirected_to(_url: any, _msg?: string): void {}
+  assert_select(_selector: any, _arg?: any, _msg?: string): void {}
+  assert_template(_name: any, _msg?: string): void {}
+
+  // Response accessors — return `any` so chained property reads
+  // (e.g. `this.response.body`) don't fight the type checker.
+  response: any;
+  request: any;
+  session: any;
+  cookies: any;
+  flash: any;
 }
 
 // Rails-side alias. `ActiveSupport::TestCase` and `ActionDispatch::-

@@ -158,10 +158,17 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
 fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> MethodDef {
     let snake = sanitize_test_name(&t.name);
     let method_name = Symbol::from(format!("test_{snake}"));
-    let body = match setup {
+    let raw_body = match setup {
         None => t.body.clone(),
         Some(s) => prepend_setup(s, &t.body),
     };
+    // Bare `articles_url(@article)` / `article_path(...)` calls in
+    // a test body need the `RouteHelpers.` namespace prefix — same
+    // rewrite controller bodies get. Without it, the bare-Send
+    // self-injection in the emitter turns these into
+    // `this.articles_url(...)`, which fails tsc since the test
+    // class doesn't carry route helpers as instance methods.
+    let body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(&raw_body);
     MethodDef {
         name: method_name,
         receiver: MethodReceiver::Instance,

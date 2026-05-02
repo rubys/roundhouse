@@ -25,7 +25,7 @@
 //! the synthesized `MethodDef`.
 
 mod process_action;
-mod rewrites;
+pub mod rewrites;
 mod util;
 
 use crate::dialect::{
