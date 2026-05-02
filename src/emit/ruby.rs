@@ -89,20 +89,37 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
 /// TS / Rust / etc. are deferred until enough lowerers exist for
 /// natural groupings to surface.
 pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
-    // Bulk lower so per-resource synthesized siblings (`<Model>Row`,
-    // future `<Resource>Params`) ride alongside the model class. Each
-    // returned `LibraryClass` becomes one `app/models/<stem>.rb` file.
-    let lcs = crate::lower::lower_models_to_library_classes(
+    // Collect controller `permit(...)` declarations so the model lowerer
+    // can synthesize `from_params(p: <Resource>Params)` factories sized
+    // to the permitted-fields list. See `controller_to_library/params.rs`.
+    let params_specs_full =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
+        params_specs_full
+            .iter()
+            .map(|(r, s)| (r.clone(), s.fields.clone()))
+            .collect();
+
+    // Bulk lower so per-resource synthesized siblings (`<Model>Row`)
+    // ride alongside the model class. Each returned `LibraryClass`
+    // becomes one `app/models/<stem>.rb` file. *Params classes are
+    // synthesized by the controller lowerer (separate emit path —
+    // `emit_lowered_controllers`); we register them here as
+    // synthesized siblings so model files that reference them
+    // (`Article.from_params(...)` calls) get explicit requires.
+    let lcs = crate::lower::lower_models_to_library_classes_with_params(
         &app.models,
         &app.schema,
         Vec::new(),
+        &params_specs,
     );
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
     // in the require chain loads them. Build a (name, anchor) map from
-    // every LC carrying an `origin` tag.
-    let synthesized: Vec<(String, String)> = lcs
+    // every LC carrying an `origin` tag, plus the *Params classes that
+    // controllers will synthesize separately.
+    let mut synthesized: Vec<(String, String)> = lcs
         .iter()
         .filter(|lc| lc.origin.is_some())
         .map(|lc| {
@@ -111,6 +128,11 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
             (name, format!("app/models/{stem}"))
         })
         .collect();
+    for spec in params_specs_full.values() {
+        let name = spec.class_id.0.as_str().to_string();
+        let stem = crate::naming::snake_case(&name);
+        synthesized.push((name, format!("app/models/{stem}")));
+    }
 
     lcs.iter()
         .map(|lc| {

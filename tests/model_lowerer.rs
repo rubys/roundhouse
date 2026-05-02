@@ -506,12 +506,28 @@ fn lowered_real_blog_typing_residual() {
         .collect();
     let view_extras = build_class_info_extras(&preliminary_views);
 
+    // Collect controller `permit(...)` specs so the model lowerer can
+    // synthesize `from_params(p: <Resource>Params)` factories. Without
+    // this, the controller body's `Article.from_params(article_params)`
+    // call has no signature in the registry and types as `TyVar(0)`.
+    let params_specs_full =
+        roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs: std::collections::BTreeMap<Symbol, Vec<Symbol>> = params_specs_full
+        .iter()
+        .map(|(r, s)| (r.clone(), s.fields.clone()))
+        .collect();
+
     // Models go through the registry-returning bulk entry so
     // controllers and views can reuse the SAME registry — keeps the
     // ApplicationRecord baseline (find/all/where/etc) visible to
     // dispatch on Article.find(...).
     let (model_lcs, model_registry) =
-        lower_models_with_registry(&app.models, &app.schema, view_extras);
+        roundhouse::lower::lower_models_with_registry_and_params(
+            &app.models,
+            &app.schema,
+            view_extras,
+            &params_specs,
+        );
 
     // Re-lower views via the bulk entry, passing the model registry
     // as extras. The bulk entry adds framework stubs (ViewHelpers,

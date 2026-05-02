@@ -25,6 +25,7 @@
 //! the synthesized `MethodDef`.
 
 mod process_action;
+pub mod params;
 pub mod rewrites;
 mod util;
 
@@ -37,13 +38,16 @@ use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_to};
 
+use self::params::ParamsSpec;
 use self::process_action::synthesize_process_action;
 use self::rewrites::{
-    rewrite_assoc_through_parent, rewrite_destroy_bang, rewrite_drop_includes,
-    rewrite_order_to_sort_by, rewrite_params, rewrite_params_helpers_to_h,
+    rewrite_assoc_through_parent_typed, rewrite_destroy_bang, rewrite_drop_includes,
+    rewrite_model_new_to_from_params, rewrite_order_to_sort_by, rewrite_params,
     rewrite_redirect_to, rewrite_render_to_views, rewrite_route_helpers,
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
+
+use std::collections::BTreeMap;
 
 /// Bulk entry point: lower every controller against a shared class
 /// registry so cross-controller / model / view dispatch types
@@ -58,14 +62,27 @@ pub fn lower_controllers_to_library_classes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
+    // Scan source-shape action bodies for `permit(...)` declarations.
+    // Each unique resource yields one `<Resource>Params` synthesized
+    // class plus the (resource, fields, class_id) record we need to
+    // rewrite controller bodies + register the class with the typer.
+    let params_specs = self::params::collect_specs(controllers);
+    let params_lcs = self::params::synthesize_params_classes(&params_specs);
+
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
-        let methods = build_methods(controller);
+        let methods = build_methods(controller, &params_specs);
         all_methods.push((methods, controller));
     }
 
     let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
         std::collections::HashMap::new();
+    // Register synthesized Params classes so dispatch on
+    // `<Resource>Params.from_raw(@params)` and the typed factory
+    // accessors resolves through the body-typer.
+    for params_lc in &params_lcs {
+        classes.insert(params_lc.name.clone(), self::params::params_class_info(params_lc));
+    }
     // Framework runtime stubs (ViewHelpers, RouteHelpers, Inflector,
     // String, Broadcasts, FormBuilder, ErrorCollection). Same set
     // the view lowerer registers — controller actions call into the
@@ -143,6 +160,30 @@ pub fn lower_controllers_to_library_classes(
             origin: None,
         });
     }
+    // Type-check synthesized Params class method bodies with a per-class
+    // ivar map seeded from the permitted-fields list. Each `attr_reader`
+    // body is `@<field>` whose type comes from this map; without the
+    // seed, the typer leaves it as `TyVar(0)` and the strict residual
+    // check fails.
+    let mut params_lcs = params_lcs;
+    for params_lc in &mut params_lcs {
+        let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
+            std::collections::HashMap::new();
+        if let Some(crate::dialect::LibraryClassOrigin::ResourceParams { fields, .. }) =
+            &params_lc.origin
+        {
+            for f in fields {
+                params_ivars.insert(f.clone(), Ty::Str);
+            }
+        }
+        for method in &mut params_lc.methods {
+            crate::lower::typing::type_method_body(method, &classes, &params_ivars);
+        }
+    }
+    // Append synthesized Params classes after controllers. Each becomes
+    // its own `app/models/<resource>_params.{rb,ts}` file via the
+    // standard per-LC emit path.
+    out.extend(params_lcs);
     out
 }
 
@@ -150,7 +191,8 @@ pub fn lower_controllers_to_library_classes(
 /// don't need cross-class typing. For whole-app emit, use
 /// `lower_controllers_to_library_classes`.
 pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClass {
-    let methods = build_methods(controller);
+    let specs = self::params::collect_specs(std::slice::from_ref(controller));
+    let methods = build_methods(controller, &specs);
     LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -161,7 +203,10 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     }
 }
 
-fn build_methods(controller: &Controller) -> Vec<MethodDef> {
+fn build_methods(
+    controller: &Controller,
+    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
     let (publics, privs) = split_public_private_actions(controller);
@@ -207,10 +252,10 @@ fn build_methods(controller: &Controller) -> Vec<MethodDef> {
     }
 
     for a in &publics_inlined {
-        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ true));
+        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ true, params_specs));
     }
     for a in &privs_kept {
-        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false));
+        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false, params_specs));
     }
 
     methods
@@ -335,6 +380,7 @@ fn action_to_method(
     controller: &Controller,
     privs: &[Action],
     is_public: bool,
+    params_specs: &BTreeMap<Symbol, ParamsSpec>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     let params: Vec<Param> = a
@@ -343,7 +389,14 @@ fn action_to_method(
         .iter()
         .map(|(n, _)| Param::positional(n.clone()))
         .collect();
-    let body = lower_action_body(&a.body, controller, a.name.as_str(), privs, is_public);
+    let body = lower_action_body(
+        &a.body,
+        controller,
+        a.name.as_str(),
+        privs,
+        is_public,
+        params_specs,
+    );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
     // refinement to per-route param types can ride on a later
@@ -352,15 +405,20 @@ fn action_to_method(
     // Return type:
     //   - Public actions terminate in render/redirect (synthesized or
     //     explicit) → Nil.
-    //   - Private `_params` helpers return the permitted params hash
-    //     (callers do `Model.new(comment_params)`); type as
-    //     Hash<Sym, Untyped>.
+    //   - Private `_params` helpers return the typed `<Resource>Params`
+    //     class (callers do `Model.from_params(comment_params)`); the
+    //     resource is derived by stripping the `_params` suffix.
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
     let ret_ty = if !is_public && method_name.ends_with("_params") {
-        Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Untyped),
+        let resource = Symbol::from(method_name.trim_end_matches("_params"));
+        if let Some(spec) = params_specs.get(&resource) {
+            Ty::Class { id: spec.class_id.clone(), args: vec![] }
+        } else {
+            // Fallback for helpers whose resource we didn't recognize
+            // (shouldn't happen for source-derived helpers, but stays
+            // typed-coarse rather than panicking).
+            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
         }
     } else {
         Ty::Nil
@@ -427,6 +485,7 @@ fn lower_action_body(
     action_name: &str,
     privs: &[Action],
     is_public: bool,
+    params_specs: &BTreeMap<Symbol, ParamsSpec>,
 ) -> Expr {
     let unwrapped = unwrap_respond_to(body);
     let with_render = if is_public {
@@ -438,12 +497,23 @@ fn lower_action_body(
         unwrapped
     };
     let with_params = rewrite_params(&with_render);
-    let with_redirects = rewrite_redirect_to(&with_params);
-    let with_assoc = rewrite_assoc_through_parent(&with_redirects);
+    // After bare `params.expect(...)` / `params.require(:r).permit(...)`
+    // canonicalize via `rewrite_params`, replace each permit chain with
+    // the typed factory `<Resource>Params.from_raw(@params)`. The
+    // controller's `<resource>_params` helper body becomes that single
+    // call; downstream call sites see a typed value, not a Hash.
+    let with_typed_params = self::params::rewrite_to_from_raw(&with_params, params_specs);
+    let with_redirects = rewrite_redirect_to(&with_typed_params);
+    // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
+    // BEFORE the assoc-through-parent rewrite, so the build path picks
+    // up the typed factory shape rather than the legacy attrs-Hash.
+    let with_from_params =
+        rewrite_model_new_to_from_params(&with_redirects, privs, params_specs);
+    let with_assoc =
+        rewrite_assoc_through_parent_typed(&with_from_params, privs, params_specs);
     let with_no_includes = rewrite_drop_includes(&with_assoc);
     let with_order = rewrite_order_to_sort_by(&with_no_includes);
-    let with_params_to_h = rewrite_params_helpers_to_h(&with_order, privs);
-    let with_destroy = rewrite_destroy_bang(&with_params_to_h);
+    let with_destroy = rewrite_destroy_bang(&with_order);
     let with_routes = rewrite_route_helpers(&with_destroy);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The

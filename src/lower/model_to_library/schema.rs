@@ -217,6 +217,85 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     }
 }
 
+/// `def self.from_params(p); instance = new; instance.<f> = p.<f>; ...; instance; end`
+///
+/// Typed counterpart to `from_row` for the controller-params boundary.
+/// `fields` is the `permit(...)` list: only those columns are assigned
+/// (id / timestamps / FKs aren't user-controllable). Other columns
+/// stay at the defaults set by `initialize` from the empty Hash.
+pub(super) fn push_from_params_method(
+    methods: &mut Vec<MethodDef>,
+    model: &crate::dialect::Model,
+    fields: &[Symbol],
+) {
+    let owner = &model.name;
+    let p = Symbol::from("p");
+    let instance = Symbol::from("instance");
+    let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
+    let params_class_id = ClassId(Symbol::from(format!(
+        "{}Params",
+        crate::naming::camelize(resource.as_str())
+    )));
+
+    let new_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(owner)),
+            method: Symbol::from("new"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    let mut stmts: Vec<Expr> = Vec::new();
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: instance.clone() },
+            value: new_call,
+        },
+    ));
+
+    for field in fields {
+        let p_field = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(p.clone())),
+                method: field.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from(format!("{}=", field.as_str())),
+                args: vec![p_field],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+
+    stmts.push(var_ref(instance));
+
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let params_ty = Ty::Class { id: params_class_id, args: vec![] };
+    methods.push(MethodDef {
+        name: Symbol::from("from_params"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(p.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(p, params_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+    });
+}
+
 /// `def self.from_row(row); instance = new; instance.col = row.col; ...; instance; end`
 ///
 /// The typed counterpart to the (still-existing) Hash-receiving

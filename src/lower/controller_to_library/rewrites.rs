@@ -4,11 +4,14 @@
 //! `synthesize_implicit_render` so the synthesized symbol-form render
 //! shows up here as a plain `Send`.
 
+use std::collections::BTreeMap;
+
 use crate::dialect::Action;
 use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
+use super::params::ParamsSpec;
 use super::util::map_expr;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +103,16 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
 // emitter walks for line-per-statement output flattens implicitly.
 // ---------------------------------------------------------------------------
 
-pub(super) fn rewrite_assoc_through_parent(expr: &Expr) -> Expr {
+pub(super) fn rewrite_assoc_through_parent_typed(
+    expr: &Expr,
+    privs: &[Action],
+    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+) -> Expr {
+    let helper_names: Vec<Symbol> = privs
+        .iter()
+        .map(|p| p.name.clone())
+        .filter(|n| n.as_str().ends_with("_params"))
+        .collect();
     map_expr(expr, &|e| {
         let ExprNode::Assign { target: LValue::Ivar { name: lhs }, value } = &*e.node else {
             return None;
@@ -142,15 +154,109 @@ pub(super) fn rewrite_assoc_through_parent(expr: &Expr) -> Expr {
         let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
         let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {
-            AssocKind::Build => expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span),
-            AssocKind::Find => expand_find(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span),
+            AssocKind::Build => {
+                if let Some(resource) = match_params_helper(&outer_args[0], &helper_names) {
+                    if params_specs.contains_key(&resource) {
+                        return Some(expand_build_typed(
+                            &model_class,
+                            &fk,
+                            parent_name,
+                            lhs,
+                            &outer_args[0],
+                            e.span,
+                        ));
+                    }
+                }
+                expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
+            }
+            AssocKind::Find => {
+                expand_find(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
+            }
         })
     })
+}
+
+/// True-when-Some: `arg` is a bare call to a `<x>_params` helper. Returns
+/// the resource symbol (`<x>` minus the `_params` suffix) so callers can
+/// look up the corresponding `ParamsSpec`.
+fn match_params_helper(arg: &Expr, helper_names: &[Symbol]) -> Option<Symbol> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*arg.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    if !helper_names.iter().any(|h| h == method) {
+        return None;
+    }
+    let stem = method.as_str().trim_end_matches("_params");
+    Some(Symbol::from(stem))
 }
 
 enum AssocKind {
     Build,
     Find,
+}
+
+/// Typed-factory build expansion:
+///
+/// ```ruby
+/// @<lhs> = <Class>.from_params(<arg>)
+/// @<lhs>.<fk> = @<parent>.id
+/// ```
+///
+/// `<arg>` is the typed `<resource>_params` helper call (returning
+/// `<Resource>Params`); `<Class>.from_params` is the per-model factory
+/// added by `model_to_library/schema.rs`. The FK setter follows the
+/// model's `attr_writer` for the foreign key column.
+pub(super) fn expand_build_typed(
+    model_class: &str,
+    fk: &str,
+    parent: &Symbol,
+    lhs: &Symbol,
+    arg: &Expr,
+    span: Span,
+) -> Expr {
+    let from_params_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&[model_class], span)),
+            method: Symbol::from("from_params"),
+            args: vec![arg.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let lhs_assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: lhs.clone() },
+            value: from_params_call,
+        },
+    );
+
+    let parent_id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(parent.as_str(), span)),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let fk_setter = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(lhs.as_str(), span)),
+            method: Symbol::from(format!("{fk}=")),
+            args: vec![parent_id],
+            block: None,
+            parenthesized: false,
+        },
+    );
+
+    Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, fk_setter] })
 }
 
 pub(super) fn expand_build(
@@ -452,19 +558,26 @@ pub(super) fn rewrite_order_to_sort_by(expr: &Expr) -> Expr {
 }
 
 // ---------------------------------------------------------------------------
-// `<x>_params` to-h wrap. Spinel's strong-params chain
-// (`@params.require(:resource).permit(:f, …)`) returns a Parameters-like
-// object; model constructors and `update` expect a plain Hash. Every
-// no-recv call to a controller-defined `<x>_params` helper gets `.to_h`
-// appended at the use site.
+// `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`.
 //
-// Scoped to private actions whose name ends in `_params` — narrow
-// enough to avoid catching unrelated method names, broad enough to
-// cover the `article_params` / `comment_params` convention without
-// inspecting body shape.
+// The typed-factory rewrite that replaces the legacy `.to_h`-wrap pass.
+// Now that the `<resource>_params` helper returns a typed `<Resource>Params`
+// (synthesized from the controller's `permit` declaration via
+// `controller_to_library::params`), the model's `new(attrs: Hash)`
+// constructor isn't the right entry point — `from_params` takes the
+// typed instance and assigns each permitted field through the named
+// accessor.
+//
+// Match shape: `<Const>.new(<bare _params helper call>)` where the
+// helper's name is in `privs` and ends with `_params`. Any other
+// argument shape (Hash literal, Array, …) flows through unchanged.
 // ---------------------------------------------------------------------------
 
-pub(super) fn rewrite_params_helpers_to_h(expr: &Expr, privs: &[Action]) -> Expr {
+pub(super) fn rewrite_model_new_to_from_params(
+    expr: &Expr,
+    privs: &[Action],
+    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+) -> Expr {
     let helper_names: Vec<Symbol> = privs
         .iter()
         .map(|p| p.name.clone())
@@ -473,38 +586,48 @@ pub(super) fn rewrite_params_helpers_to_h(expr: &Expr, privs: &[Action]) -> Expr
     if helper_names.is_empty() {
         return expr.clone();
     }
-    let wrapped = map_expr(expr, &|e| match &*e.node {
-        ExprNode::Send { recv: None, method, args, block: None, .. }
-            if args.is_empty() && helper_names.iter().any(|h| h == method) =>
-        {
-            Some(Expr::new(
-                e.span,
-                ExprNode::Send {
-                    recv: Some(e.clone()),
-                    method: Symbol::from("to_h"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            ))
+    map_expr(expr, &|e| {
+        let ExprNode::Send {
+            recv: Some(model_recv),
+            method,
+            args,
+            block: None,
+            parenthesized,
+        } = &*e.node
+        else {
+            return None;
+        };
+        if method.as_str() != "new" || args.len() != 1 {
+            return None;
         }
-        _ => None,
-    });
-    // Collapse double `.to_h.to_h` — the wrapper above is unconditional;
-    // if the source already had `article_params.to_h`, the wrapper turns
-    // it into `article_params.to_h.to_h`. Strip the redundant outer call.
-    map_expr(&wrapped, &|e| match &*e.node {
-        ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
-            if method.as_str() == "to_h" && args.is_empty() =>
-        {
-            if let ExprNode::Send { method: inner_method, .. } = &*inner.node {
-                if inner_method.as_str() == "to_h" {
-                    return Some((*inner).clone());
-                }
+        // Only rewrite `<Const>.new(...)` shapes — leaves `instance.new(...)`
+        // (rare but legal) untouched.
+        let ExprNode::Const { .. } = &*model_recv.node else {
+            return None;
+        };
+        let resource = match &*args[0].node {
+            ExprNode::Send { recv: None, method: helper_method, args: helper_args, block: None, .. }
+                if helper_args.is_empty()
+                    && helper_names.iter().any(|h| h == helper_method) =>
+            {
+                let stem = helper_method.as_str().trim_end_matches("_params");
+                Symbol::from(stem)
             }
-            None
+            _ => return None,
+        };
+        if !params_specs.contains_key(&resource) {
+            return None;
         }
-        _ => None,
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(model_recv.clone()),
+                method: Symbol::from("from_params"),
+                args: vec![args[0].clone()],
+                block: None,
+                parenthesized: *parenthesized,
+            },
+        ))
     })
 }
 

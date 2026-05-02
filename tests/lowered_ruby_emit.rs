@@ -657,21 +657,25 @@ fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
 }
 
 #[test]
-fn controllers_article_params_lowers_expect_hash_to_require_permit() {
-    // `params.expect(article: [:title, :body])` lowers to
-    // `@params.require(:article).permit([:title, :body])` — the
-    // strong-params chain. `permit` takes Array[Symbol] (not splat)
-    // so the parameter slot is monomorphic for spinel + type-strict
-    // emit targets.
+fn controllers_article_params_lowers_to_typed_factory() {
+    // `params.expect(article: [:title, :body])` and the older
+    // `params.require(:article).permit(:title, :body)` both lower to a
+    // typed-factory call: `ArticleParams.from_raw(@params)`. The
+    // synthesized `ArticleParams` LibraryClass holds the permitted
+    // fields as typed slots; the require/permit chain is gone.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("@params.require(:article).permit([:title, :body])"),
-        "expected require/permit lowering; got:\n{src}",
+        src.contains("ArticleParams.from_raw(@params)"),
+        "expected typed-factory lowering; got:\n{src}",
     );
     assert!(
         !src.contains("params.expect(article:"),
         "params.expect(article: ...) should be lowered:\n{src}",
+    );
+    assert!(
+        !src.contains("@params.require(:article).permit"),
+        "require/permit chain should be replaced by from_raw:\n{src}",
     );
 }
 
@@ -917,87 +921,98 @@ fn controllers_destroy_bang_lowers_to_destroy() {
 }
 
 #[test]
-fn controllers_params_helper_calls_get_to_h_at_use_sites() {
-    // `Article.new(article_params)` → `Article.new(article_params.to_h)`.
-    // Spinel's strong-params chain returns a Parameters-like object;
-    // model constructors expect a plain Hash.
+fn controllers_params_helper_use_sites_call_typed_factory() {
+    // `Article.new(article_params)` → `Article.from_params(article_params)`.
+    // `article_params` returns the typed `<Resource>Params` object;
+    // the model's `from_params` factory takes that typed value and
+    // assigns each permitted field through the column setter. The
+    // legacy `.to_h`-wrap-then-Hash-receive shape is gone.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.new(article_params.to_h)"),
-        "expected `article_params.to_h` in Article.new call; got:\n{src}",
+        src.contains("Article.from_params(article_params)"),
+        "expected `Article.from_params(article_params)`; got:\n{src}",
     );
     assert!(
-        src.contains("@article.update(article_params.to_h)"),
-        "expected `article_params.to_h` in update call; got:\n{src}",
+        src.contains("@article.update(article_params)"),
+        "expected `update(article_params)` (typed); got:\n{src}",
     );
-    // The bare form should not appear as a positional arg anywhere in
-    // the action bodies.
+    // Legacy forms must not appear.
     assert!(
-        !src.contains("Article.new(article_params)"),
-        "bare article_params should be wrapped:\n{src}",
+        !src.contains("article_params.to_h"),
+        "no `.to_h` wrap in typed-factory shape:\n{src}",
     );
     assert!(
-        !src.contains(".update(article_params)"),
-        "bare article_params should be wrapped:\n{src}",
+        !src.contains("Article.new(article_params"),
+        "Article.new(article_params...) should be rewritten to from_params:\n{src}",
     );
 }
 
 #[test]
-fn controllers_params_helper_body_does_not_self_wrap() {
-    // The `def article_params` body itself should not get `.to_h` —
-    // its body is `@params.require(:article).permit([:title, :body])`
-    // with no `<x>_params` Send to rewrite.
+fn controllers_params_helper_body_is_from_raw_call() {
+    // The `def article_params` body lowers to a single
+    // `ArticleParams.from_raw(@params)` call — the boundary where
+    // `Hash[Symbol, untyped]` widens once into typed slots. No
+    // `require/permit` chain, no `.to_h`.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     let body = src
         .split("def article_params").nth(1).unwrap()
         .split("end").next().unwrap();
     assert!(
+        body.contains("ArticleParams.from_raw(@params)"),
+        "expected typed-factory body; got:\n{body}",
+    );
+    assert!(
+        !body.contains("@params.require"),
+        "require chain should be replaced by from_raw call:\n{body}",
+    );
+    assert!(
         !body.contains("article_params.to_h"),
-        "article_params helper body should not call itself:\n{body}",
-    );
-    assert!(
-        body.contains("@params.require(:article).permit([:title, :body])"),
-        "expected unchanged permit chain in helper body:\n{body}",
+        "article_params body should not self-wrap:\n{body}",
     );
 }
 
 #[test]
-fn comments_build_expansion_composes_with_params_to_h_rewrite() {
-    // `attrs = comment_params.to_h` should appear exactly once — the
-    // build expansion drops `.to_h` from its synthesized form, and the
-    // params-to-h rewrite adds it back. Verifying composition order so
-    // a regression to `.to_h.to_h` would be caught.
+fn comments_build_expansion_uses_typed_factory() {
+    // The build expansion produces typed-factory shape: a single
+    // `Comment.from_params(comment_params)` call followed by the FK
+    // setter. No intermediate Hash-shaped `attrs` variable; the
+    // legacy `attrs = ...; attrs[:fk] = ...; Comment.new(attrs)`
+    // 3-statement form is replaced.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
-    assert!(src.contains("attrs = comment_params.to_h"), "{src}");
     assert!(
-        !src.contains("comment_params.to_h.to_h"),
-        "double to_h regression — params rewrite should not re-wrap:\n{src}",
+        !src.contains("attrs = comment_params"),
+        "no Hash-shaped attrs intermediate:\n{src}",
+    );
+    assert!(
+        !src.contains("attrs[:article_id]"),
+        "no attrs index assignment:\n{src}",
+    );
+    assert!(
+        !src.contains("Comment.new(attrs)"),
+        "no Comment.new(attrs) — should be Comment.from_params(...):\n{src}",
     );
 }
 
 #[test]
-fn comments_create_expands_assoc_build_to_three_statements() {
-    // `@comment = @article.comments.build(comment_params)` lowers to
-    // three statements: build the attrs hash, set the FK, then call
-    // `Comment.new(attrs)`. Mirrors spinel-blog's reference shape.
+fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
+    // `@comment = @article.comments.build(comment_params)` lowers to:
+    //   @comment = Comment.from_params(comment_params)
+    //   @comment.article_id = @article.id
+    // The typed factory absorbs the permitted-fields assignment; the
+    // FK setter follows the model's typed `attr_writer`.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("attrs = comment_params.to_h"),
-        "expected `attrs = …to_h` first stmt; got:\n{src}",
+        src.contains("@comment = Comment.from_params(comment_params)"),
+        "expected typed-factory in build; got:\n{src}",
     );
     assert!(
-        src.contains("attrs[:article_id] = @article.id"),
-        "expected `attrs[:article_id] = @article.id` second stmt; got:\n{src}",
+        src.contains("@comment.article_id = @article.id"),
+        "expected FK setter after typed factory; got:\n{src}",
     );
-    assert!(
-        src.contains("@comment = Comment.new(attrs)"),
-        "expected `@comment = Comment.new(attrs)` third stmt; got:\n{src}",
-    );
-    // The original `.comments.build(...)` form must not survive.
     assert!(
         !src.contains("@article.comments.build"),
         "assoc.build should be lowered, not preserved:\n{src}",

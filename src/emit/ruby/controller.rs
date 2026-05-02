@@ -148,13 +148,41 @@ fn emit_render(r: &RenderTarget) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub(super) fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    app.controllers
+    use crate::lower::lower_controllers_to_library_classes;
+
+    // Bulk lower so synthesized siblings (`<Resource>Params`) ride
+    // alongside the controller classes. They share the controller
+    // lowerer's output vec but get routed to `app/models/` because
+    // they're plain holders, not request handlers.
+    let lcs = lower_controllers_to_library_classes(&app.controllers, Vec::new());
+
+    // Same synthesized-siblings tracking as `emit_lowered_models`: each
+    // tagged class needs an explicit `require_relative` from any file
+    // that references it (nothing else loads them).
+    let synthesized: Vec<(String, String)> = lcs
         .iter()
-        .map(|c| {
-            let lc = lower_controller_to_library_class(c);
+        .filter(|lc| lc.origin.is_some())
+        .map(|lc| {
+            let name = lc.name.0.as_str().to_string();
+            let stem = snake_case(&name);
+            (name, format!("app/models/{stem}"))
+        })
+        .collect();
+
+    lcs.iter()
+        .map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
-            let out_path = PathBuf::from(format!("app/controllers/{file_stem}.rb"));
-            super::library::emit_library_class_decl(&lc, app, out_path)
+            let out_path = if lc.origin.is_some() {
+                PathBuf::from(format!("app/models/{file_stem}.rb"))
+            } else {
+                PathBuf::from(format!("app/controllers/{file_stem}.rb"))
+            };
+            super::library::emit_library_class_decl_with_synthesized(
+                lc,
+                app,
+                out_path,
+                &synthesized,
+            )
         })
         .collect()
 }

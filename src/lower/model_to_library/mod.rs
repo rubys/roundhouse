@@ -60,8 +60,23 @@ pub fn lower_models_with_registry(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    let (lcs, classes) = lower_models_inner(models, schema, extra_class_infos);
+    let (lcs, classes) = lower_models_inner(models, schema, extra_class_infos, &Default::default());
     (lcs, classes)
+}
+
+/// Variant that also takes (resource → permitted fields) tuples
+/// collected from controllers. When a model's resource (e.g. `:article`
+/// for `Article`) is in `params_specs`, the model gets a typed
+/// `from_params(p: <Resource>Params)` factory whose body assigns each
+/// permitted field through the column setter. Models without a
+/// matching spec skip the factory (no controller permits them).
+pub fn lower_models_with_registry_and_params(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    lower_models_inner(models, schema, extra_class_infos, params_specs)
 }
 
 pub fn lower_models_to_library_classes(
@@ -69,13 +84,23 @@ pub fn lower_models_to_library_classes(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos).0
+    lower_models_inner(models, schema, extra_class_infos, &Default::default()).0
+}
+
+pub fn lower_models_to_library_classes_with_params(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+) -> Vec<LibraryClass> {
+    lower_models_inner(models, schema, extra_class_infos, params_specs).0
 }
 
 fn lower_models_inner(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     // Synthesize per-model `<Model>Row` LibraryClasses up front. These
     // need to appear in the class registry before model body-typing so
@@ -85,7 +110,7 @@ fn lower_models_inner(
 
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
-        let methods = build_methods(model, schema);
+        let methods = build_methods(model, schema, params_specs);
         let table = schema.tables.get(&model.table.0);
         all_methods.push((methods, model.name.clone(), table, model));
     }
@@ -99,6 +124,46 @@ fn lower_models_inner(
     // / `ArticleRow.from_raw(h)` resolves through the body-typer.
     for row_lc in &row_classes {
         classes.insert(row_lc.name.clone(), self::row::row_class_info(row_lc));
+    }
+    // Register synthesized Params classes (info-only — the actual class
+    // is emitted by the controller lowerer). Needed so the model's
+    // `from_params` body's `p.<field>` Send dispatches to the
+    // `<Resource>Params` attr_reader signature.
+    for (resource, fields) in params_specs {
+        let class_id = ClassId(Symbol::from(format!(
+            "{}Params",
+            crate::naming::camelize(resource.as_str())
+        )));
+        let mut info = crate::analyze::ClassInfo::default();
+        for field in fields {
+            info.instance_methods
+                .insert(field.clone(), fn_sig(vec![], Ty::Str));
+            info.instance_method_kinds
+                .insert(field.clone(), crate::dialect::AccessorKind::AttributeReader);
+            let setter_name = Symbol::from(format!("{}=", field.as_str()));
+            info.instance_methods.insert(
+                setter_name.clone(),
+                fn_sig(vec![(Symbol::from("value"), Ty::Str)], Ty::Str),
+            );
+            info.instance_method_kinds
+                .insert(setter_name, crate::dialect::AccessorKind::AttributeWriter);
+        }
+        info.class_methods.insert(
+            Symbol::from("from_raw"),
+            fn_sig(
+                vec![(
+                    Symbol::from("params"),
+                    Ty::Hash {
+                        key: Box::new(Ty::Sym),
+                        value: Box::new(Ty::Untyped),
+                    },
+                )],
+                Ty::Class { id: class_id.clone(), args: vec![] },
+            ),
+        );
+        info.class_method_kinds
+            .insert(Symbol::from("from_raw"), crate::dialect::AccessorKind::Method);
+        classes.insert(class_id, info);
     }
     // Framework runtime stubs — referenced from broadcasts_to expansions
     // but not part of any model. Mirrors runtime/ruby/broadcasts.rb's
@@ -185,7 +250,7 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
 /// `initialize` lowerings. Models whose table isn't in the schema (rare;
 /// abstract or virtual) get only the non-schema-driven methods.
 pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryClass {
-    let mut methods = build_methods(model, schema);
+    let mut methods = build_methods(model, schema, &Default::default());
     let table = schema.tables.get(&model.table.0);
     let class_info = build_class_info(model, &methods, table);
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
@@ -214,11 +279,23 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 /// Untyped-body method synthesis — shared by the single-model and
 /// bulk entry points. Body-typing is the caller's responsibility (it
 /// needs the cross-model registry).
-fn build_methods(model: &Model, schema: &Schema) -> Vec<MethodDef> {
+fn build_methods(
+    model: &Model,
+    schema: &Schema,
+    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
         push_schema_methods(&mut methods, model, table);
+        // `from_params(p: <Resource>Params)` — typed factory matching the
+        // (resource, fields) tuple a controller's `permit(...)` declared.
+        // Skipped silently when the model isn't permitted by any
+        // controller.
+        let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
+        if let Some(fields) = params_specs.get(&resource) {
+            self::schema::push_from_params_method(&mut methods, model, fields);
+        }
     }
 
     push_validate_method(&mut methods, model);

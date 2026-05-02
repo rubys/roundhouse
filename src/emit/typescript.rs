@@ -125,10 +125,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helper_extras = library::extras_from_funcs(&route_helper_funcs);
 
-    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry(
+    // Collect controller `permit(...)` declarations once so the model
+    // lowerer can synthesize `from_params(p: <Resource>Params)` factories
+    // matching the permitted-fields list. The same specs feed the
+    // controller lowerer below — both call sites need the same view
+    // of the controller-derived metadata.
+    let params_specs_full =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs_simple: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
+        params_specs_full
+            .iter()
+            .map(|(r, s)| (r.clone(), s.fields.clone()))
+            .collect();
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,
         view_extras,
+        &params_specs_simple,
     );
 
     let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
@@ -212,16 +225,19 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
-    // Synthesized siblings (`<Model>Row`, future `<Resource>Params`)
-    // come back inside `model_lcs` carrying an `origin` tag. The render-
-    // imports pass needs to know about their names so that a class which
-    // references them resolves to a sibling `./<stem>.js` import (rather
-    // than dropping the ref as unknown).
-    let synthesized_model_names: Vec<String> = model_lcs
+    // Synthesized siblings (`<Model>Row` from models, `<Resource>Params`
+    // from controllers) carry an `origin` tag. Combine both into one
+    // list so render_imports recognizes them as model-style imports —
+    // they all live in `app/models/` regardless of which lowerer
+    // produced them.
+    let mut synthesized_names: Vec<String> = model_lcs
         .iter()
+        .chain(controller_lcs.iter())
         .filter(|lc| lc.origin.is_some())
         .map(|lc| lc.name.0.as_str().to_string())
         .collect();
+    synthesized_names.sort();
+    synthesized_names.dedup();
     for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
@@ -229,7 +245,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             lc,
             app,
             out_path,
-            &synthesized_model_names,
+            &synthesized_names,
         ));
     }
 
@@ -249,10 +265,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_views_aggregator(&app.views, &view_funcs));
     }
 
+    // Synthesized `<Resource>Params` classes ride in `controller_lcs`
+    // (origin tagged); route those to `app/models/` rather than
+    // `app/controllers/`. Use the combined `synthesized_names` so a
+    // controller body's reference to a Row class (or any other
+    // synthesized class) resolves uniformly.
     for lc in &controller_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
-        let out_path = PathBuf::from(format!("app/controllers/{stem}.ts"));
-        files.push(library::emit_class_file(lc, app, out_path));
+        let out_path = if lc.origin.is_some() {
+            PathBuf::from(format!("app/models/{stem}.ts"))
+        } else {
+            PathBuf::from(format!("app/controllers/{stem}.ts"))
+        };
+        files.push(library::emit_class_file_with_synthesized(
+            lc,
+            app,
+            out_path,
+            &synthesized_names,
+        ));
     }
 
     for lc in &app.library_classes {
