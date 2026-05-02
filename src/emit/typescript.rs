@@ -588,34 +588,63 @@ fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
 fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     use crate::dialect::MethodReceiver;
 
-    // Pull (param-types, return-type) from signature when available.
-    let (sig_param_tys, ret_ty): (Vec<Ty>, Ty) = match m.signature.as_ref() {
-        Some(Ty::Fn { params: sig_params, ret, .. }) => {
-            let non_block: Vec<&crate::ty::Param> = sig_params
-                .iter()
-                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-                .collect();
-            if non_block.len() != m.params.len() {
-                return Err(format!(
-                    "method `{}`: signature/param arity mismatch ({} vs {})",
-                    m.name,
-                    non_block.len(),
-                    m.params.len(),
-                ));
+    // Pull (param-types, kinds, return-type) from signature when
+    // available. Kinds drive optional-param decoration: Ruby kwargs
+    // with defaults (`def foo(x, status: 200)`) and explicit-optional
+    // positionals (`def foo(x = nil)`) emit as TS `name?: T` so
+    // call sites that omit them type-check. Without this, every
+    // kwarg-default call (`render(html)` where Ruby has
+    // `render(html, status: 200)`) trips TS2554.
+    let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
+        match m.signature.as_ref() {
+            Some(Ty::Fn { params: sig_params, ret, .. }) => {
+                let non_block: Vec<&crate::ty::Param> = sig_params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                    .collect();
+                if non_block.len() != m.params.len() {
+                    return Err(format!(
+                        "method `{}`: signature/param arity mismatch ({} vs {})",
+                        m.name,
+                        non_block.len(),
+                        m.params.len(),
+                    ));
+                }
+                let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+                let optionals = non_block
+                    .iter()
+                    .map(|p| {
+                        matches!(
+                            p.kind,
+                            crate::ty::ParamKind::Optional
+                                | crate::ty::ParamKind::Keyword { required: false }
+                                | crate::ty::ParamKind::KeywordRest
+                        )
+                    })
+                    .collect();
+                (tys, optionals, (**ret).clone())
             }
-            (non_block.iter().map(|p| p.ty.clone()).collect(), (**ret).clone())
-        }
-        _ => (
-            m.params.iter().map(|_| Ty::Untyped).collect(),
-            m.body.ty.clone().unwrap_or(Ty::Nil),
-        ),
-    };
+            _ => (
+                m.params.iter().map(|_| Ty::Untyped).collect(),
+                m.params.iter().map(|_| false).collect(),
+                m.body.ty.clone().unwrap_or(Ty::Nil),
+            ),
+        };
 
     let param_list: Vec<String> = m
         .params
         .iter()
         .zip(sig_param_tys.iter())
-        .map(|(name, ty)| format!("{}: {}", escape_reserved(name.as_str()), ts_ty(ty)))
+        .zip(sig_param_optional.iter())
+        .map(|((name, ty), optional)| {
+            let opt_marker = if *optional { "?" } else { "" };
+            format!(
+                "{}{}: {}",
+                escape_reserved(name.as_str()),
+                opt_marker,
+                ts_ty(ty)
+            )
+        })
         .collect();
 
     let mut out = String::new();
@@ -673,33 +702,56 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
 pub fn emit_library_function(
     func: &crate::dialect::LibraryFunction,
 ) -> Result<String, String> {
-    let (sig_param_tys, ret_ty): (Vec<Ty>, Ty) = match func.signature.as_ref() {
-        Some(Ty::Fn { params: sig_params, ret, .. }) => {
-            let non_block: Vec<&crate::ty::Param> = sig_params
-                .iter()
-                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-                .collect();
-            if non_block.len() != func.params.len() {
-                return Err(format!(
-                    "function `{}`: signature/param arity mismatch ({} vs {})",
-                    func.name,
-                    non_block.len(),
-                    func.params.len(),
-                ));
+    let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
+        match func.signature.as_ref() {
+            Some(Ty::Fn { params: sig_params, ret, .. }) => {
+                let non_block: Vec<&crate::ty::Param> = sig_params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                    .collect();
+                if non_block.len() != func.params.len() {
+                    return Err(format!(
+                        "function `{}`: signature/param arity mismatch ({} vs {})",
+                        func.name,
+                        non_block.len(),
+                        func.params.len(),
+                    ));
+                }
+                let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+                let optionals = non_block
+                    .iter()
+                    .map(|p| {
+                        matches!(
+                            p.kind,
+                            crate::ty::ParamKind::Optional
+                                | crate::ty::ParamKind::Keyword { required: false }
+                                | crate::ty::ParamKind::KeywordRest
+                        )
+                    })
+                    .collect();
+                (tys, optionals, (**ret).clone())
             }
-            (non_block.iter().map(|p| p.ty.clone()).collect(), (**ret).clone())
-        }
-        _ => (
-            func.params.iter().map(|_| Ty::Untyped).collect(),
-            func.body.ty.clone().unwrap_or(Ty::Nil),
-        ),
-    };
+            _ => (
+                func.params.iter().map(|_| Ty::Untyped).collect(),
+                func.params.iter().map(|_| false).collect(),
+                func.body.ty.clone().unwrap_or(Ty::Nil),
+            ),
+        };
 
     let param_list: Vec<String> = func
         .params
         .iter()
         .zip(sig_param_tys.iter())
-        .map(|(name, ty)| format!("{}: {}", escape_reserved(name.as_str()), ts_ty(ty)))
+        .zip(sig_param_optional.iter())
+        .map(|((name, ty), optional)| {
+            let opt_marker = if *optional { "?" } else { "" };
+            format!(
+                "{}{}: {}",
+                escape_reserved(name.as_str()),
+                opt_marker,
+                ts_ty(ty)
+            )
+        })
         .collect();
 
     let raw_name = func.name.as_str();

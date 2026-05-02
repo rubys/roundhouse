@@ -24,13 +24,13 @@ export class Base {
     (() => { throw new Error("process_action must be overridden by subclass"); })();
   }
 
-  render(html: string, status: any): void {
+  render(html: string, status?: any): void {
     this.body = html;
     this.status = this.resolve_status(status);
     null;
   }
 
-  redirect_to(path: string, notice: any, alert: any, status: any): void {
+  redirect_to(path: string, notice?: any, alert?: any, status?: any): void {
     this.location = path;
     this.status = this.resolve_status(status);
     if (notice === null) { null; } else { this.flash["notice"] = notice; }

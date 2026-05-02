@@ -14,12 +14,12 @@ export class FormBuilder {
     this.method = method;
   }
 
-  label(field: string, opts: Record<string, any>): string {
+  label(field: string, opts?: Record<string, any>): string {
     const attrs = ViewHelpers.render_attrs({ ...{ "for": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<label${attrs}>${ViewHelpers.html_escape((__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(String(field)))}</label>`;
   }
 
-  text_field(field: string, opts: Record<string, any>): string {
+  text_field(field: string, opts?: Record<string, any>): string {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
     if (value === null || String(value).length === 0) { null; } else { base["value"] = String(value); }
@@ -27,13 +27,13 @@ export class FormBuilder {
     return `<input${attrs}>`;
   }
 
-  text_area(field: string, opts: Record<string, any>): string {
+  text_area(field: string, opts?: Record<string, any>): string {
     const value = this.model[field];
     const attrs = ViewHelpers.render_attrs({ ...{ "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<textarea${attrs}>${ViewHelpers.html_escape(value)}</textarea>`;
   }
 
-  submit(label: any, opts: Record<string, any>): string {
+  submit(label?: any, opts?: Record<string, any>): string {
     const text = label || this.method === "patch" ? `Update ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}` : `Create ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}`;
     const attrs = ViewHelpers.render_attrs({ ...{ "type": "submit", "name": "commit", "value": text, "data-disable-with": text }, ...ViewHelpers.stringify_keys(opts) });
     return `<input${attrs}>`;
@@ -74,7 +74,7 @@ export class ViewHelpers {
     return String(s).gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES);
   }
 
-  truncate(s: any, length: number, omission: string): string {
+  truncate(s: any, length?: number, omission?: string): string {
     if (s === null) return "";
     const str = String(s);
     if (str.length <= length) return str;
@@ -83,7 +83,7 @@ export class ViewHelpers {
     return `${str[0, cutoff]}${omission}`;
   }
 
-  dom_id(prefix: any, id_or_suffix: any): string {
+  dom_id(prefix: any, id_or_suffix?: any): string {
     return id_or_suffix === null ? `${this.record_dom_prefix(prefix)}_${prefix.id}` : typeof id_or_suffix === "symbol" || typeof id_or_suffix === "string" ? `${id_or_suffix}_${this.record_dom_prefix(prefix)}_${prefix.id}` : `${prefix}_${id_or_suffix}`;
   }
 
@@ -91,12 +91,12 @@ export class ViewHelpers {
     return (record.constructor as any).name.toLowerCase();
   }
 
-  link_to(text: any, href: string, opts: Record<string, any>): string {
+  link_to(text: any, href: string, opts?: Record<string, any>): string {
     const attrs = this.render_attrs({ ...{ "href": href }, ...this.stringify_keys(opts) });
     return `<a${attrs}>${this.html_escape(text)}</a>`;
   }
 
-  button_to(text: any, href: string, opts: Record<string, any>): string {
+  button_to(text: any, href: string, opts?: Record<string, any>): string {
     const method = opts["method"];
     const form_class = opts["form_class"];
     const inner_opts = { ...opts };
@@ -118,13 +118,13 @@ export class ViewHelpers {
     return "";
   }
 
-  stylesheet_link_tag(name: string, opts: Record<string, any>): string {
+  stylesheet_link_tag(name: string, opts?: Record<string, any>): string {
     const href = `/assets/${name}.css`;
     const attrs = this.render_attrs({ ...{ "rel": "stylesheet", "href": href }, ...this.stringify_keys(opts) });
     return `<link${attrs}>`;
   }
 
-  javascript_importmap_tags(pins: any, entry: string): string {
+  javascript_importmap_tags(pins?: any, entry?: string): string {
     if (pins === null || pins.length === 0) {
       let json = "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}";
       return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>";
@@ -149,7 +149,7 @@ export class ViewHelpers {
     return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
   }
 
-  form_with(model: any, model_name: string, action: string, method: string, opts: Record<string, any>): string {
+  form_with(model: any, model_name: string, action: string, method?: string, opts?: Record<string, any>): string {
     const builder = new FormBuilder(model, model_name, action, method);
     const body = __block(builder);
     const method_str = String(method);

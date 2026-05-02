@@ -7,7 +7,7 @@ export class ParameterMissing extends Error {
 export class Parameters {
   hash: Record<string, any>;
 
-  constructor(hash: Record<string, any>) {
+  constructor(hash?: Record<string, any>) {
     this.hash = this.symbolize_keys(hash);
   }
 
@@ -27,7 +27,7 @@ export class Parameters {
     return this.has(key);
   }
 
-  fetch(key: string, default_: any): any {
+  fetch(key: string, default_?: any): any {
     const sym = key;
     if (sym in this.hash) return this.hash[sym];
     return default_;

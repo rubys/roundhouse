@@ -16,7 +16,7 @@ export class Validations {
     if (present) { this.errors.push(`${attr_name} must be blank`); }
   }
 
-  validates_length_of(attr_name: string, value: any, minimum: any, maximum: any, is: any): void {
+  validates_length_of(attr_name: string, value: any, minimum?: any, maximum?: any, is?: any): void {
     if (value === null) return;
     const len = typeof value === "string" || Array.isArray(value) ? value.length : 0;
     if (!(minimum === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) { this.errors.push(`${attr_name} is too short (minimum is ${minimum})`); }
@@ -24,7 +24,7 @@ export class Validations {
     if (!(is === null) && len !== is) { this.errors.push(`${attr_name} is the wrong length (should be ${is})`); }
   }
 
-  validates_numericality_of(attr_name: string, value: any, greater_than: any, less_than: any, only_integer: boolean): void {
+  validates_numericality_of(attr_name: string, value: any, greater_than?: any, less_than?: any, only_integer?: boolean): void {
     if (value === null || !(typeof value === "number")) {
       this.errors.push(`${attr_name} is not a number`);
       return null;
