@@ -55,7 +55,9 @@ pub use model_to_library::{
 };
 pub use fixture_to_library::{lower_fixtures_to_library_classes, rewrite_fixture_calls};
 pub use importmap_to_library::lower_importmap_to_library_functions;
-pub use routes_to_library::lower_routes_to_library_functions;
+pub use routes_to_library::{
+    lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
+};
 pub use schema_to_library::lower_schema_to_library_functions;
 pub use seeds_to_library::lower_seeds_to_library_functions;
 pub use test_module_to_library::{

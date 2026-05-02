@@ -184,6 +184,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
+    let routes_dispatch_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    if !routes_dispatch_funcs.is_empty() {
+        files.push(library::emit_module_file(
+            &routes_dispatch_funcs,
+            app,
+            PathBuf::from("app/routes.ts"),
+        ));
+    }
+
     let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     if !importmap_funcs.is_empty() {
         files.push(library::emit_module_file(

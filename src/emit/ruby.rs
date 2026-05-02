@@ -112,14 +112,54 @@ pub fn emit_lowered_schema(app: &App) -> EmittedFile {
 }
 
 /// Emit `config/routes.rb` in spinel-blog shape — a `Routes` module
-/// with a frozen `TABLE` of `{method:, pattern:, controller:, action:}`
-/// hashes (one entry per concrete verb+path) plus a separate `ROOT`
-/// constant. `resources` blocks expand to the standard 7 actions via
-/// `flatten_routes`; nested scopes thread `/:parent_id/` into child
-/// paths. Companion to `emit_lowered_models` and `emit_lowered_schema`
-/// for the spinel emit pipeline.
+/// `Routes` module exposing the dispatch data via class methods:
+/// `Routes.table` returns the array of `{method:, pattern:,
+/// controller:, action:}` hashes; `Routes.root` returns the
+/// shorthand `root "c#a"` route (when present). Companion to
+/// `emit_lowered_models` and `emit_lowered_schema` for the spinel
+/// emit pipeline.
+///
+/// Method-form (rather than `Routes::TABLE` constant) shares shape
+/// with the universal LibraryFunction emit consumed by every other
+/// target. Same data shape as Importmap.pins / Schema.statements.
+///
+/// A small controller-requires header lives at the top of the file
+/// because the Spinel runtime expects per-controller files to be
+/// loaded by side effect when `config/routes.rb` is required from
+/// `main.rb`. The body itself (the data) flows through the
+/// universal walker.
 pub fn emit_lowered_routes(app: &App) -> EmittedFile {
-    route::emit_lowered_routes(app)
+    let funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    let mut emitted = library::emit_module_file(
+        &funcs,
+        app,
+        PathBuf::from("config/routes.rb"),
+    );
+
+    // Prepend require_relative headers for application_controller and
+    // each unique controller used by the route table — Spinel runtime
+    // loads controllers via require chain rooted at config/routes.rb.
+    let flat = crate::lower::routes::flatten_routes(app);
+    let mut header = String::new();
+    use std::fmt::Write;
+    writeln!(
+        header,
+        "require_relative \"../app/controllers/application_controller\""
+    )
+    .unwrap();
+    let mut seen: Vec<String> = vec!["application_controller".to_string()];
+    for r in &flat {
+        let class_name = r.controller.0.as_str();
+        let stem = crate::naming::snake_case(class_name);
+        if seen.contains(&stem) {
+            continue;
+        }
+        seen.push(stem.clone());
+        writeln!(header, "require_relative \"../app/controllers/{stem}\"").unwrap();
+    }
+    writeln!(header).unwrap();
+    emitted.content = format!("{header}{}", emitted.content);
+    emitted
 }
 
 /// Emit each controller in spinel-blog shape: a `process_action(action_name)`

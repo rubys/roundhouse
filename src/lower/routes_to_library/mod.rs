@@ -15,14 +15,139 @@
 //! same way under every target's class-vs-module distinction.
 
 use crate::App;
-use crate::dialect::{LibraryFunction, Param};
+use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, Literal};
+use crate::expr::{ArrayStyle, Expr, ExprNode, InterpPart, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::lower::routes::{flatten_routes, FlatRoute};
-use crate::lower::typing::{fn_sig, lit_str, with_ty};
+use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
+
+/// Build the `Routes` dispatch module — `Routes.table -> Array<Hash>`
+/// (one hash per concrete `(method, pattern, controller, action)`)
+/// and `Routes.root -> Hash` (the shorthand `root "c#a"` route, when
+/// present). Empty when `app.routes` has no entries.
+///
+/// Symbol-keyed hashes (`{ method:, pattern:, controller:, action: }`)
+/// matching the spinel-blog runtime's `Router.match(method, path,
+/// table)` convention. TS callers see the same data shape via the
+/// universal LibraryFunction emit (string keys in TS, symbol keys
+/// in Ruby — Sym renders as a quoted string in TS object literals).
+///
+/// Separate from `RouteHelpers` (URL-helper functions like
+/// `article_path(id)`) because the two artifacts serve different
+/// consumers: helpers are called from view + controller bodies,
+/// dispatch is read at startup by the HTTP router.
+pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
+    let flat = flatten_routes(app);
+    if flat.is_empty() {
+        return Vec::new();
+    }
+    let module_path = vec![Symbol::from("Routes")];
+    // Same partition the per-target Spinel emit used: path "/" goes
+    // to `Routes.root`, everything else to `Routes.table`. Callers
+    // typically combine them at use site (`[Routes.root] +
+    // Routes.table`).
+    let (root_routes, table_routes): (Vec<&FlatRoute>, Vec<&FlatRoute>) =
+        flat.iter().partition(|r| r.path == "/");
+
+    let route_hash_ty = Ty::Hash {
+        key: Box::new(Ty::Sym),
+        value: Box::new(Ty::Untyped),
+    };
+
+    let mut out: Vec<LibraryFunction> = Vec::new();
+
+    let table_body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: table_routes
+                    .iter()
+                    .map(|r| build_route_hash(r, &route_hash_ty))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        ),
+        Ty::Array { elem: Box::new(route_hash_ty.clone()) },
+    );
+    out.push(LibraryFunction {
+        module_path: module_path.clone(),
+        name: Symbol::from("table"),
+        params: Vec::new(),
+        body: table_body,
+        signature: Some(fn_sig(
+            vec![],
+            Ty::Array { elem: Box::new(route_hash_ty.clone()) },
+        )),
+        effects: EffectSet::default(),
+    });
+
+    if let Some(r) = root_routes.first() {
+        let root_body = build_route_hash(r, &route_hash_ty);
+        out.push(LibraryFunction {
+            module_path,
+            name: Symbol::from("root"),
+            params: Vec::new(),
+            body: root_body,
+            signature: Some(fn_sig(vec![], route_hash_ty)),
+            effects: EffectSet::default(),
+        });
+    }
+
+    out
+}
+
+/// Build one route hash literal: `{ method: "GET", pattern: "/x",
+/// controller: :articles, action: :index }`. Method is a string;
+/// controller and action are symbols matching what the spinel
+/// router's `Router.match` expects.
+fn build_route_hash(r: &FlatRoute, hash_ty: &Ty) -> Expr {
+    let method_str = match r.method {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
+        HttpMethod::Delete => "DELETE",
+        HttpMethod::Head => "HEAD",
+        HttpMethod::Options => "OPTIONS",
+        HttpMethod::Any => "ANY",
+    };
+    let controller_sym = controller_symbol(r.controller.0.as_str());
+    let entries = vec![
+        (
+            lit_sym(Symbol::from("method")),
+            lit_str(method_str.to_string()),
+        ),
+        (
+            lit_sym(Symbol::from("pattern")),
+            lit_str(r.path.clone()),
+        ),
+        (
+            lit_sym(Symbol::from("controller")),
+            lit_sym(Symbol::from(controller_sym)),
+        ),
+        (
+            lit_sym(Symbol::from("action")),
+            lit_sym(r.action.clone()),
+        ),
+    ];
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries, braced: true },
+        ),
+        hash_ty.clone(),
+    )
+}
+
+/// `ArticlesController` → `articles` (the controller-symbol form
+/// the spinel router uses). Mirrors the existing per-target convention.
+fn controller_symbol(class_name: &str) -> String {
+    let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
+    crate::naming::snake_case(base)
+}
 
 /// Build the `RouteHelpers` module from `app.routes` as a list of
 /// `LibraryFunction`s, one per named route. Empty when the app has

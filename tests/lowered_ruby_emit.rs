@@ -390,8 +390,12 @@ fn routes_emits_module_wrapper_at_config_path() {
     let f = ruby::emit_lowered_routes(&app);
     assert_eq!(f.path.to_string_lossy(), "config/routes.rb");
     assert!(f.content.contains("module Routes"), "{}", f.content);
-    assert!(f.content.contains("TABLE = ["), "{}", f.content);
-    assert!(f.content.contains("].freeze"), "{}", f.content);
+    // New shape: `def self.table` returning the dispatch list +
+    // `def self.root` returning the shorthand entry. Reconciled
+    // with TS's LibraryFunction shape so the lowerer produces
+    // structured data via methods; consumers iterate.
+    assert!(f.content.contains("def self.table"), "{}", f.content);
+    assert!(f.content.contains("def self.root"), "{}", f.content);
 }
 
 #[test]
@@ -462,23 +466,27 @@ fn routes_nest_child_resource_under_parent_id_scope() {
 }
 
 #[test]
-fn routes_extract_root_into_separate_constant() {
-    // `root "articles#index"` becomes a top-level `ROOT` constant, not
-    // a TABLE entry — the spinel router checks ROOT separately so the
-    // dispatch loop doesn't have to special-case "/".
+fn routes_extract_root_into_separate_method() {
+    // `root "articles#index"` becomes a top-level `Routes.root`
+    // method, not a `Routes.table` entry — the spinel router
+    // checks root separately so the dispatch loop doesn't have to
+    // special-case "/". (Reconciled to method form 2026-05-02; was
+    // a `ROOT = ...freeze` constant before.)
     let src = lowered_real_blog_routes();
     assert!(
         src.contains(
-            r#"ROOT = { method: "GET", pattern: "/", controller: :articles, action: :index }.freeze"#
+            r#"{ method: "GET", pattern: "/", controller: :articles, action: :index }"#
         ),
         "{src}",
     );
-    // ROOT must NOT also be in TABLE — extracting it is the whole point.
-    let table_section = src.split("TABLE = [").nth(1).unwrap()
-        .split("].freeze").next().unwrap();
+    assert!(src.contains("def self.root"), "{src}");
+    // root must NOT also be in `table` — extracting it is the whole
+    // point.
+    let table_section = src.split("def self.table").nth(1).unwrap()
+        .split("def self.root").next().unwrap();
     assert!(
         !table_section.contains("pattern: \"/\""),
-        "root should be hoisted out of TABLE; got table:\n{table_section}",
+        "root should be hoisted out of table; got table:\n{table_section}",
     );
 }
 

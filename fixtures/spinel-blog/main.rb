@@ -50,7 +50,7 @@ module Main
     # legibility (it's the only literal-pattern entry); the dispatch
     # composes them here so Router.match stays a flat-table walk.
     matched = Router.match(request[:method], request[:path],
-                           [Routes::ROOT] + Routes::TABLE)
+                           [Routes.root] + Routes.table)
     if matched.nil?
       CgiIo.write_response(stdout, 404, "<h1>404 Not Found</h1>")
       return
