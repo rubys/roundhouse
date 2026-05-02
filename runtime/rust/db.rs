@@ -89,9 +89,9 @@ pub fn with_conn<R, F: FnOnce(&Connection) -> R>(f: F) -> R {
 /// the same gotcha during smoke test, so we preempt it here.
 ///
 /// `schema_sql` is the generated `schema_sql::CREATE_TABLES`
-/// string. The transform to `CREATE TABLE IF NOT EXISTS` lets us
-/// re-open an existing DB without crashing on duplicate-table
-/// errors; the emitter produces plain `CREATE TABLE` today.
+/// string. The emitter produces `CREATE TABLE IF NOT EXISTS`
+/// directly, so re-opening an existing DB no-ops over the
+/// already-present tables.
 pub fn open_production_db(path: &str, schema_sql: &str) {
     if path != ":memory:" {
         if let Some(parent) = Path::new(path).parent() {
@@ -105,8 +105,7 @@ pub fn open_production_db(path: &str, schema_sql: &str) {
         .expect("enable WAL");
     conn.pragma_update(None, "foreign_keys", "ON")
         .expect("enable foreign keys");
-    let guarded = schema_sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ");
-    conn.execute_batch(&guarded).expect("apply schema");
+    conn.execute_batch(schema_sql).expect("apply schema");
     *PROD_CONN.lock().expect("prod DB mutex") = Some(conn);
 }
 
