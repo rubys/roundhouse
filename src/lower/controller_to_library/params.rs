@@ -487,22 +487,52 @@ pub fn rewrite_to_from_raw(
     map_expr(expr, &|e| {
         let (resource, _fields) = match_permit_call(e)?;
         let spec = specs.get(&resource)?;
-        Some(build_from_raw_call(&spec.class_id, e.span))
+        Some(build_from_raw_call(&spec.class_id, &resource, e.span))
     })
 }
 
-fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
+fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Expr {
     let class_const = Expr::new(
         span,
         ExprNode::Const { path: vec![class_id.0.clone()] },
     );
     let params_ivar = Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") });
+    // `@params.require(:<resource>)` — extracts the inner Parameters
+    // wrapping the resource hash (controller params arrive nested under
+    // the resource name, e.g. `{article: {title: ..., body: ...}}`).
+    let require_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(params_ivar),
+            method: Symbol::from("require"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Sym { value: resource.clone() } },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    // `.to_h` — coerce Parameters → Hash[Symbol, untyped] so from_raw's
+    // `params.fetch(:k, "")` dispatches against Hash#fetch (typed by
+    // the default's String) rather than Parameters#fetch (which still
+    // returns sp_RbVal under spinel pending matz/spinel#207).
+    let to_h_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(require_call),
+            method: Symbol::from("to_h"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
     Expr::new(
         span,
         ExprNode::Send {
             recv: Some(class_const),
             method: Symbol::from("from_raw"),
-            args: vec![params_ivar],
+            args: vec![to_h_call],
             block: None,
             parenthesized: true,
         },

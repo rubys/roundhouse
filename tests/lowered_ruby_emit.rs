@@ -663,13 +663,16 @@ fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
 fn controllers_article_params_lowers_to_typed_factory() {
     // `params.expect(article: [:title, :body])` and the older
     // `params.require(:article).permit(:title, :body)` both lower to a
-    // typed-factory call: `ArticleParams.from_raw(@params)`. The
-    // synthesized `ArticleParams` LibraryClass holds the permitted
-    // fields as typed slots; the require/permit chain is gone.
+    // typed-factory call:
+    //   `ArticleParams.from_raw(@params.require(:article).to_h)`
+    // The synthesized `ArticleParams` LibraryClass holds the permitted
+    // fields as typed slots; the require step extracts the inner
+    // resource hash (controller params arrive nested under :resource);
+    // `.to_h` coerces to Hash for from_raw's signature.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("ArticleParams.from_raw(@params)"),
+        src.contains("ArticleParams.from_raw(@params.require(:article).to_h)"),
         "expected typed-factory lowering; got:\n{src}",
     );
     assert!(
@@ -677,8 +680,8 @@ fn controllers_article_params_lowers_to_typed_factory() {
         "params.expect(article: ...) should be lowered:\n{src}",
     );
     assert!(
-        !src.contains("@params.require(:article).permit"),
-        "require/permit chain should be replaced by from_raw:\n{src}",
+        !src.contains(".permit"),
+        "permit chain should be replaced by from_raw:\n{src}",
     );
 }
 
@@ -954,21 +957,23 @@ fn controllers_params_helper_use_sites_call_typed_factory() {
 #[test]
 fn controllers_params_helper_body_is_from_raw_call() {
     // The `def article_params` body lowers to a single
-    // `ArticleParams.from_raw(@params)` call — the boundary where
-    // `Hash[Symbol, untyped]` widens once into typed slots. No
-    // `require/permit` chain, no `.to_h`.
+    // `ArticleParams.from_raw(@params.require(:article).to_h)` call —
+    // the boundary where `Hash[Symbol, untyped]` widens once into
+    // typed slots. The require step extracts the nested resource
+    // hash; .to_h coerces to Hash for from_raw's signature. No
+    // `permit` chain.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     let body = src
         .split("def article_params").nth(1).unwrap()
         .split("end").next().unwrap();
     assert!(
-        body.contains("ArticleParams.from_raw(@params)"),
+        body.contains("ArticleParams.from_raw(@params.require(:article).to_h)"),
         "expected typed-factory body; got:\n{body}",
     );
     assert!(
-        !body.contains("@params.require"),
-        "require chain should be replaced by from_raw call:\n{body}",
+        !body.contains(".permit"),
+        "permit chain should be replaced by from_raw call:\n{body}",
     );
     assert!(
         !body.contains("article_params.to_h"),
