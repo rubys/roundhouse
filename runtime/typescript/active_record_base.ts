@@ -45,30 +45,30 @@ export class Base {
   }
 
   static all(): Base[] {
-    return ActiveRecord.adapter().all(this.table_name).map(row => this.instantiate(row));
+    return ActiveRecord.adapter.all(this.table_name).map(row => this.instantiate(row));
   }
 
   static find(id: number): Base {
-    const row = ActiveRecord.adapter().find(this.table_name, id);
+    const row = ActiveRecord.adapter.find(this.table_name, id);
     if (row === null) { (() => { throw new RecordNotFound(`Couldn't find ${this.name} with id=${id}`); })(); }
     return this.instantiate(row);
   }
 
   static find_by(conditions: Record<string, any>): any {
-    const rows = ActiveRecord.adapter().where(this.table_name, conditions);
+    const rows = ActiveRecord.adapter.where(this.table_name, conditions);
     return rows.empty ? null : this.instantiate(rows.first);
   }
 
   static where(conditions: Record<string, any>): Base[] {
-    return ActiveRecord.adapter().where(this.table_name, conditions).map(row => this.instantiate(row));
+    return ActiveRecord.adapter.where(this.table_name, conditions).map(row => this.instantiate(row));
   }
 
   static count(): number {
-    return ActiveRecord.adapter().count(this.table_name);
+    return ActiveRecord.adapter.count(this.table_name);
   }
 
   static exists(id: number): boolean {
-    return ActiveRecord.adapter().exists(this.table_name, id);
+    return ActiveRecord.adapter.exists(this.table_name, id);
   }
 
   static destroy_all(): Base[] {
@@ -86,14 +86,14 @@ export class Base {
     if (this.new_record) {
       this.before_create;
       this.fill_timestamps({ "creating": true });
-      this.id = ActiveRecord.adapter().insert(this.class.table_name, this.attributes);
+      this.id = ActiveRecord.adapter.insert((this.constructor as any).table_name, this.attributes);
       this.persisted = true;
       this.after_create;
       this.after_create_commit;
     } else {
       this.before_update;
       this.fill_timestamps({ "creating": false });
-      ActiveRecord.adapter().update(this.class.table_name, this.id, this.attributes);
+      ActiveRecord.adapter.update((this.constructor as any).table_name, this.id, this.attributes);
       this.after_update;
       this.after_update_commit;
     }
@@ -106,7 +106,7 @@ export class Base {
   destroy(): Base {
     if (this.persisted) { null; } else { return this; }
     this.before_destroy;
-    ActiveRecord.adapter().delete(this.class.table_name, this.id);
+    ActiveRecord.adapter.delete((this.constructor as any).table_name, this.id);
     this.persisted = false;
     this.destroyed = true;
     this.after_destroy;
@@ -184,7 +184,7 @@ export class Base {
   }
 
   fill_timestamps(creating: boolean): void {
-    const cols = this.class.schema_columns;
+    const cols = (this.constructor as any).schema_columns;
     const now = Time.now().utc.iso8601;
     if (cols.include("updated_at")) { this["updated_at"] = now; }
     if (creating && cols.include("created_at") && this["created_at"] === null) { this["created_at"] = now; }
@@ -201,7 +201,7 @@ export class Base {
   }
 
   hash(): number {
-    return [this.class, this.id].hash;
+    return [(this.constructor as any), this.id].hash;
   }
 }
 

@@ -1036,6 +1036,14 @@ pub(super) fn emit_send_with_parens(
     if method == "nil?" && recv.is_some() && args.is_empty() {
         return format!("{} === null", emit_expr(recv.unwrap()));
     }
+    // `x.class` (Ruby reflection — returns the receiver's class
+    // object) → `x.constructor` in TS, which exposes the same
+    // surface (static methods like `table_name`, `name`). Cast
+    // through `any` so downstream property access on the
+    // dynamically-typed constructor doesn't trip strict mode.
+    if method == "class" && recv.is_some() && args.is_empty() {
+        return format!("({}.constructor as any)", emit_expr(recv.unwrap()));
+    }
     // Ruby coercions: `.to_s` / `.to_i` / `.to_sym` map to JS
     // equivalents. `.to_sym` is a no-op in JS (use the string as
     // the hash key) — emit just the receiver. The nil case
@@ -1437,8 +1445,30 @@ pub(super) fn emit_send_with_parens(
             // parens for Const-receiver sends so `RouteHelpers.articles_path`
             // becomes `RouteHelpers.articles_path()` instead of leaking
             // the function reference.
+            //
+            // SUB-EXCEPTION: a small set of class-level attr_accessor
+            // fields in the framework runtime (`ActiveRecord.adapter`,
+            // …) emit as `static x: T;` not as a method, so callers
+            // need property access not a call. Carry the list here
+            // until the typer surfaces AccessorKind through Send.
             let is_const_recv = matches!(&*r.node, ExprNode::Const { .. });
-            if args_s.is_empty() && !parenthesized && !force_parens && !is_const_recv {
+            let const_field = is_const_recv && {
+                let path = if let ExprNode::Const { path } = &*r.node {
+                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                } else {
+                    String::new()
+                };
+                matches!(
+                    (path.as_str(), method),
+                    ("ActiveRecord", "adapter")
+                )
+            };
+            let suppress_const_parens = is_const_recv && const_field;
+            if args_s.is_empty()
+                && !parenthesized
+                && !force_parens
+                && (!is_const_recv || suppress_const_parens)
+            {
                 format!("{recv_s}.{ts_m}")
             } else {
                 format!("{recv_s}.{ts_m}({})", args_s.join(", "))

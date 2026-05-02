@@ -88,7 +88,7 @@ export class ViewHelpers {
   }
 
   record_dom_prefix(record: any): string {
-    return record.class.name.toLowerCase();
+    return (record.constructor as any).name.toLowerCase();
   }
 
   link_to(text: any, href: string, opts: Record<string, any>): string {
