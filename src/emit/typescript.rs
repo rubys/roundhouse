@@ -432,7 +432,15 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // become `static x: T;` field declarations; instance-level become
     // `x: T;`. Either form's setter is suppressed in favor of plain
     // assignment to the field.
-    let mut fields: Vec<(String, String, bool)> = Vec::new(); // (name, ty, is_static)
+    // (name, ty, is_static, from_ivar) — `from_ivar` distinguishes
+    // ivar-assignment-derived fields (constructor body assigns
+    // them) from attr_reader fields (typed accessors declared on
+    // this class). When the class has a parent, ivar-derived
+    // fields get a `declare` modifier — TS's signal that the
+    // declaration is type-only and the property is provided by
+    // the parent or by runtime assignment. Without `declare`, a
+    // re-declared parent property trips TS2612.
+    let mut fields: Vec<(String, String, bool, bool)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
@@ -442,7 +450,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
             field_names_seen.insert(m.name.as_str().to_string());
-            fields.push((m.name.as_str().to_string(), ty, is_static));
+            fields.push((m.name.as_str().to_string(), ty, is_static, false));
         }
     }
 
@@ -462,7 +470,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     }
     for (name, ty) in ivar_assignments {
         if field_names_seen.insert(name.clone()) {
-            fields.push((name, ts_ty(&ty), false));
+            fields.push((name, ts_ty(&ty), false, true));
         }
     }
 
@@ -519,9 +527,28 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     }
 
     let mut wrote_fields = false;
-    for (name, ty, is_static) in &fields {
+    let has_parent = effective_parent.is_some();
+    // Field names declared by the framework Base (active_record_base.ts)
+    // — every model extends ActiveRecordBase transitively, so these
+    // need a `declare` modifier on the subclass to avoid TS2612.
+    // Hardcoded for the small known set rather than threading the
+    // parent's field list through emit_library_class; expand when a
+    // new framework parent surface materializes.
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    for (name, ty, is_static, from_ivar) in &fields {
         let prefix = if *is_static { "static " } else { "" };
-        writeln!(out, "  {prefix}{name}: {ty};").unwrap();
+        // ivar-derived fields on a derived class get `declare` —
+        // the constructor body's `this.x = ...` (or a parent
+        // declaration) provides the runtime backing; the field
+        // line is type-only. attr_reader-derived fields get
+        // `declare` only when the name matches a known
+        // framework-inherited field (id/errors/persisted/destroyed)
+        // since attr_readers also declare per-class fields for
+        // schema columns the parent doesn't have (title, body).
+        let inherited = INHERITED_FIELD_NAMES.contains(&name.as_str());
+        let needs_declare = has_parent && (*from_ivar || inherited);
+        let declare_modifier = if needs_declare { "declare " } else { "" };
+        writeln!(out, "  {prefix}{declare_modifier}{name}: {ty};").unwrap();
         wrote_fields = true;
     }
 
@@ -599,7 +626,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
             writeln!(out).unwrap();
         }
         first = false;
-        let body_str = emit_class_member(m)?;
+        let body_str = emit_class_member(m, has_parent)?;
         for line in body_str.lines() {
             if line.is_empty() {
                 writeln!(out).unwrap();
@@ -617,7 +644,11 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
 /// `Expr`. Floats top-level `super(...)` calls to the front so TS's
 /// strict-derived-class rule (no `this` access before super) holds
 /// even when the source Ruby wrote `@x = arg; super(...)`.
-fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
+fn emit_constructor_body(
+    body: &crate::expr::Expr,
+    return_ty: &Ty,
+    has_parent: bool,
+) -> String {
     use crate::expr::{Expr, ExprNode};
 
     let exprs: Vec<&Expr> = match &*body.node {
@@ -630,6 +661,17 @@ fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
         .partition(|e| matches!(*e.node, ExprNode::Super { .. }));
 
     if supers.is_empty() {
+        // Derived classes (TS `class X extends Y`) require an explicit
+        // `super(...)` call before any `this.*` access in the
+        // constructor. Ruby's `def initialize` defaults to an
+        // implicit `super` to the parent's `initialize`; for our
+        // emit we materialize that as a synthetic zero-arg `super()`
+        // so the TS strict-derived-class rule holds. Without this,
+        // a class like `Base extends Validations` whose
+        // `initialize` writes `@id = 0` trips TS17009 + TS2377.
+        if has_parent {
+            return format!("super();\n{}", expr::emit_body(body, return_ty));
+        }
         return expr::emit_body(body, return_ty);
     }
 
@@ -648,7 +690,10 @@ fn emit_constructor_body(body: &crate::expr::Expr, return_ty: &Ty) -> String {
 /// or constructor). Uses signature when present (typed params + ret);
 /// falls back to body.ty for return and `any` for params when not
 /// (lowered models don't populate signatures yet).
-fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
+fn emit_class_member(
+    m: &crate::dialect::MethodDef,
+    has_parent: bool,
+) -> Result<String, String> {
     use crate::dialect::MethodReceiver;
 
     // Pull (param-types, kinds, return-type) from signature when
@@ -658,57 +703,132 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     // call sites that omit them type-check. Without this, every
     // kwarg-default call (`render(html)` where Ruby has
     // `render(html, status: 200)`) trips TS2554.
-    let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
-        match m.signature.as_ref() {
-            Some(Ty::Fn { params: sig_params, ret, .. }) => {
-                let non_block: Vec<&crate::ty::Param> = sig_params
-                    .iter()
-                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-                    .collect();
-                if non_block.len() != m.params.len() {
-                    return Err(format!(
-                        "method `{}`: signature/param arity mismatch ({} vs {})",
-                        m.name,
-                        non_block.len(),
-                        m.params.len(),
-                    ));
-                }
-                let tys = non_block.iter().map(|p| p.ty.clone()).collect();
-                let optionals = non_block
-                    .iter()
-                    .map(|p| {
-                        matches!(
-                            p.kind,
-                            crate::ty::ParamKind::Optional
-                                | crate::ty::ParamKind::Keyword { required: false }
-                                | crate::ty::ParamKind::KeywordRest
-                        )
-                    })
-                    .collect();
-                (tys, optionals, (**ret).clone())
+    //
+    // `is_keyword` per param drives the destructured-object emit at
+    // the end: kwargs from Ruby (`def x(a:, b: 0)`) become a single
+    // trailing `{a, b}: {a: T, b?: U}` destructured object so call
+    // sites that pass a Hash literal (`x({a: 1})`) match.
+    let (sig_param_tys, sig_param_optional, sig_param_is_keyword, ret_ty): (
+        Vec<Ty>,
+        Vec<bool>,
+        Vec<bool>,
+        Ty,
+    ) = match m.signature.as_ref() {
+        Some(Ty::Fn { params: sig_params, ret, .. }) => {
+            let non_block: Vec<&crate::ty::Param> = sig_params
+                .iter()
+                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                .collect();
+            if non_block.len() != m.params.len() {
+                return Err(format!(
+                    "method `{}`: signature/param arity mismatch ({} vs {})",
+                    m.name,
+                    non_block.len(),
+                    m.params.len(),
+                ));
             }
-            _ => (
-                m.params.iter().map(|_| Ty::Untyped).collect(),
-                m.params.iter().map(|_| false).collect(),
-                m.body.ty.clone().unwrap_or(Ty::Nil),
-            ),
-        };
+            let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+            let optionals = non_block
+                .iter()
+                .map(|p| {
+                    matches!(
+                        p.kind,
+                        crate::ty::ParamKind::Optional
+                            | crate::ty::ParamKind::Keyword { required: false }
+                            | crate::ty::ParamKind::KeywordRest
+                    )
+                })
+                .collect();
+            let is_keyword = non_block
+                .iter()
+                .map(|p| {
+                    matches!(
+                        p.kind,
+                        crate::ty::ParamKind::Keyword { .. } | crate::ty::ParamKind::KeywordRest
+                    )
+                })
+                .collect();
+            (tys, optionals, is_keyword, (**ret).clone())
+        }
+        _ => (
+            m.params.iter().map(|_| Ty::Untyped).collect(),
+            m.params.iter().map(|_| false).collect(),
+            m.params.iter().map(|_| false).collect(),
+            m.body.ty.clone().unwrap_or(Ty::Nil),
+        ),
+    };
 
-    let param_list: Vec<String> = m
-        .params
-        .iter()
-        .zip(sig_param_tys.iter())
-        .zip(sig_param_optional.iter())
-        .map(|((name, ty), optional)| {
-            let opt_marker = if *optional { "?" } else { "" };
-            format!(
+    // Build the param list — positional params first (one slot each),
+    // then a single destructured object holding any kwargs. Without
+    // this, Ruby `fill_timestamps(creating: true)` call sites emit
+    // `fill_timestamps({creating: true})` (Hash literal) but the def
+    // signature is `fill_timestamps(creating: boolean)` (positional)
+    // → TS2345 "argument of type {creating: boolean} not assignable
+    // to parameter of type boolean".
+    let mut param_slots: Vec<String> = Vec::new();
+    let mut kwarg_pieces: Vec<(String, String, bool)> = Vec::new();
+    for (i, name) in m.params.iter().enumerate() {
+        let ty = &sig_param_tys[i];
+        let optional = sig_param_optional[i];
+        let is_kw = sig_param_is_keyword[i];
+        if is_kw {
+            kwarg_pieces.push((name.as_str().to_string(), ts_ty(ty), optional));
+        } else {
+            let opt_marker = if optional { "?" } else { "" };
+            param_slots.push(format!(
                 "{}{}: {}",
                 escape_reserved(name.as_str()),
                 opt_marker,
-                ts_ty(ty)
-            )
-        })
-        .collect();
+                ts_ty(ty),
+            ));
+        }
+    }
+    if !kwarg_pieces.is_empty() {
+        // Each kwarg name appears in two slots: the destructuring
+        // pattern (must be a valid binding) and the type annotation
+        // (the original Ruby symbol, callers spell it that way).
+        // When the Ruby name shadows a TS reserved word (`with`,
+        // `class`, `default`), rename in the pattern via `:`-rename
+        // and use the escaped local in the body. The body emit
+        // already escapes via `escape_reserved` when reading the
+        // local, so the pattern's `original: escaped` keeps the
+        // type annotation untouched while the binding is JS-legal.
+        let names: Vec<String> = kwarg_pieces
+            .iter()
+            .map(|(n, _, _)| {
+                let escaped = escape_reserved(n);
+                if escaped == *n {
+                    n.clone()
+                } else {
+                    format!("{n}: {escaped}")
+                }
+            })
+            .collect();
+        let typed: Vec<String> = kwarg_pieces
+            .iter()
+            .map(|(n, t, opt)| {
+                let marker = if *opt { "?" } else { "" };
+                format!("{n}{marker}: {t}")
+            })
+            .collect();
+        // If every kwarg is optional, the kwarg object itself is
+        // optional — call sites omitting kwargs entirely
+        // (`fill_timestamps()`) still type-check. TS forbids `?` on
+        // a destructuring binding pattern in an implementation
+        // signature, so spell the optional via `= {}` default.
+        let default_clause = if kwarg_pieces.iter().all(|(_, _, opt)| *opt) {
+            " = {}"
+        } else {
+            ""
+        };
+        param_slots.push(format!(
+            "{{ {} }}: {{ {} }}{}",
+            names.join(", "),
+            typed.join(", "),
+            default_clause,
+        ));
+    }
+    let param_list = param_slots;
 
     let mut out = String::new();
     let raw_name = m.name.as_str();
@@ -723,7 +843,7 @@ fn emit_class_member(m: &crate::dialect::MethodDef) -> Result<String, String> {
     };
 
     let body = if is_constructor {
-        emit_constructor_body(&rewritten, &ret_ty)
+        emit_constructor_body(&rewritten, &ret_ty, has_parent)
     } else {
         expr::emit_body(&rewritten, &ret_ty)
     };

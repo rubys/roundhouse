@@ -5,12 +5,13 @@ import { Validations } from "./validations.js";
 import { RecordNotFound } from "./errors.js";
 
 export class Base extends Validations {
-  id: number;
-  errors: any[];
-  persisted: boolean;
-  destroyed: boolean;
+  declare id: number;
+  declare errors: any[];
+  declare persisted: boolean;
+  declare destroyed: boolean;
 
   constructor() {
+    super();
     this.id = 0;
     this.errors = [];
     this.persisted = false;
@@ -185,11 +186,11 @@ export class Base extends Validations {
     ;
   }
 
-  fill_timestamps(creating: boolean): void {
+  fill_timestamps({ creating }: { creating: boolean }): void {
     const cols = (this.constructor as any).schema_columns;
-    const now = Time.now().utc.iso8601;
-    if (cols.include("updated_at")) { this["updated_at"] = now; }
-    if (creating && cols.include("created_at") && this["created_at"] === null) { this["created_at"] = now; }
+    const now = new Date().toISOString();
+    if (cols.includes("updated_at")) { this["updated_at"] = now; }
+    if (creating && cols.includes("created_at") && this["created_at"] === null) { this["created_at"] = now; }
   }
 
   valid(): boolean {

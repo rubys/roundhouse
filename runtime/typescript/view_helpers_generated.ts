@@ -72,7 +72,7 @@ export class ViewHelpers {
     return String(s).gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES);
   }
 
-  static truncate(s: any, length?: number, omission?: string): string {
+  static truncate(s: any, { length, omission }: { length?: number, omission?: string } = {}): string {
     if (s === null) return "";
     const str = String(s);
     if (str.length <= length) return str;
@@ -147,7 +147,7 @@ export class ViewHelpers {
     return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
   }
 
-  static form_with(model: any, model_name: string, action: string, method?: string, opts?: Record<string, any>): string {
+  static form_with({ model, model_name, action, method, opts }: { model: any, model_name: string, action: string, method?: string, opts?: Record<string, any> }): string {
     const builder = new FormBuilder(model, model_name, action, method);
     const body = __block(builder);
     const method_str = String(method);

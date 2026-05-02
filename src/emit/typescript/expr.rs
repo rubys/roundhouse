@@ -1044,6 +1044,34 @@ pub(super) fn emit_send_with_parens(
     if method == "class" && recv.is_some() && args.is_empty() {
         return format!("({}.constructor as any)", emit_expr(recv.unwrap()));
     }
+    // `Time.now` → `new Date()`. Ruby's Time class has no JS
+    // analog; JS Date covers the use cases the framework runtime
+    // needs (`utc`, `iso8601`).
+    if method == "now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.len() == 1 && path[0].as_str() == "Time" {
+                    return "new Date()".to_string();
+                }
+            }
+        }
+    }
+    // `<date>.utc` → no-op chained access; Date already represents
+    // an absolute UTC instant. `.utc` returns `Date` itself.
+    if method == "utc" && args.is_empty() && recv.is_some() {
+        let inner = emit_expr(recv.unwrap());
+        // Recognize `new Date()` form so the emit collapses
+        // `Time.now.utc` → `new Date()` cleanly. Otherwise keep
+        // the chain readable as-is.
+        if inner == "new Date()" {
+            return inner;
+        }
+    }
+    // `<date>.iso8601` → `.toISOString()` — produces the Z-suffix
+    // ISO-8601 string Ruby's Time#iso8601 does.
+    if method == "iso8601" && args.is_empty() && recv.is_some() {
+        return format!("{}.toISOString()", emit_expr(recv.unwrap()));
+    }
     // Ruby coercions: `.to_s` / `.to_i` / `.to_sym` map to JS
     // equivalents. `.to_sym` is a no-op in JS (use the string as
     // the hash key) — emit just the receiver. The nil case
@@ -1433,8 +1461,15 @@ pub(super) fn emit_send_with_parens(
     // with a nonexistent TS property. Keyed on name only today; a
     // receiver-typed dispatch would replace this when per-type
     // mappings diverge.
+    //
+    // `include?` (no type info) → `.includes(...)` — the Array dispatch
+    // covers known-Array receivers above; this catches the case
+    // where receiver type is `any` (e.g. `(this.constructor as any).schema_columns.include?(...)`).
+    // Hash receivers reach the type-aware branch and emit as `in`,
+    // so they don't fall through here.
     let (mapped_name, force_parens) = match method {
         "strip" => ("trim", true),
+        "include?" => ("includes", true),
         _ => (method, false),
     };
     let ts_m = ts_method_name(mapped_name);
