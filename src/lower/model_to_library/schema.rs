@@ -592,8 +592,19 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
 
 /// Typed-Params update: takes the per-resource `<Resource>Params`
 /// (typed slots for each permitted field) and assigns through the
-/// model's `attr_writer` per field. No `.key?` guard — `*Params` always
-/// carries every permitted field. Save, return Bool.
+/// model's `attr_writer` per field, **skipping fields whose value is
+/// nil on the params object** (PATCH-style partial-update semantics).
+///
+/// The skip-nil pattern lets two construction shapes coexist:
+///   - Controller path: `<Resource>Params.from_raw(@params)` populates
+///     every field (defaults to `""` via `params.fetch(:k, "")`), so
+///     `update` writes them all.
+///   - Programmatic/test path: `<Resource>Params.new` followed by
+///     selective setter calls leaves unset fields nil, and `update`
+///     skips them — preserving Rails' partial-update idiom
+///     (`record.update(title: "Renamed")` doesn't clobber body).
+///
+/// Save, return Bool.
 fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let p = Symbol::from("p");
     let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
@@ -614,7 +625,17 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 parenthesized: false,
             },
         );
-        stmts.push(Expr::new(
+        let nil_check = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(p_field.clone()),
+                method: Symbol::from("nil?"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let assign_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(self_ref()),
@@ -622,6 +643,16 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 args: vec![p_field],
                 block: None,
                 parenthesized: false,
+            },
+        );
+        // `if p.<field>.nil? then nil else self.<field>= p.<field> end`
+        // — equivalent to `self.<field> = p.<field> unless p.<field>.nil?`.
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: nil_check,
+                then_branch: nil_lit(),
+                else_branch: assign_call,
             },
         ));
     }

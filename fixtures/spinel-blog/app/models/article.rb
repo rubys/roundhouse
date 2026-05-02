@@ -67,11 +67,15 @@ class Article < ApplicationRecord
     end
   end
 
-  def update(attrs)
-    self.title      = attrs[:title]      if attrs.key?(:title)
-    self.body       = attrs[:body]       if attrs.key?(:body)
-    self.created_at = attrs[:created_at] if attrs.key?(:created_at)
-    self.updated_at = attrs[:updated_at] if attrs.key?(:updated_at)
+  # PATCH-style partial-update: skips fields whose value is nil on
+  # the params object. Lets the controller path (where `from_raw`
+  # populates every field) write all fields, while the
+  # programmatic/test path (where `ArticleParams.new` followed by
+  # selective setter calls leaves fields nil) preserves untouched
+  # fields on the model.
+  def update(p)
+    self.title = p.title unless p.title.nil?
+    self.body  = p.body  unless p.body.nil?
     save
   end
 

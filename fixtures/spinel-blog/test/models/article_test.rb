@@ -1,5 +1,6 @@
 require_relative "../test_helper"
 require "models/article"
+require "models/article_params"
 require "models/comment"
 
 class ArticleTest < Minitest::Test
@@ -80,14 +81,18 @@ class ArticleTest < Minitest::Test
   end
 
   def test_update_changes_persisted_value
-    ok = @article.update(title: "Renamed")
+    p = ArticleParams.new
+    p.title = "Renamed"
+    ok = @article.update(p)
     assert ok
     fresh = Article.find(@article.id)
     assert_equal "Renamed", fresh.title
   end
 
   def test_update_runs_validations
-    ok = @article.update(title: "")
+    p = ArticleParams.new
+    p.title = ""
+    ok = @article.update(p)
     refute ok
     assert_includes @article.errors, "title can't be blank"
   end
