@@ -2,44 +2,49 @@
 // Do not edit by hand — edit the source `.rb` and re-run.
 
 export class Validations {
+  errors: any[];
+
   errors(): string[] {
-    if (this.errors === null) this.errors = [];
+    if (this.errors === null) { this.errors = []; }
     return this.errors;
   }
 
-  validates_presence_of(attr_name: string, value: any): null {
+  validates_presence_of(attr_name: string, value: any): void {
     let blank = false;
     if (value === null) { blank = true; } else if (typeof value === "string" && value.length === 0) { blank = true; } else if (Array.isArray(value) && value.length === 0) { blank = true; }
-    if (blank) this.errors.push(`${attr_name} can't be blank`);
+    if (blank) { this.errors.push(`${attr_name} can't be blank`); }
   }
 
-  validates_absence_of(attr_name: string, value: any): null {
+  validates_absence_of(attr_name: string, value: any): void {
     let present = false;
-    if (!(value === null)) if (typeof value === "string") { present = !(value.length === 0); } else if (Array.isArray(value)) { present = !(value.length === 0); } else { present = true; }
-    if (present) this.errors.push(`${attr_name} must be blank`);
+    if (!(value === null)) { if (typeof value === "string") { present = !(value.length === 0); } else if (Array.isArray(value)) { present = !(value.length === 0); } else { present = true; } }
+    if (present) { this.errors.push(`${attr_name} must be blank`); }
   }
 
-  validates_length_of(attr_name: string, value: any, minimum: any, maximum: any, is: any): null {
+  validates_length_of(attr_name: string, value: any, minimum: any, maximum: any, is: any): void {
     if (value === null) return;
     const len = typeof value === "string" || Array.isArray(value) ? value.length : 0;
-    if (!(minimum === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors.push(`${attr_name} is too short (minimum is ${minimum})`);
-    if (!(maximum === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors.push(`${attr_name} is too long (maximum is ${maximum})`);
-    if (!(is === null) && len !== is) this.errors.push(`${attr_name} is the wrong length (should be ${is})`);
+    if (!(minimum === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) { this.errors.push(`${attr_name} is too short (minimum is ${minimum})`); }
+    if (!(maximum === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) { this.errors.push(`${attr_name} is too long (maximum is ${maximum})`); }
+    if (!(is === null) && len !== is) { this.errors.push(`${attr_name} is the wrong length (should be ${is})`); }
   }
 
-  validates_numericality_of(attr_name: string, value: any, greater_than: any, less_than: any, only_integer: boolean): null {
-    if (value === null || !(typeof value === "number")) this.errors.push(`${attr_name} is not a number`); (() => { return null; })();
-    if (!(greater_than === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors.push(`${attr_name} must be greater than ${greater_than}`);
-    if (!(less_than === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) this.errors.push(`${attr_name} must be less than ${less_than}`);
-    if (only_integer && !Number.isInteger(value)) this.errors.push(`${attr_name} must be an integer`);
+  validates_numericality_of(attr_name: string, value: any, greater_than: any, less_than: any, only_integer: boolean): void {
+    if (value === null || !(typeof value === "number")) {
+      this.errors.push(`${attr_name} is not a number`);
+      return null;
+    }
+    if (!(greater_than === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) { this.errors.push(`${attr_name} must be greater than ${greater_than}`); }
+    if (!(less_than === null) && (() => { throw new Error("roundhouse: + with incompatible operand types"); })()) { this.errors.push(`${attr_name} must be less than ${less_than}`); }
+    if (only_integer && !Number.isInteger(value)) { this.errors.push(`${attr_name} must be an integer`); }
   }
 
-  validates_inclusion_of(attr_name: string, value: any, within: string[]): null {
+  validates_inclusion_of(attr_name: string, value: any, within: string[]): void {
     if (within.include(value)) return;
     this.errors.push(`${attr_name} is not included in the list`);
   }
 
-  validates_format_of(attr_name: string, value: any, with_: Regexp): null {
+  validates_format_of(attr_name: string, value: any, with_: Regexp): void {
     const ok = typeof value === "string" && with_.match(value);
     if (ok) { null; } else { this.errors.push(`${attr_name} is invalid`); }
   }

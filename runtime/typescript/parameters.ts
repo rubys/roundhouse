@@ -5,7 +5,9 @@ export class ParameterMissing extends Error {
 }
 
 export class Parameters {
-  constructor(hash: any) {
+  hash: Record<string, any>;
+
+  constructor(hash: Record<string, any>) {
     this.hash = this.symbolize_keys(hash);
   }
 
@@ -35,35 +37,33 @@ export class Parameters {
     return Object.keys(this.hash).length === 0;
   }
 
-  to_h(): any {
+  to_h(): Record<string, any> {
     const copy = {  };
-    Object.entries(this.hash).forEach(__p => ((k, v) => copy[k] = v instanceof Parameters ? v.to_h : v)(__p[0], __p[1]));
+    Object.entries(this.hash).forEach(__p => ((k, v) => copy[k] = v)(__p[0], __p[1]));
     return copy;
   }
 
-  merge(other: any): Parameters {
-    const other_hash = other instanceof Parameters ? other.to_h : other;
+  merge(other_hash: Record<string, any>): Parameters {
     return new Parameters({ ...this.hash, ...this.symbolize_keys(other_hash) });
   }
 
-  require(key: string): any {
+  require(key: string): Parameters {
     const val = this.hash[key];
-    if (val === null) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
-    if (val instanceof Hash && Object.keys(val).length === 0) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
-    if (val instanceof Parameters && val.empty) (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })();
-    return val instanceof Parameters ? val : val instanceof Hash ? new Parameters(val) : val;
+    if (val === null) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
+    if (val instanceof Hash) { null; } else { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
+    if (val.empty) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
+    return new Parameters(val);
   }
 
-  permit(allowed: string[]): Parameters {
+  permit(allowed_keys: string[]): Parameters {
     const filtered = {  };
-    allowed.forEach(key => { const sym = key; if (sym in this.hash) filtered[sym] = this.hash[sym]; });
+    allowed_keys.forEach(key => { const sym = key; if (sym in this.hash) { filtered[sym] = this.hash[sym]; } });
     return new Parameters(filtered);
   }
 
-  symbolize_keys(input: any): any {
-    if (input instanceof Parameters) return input.to_h;
+  symbolize_keys(hash: Record<string, any>): Record<string, any> {
     const out = {  };
-    input.each((k, v) => { const sym = typeof k === "symbol" ? k : String(k); return out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v instanceof Parameters ? v.to_h : v; });
+    Object.entries(hash).forEach(__p => ((k, v) => { const sym = typeof k === "symbol" ? k : String(k); return out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v; })(__p[0], __p[1]));
     return out;
   }
 }

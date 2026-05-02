@@ -4,6 +4,9 @@
 export class Base {
   // include: Validations
   id: number;
+  errors: any[];
+  persisted: boolean;
+  destroyed: boolean;
 
   constructor() {
     this.id = 0;
@@ -20,15 +23,15 @@ export class Base {
     return (() => { throw new NotImplementedError(`${this.name}.schema_columns must be overridden`); })();
   }
 
-  static instantiate(_row: any): Base {
+  static instantiate(_row: Record<string, any>): Base {
     return (() => { throw new NotImplementedError(`${this.name}.instantiate must be overridden`); })();
   }
 
-  attributes(): any {
+  attributes(): Record<string, any> {
     return {  };
   }
 
-  assign_from_row(_row: any): null {
+  assign_from_row(_row: Record<string, any>): void {
     (() => { throw new NotImplementedError("assign_from_row must be overridden by subclass"); })();
   }
 
@@ -50,30 +53,30 @@ export class Base {
   }
 
   static all(): Base[] {
-    return ActiveRecord.adapter.all(this.table_name).map(row => this.instantiate(row));
+    return ActiveRecord.adapter().all(this.table_name).map(row => this.instantiate(row));
   }
 
   static find(id: number): Base {
-    const row = ActiveRecord.adapter.find(this.table_name, id);
-    if (row === null) (() => { throw new RecordNotFound(`Couldn't find ${this.name} with id=${id}`); })();
+    const row = ActiveRecord.adapter().find(this.table_name, id);
+    if (row === null) { (() => { throw new RecordNotFound(`Couldn't find ${this.name} with id=${id}`); })(); }
     return this.instantiate(row);
   }
 
-  static find_by(conditions: any): any {
-    const rows = ActiveRecord.adapter.where(this.table_name, conditions);
+  static find_by(conditions: Record<string, any>): any {
+    const rows = ActiveRecord.adapter().where(this.table_name, conditions);
     return rows.empty ? null : this.instantiate(rows.first);
   }
 
-  static where(conditions: any): Base[] {
-    return ActiveRecord.adapter.where(this.table_name, conditions).map(row => this.instantiate(row));
+  static where(conditions: Record<string, any>): Base[] {
+    return ActiveRecord.adapter().where(this.table_name, conditions).map(row => this.instantiate(row));
   }
 
   static count(): number {
-    return ActiveRecord.adapter.count(this.table_name);
+    return ActiveRecord.adapter().count(this.table_name);
   }
 
   static exists(id: number): boolean {
-    return ActiveRecord.adapter.exists(this.table_name, id);
+    return ActiveRecord.adapter().exists(this.table_name, id);
   }
 
   static destroy_all(): Base[] {
@@ -91,14 +94,14 @@ export class Base {
     if (this.new_record) {
       this.before_create;
       this.fill_timestamps({ "creating": true });
-      this.id = ActiveRecord.adapter.insert(this.class.table_name, this.attributes);
+      this.id = ActiveRecord.adapter().insert(this.class.table_name, this.attributes);
       this.persisted = true;
       this.after_create;
       this.after_create_commit;
     } else {
       this.before_update;
       this.fill_timestamps({ "creating": false });
-      ActiveRecord.adapter.update(this.class.table_name, this.id, this.attributes);
+      ActiveRecord.adapter().update(this.class.table_name, this.id, this.attributes);
       this.after_update;
       this.after_update_commit;
     }
@@ -108,15 +111,10 @@ export class Base {
     return true;
   }
 
-  save(): Base {
-    if (this.save) { null; } else { (() => { throw new RecordInvalid(this); })(); }
-    return this;
-  }
-
   destroy(): Base {
     if (this.persisted) { null; } else { return this; }
     this.before_destroy;
-    ActiveRecord.adapter.delete(this.class.table_name, this.id);
+    ActiveRecord.adapter().delete(this.class.table_name, this.id);
     this.persisted = false;
     this.destroyed = true;
     this.after_destroy;
@@ -125,89 +123,85 @@ export class Base {
     return this;
   }
 
-  before_validation(): null {
+  before_validation(): void {
     ;
   }
 
-  after_validation(): null {
+  after_validation(): void {
     ;
   }
 
-  before_save(): null {
+  before_save(): void {
     ;
   }
 
-  after_save(): null {
+  after_save(): void {
     ;
   }
 
-  before_create(): null {
+  before_create(): void {
     ;
   }
 
-  after_create(): null {
+  after_create(): void {
     ;
   }
 
-  before_update(): null {
+  before_update(): void {
     ;
   }
 
-  after_update(): null {
+  after_update(): void {
     ;
   }
 
-  before_destroy(): null {
+  before_destroy(): void {
     ;
   }
 
-  after_destroy(): null {
+  after_destroy(): void {
     ;
   }
 
-  after_commit(): null {
+  after_commit(): void {
     ;
   }
 
-  after_create_commit(): null {
+  after_create_commit(): void {
     ;
   }
 
-  after_update_commit(): null {
+  after_update_commit(): void {
     ;
   }
 
-  after_destroy_commit(): null {
+  after_destroy_commit(): void {
     ;
   }
 
-  after_save_commit(): null {
+  after_save_commit(): void {
     ;
   }
 
-  after_touch(): null {
+  after_touch(): void {
     ;
   }
 
-  validate(): null {
+  validate(): void {
     ;
   }
 
-  fill_timestamps(creating: boolean): null {
+  fill_timestamps(creating: boolean): void {
     const cols = this.class.schema_columns;
-    const now = Time.now.utc.iso8601;
-    if (cols.include("updated_at")) this["updated_at"] = now;
-    if (creating && cols.include("created_at") && this["created_at"] === null) this["created_at"] = now;
+    const now = Time.now().utc.iso8601;
+    if (cols.include("updated_at")) { this["updated_at"] = now; }
+    if (creating && cols.include("created_at") && this["created_at"] === null) { this["created_at"] = now; }
   }
 
   valid(): boolean {
     this.errors = [];
     this.validate;
     return this.errors.length === 0;
-  }
-
-  ==(other: any): boolean {
-    return other instanceof this.class && this.id !== 0 && this.id === other.id;
   }
 
   eql(other: any): boolean {
@@ -220,11 +214,5 @@ export class Base {
 }
 
 export class ActiveRecord {
-  static adapter(): any {
-    return this.adapter;
-  }
-
-  static adapter=(value: any): any {
-    return this.adapter = value;
-  }
+  static adapter: any;
 }

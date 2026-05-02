@@ -3,8 +3,8 @@
 
 export class Base {
   params: Parameters;
-  session: any;
-  flash: any;
+  session: Record<string, any>;
+  flash: Record<string, any>;
   request_method: string;
   request_path: string;
   status: number;
@@ -12,7 +12,7 @@ export class Base {
   location: any;
 
   constructor() {
-    this.params = new ActionController.Parameters({  });
+    this.params = ActionController.Parameters.new({  });
     this.session = {  };
     this.flash = {  };
     this.status = 200;
@@ -20,17 +20,17 @@ export class Base {
     this.location = null;
   }
 
-  process_action(_action_name: string): null {
+  process_action(_action_name: string): void {
     (() => { throw new NotImplementedError("process_action must be overridden by subclass"); })();
   }
 
-  render(html: string, status: any): null {
+  render(html: string, status: any): void {
     this.body = html;
     this.status = this.resolve_status(status);
     null;
   }
 
-  redirect_to(path: string, notice: any, alert: any, status: any): null {
+  redirect_to(path: string, notice: any, alert: any, status: any): void {
     this.location = path;
     this.status = this.resolve_status(status);
     if (notice === null) { null; } else { this.flash["notice"] = notice; }
@@ -38,7 +38,7 @@ export class Base {
     null;
   }
 
-  head(status: any): null {
+  head(status: any): void {
     this.status = this.resolve_status(status);
     this.body = "";
     null;

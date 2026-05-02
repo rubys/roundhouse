@@ -5,6 +5,7 @@ export class FormBuilder {
   model: any;
   model_name: string;
   action: string;
+  method: string;
 
   constructor(model: any, model_name: string, action: string, method: string) {
     this.model = model;
@@ -13,12 +14,12 @@ export class FormBuilder {
     this.method = method;
   }
 
-  label(field: string, opts: any): string {
+  label(field: string, opts: Record<string, any>): string {
     const attrs = ViewHelpers.render_attrs({ ...{ "for": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<label${attrs}>${ViewHelpers.html_escape((__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(String(field)))}</label>`;
   }
 
-  text_field(field: string, opts: any): string {
+  text_field(field: string, opts: Record<string, any>): string {
     const value = this.model[field];
     const base = { "type": "text", "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` };
     if (value === null || String(value).length === 0) { null; } else { base["value"] = String(value); }
@@ -26,13 +27,13 @@ export class FormBuilder {
     return `<input${attrs}>`;
   }
 
-  text_area(field: string, opts: any): string {
+  text_area(field: string, opts: Record<string, any>): string {
     const value = this.model[field];
     const attrs = ViewHelpers.render_attrs({ ...{ "name": `${this.model_name}[${field}]`, "id": `${this.model_name}_${field}` }, ...ViewHelpers.stringify_keys(opts) });
     return `<textarea${attrs}>${ViewHelpers.html_escape(value)}</textarea>`;
   }
 
-  submit(label: any, opts: any): string {
+  submit(label: any, opts: Record<string, any>): string {
     const text = label || this.method === "patch" ? `Update ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}` : `Create ${(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())(this.model_name)}`;
     const attrs = ViewHelpers.render_attrs({ ...{ "type": "submit", "name": "commit", "value": text, "data-disable-with": text }, ...ViewHelpers.stringify_keys(opts) });
     return `<input${attrs}>`;
@@ -40,11 +41,13 @@ export class FormBuilder {
 }
 
 export class ViewHelpers {
-  reset_slots(): null {
+  slots: Record<any, any>;
+
+  reset_slots(): void {
     this.slots = {  };
   }
 
-  content_for_set(slot: string, value: string): null {
+  content_for_set(slot: string, value: string): void {
     this.slots[slot] = value;
     null;
   }
@@ -61,7 +64,7 @@ export class ViewHelpers {
     return this.slots["__body__"] || "";
   }
 
-  set_yield(content: string): null {
+  set_yield(content: string): void {
     this.slots["__body__"] = content;
     null;
   }
@@ -76,7 +79,7 @@ export class ViewHelpers {
     const str = String(s);
     if (str.length <= length) return str;
     let cutoff = length - omission.length;
-    if (cutoff < 0) cutoff = 0;
+    if (cutoff < 0) { cutoff = 0; }
     return `${str[0, cutoff]}${omission}`;
   }
 
@@ -88,15 +91,15 @@ export class ViewHelpers {
     return record.class.name.toLowerCase();
   }
 
-  link_to(text: any, href: string, opts: any): string {
+  link_to(text: any, href: string, opts: Record<string, any>): string {
     const attrs = this.render_attrs({ ...{ "href": href }, ...this.stringify_keys(opts) });
     return `<a${attrs}>${this.html_escape(text)}</a>`;
   }
 
-  button_to(text: any, href: string, opts: any): string {
+  button_to(text: any, href: string, opts: Record<string, any>): string {
     const method = opts["method"];
     const form_class = opts["form_class"];
-    const inner_opts = opts.dup;
+    const inner_opts = { ...opts };
     inner_opts.delete("method");
     inner_opts.delete("form_class");
     const form_attrs = { "action": href, "method": "post" };
@@ -115,24 +118,27 @@ export class ViewHelpers {
     return "";
   }
 
-  stylesheet_link_tag(name: string, opts: any): string {
+  stylesheet_link_tag(name: string, opts: Record<string, any>): string {
     const href = `/assets/${name}.css`;
     const attrs = this.render_attrs({ ...{ "rel": "stylesheet", "href": href }, ...this.stringify_keys(opts) });
     return `<link${attrs}>`;
   }
 
   javascript_importmap_tags(pins: any, entry: string): string {
-    if (pins === null || pins.length === 0) "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"; (() => { return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>"; })();
+    if (pins === null || pins.length === 0) {
+      let json = "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}";
+      return "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>" + "\n" + "<link rel=\"modulepreload\" href=\"/assets/turbo.min.js\">" + "\n" + "<script type=\"module\">import \"@hotwired/turbo\"</script>";
+    }
     const import_lines = pins.map(p => `    "${p["name"]}": "${p["path"]}"`).join(",\n");
-    let json = `{
+    json = `{
       "imports": {
     ${import_lines}
       }
     }`;
-    const parts = [];
-    parts.push("<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>");
+    let parts = [];
+    parts += "<script type=\"importmap\" data-turbo-track=\"reload\">" + json + "</script>";
     pins.forEach(p => parts.push(`<link rel="modulepreload" href="${p["path"]}">`));
-    parts.push(`<script type="module">import "${entry}"</script>`);
+    parts += `<script type="module">import "${entry}"</script>`;
     return parts.join("\n");
   }
 
@@ -143,7 +149,7 @@ export class ViewHelpers {
     return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${encoded}--unsigned"></turbo-cable-stream-source>`;
   }
 
-  form_with(model: any, model_name: string, action: string, method: string, opts: any): string {
+  form_with(model: any, model_name: string, action: string, method: string, opts: Record<string, any>): string {
     const builder = new FormBuilder(model, model_name, action, method);
     const body = __block(builder);
     const method_str = String(method);
@@ -154,14 +160,14 @@ export class ViewHelpers {
     return `<form${attrs}>${method_input}${auth_token_input}${body}</form>`;
   }
 
-  render_attrs(attrs: any): string {
+  render_attrs(attrs: Record<any, any>): string {
     if (Object.keys(attrs).length === 0) return "";
-    const pairs = [];
-    Object.entries(attrs).forEach(__p => ((k, v) => { if (v === null) return; return v instanceof Hash ? Object.entries(v).forEach(__p => ((inner_k, inner_v) => { if (inner_v === null) return; const inner_name = String(inner_k).tr("_", "-"); return pairs.push(` ${k}-${inner_name}="${this.html_escape(inner_v)}"`); })(__p[0], __p[1])) : pairs.push(` ${k}="${this.html_escape(v)}"`); })(__p[0], __p[1]));
+    let pairs = [];
+    Object.entries(attrs).forEach(__p => ((k, v) => { if (v === null) { return; } return v instanceof Hash ? Object.entries(v).forEach(__p => ((inner_k, inner_v) => { if (inner_v === null) { return; } const inner_name = String(inner_k).tr("_", "-"); pairs += ` ${k}-${inner_name}="${this.html_escape(inner_v)}"`; })(__p[0], __p[1])) : pairs.push(` ${k}="${this.html_escape(v)}"`); })(__p[0], __p[1]));
     return pairs.join;
   }
 
-  stringify_keys(h: any): any {
+  stringify_keys(h: Record<any, any>): Record<string, any> {
     const out = {  };
     Object.entries(h).forEach(__p => ((k, v) => out[String(k)] = v)(__p[0], __p[1]));
     return out;

@@ -374,20 +374,20 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // class-receiver attribute accessors don't have an established
     // TS rendering pattern yet.
     let is_attr_reader = |m: &crate::dialect::MethodDef| -> bool {
-        matches!(m.kind, AccessorKind::AttributeReader)
-            && matches!(m.receiver, MethodReceiver::Instance)
-            && m.params.is_empty()
+        matches!(m.kind, AccessorKind::AttributeReader) && m.params.is_empty()
     };
     let is_attr_writer = |m: &crate::dialect::MethodDef| -> bool {
-        matches!(m.kind, AccessorKind::AttributeWriter)
-            && matches!(m.receiver, MethodReceiver::Instance)
-            && m.params.len() == 1
+        matches!(m.kind, AccessorKind::AttributeWriter) && m.params.len() == 1
     };
 
     // Collect field declarations (from synthesized attr_readers — the
     // reader carries the type via its `() -> T` signature; body type
-    // is the next-best source; final fallback is `any`).
-    let mut fields: Vec<(String, String)> = Vec::new();
+    // is the next-best source; final fallback is `any`). Class-level
+    // attr_accessors (from `class << self; attr_accessor :x; end`)
+    // become `static x: T;` field declarations; instance-level become
+    // `x: T;`. Either form's setter is suppressed in favor of plain
+    // assignment to the field.
+    let mut fields: Vec<(String, String, bool)> = Vec::new(); // (name, ty, is_static)
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
@@ -395,8 +395,9 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
                 Some(Ty::Fn { ret, .. }) => ts_ty(ret),
                 _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
             };
+            let is_static = matches!(m.receiver, MethodReceiver::Class);
             field_names_seen.insert(m.name.as_str().to_string());
-            fields.push((m.name.as_str().to_string(), ty));
+            fields.push((m.name.as_str().to_string(), ty, is_static));
         }
     }
 
@@ -416,7 +417,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     }
     for (name, ty) in ivar_assignments {
         if field_names_seen.insert(name.clone()) {
-            fields.push((name, ts_ty(&ty)));
+            fields.push((name, ts_ty(&ty), false));
         }
     }
 
@@ -455,9 +456,25 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     }
 
     let mut wrote_fields = false;
-    for (name, ty) in &fields {
-        writeln!(out, "  {name}: {ty};").unwrap();
+    for (name, ty, is_static) in &fields {
+        let prefix = if *is_static { "static " } else { "" };
+        writeln!(out, "  {prefix}{name}: {ty};").unwrap();
         wrote_fields = true;
+    }
+
+    // `?`/`!` method-name suffixes get stripped on the way out
+    // (`save!` → `save`, `valid?` → `valid`); when both forms exist
+    // on the same class the sanitized names collide and TS rejects
+    // the duplicate member. Drop the bang/predicate variant when its
+    // plain twin exists in the same class — the kept form is the one
+    // that compiled callers reach via the same sanitize step.
+    let mut sanitized_seen: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for m in &class.methods {
+        let raw = m.name.as_str();
+        if !raw.ends_with('?') && !raw.ends_with('!') {
+            sanitized_seen.insert(crate::emit::typescript::library::sanitize_identifier(raw));
+        }
     }
 
     let methods_to_emit: Vec<&crate::dialect::MethodDef> = class
@@ -465,15 +482,29 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         .iter()
         .filter(|m| !is_attr_reader(m) && !is_attr_writer(m))
         .filter(|m| {
-            // Operator-method names (`[]`, `[]=`) aren't valid TS
-            // method identifiers. Real fix: rewrite call sites to
-            // call `.get(...)` / `.set(...)` AND emit the method
-            // bodies under those names. Until both halves land,
-            // skipping prevents the file from being syntactically
-            // invalid TypeScript. The bodies are lost on the
-            // generated side but are still readable in the
-            // source `.rb`.
-            !matches!(m.name.as_str(), "[]" | "[]=")
+            // Operator-method names (`[]`, `[]=`, `==`, …) aren't
+            // valid TS method identifiers. TS lacks operator
+            // overloading, so even renaming (`==` → `equals`) leaves
+            // the bodies uncalled by the emitted code: comparison
+            // sites lower to `===`, indexing lowers to `[]`, etc.
+            // Skipping keeps the file syntactically valid; the
+            // bodies remain readable in the source `.rb`.
+            !matches!(
+                m.name.as_str(),
+                "[]" | "[]=" | "==" | "!=" | "<=>" | "<" | ">" | "<=" | ">="
+                    | "<<" | ">>" | "+" | "-" | "*" | "/" | "%" | "**"
+                    | "&" | "|" | "^" | "~" | "!" | "==="
+            )
+        })
+        .filter(|m| {
+            let raw = m.name.as_str();
+            if raw.ends_with('?') || raw.ends_with('!') {
+                let stripped =
+                    crate::emit::typescript::library::sanitize_identifier(raw);
+                !sanitized_seen.contains(&stripped)
+            } else {
+                true
+            }
         })
         .collect();
 

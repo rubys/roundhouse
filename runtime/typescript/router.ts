@@ -2,9 +2,9 @@
 // Do not edit by hand — edit the source `.rb` and re-run.
 
 export class Router {
-  match(method: string, path: string, table: any[]): any {
+  match(method: string, path: string, table: Record<string, any>[]): any {
     const method_upcase = String(method).toUpperCase();
-    table.forEach(route => { if (route["method"] === method_upcase) { null; } else { return; } const params = this.match_pattern(route["pattern"], path); if (params === null) return; return { "controller": route["controller"], "action": route["action"], "path_params": params }; });
+    table.forEach(route => { if (route["method"] === method_upcase) { null; } else { return; } const params = this.match_pattern(route["pattern"], path); if (params === null) { return; } return { "controller": route["controller"], "action": route["action"], "path_params": params }; });
     return null;
   }
 
