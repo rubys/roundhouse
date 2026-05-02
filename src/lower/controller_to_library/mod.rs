@@ -140,6 +140,7 @@ pub fn lower_controllers_to_library_classes(
             parent: controller.parent.clone(),
             includes: Vec::new(),
             methods,
+            origin: None,
         });
     }
     out
@@ -156,6 +157,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         parent: controller.parent.clone(),
         includes: Vec::new(),
         methods,
+        origin: None,
     }
 }
 

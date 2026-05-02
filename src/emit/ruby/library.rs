@@ -94,6 +94,7 @@ fn synthesize_module_lc(
         parent: None,
         includes: Vec::new(),
         methods,
+        origin: None,
     }
 }
 
@@ -105,6 +106,22 @@ pub(super) fn emit_library_class_decl(
     lc: &LibraryClass,
     app: &App,
     out_path: PathBuf,
+) -> EmittedFile {
+    emit_library_class_decl_with_synthesized(lc, app, out_path, &[])
+}
+
+/// Variant that also accepts a list of (class_name, anchor) pairs for
+/// synthesized siblings (e.g. `<Model>Row`, `<Resource>Params`) that
+/// aren't in `app.library_classes` / `app.models`. Synthesized classes
+/// have no separate require chain — nothing else loads them — so a
+/// file that references one needs an explicit `require_relative`,
+/// even when the target is in the same directory. Callers that don't
+/// emit synthesized siblings pass an empty slice.
+pub(super) fn emit_library_class_decl_with_synthesized(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+    synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
     let name = lc.name.0.as_str();
     let out_dir = out_path
@@ -131,6 +148,20 @@ pub(super) fn emit_library_class_decl(
     }
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for path in &const_paths {
+        let first = match path.first() {
+            Some(s) => s,
+            None => continue,
+        };
+        // Synthesized siblings: emit require regardless of same-dir,
+        // because nothing else loads them. Match by exact first-segment
+        // name; deeper paths (`X::Y`) don't match here since synthesized
+        // classes are flat.
+        if let Some((_, anchor)) = synthesized_siblings.iter().find(|(n, _)| n == first) {
+            if anchor != &self_anchor {
+                body_requires.insert(relpath(&out_dir, anchor));
+                continue;
+            }
+        }
         if let Some(anchor) = require_path_for_body_const(path, app, name) {
             if anchor != self_anchor && !is_same_dir(&out_dir, &anchor) {
                 body_requires.insert(relpath(&out_dir, &anchor));

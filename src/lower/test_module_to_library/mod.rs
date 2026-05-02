@@ -147,6 +147,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         parent: tm.parent.clone(),
         includes: Vec::new(),
         methods,
+        origin: None,
     }
 }
 

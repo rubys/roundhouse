@@ -10,6 +10,7 @@ use crate::schema::{Column, Table};
 use crate::span::Span;
 use crate::ty::Ty;
 
+use super::row::row_class_id;
 use super::{
     class_const, fn_sig, is_id_column, lit_int, lit_str, lit_sym, nil_lit, self_ref, seq,
     ty_of_column, var_ref, with_ty,
@@ -72,8 +73,21 @@ pub(super) fn push_schema_methods(methods: &mut Vec<MethodDef>, model: &Model, t
         kind: AccessorKind::Method,
     });
 
-    // def self.instantiate(row); instance = new(row); instance.mark_persisted!; instance; end
+    // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
+    //
+    // The adapter shim returns Hash[Symbol, untyped]; the framework Ruby
+    // narrows it once via `<Model>Row.from_raw(row)` and then constructs
+    // the model via `<Model>.from_row(typed_row)`. The Hash-shaped
+    // boundary stops at `from_raw`; everything downstream is typed.
     methods.push(synth_instantiate(owner));
+
+    // def self.from_row(row); instance = new; instance.<col> = row.<col>; ...; instance; end
+    //
+    // Per-target emitters get a typed factory: input is `<Model>Row`
+    // (typed slots from the schema), output is the persisted model. No
+    // Hash flowing through. Pattern (b) from the handoff: separate
+    // class-method factories rather than overloaded initialize.
+    methods.push(synth_from_row(owner, table));
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
     methods.push(synth_initialize(owner, table));
@@ -139,13 +153,28 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
 fn synth_instantiate(owner: &ClassId) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
+    let row_class = row_class_id(owner);
 
-    let new_call = Expr::new(
+    // <Model>Row.from_raw(row) — narrow the Hash[Symbol, untyped] to the
+    // typed row holder once. Everything downstream sees typed slots.
+    let from_raw_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(&row_class)),
+            method: Symbol::from("from_raw"),
+            args: vec![var_ref(row.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    // <Model>.from_row(<typed_row>) — typed factory.
+    let from_row_call = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(class_const(owner)),
-            method: Symbol::from("new"),
-            args: vec![var_ref(row.clone())],
+            method: Symbol::from("from_row"),
+            args: vec![from_raw_call],
             block: None,
             parenthesized: true,
         },
@@ -156,7 +185,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
             Span::synthetic(),
             ExprNode::Assign {
                 target: LValue::Var { id: VarId(0), name: instance.clone() },
-                value: new_call,
+                value: from_row_call,
             },
         ),
         Expr::new(
@@ -173,12 +202,86 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     ]);
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    // The adapter returns Hash[Symbol, untyped]; that's the public
+    // signature of `instantiate`. Internal narrowing happens in the body.
     let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(row.clone())],
         body,
+        signature: Some(fn_sig(vec![(row, row_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+    }
+}
+
+/// `def self.from_row(row); instance = new; instance.col = row.col; ...; instance; end`
+///
+/// The typed counterpart to the (still-existing) Hash-receiving
+/// `initialize`. Takes a `<Model>Row` (typed slots) and produces a
+/// fresh model instance with each column copied through. The model's
+/// `initialize` runs as bare `new` here — field defaults from
+/// `synth_initialize`'s empty-Hash branch (since attrs is `{}`).
+fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
+    let row = Symbol::from("row");
+    let instance = Symbol::from("instance");
+    let row_class = row_class_id(owner);
+
+    let new_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(owner)),
+            method: Symbol::from("new"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    let mut stmts: Vec<Expr> = Vec::new();
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: instance.clone() },
+            value: new_call,
+        },
+    ));
+
+    for col in &table.columns {
+        // row.<col> — typed accessor on <Model>Row.
+        let row_field = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(row.clone())),
+                method: col.name.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from(format!("{}=", col.name.as_str())),
+                args: vec![row_field],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+
+    stmts.push(var_ref(instance));
+
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let row_ty = Ty::Class { id: row_class, args: vec![] };
+    MethodDef {
+        name: Symbol::from("from_row"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(row.clone())],
+        body: seq(stmts),
         signature: Some(fn_sig(vec![(row, row_ty)], owner_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),

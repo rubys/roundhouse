@@ -84,6 +84,7 @@ fn library_class_from_node(
         parent,
         includes,
         methods,
+        origin: None,
     })
 }
 
@@ -110,6 +111,7 @@ fn library_class_from_module_node(
         parent: None,
         includes,
         methods,
+        origin: None,
     })
 }
 

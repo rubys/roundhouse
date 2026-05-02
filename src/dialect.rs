@@ -408,6 +408,41 @@ pub struct LibraryClass {
     /// — surface form is sacrificed for downstream uniformity per the
     /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
+    /// Provenance tag for synthesized classes. `None` for source-derived
+    /// classes; populated when the lowerer creates per-resource
+    /// specializations (e.g. `<Model>Row`, `<Resource>Params`) so future
+    /// per-target collapsers can group structurally-identical instances
+    /// without rerunning equivalence detection. The tag carries the
+    /// originating template plus the (resource, fields) tuple that
+    /// instantiated it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LibraryClassOrigin>,
+}
+
+/// What synthesized a `LibraryClass`. Used by per-target collapsers to
+/// fold structurally-equivalent instances back to a generic shape (e.g.
+/// `Record<string, FieldType>`-style narrowing in TS) when the target
+/// can express it. Per `project_specialization_strategy.md`, collapse
+/// is per-emitter, not per-lowerer; the IR carries enough info for any
+/// emitter to make the call without re-detecting equivalence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "template", rename_all = "snake_case")]
+pub enum LibraryClassOrigin {
+    /// Per-resource params holder synthesized from a controller's
+    /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
+    /// model name (e.g. `:article`); `fields` is the permitted column
+    /// list in declaration order.
+    ResourceParams {
+        resource: Symbol,
+        fields: Vec<Symbol>,
+    },
+    /// Per-model row holder synthesized from a model's schema columns.
+    /// `resource` is the singular model name; `fields` is every column
+    /// in schema order (id, …, created_at, updated_at).
+    ResourceRow {
+        resource: Symbol,
+        fields: Vec<Symbol>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {

@@ -68,6 +68,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         parent: None,
         includes: Vec::new(),
         methods,
+        origin: None,
     }
 }
 

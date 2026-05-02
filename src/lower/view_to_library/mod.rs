@@ -302,6 +302,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         parent: None,
         includes: Vec::new(),
         methods: vec![method],
+        origin: None,
     }
 }
 

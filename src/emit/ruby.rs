@@ -89,13 +89,39 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
 /// TS / Rust / etc. are deferred until enough lowerers exist for
 /// natural groupings to surface.
 pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
-    app.models
+    // Bulk lower so per-resource synthesized siblings (`<Model>Row`,
+    // future `<Resource>Params`) ride alongside the model class. Each
+    // returned `LibraryClass` becomes one `app/models/<stem>.rb` file.
+    let lcs = crate::lower::lower_models_to_library_classes(
+        &app.models,
+        &app.schema,
+        Vec::new(),
+    );
+
+    // Synthesized siblings need explicit `require_relative` even when
+    // they live in the same directory as their referencer — nothing else
+    // in the require chain loads them. Build a (name, anchor) map from
+    // every LC carrying an `origin` tag.
+    let synthesized: Vec<(String, String)> = lcs
         .iter()
-        .map(|m| {
-            let lc = crate::lower::lower_model_to_library_class(m, &app.schema);
+        .filter(|lc| lc.origin.is_some())
+        .map(|lc| {
+            let name = lc.name.0.as_str().to_string();
+            let stem = crate::naming::snake_case(&name);
+            (name, format!("app/models/{stem}"))
+        })
+        .collect();
+
+    lcs.iter()
+        .map(|lc| {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{stem}.rb"));
-            library::emit_library_class_decl(&lc, app, out_path)
+            library::emit_library_class_decl_with_synthesized(
+                lc,
+                app,
+                out_path,
+                &synthesized,
+            )
         })
         .collect()
 }

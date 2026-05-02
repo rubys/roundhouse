@@ -111,9 +111,9 @@ fn article_lowers_with_schema_methods() {
         );
     }
 
-    // Receiver checks: table_name, schema_columns, instantiate are class
-    // methods; everything else is instance.
-    let class_methods = ["table_name", "schema_columns", "instantiate"];
+    // Receiver checks: table_name, schema_columns, instantiate, from_row
+    // are class methods; everything else is instance.
+    let class_methods = ["table_name", "schema_columns", "instantiate", "from_row"];
     for m in &lc.methods {
         let n = m.name.as_str();
         if class_methods.contains(&n) {

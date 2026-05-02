@@ -24,6 +24,7 @@ mod validations;
 mod associations;
 mod broadcasts;
 mod markers;
+pub mod row;
 
 use std::collections::HashMap;
 
@@ -76,6 +77,12 @@ fn lower_models_inner(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    // Synthesize per-model `<Model>Row` LibraryClasses up front. These
+    // need to appear in the class registry before model body-typing so
+    // calls to `<Model>.from_row(row)` and `<Model>Row.from_raw(hash)`
+    // resolve correctly.
+    let row_classes = self::row::synthesize_row_classes(models, schema);
+
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
         let methods = build_methods(model, schema);
@@ -87,6 +94,11 @@ fn lower_models_inner(
     for (methods, name, table, model) in &all_methods {
         let info = build_class_info(model, methods, *table);
         classes.insert(name.clone(), info);
+    }
+    // Register synthesized Row classes so dispatch on `Article.from_row(r)`
+    // / `ArticleRow.from_raw(h)` resolves through the body-typer.
+    for row_lc in &row_classes {
+        classes.insert(row_lc.name.clone(), self::row::row_class_info(row_lc));
     }
     // Framework runtime stubs — referenced from broadcasts_to expansions
     // but not part of any model. Mirrors runtime/ruby/broadcasts.rb's
@@ -110,8 +122,31 @@ fn lower_models_inner(
             parent: model.parent.clone(),
             includes: Vec::new(),
             methods,
+            origin: None,
         });
     }
+    // Type-check Row class method bodies too so the strict typing residual
+    // check doesn't blow up. The Row class shares its column shape with
+    // the model's table (schema columns map 1:1 to attr_accessor pairs),
+    // so we look up the corresponding table by stripping the `Row` suffix
+    // off the class name. The typer's `seed ivar_bindings from columns`
+    // path then resolves `@id` / `@title` / etc. inside attr_reader bodies.
+    let mut row_classes = row_classes;
+    for row_lc in &mut row_classes {
+        let model_name = row_lc.name.0.as_str().trim_end_matches("Row");
+        let table = models
+            .iter()
+            .find(|m| m.name.0.as_str() == model_name)
+            .and_then(|m| schema.tables.get(&m.table.0));
+        for method in &mut row_lc.methods {
+            type_method_body(method, &classes, table);
+        }
+    }
+    // Append synthesized Row classes after the model classes. Per-target
+    // emit walks `out` linearly and emits one file per LibraryClass; the
+    // Row classes get their own files (`app/models/article_row.rb`,
+    // `article_row.ts`, etc.).
+    out.extend(row_classes);
     (out, classes)
 }
 
@@ -155,6 +190,14 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     let class_info = build_class_info(model, &methods, table);
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     classes.insert(model.name.clone(), class_info);
+    // Register Row classes so `<Model>.from_row(r)` / `<Model>Row.from_raw(h)`
+    // calls inside the model body type correctly. The synthesized Row
+    // class itself is not returned by this entry point (single-class
+    // shape) — callers that need both should use the bulk entry point.
+    let row_lcs = self::row::synthesize_row_classes(std::slice::from_ref(model), schema);
+    for row_lc in &row_lcs {
+        classes.insert(row_lc.name.clone(), self::row::row_class_info(row_lc));
+    }
     for method in &mut methods {
         type_method_body(method, &classes, table);
     }
@@ -164,6 +207,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         parent: model.parent.clone(),
         includes: Vec::new(),
         methods,
+        origin: None,
     }
 }
 
@@ -375,7 +419,22 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "new",
-        fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty),
+        fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty.clone()),
+    );
+
+    // Typed factory taking the synthesized `<Model>Row` (one typed slot
+    // per schema column). The body-typer needs this signature to resolve
+    // `Article.from_row(row_value)` calls cross-class — `synth_from_row`
+    // installs the body, but the registry entry has to exist before the
+    // body of any caller is typed.
+    let row_class_id = self::row::row_class_id(&model.name);
+    insert_default(
+        &mut info.class_methods,
+        "from_row",
+        fn_sig(
+            vec![(Symbol::from("row"), Ty::Class { id: row_class_id, args: vec![] })],
+            owner_ty,
+        ),
     );
 
     // Tag every entry the baseline added as Method (defaults match —

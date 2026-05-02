@@ -212,10 +212,25 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
+    // Synthesized siblings (`<Model>Row`, future `<Resource>Params`)
+    // come back inside `model_lcs` carrying an `origin` tag. The render-
+    // imports pass needs to know about their names so that a class which
+    // references them resolves to a sibling `./<stem>.js` import (rather
+    // than dropping the ref as unknown).
+    let synthesized_model_names: Vec<String> = model_lcs
+        .iter()
+        .filter(|lc| lc.origin.is_some())
+        .map(|lc| lc.name.0.as_str().to_string())
+        .collect();
     for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.push(library::emit_class_file(lc, app, out_path));
+        files.push(library::emit_class_file_with_synthesized(
+            lc,
+            app,
+            out_path,
+            &synthesized_model_names,
+        ));
     }
 
     // Views: flatten the per-template LibraryClasses into
