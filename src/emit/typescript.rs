@@ -468,7 +468,13 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
 
     // Class header. Parent translation:
     //   - `StandardError` → `Error` (TS builtin)
-    //   - `ActiveRecord::Base` → `ActiveRecord` (juntos export)
+    //   - `ActiveRecord::Base` → `ActiveRecordBase` (transpiled, aliased
+    //     from `Base` in src/active_record_base.ts via render_imports).
+    //     The juntos-side `ApplicationRecord` was a parallel
+    //     hand-written re-implementation; this redirect makes the
+    //     transpiled framework Ruby the single source of truth and
+    //     forces juntos's surface down to the per-target primitive
+    //     layer (`project_active_record_layering`).
     //   - Other qualified names: last segment (Ruby's `Foo::Bar` → TS
     //     `Bar` after import)
     // Modules emit as classes for now; include-as-mixin is deferred.
@@ -476,7 +482,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         let raw = p.0.as_str();
         match raw {
             "StandardError" => "Error".to_string(),
-            "ActiveRecord::Base" => "ActiveRecord".to_string(),
+            "ActiveRecord::Base" => "ActiveRecordBase".to_string(),
             // Test parents — runtime adapter exports both names.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
