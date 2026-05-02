@@ -495,12 +495,24 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
             _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
         }
     });
-    match &parent {
+    // `include Mod` semantics: Ruby's mixin doesn't translate to TS
+    // multiple inheritance. Single-include + no-parent collapses to
+    // `extends <Mod>` so the included module's methods reach
+    // subclasses through TS's inheritance chain. Other shapes
+    // (include with explicit parent, multiple includes) still emit
+    // a comment placeholder — they need the include-as-mixin pass.
+    let synthesized_parent = if parent.is_none() && class.includes.len() == 1 {
+        Some(class.includes[0].0.as_str().rsplit("::").next().unwrap().to_string())
+    } else {
+        None
+    };
+    let effective_parent = parent.as_deref().or(synthesized_parent.as_deref());
+    match effective_parent {
         Some(p) => writeln!(out, "export class {class_name} extends {p} {{").unwrap(),
         None => writeln!(out, "export class {class_name} {{").unwrap(),
     }
 
-    if !class.includes.is_empty() {
+    if synthesized_parent.is_none() && !class.includes.is_empty() {
         for inc in &class.includes {
             writeln!(out, "  // include: {}", inc.0.as_str()).unwrap();
         }
