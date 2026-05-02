@@ -4,11 +4,6 @@
 export class Validations {
   errors: any[];
 
-  errors(): string[] {
-    if (this.errors === null) { this.errors = []; }
-    return this.errors;
-  }
-
   validates_presence_of(attr_name: string, value: any): void {
     let blank = false;
     if (value === null) { blank = true; } else if (typeof value === "string" && value.length === 0) { blank = true; } else if (Array.isArray(value) && value.length === 0) { blank = true; }

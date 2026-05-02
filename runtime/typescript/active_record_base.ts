@@ -35,16 +35,8 @@ export class Base {
     (() => { throw new NotImplementedError("assign_from_row must be overridden by subclass"); })();
   }
 
-  persisted(): boolean {
-    return this.persisted;
-  }
-
   new_record(): boolean {
     return !this.persisted;
-  }
-
-  destroyed(): boolean {
-    return this.destroyed;
   }
 
   mark_persisted(): boolean {

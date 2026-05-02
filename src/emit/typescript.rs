@@ -465,11 +465,16 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // `?`/`!` method-name suffixes get stripped on the way out
     // (`save!` → `save`, `valid?` → `valid`); when both forms exist
     // on the same class the sanitized names collide and TS rejects
-    // the duplicate member. Drop the bang/predicate variant when its
-    // plain twin exists in the same class — the kept form is the one
-    // that compiled callers reach via the same sanitize step.
+    // the duplicate member. Drop the bang/predicate variant when a
+    // plain-named twin exists — either as another method with the
+    // same sanitized name (`save` vs `save!`) or as a field
+    // declaration (`@persisted` ivar field collides with `persisted?`
+    // sanitized to `persisted`). Predicate bodies that just read the
+    // ivar (`def persisted?; @persisted; end`) are subsumed by the
+    // field; callers reading `record.persisted?` sanitize to
+    // `record.persisted` and get the field directly.
     let mut sanitized_seen: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+        field_names_seen.clone();
     for m in &class.methods {
         let raw = m.name.as_str();
         if !raw.ends_with('?') && !raw.ends_with('!') {
@@ -498,9 +503,22 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         })
         .filter(|m| {
             let raw = m.name.as_str();
+            let stripped =
+                crate::emit::typescript::library::sanitize_identifier(raw);
+            // Drop the method whenever its sanitized name collides
+            // with a field declaration (ivar OR attr_reader). The
+            // common cases: `def errors; @errors ||= []; end`,
+            // `def persisted?; @persisted; end` — bodies that just
+            // accessor-expose an ivar are subsumed by the field.
+            // Non-trivial colliders (rare) lose runtime semantics
+            // here; surface those as a separate Ruby-source change
+            // rather than emitting broken TS.
+            if field_names_seen.contains(&stripped) {
+                return false;
+            }
+            // Predicate/bang vs same-name plain-method twin (`save`
+            // vs `save!`): keep the plain twin.
             if raw.ends_with('?') || raw.ends_with('!') {
-                let stripped =
-                    crate::emit::typescript::library::sanitize_identifier(raw);
                 !sanitized_seen.contains(&stripped)
             } else {
                 true
