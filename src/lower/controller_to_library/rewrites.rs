@@ -816,12 +816,35 @@ pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
             } else {
                 method.clone()
             };
+            // Polymorphic AR-instance → `.id` extraction. Rails
+            // accepts `article_url(@article)` and dispatches via
+            // implicit `.id`; the route_helpers in this codebase take
+            // an `id: number` directly. Extract `.id` for any Ivar
+            // arg so the typed signature matches. Doesn't fire on
+            // already-projected args (`@article.id`) since those are
+            // Sends, not Ivars.
+            let projected_args: Vec<Expr> = args
+                .iter()
+                .map(|arg| match &*arg.node {
+                    ExprNode::Ivar { name } => Expr::new(
+                        arg.span,
+                        ExprNode::Send {
+                            recv: Some(arg.clone()),
+                            method: Symbol::from("id"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    ),
+                    _ => rewrite_route_helpers(arg),
+                })
+                .collect();
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {
                     recv: Some(const_path(&["RouteHelpers"], e.span)),
                     method: dispatch_method,
-                    args: args.iter().map(rewrite_route_helpers).collect(),
+                    args: projected_args,
                     block: block.as_ref().map(rewrite_route_helpers),
                     parenthesized: *parenthesized,
                 },
