@@ -591,6 +591,15 @@ fn render_imports_with_synthesized(
         if let Some(sig) = &m.signature {
             collect_ty_class_refs(sig, &mut refs);
         }
+        // Walk @ivar = <expr> assignments inside method bodies and
+        // collect class refs from the assigned expressions' types —
+        // these surface as `declare <name>: <Class>;` field
+        // declarations on the class, and the type annotation needs
+        // its class imported. Without this, a test class that
+        // declares `declare article: Article;` from
+        // `@article = ArticlesFixtures.one()` would emit without an
+        // `import { Article }` line and trip TS2304.
+        collect_ivar_assignment_class_refs(&m.body, &mut refs);
     }
     if let Some(p) = &lc.parent {
         let raw = p.0.as_str();
@@ -873,6 +882,87 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
                 collect_ty_class_refs(b, out);
             }
             collect_ty_class_refs(ret, out);
+        }
+        _ => {}
+    }
+}
+
+/// Walk `@ivar = <expr>` assignments and harvest class refs from
+/// the assigned expressions' types. Each ivar assignment surfaces
+/// in the emitted class as a `declare <name>: <Class>;` field
+/// declaration; we need to import `<Class>` so the annotation
+/// resolves.
+fn collect_ivar_assignment_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
+    use crate::expr::LValue;
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+            if let Some(ty) = &value.ty {
+                collect_ty_class_refs(ty, out);
+            }
+            collect_ivar_assignment_class_refs(value, out);
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_ivar_assignment_class_refs(recv, out);
+            }
+            collect_ivar_assignment_class_refs(value, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_ivar_assignment_class_refs(r, out);
+            }
+            for a in args {
+                collect_ivar_assignment_class_refs(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_assignment_class_refs(b, out);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            collect_ivar_assignment_class_refs(fun, out);
+            for a in args {
+                collect_ivar_assignment_class_refs(a, out);
+            }
+            if let Some(b) = block {
+                collect_ivar_assignment_class_refs(b, out);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for x in exprs {
+                collect_ivar_assignment_class_refs(x, out);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_ivar_assignment_class_refs(cond, out);
+            collect_ivar_assignment_class_refs(then_branch, out);
+            collect_ivar_assignment_class_refs(else_branch, out);
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_ivar_assignment_class_refs(body, out);
+            for r in rescues {
+                collect_ivar_assignment_class_refs(&r.body, out);
+            }
+            if let Some(b) = else_branch {
+                collect_ivar_assignment_class_refs(b, out);
+            }
+            if let Some(b) = ensure {
+                collect_ivar_assignment_class_refs(b, out);
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_ivar_assignment_class_refs(cond, out);
+            collect_ivar_assignment_class_refs(body, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_ivar_assignment_class_refs(scrutinee, out);
+            for arm in arms {
+                collect_ivar_assignment_class_refs(&arm.body, out);
+            }
+        }
+        ExprNode::Lambda { body, .. } => collect_ivar_assignment_class_refs(body, out),
+        ExprNode::Let { value, body, .. } => {
+            collect_ivar_assignment_class_refs(value, out);
+            collect_ivar_assignment_class_refs(body, out);
         }
         _ => {}
     }
