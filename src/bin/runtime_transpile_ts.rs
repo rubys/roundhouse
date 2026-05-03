@@ -41,14 +41,24 @@ enum Mode {
 type ImportSpec = &'static [(&'static str, &'static str)];
 const NO_IMPORTS: ImportSpec = &[];
 
-const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
-    // (rb_path, rbs_path, ts_out_path, mode, imports)
+/// Hand-written TS prepended after the imports and before the
+/// transpiled class bodies. Pragmatic shortcut for module-scope
+/// constants (e.g. `STATUS_CODES = {...}.freeze` in
+/// `action_controller/base.rb`) that the lowerer doesn't yet
+/// recognize — `walk_decl_body` only handles `def`, `include`,
+/// `attr_*`, `class << self`, and `module_function`. Refactor to
+/// a real lowerer pass when constants surface in more files.
+const NO_PRELUDE: &str = "";
+
+const PAIRS: &[(&str, &str, &str, Mode, ImportSpec, &str)] = &[
+    // (rb_path, rbs_path, ts_out_path, mode, imports, prelude)
     (
         "runtime/ruby/inflector.rb",
         "runtime/ruby/inflector.rbs",
         "runtime/typescript/inflector.ts",
         Mode::Module,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/active_record/errors.rb",
@@ -60,6 +70,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         // without a circular module load (Base imports
         // RecordNotFound from this same file).
         &[("type Base", "./active_record_base.js")],
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/active_record/validations.rb",
@@ -67,6 +78,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/validations.ts",
         Mode::Library,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/active_record/base.rb",
@@ -80,6 +92,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
             ("Validations", "./validations.js"),
             ("RecordNotFound, RecordInvalid", "./errors.js"),
         ],
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/action_view/view_helpers.rb",
@@ -87,6 +100,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/view_helpers_generated.ts",
         Mode::Library,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/action_view/route_helpers.rb",
@@ -94,6 +108,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/route_helpers.ts",
         Mode::Library,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/action_controller/base.rb",
@@ -103,6 +118,17 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         // Body uses ActionController.Parameters.new({}) — the
         // Parameters class lives in parameters.ts.
         &[("Parameters", "./parameters.js")],
+        // Module-scope `STATUS_CODES = {...}.freeze` in base.rb
+        // isn't recognized by the lowerer yet; hand-mirror it
+        // here. Sync risk if base.rb's table changes — keep the
+        // values in sync until the lowerer learns module
+        // constants.
+        "const STATUS_CODES: Record<string, number> = {\n\
+        \x20 ok: 200, created: 201, accepted: 202, no_content: 204,\n\
+        \x20 moved_permanently: 301, found: 302, see_other: 303, not_modified: 304,\n\
+        \x20 bad_request: 400, unauthorized: 401, forbidden: 403, not_found: 404,\n\
+        \x20 unprocessable_entity: 422, internal_server_error: 500,\n\
+        };\n\n",
     ),
     (
         "runtime/ruby/action_controller/parameters.rb",
@@ -110,6 +136,7 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/parameters.ts",
         Mode::Library,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
     (
         "runtime/ruby/action_dispatch/router.rb",
@@ -117,13 +144,14 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/router.ts",
         Mode::Library,
         NO_IMPORTS,
+        NO_PRELUDE,
     ),
 ];
 
 fn main() {
     let mut had_errors = false;
-    for (rb_path, rbs_path, ts_out, mode, imports) in PAIRS {
-        match transpile_one(rb_path, rbs_path, ts_out, mode, imports) {
+    for (rb_path, rbs_path, ts_out, mode, imports, prelude) in PAIRS {
+        match transpile_one(rb_path, rbs_path, ts_out, mode, imports, prelude) {
             Ok(n) => {
                 println!("OK   {rb_path} → {ts_out} ({n} unit(s))");
             }
@@ -144,6 +172,7 @@ fn transpile_one(
     ts_out: &str,
     mode: &Mode,
     imports: &[(&str, &str)],
+    prelude: &str,
 ) -> Result<usize, String> {
     let ruby_bytes = std::fs::read(rb_path).map_err(|e| format!("read {rb_path}: {e}"))?;
     let rbs = std::fs::read_to_string(rbs_path)
@@ -189,7 +218,7 @@ fn transpile_one(
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
     }
-    std::fs::write(&path, format!("{header}{import_block}{emitted}"))
+    std::fs::write(&path, format!("{header}{import_block}{prelude}{emitted}"))
         .map_err(|e| format!("write {ts_out}: {e}"))?;
 
     Ok(units)

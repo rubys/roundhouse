@@ -688,7 +688,29 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
+            // Ruby `Foo::Bar` gets joined with `.` for TS access.
+            // Two cases need surgery:
+            //
+            //   1. Module-wrapper prefixes (`ActionController`,
+            //      `ActiveRecord`, `ActionView`) — Ruby uses these
+            //      to namespace classes; TS emits the inner class
+            //      flat at module scope, so `ActionController::Parameters`
+            //      should reach `Parameters` (the imported name).
+            //   2. Other multi-segment paths pass through (e.g.
+            //      `Views::Articles` is a real nested object in TS).
+            let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+            const FRAMEWORK_NAMESPACES: &[&str] = &[
+                "ActionController",
+                "ActiveRecord",
+                "ActionView",
+                "ActionDispatch",
+                "ActiveSupport",
+            ];
+            if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+                segs[1..].join(".")
+            } else {
+                segs.join(".")
+            }
         }
         ExprNode::Var { name, .. } => escape_reserved_word(name.as_str()),
         ExprNode::Ivar { name } => format!("this.{}", ts_field_name(name.as_str())),
