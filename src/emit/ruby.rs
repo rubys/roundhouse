@@ -314,7 +314,30 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         content: SPINEL_TEST_HELPER.to_string(),
     });
 
+    // Test fixtures — one `<Plural>Fixtures` LibraryClass per YAML file
+    // under `test/fixtures/`, rendered to `test/fixtures/<plural>.rb`.
+    // Mirrors the TS pattern at `typescript.rs:302-306`. Available for
+    // emitted tests to consume via `ArticlesFixtures.one()` (the call
+    // shape `lower_test_modules_to_library_classes` rewrites
+    // `articles(:one)` to). Files don't conflict with the hand-written
+    // spinel-blog tests, which construct models inline rather than via
+    // fixtures, so this lands ahead of test emit without regression.
+    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+    for lc in &fixture_lcs {
+        let stem = fixture_file_stem(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("test/fixtures/{stem}.rb"));
+        files.push(library::emit_library_class_decl(lc, app, out_path));
+    }
+
     files
+}
+
+/// `ArticlesFixtures` → `articles` (strip Fixtures suffix, snake_case).
+/// Mirrors `typescript.rs:fixture_file_stem` so the emitted file path
+/// reads naturally without redundant suffixes.
+fn fixture_file_stem(class_name: &str) -> String {
+    let stem = class_name.strip_suffix("Fixtures").unwrap_or(class_name);
+    crate::naming::snake_case(stem)
 }
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
