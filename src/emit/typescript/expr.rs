@@ -693,12 +693,35 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Var { name, .. } => escape_reserved_word(name.as_str()),
         ExprNode::Ivar { name } => format!("this.{}", ts_field_name(name.as_str())),
         ExprNode::Send { recv, method, args, block, parenthesized } => {
+            // Force parens on no-paren no-arg Sends whose return
+            // type is a known value type (Array, Class). Ruby's
+            // `article.comments` lowers to a Send with
+            // `parenthesized: false`; without forcing parens we'd
+            // emit `article.comments` (a method reference) and
+            // chained calls like `article.comments.create(...)`
+            // would dispatch on the function. The typer sets
+            // e.ty on association methods to the actual return
+            // type (Array<Comment>), which lets us decide here.
+            // attr_reader-derived getters DO return Class types
+            // (e.g. `record.errors` returning ErrorCollection); they
+            // get force-paren too, which is fine — TS getter access
+            // doesn't need parens but a method call does, and
+            // attr_readers actually emit as fields/methods both
+            // ways consistently.
+            let force = !*parenthesized
+                && args.is_empty()
+                && block.is_none()
+                && recv.is_some()
+                && matches!(
+                    e.ty.as_ref(),
+                    Some(crate::ty::Ty::Array { .. })
+                );
             emit_send_with_block(
                 recv.as_ref(),
                 method.as_str(),
                 args,
                 block.as_ref(),
-                *parenthesized,
+                *parenthesized || force,
             )
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
@@ -1539,7 +1562,13 @@ pub(super) fn emit_send_with_parens(
             // the un-parenthesized cast which TS parses as
             // `<expr> as <Class.member>`.
             if is_const_recv {
-                let cast_target = match method {
+                // Method names match against the Ruby form (with the
+                // `!`/`?` suffix the source uses) since the IR
+                // preserves them — sanitize happens later, in
+                // `ts_method_name`. So `Article.create!(...)` lands
+                // here with `method == "create!"`.
+                let stripped = method.trim_end_matches('!').trim_end_matches('?');
+                let cast_target = match stripped {
                     "find" | "find_by" | "last" | "create" | "first" => Some(recv_s.clone()),
                     "all" | "where" => Some(format!("{recv_s}[]")),
                     _ => None,
