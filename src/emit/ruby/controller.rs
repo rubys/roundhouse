@@ -8,7 +8,7 @@ use super::super::EmittedFile;
 use super::expr::emit_expr;
 use super::shared::{emit_indented_body, emit_leading_comments};
 use crate::App;
-use crate::dialect::{Action, Controller, Filter, FilterKind, RenderTarget};
+use crate::dialect::{Action, Controller, Filter, FilterKind, LibraryClass, RenderTarget};
 use crate::ident::Symbol;
 use crate::lower::lower_controller_to_library_class;
 use crate::naming::snake_case;
@@ -148,14 +148,32 @@ fn emit_render(r: &RenderTarget) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub(super) fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
+    let lcs = lower_controllers_for_spinel(app);
+    emit_lowered_controllers_from_lcs(&lcs, app)
+}
+
+/// Bulk lower controllers in spinel-shape. Exposed separately so
+/// callers that need the `LibraryClass`es (e.g. `emit_spinel` building
+/// the test-typing registry, mirroring `typescript.rs:178-180`) can
+/// reuse the lowering output without re-running it.
+pub(super) fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
     use crate::lower::lower_controllers_to_library_classes;
 
     // Bulk lower so synthesized siblings (`<Resource>Params`) ride
     // alongside the controller classes. They share the controller
     // lowerer's output vec but get routed to `app/models/` because
     // they're plain holders, not request handlers.
-    let lcs = lower_controllers_to_library_classes(&app.controllers, Vec::new());
+    lower_controllers_to_library_classes(&app.controllers, Vec::new())
+}
 
+/// Render pre-lowered controller `LibraryClass`es to one
+/// `app/controllers/<stem>.rb` per non-synthesized class plus
+/// `app/models/<stem>.rb` for tagged synthesized siblings (e.g.
+/// `<Resource>Params` holders).
+pub(super) fn emit_lowered_controllers_from_lcs(
+    lcs: &[LibraryClass],
+    app: &App,
+) -> Vec<EmittedFile> {
     // Same synthesized-siblings tracking as `emit_lowered_models`: each
     // tagged class needs an explicit `require_relative` from any file
     // that references it (nothing else loads them).
