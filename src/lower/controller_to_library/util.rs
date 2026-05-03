@@ -217,7 +217,7 @@ pub(super) fn method_name_for_action(action: &str) -> &str {
 // case-per-variant walker.
 // ---------------------------------------------------------------------------
 
-pub(super) fn map_expr<F>(expr: &Expr, f: &F) -> Expr
+pub fn map_expr<F>(expr: &Expr, f: &F) -> Expr
 where
     F: Fn(&Expr) -> Option<Expr>,
 {

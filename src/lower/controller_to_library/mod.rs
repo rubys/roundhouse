@@ -27,7 +27,7 @@
 mod process_action;
 pub mod params;
 pub mod rewrites;
-mod util;
+pub mod util;
 
 use crate::dialect::{
     AccessorKind, Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass,
