@@ -33,11 +33,23 @@ pub fn ts_return_ty(ty: &Ty) -> String {
 }
 
 fn ts_class_ty(id: &ClassId) -> String {
+    let raw = id.0.as_str();
     if class_is_temporal(id) {
-        "string".into()
-    } else {
-        id.0.as_str().into()
+        return "string".into();
     }
+    // Ruby builtins whose TS spelling differs:
+    //   `Regexp` — JS calls it `RegExp` (capital E).
+    //   `Hash`   — no TS class; `Record<string, any>` is the
+    //              shape Ruby Hash flows through.
+    //   `Symbol` — JS has `symbol` (lowercase) as a primitive
+    //              type; method/field positions use `string` since
+    //              Ruby symbols typically map to string keys.
+    match raw {
+        "Regexp" => return "RegExp".into(),
+        "Hash" => return "Record<string, any>".into(),
+        _ => {}
+    }
+    raw.into()
 }
 
 fn class_is_temporal(id: &ClassId) -> bool {

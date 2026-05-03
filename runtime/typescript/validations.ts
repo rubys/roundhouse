@@ -39,7 +39,7 @@ export class Validations {
     this.errors.push(`${attr_name} is not included in the list`);
   }
 
-  validates_format_of(attr_name: string, value: any, { with: with_ }: { with: Regexp }): void {
+  validates_format_of(attr_name: string, value: any, { with: with_ }: { with: RegExp }): void {
     const ok = typeof value === "string" && with_.match(value);
     if (ok) { null; } else { this.errors.push(`${attr_name} is invalid`); }
   }

@@ -50,7 +50,7 @@ export class Parameters {
   require(key: string): Parameters {
     const val = this.hash[key];
     if (val === null) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
-    if (val instanceof Hash) { null; } else { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
+    if (typeof val === "object" && val !== null && !Array.isArray(val)) { null; } else { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
     if (val.empty) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
     return new Parameters(val);
   }
@@ -63,7 +63,7 @@ export class Parameters {
 
   symbolize_keys(hash: Record<string, any>): Record<string, any> {
     const out = {  };
-    Object.entries(hash).forEach(__p => ((k, v) => { const sym = typeof k === "symbol" ? k : String(k); return out[sym] = v instanceof Hash ? this.symbolize_keys(v) : v; })(__p[0], __p[1]));
+    Object.entries(hash).forEach(__p => ((k, v) => { const sym = typeof k === "symbol" ? k : String(k); return out[sym] = typeof v === "object" && v !== null && !Array.isArray(v) ? this.symbolize_keys(v) : v; })(__p[0], __p[1]));
     return out;
   }
 }
