@@ -14,6 +14,13 @@ use super::EmittedFile;
 use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver};
 
+/// Canonical spinel test bootstrap. Single source of truth for what
+/// the emitted spinel project's `test/test_helper.rb` should contain;
+/// the bridge at `fixtures/spinel-blog/test/test_helper.rb` and the
+/// overlay flow both route to this same content.
+const SPINEL_TEST_HELPER: &str =
+    include_str!("../../runtime/spinel/test/test_helper.rb");
+
 mod controller;
 mod expr;
 mod fixture;
@@ -295,6 +302,17 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             PathBuf::from("db/seeds.rb"),
         ));
     }
+
+    // Test bootstrap. The canonical content (LOAD_PATH wiring,
+    // SqliteAdapter setup, RequestDispatch + ActionResponse +
+    // SchemaSetup modules) lives at `runtime/spinel/test/test_helper.rb`
+    // so the standalone fixture and overlay flows share one source.
+    // Emitted unconditionally — every spinel project carries the
+    // helper even when no test files are produced yet.
+    files.push(EmittedFile {
+        path: PathBuf::from("test/test_helper.rb"),
+        content: SPINEL_TEST_HELPER.to_string(),
+    });
 
     files
 }

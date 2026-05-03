@@ -130,18 +130,10 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
         )
         .unwrap_or_else(|_| panic!("copy {entry}"));
     }
-    // Overwrite the bridge test_helper.rb with the canonical version
-    // from runtime/spinel/test/. The bridge in fixtures/spinel-blog/test/
-    // uses `require_relative "../../../runtime/spinel/test/test_helper"`
-    // — which doesn't resolve from the scratch dir — so we replace it
-    // here, mirroring the runtime/* overlay above.
-    std::fs::copy(
-        runtime_spinel.join("test/test_helper.rb"),
-        scratch.join("test/test_helper.rb"),
-    )
-    .expect("copy test_helper");
-
     // Emit the spinel-shape app/ from real-blog and write into scratch.
+    // emit_spinel writes its own `test/test_helper.rb` from the canonical
+    // at `runtime/spinel/test/`, overwriting the bridge that was copied
+    // in by the spinel-blog scaffold above.
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     for file in ruby::emit_spinel(&app) {

@@ -75,10 +75,9 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog runtime/ruby runti
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
 	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
 	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
-	# Overlay the canonical test_helper.rb over the bridge under
-	# $(SPINEL_OUT)/test/ so the emitted demo's `require_relative
-	# "../test_helper"` resolves without escaping the build dir.
-	cp runtime/spinel/test/test_helper.rb $(SPINEL_OUT)/test/test_helper.rb
+	# (The canonical `test/test_helper.rb` is emitted by emit_spinel —
+	# it replaces the bridge that the verbatim spinel-blog copy above
+	# put in place. No overlay needed here.)
 	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
