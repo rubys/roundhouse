@@ -1514,7 +1514,7 @@ pub(super) fn emit_send_with_parens(
                 )
             };
             let suppress_const_parens = is_const_recv && const_field;
-            if args_s.is_empty()
+            let raw = if args_s.is_empty()
                 && !parenthesized
                 && !force_parens
                 && (!is_const_recv || suppress_const_parens)
@@ -1522,7 +1522,33 @@ pub(super) fn emit_send_with_parens(
                 format!("{recv_s}.{ts_m}")
             } else {
                 format!("{recv_s}.{ts_m}({})", args_s.join(", "))
+            };
+            // Self-type narrowing: framework Base methods like
+            // `find`/`all`/`where`/`last`/`create` declare a return
+            // type of `Base` in RBS, but at the call site
+            // `Article.find(id)` should yield `Article`. Roundhouse's
+            // RBS parser doesn't support `instance` / `self` types,
+            // so emit a TS cast here when the receiver is a Const
+            // class and the method is one of the self-typed Base
+            // class methods. Resolves TS2740 ("Base missing
+            // properties from Article") on every model assignment
+            // from a class-method result. Singular methods cast to
+            // `<Class>`; collection-returning methods cast to
+            // `<Class>[]`. The result is parenthesized so any
+            // chained access reads from the casted value, not from
+            // the un-parenthesized cast which TS parses as
+            // `<expr> as <Class.member>`.
+            if is_const_recv {
+                let cast_target = match method {
+                    "find" | "find_by" | "last" | "create" | "first" => Some(recv_s.clone()),
+                    "all" | "where" => Some(format!("{recv_s}[]")),
+                    _ => None,
+                };
+                if let Some(target) = cast_target {
+                    return format!("({raw} as {target})");
+                }
             }
+            raw
         }
     }
 }

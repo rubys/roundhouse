@@ -62,9 +62,11 @@ module ActiveRecord
     def destroyed?: () -> bool
     def mark_persisted!: () -> bool
 
-    # Class-level CRUD — delegate to the adapter. Return types
-    # follow the implementation (Array[Base] for collections, Base
-    # for single fetches, Base? for nullable, Integer for count, …).
+    # Class-level CRUD — delegate to the adapter. Returns Base
+    # nominally; per-target emit can refine to the actual subclass
+    # via cast at the call site (RBS's `instance` / `self` self-type
+    # would express this directly but the roundhouse RBS parser
+    # doesn't support those nodes yet).
     def self.all: () -> Array[Base]
     def self.find: (Integer id) -> Base
     def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
@@ -72,6 +74,8 @@ module ActiveRecord
     def self.count: () -> Integer
     def self.exists?: (Integer id) -> bool
     def self.destroy_all: () -> Array[Base]
+    def self.create: (Hash[Symbol, untyped] attrs) -> Base
+    def self.last: () -> Base?
 
     # Instance lifecycle. `save` returns true/false based on
     # validity; `save!` returns self or raises; `destroy` returns
@@ -79,6 +83,7 @@ module ActiveRecord
     def save: () -> bool
     def save!: () -> Base
     def destroy: () -> Base
+    def reload: () -> Base
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
     def before_validation: () -> void
@@ -115,10 +120,7 @@ module ActiveRecord
     # 1.5), so `errors` and the `validates_*_of` family resolve
     # through Base's dispatch without needing to be restated here.
 
-    # Equality. `other` is genuinely polymorphic — the body
-    # narrows via `is_a?(self.class)` before reading `other.id`.
-    def ==: (untyped other) -> bool
-    def eql?: (untyped other) -> bool
-    def hash: () -> Integer
+    # Equality protocol intentionally not defined here — see comment
+    # in base.rb for the cross-target rationale.
   end
 end

@@ -75,9 +75,20 @@ export class Base extends Validations {
   }
 
   static destroy_all(): Base[] {
-    const records = this.all;
-    records.forEach(r => r.destroy);
+    const records = this.all();
+    records.forEach(r => r.destroy());
     return records;
+  }
+
+  static create(attrs: Record<string, any>): Base {
+    const instance = new this(attrs);
+    instance.save;
+    return instance;
+  }
+
+  static last(): any {
+    const records = this.all;
+    return records.length === 0 ? null : records[-1];
   }
 
   save(): boolean {
@@ -115,6 +126,13 @@ export class Base extends Validations {
     this.after_destroy;
     this.after_destroy_commit;
     this.after_commit;
+    return this;
+  }
+
+  reload(): Base {
+    const row = ActiveRecord.adapter.find((this.constructor as any).table_name, this.id);
+    if (row === null) return this;
+    this.assign_from_row(row);
     return this;
   }
 
@@ -197,14 +215,6 @@ export class Base extends Validations {
     this.errors = [];
     this.validate;
     return this.errors.length === 0;
-  }
-
-  eql(other: any): boolean {
-    return this === other;
-  }
-
-  hash(): number {
-    return [(this.constructor as any), this.id].hash;
   }
 }
 

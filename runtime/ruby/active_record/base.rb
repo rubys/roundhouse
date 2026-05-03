@@ -104,9 +104,29 @@ module ActiveRecord
     end
 
     def self.destroy_all
-      records = all
-      records.each { |r| r.destroy }
+      records = all()
+      records.each { |r| r.destroy() }
       records
+    end
+
+    # `Article.create(title: "...", body: "...")` — convenience that
+    # constructs and saves in one call. Mirrors Rails' `create`. The
+    # Hash-shaped constructor signature accepts the kwargs-as-hash
+    # the seed scripts use (`Article.create(title: ..., body: ...)`).
+    def self.create(attrs = {})
+      instance = new(attrs)
+      instance.save
+      instance
+    end
+
+    # `Article.last` — highest-id row, or nil when the table is
+    # empty. Real-blog tests use it after a create-action redirect:
+    # `assert_redirected_to article_url(Article.last)`. Implemented
+    # via `all` rather than an adapter primitive so every adapter
+    # gets it for free.
+    def self.last
+      records = all
+      records.empty? ? nil : records[-1]
     end
 
     # ---- Instance lifecycle ------------------------------------------
@@ -155,6 +175,18 @@ module ActiveRecord
       self
     end
 
+    # Re-fetch the row by id and reassign all column slots. Mirrors
+    # Rails' `record.reload` — used after a controller action that
+    # updates the row, to refresh the in-memory copy. Returns self;
+    # silently no-ops when the row no longer exists (a more
+    # aggressive impl could raise RecordNotFound).
+    def reload
+      row = ActiveRecord.adapter.find(self.class.table_name, @id)
+      return self if row.nil?
+      assign_from_row(row)
+      self
+    end
+
     # ---- Lifecycle hooks (no-ops; subclasses override) --------------
 
     def before_validation; end
@@ -195,17 +227,16 @@ module ActiveRecord
     end
 
     # ---- Equality ---------------------------------------------------
-
-    def ==(other)
-      other.is_a?(self.class) && @id != 0 && @id == other.id
-    end
-
-    def eql?(other)
-      self == other
-    end
-
-    def hash
-      [self.class, @id].hash
-    end
+    #
+    # Ruby's `==` / `eql?` / `hash` equality protocol is intentionally
+    # not defined here. The protocol is Ruby-specific (used by Hash
+    # keys and Set membership) and has no cross-target analog: TS
+    # `Map`/`Set` use `===` reference equality, Rust uses `Eq`/`Hash`
+    # derives, etc. Per-target runtimes that need value equality
+    # implement it on the appropriate target shape (e.g.
+    # `juntos.ts`'s ApplicationRecord exposes `equals(other)` if
+    # callers need it). Adding the methods to base.rb produced
+    # broken emit (`[Klass, @id].hash` has no JS equivalent) without
+    # any caller benefit.
   end
 end
