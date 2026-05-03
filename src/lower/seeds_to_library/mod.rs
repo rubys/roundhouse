@@ -71,7 +71,7 @@ pub fn lower_seeds_to_library_functions(app: &App) -> Vec<LibraryFunction> {
 /// type (a Class type the typer set), snake_cased — e.g.
 /// `Article` → `article_id`. Falls through (returns the expr
 /// unchanged) when any of the shape preconditions don't hold.
-fn rewrite_assoc_create(expr: &Expr) -> Expr {
+pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
     crate::lower::controller_to_library::util::map_expr(expr, &|e| {
         let ExprNode::Send {
             recv: Some(outer_recv),
@@ -84,9 +84,15 @@ fn rewrite_assoc_create(expr: &Expr) -> Expr {
             return None;
         };
         let outer_method_str = outer_method.as_str();
-        if !matches!(outer_method_str, "create" | "create!") {
-            return None;
-        }
+        // `create` / `create!` map to the same-named class methods.
+        // `build` is Rails-specific (instantiate without saving) —
+        // map to `new` so Ruby/CRuby callers get `<Class>.new(attrs)`
+        // and the TS emitter renders that as `new <Class>(attrs)`.
+        let target_method = match outer_method_str {
+            "create" | "create!" => outer_method.clone(),
+            "build" => Symbol::from("new"),
+            _ => return None,
+        };
         let ExprNode::Send {
             recv: Some(parent_expr),
             method: assoc_method,
@@ -150,7 +156,7 @@ fn rewrite_assoc_create(expr: &Expr) -> Expr {
                     e.span,
                     ExprNode::Const { path: vec![Symbol::from(assoc_class)] },
                 )),
-                method: outer_method.clone(),
+                method: target_method,
                 args: vec![merged_hash],
                 block: None,
                 parenthesized: true,

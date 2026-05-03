@@ -118,6 +118,12 @@ pub fn lower_test_modules_to_library_classes(
     for lc in &mut all_lcs {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            // Has-many `.create` / `.build` rewrite needs the parent
+            // expression's class type — must run AFTER the typer.
+            // Statement-shape pass (no outer Assign) so it pairs with
+            // tests that just call `article.comments.create(...)` for
+            // its side effect.
+            method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
         }
         out.push(lc.clone());
     }
