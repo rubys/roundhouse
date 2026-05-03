@@ -281,8 +281,11 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
             "expected class method `{cm}`; methods: {base_methods:?}",
         );
     }
-    // A few key instance methods.
-    for im in ["save", "save!", "destroy", "valid?", "==", "hash"] {
+    // A few key instance methods. Ruby's `==` / `eql?` / `hash`
+    // equality protocol was intentionally removed from base.rb (no
+    // cross-target analog; per-target runtimes implement value
+    // equality as appropriate for their host).
+    for im in ["save", "save!", "destroy", "valid?", "reload"] {
         assert!(
             base_methods.contains(&im),
             "expected instance method `{im}`; methods: {base_methods:?}",
@@ -291,7 +294,7 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
 
     // Receiver checks: def self.* land as Class, def x as Instance.
     let class_methods = ["table_name", "all", "find", "where", "count", "exists?"];
-    let instance_methods = ["save", "destroy", "persisted?", "==", "hash"];
+    let instance_methods = ["save", "destroy", "persisted?", "reload"];
     for m in &base.methods {
         let n = m.name.as_str();
         if class_methods.contains(&n) {
