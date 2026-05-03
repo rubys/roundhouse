@@ -370,19 +370,21 @@ The dev server (`server/dev_server.rb`) is deliberately small:
     there)
   - `__FILE__ == $PROGRAM_NAME` guard (both globals are
     fundamental; should compile)
-- **C-compile of Roundhouse-emitted real-blog is two errors away
-  from clean.** First-pass surfaced five inference maturity gaps,
+- **C-compile of Roundhouse-emitted real-blog is clean.**
+  First-pass surfaced five inference maturity gaps,
   [enumerated in the introductory blog post](https://intertwingly.net/blog/2026/04/27/Two-Compilers-One-Subset.html#the-honest-gap).
-  Since then ~14 minimal-repro issues have been filed and closed
+  Since then ~15 minimal-repro issues have been filed and closed
   by Matz on hours-cadence (#49, #126, #127, #130, #133, #176,
-  #203, #204, #207, #208, #219, #224, #229), each removing a
-  category of inference or codegen mismatch. The current real-blog
-  C-error count is **2**, both surfacing the same remaining gap
-  (default-arg values not applied at class-method call sites).
-- **End-to-end via spinel itself is still pending** but proximate.
-  Today's demo runs the lowered output on CRuby. The
-  `Spinel-compiles-this` axis is the unfinished half of the bet,
-  gated on the next single issue above closing.
+  #203, #204, #207, #208, #219, #224, #229, #239), each removing
+  a category of inference or codegen mismatch. real-blog now
+  spinel-compiles end-to-end with zero C errors.
+- **Running the compiled binary is the remaining step.** Clean
+  C-compile means the codegen pipeline produces a syntactically
+  valid C program; verifying the binary executes correctly is the
+  next gate. Beyond that, the substrate gaps in
+  [matz/spinel#214](https://github.com/matz/spinel/issues/214)
+  (FFI for SQLite + civetweb) stand between today's compiled
+  binary and a single deployable production artifact.
 
 ## How to read this fixture
 
@@ -425,10 +427,10 @@ This fixture is a *contract*, not a deliverable. Progression:
    repo root transpiles real-blog into this shape, builds
    assets, starts the dev server. Verified in a browser.
 5. **(In progress)** Spinel ingests the emitted Ruby and
-   produces a native binary. ~14 minimal-repro issues filed and
+   produces a native binary. ~15 minimal-repro issues filed and
    closed since [matz/spinel#49](https://github.com/matz/spinel/issues/49);
-   real-blog C-compile is now 2 errors away from clean, all surfacing
-   the same remaining gap. The dev-server pattern stays —
+   real-blog now C-compiles cleanly. Running the compiled binary
+   end-to-end is the next step. The dev-server pattern stays —
    only `main.rb` migrates to the compiled binary.
 
 The current end-to-end test of the emitter's correctness is:
