@@ -18,7 +18,14 @@ module ActiveRecord
 
     attr_accessor :id
 
-    def initialize
+    # `attrs = {}` keeps Base's constructor signature compatible
+    # with subclasses that take attrs (`def initialize(attrs = {})`).
+    # TS-side, this lets `new this(attrs)` in static `create` /
+    # `create!` factories type-check against `typeof Base` whose
+    # constructor signature is what TS sees at the dispatch site.
+    # Body ignores attrs — subclass override is the place that
+    # populates the column slots from the hash.
+    def initialize(_attrs = {})
       @id = 0
       @errors = []
       @persisted = false

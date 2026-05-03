@@ -25,7 +25,7 @@ module ActiveRecord
     def id: () -> Integer
     def id=: (Integer) -> Integer
 
-    def initialize: () -> void
+    def initialize: (?Hash[Symbol, untyped] attrs) -> void
 
     # Per-model overrides — base bodies raise NotImplementedError.
     # The contract is what subclasses MUST satisfy; declare the
@@ -60,7 +60,10 @@ module ActiveRecord
     def persisted?: () -> bool
     def new_record?: () -> bool
     def destroyed?: () -> bool
-    def mark_persisted!: () -> bool
+    # Side-effecting bang method; return value isn't meaningful.
+    # `void` keeps TS from requiring an explicit `return ...;` for
+    # the trailing assignment.
+    def mark_persisted!: () -> void
 
     # Class-level CRUD — delegate to the adapter. Returns Base
     # nominally; per-target emit can refine to the actual subclass

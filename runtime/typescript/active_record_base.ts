@@ -10,7 +10,7 @@ export class Base extends Validations {
   declare persisted: boolean;
   declare destroyed: boolean;
 
-  constructor() {
+  constructor(_attrs?: Record<string, any>) {
     super();
     this.id = 0;
     this.errors = [];
@@ -50,7 +50,7 @@ export class Base extends Validations {
     return this.destroyed;
   }
 
-  mark_persisted_bang(): boolean {
+  mark_persisted_bang(): void {
     this.persisted = true;
     this.destroyed = false;
   }

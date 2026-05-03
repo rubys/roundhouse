@@ -70,15 +70,27 @@ export class Test {
     return caught;
   }
 
-  assert_difference(expr: string | (() => number), body: () => any): any {
-    // Rails' `assert_difference("Model.count", +1) do … end` form.
-    // The expression form is JS-eval-style which we don't support
-    // here — accept callable form. If given a string, treat as
-    // a no-op difference check (presence-of-call semantics).
+  // Rails' `assert_difference("Model.count", +1) do … end` form.
+  // Two surface shapes survive translation:
+  //   assert_difference(expr, body)               — count diff = 1
+  //   assert_difference(expr, delta, body)        — count diff = delta
+  // The expression form is JS-eval-style which we don't support
+  // here — accept callable form. If given a string, treat as
+  // a no-op difference check (presence-of-call semantics).
+  assert_difference(
+    expr: string | (() => number),
+    deltaOrBody: number | (() => any),
+    body?: () => any,
+  ): any {
+    const [delta, runBody] = typeof deltaOrBody === "function"
+      ? [1, deltaOrBody]
+      : [deltaOrBody, body!];
     const before = typeof expr === "function" ? expr() : 0;
-    const result = body();
+    const result = runBody();
     const after = typeof expr === "function" ? expr() : 0;
-    assert.notStrictEqual(after, before, "expected difference");
+    if (typeof expr === "function") {
+      assert.strictEqual(after - before, delta, `expected difference of ${delta}`);
+    }
     return result;
   }
 

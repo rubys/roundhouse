@@ -1246,6 +1246,28 @@ pub(super) fn emit_send_with_parens(
                 "to_h" if args.is_empty() => {
                     return format!("Object.fromEntries({})", emit_expr(r));
                 }
+                // `arr.sort_by { |x| key(x) }` returns a new array
+                // sorted by the key. JS Array#sort takes a comparator
+                // (returning -1/0/+1) not a key function — wrap via
+                // an IIFE that captures the key lambda once and
+                // applies the standard ka<kb / ka>kb comparator.
+                // `[...arr]` makes a copy (Ruby sort_by is
+                // non-mutating; JS sort mutates in place).
+                "sort_by" if args.len() == 1 => {
+                    let recv_s = emit_expr(r);
+                    let key_fn = &args_s[0];
+                    return format!(
+                        "((__arr, __key) => [...__arr].sort((a, b) => {{ const ka = __key(a); const kb = __key(b); return ka < kb ? -1 : ka > kb ? 1 : 0; }}))({recv_s}, {key_fn})"
+                    );
+                }
+                // `arr.sort` (no block) → JS Array#sort with default
+                // comparator on a fresh copy. JS's default sort is
+                // string-coerced (matches Ruby's sort for strings,
+                // diverges for numbers but those need an explicit
+                // comparator anyway).
+                "sort" if args.is_empty() => {
+                    return format!("[...{}].sort()", emit_expr(r));
+                }
                 _ => {}
             },
             // String receiver: predicate forms parallel Array's; the
