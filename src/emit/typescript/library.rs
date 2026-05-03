@@ -639,6 +639,7 @@ fn render_imports_with_synthesized(
     let mut view_helpers_import: bool = false;
     let mut inflector_import: bool = false;
     let mut broadcasts_import: bool = false;
+    let mut importmap_import: bool = false;
 
     for r in refs {
         let r_str: &str = &r;
@@ -682,6 +683,11 @@ fn render_imports_with_synthesized(
             // file at `src/broadcasts.ts` adapts to the installed
             // broadcaster.
             broadcasts_import = true;
+        } else if r == "Importmap" {
+            // Importmap is generated at app/importmap.ts by the
+            // importmap lowerer. Layout view body uses
+            // `Importmap.pins()` / `Importmap.entry()`.
+            importmap_import = true;
         } else if app.models.iter().any(|m| m.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
@@ -837,6 +843,10 @@ fn render_imports_with_synthesized(
     if broadcasts_import {
         let import_path = relative_to_root(out_path, "src/broadcasts.js");
         writeln!(s, "import {{ Broadcasts }} from \"{import_path}\";").unwrap();
+    }
+    if importmap_import {
+        let import_path = relative_to_root(out_path, "app/importmap.js");
+        writeln!(s, "import {{ Importmap }} from \"{import_path}\";").unwrap();
     }
     s
 }

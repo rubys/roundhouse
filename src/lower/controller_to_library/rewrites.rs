@@ -819,24 +819,51 @@ pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
             // Polymorphic AR-instance → `.id` extraction. Rails
             // accepts `article_url(@article)` and dispatches via
             // implicit `.id`; the route_helpers in this codebase take
-            // an `id: number` directly. Extract `.id` for any Ivar
-            // arg so the typed signature matches. Doesn't fire on
-            // already-projected args (`@article.id`) since those are
-            // Sends, not Ivars.
+            // an `id: number` directly. Extract `.id` for:
+            //   - Ivar args (`@article` → `@article.id`)
+            //   - Class-method calls on capital-named Const recvs
+            //     (`Article.last`, `Article.find(1)` → `<x>.id`).
+            //     Heuristic at lower time: a Send whose recv is a
+            //     Const with capitalized first segment is almost
+            //     always a model class method returning an instance.
+            // Already-projected args (`@article.id`) pass through
+            // since they're Sends with method `id` — adding another
+            // `.id` would double-wrap, so detect that shape.
             let projected_args: Vec<Expr> = args
                 .iter()
-                .map(|arg| match &*arg.node {
-                    ExprNode::Ivar { name } => Expr::new(
-                        arg.span,
-                        ExprNode::Send {
-                            recv: Some(arg.clone()),
-                            method: Symbol::from("id"),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
-                    ),
-                    _ => rewrite_route_helpers(arg),
+                .map(|arg| {
+                    let needs_id = match &*arg.node {
+                        ExprNode::Ivar { .. } => true,
+                        ExprNode::Send { recv: Some(r), method, .. }
+                            if method.as_str() != "id" =>
+                        {
+                            matches!(
+                                &*r.node,
+                                ExprNode::Const { path }
+                                    if path.first().map(|s| {
+                                        s.as_str()
+                                            .chars()
+                                            .next()
+                                            .is_some_and(|c| c.is_ascii_uppercase())
+                                    }).unwrap_or(false)
+                            )
+                        }
+                        _ => false,
+                    };
+                    if needs_id {
+                        Expr::new(
+                            arg.span,
+                            ExprNode::Send {
+                                recv: Some(arg.clone()),
+                                method: Symbol::from("id"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        )
+                    } else {
+                        rewrite_route_helpers(arg)
+                    }
                 })
                 .collect();
             Some(Expr::new(

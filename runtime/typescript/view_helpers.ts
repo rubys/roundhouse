@@ -125,12 +125,12 @@ export function stylesheetLinkTag(name: string, opts: Record<string, string> = {
  *  the module imported by the bootstrap script (usually
  *  `application`; overridable per the importmap config). */
 export function javascriptImportmapTags(
-  pins: ReadonlyArray<{ name: string; path: string }>,
+  pins: ReadonlyArray<Record<string, string>>,
   main_entry: string = "application",
 ): string {
   const imports: Record<string, string> = {};
   for (const pin of pins) {
-    imports[pin.name] = pin.path;
+    imports[pin["name"]] = pin["path"];
   }
   const mapJson = JSON.stringify({ imports }, null, 2);
   let out = `<script type="importmap" data-turbo-track="reload">${mapJson}</script>`;
@@ -534,7 +534,7 @@ export class ViewHelpers {
   }
 
   static javascript_importmap_tags(
-    pins: ReadonlyArray<{ name: string; path: string }> | null | undefined,
+    pins: ReadonlyArray<Record<string, string>> | null | undefined,
     entry: string = "application",
   ): string {
     return javascriptImportmapTags(pins ?? [], entry);
