@@ -319,14 +319,78 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // Mirrors the TS pattern at `typescript.rs:302-306`. Available for
     // emitted tests to consume via `ArticlesFixtures.one()` (the call
     // shape `lower_test_modules_to_library_classes` rewrites
-    // `articles(:one)` to). Files don't conflict with the hand-written
-    // spinel-blog tests, which construct models inline rather than via
-    // fixtures, so this lands ahead of test emit without regression.
+    // `articles(:one)` to).
     let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
     for lc in &fixture_lcs {
         let stem = fixture_file_stem(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("test/fixtures/{stem}.rb"));
         files.push(library::emit_library_class_decl(lc, app, out_path));
+    }
+
+    // Test modules — lower each `XTest` class into a `LibraryClass`
+    // whose methods are `def test_<snake>` blocks (one per `test "..."`
+    // macro), then render to `test/models/<stem>_test.rb` or
+    // `test/controllers/<stem>_test.rb` depending on the class name
+    // suffix. Mirrors `typescript.rs:308-325`. Empty extras for now
+    // (the lowerer registers minitest baseline + framework stubs +
+    // fixture helpers internally); broader extras assembly can land
+    // when a test body needs more than the lowerer's own registry.
+    if !app.test_modules.is_empty() {
+        let test_lcs = crate::lower::lower_test_modules_to_library_classes(
+            &app.test_modules,
+            &app.fixtures,
+            &app.models,
+            Vec::new(),
+        );
+        // Fixture classes (`ArticlesFixtures`, etc.) live at
+        // `test/fixtures/<plural>.rb` — outside the model/controller
+        // require-resolution paths the library emitter knows. Pass them
+        // as synthesized siblings so any test body that references one
+        // gets an explicit `require_relative "../fixtures/<plural>"`.
+        let fixture_siblings: Vec<(String, String)> = fixture_lcs
+            .iter()
+            .map(|lc| {
+                let name = lc.name.0.as_str().to_string();
+                let stem = fixture_file_stem(&name);
+                (name, format!("test/fixtures/{stem}"))
+            })
+            .collect();
+        for lc in &test_lcs {
+            let class_name = lc.name.0.as_str();
+            let stem = test_file_stem(class_name);
+            let dir = if class_name.ends_with("ControllerTest") {
+                "controllers"
+            } else {
+                "models"
+            };
+            let out_path = PathBuf::from(format!("test/{dir}/{stem}_test.rb"));
+            // Map Rails's `ActiveSupport::TestCase` parent to plain
+            // `Minitest::Test` for the spinel runtime — AS isn't part of
+            // the framework runtime; assertion-method gaps are bridged
+            // by shims in test_helper.rb (assert_not, assert_difference,
+            // etc.). Ruby-target-specific rewrite, so it lives here
+            // rather than in the lowerer.
+            let mut lc_for_emit = lc.clone();
+            if matches!(&lc.parent, Some(p) if p.0.as_str() == "ActiveSupport::TestCase") {
+                lc_for_emit.parent = Some(crate::ident::ClassId(
+                    crate::ident::Symbol::from("Minitest::Test"),
+                ));
+            }
+            let mut emitted = library::emit_library_class_decl_with_synthesized(
+                &lc_for_emit,
+                app,
+                out_path,
+                &fixture_siblings,
+            );
+            // Test files need the bootstrap (minitest/autorun + LOAD_PATH
+            // + SqliteAdapter setup) before any model require resolves;
+            // prepend the require before the body-derived require headers.
+            emitted.content = format!(
+                "require_relative \"../test_helper\"\n{}",
+                emitted.content,
+            );
+            files.push(emitted);
+        }
     }
 
     files
@@ -337,6 +401,14 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
 /// reads naturally without redundant suffixes.
 fn fixture_file_stem(class_name: &str) -> String {
     let stem = class_name.strip_suffix("Fixtures").unwrap_or(class_name);
+    crate::naming::snake_case(stem)
+}
+
+/// `ArticleTest` → `article`, `ArticlesControllerTest` →
+/// `articles_controller` (strip Test suffix, snake_case). Used for the
+/// `test/<dir>/<stem>_test.rb` output path.
+fn test_file_stem(class_name: &str) -> String {
+    let stem = class_name.strip_suffix("Test").unwrap_or(class_name);
     crate::naming::snake_case(stem)
 }
 

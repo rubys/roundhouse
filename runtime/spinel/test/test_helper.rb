@@ -68,6 +68,32 @@ class ActionResponse
   end
 end
 
+# ActiveSupport::TestCase compatibility shims — emitted tests inherit
+# from Minitest::Test (rewritten at emit time from `ActiveSupport::
+# TestCase`) but call AS-extension assertion methods. Reopen Minitest::
+# Test so every test class picks them up without a parent change.
+class Minitest::Test
+  def assert_not(value, msg = nil)
+    refute(value, msg)
+  end
+
+  def assert_not_nil(value, msg = nil)
+    refute_nil(value, msg)
+  end
+
+  # Evaluates `expression` (a String containing Ruby code) before and
+  # after `block`, asserting the integer delta matches `change`. Mirror
+  # of ActiveSupport::Testing::Assertions#assert_difference for the
+  # single-expression case the lowered tests use.
+  def assert_difference(expression, change = 1)
+    before = eval(expression)
+    yield
+    after = eval(expression)
+    assert_equal(before + change, after,
+      "#{expression} didn't change by #{change}")
+  end
+end
+
 module RequestDispatch
   def get(path, params: {})
     dispatch_request("GET", path, params)

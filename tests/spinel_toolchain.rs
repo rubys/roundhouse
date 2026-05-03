@@ -143,6 +143,21 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
         }
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
+
+    // emit_spinel writes test/{models,controllers}/*_test.rb in real-blog's
+    // shape, but those files lean on Rails idioms (fixture persistence,
+    // assert_difference, assert_select, ActionDispatch::IntegrationTest,
+    // setup do/params:) that the spinel runtime doesn't yet satisfy.
+    // Re-overlay spinel-blog's hand-written tests so the toolchain
+    // contract assertions stay meaningful while the emitted tests take
+    // shape. Per project_spinel_test_asymmetry, this overlay is the
+    // remaining bounded asymmetry — once the gaps close, drop it.
+    for entry in ["test/models", "test/controllers"] {
+        let src = scaffold.join(entry);
+        if src.exists() {
+            copy_tree(&src, &scratch.join(entry));
+        }
+    }
 }
 
 /// Run a single test file via `bundle exec ruby -Itest -I.` and assert
