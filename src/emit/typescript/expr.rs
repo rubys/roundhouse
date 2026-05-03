@@ -1428,6 +1428,15 @@ pub(super) fn emit_send_with_parens(
                 Ty::Array { .. } => {
                     return format!("{}.push({})", emit_expr(r), args_s[0]);
                 }
+                // Ruby's `str << x` appends in place. TS strings
+                // are immutable, but the receiver is always a
+                // local variable in our view-builder pattern (the
+                // synthesized `io` buffer), so `+=` produces the
+                // same effect at the call site. View bodies use
+                // this as `io << "...html..."` to accumulate output.
+                Ty::Str => {
+                    return format!("{} += {}", emit_expr(r), args_s[0]);
+                }
                 _ => {}
             }
         }
