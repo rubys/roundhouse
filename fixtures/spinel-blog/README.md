@@ -13,6 +13,34 @@ This is a working specimen, not a framework. Read it to see what
 "Rails-shape Ruby without metaprogramming" actually looks like
 across an end-to-end MVC + WebSocket stack.
 
+## Why this exists
+
+The destination is a **single deployable binary**: Spinel compiles
+`main.rb` end-to-end into native code, the binary serves production
+HTTP traffic, SQLite-backed persistence survives restarts. Today's
+demo runs the lowered output under CRuby; the spinel-compile half
+of the round trip is the unfinished half of the bet. Most of this
+fixture's design choices are in service of getting there.
+
+Two substrate gaps stand between the current demo and that endpoint,
+both FFI-shaped:
+
+- **Persistence.** `runtime/sqlite_adapter.rb` wraps the CRuby
+  `sqlite3` gem (a C extension that doesn't compile under spinel).
+  The adapter is shaped for FFI lowering — the moment spinel can
+  link SQLite directly, the existing adapter swaps in unchanged.
+  `runtime/in_memory_adapter.rb` is the stopgap for the spinel-compiled
+  path today.
+- **HTTP/WebSocket server.** `server/dev_server.rb` is a pure-CRuby
+  HTTP/WS terminator using Thread, Mutex, and sockets — things spinel
+  doesn't compile. The intentional split — fixture proper does CGI;
+  dev server does sockets — keeps the spinel-compile path narrow.
+  The compiled binary is destined to embed [civetweb](https://github.com/civetweb/civetweb)
+  (or similar) via FFI; the dev server stays as-is for development.
+
+The substrate request is tracked in [matz/spinel#214](https://github.com/matz/spinel/issues/214);
+the fixture works without it today, just not as a single binary.
+
 ## Quick start
 
 ### Prerequisites
@@ -87,7 +115,7 @@ refresh.
 fixtures/spinel-blog/
   app/
     controllers/                 ApplicationController + Articles + Comments
-    models/                      ApplicationRecord + Article + Comment
+    models/                      ApplicationRecord + Article + Comment + ArticleParams (typed param factories)
     views/
       articles/{index,show,new,edit,_form,_article}.rb
       comments/_comment.rb       (.rb, not .erb — see "No ERB at runtime")
@@ -144,7 +172,7 @@ watcher never sees a half-written file.
 | Lifecycle callbacks | `before_*` / `after_*` for save/create/update/destroy + `*_commit` variants; auto-fill `created_at`/`updated_at` |
 | Adapters | `SqliteAdapter` (sqlite3 gem) + `InMemoryAdapter` (pure Ruby Hash); same interface, swappable |
 | Routing | Pattern-matching path → controller dispatch with nested resources |
-| Controllers | `params.require.permit`, `before_action`-equivalent, `render`/`redirect_to`/`head`, symbolic statuses (`:see_other`, `:unprocessable_entity`) |
+| Controllers | `params.require.permit`, per-resource typed `*Params` factories (`ArticleParams.from_raw(...)`), `before_action`-equivalent, `render`/`redirect_to`/`head`, symbolic statuses (`:see_other`, `:unprocessable_entity`) |
 | Views | One `Views::<Controller>.<action>` method per template; HTML built via `String#<<` concatenation; no ERB at runtime |
 | View helpers | `link_to`, `button_to`, `dom_id`, `content_for`, `turbo_stream_from`, `truncate`, `pluralize`, `stylesheet_link_tag`, `javascript_importmap_tags`, FormBuilder (label/text_field/text_area/submit) |
 | Layouts | `Views::Layouts.application(body)` consumes `content_for(:title)`, emits importmap referencing Turbo |
@@ -336,25 +364,25 @@ The dev server (`server/dev_server.rb`) is deliberately small:
 ### Spinel compatibility
 
 - Linter-clean across all 34 production files.
-- Three known soft-blockers exist as small CRuby-isms:
+- Two known soft-blockers exist as small CRuby-isms:
   - `force_encoding("UTF-8")` in `cgi_io.rb`'s `url_decode`
     (CRuby-specific; spinel "assumes UTF-8/ASCII" so it's a no-op
     there)
-  - `Time.now.utc.iso8601` (Time is in spinel's supported types
-    but the exact `.iso8601` method may need verification)
   - `__FILE__ == $PROGRAM_NAME` guard (both globals are
     fundamental; should compile)
-- **First-pass spinel compile surfaced five inference maturity
-  gaps**, [enumerated in the introductory blog post](https://intertwingly.net/blog/2026/04/27/Two-Compilers-One-Subset.html#the-honest-gap).
-  The first ([matz/spinel#49](https://github.com/matz/spinel/issues/49)
-  — default-argument values not inserted at omitting call sites)
-  was filed and closed by Matz within minutes of opening. The
-  remaining four are documented gaps in inference, not in
-  the fixture's adherence to the subset.
-- **End-to-end via spinel itself is still pending.** Today's
-  demo runs the lowered output on CRuby. The `Spinel-compiles-this`
-  axis is the unfinished half of the bet, gated on the inference
-  gaps above closing.
+- **C-compile of Roundhouse-emitted real-blog is two errors away
+  from clean.** First-pass surfaced five inference maturity gaps,
+  [enumerated in the introductory blog post](https://intertwingly.net/blog/2026/04/27/Two-Compilers-One-Subset.html#the-honest-gap).
+  Since then ~14 minimal-repro issues have been filed and closed
+  by Matz on hours-cadence (#49, #126, #127, #130, #133, #176,
+  #203, #204, #207, #208, #219, #224, #229), each removing a
+  category of inference or codegen mismatch. The current real-blog
+  C-error count is **2**, both surfacing the same remaining gap
+  (default-arg values not applied at class-method call sites).
+- **End-to-end via spinel itself is still pending** but proximate.
+  Today's demo runs the lowered output on CRuby. The
+  `Spinel-compiles-this` axis is the unfinished half of the bet,
+  gated on the next single issue above closing.
 
 ## How to read this fixture
 
@@ -397,9 +425,10 @@ This fixture is a *contract*, not a deliverable. Progression:
    repo root transpiles real-blog into this shape, builds
    assets, starts the dev server. Verified in a browser.
 5. **(In progress)** Spinel ingests the emitted Ruby and
-   produces a native binary. First inference issue closed
-   ([matz/spinel#49](https://github.com/matz/spinel/issues/49));
-   four documented gaps remain. The dev-server pattern stays —
+   produces a native binary. ~14 minimal-repro issues filed and
+   closed since [matz/spinel#49](https://github.com/matz/spinel/issues/49);
+   real-blog C-compile is now 2 errors away from clean, all surfacing
+   the same remaining gap. The dev-server pattern stays —
    only `main.rb` migrates to the compiled binary.
 
 The current end-to-end test of the emitter's correctness is:
