@@ -122,8 +122,12 @@ pub fn lower_test_modules_to_library_classes(
             // expression's class type — must run AFTER the typer.
             // Statement-shape pass (no outer Assign) so it pairs with
             // tests that just call `article.comments.create(...)` for
-            // its side effect.
+            // its side effect. Re-type after the rewrite so the
+            // freshly-synthesized Sends/Hash entries get a `ty` —
+            // `lowered_real_blog_typing_residual` enforces a
+            // 0-untyped ceiling.
             method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
         out.push(lc.clone());
     }

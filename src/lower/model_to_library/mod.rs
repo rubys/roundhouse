@@ -573,6 +573,21 @@ fn build_class_info(
     insert_default(
         &mut info.class_methods,
         "new",
+        fn_sig(vec![(Symbol::from("attrs"), any_hash.clone())], owner_ty.clone()),
+    );
+    // `<Model>.create(attrs)` → instance; `<Model>.create!(attrs)`
+    // raises on validation failure but returns instance otherwise.
+    // Both registered so test bodies (which use the bang form) and
+    // seeds (which my has-many rewrite produces) type cleanly
+    // through the registry.
+    insert_default(
+        &mut info.class_methods,
+        "create",
+        fn_sig(vec![(Symbol::from("attrs"), any_hash.clone())], owner_ty.clone()),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "create!",
         fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty.clone()),
     );
 
