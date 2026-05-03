@@ -1009,13 +1009,27 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
 // — keep them here.
 
 /// Ruby allows `?` and `!` suffixes on method names; TS does not.
-/// Strip them for the output identifier. Juntos's runtime drops them
-/// too (`Article.exists(id)` not `Article.exists?(id)`).
+/// Rename instead of silently stripping — silent strip merges
+/// three namespaces (`persisted?`, `persisted!`, `persisted`) into
+/// one and creates collisions with same-named fields:
+///   * `?`-suffix predicate → prepend `is_` (TS-idiomatic for
+///     boolean methods: `Array.isArray`, `Number.isInteger`).
+///     `def persisted?` becomes `is_persisted()`; `def valid?`
+///     becomes `is_valid()`. Doesn't collide with the field
+///     `persisted` (from `@persisted = false` ivar).
+///   * `!`-suffix bang method → suffix `_bang`. `def save!`
+///     becomes `save_bang()`; doesn't collide with `def save`.
+/// Both definition emit and call-site emit go through the same
+/// rule so `def persisted?` and `record.persisted?` line up at
+/// the call site (`record.is_persisted()`).
 pub(super) fn sanitize_identifier(ruby_name: &str) -> String {
-    ruby_name
-        .trim_end_matches('?')
-        .trim_end_matches('!')
-        .to_string()
+    if let Some(stem) = ruby_name.strip_suffix('?') {
+        return format!("is_{stem}");
+    }
+    if let Some(stem) = ruby_name.strip_suffix('!') {
+        return format!("{stem}_bang");
+    }
+    ruby_name.to_string()
 }
 
 /// IR transformation applied to each class method body before emission.

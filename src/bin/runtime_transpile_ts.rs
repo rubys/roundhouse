@@ -74,10 +74,11 @@ const PAIRS: &[(&str, &str, &str, Mode, ImportSpec)] = &[
         "runtime/typescript/active_record_base.ts",
         Mode::Library,
         // Base extends Validations (via include lowering) and
-        // throws RecordNotFound from `find`.
+        // throws RecordNotFound from `find` / RecordInvalid from
+        // `save!` / `create!`.
         &[
             ("Validations", "./validations.js"),
-            ("RecordNotFound", "./errors.js"),
+            ("RecordNotFound, RecordInvalid", "./errors.js"),
         ],
     ),
     (

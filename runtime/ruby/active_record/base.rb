@@ -119,6 +119,17 @@ module ActiveRecord
       instance
     end
 
+    # `Article.create!(...)` — bang variant: raises RecordInvalid
+    # when validation fails instead of returning the unsaved
+    # instance. Used by seeds and tests that expect creation to
+    # succeed unconditionally; failure is a fatal error rather
+    # than a flow-control branch.
+    def self.create!(attrs = {})
+      instance = new(attrs)
+      raise RecordInvalid, instance unless instance.save
+      instance
+    end
+
     # `Article.last` — highest-id row, or nil when the table is
     # empty. Real-blog tests use it after a create-action redirect:
     # `assert_redirected_to article_url(Article.last)`. Implemented

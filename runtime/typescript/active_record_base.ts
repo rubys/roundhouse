@@ -2,7 +2,7 @@
 // Do not edit by hand — edit the source `.rb` and re-run.
 
 import { Validations } from "./validations.js";
-import { RecordNotFound } from "./errors.js";
+import { RecordNotFound, RecordInvalid } from "./errors.js";
 
 export class Base extends Validations {
   declare id: number;
@@ -38,11 +38,19 @@ export class Base extends Validations {
     (() => { throw new Error("assign_from_row must be overridden by subclass"); })();
   }
 
-  new_record(): boolean {
+  is_persisted(): boolean {
+    return this.persisted;
+  }
+
+  is_new_record(): boolean {
     return !this.persisted;
   }
 
-  mark_persisted(): boolean {
+  is_destroyed(): boolean {
+    return this.destroyed;
+  }
+
+  mark_persisted_bang(): boolean {
     this.persisted = true;
     this.destroyed = false;
   }
@@ -59,7 +67,7 @@ export class Base extends Validations {
 
   static find_by(conditions: Record<string, any>): any {
     const rows = ActiveRecord.adapter.where(this.table_name, conditions);
-    return rows.empty ? null : this.instantiate(rows.first);
+    return rows.is_empty ? null : this.instantiate(rows.first);
   }
 
   static where(conditions: Record<string, any>): Base[] {
@@ -70,8 +78,8 @@ export class Base extends Validations {
     return ActiveRecord.adapter.count(this.table_name);
   }
 
-  static exists(id: number): boolean {
-    return ActiveRecord.adapter.exists(this.table_name, id);
+  static is_exists(id: number): boolean {
+    return ActiveRecord.adapter.is_exists(this.table_name, id);
   }
 
   static destroy_all(): Base[] {
@@ -86,6 +94,12 @@ export class Base extends Validations {
     return instance;
   }
 
+  static create_bang(attrs: Record<string, any>): Base {
+    const instance = new this(attrs);
+    if (instance.save) { null; } else { (() => { throw new RecordInvalid(instance); })(); }
+    return instance;
+  }
+
   static last(): any {
     const records = this.all;
     return records.length === 0 ? null : records[-1];
@@ -93,11 +107,11 @@ export class Base extends Validations {
 
   save(): boolean {
     this.before_validation;
-    const ok = this.valid;
+    const ok = this.is_valid;
     this.after_validation;
     if (ok) { null; } else { return false; }
     this.before_save;
-    if (this.new_record) {
+    if (this.is_new_record) {
       this.before_create;
       this.fill_timestamps({ "creating": true });
       this.id = ActiveRecord.adapter.insert((this.constructor as any).table_name, this.attributes);
@@ -117,8 +131,13 @@ export class Base extends Validations {
     return true;
   }
 
+  save_bang(): Base {
+    if (this.save) { null; } else { (() => { throw new RecordInvalid(this); })(); }
+    return this;
+  }
+
   destroy(): Base {
-    if (this.persisted) { null; } else { return this; }
+    if (this.is_persisted) { null; } else { return this; }
     this.before_destroy;
     ActiveRecord.adapter.delete((this.constructor as any).table_name, this.id);
     this.persisted = false;
@@ -211,7 +230,7 @@ export class Base extends Validations {
     if (creating && cols.includes("created_at") && this["created_at"] === null) { this["created_at"] = now; }
   }
 
-  valid(): boolean {
+  is_valid(): boolean {
     this.errors = [];
     this.validate;
     return this.errors.length === 0;

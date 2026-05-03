@@ -19,12 +19,12 @@ export class Parameters {
     return this.hash[key] = value;
   }
 
-  has(key: string): boolean {
+  is_has(key: string): boolean {
     return key in this.hash;
   }
 
-  key(key: string): boolean {
-    return this.has(key);
+  is_key(key: string): boolean {
+    return this.is_has(key);
   }
 
   fetch(key: string, default_?: any): any {
@@ -33,7 +33,7 @@ export class Parameters {
     return default_;
   }
 
-  empty(): boolean {
+  is_empty(): boolean {
     return Object.keys(this.hash).length === 0;
   }
 
@@ -51,7 +51,7 @@ export class Parameters {
     const val = this.hash[key];
     if (val === null) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
     if (typeof val === "object" && val !== null && !Array.isArray(val)) { null; } else { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
-    if (val.empty) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
+    if (val.is_empty) { (() => { throw new ParameterMissing(`param is missing or the value is empty: ${key}`); })(); }
     return new Parameters(val);
   }
 

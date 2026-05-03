@@ -41,7 +41,7 @@ export class FormBuilder {
 }
 
 export class ViewHelpers {
-  static reset_slots(): void {
+  static reset_slots_bang(): void {
     this.slots = {  };
   }
 

@@ -1072,6 +1072,20 @@ pub(super) fn emit_send_with_parens(
     if method == "iso8601" && args.is_empty() && recv.is_some() {
         return format!("{}.toISOString()", emit_expr(recv.unwrap()));
     }
+    // `<regex>.match?(s)` → `<regex>.test(s)`. Ruby's `Regexp#match?`
+    // returns boolean; JS RegExp has `.test()` for the same purpose.
+    // Both `match?` (predicate) and `match` (returns MatchData) get
+    // mapped: predicate → `.test()`, value form → `.exec()`.
+    if method == "match?" && args.len() == 1 && recv.is_some() {
+        return format!("{}.test({})", emit_expr(recv.unwrap()), args_s[0]);
+    }
+    if method == "match" && args.len() == 1 && recv.is_some() {
+        if let Some(crate::ty::Ty::Class { id, .. }) = recv.unwrap().ty.as_ref() {
+            if id.0.as_str() == "Regexp" || id.0.as_str() == "RegExp" {
+                return format!("{}.exec({})", emit_expr(recv.unwrap()), args_s[0]);
+            }
+        }
+    }
     // Ruby coercions: `.to_s` / `.to_i` / `.to_sym` map to JS
     // equivalents. `.to_sym` is a no-op in JS (use the string as
     // the hash key) — emit just the receiver. The nil case
