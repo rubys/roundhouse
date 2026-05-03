@@ -221,17 +221,85 @@ fn lower_models_inner(
 /// `class_methods` (for `MethodReceiver::Class`) or `instance_methods`
 /// (for `MethodReceiver::Instance`).
 pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::ClassInfo {
+    use crate::dialect::AccessorKind;
+    use crate::expr::{ExprNode, LValue};
+
+    // Collect ivar names assigned in any instance method body. A
+    // method whose name matches one of these ivars (e.g. Validations'
+    // `def errors` paired with `@errors = []`) shadows the field
+    // declaration in TS emit; the body analyzer's force-parens rule
+    // shouldn't add `()` to such calls since the field is read as
+    // a property. Reclassify those Method entries as AttributeReader
+    // so the typer treats them like field accesses.
+    let mut ivar_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    fn collect_ivars(e: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                out.insert(name.as_str().to_string());
+                collect_ivars(value, out);
+            }
+            ExprNode::Assign { target, value } => {
+                if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                    collect_ivars(recv, out);
+                }
+                collect_ivars(value, out);
+            }
+            ExprNode::Send { recv, args, block, .. } => {
+                if let Some(r) = recv {
+                    collect_ivars(r, out);
+                }
+                for a in args {
+                    collect_ivars(a, out);
+                }
+                if let Some(b) = block {
+                    collect_ivars(b, out);
+                }
+            }
+            ExprNode::Seq { exprs } => {
+                for x in exprs {
+                    collect_ivars(x, out);
+                }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                collect_ivars(cond, out);
+                collect_ivars(then_branch, out);
+                collect_ivars(else_branch, out);
+            }
+            ExprNode::Lambda { body, .. } => collect_ivars(body, out),
+            _ => {}
+        }
+    }
+    for m in &lc.methods {
+        if matches!(m.receiver, MethodReceiver::Instance) {
+            collect_ivars(&m.body, &mut ivar_names);
+        }
+    }
+
     let mut info = crate::analyze::ClassInfo::default();
     for m in &lc.methods {
         if let Some(sig) = &m.signature {
+            // If a Method-kind instance method's name matches an ivar
+            // in the class body, treat as AttributeReader for the
+            // typer. The TS emit already drops such methods in favor
+            // of the ivar-derived field declaration; the kind change
+            // keeps force-parens from firing on call sites.
+            let kind = if matches!(m.receiver, MethodReceiver::Instance)
+                && matches!(m.kind, AccessorKind::Method)
+                && ivar_names.contains(m.name.as_str())
+            {
+                AccessorKind::AttributeReader
+            } else {
+                m.kind
+            };
             match m.receiver {
                 MethodReceiver::Instance => {
                     info.instance_methods.insert(m.name.clone(), sig.clone());
-                    info.instance_method_kinds.insert(m.name.clone(), m.kind);
+                    info.instance_method_kinds.insert(m.name.clone(), kind);
                 }
                 MethodReceiver::Class => {
                     info.class_methods.insert(m.name.clone(), sig.clone());
-                    info.class_method_kinds.insert(m.name.clone(), m.kind);
+                    info.class_method_kinds.insert(m.name.clone(), kind);
                 }
             }
         }
@@ -376,10 +444,18 @@ fn build_class_info(
         "mark_persisted!",
         fn_sig(vec![], Ty::Nil),
     );
+    // `errors` returns the same shape Validations.rb's ivar holds —
+    // `Array[untyped]` (the framework runtime uses a plain Ruby
+    // Array, mutated via `<<`/`push` and read via `empty?`/`count`/
+    // `each`). The juntos hand-written ApplicationRecord wrapped
+    // this in an ErrorCollection class, but the transpiled framework
+    // keeps it primitive. Type-aware Array dispatch (`empty?` →
+    // `length === 0`, `each` → `forEach`, etc.) handles all the
+    // call sites uniformly.
     insert_default(
         &mut info.instance_methods,
         "errors",
-        fn_sig(vec![], Ty::Class { id: ClassId(Symbol::from("ErrorCollection")), args: vec![] }),
+        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Untyped) }),
     );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
     insert_default(
@@ -527,6 +603,15 @@ fn build_class_info(
     }
     for name in info.instance_methods.keys().cloned().collect::<Vec<_>>() {
         info.instance_method_kinds.entry(name).or_insert(AccessorKind::Method);
+    }
+    // Baseline names that are field-like on the transpiled framework
+    // Base/Validations (backed by `@<name>` ivars set in
+    // `initialize`) — override the Method default so the body
+    // analyzer's force-parens skips them. Callers reading
+    // `record.errors` need the field, not a method call.
+    for field_name in ["errors", "id"] {
+        info.instance_method_kinds
+            .insert(Symbol::from(field_name), AccessorKind::AttributeReader);
     }
     info
 }

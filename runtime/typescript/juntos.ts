@@ -116,7 +116,7 @@ export class ApplicationRecord {
   get save(): boolean {
     this.errors = new ErrorCollection();
     this.validate();
-    if (!this.errors.none) return false;
+    if (!this.errors.is_none()) return false;
 
     const cls = this.constructor as typeof ApplicationRecord;
 
@@ -373,22 +373,24 @@ export class ApplicationRecord {
 export class ErrorCollection {
   private _errors: Array<{ field: string; message: string }> = [];
 
-  get none(): boolean {
+  // Method-form (not getter) so the transpiled call shape
+  // `errors.<x>()` (with parens, after analyzer force-parens for
+  // Method-kind dispatches) matches. Predicate methods (`empty?`,
+  // `any?`, `none?`) get renamed to `is_<x>` per the TS emit
+  // suffix-rename rule (eliminates field/method collisions).
+  is_none(): boolean {
     return this._errors.length === 0;
   }
 
-  get any(): boolean {
+  is_any(): boolean {
     return this._errors.length > 0;
   }
 
-  get count(): number {
+  count(): number {
     return this._errors.length;
   }
 
-  // Ruby's `errors.empty?` predicate. Used by the lowered view
-  // bodies (`record.errors.empty?` lowers to `record.errors.empty`
-  // after `?` strip). Same semantics as `none`.
-  get empty(): boolean {
+  is_empty(): boolean {
     return this._errors.length === 0;
   }
 

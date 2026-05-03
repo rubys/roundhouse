@@ -1237,7 +1237,7 @@ pub(super) fn emit_send_with_parens(
                         format!("{recv_s}.forEach({})", args_s.join(", "))
                     };
                 }
-                "size" | "length" if args.is_empty() => {
+                "size" | "length" | "count" if args.is_empty() => {
                     return format!("{}.length", emit_expr(r));
                 }
                 "empty?" if args.is_empty() => {
