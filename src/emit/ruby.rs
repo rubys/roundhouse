@@ -336,11 +336,22 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // fixture helpers internally); broader extras assembly can land
     // when a test body needs more than the lowerer's own registry.
     if !app.test_modules.is_empty() {
+        // Each `<Plural>Fixtures` LibraryClass surfaces its label
+        // methods (typed `() -> Class<Model>`) and `_fixtures_load!`
+        // through the registry so test bodies that bind a local from
+        // `ArticlesFixtures.one` get the parent's class type — which
+        // is what the has-many `.create`/`.build` rewrite consults to
+        // de-magic `article.comments.create(...)` into
+        // `Comment.create(article_id: article.id, ...)`.
+        let fixture_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = fixture_lcs
+            .iter()
+            .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
+            .collect();
         let test_lcs = crate::lower::lower_test_modules_to_library_classes(
             &app.test_modules,
             &app.fixtures,
             &app.models,
-            Vec::new(),
+            fixture_extras,
         );
         // Fixture classes (`ArticlesFixtures`, etc.) live at
         // `test/fixtures/<plural>.rb` — outside the model/controller

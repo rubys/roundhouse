@@ -6,7 +6,7 @@
 //! `def validate` per model; multiple rules across multiple attrs share the
 //! same method.
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ValidationRule};
+use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model, ValidationRule};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, Literal};
 use crate::ident::Symbol;
@@ -21,6 +21,17 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     for v in model.validations() {
         for rule in &v.rules {
             stmts.extend(validation_rule_to_calls(&v.attribute, rule));
+        }
+    }
+
+    // Rails 5+ default: every `belongs_to` requires the associated
+    // record to exist before save. Emit `validates_belongs_to(:assoc,
+    // @<fk>, <Target>)` per non-optional belongs_to. The runtime
+    // helper short-circuits when the FK is unset (nil/0) and queries
+    // `<Target>.exists?(fk_value)` otherwise.
+    for assoc in model.associations() {
+        if let Association::BelongsTo { name, target, foreign_key, optional: false } = assoc {
+            stmts.push(belongs_to_validation_call(name, foreign_key, target));
         }
     }
 
@@ -163,6 +174,25 @@ fn helper_call(name: &str, args: Vec<Expr>) -> Expr {
             block: None,
             parenthesized: true,
         },
+    )
+}
+
+/// `validates_belongs_to(:<assoc_name>, @<fk>, <TargetClass>)` —
+/// emitted once per non-optional `belongs_to`. The third argument is
+/// a Const referencing the target model so the helper can dispatch
+/// `<Target>.exists?(fk_value)` to verify the FK is live.
+fn belongs_to_validation_call(
+    assoc_name: &Symbol,
+    foreign_key: &Symbol,
+    target: &crate::ident::ClassId,
+) -> Expr {
+    let target_const = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: vec![target.0.clone()] },
+    );
+    helper_call(
+        "validates_belongs_to",
+        vec![lit_sym(assoc_name.clone()), ivar(foreign_key), target_const],
     )
 }
 

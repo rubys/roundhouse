@@ -225,16 +225,31 @@ fn comment_lowers_validate_with_two_presence_calls() {
         roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
         other => panic!("validate body should be Seq; got {other:?}"),
     };
+    // Two `validates_presence_of` calls (commenter + body) plus one
+    // `validates_belongs_to` call synthesized from `belongs_to :article`
+    // (Rails 5+ presence-by-default).
     assert_eq!(
         exprs.len(),
-        2,
-        "Comment has presence on commenter + body → 2 calls; got {}",
+        3,
+        "Comment validate emits commenter + body presence + article belongs_to (3 calls); got {}",
         exprs.len(),
+    );
+    let methods: Vec<&str> = exprs
+        .iter()
+        .filter_map(|e| match &*e.node {
+            roundhouse::ExprNode::Send { method, .. } => Some(method.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["validates_presence_of", "validates_presence_of", "validates_belongs_to"],
+        "expected commenter + body presence then article belongs_to",
     );
     for e in &exprs {
         match &*e.node {
-            roundhouse::ExprNode::Send { method, .. } => {
-                assert_eq!(method.as_str(), "validates_presence_of");
+            roundhouse::ExprNode::Send { .. } => {
+                // checked above
             }
             other => panic!("validate stmt should be Send; got {other:?}"),
         }

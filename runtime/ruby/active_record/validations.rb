@@ -69,5 +69,19 @@ module ActiveRecord
       ok = value.is_a?(String) && with.match?(value)
       errors << "#{attr_name} is invalid" unless ok
     end
+
+    # `belongs_to` presence — Rails 5+ default. The associated record
+    # must exist for the save to succeed. `fk_value` is the foreign-key
+    # ivar (e.g. `@article_id`); `target_class` is the model the FK
+    # references. Skips the existence query when the FK is unset
+    # (nil/0) and emits a "must exist" error so the message matches
+    # the parent_name (`article`) rather than the FK name.
+    def validates_belongs_to(attr_name, fk_value, target_class)
+      if fk_value.nil? || fk_value == 0
+        errors << "#{attr_name} must exist"
+        return
+      end
+      errors << "#{attr_name} must exist" unless target_class.exists?(fk_value)
+    end
   end
 end

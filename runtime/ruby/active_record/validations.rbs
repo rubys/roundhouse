@@ -26,5 +26,11 @@ module ActiveRecord
     # uses `with.match?` which body-typer resolves via the
     # universal_method table.
     def validates_format_of: (Symbol attr_name, untyped value, with: Regexp) -> void
+
+    # `belongs_to` presence (Rails 5+ default). `fk_value` is the
+    # foreign-key ivar (Integer); `target_class` is the model the FK
+    # references — the body dispatches `<Target>.exists?(fk_value)`,
+    # which the registry resolves via the model's class methods.
+    def validates_belongs_to: (Symbol attr_name, Integer fk_value, untyped target_class) -> void
   end
 end

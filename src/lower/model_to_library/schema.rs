@@ -94,6 +94,16 @@ pub(super) fn push_schema_methods(
     // class-method factories rather than overloaded initialize.
     methods.push(synth_from_row(owner, table));
 
+    // def assign_from_row(row); self.<col> = row[:<col>]; ...; end
+    //
+    // Instance-level reload helper. ActiveRecord::Base#reload re-fetches
+    // the row via the adapter (returns Hash[Symbol, untyped]) and
+    // dispatches to `assign_from_row(row)` to mutate the existing
+    // instance in place. Indexing via `row[:col]` rather than typed
+    // accessors so the path stays Hash-shaped — `from_row` already
+    // covers the typed-Row construction case.
+    methods.push(synth_assign_from_row(owner, table));
+
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
     methods.push(synth_initialize(owner, table));
 
@@ -377,6 +387,60 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         params: vec![Param::positional(row.clone())],
         body: seq(stmts),
         signature: Some(fn_sig(vec![(row, row_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+    }
+}
+
+/// `def assign_from_row(row); self.<col> = row[:<col>]; ...; end`
+/// — mutates `self`, used by `ActiveRecord::Base#reload` after the
+/// adapter re-fetches the row as a `Hash[Symbol, untyped]`. The Hash
+/// stays Hash-shaped (no typed Row narrowing) since reload only
+/// touches the existing instance's slots.
+fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
+    let row = Symbol::from("row");
+    let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+
+    let mut stmts: Vec<Expr> = Vec::new();
+    for col in &table.columns {
+        // row[:<col>] — Hash index lookup keyed on the column symbol.
+        let key = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Sym { value: col.name.clone() } },
+            ),
+            Ty::Sym,
+        );
+        let lookup = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(row.clone())),
+                method: Symbol::from("[]"),
+                args: vec![key],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        // self.<col>= = row[:<col>]
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                method: Symbol::from(format!("{}=", col.name.as_str())),
+                args: vec![lookup],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+
+    MethodDef {
+        name: Symbol::from("assign_from_row"),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(row.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(row, row_ty)], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

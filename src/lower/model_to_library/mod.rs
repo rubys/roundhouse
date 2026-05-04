@@ -523,6 +523,18 @@ fn build_class_info(
             Ty::Nil,
         ),
     );
+    insert_default(
+        &mut info.instance_methods,
+        "validates_belongs_to",
+        fn_sig(
+            vec![
+                (Symbol::from("attr"), Ty::Sym),
+                (Symbol::from("fk_value"), Ty::Int),
+                (Symbol::from("target_class"), Ty::Untyped),
+            ],
+            Ty::Nil,
+        ),
+    );
 
     // Class-level finders / scopes.
     insert_default(

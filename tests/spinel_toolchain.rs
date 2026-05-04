@@ -1,18 +1,14 @@
 //! Spinel toolchain integration test — runs CRuby over the emitted
-//! spinel-shape output to assert the lowering produces a project that
-//! satisfies spinel-blog's test contract.
+//! spinel-shape output (app + tests) to assert the lowering produces a
+//! project that satisfies real-blog's test contract.
 //!
-//! **Methodology asymmetry vs. other toolchain jobs.** TypeScript /
-//! Rust / Crystal / etc. emit both the app AND its tests, then run the
-//! emitted tests against the emitted app. Spinel only emits the app:
-//! tests are borrowed wholesale from `fixtures/spinel-blog/test/`
-//! (hand-written), and CRuby executes them — spinel is a Ruby subset,
-//! so CRuby is a valid runtime until spinel grows its own test runner.
-//! The hand-written spinel-blog tests already encode the runtime
-//! contract (errors as `Vec<String>`, `persisted?` semantics, etc.);
-//! lowering real-blog's Rails tests would force the same Rails→spinel
-//! API shifts in the test surface for no marginal contract value while
-//! bootstrapping. See `project_spinel_test_asymmetry`.
+//! Symmetry with other toolchain jobs: TypeScript / Rust / Crystal /
+//! etc. emit both the app AND its tests, then run the emitted tests
+//! against the emitted app. Spinel does the same — `emit_spinel`
+//! emits `test/test_helper.rb`, `test/fixtures/<plural>.rb`, and
+//! `test/{models,controllers}/<stem>_test.rb` from real-blog's test
+//! sources. CRuby is the runtime (spinel is a Ruby subset; spinel's
+//! own test runner can swap in once it lands).
 //!
 //! Marked `#[ignore]` so it doesn't run in the default `cargo test`
 //! sweep — the bundle install + Ruby invocation costs are CI-only.
@@ -144,20 +140,13 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
         std::fs::write(&path, &file.content).expect("write emitted file");
     }
 
-    // emit_spinel writes test/{models,controllers}/*_test.rb in real-blog's
-    // shape, but those files lean on Rails idioms (fixture persistence,
-    // assert_difference, assert_select, ActionDispatch::IntegrationTest,
-    // setup do/params:) that the spinel runtime doesn't yet satisfy.
-    // Re-overlay spinel-blog's hand-written tests so the toolchain
-    // contract assertions stay meaningful while the emitted tests take
-    // shape. Per project_spinel_test_asymmetry, this overlay is the
-    // remaining bounded asymmetry — once the gaps close, drop it.
-    for entry in ["test/models", "test/controllers"] {
-        let src = scaffold.join(entry);
-        if src.exists() {
-            copy_tree(&src, &scratch.join(entry));
-        }
-    }
+    // emit_spinel writes test/{models,controllers}/*_test.rb in
+    // real-blog's shape and the spinel runtime now supports the
+    // Rails-idiom surface those tests use (fixture persistence via
+    // FixtureLoader, assert_response/assert_select/
+    // assert_no_difference shims, ActionDispatch::IntegrationTest
+    // parent class, single-arg assert_redirected_to). No overlay —
+    // the emitted tests run as-is.
 }
 
 /// Run a single test file via `bundle exec ruby -Itest -I.` and assert

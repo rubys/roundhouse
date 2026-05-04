@@ -42,13 +42,17 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
     let owner_id = ClassId(Symbol::from(owner_name.clone()));
     let class_ty = Ty::Class { id: f.class.clone(), args: vec![] };
 
-    let methods: Vec<MethodDef> = f
+    // Each label method (`one`, `two`, …) returns the persisted record
+    // looked up by id. The actual insert happens in `_fixtures_load!`,
+    // which the test_helper's FixtureLoader invokes after each
+    // SchemaSetup.reset!.
+    let mut methods: Vec<MethodDef> = f
         .records
         .iter()
         .enumerate()
         .map(|(idx, r)| {
             let id = (idx + 1) as i64;
-            let body = build_constructor_call(&f.class, id, r, all);
+            let body = build_find_call(&f.class, id);
             MethodDef {
                 name: r.label.clone(),
                 receiver: MethodReceiver::Class,
@@ -62,6 +66,22 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         })
         .collect();
 
+    // `_fixtures_load!` — class method that inserts every record into
+    // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
+    // 1-indexed file order so the autoincrement column matches the
+    // ids the label methods look up. Body is a Seq of Sends.
+    let load_body = build_load_method_body(&f.class, &f.records, all);
+    methods.push(MethodDef {
+        name: Symbol::from("_fixtures_load!"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body: load_body,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner_id.0.clone()),
+        kind: AccessorKind::Method,
+    });
+
     LibraryClass {
         name: owner_id,
         is_module: true,
@@ -70,6 +90,62 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         methods,
         origin: None,
     }
+}
+
+/// `<Class>.find(<id>)` — used by each label method to return the
+/// persisted record corresponding to that fixture row.
+fn build_find_call(cls: &ClassId, id: i64) -> Expr {
+    let class_const = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![cls.0.clone()] },
+        ),
+        Ty::Class { id: cls.clone(), args: vec![] },
+    );
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(class_const),
+                method: Symbol::from("find"),
+                args: vec![lit_int(id)],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Class { id: cls.clone(), args: vec![] },
+    )
+}
+
+/// Body of `_fixtures_load!`: a Seq of `<Class>.new({...}).save` Sends,
+/// one per fixture record in 1-indexed source order.
+fn build_load_method_body(
+    cls: &ClassId,
+    records: &[LoweredFixtureRecord],
+    all: &LoweredFixtureSet,
+) -> Expr {
+    let exprs: Vec<Expr> = records
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            let id = (idx + 1) as i64;
+            let new_call = build_constructor_call(cls, id, r, all);
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(new_call),
+                        method: Symbol::from("save"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Bool,
+            )
+        })
+        .collect();
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
 }
 
 /// Build `<Class>.new({id: <id>, <field>: <value>, ...})`. Fields
