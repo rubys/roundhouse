@@ -25,8 +25,10 @@
 //! and preludes.
 
 use crate::dialect::{LibraryClass, MethodDef};
-use crate::emit::typescript::{emit_library_class, emit_module};
-use crate::runtime_src::{parse_library_with_rbs, parse_methods_with_rbs};
+use crate::emit::typescript::{emit_expr_for_runtime, emit_library_class, emit_module};
+use crate::runtime_src::{
+    parse_library_with_rbs, parse_methods_with_rbs, parse_module_constant_exprs,
+};
 use std::path::PathBuf;
 
 /// Strategy: each entry picks one of two pipelines.
@@ -164,14 +166,11 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         out_path: "src/action_controller_base.ts",
         mode: Mode::Library,
         imports: &[("Parameters", "./parameters.js")],
-        // Module-scope `STATUS_CODES = {...}.freeze` from base.rb.
-        // Hand-mirrored until the lowerer learns module constants.
-        prelude: "const STATUS_CODES: Record<string, number> = {\n\
-        \x20 ok: 200, created: 201, accepted: 202, no_content: 204,\n\
-        \x20 moved_permanently: 301, found: 302, see_other: 303, not_modified: 304,\n\
-        \x20 bad_request: 400, unauthorized: 401, forbidden: 403, not_found: 404,\n\
-        \x20 unprocessable_entity: 422, internal_server_error: 500,\n\
-        };\n\n",
+        // Module-scope `STATUS_CODES` is now picked up by
+        // `parse_module_constant_exprs` and emitted as a
+        // top-level `const STATUS_CODES = ...;` automatically;
+        // no hand-written prelude needed.
+        prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
@@ -200,6 +199,23 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // these roots `Router.match` would drop and `src/router.ts`
         // would emit empty.
         extra_roots: &[("Router", "match")],
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "ActionView",
+        out_path: "src/view_helpers.ts",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        // Roots for the hand-written server.ts that calls into
+        // ViewHelpers directly. Suffix-renames apply (`reset_slots!`
+        // → `reset_slots_bang`).
+        extra_roots: &[
+            ("ViewHelpers", "reset_slots!"),
+            ("ViewHelpers", "set_yield"),
+        ],
     },
 ];
 
@@ -239,7 +255,25 @@ where
                 entry.rb_path,
             )?;
             let classes = transform(entry.out_path, classes);
+            // Module-level constants (`HTML_ESCAPES = { ... }.freeze`
+            // in `view_helpers.rb`, etc.) emit as top-level
+            // `const NAME = ...;` declarations BEFORE class bodies,
+            // so methods that reference them resolve. Same source
+            // walked by `parse_module_constants` for typing — these
+            // two views need to stay in sync.
+            let constants = parse_module_constant_exprs(entry.rb_src)
+                .unwrap_or_default();
             let mut body = String::new();
+            for (name, value) in &constants {
+                body.push_str(&format!(
+                    "const {} = {};\n",
+                    name.as_str(),
+                    emit_expr_for_runtime(value),
+                ));
+            }
+            if !constants.is_empty() {
+                body.push('\n');
+            }
             for (i, c) in classes.iter().enumerate() {
                 if i > 0 {
                     body.push('\n');

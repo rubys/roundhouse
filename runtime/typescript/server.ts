@@ -26,7 +26,7 @@ import Database from "better-sqlite3";
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
-import * as Helpers from "./view_helpers.js";
+import { ViewHelpers } from "./view_helpers.js";
 
 // ── Action Cable server ────────────────────────────────────────
 
@@ -147,7 +147,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // Reset per-request render state (yield body, content_for
   // slots) so nothing leaks across requests.
-  Helpers.resetRenderState();
+  ViewHelpers.reset_slots_bang();
 
   let response: ActionResponse;
   try {
@@ -193,7 +193,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // The slot-store `setYield` is still populated for layouts that
     // also need `<% yield :head %>` / `<% yield :alt %>` style
     // named-yield reads.
-    Helpers.setYield(response.body ?? "");
+    ViewHelpers.set_yield(response.body ?? "");
     res.end(layoutRenderer(response.body ?? ""));
   } else {
     res.end(renderLayout(response.body ?? ""));

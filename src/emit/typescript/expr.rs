@@ -26,7 +26,79 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         .collect();
     let mut declared: std::collections::HashSet<crate::ident::Symbol> =
         std::collections::HashSet::new();
-    emit_body_with_state(body, return_ty, &reassigned, &mut declared)
+    // Names whose first assignment lives inside a nested block (an
+    // `if`/`else` arm, a `case` branch, …) need a hoisted `let`
+    // declaration at the function-body level — TS `let` is block-
+    // scoped, so a `let x = ...` inside the if-arm doesn't reach
+    // sibling statements. Without hoisting, Ruby idioms like
+    //   if cond
+    //     x = "..."
+    //     return x
+    //   end
+    //   x = "..."   # second assignment, outside the if
+    // emit a TS file that references `x` outside of any visible
+    // declaration. Always-hoist would lose the readable
+    // `let x = init;` form for top-level-first reassignments;
+    // restrict to vars whose top-level assignment count is strictly
+    // less than their total count — i.e., at least one assignment
+    // lives in a nested branch.
+    let mut top_level_counts: std::collections::HashMap<crate::ident::Symbol, usize> =
+        std::collections::HashMap::new();
+    count_top_level_var_assignments(body, &mut top_level_counts);
+    let mut hoisted: Vec<crate::ident::Symbol> = reassigned
+        .iter()
+        .filter(|name| {
+            let total = count_var_for(body, name);
+            let top = top_level_counts.get(*name).copied().unwrap_or(0);
+            top < total
+        })
+        .cloned()
+        .collect();
+    hoisted.sort();
+    let mut hoist_decls = String::new();
+    for name in &hoisted {
+        let escaped = escape_reserved_word(name.as_str());
+        hoist_decls.push_str(&format!("let {escaped}: any;\n"));
+        declared.insert(name.clone());
+    }
+    let body_s = emit_body_with_state(body, return_ty, &reassigned, &mut declared);
+    if hoist_decls.is_empty() {
+        body_s
+    } else {
+        format!("{hoist_decls}{body_s}")
+    }
+}
+
+/// Count Var-assignment occurrences only at the top level of a
+/// function body's `Seq` — siblings of the body's outermost
+/// statement list. Nested branches (if-arms, case bodies) are NOT
+/// counted; this lets the hoist-detection logic identify vars whose
+/// reassignment splits across scopes.
+fn count_top_level_var_assignments(
+    body: &Expr,
+    out: &mut std::collections::HashMap<crate::ident::Symbol, usize>,
+) {
+    match &*body.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
+                    *out.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            *out.entry(name.clone()).or_insert(0) += 1;
+        }
+        _ => {}
+    }
+}
+
+/// Total count of Var-assignments to `name` in `body` (recursive).
+fn count_var_for(body: &Expr, name: &crate::ident::Symbol) -> usize {
+    let mut all: std::collections::HashMap<crate::ident::Symbol, usize> =
+        std::collections::HashMap::new();
+    count_var_assignments(body, &mut all);
+    all.get(name).copied().unwrap_or(0)
 }
 
 fn emit_body_with_state(
@@ -1103,6 +1175,38 @@ pub(super) fn emit_send_with_parens(
             }
         }
     }
+    // Ruby stdlib `JSON.generate(x)` → JS `JSON.stringify(x)`. Same
+    // semantics for the framework runtime's use cases (no
+    // pretty-print options, no symbol-key handling). The companion
+    // `JSON.parse` is identical in both languages — passes through
+    // the generic Const-recv dispatch.
+    if method == "generate" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.len() == 1 && path[0].as_str() == "JSON" {
+                    return format!("JSON.stringify({})", args_s[0]);
+                }
+            }
+        }
+    }
+    // Ruby stdlib `Base64.strict_encode64(x)` → Node
+    // `Buffer.from(x).toString("base64")`. `strict_encode64` differs
+    // from `encode64` only in not inserting newlines; `Buffer`'s
+    // base64 is already strict-shaped. The browser-side `btoa`
+    // alternative would be ASCII-only — `Buffer.from` handles
+    // arbitrary bytes correctly, matching Ruby's Base64 behavior.
+    if method == "strict_encode64" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.len() == 1 && path[0].as_str() == "Base64" {
+                    return format!(
+                        "Buffer.from({}).toString(\"base64\")",
+                        args_s[0],
+                    );
+                }
+            }
+        }
+    }
     // `<date>.utc` → no-op chained access; Date already represents
     // an absolute UTC instant. `.utc` returns `Date` itself.
     if method == "utc" && args.is_empty() && recv.is_some() {
@@ -1161,7 +1265,14 @@ pub(super) fn emit_send_with_parens(
             "Integer" => format!("Number.isInteger({recv_s})"),
             "Float" => format!("typeof {recv_s} === \"number\" && !Number.isInteger({recv_s})"),
             "Numeric" => format!("typeof {recv_s} === \"number\""),
-            "Symbol" => format!("typeof {recv_s} === \"symbol\""),
+            // Ruby Symbol values render as TS strings (Lit::Sym
+            // emits as a quoted string), so `is_a?(Symbol)` maps to
+            // the same `typeof === "string"` check `is_a?(String)`
+            // produces. Without the redirect, `typeof === "symbol"`
+            // narrows TS's static type to `symbol`, which then
+            // triggers TS2731 ("implicit Symbol-to-string coercion")
+            // on subsequent template-literal interpolations.
+            "Symbol" => format!("typeof {recv_s} === \"string\""),
             "Array" => format!("Array.isArray({recv_s})"),
             "TrueClass" | "FalseClass" => format!("typeof {recv_s} === \"boolean\""),
             // Ruby's `Hash` is a plain object in JS — no constructor
@@ -1326,6 +1437,16 @@ pub(super) fn emit_send_with_parens(
                 "sort" if args.is_empty() => {
                     return format!("[...{}].sort()", emit_expr(r));
                 }
+                // Ruby's `Array#join` with no args uses `$,` as the
+                // separator (defaults to nil → "").  JS's
+                // `Array.prototype.join()` defaults to "," — wrong
+                // semantics. Always pass an explicit separator.
+                "join" if args.is_empty() => {
+                    return format!("{}.join(\"\")", emit_expr(r));
+                }
+                "join" if args.len() == 1 => {
+                    return format!("{}.join({})", emit_expr(r), args_s[0]);
+                }
                 _ => {}
             },
             // String receiver: predicate forms parallel Array's; the
@@ -1370,6 +1491,82 @@ pub(super) fn emit_send_with_parens(
                 }
                 "include?" if args.len() == 1 => {
                     return format!("{}.includes({})", emit_expr(r), args_s[0]);
+                }
+                // `s.sub(pat, repl)` → `s.replace(pat, repl)` (first
+                // match only — JS replace's default semantics match
+                // Ruby sub).
+                "sub" if args.len() == 2 => {
+                    return format!(
+                        "{}.replace({}, {})",
+                        emit_expr(r),
+                        args_s[0],
+                        args_s[1],
+                    );
+                }
+                // `s.gsub(pat, repl)` → `s.replace(pat_with_g, repl)`.
+                // Ruby gsub replaces every match; JS replace defaults
+                // to first only — the regex needs a `g` flag. Patch
+                // it inline when the pattern is a regex literal;
+                // otherwise wrap with a runtime g-flag enforcer.
+                // Hash replacements (`s.gsub(re, MAP)`) wrap in a
+                // lookup callback `m => MAP[m]`.
+                "gsub" if args.len() == 2 => {
+                    let pat_s = if let ExprNode::Lit {
+                        value: Literal::Regex { pattern, flags },
+                    } = &*args[0].node
+                    {
+                        let new_flags = if flags.contains('g') {
+                            flags.clone()
+                        } else {
+                            format!("{flags}g")
+                        };
+                        format!("/{pattern}/{new_flags}")
+                    } else {
+                        // Runtime check — covers Const refs to
+                        // regex constants (`HTML_ESCAPE_PATTERN`)
+                        // whose type isn't visible at emit time.
+                        let raw = &args_s[0];
+                        format!(
+                            "{raw} instanceof RegExp && !{raw}.flags.includes(\"g\") ? new RegExp({raw}.source, {raw}.flags + \"g\") : {raw}",
+                        )
+                    };
+                    let repl_s = if matches!(args[1].ty.as_ref(), Some(Ty::Hash { .. })) {
+                        format!("(__m: string) => ({})[__m]", args_s[1])
+                    } else {
+                        args_s[1].clone()
+                    };
+                    return format!("{}.replace({pat_s}, {repl_s})", emit_expr(r));
+                }
+                // `s.tr(from, to)` — character translation. Limited
+                // to single-char from/to (covers framework Ruby's
+                // `inner_k.to_s.tr("_", "-")` shape). Multi-char
+                // and ranges aren't yet supported; the call falls
+                // through to the generic dispatch (and tsc errors)
+                // so the gap surfaces instead of silently miscompiling.
+                "tr" if args.len() == 2 => {
+                    if let (
+                        ExprNode::Lit { value: Literal::Str { value: from } },
+                        ExprNode::Lit { value: Literal::Str { value: to } },
+                    ) = (&*args[0].node, &*args[1].node)
+                    {
+                        if from.chars().count() == 1 && to.chars().count() == 1 {
+                            // Escape the `from` char for use inside a
+                            // regex character class.
+                            let c = from.chars().next().unwrap();
+                            let escaped = match c {
+                                '\\' | '/' | '^' | '$' | '.' | '|' | '?'
+                                | '*' | '+' | '(' | ')' | '[' | ']' | '{'
+                                | '}' => format!("\\{c}"),
+                                _ => c.to_string(),
+                            };
+                            return format!(
+                                "{}.replace(/{}/g, {:?})",
+                                emit_expr(r),
+                                escaped,
+                                to,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             },

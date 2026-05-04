@@ -47,6 +47,75 @@ pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<
     Ok(out)
 }
 
+/// Parallel to `parse_module_constants` but returns each constant as
+/// an ingested `Expr` (the ingest of its RHS, with `.freeze` peeled).
+/// runtime_loader uses this to emit the constants as top-level
+/// `const NAME = ...;` declarations in the transpiled file. The
+/// types come from `parse_module_constants`; the values come from
+/// here.
+pub fn parse_module_constant_exprs(
+    source: &str,
+) -> Result<Vec<(Symbol, Expr)>, String> {
+    let result = parse(source.as_bytes());
+    let mut out: Vec<(Symbol, Expr)> = Vec::new();
+    if result.errors().count() > 0 {
+        return Ok(out);
+    }
+    let root = result.node();
+    walk_constant_exprs(&root, &mut out);
+    Ok(out)
+}
+
+fn walk_constant_exprs(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+    if let Some(program) = node.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            collect_constant_expr_from_stmt(&stmt, out);
+        }
+    } else if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_constant_expr_from_stmt(&stmt, out);
+        }
+    }
+}
+
+fn collect_constant_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+    if let Some(module) = node.as_module_node() {
+        if let Some(body) = module.body() {
+            walk_constant_exprs(&body, out);
+        }
+        return;
+    }
+    if let Some(class) = node.as_class_node() {
+        if let Some(body) = class.body() {
+            walk_constant_exprs(&body, out);
+        }
+        return;
+    }
+    if let Some(write) = node.as_constant_write_node() {
+        let name_bytes = write.name().as_slice();
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
+        let value = write.value();
+        // Strip `.freeze` so the emitted TS gets the underlying
+        // hash/array/regex literal — TS has no freeze concept and
+        // the runtime distinction is not load-bearing for the
+        // framework Ruby's call sites.
+        let inner = match value.as_call_node() {
+            Some(call)
+                if std::str::from_utf8(call.name().as_slice()).ok() == Some("freeze") =>
+            {
+                match call.receiver() {
+                    Some(r) => r,
+                    None => value,
+                }
+            }
+            _ => value,
+        };
+        if let Ok(expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+            out.push((Symbol::new(name_str), expr));
+        }
+    }
+}
+
 fn walk_constants(node: &Node<'_>, out: &mut std::collections::HashMap<Symbol, Ty>) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {

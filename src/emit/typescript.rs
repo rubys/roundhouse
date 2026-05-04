@@ -45,10 +45,6 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         include_str!("../../runtime/typescript/broadcasts.ts"),
     ),
     ("src/server.ts", include_str!("../../runtime/typescript/server.ts")),
-    (
-        "src/view_helpers.ts",
-        include_str!("../../runtime/typescript/view_helpers.ts"),
-    ),
 ];
 
 mod expr;
@@ -58,6 +54,15 @@ mod package;
 mod ty;
 
 pub use ty::{ts_return_ty, ts_ty};
+
+/// Public re-export so `runtime_loader` can render module-level
+/// constant values (`HTML_ESCAPES = { ... }.freeze` from
+/// `view_helpers.rb`) as top-level `const NAME = ...;` declarations
+/// in the transpiled output. The constant body uses the same
+/// expression emitter every method body does.
+pub fn emit_expr_for_runtime(e: &crate::expr::Expr) -> String {
+    expr::emit_expr(e)
+}
 
 /// Emit a TypeScript project for `app`. Every artifact (models,
 /// views, controllers, fixtures, tests, schema) flows through the
@@ -803,6 +808,101 @@ fn emit_constructor_body(
     expr::emit_body(&reordered, return_ty)
 }
 
+/// Walk an expression tree looking for `ExprNode::Yield`. Used to
+/// detect methods that need a `__block` parameter injected — Ruby's
+/// implicit-block yield translates to `__block(args)` in the emit,
+/// so the method signature must declare the parameter for tsc to
+/// resolve the name.
+fn body_contains_yield(body: &crate::expr::Expr) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    match &*body.node {
+        ExprNode::Yield { .. } => true,
+        ExprNode::Seq { exprs } => exprs.iter().any(body_contains_yield),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            body_contains_yield(cond)
+                || body_contains_yield(then_branch)
+                || body_contains_yield(else_branch)
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            body_contains_yield(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(body_contains_yield)
+                        || body_contains_yield(&a.body)
+                })
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            recv.as_ref().is_some_and(body_contains_yield)
+                || args.iter().any(body_contains_yield)
+                || block.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Apply { fun, args, block } => {
+            body_contains_yield(fun)
+                || args.iter().any(body_contains_yield)
+                || block.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Lambda { body: lb, .. } => body_contains_yield(lb),
+        ExprNode::Assign { target, value } => {
+            (match target {
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
+                    body_contains_yield(recv)
+                }
+                _ => false,
+            }) || body_contains_yield(value)
+        }
+        ExprNode::Return { value } => body_contains_yield(value),
+        ExprNode::Raise { value } => body_contains_yield(value),
+        ExprNode::Next { value } => value.as_ref().is_some_and(body_contains_yield),
+        ExprNode::Super { args } => args
+            .as_ref()
+            .is_some_and(|v| v.iter().any(body_contains_yield)),
+        ExprNode::BoolOp { left, right, .. } => {
+            body_contains_yield(left) || body_contains_yield(right)
+        }
+        ExprNode::While { cond, body: wb, .. } => {
+            body_contains_yield(cond) || body_contains_yield(wb)
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            body_contains_yield(expr) || body_contains_yield(fallback)
+        }
+        ExprNode::BeginRescue {
+            body: inner,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            body_contains_yield(inner)
+                || rescues.iter().any(|r| body_contains_yield(&r.body))
+                || else_branch.as_ref().is_some_and(body_contains_yield)
+                || ensure.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Range { begin, end, .. } => {
+            begin.as_ref().is_some_and(body_contains_yield)
+                || end.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::MultiAssign { value, .. } => body_contains_yield(value),
+        ExprNode::StringInterp { parts } => {
+            parts.iter().any(|p| match p {
+                crate::expr::InterpPart::Expr { expr } => body_contains_yield(expr),
+                crate::expr::InterpPart::Text { .. } => false,
+            })
+        }
+        ExprNode::Array { elements, .. } => elements.iter().any(body_contains_yield),
+        ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| body_contains_yield(k) || body_contains_yield(v)),
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => false,
+        // Catch-all for any new ExprNode variants — be conservative
+        // and assume "no yield" so the function still compiles. New
+        // nodes that wrap sub-expressions should add their own arm.
+        _ => false,
+    }
+}
+
 /// Emit one `MethodDef` as a class member (instance method, static,
 /// or constructor). Uses signature when present (typed params + ret);
 /// falls back to body.ty for return and `any` for params when not
@@ -900,6 +1000,7 @@ fn emit_class_member(
             ));
         }
     }
+    let body_uses_yield = body_contains_yield(&m.body);
     if !kwarg_pieces.is_empty() {
         // Each kwarg name appears in two slots: the destructuring
         // pattern (must be a valid binding) and the type annotation
@@ -944,6 +1045,17 @@ fn emit_class_member(
             typed.join(", "),
             default_clause,
         ));
+    }
+    // Inject a `__block: (...args: any[]) => any` parameter when the
+    // method body uses `yield`. The yield-emit code in expr.rs
+    // produces `__block(args)`; without a corresponding parameter
+    // declaration, tsc errors with "Cannot find name '__block'".
+    // Block-aware call sites (`emit_send_with_block`) pass the block
+    // as the trailing positional arg, so the wire-up works once
+    // both ends agree on the param name. Goes LAST in the param
+    // list — Ruby blocks always trail positional + keyword args.
+    if body_uses_yield {
+        param_slots.push("__block: (...args: any[]) => any".to_string());
     }
     let param_list = param_slots;
 
