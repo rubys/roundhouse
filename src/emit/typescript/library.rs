@@ -1300,12 +1300,17 @@ fn rewrite_free(e: &Expr) -> Expr {
 }
 
 /// Bare-Send method names that the emitter handles as Kernel-level
-/// (`raise` → `throw`, `puts`/`print`/`p`/`pp` → `console.log`).
-/// These keep `recv: None` through the rewrite so the
+/// (`raise` → `throw`, `puts`/`print`/`p`/`pp` → `console.log`,
+/// `require`/`require_relative`/`load`/`autoload` → drop). These
+/// keep `recv: None` through the rewrite so the
 /// `emit_send_with_parens` special-cases fire instead of producing a
 /// stray `this.method(...)`.
 fn is_kernel_call(method: &str) -> bool {
-    matches!(method, "raise" | "puts" | "print" | "p" | "pp")
+    matches!(
+        method,
+        "raise" | "puts" | "print" | "p" | "pp"
+            | "require" | "require_relative" | "load" | "autoload",
+    )
 }
 
 fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {

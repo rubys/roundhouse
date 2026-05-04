@@ -358,13 +358,27 @@ pub(super) fn emit_stmt_with_state(
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
+            // Buffer-accumulate idiom only applies to a String-typed
+            // local variable (the synthesized view `io` buffer or
+            // similar). Arrays go through `emit_expr` so the
+            // type-aware `<<` dispatch produces `.push(...)`. When
+            // the recv has no type (Untyped), fall back to `+=` to
+            // preserve the prior behavior on view bodies that
+            // synthesize a buffer without explicit init.
             if let ExprNode::Var { name, .. } = &*recv.node {
-                let val_s = emit_expr(&args[0]);
-                return format!("{} += {val_s};", escape_reserved_word(name.as_str()));
+                let is_string_buf = matches!(
+                    recv.ty,
+                    Some(Ty::Str) | None,
+                );
+                if is_string_buf {
+                    let val_s = emit_expr(&args[0]);
+                    return format!("{} += {val_s};", escape_reserved_word(name.as_str()));
+                }
             }
-            // Receiver isn't a bare local — fall through to the default
-            // arm, which routes through `emit_expr` (and its type-aware
-            // `<<` dispatch for arrays / class-with-add).
+            // Receiver isn't a String-typed bare local — fall through
+            // to the default arm, which routes through `emit_expr`
+            // (and its type-aware `<<` dispatch for arrays /
+            // class-with-add).
             if is_last && !void_return {
                 format!("return {};", emit_expr(e))
             } else {
@@ -987,6 +1001,17 @@ pub(super) fn emit_send_with_parens(
             };
         }
     }
+    if method == "[]" && recv.is_some() && args.len() == 2 {
+        // Ruby's two-arg `str[start, length]` / `arr[start, length]`
+        // — substring/subarray of the given length. TS string and
+        // array both expose `.slice(start, end)` with the same
+        // start-inclusive/end-exclusive semantics, so the rewrite
+        // is `recv.slice(start, start + length)`. Without this, the
+        // generic `recv[a, b]` fallback produces JS `recv[(a, b)]`
+        // (comma operator) — silently wrong.
+        let recv_s = emit_expr(recv.unwrap());
+        return format!("{recv_s}.slice({}, {} + {})", args_s[0], args_s[0], args_s[1]);
+    }
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
@@ -1192,6 +1217,17 @@ pub(super) fn emit_send_with_parens(
     // and avoids a per-variant runtime shim.
     if recv.is_none() && matches!(method, "puts" | "print" | "p" | "pp") {
         return format!("console.log({})", args_s.join(", "));
+    }
+    // Kernel `require` / `require_relative` / `load` / `autoload`
+    // — Ruby's late-bound module loading. TS resolves modules at
+    // import time via ES module syntax (handled separately in the
+    // file header), so call-site `require "base64"` has no
+    // analog and drops to a no-op. Emitting `null` keeps the
+    // statement well-formed; treeshake / minifier elide it.
+    if recv.is_none()
+        && matches!(method, "require" | "require_relative" | "load" | "autoload")
+    {
+        return "null".to_string();
     }
     // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
     // to `cond.!`). Emit TS's prefix `!`. Parenthesize the operand so

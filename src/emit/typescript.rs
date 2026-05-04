@@ -561,14 +561,33 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // from the assignment RHS; falls back to `any` when the analyzer
     // didn't infer one.
     let mut ivar_assignments: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    let mut static_ivar_assignments: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
     for m in &class.methods {
-        if matches!(m.receiver, MethodReceiver::Instance) {
-            collect_ivar_assignments(&m.body, &mut ivar_assignments);
+        match m.receiver {
+            MethodReceiver::Instance => {
+                collect_ivar_assignments(&m.body, &mut ivar_assignments);
+            }
+            MethodReceiver::Class => {
+                // `def self.reset_slots!; @slots = {}; end` —
+                // module-level `@slots` is shared across all class
+                // methods and emits as a `static` field.
+                // module_function-promoted methods land here too,
+                // so framework runtime files like `view_helpers.rb`
+                // (which uses `@slots` from inside `module_function`
+                // methods) get a static field declaration on the
+                // emitted class.
+                collect_ivar_assignments(&m.body, &mut static_ivar_assignments);
+            }
         }
     }
     for (name, ty) in ivar_assignments {
         if field_names_seen.insert(name.clone()) {
             fields.push((name, ts_ty(&ty), false, true));
+        }
+    }
+    for (name, ty) in static_ivar_assignments {
+        if field_names_seen.insert(name.clone()) {
+            fields.push((name, ts_ty(&ty), true, true));
         }
     }
 
