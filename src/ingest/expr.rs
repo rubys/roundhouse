@@ -60,6 +60,10 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let v: i32 = i.value().try_into().unwrap_or(0);
             ExprNode::Lit { value: Literal::Int { value: v as i64 } }
         }
+        n if n.as_float_node().is_some() => {
+            let f = n.as_float_node().unwrap();
+            ExprNode::Lit { value: Literal::Float { value: f.value() } }
+        }
         n if n.as_string_node().is_some() => {
             let s = n.as_string_node().unwrap();
             let bytes = s.unescaped();

@@ -63,7 +63,7 @@ pub fn ingest_library_classes(
     Ok(out)
 }
 
-fn library_class_from_node(
+pub(super) fn library_class_from_node(
     class: &ruby_prism::ClassNode<'_>,
     file: &str,
 ) -> IngestResult<LibraryClass> {
@@ -280,7 +280,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
     }
 }
 
-fn ingest_library_method(
+pub(super) fn ingest_library_method(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
     file: &str,

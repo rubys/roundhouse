@@ -749,6 +749,22 @@ pub struct TestModule {
     /// `None` when the test class has no setup hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<Expr>,
+    /// Classes declared inside the test class body — e.g. the
+    /// framework-test pattern of `class Validatable; include
+    /// ActiveRecord::Validations; end` inside `class ValidationsTest
+    /// < Minitest::Test`. They're scoped to the test file in Ruby;
+    /// the TS emit hoists them to file scope above the test class.
+    /// Empty for the typical Rails app-test (which just calls into
+    /// app/models/ and doesn't redefine classes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inner_classes: Vec<LibraryClass>,
+    /// Non-test, non-setup instance methods on the test class —
+    /// helper methods like `setup_adapter_with_stub_row(id)` that
+    /// the test methods invoke. Captured here so the lowerer can
+    /// emit them as ordinary instance methods on the lowered test
+    /// class. Empty when the file has no helpers (the typical case).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub helpers: Vec<MethodDef>,
 }
 
 /// A single `test "name" do ... end` block. `name` is the literal

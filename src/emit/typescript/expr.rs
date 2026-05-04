@@ -1884,8 +1884,51 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         // the scaffold a string is unambiguous and round-trips through
         // comparison as expected.
         Literal::Sym { value } => format!("{:?}", value.as_str()),
-        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
+        Literal::Regex { pattern, flags } => {
+            // Ruby regex anchors don't have direct JS equivalents:
+            //   `\A` / `\z` / `\Z` — Ruby string-boundary anchors,
+            //                        absolute (don't match before/after \n).
+            //   JS `^` / `$` — line-boundary anchors by default.
+            //
+            // Without translation, `/\A\d{5}\z/` emits literally and JS
+            // treats `\A` / `\z` as escaped letters (matches the
+            // characters A and z), silently breaking every Ruby pattern
+            // that uses them. JS `^` / `$` without the `m` flag are
+            // string-boundary in practice (no `m` → no per-line shift),
+            // matching Ruby `\A` / `\z` for the framework's use cases
+            // (validates_format_of, route param matching, etc.).
+            //
+            // Translate only when neither escaped already. `\\A`
+            // (literal-backslash followed by A) keeps that meaning.
+            // Cheap state machine: walk char-by-char, copy escaped
+            // backslash sequences verbatim, replace bare `\A` / `\z` /
+            // `\Z`. Strict-end `\Z` differs from `\z` only in trailing-
+            // newline handling — close enough to `$` for these targets.
+            let translated = translate_ruby_regex_anchors(pattern);
+            format!("/{translated}/{flags}")
+        }
     }
+}
+
+/// Walk a Ruby regex source, replacing string-boundary anchors with
+/// JS line-boundary anchors. Handles `\\` escapes so a literal
+/// backslash followed by `A`/`z`/`Z` doesn't get clobbered.
+fn translate_ruby_regex_anchors(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('A') => { out.push('^'); chars.next(); }
+                Some('z') | Some('Z') => { out.push('$'); chars.next(); }
+                Some('\\') => { out.push('\\'); out.push('\\'); chars.next(); }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn ts_binop(method: &str) -> Option<&'static str> {

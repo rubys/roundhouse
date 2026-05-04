@@ -151,19 +151,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
 
-    let test_lcs = if app.test_modules.is_empty() {
+    let test_lowered: Vec<crate::lower::LoweredTestModule> = if app.test_modules.is_empty() {
         Vec::new()
     } else {
         let mut test_extras = controller_extras;
         test_extras.extend(library::extras_from_lcs(&controller_lcs));
         test_extras.extend(library::extras_from_lcs(&fixture_lcs));
-        crate::lower::lower_test_modules_to_library_classes(
+        crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,
             &app.models,
             test_extras,
         )
     };
+    let test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
+        .iter()
+        .map(|m| m.test_class.clone())
+        .collect();
+    // Inner classes are file-scoped to their owning test class; they
+    // need to be reachable for treeshake (so methods on Validatable
+    // aren't dropped) but get emitted INSIDE each test file rather
+    // than as their own files.
+    let test_inner_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
+        .iter()
+        .flat_map(|m| m.inner_classes.iter().cloned())
+        .collect();
 
     // ── Emit ────────────────────────────────────────────────────────
 
@@ -175,12 +187,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // untyped Sends — keeps the method on every class that defines
     // it, never wrong.
     let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
-        Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len());
+        Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
     all_app_classes.extend(model_lcs.iter().cloned());
     all_app_classes.extend(view_lcs.iter().cloned());
     all_app_classes.extend(controller_lcs.iter().cloned());
     all_app_classes.extend(fixture_lcs.iter().cloned());
     all_app_classes.extend(test_lcs.iter().cloned());
+    all_app_classes.extend(test_inner_lcs.iter().cloned());
 
     // First pass: parse-only to get the runtime classes for
     // reachability. `typescript_units` parses + emits in one step;
@@ -380,10 +393,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             content: MINITEST_RUNTIME_SOURCE.to_string(),
         });
         files.push(emit_test_setup_ts(app, &fixture_lcs));
-        for lc in &test_lcs {
+        for lowered in &test_lowered {
+            let lc = &lowered.test_class;
             let stem = test_file_stem(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("test/{stem}.test.ts"));
-            let mut emitted = library::emit_class_file(lc, app, out_path.clone());
+            // Inner classes (declared inline inside the test class
+            // body in Ruby) hoist to file scope as companions; share
+            // the test file's import header so framework dependencies
+            // (`Validations`, `ActiveRecordBase`, etc.) resolve.
+            let mut emitted = library::emit_class_file_with_companions(
+                lc,
+                app,
+                out_path.clone(),
+                &[],
+                &lowered.inner_classes,
+            );
+
             emitted.content.push('\n');
             // setup.ts runs schema + adapter + routes + fixtures setup
             // at module-load time. node:test loads each `.test.ts`
@@ -1113,14 +1138,25 @@ fn emit_class_member(
         // already escapes via `escape_reserved` when reading the
         // local, so the pattern's `original: escaped` keeps the
         // type annotation untouched while the binding is JS-legal.
+        // Optional kwargs default to `null` in the destructuring
+        // pattern so omitted args produce `null` (matching Ruby's
+        // `nil` default) rather than `undefined`. Without this,
+        // `x.nil?` (which the emit lowers to `x === null`) returns
+        // false for omitted kwargs — a Ruby `if !x.nil? && cond`
+        // would pull in untaken branches with undefined values.
         let names: Vec<String> = kwarg_pieces
             .iter()
-            .map(|(n, _, _)| {
+            .map(|(n, _, opt)| {
                 let escaped = escape_reserved(n);
-                if escaped == *n {
+                let pat = if escaped == *n {
                     n.clone()
                 } else {
                     format!("{n}: {escaped}")
+                };
+                if *opt {
+                    format!("{pat} = null")
+                } else {
+                    pat
                 }
             })
             .collect();
@@ -1174,7 +1210,14 @@ fn emit_class_member(
     };
 
     let body = if is_constructor {
-        emit_constructor_body(&rewritten, &ret_ty, has_parent)
+        // TS constructors implicitly return the constructed instance;
+        // an explicit `return <expr>` on the last statement of a Ruby
+        // `def initialize` would replace `this` with the expression's
+        // value (e.g. `return this.errors = []` → constructor returns
+        // an array, breaking `instanceof` and method dispatch). Emit
+        // body as void so the trailing-statement-becomes-return
+        // transform is suppressed.
+        emit_constructor_body(&rewritten, &Ty::Nil, has_parent)
     } else {
         expr::emit_body(&rewritten, &ret_ty)
     };

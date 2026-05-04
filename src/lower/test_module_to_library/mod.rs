@@ -21,17 +21,48 @@ use crate::naming::{camelize, singularize};
 use crate::span::Span;
 use crate::ty::Ty;
 
+/// One lowered test module: the test class itself plus any classes
+/// that were declared inline inside its body. Inner classes are
+/// scoped to the test file in Ruby; per-target emission keeps them
+/// co-located (e.g. TS hoists them to file scope above the lowered
+/// test class). For test files with no inline classes (the typical
+/// Rails app pattern), `inner_classes` is empty.
+#[derive(Clone, Debug)]
+pub struct LoweredTestModule {
+    pub test_class: LibraryClass,
+    pub inner_classes: Vec<LibraryClass>,
+}
+
 /// Bulk entry. Lower every test module against a shared class
 /// registry (typically the merged map from model + view + controller
 /// lowerings) so test bodies dispatch on real receivers — `@article
 /// .title` resolves to Article's title accessor, `Comment.where(…)`
 /// resolves to the model's class methods.
+///
+/// Backwards-compatible flat-shape entry that drops inner classes;
+/// callers that need them invoke `lower_test_modules_with_inner`.
 pub fn lower_test_modules_to_library_classes(
     test_modules: &[TestModule],
     fixtures: &[Fixture],
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
 ) -> Vec<LibraryClass> {
+    lower_test_modules_with_inner(test_modules, fixtures, models, extras)
+        .into_iter()
+        .map(|m| m.test_class)
+        .collect()
+}
+
+/// Same as `lower_test_modules_to_library_classes` but preserves
+/// inner classes (`class Validatable; ... end` declared inside the
+/// test class body) alongside their owning test class. Used by
+/// targets that hoist them to file scope rather than dropping them.
+pub fn lower_test_modules_with_inner(
+    test_modules: &[TestModule],
+    fixtures: &[Fixture],
+    models: &[Model],
+    extras: Vec<(ClassId, ClassInfo)>,
+) -> Vec<LoweredTestModule> {
     let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
     for (id, info) in extras {
         classes.insert(id, info);
@@ -45,6 +76,39 @@ pub fn lower_test_modules_to_library_classes(
     crate::lower::view_to_library::insert_framework_stubs(&mut classes);
     insert_minitest_test_baseline(&mut classes);
 
+    // Inner classes (e.g. `class Validatable; include
+    // ActiveRecord::Validations; end` inside ValidationsTest) need
+    // to register in the typing registry BEFORE test bodies are
+    // typed so `Validatable.new` resolves. Each inner class also
+    // carries an inferred `new -> Self` constructor so the
+    // typer sees `Validatable.new()` returning a Validatable.
+    let inner_classes_per_module: Vec<Vec<LibraryClass>> = test_modules
+        .iter()
+        .map(|tm| tm.inner_classes.clone())
+        .collect();
+    for inner in inner_classes_per_module.iter().flatten() {
+        let mut info = crate::lower::class_info_from_library_class(inner);
+        // Synthesize `new() -> Self` if the inner class doesn't
+        // explicitly declare one. Ruby's class-level `.new` is
+        // implicit; without registering it the typer leaves
+        // `Validatable.new` Untyped and downstream method dispatch
+        // (`@subject.validates_presence_of(...)`) drops through.
+        let new_sym = Symbol::from("new");
+        if !info.class_methods.contains_key(&new_sym) {
+            info.class_methods.insert(
+                new_sym.clone(),
+                crate::lower::typing::fn_sig(
+                    vec![],
+                    Ty::Class { id: inner.name.clone(), args: Vec::new() },
+                ),
+            );
+            info.class_method_kinds
+                .entry(new_sym)
+                .or_insert(AccessorKind::Method);
+        }
+        classes.insert(inner.name.clone(), info);
+    }
+
     // Fixture helpers — Rails mixes in `<table_name>(name: Sym) ->
     // Class(<Model>)` on every test class. Self-describing: derive
     // from app.fixtures + app.models so the registry knows what
@@ -57,7 +121,7 @@ pub fn lower_test_modules_to_library_classes(
     // sees the rewritten Const-receiver Sends.
     let fixture_names: Vec<crate::ident::Symbol> =
         fixtures.iter().map(|f| f.name.clone()).collect();
-    let mut out: Vec<LibraryClass> = Vec::new();
+    let mut out: Vec<LoweredTestModule> = Vec::new();
     let mut all_lcs: Vec<LibraryClass> = test_modules
         .iter()
         .map(build_library_class)
@@ -115,7 +179,29 @@ pub fn lower_test_modules_to_library_classes(
     }
 
     let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
-    for lc in &mut all_lcs {
+
+    // Type inner-class methods first — they may reference each other
+    // and need their bodies typed for downstream emit. Same shape as
+    // the test-class body typing below; just no fixture-call rewrite
+    // (inner classes are framework-test stand-ins, not Rails models).
+    let mut typed_inner_per_module: Vec<Vec<LibraryClass>> = inner_classes_per_module
+        .into_iter()
+        .map(|inners| {
+            inners
+                .into_iter()
+                .map(|mut inner| {
+                    for method in &mut inner.methods {
+                        crate::lower::typing::type_method_body(
+                            method, &classes, &empty_ivars,
+                        );
+                    }
+                    inner
+                })
+                .collect()
+        })
+        .collect();
+
+    for (idx, lc) in all_lcs.iter_mut().enumerate() {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             // Has-many `.create` / `.build` rewrite needs the parent
@@ -129,7 +215,10 @@ pub fn lower_test_modules_to_library_classes(
             method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
-        out.push(lc.clone());
+        out.push(LoweredTestModule {
+            test_class: lc.clone(),
+            inner_classes: std::mem::take(&mut typed_inner_per_module[idx]),
+        });
     }
     out
 }
@@ -146,11 +235,29 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
     // propagates the type to downstream reads. Self-describing IR —
     // the assignment is materialized at every call site, just like
     // controller before-action filter inlining (ticket 8).
-    let methods: Vec<MethodDef> = tm
+    let mut methods: Vec<MethodDef> = tm
         .tests
         .iter()
         .map(|t| test_to_method_def(&tm.name, t, tm.setup.as_ref()))
         .collect();
+    // Helpers (non-test, non-setup `def` items in the test class
+    // body — e.g. `setup_adapter_with_stub_row`) lower as ordinary
+    // instance methods on the test class so test bodies can dispatch
+    // on them via `self.<helper>(...)`. Default-typed to nil return
+    // when the ingest pipeline didn't attach a signature.
+    for h in &tm.helpers {
+        let mut m = h.clone();
+        if m.signature.is_none() {
+            let param_pairs: Vec<(Symbol, Ty)> = m
+                .params
+                .iter()
+                .map(|p| (p.name.clone(), Ty::Untyped))
+                .collect();
+            m.signature = Some(crate::lower::typing::fn_sig(param_pairs, Ty::Nil));
+        }
+        m.enclosing_class = Some(tm.name.0.clone());
+        methods.push(m);
+    }
     LibraryClass {
         name: tm.name.clone(),
         is_module: false,

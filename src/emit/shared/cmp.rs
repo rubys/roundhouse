@@ -38,8 +38,17 @@ pub fn classify_cmp(lhs: &Expr, rhs: &Expr) -> CmpCase {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
+    // Untyped is the gradual-escape hatch: caller used RBS `untyped`
+    // (or the analyzer couldn't refine the type past it). Treat as
+    // Unknown so the emit falls through to native infix — same
+    // posture as missing type info. Otherwise the catch-all arm
+    // below would mis-flag e.g. `untyped <= Integer` as Incompatible
+    // and the runtime would throw on a perfectly valid comparison.
     let is_unknown = |t: Option<&Ty>| {
-        matches!(t, None | Some(Ty::Var { .. }))
+        matches!(
+            t,
+            None | Some(Ty::Var { .. }) | Some(Ty::Untyped),
+        )
     };
     if is_unknown(lhs_ty) || is_unknown(rhs_ty) {
         return CmpCase::Unknown;

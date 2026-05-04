@@ -71,6 +71,30 @@ export class Test {
     assert.notStrictEqual(value, undefined, msg);
   }
 
+  assert_empty(collection: any, msg?: string): void {
+    if (Array.isArray(collection) || typeof collection === "string") {
+      assert.strictEqual(collection.length, 0, msg);
+    } else if (collection && typeof collection.size === "number") {
+      assert.strictEqual(collection.size, 0, msg);
+    } else if (collection && typeof collection === "object") {
+      assert.strictEqual(Object.keys(collection).length, 0, msg);
+    } else {
+      assert.fail(`assert_empty: unsupported collection type for ${collection}`);
+    }
+  }
+
+  assert_not_empty(collection: any, msg?: string): void {
+    if (Array.isArray(collection) || typeof collection === "string") {
+      assert.notStrictEqual(collection.length, 0, msg);
+    } else if (collection && typeof collection.size === "number") {
+      assert.notStrictEqual(collection.size, 0, msg);
+    } else if (collection && typeof collection === "object") {
+      assert.notStrictEqual(Object.keys(collection).length, 0, msg);
+    } else {
+      assert.fail(`assert_not_empty: unsupported collection type for ${collection}`);
+    }
+  }
+
   assert_includes(collection: any, item: any, msg?: string): void {
     if (Array.isArray(collection) || typeof collection === "string") {
       assert.ok(collection.includes(item), msg);

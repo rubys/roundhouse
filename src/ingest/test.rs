@@ -6,12 +6,13 @@
 
 use ruby_prism::{Node, parse};
 
-use crate::dialect::{Test, TestModule};
+use crate::dialect::{MethodDef, Test, TestModule};
 use crate::expr::{Expr, ExprNode};
 use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
+use super::library_class::{ingest_library_method, library_class_from_node};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_first_class, flatten_statements,
 };
@@ -47,6 +48,8 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 
     let mut tests: Vec<Test> = Vec::new();
     let mut setup: Option<Expr> = None;
+    let mut inner_classes: Vec<crate::dialect::LibraryClass> = Vec::new();
+    let mut helpers: Vec<MethodDef> = Vec::new();
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
@@ -73,11 +76,39 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
                         Expr::new(Span::synthetic(), ExprNode::Seq { exprs: all })
                     }
                 });
+                continue;
+            }
+            // Inline class declaration inside the test class —
+            // `class Validatable; include ActiveRecord::Validations;
+            // ...; end`. Captured per-test-module so the emit can
+            // hoist them to file scope above the lowered test class.
+            if let Some(inner) = stmt.as_class_node() {
+                let lc = library_class_from_node(&inner, file)?;
+                inner_classes.push(lc);
+                continue;
+            }
+            // Non-test, non-setup `def` — instance helper method
+            // (e.g. `setup_adapter_with_stub_row(id)`). Capture as
+            // an ordinary method on the test class so test bodies
+            // can `self.<helper>(...)` it. Definitions of `def
+            // setup` and `def test_*` already short-circuited above.
+            if let Some(def) = stmt.as_def_node() {
+                let m = ingest_library_method(&def, &name, file)?;
+                helpers.push(m);
+                continue;
             }
         }
     }
 
-    Ok(Some(TestModule { name, parent, target, tests, setup }))
+    Ok(Some(TestModule {
+        name,
+        parent,
+        target,
+        tests,
+        setup,
+        inner_classes,
+        helpers,
+    }))
 }
 
 /// Recognize `setup do ... end` (Call with method=setup, block body)
@@ -121,14 +152,42 @@ fn ingest_setup_declaration(
     Ok(None)
 }
 
-/// Recognize a single `test "name" do ... end` call. Returns `None` for
-/// any other statement shape (intentional — we silently drop unrecognized
-/// body items rather than error; they'll surface when the test tries to
-/// reference something that isn't emitted).
+/// Recognize a single test declaration. Two shapes are supported:
+///
+///   `test "name" do ... end`  — Rails AS::TestCase DSL. Test name is the
+///                                string argument verbatim.
+///   `def test_*; ...; end`    — vanilla Minitest. Test name is the
+///                                method name with the `test_` prefix
+///                                stripped and underscores replaced with
+///                                spaces (mirrors how Minitest reports
+///                                them; keeps the two shapes
+///                                indistinguishable downstream).
+///
+/// Returns `None` for any other statement shape (intentional — we
+/// silently drop unrecognized body items rather than error; they'll
+/// surface when the test tries to reference something that isn't
+/// emitted).
 fn ingest_test_declaration(
     stmt: &Node<'_>,
     file: &str,
 ) -> IngestResult<Option<Test>> {
+    // `def test_*; ...; end` form (vanilla Minitest).
+    if let Some(def) = stmt.as_def_node() {
+        let name_bytes = def.name().as_slice();
+        let Some(method_name) = std::str::from_utf8(name_bytes).ok() else {
+            return Ok(None);
+        };
+        let Some(stem) = method_name.strip_prefix("test_") else {
+            return Ok(None);
+        };
+        let name = stem.replace('_', " ");
+        let body = match def.body() {
+            Some(body_node) => ingest_expr(&body_node, file)?,
+            None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+        };
+        return Ok(Some(Test { name, body }));
+    }
+
     let Some(call) = stmt.as_call_node() else {
         return Ok(None);
     };

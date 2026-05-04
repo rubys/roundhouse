@@ -96,7 +96,7 @@ export interface ActiveRecordAdapter {
   all(table: string): Row[];
   where(table: string, conditions: Conditions): Row[];
   count(table: string): number;
-  exists(table: string, id: number): boolean;
+  is_exists(table: string, id: number): boolean;
   // Write
   insert(table: string, row: Row): number;
   update(table: string, id: number, row: Row): boolean;
@@ -171,10 +171,125 @@ export class InMemoryActiveRecordAdapter implements ActiveRecordAdapter {
     return this.tables.get(table)?.size ?? 0;
   }
 
-  exists(table: string, id: number): boolean {
+  is_exists(table: string, id: number): boolean {
     return this.tables.get(table)?.has(id) ?? false;
   }
 }
+
+/** Test-only adapter mirroring `runtime/ruby/test/test_helper.rb`'s
+ *  `FrameworkTestAdapter` Ruby module. Framework-level tests
+ *  under `runtime/ruby/test/` reference it directly:
+ *
+ *    ActiveRecord.adapter = FrameworkTestAdapter
+ *    FrameworkTestAdapter.reset_all!
+ *    FrameworkTestAdapter.create_table("stubs", columns: [:id])
+ *    FrameworkTestAdapter.insert("stubs", id: 7)
+ *
+ *  After Ruby's `?`/`!` suffix rename, those lower to
+ *  `FrameworkTestAdapter.reset_all_bang()` / `is_exists(...)` etc.
+ *
+ *  Differs from `InMemoryActiveRecordAdapter` in two surface ways:
+ *  (1) `create_table` takes a kwargs-shaped `{ columns, foreign_keys }`
+ *      object instead of positional args; and
+ *  (2) `insert` honors an explicit `id` in attrs (the framework
+ *      tests pre-assign ids: `insert("stubs", id: 7)`), where the
+ *      production InMemory adapter always synthesizes a fresh id.
+ *
+ *  Implemented as a singleton (the Ruby module is module_function-
+ *  style; assignment to `ActiveRecord.adapter` expects a value, not
+ *  a constructor invocation).
+ */
+export const FrameworkTestAdapter = (() => {
+  let tables: Map<string, Map<number, Row>> = new Map();
+  let nextId: Map<string, number> = new Map();
+  let schemas: Map<string, AdapterSchema> = new Map();
+
+  return {
+    reset_all_bang(): void {
+      tables = new Map();
+      nextId = new Map();
+      schemas = new Map();
+    },
+
+    create_table(
+      name: string,
+      opts: { columns: string[]; foreign_keys?: ForeignKey[] },
+    ): void {
+      tables.set(name, new Map());
+      nextId.set(name, 0);
+      schemas.set(name, {
+        columns: opts.columns,
+        foreign_keys: opts.foreign_keys ?? [],
+      });
+    },
+
+    drop_table(name: string): void {
+      tables.delete(name);
+      nextId.delete(name);
+      schemas.delete(name);
+    },
+
+    schema(table: string): AdapterSchema | null {
+      return schemas.get(table) ?? null;
+    },
+
+    find(table: string, id: number): Row | null {
+      return tables.get(table)?.get(id) ?? null;
+    },
+
+    all(table: string): Row[] {
+      const t = tables.get(table);
+      return t ? Array.from(t.values()) : [];
+    },
+
+    where(table: string, conditions: Conditions): Row[] {
+      const entries = Object.entries(conditions);
+      return this.all(table).filter((row) =>
+        entries.every(([k, v]) => row[k] === v),
+      );
+    },
+
+    count(table: string): number {
+      return tables.get(table)?.size ?? 0;
+    },
+
+    is_exists(table: string, id: number): boolean {
+      return tables.get(table)?.has(id) ?? false;
+    },
+
+    insert(table: string, attrs: Record<string, any>): number {
+      const t = tables.get(table);
+      if (!t) throw new Error(`insert: unknown table ${table}`);
+      // Honor an explicit `id` in attrs (framework tests assign
+      // ids directly: `insert("stubs", id: 7)`); fall through to
+      // synthetic id only when none provided. nextId tracks the
+      // max so a later auto-generated id can't collide.
+      const explicit = attrs.id;
+      const id =
+        explicit !== undefined && explicit !== null && explicit !== 0
+          ? Number(explicit)
+          : (nextId.get(table) ?? 0) + 1;
+      const current = nextId.get(table) ?? 0;
+      nextId.set(table, Math.max(current, id));
+      const stored: Row = { ...(attrs as Row), id };
+      t.set(id, stored);
+      return id;
+    },
+
+    update(table: string, id: number, attrs: Row): boolean {
+      const t = tables.get(table);
+      if (!t || !t.has(id)) return false;
+      t.set(id, { ...attrs, id });
+      return true;
+    },
+
+    delete(table: string, id: number): boolean {
+      const t = tables.get(table);
+      if (!t) return false;
+      return t.delete(id);
+    },
+  };
+})();
 
 /** better-sqlite3-backed adapter — production path. Wraps a
  *  pre-opened Database connection (the server opens it, runs the
@@ -233,7 +348,7 @@ export class SqliteActiveRecordAdapter implements ActiveRecordAdapter {
     return row.c;
   }
 
-  exists(table: string, id: number): boolean {
+  is_exists(table: string, id: number): boolean {
     return this.find(table, id) !== null;
   }
 
