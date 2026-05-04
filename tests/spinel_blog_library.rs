@@ -393,6 +393,14 @@ fn walk_rb_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path)) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Skip the framework's own test tree — those files are
+            // Minitest test cases authored to run under stock Ruby,
+            // not framework library code. They use Ruby constructs
+            // (Float literals, eval-shaped fixtures, etc.) that
+            // ingest_library_classes intentionally doesn't accept.
+            if path.file_name().is_some_and(|n| n == "test") {
+                continue;
+            }
             walk_rb_files(&path, f);
         } else if path.extension().map(|e| e == "rb").unwrap_or(false) {
             f(&path);
