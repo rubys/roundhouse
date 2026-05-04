@@ -24,6 +24,7 @@ require "active_record"
 require "action_view/view_helpers"
 require "action_dispatch/router"
 require "action_controller/parameters"
+require "inflector"
 
 # Tiny in-memory adapter satisfying the 12-method
 # `ActiveRecord::Base` contract. Mirrors the semantics of
