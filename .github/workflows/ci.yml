@@ -131,6 +131,30 @@ jobs:
   #     - name: cargo test --test typescript_toolchain -- --ignored
   #       run: cargo test --test typescript_toolchain -- --ignored --nocapture
 
+  framework-tests-typescript:
+    # Per-target framework-test conformance gate. Transpiles
+    # runtime/ruby/test/**/*_test.rb to TS and runs under tsx.
+    # Independent of the real-blog fixture (each test builds a
+    # minimal in-process App), so this parallelizes freely
+    # against generate-fixture / toolchain-* jobs. Catches
+    # per-target adapter contract drift (e.g., is_exists vs
+    # exists rename, regex anchor translation) before it
+    # cascades into real-blog runtime failures. Sibling of the
+    # disabled toolchain-typescript above; runs on the same
+    # Node setup but a much smaller and faster scope (~12s vs
+    # minutes). See project_framework_test_transpile.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: cargo test --test framework_tests_typescript -- --ignored
+        run: cargo test --test framework_tests_typescript -- --ignored --nocapture
+
   toolchain-go:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -421,6 +445,7 @@ jobs:
       - toolchain-rust
       - toolchain-crystal
       # toolchain-typescript: disabled during TS rewrite
+      - framework-tests-typescript
       - toolchain-go
       - toolchain-elixir
       - toolchain-python
