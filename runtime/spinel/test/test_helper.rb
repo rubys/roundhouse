@@ -74,11 +74,15 @@ module FixtureLoader
   # parent row to exist when the child saves). Topological ordering by
   # belongs_to graph is the principled fix; defer until a fixture set
   # exposes a non-alphabetic dependency.
+  #
+  # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
+  # constants like Ruby 3.4's `SortedSet` (which raises on access via
+  # autoload) don't get touched while scanning for fixture modules.
   def load_all!
     Object.constants.sort.each do |c|
+      next unless c.to_s.end_with?("Fixtures")
       mod = Object.const_get(c)
       next unless mod.is_a?(Module)
-      next unless c.to_s.end_with?("Fixtures")
       next unless mod.respond_to?(:_fixtures_load!)
       mod._fixtures_load!
     end
