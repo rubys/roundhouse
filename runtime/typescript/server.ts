@@ -23,7 +23,9 @@ import { dirname } from "node:path";
 import { URL } from "node:url";
 import Database from "better-sqlite3";
 
-import { Router, setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
+import { Router } from "./router.js";
+import { Parameters } from "./parameters.js";
+import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import * as Helpers from "./view_helpers.js";
 
 // ── Action Cable server ────────────────────────────────────────
@@ -122,7 +124,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
   }
 
-  const match = Router.match(method, url.pathname);
+  const match = Router.match(method, url.pathname, dispatchTable);
   if (!match) {
     res.statusCode = 404;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -130,8 +132,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
+  const ctrlClass = controllerRegistry[match.controller];
+  if (!ctrlClass) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(`No controller registered: ${match.controller}`);
+    return;
+  }
+
   // Merge: path params + query string + form/json body.
-  const merged: Record<string, string> = { ...match.params };
+  const merged: Record<string, any> = { ...match.path_params };
   for (const [k, v] of url.searchParams) merged[k] = v;
   Object.assign(merged, params);
 
@@ -141,10 +151,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   let response: ActionResponse;
   try {
-    response = await match.handler({
-      params: merged,
-      request: { headers: req.headers, method, path: url.pathname },
-    });
+    const controller = new ctrlClass();
+    controller.params = new Parameters(merged);
+    controller.session = sessionStore;
+    controller.flash = flashStore;
+    controller.request_method = method;
+    controller.request_path = url.pathname;
+    await controller.process_action(match.action);
+    // Rails carries flash forward exactly once: the action that
+    // sets `flash[:notice] = ...` then `redirect_to`s, the next
+    // request reads the notice, and a request after that sees an
+    // empty flash. Mirror that with a per-request swap — keep the
+    // current flash if the action set anything, replace with a
+    // fresh hash for the next request.
+    flashStore = controller.flash ?? {};
+    response = {
+      body: controller.body,
+      status: controller.status,
+      location: controller.location,
+    };
   } catch (err) {
     console.error("handler error:", err);
     res.statusCode = 500;
@@ -343,6 +368,31 @@ function openDatabase(dbPath: string, schemaStatements: string[]): void {
 
 // ── Public entry point ─────────────────────────────────────────
 
+/** One row from the emitted `Routes.table()` / `Routes.root()`. The
+ *  routes lowerer emits these as symbol-keyed Ruby hashes whose TS
+ *  rendering is `Record<string, any>` — TS doesn't narrow Record to
+ *  a struct shape, so we mirror that here for type compatibility
+ *  with the lowered output. Reads always go through `route["method"]`
+ *  etc., never struct member access. */
+export type RouteRow = Record<string, any>;
+
+/** Constructable controller shape — bare class. Each emitted
+ *  controller exports its class; `main.ts` builds a
+ *  `{ articles: ArticlesController, ... }` map keyed by the
+ *  controller_symbol form (`ArticlesController` → `articles`)
+ *  the routes table uses. Constructed per-request, fields set
+ *  from path/query/body params, then `process_action(action)`.
+ *
+ *  Typed `any` for the construct return so the emitted controllers'
+ *  declared field types don't fight this contract — controllers
+ *  declare `body: string`, `status: any`, etc. in different
+ *  combinations across the kind-agnostic emit, and TS variance on
+ *  construct signatures is invariant. The runtime expectation is
+ *  documented in the dispatcher: each controller carries `params`,
+ *  `session`, `flash`, `request_method`, `request_path`, `body`,
+ *  `status`, `location` plus `process_action(action)`. */
+export type ControllerClass = new () => any;
+
 export interface StartOptions {
   /** File path for the sqlite DB. Defaults to `./db/development.sqlite3`. */
   dbPath?: string;
@@ -368,7 +418,28 @@ export interface StartOptions {
    *  server falls back to
    *  the minimal `renderLayout` shell below. */
   layout?: (body: string) => string;
+  /** Routes table — `Routes.table()` from the emitted
+   *  `app/routes.ts`. Order is config/routes.rb order. */
+  routes: RouteRow[];
+  /** Optional root route — `Routes.root()` from the emitted
+   *  `app/routes.ts`. Composed at the head of `routes` so a
+   *  GET `/` matches before fallthroughs. */
+  rootRoute?: RouteRow;
+  /** Map from controller-symbol (`articles` for `ArticlesController`)
+   *  to the controller class. Built by `main.ts` from the imported
+   *  controller modules. */
+  controllers: Record<string, ControllerClass>;
 }
+
+// Per-process dispatch table — set by `startServer`. Composed
+// `[rootRoute, ...routes]` so GET `/` matches before fallthroughs.
+let dispatchTable: RouteRow[] = [];
+let controllerRegistry: Record<string, ControllerClass> = {};
+// Persistent session/flash stores. Real Rails session/flash carry
+// per-cookie scoping; this minimal stub is process-global so the
+// scaffold blog's flash-after-redirect works in single-user dev.
+const sessionStore: Record<string, any> = {};
+let flashStore: Record<string, any> = {};
 
 /** Start the server. Returns a promise that resolves once the
  *  HTTP + WebSocket listeners are accepting connections. */
@@ -377,6 +448,8 @@ export async function startServer(opts: StartOptions): Promise<void> {
   const port = opts.port ?? Number(process.env.PORT ?? 3000);
 
   layoutRenderer = opts.layout ?? null;
+  dispatchTable = opts.rootRoute ? [opts.rootRoute, ...opts.routes] : [...opts.routes];
+  controllerRegistry = opts.controllers;
 
   openDatabase(dbPath, opts.schemaStatements);
 

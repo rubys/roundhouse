@@ -10,17 +10,28 @@ module Router
 
   # Match a request against the route table. Returns a hash with
   # :controller, :action, :path_params on success; nil otherwise.
+  #
+  # Index-style loop (not `table.each do |...| ... return ... end`)
+  # so the cross-target lowering doesn't have to model "return from
+  # enclosing method out of an iterator block" — JS `forEach` can't
+  # break out of the surrounding function and the body-walker would
+  # silently strip the early-return.
   def match(method, path, table)
     method_upcase = method.to_s.upcase
-    table.each do |route|
-      next unless route[:method] == method_upcase
-      params = match_pattern(route[:pattern], path)
-      next if params.nil?
-      return {
-        controller: route[:controller],
-        action:     route[:action],
-        path_params: params,
-      }
+    i = 0
+    while i < table.length
+      route = table[i]
+      if route[:method] == method_upcase
+        params = match_pattern(route[:pattern], path)
+        unless params.nil?
+          return {
+            controller: route[:controller],
+            action:     route[:action],
+            path_params: params,
+          }
+        end
+      end
+      i += 1
     end
     nil
   end

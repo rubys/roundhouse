@@ -54,6 +54,14 @@ const NO_IMPORTS: ImportSpec = &[];
 /// recognize.
 const NO_PRELUDE: &str = "";
 
+/// `(class_name, method_name)` pairs that hand-written runtime files
+/// (server.ts, test_support.ts, broadcasts.ts) call into directly.
+/// Tree-shake walks app-side bodies for reachability; calls that
+/// only appear in hand-written runtime code aren't visible to that
+/// walk and would otherwise drop. Listing them here keeps them.
+type ExtraRoots = &'static [(&'static str, &'static str)];
+const NO_EXTRA_ROOTS: ExtraRoots = &[];
+
 /// One entry in the runtime transpile table. Maps a Ruby+RBS pair
 /// to its emit shape (target path, mode, imports, prelude).
 struct RuntimeEntry {
@@ -71,6 +79,10 @@ struct RuntimeEntry {
     mode: Mode,
     imports: ImportSpec,
     prelude: &'static str,
+    /// `(class, method)` pairs that the per-target hand-written
+    /// runtime references but that wouldn't be discovered by the
+    /// reachability walk over app-side bodies.
+    extra_roots: ExtraRoots,
 }
 
 /// One emitted runtime file ready to be written into the target
@@ -88,6 +100,9 @@ pub struct RuntimeUnit {
     /// Enclosing module name (e.g. `"ActiveRecord"`). See
     /// `RuntimeEntry.namespace`.
     pub namespace: &'static str,
+    /// Hand-written runtime call sites, propagated from
+    /// `RuntimeEntry.extra_roots`.
+    pub extra_roots: ExtraRoots,
 }
 
 /// The TypeScript-target transpile table. Each entry corresponds
@@ -103,6 +118,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Module,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
@@ -113,6 +129,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: &[("type Base", "./active_record_base.js")],
         prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
@@ -123,6 +140,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
@@ -136,6 +154,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
             ("RecordNotFound, RecordInvalid", "./errors.js"),
         ],
         prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
@@ -153,6 +172,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         \x20 bad_request: 400, unauthorized: 401, forbidden: 403, not_found: 404,\n\
         \x20 unprocessable_entity: 422, internal_server_error: 500,\n\
         };\n\n",
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_controller/parameters.rb"),
@@ -163,6 +183,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
@@ -173,6 +194,12 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
+        // Hand-written `server.ts` and `test_support.ts` call
+        // `Router.match(method, path, table)` directly. Treeshake's
+        // app-side walk doesn't see those callsites, so without
+        // these roots `Router.match` would drop and `src/router.ts`
+        // would emit empty.
+        extra_roots: &[("Router", "match")],
     },
 ];
 
@@ -245,5 +272,6 @@ where
         classes,
         functions,
         namespace: entry.namespace,
+        extra_roots: entry.extra_roots,
     })
 }

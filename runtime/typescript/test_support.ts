@@ -13,12 +13,32 @@
 // touching only this file; emitted test bodies are insulated via
 // the TestResponse method contracts.
 
-import { Router, type ActionResponse, type ActionContext } from "juntos";
+import { Router } from "./router.js";
+import { Parameters } from "./parameters.js";
+import { type ActionResponse } from "./juntos.js";
+
+/** Test fixtures need to install the dispatch table + controller
+ *  registry before issuing requests. Mirrors `startServer`'s shape;
+ *  test setup calls `installRoutes(Routes.table(), Routes.root(),
+ *  controllers)` once before any TestClient request. */
+type RouteRow = Record<string, any>;
+type ControllerClass = new () => any;
+
+let testDispatchTable: RouteRow[] = [];
+let testControllerRegistry: Record<string, ControllerClass> = {};
+
+export function installRoutes(
+  routes: RouteRow[],
+  rootRoute: RouteRow | undefined,
+  controllers: Record<string, ControllerClass>,
+): void {
+  testDispatchTable = rootRoute ? [rootRoute, ...routes] : [...routes];
+  testControllerRegistry = controllers;
+}
 
 /** Pure-TS test client — dispatches through `Router.match`,
- *  calls the resolved action, wraps the response. No real HTTP,
- *  no tokio-analogue event loop, no socket setup. Fast + leak-free
- *  across tests. */
+ *  instantiates the matched controller, calls `process_action`,
+ *  wraps the response. No real HTTP, no socket setup. */
 export class TestClient {
   async get(path: string): Promise<TestResponse> {
     return this.dispatch("GET", path, {});
@@ -41,15 +61,28 @@ export class TestClient {
     path: string,
     body: Record<string, string>,
   ): Promise<TestResponse> {
-    const match = Router.match(method, path);
+    const match = Router.match(method, path, testDispatchTable);
     if (!match) {
       throw new Error(`no route for ${method} ${path}`);
     }
-    const context: ActionContext = {
-      params: { ...match.params, ...body },
+    const ctrlClass = testControllerRegistry[match.controller];
+    if (!ctrlClass) {
+      throw new Error(`no controller registered for ${match.controller}`);
+    }
+    const merged: Record<string, any> = { ...match.path_params, ...body };
+    const controller = new ctrlClass();
+    controller.params = new Parameters(merged);
+    controller.session = {};
+    controller.flash = {};
+    controller.request_method = method;
+    controller.request_path = path;
+    await controller.process_action(match.action);
+    const response: ActionResponse = {
+      body: controller.body,
+      status: controller.status,
+      location: controller.location,
     };
-    const result = await match.handler(context);
-    return new TestResponse(result);
+    return new TestResponse(response);
   }
 }
 

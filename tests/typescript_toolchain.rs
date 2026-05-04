@@ -154,14 +154,9 @@ fn real_blog_node_test_passes() {
     generate_project(fixture, &scratch);
 
     // Shell invocation so glob expansion picks up every test file —
-    // passing `spec/models` as a directory confuses tsx/node:test when
-    // there's no index entry. tsx registers a module loader so `.ts`
-    // imports resolve at run time.
-    // Install devDependencies first so the locally-installed tsx is
-    // on disk, then run it via a shell for glob expansion — passing
-    // `spec/models` as a directory confuses tsx/node:test when
-    // there's no index entry. tsx registers a module loader so
-    // `.ts` imports resolve at run time.
+    // passing the directory confuses tsx/node:test when there's no
+    // index entry. tsx registers a module loader so `.ts` imports
+    // resolve at run time.
     let install = Command::new("npm")
         .arg("install")
         .arg("--silent")
@@ -182,7 +177,7 @@ fn real_blog_node_test_passes() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg("./node_modules/.bin/tsx --test spec/models/*.test.ts")
+        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
         .current_dir(&scratch)
         .output()
         .expect("run node --test via tsx");

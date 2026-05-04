@@ -59,6 +59,7 @@ impl Reachability {
         app_classes: &[LibraryClass],
         runtime_aliases: &[(ClassId, &LibraryClass)],
         app_functions: &[LibraryFunction],
+        extra_roots: &[(ClassId, Symbol)],
     ) -> Self {
         // Multi-map: simple names like `Base` collide between
         // ActiveRecord::Base and ActionController::Base. The
@@ -133,6 +134,24 @@ impl Reachability {
                         &mut reachable_names,
                     );
                 }
+            }
+        }
+
+        // Hand-written runtime files (server.ts, test_support.ts,
+        // broadcasts.ts) call into the transpiled framework
+        // (`Router.match`, etc.) — those Sends aren't in the app-side
+        // bodies the walker scans, so the methods would otherwise be
+        // dropped. The runtime_loader carries an `extra_roots` list
+        // per file naming the (class, method) pairs its hand-written
+        // siblings reference; we add each one as a root the same way
+        // an app-side `Class.method(...)` Send would.
+        for (cls, method) in extra_roots {
+            let recv_ty = Ty::Class {
+                id: cls.clone(),
+                args: vec![],
+            };
+            for target in resolve_targets(Some(&recv_ty), method, &registry) {
+                record(target, &mut queue, &mut reachable, &mut reachable_names);
             }
         }
 

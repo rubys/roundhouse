@@ -301,20 +301,13 @@ pub fn parse_library_with_rbs(
         crate::ident::ClassId,
         crate::analyze::ClassInfo,
     > = std::collections::HashMap::new();
+    // Use the shared `class_info_from_library_class` helper so kinds
+    // (and the ivar-shadows-method reclassification — `def errors` paired
+    // with `@errors = []` reads as a field, so its dispatch should not
+    // force-parens) match what the model lowerer produces.
     for lc in &library_classes {
-        let mut ci = crate::analyze::ClassInfo::default();
-        for m in &lc.methods {
-            let Some(sig) = &m.signature else { continue };
-            match m.receiver {
-                crate::dialect::MethodReceiver::Class => {
-                    ci.class_methods.insert(m.name.clone(), sig.clone());
-                }
-                crate::dialect::MethodReceiver::Instance => {
-                    ci.instance_methods.insert(m.name.clone(), sig.clone());
-                }
-            }
-        }
-        class_registry.insert(lc.name.clone(), ci);
+        let info = crate::lower::class_info_from_library_class(lc);
+        class_registry.insert(lc.name.clone(), info);
     }
 
     // Step 3: body-type each method. Two-pass ivar typing mirroring the
