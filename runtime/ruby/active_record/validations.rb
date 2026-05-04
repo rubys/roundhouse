@@ -41,7 +41,19 @@ module ActiveRecord
 
     def validates_length_of(attr_name, value, minimum: nil, maximum: nil, is: nil)
       return if value.nil?
-      len = if value.is_a?(String) || value.is_a?(Array)
+      # Single-predicate per branch so the analyzer's narrowing
+      # extract (which recognizes one is_a? per branch, not BoolOp
+      # chains) types each then-arm cleanly: value: Str → Int,
+      # value: Array → Int. Without this shape, `value.length` lands
+      # under the BoolOp's untyped `value`, returns Untyped, joins
+      # with `0` (Int) into Union<Untyped, Int>, and the downstream
+      # `len < minimum` comparison trips a false-positive
+      # incompatible-operand diagnostic. The elsif spelling is also
+      # plain better Ruby — each branch is unambiguous about which
+      # shape it's handling.
+      len = if value.is_a?(String)
+              value.length
+            elsif value.is_a?(Array)
               value.length
             else
               0

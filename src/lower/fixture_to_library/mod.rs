@@ -138,7 +138,12 @@ fn build_load_method_body(
                         method: Symbol::from("save"),
                         args: vec![],
                         block: None,
-                        parenthesized: false,
+                        // `save` is a real method (`AccessorKind::Method`)
+                        // on `ActiveRecord::Base`. The fixture lowerer
+                        // synthesizes this Send directly without running
+                        // the body-typer, so the parens-on-Method-kind
+                        // annotation doesn't fire — set it explicitly.
+                        parenthesized: true,
                     },
                 ),
                 Ty::Bool,

@@ -360,18 +360,10 @@ fn resolve_targets(
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             for start in candidates {
-                let mut current = Some(*start);
-                while let Some(lc) = current {
-                    if lc.methods.iter().any(|m| m.name == *method) {
-                        targets.push((lc.name.clone(), method.clone()));
-                        break;
-                    }
-                    current = lc
-                        .parent
-                        .as_ref()
-                        .and_then(|p| registry.get(p))
-                        .and_then(|v| v.first())
-                        .copied();
+                if let Some(found) =
+                    walk_inheritance_for_method(start, registry, method)
+                {
+                    targets.push((found, method.clone()));
                 }
             }
             targets
@@ -387,30 +379,80 @@ fn resolve_targets(
     }
 }
 
-/// Look up a method definition by walking the parent chain. Returns
-/// `(owning_class, method_def)` — the class where the method was
-/// actually found.
+/// Walk a class's inheritance chain (parent + includes) looking for
+/// the first class that defines `method`. Ruby's method dispatch
+/// walks both `class < Parent` and `include Mod` mixins; the
+/// ancestor chain is `[Self, included_modules_in_reverse_order,
+/// Parent, Parent's_includes, ...]`. We approximate by walking
+/// includes before parent (matches Ruby's MRO for the simple cases
+/// the framework Ruby uses — single include, no diamond) so the
+/// `Base includes Validations` case finds Validations methods
+/// before continuing up the parent chain.
+fn walk_inheritance_for_method(
+    start: &LibraryClass,
+    registry: &HashMap<ClassId, Vec<&LibraryClass>>,
+    method: &Symbol,
+) -> Option<ClassId> {
+    let mut visited: std::collections::HashSet<ClassId> =
+        std::collections::HashSet::new();
+    let mut stack: Vec<&LibraryClass> = vec![start];
+    while let Some(lc) = stack.pop() {
+        if !visited.insert(lc.name.clone()) {
+            continue;
+        }
+        if lc.methods.iter().any(|m| m.name == *method) {
+            return Some(lc.name.clone());
+        }
+        // Visit includes (mixins) before parent — matches Ruby MRO
+        // for the single-include shape framework Ruby uses.
+        // Reverse-iter so the stack pop order matches source order.
+        for inc in lc.includes.iter().rev() {
+            if let Some(inc_lc) = registry.get(inc).and_then(|v| v.first()) {
+                stack.push(*inc_lc);
+            }
+        }
+        if let Some(parent) = &lc.parent {
+            if let Some(parent_lc) = registry.get(parent).and_then(|v| v.first()) {
+                stack.push(*parent_lc);
+            }
+        }
+    }
+    None
+}
+
+/// Look up a method definition by walking the inheritance chain
+/// (parent + includes). Returns `(owning_class, method_def)` — the
+/// class where the method was actually found.
 fn lookup_method<'a>(
     registry: &'a HashMap<ClassId, Vec<&'a LibraryClass>>,
     class: &ClassId,
     method: &Symbol,
 ) -> Option<(ClassId, &'a crate::dialect::MethodDef)> {
     // Try each class candidate matching this name (simple-name
-    // ambiguity), and walk each one's parent chain looking for
-    // the method. First match wins.
+    // ambiguity), and walk each one's inheritance chain (parent +
+    // includes) looking for the method. First match wins.
     let candidates = registry.get(class)?;
     for start in candidates {
-        let mut current = Some(*start);
-        while let Some(lc) = current {
+        let mut visited: std::collections::HashSet<ClassId> =
+            std::collections::HashSet::new();
+        let mut stack: Vec<&LibraryClass> = vec![*start];
+        while let Some(lc) = stack.pop() {
+            if !visited.insert(lc.name.clone()) {
+                continue;
+            }
             if let Some(m) = lc.methods.iter().find(|m| m.name == *method) {
                 return Some((lc.name.clone(), m));
             }
-            current = lc
-                .parent
-                .as_ref()
-                .and_then(|p| registry.get(p))
-                .and_then(|v| v.first())
-                .copied();
+            for inc in lc.includes.iter().rev() {
+                if let Some(inc_lc) = registry.get(inc).and_then(|v| v.first()) {
+                    stack.push(*inc_lc);
+                }
+            }
+            if let Some(parent) = &lc.parent {
+                if let Some(parent_lc) = registry.get(parent).and_then(|v| v.first()) {
+                    stack.push(*parent_lc);
+                }
+            }
         }
     }
     None

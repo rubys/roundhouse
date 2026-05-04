@@ -277,6 +277,7 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
     }
 
     let mut info = crate::analyze::ClassInfo::default();
+    info.parent = lc.parent.clone();
     for m in &lc.methods {
         if let Some(sig) = &m.signature {
             // If a Method-kind instance method's name matches an ivar
@@ -389,6 +390,7 @@ fn build_class_info(
 ) -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
+    info.parent = model.parent.clone();
 
     // Attributes row from schema columns.
     if let Some(t) = table {

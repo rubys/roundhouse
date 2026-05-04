@@ -76,6 +76,14 @@ pub struct ClassInfo {
     /// is assumed when a name isn't present.
     pub class_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
     pub instance_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
+    /// Parent class for inheritance lookups. The force-parens check
+    /// in the Send arm walks this chain so methods inherited from
+    /// (e.g.) ActiveRecord::Base resolve when called on a subclass
+    /// (`new Article(...).save` looks up `save` on Article first,
+    /// then ApplicationRecord, then Base — finding it as
+    /// `AccessorKind::Method` and forcing the parens). Class lookups
+    /// use the same `ClassId` shape the registry keys use.
+    pub parent: Option<crate::ident::ClassId>,
 }
 
 /// Reusable body-type walker. Holds a borrow of the dispatch table so
@@ -395,15 +403,37 @@ impl<'a> BodyTyper<'a> {
                 // form for round-trip-through-emit.
                 if !*parenthesized {
                     if let Some(Ty::Class { id, .. }) = &recv_ty {
-                        if let Some(cls) = self.classes().get(id) {
-                            use crate::dialect::AccessorKind;
-                            let resolved_kind = cls
+                        use crate::dialect::AccessorKind;
+                        // Walk the parent chain so methods inherited
+                        // from a base class (e.g. `save` on
+                        // `ActiveRecord::Base` reached via Article →
+                        // ApplicationRecord → Base) resolve. The
+                        // first kind found wins; cycles are
+                        // impossible by construction (Ruby class
+                        // hierarchy is a DAG).
+                        let mut current_id: Option<&crate::ident::ClassId> = Some(id);
+                        let mut seen = 0usize;
+                        let mut resolved: Option<AccessorKind> = None;
+                        while let Some(cid) = current_id {
+                            seen += 1;
+                            if seen > 32 {
+                                break; // defensive cycle break
+                            }
+                            let Some(cls) = self.classes().get(cid) else {
+                                break;
+                            };
+                            if let Some(k) = cls
                                 .instance_method_kinds
                                 .get(method)
-                                .or_else(|| cls.class_method_kinds.get(method));
-                            if matches!(resolved_kind, Some(AccessorKind::Method)) {
-                                *parenthesized = true;
+                                .or_else(|| cls.class_method_kinds.get(method))
+                            {
+                                resolved = Some(*k);
+                                break;
                             }
+                            current_id = cls.parent.as_ref();
+                        }
+                        if matches!(resolved, Some(AccessorKind::Method)) {
+                            *parenthesized = true;
                         }
                     }
                 }
