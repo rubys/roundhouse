@@ -1,0 +1,22 @@
+# Framework Ruby unit-test runner.
+#
+# Usage:
+#   rake -f runtime/ruby/Rakefile test
+#   ruby runtime/ruby/test/active_record/<thing>_test.rb   # one file
+#
+# Tests run under stock CRuby — no spinel, no transpile, no app
+# fixture. Sweeps `runtime/ruby/test/**/*_test.rb` and runs them
+# as a single Minitest process; fast feedback for framework-source
+# changes. CI gates this before any target's transpile.
+
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "."
+  t.libs << "test"
+  t.test_files = FileList["test/**/*_test.rb"]
+  t.warning = false
+  t.verbose = false
+end
+
+task default: :test
