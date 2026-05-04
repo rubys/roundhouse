@@ -60,6 +60,13 @@ struct RuntimeEntry {
     rb_src: &'static str,
     rbs_src: &'static str,
     rb_path: &'static str,  // for error messages only
+    /// Enclosing module name as written in the Ruby source (e.g.
+    /// `"ActiveRecord"` for `module ActiveRecord; class Base; end; end`).
+    /// Tree-shake uses this to register parsed classes under their
+    /// qualified name (`ActiveRecord::Base`) so app-side parent
+    /// references like `class ApplicationRecord < ActiveRecord::Base`
+    /// resolve in the registry. Empty when no module wrapper.
+    namespace: &'static str,
     out_path: &'static str,
     mode: Mode,
     imports: ImportSpec,
@@ -78,6 +85,9 @@ pub struct RuntimeUnit {
     /// filter `methods` before re-emit.
     pub classes: Vec<LibraryClass>,
     pub functions: Vec<MethodDef>,
+    /// Enclosing module name (e.g. `"ActiveRecord"`). See
+    /// `RuntimeEntry.namespace`.
+    pub namespace: &'static str,
 }
 
 /// The TypeScript-target transpile table. Each entry corresponds
@@ -88,6 +98,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
         rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
         rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
         out_path: "src/inflector.ts",
         mode: Mode::Module,
         imports: NO_IMPORTS,
@@ -97,6 +108,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
         rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "ActiveRecord",
         out_path: "src/errors.ts",
         mode: Mode::Library,
         imports: &[("type Base", "./active_record_base.js")],
@@ -106,6 +118,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/validations.rbs"),
         rb_path: "runtime/ruby/active_record/validations.rb",
+        namespace: "ActiveRecord",
         out_path: "src/validations.ts",
         mode: Mode::Library,
         imports: NO_IMPORTS,
@@ -115,6 +128,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
         rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "ActiveRecord",
         out_path: "src/active_record_base.ts",
         mode: Mode::Library,
         imports: &[
@@ -127,6 +141,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
         rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
         rb_path: "runtime/ruby/action_controller/base.rb",
+        namespace: "ActionController",
         out_path: "src/action_controller_base.ts",
         mode: Mode::Library,
         imports: &[("Parameters", "./parameters.js")],
@@ -143,6 +158,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/action_controller/parameters.rb"),
         rbs_src: include_str!("../runtime/ruby/action_controller/parameters.rbs"),
         rb_path: "runtime/ruby/action_controller/parameters.rb",
+        namespace: "ActionController",
         out_path: "src/parameters.ts",
         mode: Mode::Library,
         imports: NO_IMPORTS,
@@ -152,6 +168,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
         rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
         rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "ActionDispatch",
         out_path: "src/router.ts",
         mode: Mode::Library,
         imports: NO_IMPORTS,
@@ -227,5 +244,6 @@ where
         content,
         classes,
         functions,
+        namespace: entry.namespace,
     })
 }

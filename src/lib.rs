@@ -26,6 +26,7 @@ pub mod query;
 pub mod rbs;
 pub mod runtime_loader;
 pub mod runtime_src;
+pub mod treeshake;
 pub mod schema;
 pub mod span;
 pub mod ty;

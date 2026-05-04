@@ -91,19 +91,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // Transpile-from-Ruby runtime files (Validations, Base,
-    // Parameters, Router, etc.) are parsed and emitted inline at
-    // emit time — no checked-in `runtime/typescript/<x>.ts`
-    // intermediates to drift. Identity transform passed for now;
-    // tree-shake hooks into this slot in a follow-up commit.
-    let runtime_units = crate::runtime_loader::typescript_units(|_path, classes| classes)
-        .expect("runtime transpile failed (Ruby source error)");
-    for unit in runtime_units {
-        files.push(EmittedFile {
-            path: unit.out_path,
-            content: unit.content,
-        });
-    }
+    // (Transpile-from-Ruby runtime emit deferred to AFTER the
+    // lowering pipeline so the tree-shake walker can use the
+    // lowered app classes as reachability roots.)
 
     // ── Lowering pipeline ───────────────────────────────────────────
     // Order matters because each step's output feeds the next's
@@ -176,6 +166,78 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     };
 
     // ── Emit ────────────────────────────────────────────────────────
+
+    // Tree-shake the framework runtime: walk all app-side method
+    // bodies (models, controllers, views, fixtures, tests) and
+    // filter the runtime LibraryClasses to only the methods reached
+    // transitively. `validates_format_of` etc. that the app never
+    // uses get dropped from `validations.ts`. Conservative on
+    // untyped Sends — keeps the method on every class that defines
+    // it, never wrong.
+    let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
+        Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len());
+    all_app_classes.extend(model_lcs.iter().cloned());
+    all_app_classes.extend(view_lcs.iter().cloned());
+    all_app_classes.extend(controller_lcs.iter().cloned());
+    all_app_classes.extend(fixture_lcs.iter().cloned());
+    all_app_classes.extend(test_lcs.iter().cloned());
+
+    // First pass: parse-only to get the runtime classes for
+    // reachability. `typescript_units` parses + emits in one step;
+    // we need to seed the reachability walker with the runtime's
+    // own classes so cross-references between (e.g.) Base and
+    // Validations resolve. The parse happens twice — once here for
+    // reachability, once below for the actual emit. Cheap (~10ms
+    // for the framework runtime).
+    let runtime_units_seed = crate::runtime_loader::typescript_units(|_, c| c)
+        .expect("runtime transpile parse failed");
+    // Build the runtime alias list: each LibraryClass appears under
+    // its simple name AND its qualified name (`ActiveRecord::Base`).
+    // Two `Base` classes (one from AR, one from ActionController)
+    // would collide on the simple name; the qualified alias
+    // disambiguates parent-chain lookups from app-side classes.
+    let runtime_aliases: Vec<(crate::ident::ClassId, &crate::dialect::LibraryClass)> =
+        runtime_units_seed
+            .iter()
+            .flat_map(|u| {
+                u.classes.iter().flat_map(move |c| {
+                    let mut entries = vec![(c.name.clone(), c)];
+                    if !u.namespace.is_empty() {
+                        let qualified = crate::ident::ClassId(crate::ident::Symbol::from(
+                            format!("{}::{}", u.namespace, c.name.0.as_str()),
+                        ));
+                        entries.push((qualified, c));
+                    }
+                    entries
+                })
+            })
+            .collect();
+    // App-side standalone functions (seeds, route helpers, schema,
+    // importmap, routes dispatch) carry app code too. Their bodies
+    // are roots — `Article.create!(...)` in seeds.rb needs to keep
+    // `create!` alive on Base.
+    let mut all_app_functions: Vec<crate::dialect::LibraryFunction> = Vec::new();
+    all_app_functions.extend(crate::lower::lower_seeds_to_library_functions(app));
+    all_app_functions.extend(route_helper_funcs.clone());
+    let reach = crate::treeshake::Reachability::from_app_roots(
+        &all_app_classes,
+        &runtime_aliases,
+        &all_app_functions,
+    );
+
+    let runtime_units = crate::runtime_loader::typescript_units(|_path, classes| {
+        classes
+            .into_iter()
+            .map(|c| crate::treeshake::filter_runtime_class(&c, &reach))
+            .collect()
+    })
+    .expect("runtime transpile failed (Ruby source error)");
+    for unit in runtime_units {
+        files.push(EmittedFile {
+            path: unit.out_path,
+            content: unit.content,
+        });
+    }
 
     let schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
     if !schema_funcs.is_empty() {
