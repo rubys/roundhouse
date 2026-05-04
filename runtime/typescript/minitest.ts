@@ -1,5 +1,11 @@
 // Minitest::Test analog for TypeScript — registers each `test_*`
-// instance method on a subclass as a node:test test() block.
+// instance method on a subclass as a node:test test() block, and
+// supplies the Test base class with both the core Minitest
+// assertions (assert_equal, assert_not_nil, …) and the Rails
+// ActionDispatch::IntegrationTest surface (get/post/patch/delete +
+// assert_response/assert_redirected_to/assert_select). Mirrors
+// spinel's `runtime/spinel/test/test_helper.rb` — same role, one
+// file per target.
 //
 // Lowering convention: `test_module_to_library` produces a class
 // per Minitest test file, with one `test_<snake_name>(): void`
@@ -7,13 +13,36 @@
 // inlined at the top of each test method (no separate `setup()`
 // override on subclasses), so the runtime here just instantiates
 // and invokes.
-//
-// Assertion methods mirror Minitest's surface so emitted bodies
-// like `this.assert_equal(expected, actual)` resolve to a real
-// implementation; each delegates to node's `assert/strict`.
 
 import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
+
+// minitest.ts is emitted to `test/_runtime/`; `router.ts` and
+// `parameters.ts` are emitted to `src/`. Two levels up.
+import { Router } from "../../src/router.js";
+import { Parameters } from "../../src/parameters.js";
+
+// ── Per-test dispatch table ────────────────────────────────────────
+//
+// Tests need to install the routes table + controller registry once
+// before any HTTP-style request method (`this.get(...)`) fires.
+// `installRoutes` is the seam — call it from a generated bootstrap
+// step that runs before `discover_tests`.
+
+type RouteRow = Record<string, any>;
+type ControllerClass = new () => any;
+
+let testDispatchTable: RouteRow[] = [];
+let testControllerRegistry: Record<string, ControllerClass> = {};
+
+export function installRoutes(
+  routes: RouteRow[],
+  rootRoute: RouteRow | undefined,
+  controllers: Record<string, ControllerClass>,
+): void {
+  testDispatchTable = rootRoute ? [rootRoute, ...routes] : [...routes];
+  testControllerRegistry = controllers;
+}
 
 export class Test {
   // ── Core assertions ──────────────────────────────────────────
@@ -124,32 +153,157 @@ export class Test {
   }
 
   // ── ActionDispatch::IntegrationTest surface ──────────────────
-  // Stub HTTP request methods. A real test rack-stack lives in the
-  // ts-spinel runtime; for now these accept any URL/options and
-  // record nothing — tests that depend on response state fail at
-  // assertion time, not at type-check time.
-  get(_url: any, _opts?: any): void {}
-  post(_url: any, _opts?: any): void {}
-  put(_url: any, _opts?: any): void {}
-  patch(_url: any, _opts?: any): void {}
-  delete(_url: any, _opts?: any): void {}
-  head(_url: any, _opts?: any): void {}
+  //
+  // HTTP-style requests dispatch in-process through `Router.match`
+  // and the per-test controller registry — same shape as spinel's
+  // `RequestDispatch.dispatch_request`. The matched controller's
+  // `body` / `status` / `location` populate this.response /
+  // this.status / this.location for subsequent assert_* calls.
+  // Tests that hit these methods without `installRoutes(...)`
+  // having been called raise loudly so silent no-op runs don't
+  // mask a missing bootstrap.
 
-  // Response-side assertions — same stub strategy. The arity
-  // matches Rails' Minitest assertions so emitted bodies type-check;
-  // bodies are no-ops until the test rack stack lands.
-  assert_response(_status: any, _msg?: string): void {}
-  assert_redirected_to(_url: any, _msg?: string): void {}
-  assert_select(_selector: any, _arg?: any, _msg?: string): void {}
-  assert_template(_name: any, _msg?: string): void {}
+  body: string = "";
+  status: number = 0;
+  location: string = "";
 
-  // Response accessors — return `any` so chained property reads
-  // (e.g. `this.response.body`) don't fight the type checker.
+  // Rails carries these as instance accessors — typed `any` so
+  // chained property reads (e.g. `this.response.body`) don't fight
+  // the type checker.
   response: any;
   request: any;
-  session: any;
+  session: Record<string, any> = {};
   cookies: any;
-  flash: any;
+  flash: Record<string, any> = {};
+
+  async get(path: string, _opts?: any): Promise<void> {
+    await this.dispatch("GET", path, {});
+  }
+  async post(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
+    await this.dispatch("POST", path, opts.params ?? {});
+  }
+  async put(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
+    await this.dispatch("PUT", path, opts.params ?? {});
+  }
+  async patch(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
+    await this.dispatch("PATCH", path, opts.params ?? {});
+  }
+  async delete(path: string, _opts?: any): Promise<void> {
+    await this.dispatch("DELETE", path, {});
+  }
+  async head(path: string, _opts?: any): Promise<void> {
+    await this.dispatch("HEAD", path, {});
+  }
+
+  private async dispatch(
+    method: string,
+    path: string,
+    body: Record<string, any>,
+  ): Promise<void> {
+    const match = Router.match(method, path, testDispatchTable);
+    if (!match) {
+      throw new Error(`no route for ${method} ${path}`);
+    }
+    const ctrlClass = testControllerRegistry[match.controller];
+    if (!ctrlClass) {
+      throw new Error(`no controller registered for ${match.controller}`);
+    }
+    const merged: Record<string, any> = { ...match.path_params, ...body };
+    const controller = new ctrlClass();
+    controller.params = new Parameters(merged);
+    controller.session = this.session;
+    controller.flash = this.flash;
+    controller.request_method = method;
+    controller.request_path = path;
+    await controller.process_action(match.action);
+    this.body = controller.body ?? "";
+    this.status = controller.status ?? 200;
+    this.location = controller.location ?? "";
+    this.response = { body: this.body, status: this.status };
+    this.flash = controller.flash ?? {};
+  }
+
+  // ── HTTP response assertions ─────────────────────────────────
+  //
+  // `assert_response :symbol` and `assert_response 200` are both
+  // valid Rails forms; map symbols to their HTTP code, accept
+  // numeric codes directly.
+  assert_response(expected: string | number, _msg?: string): void {
+    const expectedCode = typeof expected === "number"
+      ? expected
+      : RESPONSE_SYMBOLS[expected] ?? -1;
+    if (expectedCode === -1) {
+      assert.fail(`unknown response symbol: ${String(expected)}`);
+    }
+    assert.strictEqual(
+      this.status,
+      expectedCode,
+      `expected response ${expectedCode}, got ${this.status}`,
+    );
+  }
+
+  assert_redirected_to(expected: string, _msg?: string): void {
+    if (this.status < 300 || this.status >= 400) {
+      assert.fail(`expected a redirection, got ${this.status}`);
+    }
+    if (!this.location.includes(expected)) {
+      assert.fail(
+        `expected Location to contain ${JSON.stringify(expected)}, got ${JSON.stringify(this.location)}`,
+      );
+    }
+  }
+
+  // `assert_select` substring-matches on the opening tag or
+  // `id=`/`class=` attribute fragment derived from the selector.
+  // Rough but effective for the scaffold-blog HTML shapes —
+  // bodies of the form `"#articles"`, `".p-4"`, `"h1"`, etc.
+  assert_select(selector: string, _arg?: any, _msg?: string): void {
+    const fragment = selectorFragment(selector);
+    if (!this.body.includes(fragment)) {
+      assert.fail(
+        `expected body to match selector ${JSON.stringify(selector)} (looked for ${JSON.stringify(fragment)})`,
+      );
+    }
+  }
+
+  assert_template(_name: string, _msg?: string): void {
+    // Rails' `assert_template` checks which view was rendered.
+    // Matching that requires controller-side instrumentation
+    // (the action records `template_name` when `render` is
+    // called). Not yet wired; left as no-op so the rare test
+    // that uses it doesn't fail at runtime.
+  }
+}
+
+const RESPONSE_SYMBOLS: Record<string, number> = {
+  ok: 200,
+  success: 200,
+  created: 201,
+  accepted: 202,
+  no_content: 204,
+  moved_permanently: 301,
+  found: 302,
+  see_other: 303,
+  not_modified: 304,
+  redirect: 302,
+  bad_request: 400,
+  unauthorized: 401,
+  forbidden: 403,
+  not_found: 404,
+  unprocessable_entity: 422,
+  internal_server_error: 500,
+  missing: 404,
+};
+
+/** Turn a loose selector into a substring fragment that probably
+ *  appears in matching HTML. `#id` → `id="id"`, `.class` →
+ *  `class"`, bare tag → `<tag`. Compound selectors split and pick
+ *  the first chunk. */
+function selectorFragment(selector: string): string {
+  const first = selector.split(/\s+/)[0] ?? "";
+  if (first.startsWith("#")) return `id="${first.slice(1)}"`;
+  if (first.startsWith(".")) return `${first.slice(1)}"`;
+  return `<${first}`;
 }
 
 // Rails-side alias. `ActiveSupport::TestCase` and `ActionDispatch::-

@@ -38,7 +38,10 @@ function emit(action: string, opts: BroadcastOpts): void {
 
 /** Static-method facade matching the lowerer's typing stub
  *  (see `broadcasts_class_info` in `model_to_library`). Each method
- *  takes a kwargs-shaped hash and returns nothing. */
+ *  takes a kwargs-shaped hash and returns nothing. The action set
+ *  matches `BroadcastAct` in the lowerer (Append/Prepend/Replace/
+ *  Remove) — adding methods here without a matching variant there
+ *  produces dead code. */
 export class Broadcasts {
   static prepend(opts: BroadcastOpts): void {
     emit("prepend", opts);
@@ -51,8 +54,5 @@ export class Broadcasts {
   }
   static remove(opts: BroadcastOpts): void {
     emit("remove", opts);
-  }
-  static update(opts: BroadcastOpts): void {
-    emit("update", opts);
   }
 }

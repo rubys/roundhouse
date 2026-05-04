@@ -7,7 +7,7 @@
 //! the Ruby source IS the source of truth, no checked-in artifact
 //! to fall out of sync.
 //!
-//! Hand-written runtime files (`juntos.ts`, `http.ts`, `minitest.ts`,
+//! Hand-written runtime files (`juntos.ts`, `minitest.ts`,
 //! etc.) stay as `include_str!` of `.ts` content in `src/emit/typescript.rs`.
 //! This module covers ONLY the generated set.
 //!

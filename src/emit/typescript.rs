@@ -44,12 +44,7 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
         "src/broadcasts.ts",
         include_str!("../../runtime/typescript/broadcasts.ts"),
     ),
-    ("src/http.ts", include_str!("../../runtime/typescript/http.ts")),
     ("src/server.ts", include_str!("../../runtime/typescript/server.ts")),
-    (
-        "src/test_support.ts",
-        include_str!("../../runtime/typescript/test_support.ts"),
-    ),
     (
         "src/view_helpers.ts",
         include_str!("../../runtime/typescript/view_helpers.ts"),
