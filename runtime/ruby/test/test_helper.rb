@@ -23,7 +23,7 @@ $LOAD_PATH.unshift(FRAMEWORK_RUBY)
 require "active_record"
 require "action_view/view_helpers"
 require "action_dispatch/router"
-require "action_controller/parameters"
+require "action_controller/base"
 require "inflector"
 
 # Tiny in-memory adapter satisfying the 12-method
