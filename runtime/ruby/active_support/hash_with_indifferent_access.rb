@@ -34,12 +34,26 @@ module ActiveSupport
       end
     end
 
-    def [](key)
+    # `get` / `set` are the cross-target named API; targets that
+    # can't express operator methods (TS, Python, Go) emit calls as
+    # `hwia.get(k)` / `hwia.set(k, v)` (the bracket-syntax `[]`/`[]=`
+    # rewrite in src/emit/typescript/expr.rs routes through these).
+    # `[]` / `[]=` stay as one-line delegators so Ruby idiom
+    # (`hwia[:k]`) keeps working under CRuby and Spinel.
+    def get(key)
       @data[key.to_s]
     end
 
-    def []=(key, value)
+    def set(key, value)
       @data[key.to_s] = normalize_value(value)
+    end
+
+    def [](key)
+      get(key)
+    end
+
+    def []=(key, value)
+      set(key, value)
     end
 
     def key?(key)

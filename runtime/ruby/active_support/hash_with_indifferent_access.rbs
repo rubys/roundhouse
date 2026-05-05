@@ -11,6 +11,8 @@ module ActiveSupport
 
     def initialize: (?Hash[untyped, untyped]? other) -> void
 
+    def get: (untyped key) -> untyped
+    def set: (untyped key, untyped value) -> untyped
     def []: (untyped key) -> untyped
     def []=: (untyped key, untyped value) -> untyped
     def key?: (untyped key) -> bool

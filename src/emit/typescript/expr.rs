@@ -1110,16 +1110,45 @@ pub(super) fn emit_send_with_parens(
             }
         }
     }
-    // Controller `@params[:k]` — `@params` is the framework
-    // `ActionController::Parameters` wrapper at TS runtime, not a
-    // plain object. The IR types it as `Hash[Sym, Untyped]` (so
-    // typing-side dispatch hits Hash#[]), but JS bracket access on a
-    // wrapper instance returns `undefined` — `Number(this.params["id"])`
-    // would yield NaN and break every action that reads a path
-    // parameter. Rewrite at emit time to `.get(...)`, which is the
-    // `parameters.ts` runtime's named accessor.
+    // Framework class-instance receivers route bracket access to
+    // method dispatch (`.get(k)` / `.set(k, v)`). JS bracket access
+    // on a class instance returns `undefined` for runtime keys
+    // (no index signature on the class shape); the framework runtime
+    // classes (Parameters, HashWithIndifferentAccess, …) expose
+    // explicit `get` / `set` methods as their cross-target API.
+    //
+    // Hash-typed and Array-typed receivers fall through to the
+    // bracket-access form below — `Record<K, V>[k]` is correct for
+    // Hash, and `T[][i]` is correct for Array. Same hardcoded class-
+    // name list as the zero-arg-method fix; goes away once the typer
+    // plumbs `AccessorKind` to Send.
+    let is_framework_class_recv = |r: &Expr| -> bool {
+        let recv_ty = strip_nullable(r.ty.as_ref());
+        matches!(
+            recv_ty,
+            Some(Ty::Class { id, .. }) if {
+                let name = id.0.as_str();
+                let last = name.rsplit("::").next().unwrap_or(name);
+                matches!(
+                    last,
+                    "HashWithIndifferentAccess"
+                        | "Parameters"
+                        | "ParameterMissing"
+                        | "Router"
+                )
+            }
+        )
+    };
     if method == "[]" && args.len() == 1 {
         if let Some(r) = recv {
+            if is_framework_class_recv(r) {
+                return format!("{}.get({})", emit_expr(r), args_s[0]);
+            }
+            // Legacy hardcode for `@params[:k]` — @params's ty isn't
+            // always recovered as Class (it can flow as Hash[Sym, Any]
+            // through the analyzer), so the ivar-name shortcut still
+            // pays for itself. Subsumed by the framework-class match
+            // above when the type is recovered.
             if matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") {
                 return format!("{}.get({})", emit_expr(r), args_s[0]);
             }
@@ -1128,12 +1157,16 @@ pub(super) fn emit_send_with_parens(
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
-    // `recv.[]=(k, v)` — indexed assignment lowered to a Send. TS needs
-    // the LHS form `recv[k] = v`.
+    // `recv.[]=(k, v)` — indexed assignment lowered to a Send.
     if method == "[]=" && recv.is_some() && args.len() == 2 {
+        let r = recv.unwrap();
+        if is_framework_class_recv(r) {
+            return format!("{}.set({}, {})", emit_expr(r), args_s[0], args_s[1]);
+        }
+        // Default: `recv[k] = v`.
         return format!(
             "{}[{}] = {}",
-            emit_expr(recv.unwrap()),
+            emit_expr(r),
             args_s[0],
             args_s[1]
         );
