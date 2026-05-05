@@ -1893,9 +1893,37 @@ pub(super) fn emit_send_with_parens(
                 )
             };
             let suppress_const_parens = is_const_recv && const_field;
+            // Class-instance receivers whose class is one of the
+            // transpiled framework runtime classes ALWAYS need `()`
+            // for zero-arg method calls — these classes use explicit
+            // `def` methods (Parameters, HashWithIndifferentAccess,
+            // ActionDispatch::Router, etc.), not attr_reader-collapsed
+            // TS fields. Without `()`, the emit produces a method
+            // reference (`this.hash.is_empty`) instead of a call
+            // (`this.hash.is_empty()`), which JS lets stand at parse
+            // time and produces wrong values at runtime.
+            //
+            // App-level model classes (Article, Comment, …) have their
+            // attr_readers collapsed to TS fields, so zero-arg
+            // `article.title` SHOULD stay as property access — those
+            // aren't on this list. The body-typer carries
+            // `AccessorKind` per method but doesn't yet thread it
+            // through to the Send-emit; this hardcoded class-name list
+            // is the bridge until that plumbing lands.
+            let is_method_class_recv = matches!(
+                r.ty.as_ref(),
+                Some(Ty::Class { id, .. }) if matches!(
+                    id.0.as_str(),
+                    "HashWithIndifferentAccess"
+                        | "Parameters"
+                        | "ParameterMissing"
+                        | "Router"
+                )
+            );
             let raw = if args_s.is_empty()
                 && !parenthesized
                 && !force_parens
+                && !is_method_class_recv
                 && (!is_const_recv || suppress_const_parens)
             {
                 format!("{recv_s}.{ts_m}")
