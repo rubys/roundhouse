@@ -272,7 +272,10 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionController",
         out_path: "src/action_controller_base.ts",
         mode: Mode::Library,
-        imports: &[("Parameters", "./parameters.js")],
+        imports: &[
+            ("Parameters", "./parameters.js"),
+            ("HashWithIndifferentAccess", "./hash_with_indifferent_access.js"),
+        ],
         // Module-scope `STATUS_CODES` is now picked up by
         // `parse_module_constant_exprs` and emitted as a
         // top-level `const STATUS_CODES = ...;` automatically;

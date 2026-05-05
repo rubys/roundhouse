@@ -37,9 +37,9 @@ class ActionControllerBaseTest < Minitest::Test
 
   def test_initial_state_has_empty_params_and_default_status
     refute_nil @controller.params
-    assert_equal({}, @controller.params.to_h)
-    assert_equal({}, @controller.session)
-    assert_equal({}, @controller.flash)
+    assert_equal 0, @controller.params.to_h.length
+    assert_equal 0, @controller.session.length
+    assert_equal 0, @controller.flash.length
     assert_equal 200, @controller.status
     assert_equal "", @controller.body
     assert_nil @controller.location
