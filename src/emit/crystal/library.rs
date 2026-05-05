@@ -82,8 +82,15 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
 
 /// Public emit entry — for Module mode (flat list of class methods).
 /// Used by `runtime_loader::crystal_units` for `Module`-mode runtime
-/// files (e.g. `inflector.rb`). Returns the bare method bodies; the
-/// loader wraps them in the appropriate header/imports.
+/// files (e.g. `inflector.rb`).
+///
+/// Crystal requires explicit `module X ... end` wrapping for class
+/// methods to be addressable as `X.method` (unlike TS where bare
+/// `export function` + `import * as X` produces the namespace from
+/// the import side). The module name is derived from the methods'
+/// `enclosing_class` field; missing or inconsistent values trip an
+/// error rather than emitting top-level functions that would attach
+/// to the implicit Object class.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     use crate::dialect::MethodReceiver;
     if methods.is_empty() {
@@ -100,12 +107,47 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
                 .unwrap_or("<none>"),
         ));
     }
+
+    let module_name = methods
+        .first()
+        .and_then(|m| m.enclosing_class.as_ref())
+        .map(|sym| sym.as_str().to_string())
+        .ok_or_else(|| {
+            "crystal::emit_module: methods missing `enclosing_class`; \
+             cannot synthesize Crystal `module X ... end` wrapping"
+                .to_string()
+        })?;
+
+    // Compound names like `ActiveRecord::Errors` nest as
+    // `module ActiveRecord\n  module Errors`. Same logic as
+    // `render_class` for class-shape inputs.
+    let segments: Vec<&str> = module_name.split("::").collect();
+    let depth = segments.len();
+    let body_pad = "  ".repeat(depth);
+
     let mut out = String::new();
-    for (i, m) in methods.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    for (i, seg) in segments.iter().enumerate() {
+        writeln!(out, "{}module {seg}", "  ".repeat(i)).unwrap();
+    }
+
+    let mut first = true;
+    for m in methods {
+        if !first {
+            writeln!(out).unwrap();
         }
-        out.push_str(&emit_method_impl(m));
+        first = false;
+        let body = emit_method_impl(m);
+        for line in body.lines() {
+            if line.is_empty() {
+                writeln!(out).unwrap();
+            } else {
+                writeln!(out, "{body_pad}{line}").unwrap();
+            }
+        }
+    }
+
+    for i in (0..depth).rev() {
+        writeln!(out, "{}end", "  ".repeat(i)).unwrap();
     }
     Ok(out)
 }

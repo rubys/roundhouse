@@ -65,6 +65,27 @@ fn ts_format_constant(name: &str, value: &str) -> String {
     format!("const {name} = {value};")
 }
 
+const CRYSTAL_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::crystal::emit_module,
+    emit_library_class: crate::emit::crystal::emit_library_class,
+    emit_expr_for_runtime: crate::emit::crystal::emit_expr_for_runtime,
+    format_import: crystal_format_import,
+    format_constant: crystal_format_constant,
+};
+
+/// Crystal's `require` is path-based (no named-import clause). The
+/// `name` parameter from `RuntimeEntry.imports` is informational —
+/// Crystal pulls everything publicly visible from the required file.
+fn crystal_format_import(_name: &str, source: &str) -> String {
+    format!("require {source:?}\n")
+}
+
+/// Crystal: top-level constant `NAME = VALUE` (no `const` keyword,
+/// no statement terminator).
+fn crystal_format_constant(name: &str, value: &str) -> String {
+    format!("{name} = {value}")
+}
+
 /// Strategy: each entry picks one of two pipelines.
 ///
 /// `Module` — flat list of `def self.*` helpers (e.g. inflector.rb).
@@ -252,6 +273,40 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         ],
     },
 ];
+
+/// The Crystal-target transpile table. Mirrors TYPESCRIPT_RUNTIME
+/// shape — each entry maps one `runtime/ruby/<x>.rb` file to a
+/// transpiled `src/<x>.cr` output. Initial scope is just `inflector.rb`
+/// (Module mode, no dependencies); expanded as the Crystal target
+/// proves out additional surface area.
+const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "src/inflector.cr",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+/// Parse + emit the Crystal runtime files. Mirrors `typescript_units`
+/// — same driver, same `RuntimeEntry` shape, plus the Crystal-specific
+/// `TargetEmit` and `#` comment prefix.
+pub fn crystal_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(CRYSTAL_RUNTIME.len());
+    for entry in CRYSTAL_RUNTIME {
+        let unit = transpile_entry(entry, &CRYSTAL_TARGET, "#", &mut transform)?;
+        out.push(unit);
+    }
+    Ok(out)
+}
 
 /// Parse + emit the TypeScript runtime files. Returns one `RuntimeUnit`
 /// per entry, ready to be written to disk by the caller.

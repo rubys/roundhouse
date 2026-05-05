@@ -47,6 +47,20 @@ pub fn emit_method(m: &MethodDef) -> String {
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
+    // Transpiled framework runtime — `runtime/ruby/*.rb` files
+    // converted to Crystal at app emit time. Each unit lands at the
+    // path declared in `CRYSTAL_RUNTIME` (e.g. `src/inflector.cr`).
+    // Identity transform on the parsed classes for now; tree-shake
+    // can drop unreachable methods in a follow-up pass.
+    let runtime_units = crate::runtime_loader::crystal_units(|_path, classes| classes)
+        .expect("crystal runtime transpile failed (Ruby source error)");
+    for unit in runtime_units {
+        files.push(EmittedFile {
+            path: unit.out_path,
+            content: unit.content,
+        });
+    }
+
     // Schema → src/schema.cr (LibraryFunction module).
     let schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
     if !schema_funcs.is_empty() {
