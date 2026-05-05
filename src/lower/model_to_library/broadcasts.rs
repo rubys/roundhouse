@@ -250,11 +250,13 @@ fn rewrite_lambda_param(e: &Expr, param: Option<&Symbol>) -> Expr {
 /// Rewrite Rails-API `<assoc>.broadcast_<action>_to(<stream>)` calls
 /// (typical inside `after_<x>_commit { ... }` blocks) to spinel-shape:
 ///
-///     parent = <assoc>
-///     return if parent.nil?
-///     Broadcasts.<action>(stream: <stream>,
-///                         target: "<sing>_#{parent.id}",
-///                         html: Views::<Plur>.<sing>(parent))
+/// ```text
+/// parent = <assoc>
+/// return if parent.nil?
+/// Broadcasts.<action>(stream: <stream>,
+///                     target: "<sing>_#{parent.id}",
+///                     html: Views::<Plur>.<sing>(parent))
+/// ```
 ///
 /// `<assoc>` must name a `belongs_to` association on `model` so the
 /// target class — and from it the stream's per-record DOM target +
