@@ -42,10 +42,42 @@ pub fn emit_method(m: &MethodDef) -> String {
     method::emit_method(m)
 }
 
+/// Minimal `shard.yml` for the emitted project. Crystal's package
+/// manager (shards) requires this to resolve dependencies. sqlite3
+/// is the only external dep; HTTP / WebSocket / Spec come from
+/// Crystal's stdlib.
+const SHARD_YML: &str = "name: roundhouse-app
+version: 0.1.0
+crystal: \">= 1.6.0\"
+
+dependencies:
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+";
+
+// Hand-written Crystal primitive runtime — copied verbatim into the
+// generated project as `src/<file>.cr`. These provide HTTP / DB /
+// cable / spec-helper glue that the transpiled framework runtime
+// stands on top of. Ruby-shape framework code (ActionController::Base,
+// ActiveRecord::Base, Router, ViewHelpers) lives in `runtime/ruby/`
+// and transpiles via `runtime_loader::crystal_units`.
+const CR_DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");
+const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
+const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
+const CR_CABLE_SOURCE: &str = include_str!("../../runtime/crystal/cable.cr");
+const CR_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/crystal/test_support.cr");
+
 /// Emit a full Crystal project for `app`. Composes the lowered-IR
 /// emit pipeline (mirrors Spinel's `emit_spinel`).
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
+
+    // shard.yml — minimal Crystal project manifest with sqlite3
+    // dependency (db.cr's only external requirement).
+    files.push(EmittedFile {
+        path: PathBuf::from("shard.yml"),
+        content: SHARD_YML.to_string(),
+    });
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` files
     // converted to Crystal at app emit time. Each unit lands at the
@@ -60,6 +92,28 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             content: unit.content,
         });
     }
+
+    // Primitive runtime — hand-written platform glue.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/db.cr"),
+        content: CR_DB_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/http.cr"),
+        content: CR_HTTP_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/server.cr"),
+        content: CR_SERVER_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/cable.cr"),
+        content: CR_CABLE_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/test_support.cr"),
+        content: CR_TEST_SUPPORT_SOURCE.to_string(),
+    });
 
     // Schema → src/schema.cr (LibraryFunction module).
     let schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
@@ -132,6 +186,44 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             out_path,
             &synthesized_siblings,
         ));
+    }
+
+    // Synthesize `ApplicationRecord` if any emitted model references
+    // it as parent but the app doesn't define one. Rails scaffolds
+    // make this base class explicit; minimal fixtures sometimes skip
+    // it. Crystal needs the class defined for the parent reference
+    // to resolve.
+    let needs_app_record = model_lcs
+        .iter()
+        .any(|lc| matches!(lc.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationRecord"))
+        && !model_lcs
+            .iter()
+            .any(|lc| lc.name.0.as_str() == "ApplicationRecord");
+    if needs_app_record {
+        files.push(EmittedFile {
+            path: PathBuf::from("src/models/application_record.cr"),
+            content: "class ApplicationRecord < ActiveRecord::Base\nend\n".to_string(),
+        });
+    }
+
+    // Synthesize `ApplicationController` if any emitted controller
+    // references it as parent but the app doesn't define one. Rails
+    // scaffolds always extend `ApplicationController`; minimal
+    // fixtures (tiny-blog) skip the explicit declaration. Without
+    // this, Crystal compilation fails on the dangling reference.
+    let needs_app_controller = app
+        .controllers
+        .iter()
+        .any(|c| matches!(c.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationController"))
+        && !app
+            .controllers
+            .iter()
+            .any(|c| c.name.0.as_str() == "ApplicationController");
+    if needs_app_controller {
+        files.push(EmittedFile {
+            path: PathBuf::from("src/controllers/application_controller.cr"),
+            content: "class ApplicationController < ActionController::Base\nend\n".to_string(),
+        });
     }
 
     // Controllers → src/controllers/<stem>.cr; synthesized
