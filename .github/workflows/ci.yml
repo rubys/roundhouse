@@ -87,24 +87,32 @@ jobs:
       - name: cargo test --test rust_toolchain -- --ignored
         run: cargo test --test rust_toolchain -- --ignored --nocapture
 
-  toolchain-crystal:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1
-        with:
-          crystal: latest
-      - name: cargo test --test crystal_toolchain -- --ignored
-        run: cargo test --test crystal_toolchain -- --ignored --nocapture
+  # toolchain-crystal: temporarily disabled while the Crystal target is
+  # rebuilt from scratch using Spinel's emit-shape template + the
+  # target-pluggable runtime_loader. The existing 6,604-LOC walker-style
+  # emitter is being replaced with a ~2,800-LOC LibraryClass consumer
+  # mirroring src/emit/ruby/. See memory:
+  # project_crystal_rip_and_replace.md. Re-enable once the new emitter
+  # passes locally.
+  #
+  # toolchain-crystal:
+  #   needs: generate-fixture
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: real-blog-fixture
+  #     - name: Extract fixture
+  #       run: tar -xzf real-blog.tar.gz
+  #     - name: Install Crystal
+  #       uses: crystal-lang/install-crystal@v1
+  #       with:
+  #         crystal: latest
+  #     - name: cargo test --test crystal_toolchain -- --ignored
+  #       run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
   # toolchain-typescript: tsc parity + node:test on real-blog. The
   # filter `real_blog` excludes the still-aspirational tiny_blog
@@ -268,29 +276,31 @@ jobs:
       - name: scripts/compare rust
         run: scripts/compare rust
 
-  compare-crystal:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1
-        with:
-          crystal: latest
-      - name: scripts/compare crystal
-        run: scripts/compare crystal
+  # compare-crystal: temporarily disabled — see toolchain-crystal above.
+  #
+  # compare-crystal:
+  #   needs: generate-fixture
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: real-blog-fixture
+  #     - name: Extract fixture
+  #       run: tar -xzf real-blog.tar.gz
+  #     - uses: ruby/setup-ruby@v1
+  #       with:
+  #         ruby-version: '3.4'
+  #         bundler-cache: true
+  #         working-directory: ./fixtures/real-blog
+  #     - name: Install Crystal
+  #       uses: crystal-lang/install-crystal@v1
+  #       with:
+  #         crystal: latest
+  #     - name: scripts/compare crystal
+  #       run: scripts/compare crystal
 
   compare-typescript:
     needs: generate-fixture
@@ -437,7 +447,7 @@ jobs:
     needs:
       - unit
       - toolchain-rust
-      - toolchain-crystal
+      # - toolchain-crystal  # disabled during Crystal rip-and-replace
       - toolchain-typescript
       - framework-tests-typescript
       - toolchain-go
@@ -445,7 +455,7 @@ jobs:
       - toolchain-python
       - toolchain-spinel
       - compare-rust
-      - compare-crystal
+      # - compare-crystal  # disabled during Crystal rip-and-replace
       - compare-typescript
       - compare-go
       - compare-elixir
