@@ -7,7 +7,9 @@ module ActiveSupport
   # union annotation. `each` yields `(String, untyped)` because the
   # internal storage is String-keyed by construction.
   class HashWithIndifferentAccess
-    def initialize: (?untyped other) -> void
+    @data: Hash[String, untyped]
+
+    def initialize: (?Hash[untyped, untyped]? other) -> void
 
     def []: (untyped key) -> untyped
     def []=: (untyped key, untyped value) -> untyped
@@ -23,6 +25,7 @@ module ActiveSupport
     def size: () -> Integer
     def keys: () -> Array[String]
     def values: () -> Array[untyped]
+    def each: () { (String, untyped) -> void } -> HashWithIndifferentAccess
     def normalize_value: (untyped value) -> untyped
   end
 end

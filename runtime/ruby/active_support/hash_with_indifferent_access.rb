@@ -16,12 +16,21 @@ module ActiveSupport
   # HWIAs uniformly. Other value types (String, Integer, Array, the
   # transpiled framework's other classes) pass through unchanged.
   class HashWithIndifferentAccess
+    # The `other` arg is typed as a plain Hash (see .rbs). Callers
+    # holding an existing HWIA call `.to_h` first to expose the inner
+    # Hash. Constraining the input to Hash here keeps target-language
+    # dispatch on `.keys` / `[]` clean — TS lowers `hash.keys` to
+    # `Object.keys(hash)` only when the analyzer sees Hash, not HWIA.
     def initialize(other = nil)
       @data = {}
-      if !other.nil?
-        other.each do |k, v|
-          @data[k.to_s] = normalize_value(v)
-        end
+      return if other.nil?
+      other_keys = other.keys
+      i = 0
+      while i < other_keys.length
+        k = other_keys[i]
+        v = other[k]
+        @data[k.to_s] = normalize_value(v)
+        i += 1
       end
     end
 
@@ -94,13 +103,25 @@ module ActiveSupport
       @data.values
     end
 
-    # `each` is intentionally omitted for now — the body-typer doesn't
-    # yet infer block-yield param types when the source uses
-    # `@data.each do |k, v| yield k, v end` (the generic block-return
-    # cost referenced in validations.rb's comments). Consumers needing
-    # to iterate go through `to_h` and iterate the underlying Hash
-    # directly. Restore once the typer handles the pattern OR rewrite
-    # the body to a typer-friendly shape.
+    # Index-style iteration. The body-typer can't yet infer block
+    # param types for `Hash#each do |k, v|` (the destructured 2-arg
+    # form); even with `@data : Hash[String, untyped]` declared in
+    # rbs, the block params come back as TyVar. Stepping through
+    # `keys` with a local index variable avoids the block-param
+    # inference path entirely; every var is typed via explicit
+    # assignment from a typed expression. Same iteration order in
+    # Ruby (Hash preserves insertion order).
+    def each
+      keys = @data.keys
+      i = 0
+      while i < keys.length
+        k = keys[i]
+        v = @data[k]
+        yield k, v
+        i += 1
+      end
+      self
+    end
 
     # Internal: normalize a value on insert. Plain Hashes recursively
     # become HWIAs so deep access (`params[:user][:name]`) walks a

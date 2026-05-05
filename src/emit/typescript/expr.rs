@@ -1910,15 +1910,24 @@ pub(super) fn emit_send_with_parens(
             // `AccessorKind` per method but doesn't yet thread it
             // through to the Send-emit; this hardcoded class-name list
             // is the bridge until that plumbing lands.
+            // The receiver type may be nullable (`Union<Class, Nil>`
+            // — an ivar's flow-sensitive type is nullable until the
+            // analyzer proves a write-before-read). Strip the Nil
+            // variant so the class-name match fires on the real type.
+            let recv_ty_inner = strip_nullable(r.ty.as_ref());
             let is_method_class_recv = matches!(
-                r.ty.as_ref(),
-                Some(Ty::Class { id, .. }) if matches!(
-                    id.0.as_str(),
-                    "HashWithIndifferentAccess"
-                        | "Parameters"
-                        | "ParameterMissing"
-                        | "Router"
-                )
+                recv_ty_inner,
+                Some(Ty::Class { id, .. }) if {
+                    let name = id.0.as_str();
+                    let last = name.rsplit("::").next().unwrap_or(name);
+                    matches!(
+                        last,
+                        "HashWithIndifferentAccess"
+                            | "Parameters"
+                            | "ParameterMissing"
+                            | "Router"
+                    )
+                }
             );
             let raw = if args_s.is_empty()
                 && !parenthesized
