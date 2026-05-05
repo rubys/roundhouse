@@ -22,7 +22,9 @@ class RouterTest < Minitest::Test
     m = Router.match("GET", "/articles", TABLE)
     refute_nil m
     assert_equal :index, m[:action]
-    assert_equal({}, m[:path_params])
+    # path_params is now an HWIA (String-keyed); empty for static
+    # match. Compare via length rather than literal Hash equality.
+    assert_equal 0, m[:path_params].length
   end
 
   def test_matches_member_get_and_captures_id
@@ -89,7 +91,7 @@ class RouterTest < Minitest::Test
   # the other.
 
   def test_match_pattern_returns_empty_hash_for_pure_static_match
-    assert_equal({}, Router.match_pattern("/articles", "/articles"))
+    assert_equal 0, Router.match_pattern("/articles", "/articles").length
   end
 
   def test_match_pattern_returns_nil_on_length_mismatch
@@ -102,13 +104,17 @@ class RouterTest < Minitest::Test
   end
 
   def test_match_pattern_captures_one_param
-    assert_equal({ id: "42" }, Router.match_pattern("/articles/:id", "/articles/42"))
+    h = Router.match_pattern("/articles/:id", "/articles/42")
+    # HWIA accepts either Symbol or String access; assert via Symbol
+    # form so the indifferent surface is exercised.
+    assert_equal "42", h[:id]
+    assert_equal 1, h.length
   end
 
   def test_match_pattern_captures_multiple_params
-    assert_equal(
-      { article_id: "7", id: "3" },
-      Router.match_pattern("/articles/:article_id/comments/:id", "/articles/7/comments/3"),
-    )
+    h = Router.match_pattern("/articles/:article_id/comments/:id", "/articles/7/comments/3")
+    assert_equal "7", h[:article_id]
+    assert_equal "3", h[:id]
+    assert_equal 2, h.length
   end
 end

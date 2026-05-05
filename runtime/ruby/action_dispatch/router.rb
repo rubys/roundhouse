@@ -5,6 +5,8 @@
 # `resources` DSL; in spinel-blog it's a flat data structure (see
 # `config/routes.rb`). The eventual transpiler reproduces this shape
 # from the DSL declarations.
+require_relative "../active_support/hash_with_indifferent_access"
+
 module Router
   module_function
 
@@ -37,19 +39,20 @@ module Router
   end
 
   # Match a path against a pattern containing `:name` segments.
-  # Returns a Hash[Symbol => String] of captured params, or nil if
-  # the pattern doesn't match. No regex; segment-by-segment compare.
+  # Returns an HWIA of captured params (String-keyed internally,
+  # accepts Symbol-or-String access via `[](:id)` / `["id"]`), or nil
+  # if no match. No regex; segment-by-segment compare.
   def match_pattern(pattern, path)
     pattern_parts = pattern.split("/")
     path_parts    = path.split("/")
     return nil if pattern_parts.length != path_parts.length
-    params = {}
+    params = ActiveSupport::HashWithIndifferentAccess.new
     i = 0
     while i < pattern_parts.length
       pp = pattern_parts[i]
       ap = path_parts[i]
       if pp.start_with?(":")
-        params[pp[1..].to_sym] = ap
+        params[pp[1..]] = ap
       elsif pp != ap
         return nil
       end

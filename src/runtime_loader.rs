@@ -298,7 +298,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionDispatch",
         out_path: "src/router.ts",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        imports: &[("HashWithIndifferentAccess", "./hash_with_indifferent_access.js")],
         prelude: NO_PRELUDE,
         // Hand-written `server.ts` and `test_support.ts` call
         // `Router.match(method, path, table)` directly. Treeshake's
