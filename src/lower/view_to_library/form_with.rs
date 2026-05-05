@@ -132,7 +132,7 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     {
         let opts_hash = Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries: opts_entries, braced: true },
+            ExprNode::Hash { entries: opts_entries, kwargs: false },
         );
         let entries: Vec<(Expr, Expr)> = vec![
             (lit_sym(Symbol::from("model")), nested_model),
@@ -143,7 +143,7 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
         ];
         let new_hash = Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries, braced: false },
+            ExprNode::Hash { entries, kwargs: true },
         );
         let mut out = other_args;
         out.push(new_hash);
@@ -195,7 +195,7 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
 
     let opts_hash = Expr::new(
         Span::synthetic(),
-        ExprNode::Hash { entries: opts_entries, braced: true },
+        ExprNode::Hash { entries: opts_entries, kwargs: false },
     );
 
     let new_entries: Vec<(Expr, Expr)> = vec![
@@ -205,12 +205,12 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
         (lit_sym(Symbol::from("method")), method),
         (lit_sym(Symbol::from("opts")), opts_hash),
     ];
-    // `braced: false` so the kwargs render bare (`model: rec, …`) at
+    // `kwargs: true` so the kwargs render bare (`model: rec, …`) at
     // the call site, matching `f(a: 1, b: 2)` Ruby surface. The inner
     // `opts:` value above stays braced because it's an explicit hash.
     let new_hash = Expr::new(
         Span::synthetic(),
-        ExprNode::Hash { entries: new_entries, braced: false },
+        ExprNode::Hash { entries: new_entries, kwargs: true },
     );
 
     let mut out = other_args;
@@ -342,7 +342,7 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
             block: block.as_ref().map(|b| rewrite_errors_each_body(b, var_name)),
             parenthesized: *parenthesized,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| {
@@ -352,7 +352,7 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
                     )
                 })
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements

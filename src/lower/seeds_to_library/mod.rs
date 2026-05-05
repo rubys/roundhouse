@@ -138,14 +138,14 @@ pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
         // `article.comments.create!(commenter:, body:)` parses the
         // trailing kwargs as a single Hash arg.
         let merged_hash = match outer_args.first().map(|a| (&*a.node, a.span)) {
-            Some((ExprNode::Hash { entries, braced }, span)) => {
+            Some((ExprNode::Hash { entries, kwargs }, span)) => {
                 let mut new_entries = vec![fk_entry];
                 new_entries.extend(entries.iter().cloned());
-                Expr::new(span, ExprNode::Hash { entries: new_entries, braced: *braced })
+                Expr::new(span, ExprNode::Hash { entries: new_entries, kwargs: *kwargs })
             }
             _ => Expr::new(
                 e.span,
-                ExprNode::Hash { entries: vec![fk_entry], braced: false },
+                ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
             ),
         };
 

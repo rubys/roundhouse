@@ -209,9 +209,9 @@ fn rewrite_bare_attrs_to_receiver(
             elements: elements.iter().map(&rewrite).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries.iter().map(|(k, v)| (rewrite(k), rewrite(v))).collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
             cond: rewrite(cond),

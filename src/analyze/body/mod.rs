@@ -1219,7 +1219,7 @@ mod tests {
         let h = || {
             let mut e = synth(ExprNode::Hash {
                 entries: vec![],
-                braced: true,
+                kwargs: false,
             });
             e.ty = Some(Ty::Hash {
                 key: Box::new(Ty::Sym),

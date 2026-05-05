@@ -96,12 +96,12 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
             elements: elements.iter().map(unwrap_respond_to).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| (unwrap_respond_to(k), unwrap_respond_to(v)))
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         // Literal, Const, Var, Ivar, Apply, Case, Yield, Raise,
         // RescueModifier, StringInterp, Let — no respond_to inside

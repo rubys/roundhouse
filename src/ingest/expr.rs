@@ -305,7 +305,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let hn = n.as_hash_node().unwrap();
             ExprNode::Hash {
                 entries: hash_entries_from(&hn.elements(), file)?,
-                braced: true,
+                kwargs: false,
             }
         }
         n if n.as_keyword_hash_node().is_some() => {
@@ -314,7 +314,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let kh = n.as_keyword_hash_node().unwrap();
             ExprNode::Hash {
                 entries: hash_entries_from(&kh.elements(), file)?,
-                braced: false,
+                kwargs: true,
             }
         }
         n if n.as_instance_variable_write_node().is_some() => {

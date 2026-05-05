@@ -30,7 +30,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
         }
-        ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
+        ExprNode::Hash { entries, kwargs } => emit_hash(entries, *kwargs),
         ExprNode::Array { elements, style } => emit_array(elements, style),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, surface, left, right } => {
@@ -284,7 +284,7 @@ fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {
     }
 }
 
-fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
+fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
     let parts: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
@@ -305,14 +305,16 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
             }
         })
         .collect();
-    if braced {
-        if parts.is_empty() {
-            "{}".to_string()
-        } else {
-            format!("{{ {} }}", parts.join(", "))
-        }
-    } else {
+    // `kwargs: true` → bare trailing-kwargs form (`a: 1, b: 2`).
+    // `kwargs: false` → explicit Hash literal with `{...}` braces.
+    // Ruby treats both as Hash at runtime; the distinction is purely
+    // surface — preserving it makes round-trips faithful.
+    if kwargs {
         parts.join(", ")
+    } else if parts.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", parts.join(", "))
     }
 }
 

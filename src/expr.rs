@@ -56,8 +56,6 @@ impl Expr {
     }
 }
 
-fn default_true() -> bool { true }
-
 /// Surface form of an array literal. Source fidelity: `[:a, :b]` (Brackets),
 /// `%i[a b]` (PercentI, symbol list), `%w[a b]` (PercentW, word list) all
 /// produce the same Prism `ArrayNode` but differ byte-for-byte in source.
@@ -142,14 +140,20 @@ pub enum ExprNode {
     Ivar { name: Symbol },
     Const { path: Vec<Symbol> },
     /// Hash literal: `{ k1 => v1, k2 => v2 }` or trailing kwargs `k: v`.
-    /// Keys and values are both expressions. `braced` preserves whether the
-    /// source used explicit `{}` (HashNode) or the trailing-kwargs form
-    /// (KeywordHashNode) — the latter only appears as the last argument of
-    /// a method call.
+    /// Keys and values are both expressions. `kwargs` distinguishes the
+    /// trailing-kwargs form (KeywordHashNode in the Ruby parser, only at
+    /// the last position of a method call) from an explicit `{}` Hash
+    /// literal (HashNode). The two forms are semantically distinct in
+    /// some targets — Crystal's `{k: v}` parses as `NamedTuple(k: V)`
+    /// (compile-time, fixed shape) while `{ "k" => v }` produces an
+    /// `Hash(String, V)` (runtime, dynamic). Per-target emit dispatches
+    /// on this flag: kwargs render bare (`a: 1, b: 2` at the call site,
+    /// NamedTuple-compatible), Hash literals render with explicit
+    /// hashrocket-style braces.
     Hash {
         entries: Vec<(Expr, Expr)>,
-        #[serde(default = "default_true")]
-        braced: bool,
+        #[serde(default)]
+        kwargs: bool,
     },
     /// Array literal: `[a, b, c]`, `%i[a b c]`, `%w[a b c]`.
     /// `style` preserves which surface form the source used.

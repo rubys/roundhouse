@@ -44,7 +44,7 @@ fn synth_has_many_reader(
                     ExprNode::Ivar { name: Symbol::from("id") },
                 ),
             )],
-            braced: false,
+            kwargs: true,
         },
     )];
 
@@ -117,7 +117,7 @@ fn synth_belongs_to_reader(
                             ExprNode::Ivar { name: foreign_key.clone() },
                         ),
                     )],
-                    braced: false,
+                    kwargs: true,
                 },
             )],
             block: None,

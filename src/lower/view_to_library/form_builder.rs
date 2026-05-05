@@ -49,7 +49,7 @@ pub(super) fn emit_form_builder_call(
 /// array. Replaces the array with just the base string. Other entries
 /// pass through unchanged.
 fn simplify_arg_class_array(arg: &Expr) -> Expr {
-    let ExprNode::Hash { entries, braced } = &*arg.node else {
+    let ExprNode::Hash { entries, kwargs } = &*arg.node else {
         return arg.clone();
     };
     let new_entries: Vec<(Expr, Expr)> = entries
@@ -68,7 +68,7 @@ fn simplify_arg_class_array(arg: &Expr) -> Expr {
         .collect();
     Expr::new(
         arg.span,
-        ExprNode::Hash { entries: new_entries, braced: *braced },
+        ExprNode::Hash { entries: new_entries, kwargs: *kwargs },
     )
 }
 

@@ -100,7 +100,7 @@ module Roundhouse
       row
     end
 
-    def where(table_name : String, conditions : Hash(String, _))
+    def where(table_name : String, conditions : Hash(Symbol, _))
       keys = conditions.keys
       rows = [] of Hash(String, DB::Any)
       return rows if keys.empty?
@@ -130,7 +130,7 @@ module Roundhouse
       n > 0
     end
 
-    def insert(table_name : String, attributes : Hash(String, _)) : Int64
+    def insert(table_name : String, attributes : Hash(Symbol, _)) : Int64
       keys = attributes.keys
       cols = keys.map(&.to_s).join(", ")
       placeholders = (["?"] * keys.size).join(", ")
@@ -139,7 +139,7 @@ module Roundhouse
       conn.query_one("SELECT last_insert_rowid()", as: Int64)
     end
 
-    def update(table_name : String, id, attributes : Hash(String, _)) : Nil
+    def update(table_name : String, id, attributes : Hash(Symbol, _)) : Nil
       keys = attributes.keys
       return if keys.empty?
       sets = keys.map { |k| "#{k} = ?" }.join(", ")

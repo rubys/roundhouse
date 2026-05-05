@@ -176,7 +176,7 @@ fn build_constructor_call(
     let hash_expr = with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries, braced: true },
+            ExprNode::Hash { entries, kwargs: false },
         ),
         hash_ty,
     );
@@ -348,12 +348,12 @@ fn map_expr(e: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
             left: map_expr(left, f),
             right: map_expr(right, f),
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| (map_expr(k, f), map_expr(v, f)))
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements.iter().map(|x| map_expr(x, f)).collect(),

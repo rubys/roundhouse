@@ -583,7 +583,7 @@ fn extract_status_from_kwargs_finds_symbol_value() {
         Span::synthetic(),
         ExprNode::Hash {
             entries: vec![(sym_lit("status"), sym_lit("see_other"))],
-            braced: false,
+            kwargs: true,
         },
     );
     assert_eq!(extract_status_from_kwargs(&[hash]), Some(303));
@@ -595,7 +595,7 @@ fn extract_status_from_kwargs_finds_integer_value() {
         Span::synthetic(),
         ExprNode::Hash {
             entries: vec![(sym_lit("status"), lit_int(418))],
-            braced: false,
+            kwargs: true,
         },
     );
     assert_eq!(extract_status_from_kwargs(&[hash]), Some(418));
@@ -607,7 +607,7 @@ fn extract_status_from_kwargs_returns_none_without_status_key() {
         Span::synthetic(),
         ExprNode::Hash {
             entries: vec![(sym_lit("notice"), lit_int(1))],
-            braced: false,
+            kwargs: true,
         },
     );
     assert_eq!(extract_status_from_kwargs(&[hash]), None);

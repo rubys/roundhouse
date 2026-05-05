@@ -522,7 +522,7 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
     // type-checks.
     let attrs_default = Expr::new(
         Span::synthetic(),
-        ExprNode::Hash { entries: Vec::new(), braced: true },
+        ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
     let signature = Ty::Fn {
@@ -571,7 +571,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
     let body = with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries, braced: true },
+            ExprNode::Hash { entries, kwargs: false },
         ),
         hash_ty.clone(),
     );

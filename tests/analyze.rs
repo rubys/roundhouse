@@ -172,7 +172,7 @@ fn scope_body_self_is_model_class() {
 #[test]
 fn hash_literal_in_where_call_types_as_hash() {
     // `scope :published, -> { where(published: true) }`
-    // The `published: true` kwarg is a Hash literal (braced: false in IR).
+    // The `published: true` kwarg is a Hash literal (kwargs: true in IR).
     let app = analyzed_app();
     let post = app
         .models
@@ -189,8 +189,8 @@ fn hash_literal_in_where_call_types_as_hash() {
     };
     assert_eq!(args.len(), 1, "where takes one hash arg");
     match &*args[0].node {
-        ExprNode::Hash { entries, braced } => {
-            assert!(!*braced, "trailing kwargs form should be unbraced");
+        ExprNode::Hash { entries, kwargs } => {
+            assert!(*kwargs, "trailing-kwargs form should set kwargs=true");
             assert_eq!(entries.len(), 1);
             // Key is Sym(published), value is true.
             match &*entries[0].0.node {
@@ -844,7 +844,7 @@ fn hash_each_block_binds_key_and_value() {
                     ExprNode::Lit { value: Literal::Int { value: 1 } },
                 ),
             )],
-            braced: true,
+            kwargs: false,
         },
     );
     let block_body = Expr::new(

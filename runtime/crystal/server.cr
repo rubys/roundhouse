@@ -25,7 +25,12 @@ require "./cable"
 module Roundhouse
   module Server
     @@layout : Proc(String, String)? = nil
-    @@routes : Array(NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)) = [] of NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
+    # Routes are emitted by the lowerer as Symbol-keyed Hash literals
+    # (`{ :method => "GET", :pattern => "/", :controller => :app,
+    # :action => :index }`). Symbol keys preserve Ruby's idiom and let
+    # the transpiled router access via `route[:method]` directly. Values
+    # vary — method/pattern are String, controller/action are Symbol.
+    @@routes : Array(Hash(Symbol, String | Symbol)) = [] of Hash(Symbol, String | Symbol)
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
     @@session : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new
     @@flash : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new

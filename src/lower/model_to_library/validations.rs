@@ -76,7 +76,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
             let mut args = vec![lit_sym(attr.clone()), ivar(attr)];
             args.push(Expr::new(
                 Span::synthetic(),
-                ExprNode::Hash { entries, braced: false },
+                ExprNode::Hash { entries, kwargs: true },
             ));
             vec![helper_call("validates_length_of", args)]
         }
@@ -100,7 +100,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
                                 },
                             ),
                         )],
-                        braced: false,
+                        kwargs: true,
                     },
                 ),
             ],
@@ -126,7 +126,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
             if !entries.is_empty() {
                 args.push(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Hash { entries, braced: false },
+                    ExprNode::Hash { entries, kwargs: true },
                 ));
             }
             vec![helper_call("validates_numericality_of", args)]
@@ -152,7 +152,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
                     ivar(attr),
                     Expr::new(
                         Span::synthetic(),
-                        ExprNode::Hash { entries, braced: false },
+                        ExprNode::Hash { entries, kwargs: true },
                     ),
                 ],
             )]

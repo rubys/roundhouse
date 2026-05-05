@@ -82,7 +82,7 @@ fn emit_node(n: &ExprNode) -> String {
                 joined
             }
         }
-        ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
+        ExprNode::Hash { entries, kwargs } => emit_hash(entries, *kwargs),
         ExprNode::Array { elements, style } => emit_array(elements, style),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, surface, left, right } => {
@@ -347,48 +347,56 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
     format!("[{}]", parts.join(", "))
 }
 
-fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
+fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
+    if kwargs {
+        // Kwargs at call site → bare `key: value` shorthand. In Crystal
+        // this binds to `**opts` parameters as a NamedTuple. Symbol-keyed
+        // entries use the bareword form; hyphenated/special keys quote
+        // (`"data-x": v`); non-symbol keys fall back to hashrocket
+        // (rare for kwargs but keeps the emitter total).
+        let parts: Vec<String> = entries
+            .iter()
+            .map(|(k, v)| {
+                if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                    let name = value.as_str();
+                    if is_simple_ident(name) {
+                        return format!("{name}: {}", emit_expr(v));
+                    }
+                    return format!("{:?}: {}", name, emit_expr(v));
+                }
+                format!("{} => {}", emit_expr(k), emit_expr(v))
+            })
+            .collect();
+        return parts.join(", ");
+    }
+    // Real Hash literal → `{ :key => value, ... }` hashrocket form.
+    // Crystal's `{key: v}` shorthand creates a NamedTuple (compile-time
+    // fixed shape, distinct type), so we use the rocket form to force
+    // a runtime `Hash(...)`. Preserve the source key type:
+    //   - Symbol-typed keys → `:key => value` → Hash(Symbol, V)
+    //   - String-typed keys → `"key" => value` → Hash(String, V)
+    //   - Generic exprs     → `<expr> => value`
+    // Keeping Symbol keys in Crystal matches the framework runtime's
+    // expectations (`route[:method]` works against a `Hash(Symbol, V)`,
+    // and Crystal Symbols are static so the symbol set is closed —
+    // no dynamic-Symbol-creation concern at literal sites).
+    if entries.is_empty() {
+        // Crystal rejects bare `{}` because it can't infer Hash vs
+        // NamedTuple types. Default to `Hash(String, String)` —
+        // matches the body-typer's `@h = {}` ivar inference and the
+        // typical Rails-shape case.
+        return "{} of String => String".to_string();
+    }
     let parts: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            // Symbol-keyed entries use the bareword shorthand
-            // `key: value` when the key is a simple identifier — same
-            // as Ruby/Spinel. In Crystal this produces a NamedTuple
-            // entry, which interoperates with `**opts` parameters.
-            // Hyphenated/special-character keys quote: `"data-x": v`.
-            // Non-symbol keys fall through to the rocket form
-            // (`expr => value`), producing a Hash literal.
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                let name = value.as_str();
-                if is_simple_ident(name) {
-                    format!("{name}: {}", emit_expr(v))
-                } else {
-                    format!("{:?}: {}", name, emit_expr(v))
-                }
-            } else {
-                format!("{} => {}", emit_expr(k), emit_expr(v))
+                return format!(":{} => {}", value.as_str(), emit_expr(v));
             }
+            format!("{} => {}", emit_expr(k), emit_expr(v))
         })
         .collect();
-    if braced {
-        if parts.is_empty() {
-            // Crystal rejects bare `{}` because it can't infer Hash vs
-            // NamedTuple types. `Hash(String, String)` matches what
-            // the body-typer infers for `@h = {}` ivar declarations
-            // (avoiding declaration/assignment-type mismatches at the
-            // class header) and covers the typical Rails-shape case.
-            // Crystal forbids dynamic Symbol creation, so transpiled
-            // router/parameters drop `.to_sym` calls and stay
-            // string-keyed. Call sites needing nilable values or
-            // other element types will surface a Crystal type error
-            // and we fix the source there.
-            "{} of String => String".to_string()
-        } else {
-            format!("{{ {} }}", parts.join(", "))
-        }
-    } else {
-        parts.join(", ")
-    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 fn is_simple_ident(s: &str) -> bool {

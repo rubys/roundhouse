@@ -88,7 +88,7 @@ fn build_pins_array(pins: &[crate::app::ImportmapPin], hash_ty: &Ty) -> Expr {
             with_ty(
                 Expr::new(
                     Span::synthetic(),
-                    ExprNode::Hash { entries, braced: true },
+                    ExprNode::Hash { entries, kwargs: false },
                 ),
                 hash_ty.clone(),
             )

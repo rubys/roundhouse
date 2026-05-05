@@ -286,12 +286,12 @@ where
             elements: elements.iter().map(|e| map_expr(e, f)).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| (map_expr(k, f), map_expr(v, f)))
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::StringInterp { parts } => ExprNode::StringInterp {
             parts: parts

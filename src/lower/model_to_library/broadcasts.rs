@@ -128,7 +128,7 @@ fn broadcasts_call(
     if let Some(h) = html {
         entries.push((lit_sym(Symbol::from("html")), h));
     }
-    let kwargs = Expr::new(Span::synthetic(), ExprNode::Hash { entries, braced: false });
+    let kwargs = Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true });
     Expr::new(
         Span::synthetic(),
         ExprNode::Send {

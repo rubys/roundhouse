@@ -821,12 +821,12 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
             elements: elements.iter().map(rewrite_ivars_to_locals).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| (rewrite_ivars_to_locals(k), rewrite_ivars_to_locals(v)))
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
             params: params.clone(),

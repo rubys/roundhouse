@@ -1301,9 +1301,9 @@ fn rewrite_free(e: &Expr) -> Expr {
             elements: elements.iter().map(rewrite_free).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries.iter().map(|(k, v)| (rewrite_free(k), rewrite_free(v))).collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::StringInterp { parts } => ExprNode::StringInterp {
             parts: parts.iter().map(|p| match p {
@@ -1502,12 +1502,12 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
             elements: elements.iter().map(|c| rewrite(c, super_method)).collect(),
             style: *style,
         },
-        ExprNode::Hash { entries, braced } => ExprNode::Hash {
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
                 .map(|(k, v)| (rewrite(k, super_method), rewrite(v, super_method)))
                 .collect(),
-            braced: *braced,
+            kwargs: *kwargs,
         },
         ExprNode::StringInterp { parts } => ExprNode::StringInterp {
             parts: parts
