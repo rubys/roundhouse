@@ -66,6 +66,7 @@ const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
 const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
 const CR_CABLE_SOURCE: &str = include_str!("../../runtime/crystal/cable.cr");
 const CR_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/crystal/test_support.cr");
+const CR_BROADCASTS_SOURCE: &str = include_str!("../../runtime/crystal/broadcasts.cr");
 
 /// Emit a full Crystal project for `app`. Composes the lowered-IR
 /// emit pipeline (mirrors Spinel's `emit_spinel`).
@@ -113,6 +114,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/test_support.cr"),
         content: CR_TEST_SUPPORT_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/broadcasts.cr"),
+        content: CR_BROADCASTS_SOURCE.to_string(),
     });
 
     // Schema → src/schema.cr (LibraryFunction module).

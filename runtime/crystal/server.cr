@@ -92,9 +92,13 @@ module Roundhouse
         return
       end
 
-      ctrl_sym = matched[:controller]
-      action = matched[:action]
-      path_params = matched[:path_params]
+      # The transpiled router's match() returns a Hash whose value
+      # type is the union of all field types (String | Symbol | HWIA).
+      # Narrow each access to the field's known type — the framework
+      # contract guarantees these shapes; Crystal needs explicit casts.
+      ctrl_sym = matched[:controller].as(Symbol)
+      action = matched[:action].as(Symbol)
+      path_params = matched[:path_params].as(ActiveSupport::HashWithIndifferentAccess)
       ctrl_class = @@controllers[ctrl_sym]?
       if ctrl_class.nil?
         context.response.status_code = 500

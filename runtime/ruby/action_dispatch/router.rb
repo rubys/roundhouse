@@ -23,8 +23,15 @@ module Router
     i = 0
     while i < table.length
       route = table[i]
-      if route[:method] == method_upcase
-        params = match_pattern(route[:pattern], path)
+      # `route[:*]` reads return the Hash's value-type union; the
+      # lowerer-emitted route table is `Hash[Symbol, String | Symbol]`.
+      # `.to_s` on String-typed fields narrows the union to String for
+      # strict-typed targets (Crystal); in Ruby, `String#to_s` returns
+      # self — no-op. Same for Symbol-typed fields and `.to_sym`
+      # downstream (Ruby no-op; Crystal targets drop it as part of the
+      # to_sym Send rewrite).
+      if route[:method].to_s == method_upcase
+        params = match_pattern(route[:pattern].to_s, path)
         unless params.nil?
           return {
             controller: route[:controller],

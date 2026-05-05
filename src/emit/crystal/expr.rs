@@ -27,14 +27,71 @@ pub fn emit_expr(e: &Expr) -> String {
     // `@article` read, `e.ty` is the narrowed non-nilable type.
     // Emit `@article.not_nil!` at those reads to bridge the gap —
     // safe (the typer's narrowing is sound) and idiomatic Crystal.
-    // Only applied to Ivar reads typed as a concrete `Ty::Class` —
-    // primitive ivars (counters, flags) and unions stay unwrapped.
+    //
+    // Applied to Ivar reads typed as a concrete non-nilable type
+    // (`Class`, primitives `Int`/`Str`/`Bool`/`Float`/`Sym`,
+    // collections `Array`/`Hash`). Excluded: `Ty::Untyped`,
+    // `Ty::Nil`, `Ty::Var`, `Ty::Union` — these either are or
+    // already include nil; `.not_nil!` would be wrong or redundant.
+    // Schema-derived attr accessors carry the non-nilable column
+    // type (e.g. `Ty::Int` for `article_id` even when the underlying
+    // `property` declaration is `Int64?`) — narrowing here matches
+    // what the body-typer guarantees.
     if let ExprNode::Ivar { .. } = &*e.node {
-        if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Class { .. })) {
+        if let Some(ty) = e.ty.as_ref() {
+            if is_non_nilable_concrete(ty) {
+                return format!("{raw}.not_nil!");
+            }
+        }
+    }
+    // Same bridge for `recv.attr` Send dispatches that resolve to a
+    // model column reader. Crystal's auto-generated `property name : T?`
+    // getter returns the nilable form, but the body-typer types the
+    // accessor's result by its schema column type (non-nilable when
+    // the column is `null: false`). Narrow at the call site for Sends
+    // that look like attribute reads — zero-arg, no block, receiver
+    // typed as a `Ty::Class` instance — to keep typed call sites
+    // (e.g. `RouteHelpers.x_path(comment.article_id)` requiring
+    // `Int64` not `Int64?`) compiling. Stricter than the Ivar rule —
+    // the receiver-class check filters out unrelated zero-arg sends
+    // (e.g. `1.to_s`, `"".size`) where `.not_nil!` would be wrong.
+    if let ExprNode::Send { recv: Some(recv), args, block: None, .. } = &*e.node {
+        if args.is_empty()
+            && matches!(recv.ty.as_ref(), Some(crate::ty::Ty::Class { .. }))
+            && matches!(e.ty.as_ref(), Some(t) if is_non_nilable_primitive(t))
+        {
             return format!("{raw}.not_nil!");
         }
     }
     raw
+}
+
+/// Subset of [`is_non_nilable_concrete`] limited to primitive types
+/// that frequently appear as nilable column properties in Crystal
+/// (`Int`, `Str`, `Bool`, `Float`). Class types are excluded — they
+/// hit the Ivar/instance path with their own narrowing.
+fn is_non_nilable_primitive(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym)
+}
+
+/// True for Ty variants that emit as non-nilable concrete Crystal types.
+/// `Untyped`/`Nil`/`Var`/`Union`/`Bottom` excluded — they're either
+/// already nilable or unknown, so `.not_nil!` would be incorrect.
+fn is_non_nilable_concrete(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    matches!(
+        ty,
+        Ty::Class { .. }
+            | Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Sym
+            | Ty::Array { .. }
+            | Ty::Hash { .. }
+            | Ty::Tuple { .. }
+    )
 }
 
 /// Public entry point used by `runtime_loader::crystal_units` for
@@ -48,6 +105,25 @@ pub fn emit_expr_for_runtime(e: &Expr) -> String {
 fn is_empty_branch(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// Resolve a bare framework class name to its fully-qualified Crystal
+/// module path. The body-typer's class registry holds aliases under
+/// the last-segment name (`ViewHelpers`, `Parameters`, ...), but
+/// Crystal's namespace resolution needs the parent module spelled
+/// out at every reference site that isn't itself nested inside the
+/// home module. Returns `None` when the bare name isn't a known
+/// framework class — caller falls back to the unqualified spelling.
+fn qualify_bare_framework(name: &str) -> Option<&'static str> {
+    match name {
+        "HashWithIndifferentAccess" => Some("::ActiveSupport::HashWithIndifferentAccess"),
+        "Parameters" => Some("::ActionController::Parameters"),
+        "ParameterMissing" => Some("::ActionController::ParameterMissing"),
+        "Router" => Some("::ActionDispatch::Router"),
+        "ViewHelpers" => Some("::ActionView::ViewHelpers"),
+        "FormBuilder" => Some("::ActionView::FormBuilder"),
+        _ => None,
+    }
 }
 
 fn emit_node(n: &ExprNode) -> String {
@@ -77,10 +153,22 @@ fn emit_node(n: &ExprNode) -> String {
                 first,
                 "ActiveRecord" | "ActionController" | "ActionView" | "ActionDispatch" | "ActiveSupport"
             ) {
-                format!("::{joined}")
-            } else {
-                joined
+                return format!("::{joined}");
             }
+            // Bare last-segment refs to framework classes whose home
+            // module is elsewhere — `ViewHelpers` lives under
+            // `ActionView`, `HashWithIndifferentAccess` under
+            // `ActiveSupport`, etc. The body-typer registers an alias
+            // under the bare name so dispatch resolves, but Crystal
+            // namespace lookup needs the qualified path. Re-attach
+            // when we see a single-segment Const matching one of
+            // these known names.
+            if path.len() == 1 {
+                if let Some(qualified) = qualify_bare_framework(first) {
+                    return qualified.to_string();
+                }
+            }
+            joined
         }
         ExprNode::Hash { entries, kwargs } => emit_hash(entries, *kwargs),
         ExprNode::Array { elements, style } => emit_array(elements, style),
@@ -132,6 +220,24 @@ fn emit_node(n: &ExprNode) -> String {
                 )
             {
                 return format!("# Crystal: {} (skipped — module load handled at file scope)", emit_send_base(recv.as_ref(), method, args, *parenthesized));
+            }
+            // Buffer-accumulate idiom: `io << x` (Ruby) where `io` is a
+            // String-typed local appends in place. Crystal Strings are
+            // immutable and don't define `<<`; rewrite to the
+            // assign-back form `io = io + x` (the lowerer's view-body
+            // accumulator is the canonical case — `io = String.new`
+            // followed by `io << helper(...)`). The bare `String.new`
+            // initializer is rewritten to `""` below in emit_send_base.
+            if method.as_str() == "<<" && args.len() == 1 {
+                if let Some(r) = recv {
+                    if let ExprNode::Var { name, .. } = &*r.node {
+                        if matches!(r.ty, Some(crate::ty::Ty::Str)) {
+                            let var = escape_ident(name.as_str());
+                            let val = emit_expr(&args[0]);
+                            return format!("{var} = {var} + {val}");
+                        }
+                    }
+                }
             }
             let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
             match block {
@@ -441,6 +547,21 @@ pub(super) fn emit_send_base(
     // an `ExprNode::Raise`.
     if recv.is_none() && method.as_str() == "raise" && args_s.len() == 2 {
         return format!("raise {}.new({})", args_s[0], args_s[1]);
+    }
+    // `String.new` (no args) → `""`. Ruby/Spinel `String.new` produces
+    // a fresh mutable empty String; Crystal `String.new` exists but
+    // takes a Bytes/Slice argument — and Crystal Strings are immutable
+    // anyway. The empty string literal `""` is the cross-target
+    // accumulator-init the view-body lowerer expects (paired with the
+    // `<<` → `io = io + x` rewrite above for appends).
+    if method.as_str() == "new" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("String") {
+                    return r#""""#.to_string();
+                }
+            }
+        }
     }
     // Ruby `Time` stdlib → Crystal `Time` stdlib bridges.
     //
