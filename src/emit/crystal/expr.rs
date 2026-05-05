@@ -452,6 +452,7 @@ pub(super) fn emit_send_base(
 
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
+        && !is_binary_operator(m)
         && !super::shared::is_crystal_reserved(m)
     {
         if args_s.is_empty() {

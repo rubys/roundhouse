@@ -1,41 +1,70 @@
 module ActionController
-  # Strong-parameters analogue. Wraps an
-  # ActiveSupport::HashWithIndifferentAccess; key access accepts
-  # either Symbol or String. Most signatures take `untyped` keys
-  # because HWIA normalizes via `Symbol#to_s`.
+  # Strong-parameters analogue. Wraps a Hash with the small subset of
+  # Rails::ActionController::Parameters real-blog uses. Keys are
+  # symbolized at construction; access via `[]` / `key?` / `fetch`
+  # accepts either Symbol or String (each method `.to_sym`s the key).
   class Parameters
-    # `hash` defaults to `nil` — typed as `untyped` for the
-    # construction-from-untyped-source case (request bodies) plus the
-    # HWIA-passthrough case.
-    def initialize: (?untyped hash) -> void
+    # `hash` defaults to `{}` — typed as `Hash[Symbol, untyped]` for
+    # the typical-call shape. Real callers pass a request-body hash
+    # whose values are genuinely polymorphic (String/Integer/nested
+    # Hash/Parameters), so `untyped` is the deliberate value type.
+    def initialize: (?Hash[Symbol, untyped] hash) -> void
 
-    def get: (untyped key) -> untyped
-    def set: (untyped key, untyped value) -> untyped
-    def has?: (untyped key) -> bool
+    # `get` / `set` / `has?` are the cross-target named-method API.
+    # `[]` / `[]=` / `key?` are one-line delegators kept for Ruby
+    # idiom under CRuby; non-Ruby emits use the named forms.
+    def get: (Symbol key) -> untyped
+    def set: (Symbol key, untyped value) -> untyped
+    def has?: (Symbol key) -> bool
 
-    def []: (untyped key) -> untyped
-    def []=: (untyped key, untyped value) -> untyped
+    # `key.to_sym` is called inside, so callers may pass a Symbol or
+    # String. RBS type Symbol covers the common case; widen via union
+    # if a String-key fixture forces it.
+    def []: (Symbol key) -> untyped
+    def []=: (Symbol key, untyped value) -> untyped
 
-    def key?: (untyped key) -> bool
+    def key?: (Symbol key) -> bool
 
-    def fetch: (untyped key, ?untyped default) -> untyped
+    # `default` is `nil` when omitted; returned as-is when the key is
+    # absent. The result type is the union of the stored value (untyped)
+    # and the default — we collapse to `untyped` since the caller's
+    # narrowing is at the use-site.
+    def fetch: (Symbol key, ?untyped default) -> untyped
 
     def empty?: () -> bool
 
-    # Underlying String-keyed Hash (HWIA convention).
-    def to_h: () -> Hash[String, untyped]
+    # Rebuilds a plain Hash. Values pass through unchanged (no nested
+    # Parameters in @hash today; symbolize_keys never produces them).
+    def to_h: () -> Hash[Symbol, untyped]
 
-    # Accepts a Hash or HWIA; HWIA normalizes either on insert.
-    def merge: (untyped other_hash) -> Parameters
+    # Accepts a Hash. Callers holding a Parameters pre-convert via
+    # `.to_h`. Monomorphic param keeps the slot one-shape for spinel
+    # and for type-strict emit targets (Rust, Crystal, Go).
+    def merge: (Hash[Symbol, untyped] other_hash) -> Parameters
 
-    # Returns nested Parameters; raises on missing/non-Hash/empty.
-    def require: (untyped key) -> Parameters
+    # `params.require(:article)` — returns the nested Parameters.
+    # Raises ParameterMissing when the value is nil, not a Hash, or
+    # an empty Hash. Always Parameters on success — no bare-value
+    # passthrough.
+    def require: (Symbol key) -> Parameters
 
-    # Filtered Parameters containing only allowed_keys. Array elements
-    # may be Symbol or String — HWIA normalizes.
-    def permit: (Array[untyped] allowed_keys) -> Parameters
+    # `params.permit([:title, :body])` — returns a new Parameters
+    # containing only the listed keys. Takes an Array[Symbol] for a
+    # monomorphic param slot (spinel + type-strict-target friendly);
+    # the controller lowerer emits this form from the Rails-idiom
+    # `params.expect(article: [:title, :body])` source shape.
+    def permit: (Array[Symbol] allowed_keys) -> Parameters
+
+    # Internal: walk a Hash recursively, symbolizing String keys and
+    # recursing into nested Hashes. Values that aren't Hashes pass
+    # through.
+    def symbolize_keys: (Hash[Symbol, untyped] hash) -> Hash[Symbol, untyped]
   end
 
+  # `ParameterMissing < StandardError; end` — a class declaration
+  # with no body. No methods to declare, but the class itself needs
+  # to exist for body-typer dispatch. Empty-body class declarations
+  # in RBS are legal.
   class ParameterMissing < StandardError
   end
 end

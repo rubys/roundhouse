@@ -23,7 +23,6 @@ module ActiveSupport
     def size: () -> Integer
     def keys: () -> Array[String]
     def values: () -> Array[untyped]
-    def each: () { (String, untyped) -> void } -> HashWithIndifferentAccess
     def normalize_value: (untyped value) -> untyped
   end
 end

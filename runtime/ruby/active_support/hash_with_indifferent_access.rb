@@ -94,12 +94,13 @@ module ActiveSupport
       @data.values
     end
 
-    def each
-      @data.each do |k, v|
-        yield k, v
-      end
-      self
-    end
+    # `each` is intentionally omitted for now — the body-typer doesn't
+    # yet infer block-yield param types when the source uses
+    # `@data.each do |k, v| yield k, v end` (the generic block-return
+    # cost referenced in validations.rb's comments). Consumers needing
+    # to iterate go through `to_h` and iterate the underlying Hash
+    # directly. Restore once the typer handles the pattern OR rewrite
+    # the body to a typer-friendly shape.
 
     # Internal: normalize a value on insert. Plain Hashes recursively
     # become HWIAs so deep access (`params[:user][:name]`) walks a
