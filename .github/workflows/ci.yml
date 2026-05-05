@@ -106,30 +106,29 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  # toolchain-typescript: disabled during the TS emitter rewrite.
-  # The kind-aware emitter is being torn out and replaced with a
-  # kind-agnostic LibraryClass walker. Re-enable once the new path
-  # reaches parity on tiny-blog and real-blog. See docs/pipeline/emit.md
-  # ("Working policy: rip-and-replace").
-  #
-  # toolchain-typescript:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - name: Install Node
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - name: cargo test --test typescript_toolchain -- --ignored
-  #       run: cargo test --test typescript_toolchain -- --ignored --nocapture
+  # toolchain-typescript: tsc parity + node:test on real-blog. The
+  # filter `real_blog` excludes the still-aspirational tiny_blog
+  # gate (broken on main, pre-existing) and the diagnostic
+  # `dump_transpiled_blog_tsc_errors` non-asserting helper. Drop the
+  # filter once tiny_blog reaches parity.
+  toolchain-typescript:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: cargo test --test typescript_toolchain real_blog -- --ignored
+        run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
 
   framework-tests-typescript:
     # Per-target framework-test conformance gate. Transpiles
@@ -293,10 +292,13 @@ jobs:
       - name: scripts/compare crystal
         run: scripts/compare crystal
 
-  # compare-typescript: disabled during the TS emitter rewrite (see
-  # toolchain-typescript above). DOM-equivalence runs against emitted
-  # output that's about to change shape; re-enable once the new path
-  # boots a real-blog server.
+  # compare-typescript: TS server boots and serves pages, but the
+  # rendered <head> diverges from Rails (extra `<meta>` and `<link>`
+  # tags Rails injects via asset pipeline / CSRF / importmap that the
+  # TS emitter doesn't yet replicate). 0/5 paths match as of
+  # 2026-05-04. Re-enable once the head divergence is closed —
+  # toolchain-typescript above is the working node:test gate in the
+  # meantime.
   #
   # compare-typescript:
   #   needs: generate-fixture
@@ -444,7 +446,7 @@ jobs:
       - unit
       - toolchain-rust
       - toolchain-crystal
-      # toolchain-typescript: disabled during TS rewrite
+      - toolchain-typescript
       - framework-tests-typescript
       - toolchain-go
       - toolchain-elixir
