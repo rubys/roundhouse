@@ -22,7 +22,11 @@ class ParametersTest < Minitest::Test
 
   def test_to_h_returns_plain_hash
     p = ActionController::Parameters.new(title: "x", nested: { a: 1 })
-    assert_equal({ title: "x", nested: { a: 1 } }, p.to_h)
+    # HWIA stores keys as Strings; nested Hash values become nested
+    # HWIA on insert.
+    h = p.to_h
+    assert_equal "x", h["title"]
+    assert_equal({ "a" => 1 }, h["nested"].to_h)
   end
 
   def test_require_returns_nested_parameters
@@ -45,13 +49,13 @@ class ParametersTest < Minitest::Test
   def test_permit_filters_to_listed_keys
     p = ActionController::Parameters.new(title: "x", body: "y", evil: "z")
     permitted = p.permit([:title, :body])
-    assert_equal({ title: "x", body: "y" }, permitted.to_h)
+    assert_equal({ "title" => "x", "body" => "y" }, permitted.to_h)
   end
 
   def test_permit_omits_missing_keys
     p = ActionController::Parameters.new(title: "x")
     permitted = p.permit([:title, :body])
-    assert_equal({ title: "x" }, permitted.to_h)
+    assert_equal({ "title" => "x" }, permitted.to_h)
   end
 
   def test_string_keys_normalized_to_symbols

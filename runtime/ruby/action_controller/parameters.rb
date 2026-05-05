@@ -1,34 +1,34 @@
+require_relative "../active_support/hash_with_indifferent_access"
+
 module ActionController
   class ParameterMissing < StandardError; end
 
-  # Strong-parameters analogue. Wraps a Hash with the small subset of
-  # Rails::ActionController::Parameters real-blog uses: `[]`, `key?`,
-  # `fetch`, `to_h`, `merge`, `require(:key)`, `permit(:k1, :k2)`.
-  # Keys are normalized to symbols at construction time so callers
-  # don't need to remember whether the request body produced strings
-  # or symbols.
+  # Strong-parameters analogue. Wraps an
+  # ActiveSupport::HashWithIndifferentAccess so callers can use either
+  # `params[:title]` or `params["title"]` interchangeably.
+  #
+  # The HWIA stores keys as Strings and normalizes via `Symbol#to_s`,
+  # which is universal across targets (Crystal/Elixir forbid the
+  # reverse `String#to_sym`).
   class Parameters
-    def initialize(hash = {})
-      @hash = symbolize_keys(hash)
+    def initialize(hash = nil)
+      @hash = ActiveSupport::HashWithIndifferentAccess.new(hash)
     end
 
-    # `get` / `set` / `has?` are the primary cross-target API. `[]`
-    # / `[]=` / `key?` stay as one-line delegators so Ruby idiom
-    # (`params[:title]`, `params.key?(:title)`) keeps working under
-    # CRuby, while non-Ruby targets that can't express operator
-    # methods (TS, Python, Elixir, Go, Rust) emit `get`/`set`/`has?`
-    # directly. A future caller-side lowerer will rewrite Ruby
-    # `params[k]` Send nodes to `params.get(k)` for those targets.
+    # `get` / `set` / `has?` are the cross-target named-method API.
+    # `[]` / `[]=` / `key?` stay as one-line delegators so Ruby idiom
+    # keeps working under CRuby; the TS emit rewrites bracket access
+    # on a Parameters instance to `.get`/`.set` automatically.
     def get(key)
-      @hash[key.to_sym]
+      @hash[key]
     end
 
     def set(key, value)
-      @hash[key.to_sym] = value
+      @hash[key] = value
     end
 
     def has?(key)
-      @hash.key?(key.to_sym)
+      @hash.key?(key)
     end
 
     def [](key)
@@ -44,65 +44,52 @@ module ActionController
     end
 
     def fetch(key, default = nil)
-      sym = key.to_sym
-      return @hash[sym] if @hash.key?(sym)
-      default
+      @hash.fetch(key, default)
     end
 
     def empty?
       @hash.empty?
     end
 
+    # Underlying String-keyed Hash (HWIA convention: `to_h` exposes
+    # the inner storage; the "indifferent" half goes away here).
     def to_h
-      copy = {}
-      @hash.each { |k, v| copy[k] = v }
-      copy
+      @hash.to_h
     end
 
-    # Accepts a Hash. Callers holding a Parameters call `.to_h` first.
-    # Monomorphic param type keeps the slot one-shape for spinel and
-    # for type-strict targets (Rust, Crystal, Go).
+    # Accepts a plain Hash. The merged HWIA is unwrapped via `.to_h`
+    # before constructing — HWIA's initialize is typed to take Hash.
     def merge(other_hash)
-      Parameters.new(@hash.merge(symbolize_keys(other_hash)))
+      Parameters.new(@hash.merge(other_hash).to_h)
     end
 
-    # `params.require(:article)` — returns the nested Parameters for
-    # the given key; raises ParameterMissing when the value is nil,
-    # not a Hash, or an empty Hash. Real-blog only requires keys whose
-    # values are Hashes (request-body nested data).
+    # `params.require(:article)` — returns the nested Parameters.
+    # Raises ParameterMissing when the value is nil, not a hash, or
+    # an empty hash. HWIA recursively normalizes nested Hash values
+    # into nested HWIA on insert, so the value here is HWIA when
+    # present.
     def require(key)
-      val = @hash[key.to_sym]
+      raw = @hash[key]
+      raise ParameterMissing, "param is missing or the value is empty: #{key}" if raw.nil?
+      # Bind through an `is_a?` ternary so the narrowed type carries
+      # to the next line — the body-typer (and the TS emit's class-
+      # recv dispatch) sees `val` as HWIA, not the wider Untyped from
+      # @hash[key]. Without this binding, `val.empty?` emits as a
+      # property reference (always truthy) under the TS no-paren-on-
+      # zero-arg fallback for non-class receivers.
+      val = raw.is_a?(ActiveSupport::HashWithIndifferentAccess) ? raw : nil
       raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.nil?
-      raise ParameterMissing, "param is missing or the value is empty: #{key}" unless val.is_a?(Hash)
       raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.empty?
-      Parameters.new(val)
+      Parameters.new(val.to_h)
     end
 
-    # `params.permit([:title, :body])` — returns a new Parameters
-    # with only the listed keys. Takes an Array[Symbol] (no splat) so
-    # the parameter shape is monomorphic for spinel + type-strict
-    # targets; callers used to writing `params.permit(:title, :body)`
-    # in Rails idiom go through the controller lowerer, which emits
-    # the Array form.
+    # `params.permit([:title, :body])` — returns filtered Parameters.
     def permit(allowed_keys)
       filtered = {}
       allowed_keys.each do |key|
-        sym = key.to_sym
-        filtered[sym] = @hash[sym] if @hash.key?(sym)
+        filtered[key.to_s] = @hash[key] if @hash.key?(key)
       end
       Parameters.new(filtered)
-    end
-
-    # Internal: walk a Hash recursively, symbolizing String keys and
-    # recursing into nested Hashes. Values that aren't Hashes pass
-    # through unchanged.
-    def symbolize_keys(hash)
-      out = {}
-      hash.each do |k, v|
-        sym = k.is_a?(Symbol) ? k : k.to_s.to_sym
-        out[sym] = v.is_a?(Hash) ? symbolize_keys(v) : v
-      end
-      out
     end
   end
 end

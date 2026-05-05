@@ -287,7 +287,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionController",
         out_path: "src/parameters.ts",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        imports: &[("HashWithIndifferentAccess", "./hash_with_indifferent_access.js")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
