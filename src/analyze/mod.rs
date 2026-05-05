@@ -970,6 +970,7 @@ impl Analyzer {
                 if let Some(b) = begin { self.collect_send_sites(b, out); }
                 if let Some(e) = end { self.collect_send_sites(e, out); }
             }
+            ExprNode::Cast { value, .. } => self.collect_send_sites(value, out),
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
@@ -1144,6 +1145,7 @@ impl Analyzer {
                 if let Some(b) = begin { self.visit_effects(b, ctx, out); }
                 if let Some(e) = end { self.visit_effects(e, ctx, out); }
             }
+            ExprNode::Cast { value, .. } => self.visit_effects(value, ctx, out),
         }
 
         // Persist local effects onto this node and feed the running
@@ -1928,6 +1930,7 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             if let Some(b) = begin { diagnose_expr(b, out); }
             if let Some(e) = end { diagnose_expr(e, out); }
         }
+        ExprNode::Cast { value, .. } => diagnose_expr(value, out),
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }

@@ -689,6 +689,7 @@ fn action_aggregate_equals_subtree_fold() {
                 if let Some(b) = begin { fold(b, acc); }
                 if let Some(e) = end { fold(e, acc); }
             }
+            ExprNode::Cast { value, .. } => fold(value, acc),
         }
     }
 
@@ -998,6 +999,7 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
             if let Some(b) = begin { collect_ivar_reads(b, out); }
             if let Some(e) = end { collect_ivar_reads(e, out); }
         }
+        ExprNode::Cast { value, .. } => collect_ivar_reads(value, out),
         ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
@@ -1163,6 +1165,7 @@ fn collect_var_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Optio
             if let Some(b) = begin { collect_var_reads(b, out); }
             if let Some(e) = end { collect_var_reads(e, out); }
         }
+        ExprNode::Cast { value, .. } => collect_var_reads(value, out),
         ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }
@@ -1297,6 +1300,7 @@ fn collect_bare_name_sends(
             if let Some(b) = begin { collect_bare_name_sends(b, out); }
             if let Some(e) = end { collect_bare_name_sends(e, out); }
         }
+        ExprNode::Cast { value, .. } => collect_bare_name_sends(value, out),
         ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
     }
 }

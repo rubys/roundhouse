@@ -485,6 +485,9 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             if let Some(b) = begin { f(b); visit_subexprs(b, f); }
             if let Some(e) = end { f(e); visit_subexprs(e, f); }
         }
+        ExprNode::Cast { value, .. } => {
+            f(value); visit_subexprs(value, f);
+        }
     }
 }
 

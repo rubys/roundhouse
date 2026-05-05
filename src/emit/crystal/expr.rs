@@ -251,6 +251,12 @@ fn emit_node(n: &ExprNode) -> String {
             }
             s
         }
+        ExprNode::Cast { value, target_ty } => {
+            // Crystal `.as(T)` — runtime-checked downcast. Wraps the
+            // value in parens so chained casts and operator-precedence
+            // edges (`a + b.as(Int64)`) parse correctly.
+            format!("({}).as({})", emit_expr(value), super::ty::crystal_ty(target_ty))
+        }
     }
 }
 
@@ -313,12 +319,13 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
     // unconditionally. `style` is preserved for round-trip fidelity
     // in Ruby/Spinel emit but doesn't affect Crystal output.
     if elements.is_empty() {
-        // Crystal rejects bare `[]` for the same reason as `{}`
-        // (untyped). `[] of String?` is a permissive default that
-        // matches the lowered IR's typical usage (errors arrays,
-        // accumulator strings). Type-mismatched call sites surface a
-        // Crystal error and we fix the source there.
-        return "[] of String?".to_string();
+        // Crystal rejects bare `[]` (no element type to infer).
+        // `[] of String` matches the body-typer's `Array(String)`
+        // inference for empty-array initializers; nilable-element
+        // call sites can still write `[nil]` which inserts a
+        // narrower union via the elements' types. Type-mismatched
+        // sites surface a Crystal error.
+        return "[] of String".to_string();
     }
     let parts: Vec<String> = elements.iter().map(emit_expr).collect();
     format!("[{}]", parts.join(", "))

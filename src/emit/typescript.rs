@@ -1612,6 +1612,7 @@ fn collect_ivar_assignments(
                 }
             }
         }
+        ExprNode::Cast { value, .. } => collect_ivar_assignments(value, out),
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }

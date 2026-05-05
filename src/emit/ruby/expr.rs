@@ -190,6 +190,10 @@ fn emit_node(n: &ExprNode) -> String {
             }
             s
         }
+        // Ruby is dynamic — no cast operator needed. The Cast IR
+        // node is a hint to typed targets; in Ruby we just emit the
+        // inner value verbatim.
+        ExprNode::Cast { value, .. } => emit_expr(value),
     }
 }
 

@@ -269,6 +269,25 @@ pub enum ExprNode {
         #[serde(default)]
         implicit: bool,
     },
+    /// Type assertion: tells the typer + per-target emitters that
+    /// `value` should be treated as having `target_ty` at this
+    /// position. Lowerers insert this where the runtime value is
+    /// known to be wider than the static target — most prominently
+    /// at adapter-row boundaries (`row[:id]` returning `DB::Any` /
+    /// `untyped` being assigned to a typed column).
+    ///
+    /// Per-target rendering:
+    ///   - Crystal: `(value).as(T)` (runtime-checked cast)
+    ///   - TS:      `(value as T)` (compile-time assertion)
+    ///   - Ruby/Spinel: render `value` unchanged (Ruby is dynamic;
+    ///     no cast operator needed)
+    ///   - Rust/strict targets: emit a type-narrowing pattern
+    ///     (try_into / match) to make the cast explicit at runtime
+    ///
+    /// `target_ty` is the type the value should have AFTER the cast.
+    /// The typer types the whole `Cast` expression as `target_ty`,
+    /// so downstream uses see the narrowed type.
+    Cast { value: Expr, target_ty: crate::ty::Ty },
 }
 
 /// One `rescue` clause inside a `BeginRescue`.

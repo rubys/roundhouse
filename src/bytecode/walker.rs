@@ -519,5 +519,6 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::MultiAssign { .. } => "MultiAssign",
         ExprNode::While { .. } => "While",
         ExprNode::Range { .. } => "Range",
+        ExprNode::Cast { .. } => "Cast",
     }
 }

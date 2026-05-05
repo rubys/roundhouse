@@ -469,6 +469,9 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(e, &format!("{path}/range.end"), out);
             }
         }
+        ExprNode::Cast { value, .. } => {
+            collect_untyped_lowered(value, &format!("{path}/cast.value"), out);
+        }
     }
 }
 

@@ -988,6 +988,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             Some(v) => format!("(() => {{ return {}; }})()", emit_expr(v)),
             None => "(() => { return; })()".to_string(),
         },
+        ExprNode::Cast { value, target_ty } => {
+            // TS `as T` is a compile-time assertion — no runtime
+            // narrowing. The lowerer adds Cast at adapter-row sites
+            // where the static value type is wider than the column;
+            // TS's `any` lets the assignment through without `as`,
+            // but emitting it documents intent and helps TS's narrowing.
+            // Wrap value in parens for precedence safety.
+            format!("({} as {})", emit_expr(value), super::ty::ts_ty(target_ty))
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

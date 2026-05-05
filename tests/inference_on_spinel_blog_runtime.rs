@@ -173,6 +173,9 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(e, &format!("{path}/range.end"), out);
             }
         }
+        ExprNode::Cast { value, .. } => {
+            collect_untyped(value, &format!("{path}/cast.value"), out);
+        }
     }
 }
 

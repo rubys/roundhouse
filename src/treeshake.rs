@@ -328,6 +328,7 @@ where
                 walk_sends(e, visit);
             }
         }
+        ExprNode::Cast { value, .. } => walk_sends(value, visit),
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }

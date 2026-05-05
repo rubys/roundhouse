@@ -216,6 +216,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
             if let Some(b) = begin { count_gradual_recurse(b, total); }
             if let Some(eb) = end { count_gradual_recurse(eb, total); }
         }
+        N::Cast { value, .. } => count_gradual_recurse(value, total),
     }
 }
 
@@ -357,6 +358,9 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
             if let Some(e) = end {
                 collect_untyped(e, &format!("{path}/range.end"), out);
             }
+        }
+        ExprNode::Cast { value, .. } => {
+            collect_untyped(value, &format!("{path}/cast.value"), out);
         }
     }
 }

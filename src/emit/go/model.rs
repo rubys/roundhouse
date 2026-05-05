@@ -287,6 +287,10 @@ fn rewrite_bare_attrs_to_receiver(
             expr: rewrite(expr),
             fallback: rewrite(fallback),
         },
+        ExprNode::Cast { value, target_ty } => ExprNode::Cast {
+            value: rewrite(value),
+            target_ty: target_ty.clone(),
+        },
         // Leaves.
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }

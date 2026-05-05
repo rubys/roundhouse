@@ -708,6 +708,10 @@ fn rewrite_bare_attrs_to_ivars_ex(e: &Expr, attrs: &[Symbol]) -> Expr {
             expr: rewrite(expr),
             fallback: rewrite(fallback),
         },
+        ExprNode::Cast { value, target_ty } => ExprNode::Cast {
+            value: rewrite(value),
+            target_ty: target_ty.clone(),
+        },
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }

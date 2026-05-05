@@ -175,6 +175,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
     ));
 
     for col in &table.columns {
+        let col_ty = ty_of_column(&col.col_type);
         let lookup = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -188,7 +189,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
         // ID-shaped columns get `|| 0` defaults — same semantics as
         // the model's existing initialize: missing-id maps to "unsaved"
         // sentinel (0), not nil. Keeps integer slots integer.
-        let value = if is_id_column(&col.name) {
+        let raw_value = if is_id_column(&col.name) {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::BoolOp {
@@ -201,6 +202,20 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
         } else {
             lookup
         };
+        // Wrap each adapter-row value in a `Cast` IR node so strict-
+        // typed targets (Crystal `.as(T)`, future Rust `try_into`)
+        // bridge the adapter's wide row-value type (DB::Any union /
+        // sp_RbVal / sqlx Row::get<T>) into the column's declared
+        // type. Ruby/Spinel emit unwraps Cast as the inner value (no
+        // cast operator needed); TS emit either no-ops or emits
+        // `(value as T)` depending on width.
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast {
+                value: raw_value,
+                target_ty: col_ty,
+            },
+        );
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {

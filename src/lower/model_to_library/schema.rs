@@ -354,7 +354,15 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     ));
 
     for col in &table.columns {
-        // row.<col> — typed accessor on <Model>Row.
+        // row.<col> — typed accessor on <Model>Row. ArticleRow's
+        // attr_readers are nilable (`property id : Int64?`), but
+        // ActiveRecord::Base subclasses' inherited `id` (and
+        // timestamp columns set in initialize) are non-nilable.
+        // Wrap the row accessor in Cast to bridge the wider Row
+        // type into the narrower model property — Crystal renders
+        // as `row.id.as(Int64)`; TS as `row.id as number`; Spinel
+        // unwraps to bare `row.id`.
+        let col_ty = super::ty_of_column(&col.col_type);
         let row_field = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -365,12 +373,19 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: false,
             },
         );
+        let cast_field = Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast {
+                value: row_field,
+                target_ty: col_ty,
+            },
+        );
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
                 method: Symbol::from(format!("{}=", col.name.as_str())),
-                args: vec![row_field],
+                args: vec![cast_field],
                 block: None,
                 parenthesized: false,
             },

@@ -1199,6 +1199,7 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
             if let Some(b) = begin { collect_class_refs(b, out); }
             if let Some(e) = end { collect_class_refs(e, out); }
         }
+        ExprNode::Cast { value, .. } => collect_class_refs(value, out),
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
@@ -1384,6 +1385,10 @@ fn rewrite_free(e: &Expr) -> Expr {
         },
         ExprNode::Super { args } => ExprNode::Super {
             args: args.as_ref().map(|v| v.iter().map(rewrite_free).collect()),
+        },
+        ExprNode::Cast { value, target_ty } => ExprNode::Cast {
+            value: rewrite_free(value),
+            target_ty: target_ty.clone(),
         },
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
@@ -1606,6 +1611,10 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
             begin: begin.as_ref().map(|b| rewrite(b, super_method)),
             end: end.as_ref().map(|e| rewrite(e, super_method)),
             exclusive: *exclusive,
+        },
+        ExprNode::Cast { value, target_ty } => ExprNode::Cast {
+            value: rewrite(value, super_method),
+            target_ty: target_ty.clone(),
         },
         // Leaves pass through unchanged.
         ExprNode::Lit { .. }

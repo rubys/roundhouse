@@ -575,6 +575,15 @@ impl<'a> BodyTyper<'a> {
                     args: vec![elem],
                 }
             }
+            ExprNode::Cast { value, target_ty } => {
+                // Visit the value so its inner sub-exprs get typed,
+                // then return the explicit cast target — that's the
+                // whole point of Cast: assert this expression has
+                // `target_ty` regardless of what the value's flow
+                // type computed to.
+                let _ = self.analyze_expr(value, ctx);
+                target_ty.clone()
+            }
         }
     }
 
