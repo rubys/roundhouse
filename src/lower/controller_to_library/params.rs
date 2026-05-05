@@ -517,6 +517,12 @@ fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Exp
     // `params.fetch(:k, "")` dispatches against Hash#fetch (typed by
     // the default's String) rather than Parameters#fetch (which still
     // returns sp_RbVal under spinel pending matz/spinel#207).
+    // `to_h` is a Method-kind member on Parameters — synthesize the
+    // Send with `parenthesized: true` so per-target emit produces the
+    // call form (`params.require(...).to_h()`) instead of the
+    // property-access form (`params.require(...).to_h`), which would
+    // pass the function reference through to from_raw and surface
+    // every field as undefined.
     let to_h_call = Expr::new(
         span,
         ExprNode::Send {
@@ -524,7 +530,7 @@ fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Exp
             method: Symbol::from("to_h"),
             args: Vec::new(),
             block: None,
-            parenthesized: false,
+            parenthesized: true,
         },
     );
     Expr::new(

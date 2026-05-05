@@ -851,12 +851,21 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
         names.push(Param::positional(Symbol::new(decode_utf8(rp.name().as_slice(), method_name)?)));
     }
 
-    // Optional positional: `def foo(a = 1)`.
+    // Optional positional: `def foo(a = 1)`. Ingest the default
+    // expression so per-target emit can produce `name: T = <default>`
+    // signatures — without it, the param emits as `name?: T` (TS
+    // optional) and the method body's `name.<method>` calls trip on
+    // undefined when callers omit the arg. Framework code like
+    // `def label(field, opts = {})` relies on the default reaching
+    // `stringify_keys(opts)` as `{}`, not undefined.
     for opt in params_node.optionals().iter() {
         let op = opt.as_optional_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected optional-parameter shape")
         })?;
-        names.push(Param::positional(Symbol::new(decode_utf8(op.name().as_slice(), method_name)?)));
+        let name = Symbol::new(decode_utf8(op.name().as_slice(), method_name)?);
+        let default = ingest_expr(&op.value(), VIRTUAL_FILE)
+            .map_err(|e| format!("method `{method_name}` default for `{name}`: {e}"))?;
+        names.push(Param::with_default(name, default));
     }
 
     // Rest/splat: `*args`. Anonymous `*` has no name — skip.
@@ -878,11 +887,18 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
     }
 
     // Keywords (required and optional): `def foo(a:, b: 1)`.
+    // Optional keywords (`status: :found`) carry a default Expr —
+    // capture so emit can produce `status: T = :found` rather than
+    // `status?: T` (which binds undefined when the caller omits the
+    // arg, breaking framework code that relies on the default).
     for kw in params_node.keywords().iter() {
         if let Some(rkp) = kw.as_required_keyword_parameter_node() {
             names.push(Param::positional(Symbol::new(decode_utf8(rkp.name().as_slice(), method_name)?)));
         } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
-            names.push(Param::positional(Symbol::new(decode_utf8(okp.name().as_slice(), method_name)?)));
+            let name = Symbol::new(decode_utf8(okp.name().as_slice(), method_name)?);
+            let default = ingest_expr(&okp.value(), VIRTUAL_FILE)
+                .map_err(|e| format!("method `{method_name}` default for `{name}`: {e}"))?;
+            names.push(Param::with_default(name, default));
         } else {
             return Err(format!(
                 "method `{method_name}`: unexpected keyword-parameter shape"

@@ -300,40 +300,58 @@ pub(super) fn ingest_library_method(
     // Bodies under app/models/ legitimately use optionals (`attrs = {}`)
     // and keywords (`columns:`); the model ingest doesn't need them yet
     // but library classes do.
-    let mut params: Vec<Symbol> = Vec::new();
+    let mut params: Vec<Param> = Vec::new();
     if let Some(pn) = def.parameters() {
         for req in pn.requireds().iter() {
             if let Some(rp) = req.as_required_parameter_node() {
-                params.push(Symbol::from(constant_id_str(&rp.name())));
+                params.push(Param::positional(Symbol::from(constant_id_str(&rp.name()))));
             }
         }
         for opt in pn.optionals().iter() {
             if let Some(op) = opt.as_optional_parameter_node() {
-                params.push(Symbol::from(constant_id_str(&op.name())));
+                let name = Symbol::from(constant_id_str(&op.name()));
+                // Capture the default Expr so per-target emit can
+                // produce `name: T = <default>` signatures. Without
+                // it, `def label(field, opts = {})` lowers to
+                // `label(field, opts?: Record<...>)` and callers
+                // omitting `opts` see `undefined`, breaking
+                // downstream `Object.entries(opts)` /
+                // `opts.merge(...)` chains in framework code.
+                let default = ingest_expr(&op.value(), file)?;
+                params.push(Param::with_default(name, default));
             }
         }
         if let Some(rest) = pn.rest() {
             if let Some(rp) = rest.as_rest_parameter_node() {
                 if let Some(loc) = rp.name() {
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                        params.push(Symbol::from(s));
+                        params.push(Param::positional(Symbol::from(s)));
                     }
                 }
             }
         }
         for post in pn.posts().iter() {
             if let Some(pp) = post.as_required_parameter_node() {
-                params.push(Symbol::from(constant_id_str(&pp.name())));
+                params.push(Param::positional(Symbol::from(constant_id_str(&pp.name()))));
             }
         }
         for kw in pn.keywords().iter() {
             if let Some(rkp) = kw.as_required_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(rkp.name().as_slice()) {
-                    params.push(Symbol::from(s));
+                    params.push(Param::positional(Symbol::from(s)));
                 }
             } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(okp.name().as_slice()) {
-                    params.push(Symbol::from(s));
+                    // Capture the default Expr so emit can produce
+                    // `status: T = :found` rather than `status?: T`
+                    // (which binds undefined when the caller omits
+                    // the kwarg). action_controller/base.rb's
+                    // `redirect_to(path, notice: nil, alert: nil,
+                    // status: :found)` is the load-bearing case —
+                    // without the default, every redirect loses
+                    // its 302 status and the test client sees 200.
+                    let default = ingest_expr(&okp.value(), file)?;
+                    params.push(Param::with_default(Symbol::from(s), default));
                 }
             }
         }
@@ -341,7 +359,7 @@ pub(super) fn ingest_library_method(
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                        params.push(Symbol::from(s));
+                        params.push(Param::positional(Symbol::from(s)));
                     }
                 }
             }
@@ -349,7 +367,7 @@ pub(super) fn ingest_library_method(
         if let Some(block) = pn.block() {
             if let Some(loc) = block.name() {
                 if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                    params.push(Symbol::from(s));
+                    params.push(Param::positional(Symbol::from(s)));
                 }
             }
         }
@@ -363,7 +381,7 @@ pub(super) fn ingest_library_method(
     Ok(MethodDef {
         name,
         receiver,
-        params: params.into_iter().map(Param::positional).collect(),
+        params,
         body,
         signature: None,
         effects: crate::effect::EffectSet::default(),

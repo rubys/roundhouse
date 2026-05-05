@@ -200,30 +200,39 @@ export class Test {
   cookies: any;
   flash: Record<string, any> = {};
 
-  async get(path: string, _opts?: any): Promise<void> {
-    await this.dispatch("GET", path, {});
+  // Dispatch is synchronous — emitted controller actions are
+  // currently all sync (process_action's switch arms call sync
+  // index/show/etc. methods). node:test wraps each test in an
+  // async runner; an async dispatch surface forced every emitted
+  // test method to also be async + `await`, which the lowerer
+  // doesn't yet produce. Keeping these sync until process_action
+  // genuinely needs to await something (e.g. database I/O via a
+  // Promise-returning adapter) — at which point the lowerer needs
+  // to learn to emit async test methods anyway.
+  get(path: string, _opts?: any): void {
+    this.dispatch("GET", path, {});
   }
-  async post(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
-    await this.dispatch("POST", path, opts.params ?? {});
+  post(path: string, opts: { params?: Record<string, any> } = {}): void {
+    this.dispatch("POST", path, opts.params ?? {});
   }
-  async put(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
-    await this.dispatch("PUT", path, opts.params ?? {});
+  put(path: string, opts: { params?: Record<string, any> } = {}): void {
+    this.dispatch("PUT", path, opts.params ?? {});
   }
-  async patch(path: string, opts: { params?: Record<string, any> } = {}): Promise<void> {
-    await this.dispatch("PATCH", path, opts.params ?? {});
+  patch(path: string, opts: { params?: Record<string, any> } = {}): void {
+    this.dispatch("PATCH", path, opts.params ?? {});
   }
-  async delete(path: string, _opts?: any): Promise<void> {
-    await this.dispatch("DELETE", path, {});
+  delete(path: string, _opts?: any): void {
+    this.dispatch("DELETE", path, {});
   }
-  async head(path: string, _opts?: any): Promise<void> {
-    await this.dispatch("HEAD", path, {});
+  head(path: string, _opts?: any): void {
+    this.dispatch("HEAD", path, {});
   }
 
-  private async dispatch(
+  private dispatch(
     method: string,
     path: string,
     body: Record<string, any>,
-  ): Promise<void> {
+  ): void {
     const match = Router.match(method, path, testDispatchTable);
     if (!match) {
       throw new Error(`no route for ${method} ${path}`);
@@ -239,7 +248,7 @@ export class Test {
     controller.flash = this.flash;
     controller.request_method = method;
     controller.request_path = path;
-    await controller.process_action(match.action);
+    controller.process_action(match.action);
     this.body = controller.body ?? "";
     this.status = controller.status ?? 200;
     this.location = controller.location ?? "";

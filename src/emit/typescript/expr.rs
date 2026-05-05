@@ -1084,6 +1084,39 @@ pub(super) fn emit_send_with_parens(
         let recv_s = emit_expr(recv.unwrap());
         return format!("{recv_s}.slice({}, {} + {})", args_s[0], args_s[0], args_s[1]);
     }
+    // Negative-int index on an Array (`arr[-1]` = last element,
+    // `arr[-2]` = second to last, …). JS arrays don't support
+    // negative indexing — `arr[-1]` reads the property "-1", which
+    // is `undefined` for ordinary arrays. Rewrite to
+    // `arr[arr.length + N]` (where N is negative). For dynamic
+    // negative indices the same rewrite would need a runtime
+    // check, but the literal case covers the framework patterns
+    // we ship today (`records[-1]` in `Base.last`'s body).
+    if method == "[]" && recv.is_some() && args.len() == 1 {
+        if let (Some(r), ExprNode::Lit { value: Literal::Int { value } }) =
+            (recv, &*args[0].node)
+        {
+            if *value < 0 && matches!(r.ty.as_ref(), Some(Ty::Array { .. }) | Some(Ty::Str)) {
+                let recv_s = emit_expr(r);
+                return format!("{recv_s}[{recv_s}.length{value}]");
+            }
+        }
+    }
+    // Controller `@params[:k]` — `@params` is the framework
+    // `ActionController::Parameters` wrapper at TS runtime, not a
+    // plain object. The IR types it as `Hash[Sym, Untyped]` (so
+    // typing-side dispatch hits Hash#[]), but JS bracket access on a
+    // wrapper instance returns `undefined` — `Number(this.params["id"])`
+    // would yield NaN and break every action that reads a path
+    // parameter. Rewrite at emit time to `.get(...)`, which is the
+    // `parameters.ts` runtime's named accessor.
+    if method == "[]" && args.len() == 1 {
+        if let Some(r) = recv {
+            if matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") {
+                return format!("{}.get({})", emit_expr(r), args_s[0]);
+            }
+        }
+    }
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
     }
@@ -1149,11 +1182,23 @@ pub(super) fn emit_send_with_parens(
             return format!("new {recv_s}({})", args_s.join(", "));
         }
     }
-    // `x.nil?` → `x === null`. Ruby's `nil?` only matches nil (not
-    // `false`, and TS equivalent must distinguish from `undefined`).
-    // Strict equality preserves semantics.
+    // `x.nil?` → `x == null` (loose equality — matches both null
+    // AND undefined). Ruby's `nil?` returns true for any unset ivar
+    // (Ruby reads unset @vars as nil); the TS analog of "unset"
+    // is `undefined`, not `null`. Strict `=== null` would miss
+    // unset class fields and break the model constructor →
+    // `fill_timestamps` path: when a field isn't supplied in
+    // `new Article({...})`, `this.created_at` is undefined; the
+    // `if self[:created_at].nil?` guard in fill_timestamps must
+    // fire so the timestamp gets populated, otherwise the SQL
+    // INSERT fails the NOT NULL constraint.
+    //
+    // Loose `== null` is safe against the false-vs-nil concern
+    // earlier prose flagged: `false == null` is false in JS, so
+    // `x.nil?` still distinguishes nil from false. Likewise
+    // `0 == null` and `"" == null` are both false.
     if method == "nil?" && recv.is_some() && args.is_empty() {
-        return format!("{} === null", emit_expr(recv.unwrap()));
+        return format!("{} == null", emit_expr(recv.unwrap()));
     }
     // `x.class` (Ruby reflection — returns the receiver's class
     // object) → `x.constructor` in TS, which exposes the same
@@ -1590,6 +1635,22 @@ pub(super) fn emit_send_with_parens(
                     }
                     "merge" if args.len() == 1 => {
                         return format!("{{ ...{recv_s}, ...{} }}", args_s[0]);
+                    }
+                    // `hash.delete(key)` — Ruby removes the key in
+                    // place and returns the deleted value (or nil).
+                    // JS plain objects don't have `.delete()`; the
+                    // `delete` keyword is the statement form. Emit
+                    // an IIFE so the Send expression is valid in
+                    // both expression and statement position, and so
+                    // the return value matches Ruby (the prior
+                    // value at the key, or `undefined` if absent —
+                    // close enough to nil for the framework's call
+                    // sites).
+                    "delete" if args.len() == 1 => {
+                        return format!(
+                            "((__h, __k) => {{ const __v = __h[__k]; delete __h[__k]; return __v; }})({recv_s}, {})",
+                            args_s[0],
+                        );
                     }
                     "keys" if args.is_empty() => {
                         return format!("Object.keys({recv_s})");

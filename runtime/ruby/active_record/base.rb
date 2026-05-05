@@ -94,8 +94,15 @@ module ActiveRecord
     end
 
     def self.find_by(conditions)
+      # `ActiveRecord.adapter.where` is typed `untyped` (the adapter
+      # interface is target-specific), so the body-typer can't
+      # narrow the return as `Array`. Avoid Array idioms that
+      # require Ty::Array dispatch (`empty?`, `first`) — use
+      # `length` and `[0]` which are JS-array-native and Ruby-
+      # Array-native both. Same shape for every target.
       rows = ActiveRecord.adapter.where(table_name, conditions)
-      rows.empty? ? nil : instantiate(rows.first)
+      return nil if rows.length == 0
+      instantiate(rows[0])
     end
 
     def self.where(conditions)

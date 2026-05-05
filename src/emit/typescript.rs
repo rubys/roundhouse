@@ -797,7 +797,25 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         let inherited = INHERITED_FIELD_NAMES.contains(&name.as_str());
         let needs_declare = has_parent && (*from_ivar || inherited);
         let declare_modifier = if needs_declare { "declare " } else { "" };
-        writeln!(out, "  {prefix}{declare_modifier}{name}: {ty};").unwrap();
+        // Static fields synthesized from class-method `@ivar = ...`
+        // assignments (module-level state in `module ViewHelpers;
+        // @slots = {}; def self.reset_slots!; @slots = {}; end; end`)
+        // need an initializer — without one, the field is `undefined`
+        // until `reset_slots_bang()` is called, and any earlier read
+        // (`this.slots[slot] = ...` from `content_for_set`) crashes.
+        // The Ruby source initializes module-level @vars at module
+        // load; mirror that with a type-driven default. Skip the
+        // initializer when the field is `declare`d (parent provides
+        // backing).
+        let initializer = if *is_static && !needs_declare {
+            ts_default_for_type(ty)
+        } else {
+            String::new()
+        };
+        writeln!(
+            out,
+            "  {prefix}{declare_modifier}{name}: {ty}{initializer};",
+        ).unwrap();
         wrote_fields = true;
     }
 
@@ -940,6 +958,35 @@ fn emit_constructor_body(
 /// implicit-block yield translates to `__block(args)` in the emit,
 /// so the method signature must declare the parameter for tsc to
 /// resolve the name.
+/// TS initializer fragment (` = <expr>`) for a field whose Ruby
+/// equivalent would default to nil (unset @ivar reads as nil).
+/// For Hash/Array, emit a fresh empty literal so reads don't crash
+/// on `undefined.<key>` / `undefined.length`. Other concrete types
+/// fall back to `null` as a Ruby-nil-aligned default. Untyped /
+/// Var return empty (no initializer) — the consumer must guard.
+fn ts_default_for_type(ty: &str) -> String {
+    // String matching is the cheap path — `ts_ty` already collapsed
+    // the Ty into its TS form, and the common cases are
+    // string-distinguishable.
+    if ty.starts_with("Record<") || ty == "any" {
+        " = {}".to_string()
+    } else if ty.ends_with("[]") || ty.starts_with("Array<") {
+        " = []".to_string()
+    } else if ty == "string" {
+        " = \"\"".to_string()
+    } else if ty == "number" {
+        " = 0".to_string()
+    } else if ty == "boolean" {
+        " = false".to_string()
+    } else {
+        // Class types, unions, etc. — leave uninitialized so tsc
+        // doesn't infer `null` into a non-nullable position.
+        // Static-field-from-class-method usage reassigns before
+        // reading anyway in the framework patterns we ship today.
+        String::new()
+    }
+}
+
 fn body_contains_yield(body: &crate::expr::Expr) -> bool {
     use crate::expr::{ExprNode, LValue};
     match &*body.node {
@@ -1110,21 +1157,51 @@ fn emit_class_member(
     // → TS2345 "argument of type {creating: boolean} not assignable
     // to parameter of type boolean".
     let mut param_slots: Vec<String> = Vec::new();
-    let mut kwarg_pieces: Vec<(String, String, bool)> = Vec::new();
+    // (name, ts_ty, optional, default_expr_str)
+    let mut kwarg_pieces: Vec<(String, String, bool, Option<String>)> = Vec::new();
     for (i, name) in m.params.iter().enumerate() {
         let ty = &sig_param_tys[i];
         let optional = sig_param_optional[i];
         let is_kw = sig_param_is_keyword[i];
         if is_kw {
-            kwarg_pieces.push((name.as_str().to_string(), ts_ty(ty), optional));
+            // Carry through the default Expr (rendered as TS) when
+            // the Ruby source supplied one — `def redirect_to(...
+            // status: :found)` defaults `status` to "found", so a
+            // call without `status:` resolves to 302 (Found) not 200.
+            // Without this, the destructuring pattern uses the
+            // generic `null` fallback and breaks every Rails
+            // optional-kwarg-with-non-nil-default API.
+            let default_s = name.default.as_ref().map(|d| expr::emit_expr(d));
+            kwarg_pieces.push((name.as_str().to_string(), ts_ty(ty), optional, default_s));
         } else {
-            let opt_marker = if optional { "?" } else { "" };
-            param_slots.push(format!(
-                "{}{}: {}",
-                escape_reserved(name.as_str()),
-                opt_marker,
-                ts_ty(ty),
-            ));
+            // Default-value path: when the param is `Optional` AND
+            // carries a default Expr, prefer `name: T = <default>`
+            // over `name?: T`. The latter binds the param to
+            // `undefined` when the caller omits it; the former
+            // gives back the actual default the Ruby source wrote.
+            // Matters for `def initialize(attrs = {})`: with `?:`
+            // the body's `attrs["id"]` crashes on a no-args call
+            // (`new Article()` from `from_row`), with `= {}` the
+            // empty hash is what's read from. Both signatures
+            // type-check at call sites since `?` and `=` give the
+            // caller the same option to omit the argument.
+            if optional && name.default.is_some() {
+                let default_s = expr::emit_expr(name.default.as_ref().unwrap());
+                param_slots.push(format!(
+                    "{}: {} = {}",
+                    escape_reserved(name.as_str()),
+                    ts_ty(ty),
+                    default_s,
+                ));
+            } else {
+                let opt_marker = if optional { "?" } else { "" };
+                param_slots.push(format!(
+                    "{}{}: {}",
+                    escape_reserved(name.as_str()),
+                    opt_marker,
+                    ts_ty(ty),
+                ));
+            }
         }
     }
     let body_uses_yield = body_contains_yield(&m.body);
@@ -1146,23 +1223,23 @@ fn emit_class_member(
         // would pull in untaken branches with undefined values.
         let names: Vec<String> = kwarg_pieces
             .iter()
-            .map(|(n, _, opt)| {
+            .map(|(n, _, opt, default_s)| {
                 let escaped = escape_reserved(n);
                 let pat = if escaped == *n {
                     n.clone()
                 } else {
                     format!("{n}: {escaped}")
                 };
-                if *opt {
-                    format!("{pat} = null")
-                } else {
-                    pat
+                match (opt, default_s) {
+                    (true, Some(d)) => format!("{pat} = {d}"),
+                    (true, None) => format!("{pat} = null"),
+                    _ => pat,
                 }
             })
             .collect();
         let typed: Vec<String> = kwarg_pieces
             .iter()
-            .map(|(n, t, opt)| {
+            .map(|(n, t, opt, _)| {
                 let marker = if *opt { "?" } else { "" };
                 format!("{n}{marker}: {t}")
             })
@@ -1172,7 +1249,7 @@ fn emit_class_member(
         // (`fill_timestamps()`) still type-check. TS forbids `?` on
         // a destructuring binding pattern in an implementation
         // signature, so spell the optional via `= {}` default.
-        let default_clause = if kwarg_pieces.iter().all(|(_, _, opt)| *opt) {
+        let default_clause = if kwarg_pieces.iter().all(|(_, _, opt, _)| *opt) {
             " = {}"
         } else {
             ""
