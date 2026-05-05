@@ -301,15 +301,26 @@ fn render_class(lc: &LibraryClass) -> String {
         writeln!(s, "{body_pad}property {name} : {ty}").unwrap();
         wrote_header_lines = true;
     }
-    for (name, ty) in &ivars {
-        let ty_s = super::ty::crystal_ty(ty);
-        let ty_nilable = if ty_s.ends_with('?') || ty_s == "Nil" {
-            ty_s
-        } else {
-            format!("{ty_s}?")
-        };
-        writeln!(s, "{body_pad}{ivar_prefix}{name} : {ty_nilable}").unwrap();
-        wrote_header_lines = true;
+    // Class-var modules (`module_function` style — view_helpers.rb)
+    // share state across `def self.X` methods. Crystal's class-var
+    // type inference picks up types from the union of all assignments,
+    // and an explicit narrow declaration here can over-constrain (e.g.
+    // `@@slots = {}` with `Hash(String, String)` declared but the
+    // bodies using both Symbol and String keys). Skip the declaration
+    // for class-var-modules and let Crystal infer; the explicit
+    // declaration is still useful for instance ivars where the type
+    // is more uniformly determined.
+    if !is_class_var_module {
+        for (name, ty) in &ivars {
+            let ty_s = super::ty::crystal_ty(ty);
+            let ty_nilable = if ty_s.ends_with('?') || ty_s == "Nil" {
+                ty_s
+            } else {
+                format!("{ty_s}?")
+            };
+            writeln!(s, "{body_pad}{ivar_prefix}{name} : {ty_nilable}").unwrap();
+            wrote_header_lines = true;
+        }
     }
     if wrote_header_lines && lc.methods.iter().any(|m| !is_skipped_method(m, &accessor_method_names)) {
         writeln!(s).unwrap();

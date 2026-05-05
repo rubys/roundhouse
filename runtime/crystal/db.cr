@@ -1,15 +1,22 @@
-# Roundhouse Crystal DB runtime.
+# Roundhouse Crystal DB runtime — sqlite primitive layer plus the
+# `ActiveRecord.adapter` plug-in.
 #
-# Hand-written helpers the Crystal emitter copies verbatim into each
-# generated project as `src/db.cr`. Owns the SQLite connection and
-# hides `crystal-db`'s `DB::Database` API from the generated code —
-# save/destroy/count/find all reach the connection via
-# `Roundhouse::Db.conn`.
+# Two responsibilities:
+#   1. `Roundhouse::Db` — owns the sqlite3 connection. `open_production_db`
+#      is called from `Roundhouse::Server.start`; `setup_test_db` resets
+#      the connection between specs.
+#   2. `Roundhouse::SqliteAdapter` — implements the abstract API the
+#      transpiled `ActiveRecord::Base` calls (`all`, `find`, `where`,
+#      `insert`, `update`, `delete`, `count`, `exists?`). Server boot
+#      assigns an instance to `ActiveRecord.adapter`.
 #
-# Crystal spec runs sequentially by default, so a single module-level
-# connection is safe; `setup_test_db` is called from `Spec.before_each`
-# to reset it between tests. (A fiber-local slot would generalize to
-# parallel specs later.)
+# The `module ActiveRecord ... end` extension at the bottom adds the
+# `.adapter` getter/setter that the Ruby source's
+# `class << self; attr_accessor :adapter; end` would have produced —
+# the runtime_loader transpile pipeline doesn't yet expose
+# module-level attr_accessors on the metaclass, so we declare them
+# here to keep `ActiveRecord.adapter = X` and `ActiveRecord.adapter.X`
+# resolvable.
 
 require "sqlite3"
 
@@ -17,14 +24,7 @@ module Roundhouse
   module Db
     @@db : DB::Database? = nil
 
-    # Open a fresh :memory: SQLite connection, run the schema DDL,
-    # and install it in the thread-local slot. Called by
-    # `Fixtures.setup` at the top of every spec.
-    #
-    # The schema string may contain several `CREATE TABLE` statements;
-    # `DB::Database#exec` accepts one statement at a time, so we split
-    # on `;\n` and dispatch each non-empty chunk.
-    def self.setup_test_db(schema_sql : String)
+    def self.setup_test_db(schema_sql : String) : Nil
       if old = @@db
         old.close
       end
@@ -37,16 +37,10 @@ module Roundhouse
       @@db = db
     end
 
-    # Borrow the current connection. Raises if `setup_test_db` hasn't
-    # been called yet — that would only happen if a generated test
-    # bypassed the spec harness.
     def self.conn : DB::Database
       @@db.not_nil!
     end
 
-    # Open a file-backed SQLite connection and apply the schema DDL
-    # when the target DB has no tables yet. Skipping the schema on
-    # a populated DB preserves a compare-tool-staged seed.
     def self.open_production_db(path : String, schema_sql : String) : Nil
       if old = @@db
         old.close
@@ -67,5 +61,110 @@ module Roundhouse
       end
       @@db = db
     end
+  end
+
+  # Concrete sqlite-backed adapter implementing the API
+  # `ActiveRecord::Base` (transpiled from runtime/ruby/active_record/
+  # base.rb) calls. Method names + arities match the Ruby surface;
+  # row results come back as `Hash(Symbol, DB::Any)` matching Crystal's
+  # crystal-db return shape.
+  class SqliteAdapter
+    private def conn
+      Roundhouse::Db.conn
+    end
+
+    def all(table_name : String)
+      rows = [] of Hash(Symbol, DB::Any)
+      conn.query("SELECT * FROM #{table_name}") do |rs|
+        rs.column_count.times { rs.column_name(0) } # warm up metadata
+        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        rs.each do
+          h = {} of Symbol => DB::Any
+          names.each_with_index { |n, i| h[n] = rs.read }
+          rows << h
+        end
+      end
+      rows
+    end
+
+    def find(table_name : String, id)
+      row = nil
+      conn.query("SELECT * FROM #{table_name} WHERE id = ? LIMIT 1", id) do |rs|
+        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        rs.each do
+          h = {} of Symbol => DB::Any
+          names.each_with_index { |n, i| h[n] = rs.read }
+          row = h
+        end
+      end
+      row
+    end
+
+    def where(table_name : String, conditions : Hash(Symbol, _))
+      keys = conditions.keys
+      rows = [] of Hash(Symbol, DB::Any)
+      return rows if keys.empty?
+      where_clause = keys.map { |k| "#{k} = ?" }.join(" AND ")
+      args = keys.map { |k| conditions[k].as(DB::Any) }
+      conn.query("SELECT * FROM #{table_name} WHERE #{where_clause}", args: args) do |rs|
+        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        rs.each do
+          h = {} of Symbol => DB::Any
+          names.each_with_index { |n, i| h[n] = rs.read }
+          rows << h
+        end
+      end
+      rows
+    end
+
+    def count(table_name : String) : Int64
+      conn.query_one("SELECT COUNT(*) FROM #{table_name}", as: Int64)
+    end
+
+    def exists?(table_name : String, id) : Bool
+      n = conn.query_one(
+        "SELECT COUNT(*) FROM #{table_name} WHERE id = ?",
+        id,
+        as: Int64,
+      )
+      n > 0
+    end
+
+    def insert(table_name : String, attributes : Hash(Symbol, _)) : Int64
+      keys = attributes.keys
+      cols = keys.map(&.to_s).join(", ")
+      placeholders = (["?"] * keys.size).join(", ")
+      args = keys.map { |k| attributes[k].as(DB::Any) }
+      conn.exec("INSERT INTO #{table_name} (#{cols}) VALUES (#{placeholders})", args: args)
+      conn.query_one("SELECT last_insert_rowid()", as: Int64)
+    end
+
+    def update(table_name : String, id, attributes : Hash(Symbol, _)) : Nil
+      keys = attributes.keys
+      return if keys.empty?
+      sets = keys.map { |k| "#{k} = ?" }.join(", ")
+      args = keys.map { |k| attributes[k].as(DB::Any) } + [id.as(DB::Any)]
+      conn.exec("UPDATE #{table_name} SET #{sets} WHERE id = ?", args: args)
+    end
+
+    def delete(table_name : String, id) : Nil
+      conn.exec("DELETE FROM #{table_name} WHERE id = ?", id)
+    end
+  end
+end
+
+# Module-level attr_accessor analog. The Ruby source declares
+# `class << self; attr_accessor :adapter; end` inside `module
+# ActiveRecord`; the transpiler doesn't yet emit module-metaclass
+# accessors. Re-opening the module here adds the missing surface.
+module ActiveRecord
+  @@adapter : Roundhouse::SqliteAdapter? = nil
+
+  def self.adapter : Roundhouse::SqliteAdapter
+    @@adapter.not_nil!
+  end
+
+  def self.adapter=(value : Roundhouse::SqliteAdapter) : Roundhouse::SqliteAdapter
+    @@adapter = value
   end
 end

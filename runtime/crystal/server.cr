@@ -1,29 +1,56 @@
-# Roundhouse Crystal server runtime.
+# Roundhouse Crystal server runtime — primitive HTTP listener that
+# dispatches through the transpiled framework runtime.
+#
+# Pipeline mirrors runtime/typescript/server.ts:
+#   1. Parse HTTP request → method, path, body params
+#   2. ActionDispatch::Router.match(method, path, routes_table) →
+#      {controller: Symbol, action: Symbol, path_params: Hash}
+#   3. Look up the controller class in @@controllers, instantiate
+#   4. Set @params (ActionController::Parameters), @session, @flash
+#   5. Invoke controller.process_action(action)
+#   6. Format @body, @status, @location into the HTTP response
+#
+# Controllers extend ActionController::Base (transpiled from
+# runtime/ruby/action_controller/base.rb) and inherit render /
+# redirect_to / head etc. The Roundhouse:: namespace here is reserved
+# for primitive concerns (HTTP, sqlite, websocket); framework concerns
+# live under ActionView/ActionController/ActionDispatch/ActiveRecord
+# from the transpiled runtime.
 
 require "http/server"
 require "uri"
-require "./http"
 require "./db"
-require "./view_helpers"
 require "./cable"
 
 module Roundhouse
   module Server
-    @@layout : Proc(String)? = nil
+    @@layout : Proc(String, String)? = nil
+    @@routes : Array(NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)) = [] of NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
+    @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
+    @@session : Hash(Symbol, String) = {} of Symbol => String
+    @@flash : Hash(Symbol, String) = {} of Symbol => String
 
-    def self.start(schema_sql : String, layout : Proc(String)? = nil, db_path : String? = nil, port : Int32? = nil) : Nil
-      resolved_path = db_path || "storage/development.sqlite3"
-      resolved_port = port
-      if resolved_port.nil?
-        env_port = ENV["PORT"]?
-        if env_port
-          resolved_port = env_port.to_i
-        else
-          resolved_port = 3000
-        end
-      end
+    def self.start(
+      schema_sql : String,
+      routes,
+      controllers : Hash(Symbol, ActionController::Base.class),
+      root_route = nil,
+      layout : Proc(String, String)? = nil,
+      db_path : String? = nil,
+      port : Int32? = nil,
+    ) : Nil
+      resolved_path = db_path || "db/development.sqlite3"
+      resolved_port = port || (ENV["PORT"]?.try(&.to_i) || 3000)
 
       Roundhouse::Db.open_production_db(resolved_path, schema_sql)
+      ActiveRecord.adapter = Roundhouse::SqliteAdapter.new
+
+      @@routes = if root_route
+                   [root_route] + routes
+                 else
+                   routes
+                 end
+      @@controllers = controllers
       @@layout = layout
 
       server = HTTP::Server.new do |context|
@@ -35,7 +62,7 @@ module Roundhouse
     end
 
     def self.dispatch(context : HTTP::Server::Context) : Nil
-      Roundhouse::ViewHelpers.reset_render_state
+      ActionView::ViewHelpers.reset_slots!
       method = context.request.method.upcase
       path = context.request.path
 
@@ -45,7 +72,6 @@ module Roundhouse
       end
 
       body_params = read_form_body(context.request)
-
       if method == "POST" && body_params.has_key?("_method")
         upper = body_params["_method"].upcase
         if upper == "PATCH" || upper == "PUT" || upper == "DELETE"
@@ -53,64 +79,87 @@ module Roundhouse
         end
       end
 
-      matched = Roundhouse::Http::Router.match(method, path)
+      matched = ActionDispatch::Router.match(method, path, @@routes)
       if matched.nil?
         context.response.status_code = 404
         context.response.content_type = "text/plain"
-        context.response.print "Not Found"
+        context.response.print "Not Found: #{method} #{path}"
         return
       end
 
-      handler = matched[0]
-      path_params = matched[1]
-      params = {} of String => String
-      path_params.each do |k, v|
-        params[k] = v
-      end
-      body_params.each do |k, v|
-        params[k] = v
-      end
-
-      ctx = Roundhouse::Http::ActionContext.new(params)
-      resp = handler.call(ctx)
-      status = resp.status
-      if status == 0
-        status = 200
-      end
-
-      if status >= 300 && status < 400 && !resp.location.empty?
-        context.response.status_code = status
-        context.response.headers["Location"] = resp.location
-        context.response.content_type = "text/html; charset=utf-8"
-        context.response.print resp.body
+      ctrl_sym = matched[:controller]
+      action = matched[:action]
+      path_params = matched[:path_params]
+      ctrl_class = @@controllers[ctrl_sym]?
+      if ctrl_class.nil?
+        context.response.status_code = 500
+        context.response.content_type = "text/plain"
+        context.response.print "No controller registered: #{ctrl_sym}"
         return
       end
 
-      body = resp.body
-      layout = @@layout
-      if !layout.nil?
-        Roundhouse::ViewHelpers.set_yield(body)
-        body = layout.call
+      # Build merged params (path + query + body), all symbol-keyed.
+      merged = {} of Symbol => String?
+      path_params.each { |k, v| merged[k] = v }
+      context.request.query_params.each { |k, v| merged[k.to_sym] = v }
+      body_params.each { |k, v| merged[k.to_sym] = v }
+
+      ctrl = ctrl_class.new
+      ctrl.params = ActionController::Parameters.new(merged)
+      ctrl.session = @@session
+      ctrl.flash = @@flash
+      ctrl.request_method = method
+      ctrl.request_path = path
+
+      begin
+        ctrl.process_action(action)
+      rescue err : Exception
+        STDERR.puts "handler error: #{err.message}"
+        STDERR.puts err.backtrace.join("\n")
+        context.response.status_code = 500
+        context.response.content_type = "text/plain"
+        context.response.print "Server error: #{err.message}"
+        return
       end
-      context.response.status_code = status
+
+      # Carry flash forward exactly once: post-redirect, the next
+      # request reads the flash, the request after that sees fresh.
+      flash_for_response = ctrl.flash || {} of Symbol => String
+      @@flash = {} of Symbol => String
+
+      status = ctrl.status || 200i64
+      body = ctrl.body || ""
+      location = ctrl.location
+
+      if !location.nil? && !location.empty?
+        context.response.status_code = status.to_i
+        context.response.headers["Location"] = location
+        @@flash = flash_for_response
+        return
+      end
+
+      # Layout wrapping: when a layout proc is configured, pass body
+      # to it (mirrors TS's `layout?: (body) => string` shape).
+      response_body = if (l = @@layout)
+                       ActionView::ViewHelpers.set_yield(body)
+                       l.call(body)
+                     else
+                       body
+                     end
+
+      context.response.status_code = status.to_i
       context.response.content_type = "text/html; charset=utf-8"
-      context.response.print body
+      context.response.print response_body
     end
 
     def self.read_form_body(request : HTTP::Request) : Hash(String, String)
       result = {} of String => String
       content_type = request.headers["Content-Type"]? || ""
-      if !content_type.starts_with?("application/x-www-form-urlencoded")
-        return result
-      end
+      return result unless content_type.starts_with?("application/x-www-form-urlencoded")
       body_io = request.body
-      if body_io.nil?
-        return result
-      end
+      return result if body_io.nil?
       raw = body_io.gets_to_end
-      if raw.empty?
-        return result
-      end
+      return result if raw.empty?
       URI::Params.parse(raw) do |k, v|
         result[k] = v
       end

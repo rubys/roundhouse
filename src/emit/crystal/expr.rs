@@ -327,14 +327,14 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
     if braced {
         if parts.is_empty() {
             // Crystal rejects bare `{}` because it can't infer Hash vs
-            // NamedTuple types. The transpiled framework runtime uses
-            // empty hashes as default args (`def initialize(hash = {})`)
-            // and as accumulators. `{} of Symbol => String?` is a
-            // permissive default that matches the lowered IR's typical
-            // usage (Rails Hash with symbol keys, nilable string values);
-            // call sites that need different element types will surface
-            // a Crystal type error and we'll fix the source there.
-            "{} of Symbol => String?".to_string()
+            // NamedTuple types. `Hash(String, String?)` is the most
+            // permissive default that accepts both string-literal and
+            // string-converted keys (Crystal forbids dynamic Symbol
+            // creation, so the transpiled router/parameters drop
+            // `.to_sym` calls and stay string-keyed). Call sites that
+            // need other element types surface a Crystal type error
+            // and we fix the source there.
+            "{} of String => String?".to_string()
         } else {
             format!("{{ {} }}", parts.join(", "))
         }
@@ -373,7 +373,30 @@ pub(super) fn emit_send_base(
     parenthesized: bool,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-    let m = method.as_str();
+    // Ruby → Crystal method-name translations. Crystal stdlib
+    // collections (Array, String, Hash) use `size` not `length`;
+    // Ruby has both as aliases. Translate at the call site so
+    // emitted code is Crystal-idiomatic.
+    let m = match method.as_str() {
+        "length" => "size",
+        // Crystal: starts_with? / ends_with? (note plural).
+        "start_with?" => "starts_with?",
+        "end_with?" => "ends_with?",
+        other => other,
+    };
+    // Ruby's `String#to_sym` dynamically creates Symbols; Crystal
+    // doesn't allow runtime Symbol creation. Drop the call entirely
+    // (return the receiver) so transpiled code that uses `key.to_sym`
+    // for hash-key normalization just stays string-keyed; the
+    // primitive runtime treats hash keys as strings throughout.
+    if m == "to_sym" && args_s.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(r);
+        }
+    }
+    let method_str = m.to_string();
+    let method = &method_str;
+    let m: &str = method;
     // `recv[idx]` and `recv[idx] = value` rendering. Always emits
     // index-syntax even when receiver is `self` — Ruby's parser shapes
     // `self[k]` as `Send { recv: SelfRef, method: "[]", args: [k] }`,
