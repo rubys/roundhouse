@@ -1,0 +1,29 @@
+module ActiveSupport
+  # String-keyed Hash with Symbol-or-String access at the API surface.
+  # See `hash_with_indifferent_access.rb` for design rationale.
+  #
+  # Most method args are `untyped` to accept Symbol|String keys (and
+  # arbitrary value types) without forcing every caller through a
+  # union annotation. `each` yields `(String, untyped)` because the
+  # internal storage is String-keyed by construction.
+  class HashWithIndifferentAccess
+    def initialize: (?untyped other) -> void
+
+    def []: (untyped key) -> untyped
+    def []=: (untyped key, untyped value) -> untyped
+    def key?: (untyped key) -> bool
+    def has_key?: (untyped key) -> bool
+    def include?: (untyped key) -> bool
+    def fetch: (untyped key, ?untyped default) -> untyped
+    def delete: (untyped key) -> untyped
+    def merge: (untyped other) -> HashWithIndifferentAccess
+    def to_h: () -> Hash[String, untyped]
+    def empty?: () -> bool
+    def length: () -> Integer
+    def size: () -> Integer
+    def keys: () -> Array[String]
+    def values: () -> Array[untyped]
+    def each: () { (String, untyped) -> void } -> HashWithIndifferentAccess
+    def normalize_value: (untyped value) -> untyped
+  end
+end

@@ -208,6 +208,17 @@ pub struct RuntimeUnit {
 /// in the output project.
 const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
     RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
+        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
+        namespace: "ActiveSupport",
+        out_path: "src/hash_with_indifferent_access.ts",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
         rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
         rb_path: "runtime/ruby/inflector.rb",
@@ -321,6 +332,17 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
 /// (Module mode, no dependencies); expanded as the Crystal target
 /// proves out additional surface area.
 const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
+        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
+        namespace: "ActiveSupport",
+        out_path: "src/hash_with_indifferent_access.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
         rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
