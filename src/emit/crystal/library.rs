@@ -239,20 +239,26 @@ fn render_class(lc: &LibraryClass) -> String {
     for m in &lc.methods {
         match m.kind {
             AccessorKind::AttributeReader => {
+                // Crystal's `property` macro requires a plain
+                // identifier — no `?` or `!` suffix. Predicate-named
+                // attr_readers (`abstract?`) and bang-named ones don't
+                // collapse; they emit as the explicit `def name? : T`
+                // form instead.
+                let mname = m.name.as_str();
+                if mname.ends_with('?') || mname.ends_with('!') {
+                    continue;
+                }
                 let ty = match m.signature.as_ref() {
                     Some(crate::ty::Ty::Fn { ret, .. }) => super::ty::crystal_ty(ret),
                     _ => "String".to_string(),
                 };
-                // `T?` shorthand so the property can default to nil
-                // and the auto-synthesized initializer doesn't require
-                // the caller to pass it.
                 let ty_nilable = if ty.ends_with('?') || ty == "Nil" {
                     ty
                 } else {
                     format!("{ty}?")
                 };
-                properties.push((m.name.as_str().to_string(), ty_nilable));
-                accessor_method_names.insert(m.name.as_str().to_string());
+                properties.push((mname.to_string(), ty_nilable));
+                accessor_method_names.insert(mname.to_string());
             }
             AccessorKind::AttributeWriter => {
                 // Setter `def name=(v)` collapses with its reader; if
@@ -273,6 +279,20 @@ fn render_class(lc: &LibraryClass) -> String {
     }
     ivars.retain(|name, _| !properties.iter().any(|(p, _)| p == name));
 
+    // For modules whose methods are all class-level (Ruby's
+    // `module_function` pattern — view_helpers.rb being the canonical
+    // example), `@ivar` references in the method bodies are rewritten
+    // to `@@ivar` (Crystal class variables, since metaclass instance
+    // vars aren't allowed). The class-header declarations follow suit:
+    // emit `@@name : T?` instead of `@name : T?`.
+    let is_class_var_module = lc.is_module
+        && !lc.methods.is_empty()
+        && lc
+            .methods
+            .iter()
+            .all(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Class));
+    let ivar_prefix = if is_class_var_module { "@@" } else { "@" };
+
     // Class header emit: `property` declarations first, then `@ivar`
     // declarations, then methods (with attr_reader/writer methods
     // skipped via `accessor_method_names`).
@@ -288,7 +308,7 @@ fn render_class(lc: &LibraryClass) -> String {
         } else {
             format!("{ty_s}?")
         };
-        writeln!(s, "{body_pad}@{name} : {ty_nilable}").unwrap();
+        writeln!(s, "{body_pad}{ivar_prefix}{name} : {ty_nilable}").unwrap();
         wrote_header_lines = true;
     }
     if wrote_header_lines && lc.methods.iter().any(|m| !is_skipped_method(m, &accessor_method_names)) {

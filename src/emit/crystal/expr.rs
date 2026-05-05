@@ -15,7 +15,7 @@
 use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
 use crate::ident::Symbol;
 
-use super::shared::indent_lines;
+use super::shared::{escape_ident, indent_lines};
 
 pub fn emit_expr(e: &Expr) -> String {
     emit_node(&e.node)
@@ -37,7 +37,7 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Var { name, .. } => escape_ident(name.as_str()),
         ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::SelfRef => "self".to_string(),
         ExprNode::Const { path } => {
@@ -78,6 +78,22 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
+            // `require "x"` calls in Ruby method bodies are loadlate
+            // imports — Ruby allows them anywhere, Crystal rejects
+            // them outside file scope. Skip the call entirely; the
+            // emitted Crystal file's top-level `require` statements
+            // (or stdlib auto-load for Base64/JSON) handle the
+            // semantic. Emits a comment so the diff stays auditable.
+            if recv.is_none()
+                && method.as_str() == "require"
+                && args.len() == 1
+                && matches!(
+                    &*args[0].node,
+                    ExprNode::Lit { value: Literal::Str { .. } }
+                )
+            {
+                return format!("# Crystal: {} (skipped — module load handled at file scope)", emit_send_base(recv.as_ref(), method, args, *parenthesized));
+            }
             let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
             match block {
                 None => base,
@@ -379,7 +395,7 @@ pub(super) fn emit_send_base(
 
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
-        && !is_crystal_keyword(m)
+        && !super::shared::is_crystal_reserved(m)
     {
         if args_s.is_empty() {
             return method.to_string();
@@ -443,60 +459,6 @@ fn is_binary_operator(m: &str) -> bool {
             | "&"
             | "|"
             | "^"
-    )
-}
-
-/// True when `m` collides with a Crystal reserved word and so cannot
-/// appear as a bare method name. The collapse `self.method → method`
-/// is suppressed for these to keep the explicit `self.` prefix —
-/// `self.class.X` works in Crystal where `class.X` would be parsed as
-/// an inline class definition.
-fn is_crystal_keyword(m: &str) -> bool {
-    matches!(
-        m,
-        "class"
-            | "module"
-            | "def"
-            | "end"
-            | "if"
-            | "else"
-            | "elsif"
-            | "case"
-            | "when"
-            | "do"
-            | "begin"
-            | "rescue"
-            | "ensure"
-            | "while"
-            | "until"
-            | "return"
-            | "yield"
-            | "next"
-            | "break"
-            | "true"
-            | "false"
-            | "nil"
-            | "self"
-            | "super"
-            | "then"
-            | "in"
-            | "of"
-            | "as"
-            | "unless"
-            | "type"
-            | "struct"
-            | "abstract"
-            | "alias"
-            | "include"
-            | "extend"
-            | "fun"
-            | "lib"
-            | "macro"
-            | "private"
-            | "protected"
-            | "select"
-            | "with"
-            | "raise"
     )
 }
 
@@ -571,7 +533,7 @@ pub(super) fn emit_literal(l: &Literal) -> String {
 
 fn emit_lvalue(lv: &LValue) -> String {
     match lv {
-        LValue::Var { name, .. } => name.to_string(),
+        LValue::Var { name, .. } => escape_ident(name.as_str()),
         LValue::Ivar { name } => format!("@{name}"),
         LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
