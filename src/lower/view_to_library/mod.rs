@@ -915,6 +915,29 @@ impl ViewCtx {
     }
 }
 
+/// View helpers (`button_to`, `link_to`, `stylesheet_link_tag`, etc.)
+/// declare their option-bag as a single trailing positional `opts =
+/// {}` Hash parameter — not as kwargs. The Ruby parser shapes the
+/// caller's `helper "...", path, k1: v1, k2: v2` as a trailing
+/// `KeywordHash` (our `kwargs: true`) which Ruby implicitly collects
+/// into the `opts` Hash. Crystal doesn't auto-collect kwargs into a
+/// Hash — kwargs become a NamedTuple, mismatch with the helper's
+/// `opts : Hash(...)` param. Flip the trailing Hash's `kwargs` flag
+/// to `false` so it emits as an explicit Hash literal at the call
+/// site, matching `opts : Hash` in every target. Inner Hashes keep
+/// their original flag (e.g. `data: { turbo_confirm: ... }` — the
+/// inner braces ARE explicit, kwargs: false already).
+fn hash_args_to_explicit(mut args: Vec<Expr>) -> Vec<Expr> {
+    if let Some(last) = args.last_mut() {
+        if let ExprNode::Hash { kwargs, .. } = &mut *last.node {
+            if *kwargs {
+                *kwargs = false;
+            }
+        }
+    }
+    args
+}
+
 // ── small IR constructors ────────────────────────────────────────
 
 /// `<accumulator> = String.new` — synthesized once per template body.
@@ -953,7 +976,7 @@ pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
         Span::synthetic(),
         ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
     );
-    send(Some(recv), method, args, None, true)
+    send(Some(recv), method, hash_args_to_explicit(args), None, true)
 }
 
 pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {

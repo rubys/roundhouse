@@ -668,6 +668,18 @@ pub(super) fn emit_send_base(
         }
         (Some(r), _) => {
             let recv_s = emit_expr(r);
+            // Wrap low-precedence receivers (e.g. `a || b`, `a && b`,
+            // assignments, ternaries) in parens so the dot binds to
+            // the whole expression — `(a || b).to_s` not the natural
+            // parse `a || b.to_s`. The IR carries the source-grouping
+            // intent (the `(... ||  ...).to_s` shape lowers to
+            // Send{recv: BoolOp, ...}); preserve that grouping in
+            // the emit.
+            let recv_s = if needs_recv_parens(r) {
+                format!("({recv_s})")
+            } else {
+                recv_s
+            };
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
             } else if parenthesized {
@@ -677,6 +689,17 @@ pub(super) fn emit_send_base(
             }
         }
     }
+}
+
+/// True when an expression's natural emit would have lower precedence
+/// than the surrounding `recv.method` dot — wrap it in parens at the
+/// recv position so the dot binds to the whole expression. Conservative:
+/// only flags the cases we've actually hit (BoolOp + If/ternary).
+fn needs_recv_parens(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::BoolOp { .. } | ExprNode::If { .. } | ExprNode::Assign { .. }
+    )
 }
 
 fn is_binary_operator(m: &str) -> bool {

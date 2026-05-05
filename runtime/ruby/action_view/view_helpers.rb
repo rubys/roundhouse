@@ -120,7 +120,10 @@ module ViewHelpers
     # Rails' `button_to` defaults the form class to `button_to` when
     # the caller doesn't pass one — match that so the cross-target
     # compare sees the same `class` attribute set.
-    form_attrs["class"] = form_class || "button_to"
+    # `.to_s` narrows the `opts[k]` union (Hash/Symbol/String/...)
+    # to String for strict-typed targets. Ruby `String#to_s` is a no-op;
+    # `||` short-circuits before `.to_s` runs on a real String value.
+    form_attrs["class"] = (form_class || "button_to").to_s
     button_attrs = render_attrs({ "type" => "submit" }.merge(stringify_keys(inner_opts)))
     method_input = if !method.nil? && method.to_s != "post"
                      %(<input type="hidden" name="_method" value="#{method}">)
