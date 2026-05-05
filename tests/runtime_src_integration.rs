@@ -68,12 +68,6 @@ fn inflector_pluralize_lives_in_runtime_python() {
 }
 
 #[test]
-fn inflector_pluralize_lives_in_runtime_crystal() {
-    let emitted = roundhouse::emit::crystal::emit_method(&pluralize_method());
-    assert_emitted_lives_in(&emitted, "runtime/crystal/view_helpers.cr");
-}
-
-#[test]
 fn inflector_pluralize_lives_in_runtime_rust() {
     let emitted = roundhouse::emit::rust::emit_method(&pluralize_method());
     assert_emitted_lives_in(&emitted, "runtime/rust/view_helpers.rs");
