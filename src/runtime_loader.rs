@@ -47,6 +47,12 @@ pub struct TargetEmit {
     /// Format a top-level constant declaration. TS: `const NAME = VALUE;`.
     /// Crystal: `NAME = VALUE` (no `const` keyword, no terminator).
     pub format_constant: fn(name: &str, value_expr: &str) -> String,
+    /// Wrap a body in the target's namespace syntax. TS resolves
+    /// namespaces through imports + qualified-name registration in
+    /// treeshake, so this is a no-op (`namespace` arg ignored). Crystal
+    /// requires explicit `module X ... end` wrapping for refs of the
+    /// form `X::Y` to resolve.
+    pub wrap_namespace: fn(namespace: &str, body: &str) -> String,
 }
 
 const TS_TARGET: TargetEmit = TargetEmit {
@@ -55,7 +61,14 @@ const TS_TARGET: TargetEmit = TargetEmit {
     emit_expr_for_runtime: crate::emit::typescript::emit_expr_for_runtime,
     format_import: ts_format_import,
     format_constant: ts_format_constant,
+    wrap_namespace: ts_wrap_namespace,
 };
+
+fn ts_wrap_namespace(_namespace: &str, body: &str) -> String {
+    // TS resolves namespaces through imports + treeshake's qualified
+    // class registry; the per-file body emits flat at module top.
+    body.to_string()
+}
 
 fn ts_format_import(name: &str, source: &str) -> String {
     format!("import {{ {name} }} from \"{source}\";\n")
@@ -71,7 +84,35 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
     emit_expr_for_runtime: crate::emit::crystal::emit_expr_for_runtime,
     format_import: crystal_format_import,
     format_constant: crystal_format_constant,
+    wrap_namespace: crystal_wrap_namespace,
 };
+
+/// Wrap `body` in `module Foo ... end` (or nested forms for compound
+/// names like `A::B`). Empty namespace returns the body unchanged.
+fn crystal_wrap_namespace(namespace: &str, body: &str) -> String {
+    if namespace.is_empty() {
+        return body.to_string();
+    }
+    let segments: Vec<&str> = namespace.split("::").collect();
+    let mut out = String::new();
+    for (i, seg) in segments.iter().enumerate() {
+        out.push_str(&"  ".repeat(i));
+        out.push_str(&format!("module {seg}\n"));
+    }
+    let pad = "  ".repeat(segments.len());
+    for line in body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("{pad}{line}\n"));
+        }
+    }
+    for i in (0..segments.len()).rev() {
+        out.push_str(&"  ".repeat(i));
+        out.push_str("end\n");
+    }
+    out
+}
 
 /// Crystal's `require` is path-based (no named-import clause). The
 /// `name` parameter from `RuntimeEntry.imports` is informational —
@@ -291,6 +332,17 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
+        rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "ActiveRecord",
+        out_path: "src/errors.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Crystal runtime files. Mirrors `typescript_units`
@@ -382,6 +434,11 @@ where
                 }
                 body.push_str(&(target.emit_library_class)(c)?);
             }
+            // Wrap in the enclosing namespace, if any. TS no-ops here
+            // (its target collapses namespaces through imports + the
+            // treeshake registry); Crystal wraps in `module X ... end`
+            // so refs of the form `X::Y` resolve at the call site.
+            let body = (target.wrap_namespace)(entry.namespace, &body);
             (body, classes, Vec::new())
         }
     };

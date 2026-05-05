@@ -223,7 +223,7 @@ fn render_class(lc: &LibraryClass) -> String {
         let last = segments[depth - 1];
         let pad = "  ".repeat(depth - 1);
         match lc.parent.as_ref() {
-            Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            Some(p) => writeln!(s, "{pad}class {last} < {}", crystal_parent_name(p.0.as_str())).unwrap(),
             None => writeln!(s, "{pad}class {last}").unwrap(),
         }
     }
@@ -523,6 +523,22 @@ fn is_same_dir(from_dir: &Path, to_anchor: &str) -> bool {
         .map(|(d, _)| d.to_string())
         .unwrap_or_default();
     from_dir.to_str().unwrap_or("") == to_dir
+}
+
+/// Translate a Ruby parent class name to its Crystal equivalent.
+/// Crystal's exception hierarchy roots at `Exception` (no
+/// `StandardError`); mapping the common Ruby base names keeps
+/// transpiled framework runtime files compilable. Unknown names pass
+/// through unchanged so app-level inheritance (e.g. `class Article <
+/// ApplicationRecord`) still works.
+pub(super) fn crystal_parent_name(ruby_name: &str) -> String {
+    match ruby_name {
+        "StandardError" => "Exception".to_string(),
+        "RuntimeError" => "Exception".to_string(),
+        "ArgumentError" | "TypeError" | "NotImplementedError" | "NoMethodError"
+        | "RangeError" | "IndexError" | "KeyError" | "Exception" => ruby_name.to_string(),
+        _ => ruby_name.to_string(),
+    }
 }
 
 /// Format a Crystal `require` path. `./relpath` for sibling or
