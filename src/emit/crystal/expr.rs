@@ -273,6 +273,14 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
     // Crystal doesn't have %i / %w shorthand — render bracket form
     // unconditionally. `style` is preserved for round-trip fidelity
     // in Ruby/Spinel emit but doesn't affect Crystal output.
+    if elements.is_empty() {
+        // Crystal rejects bare `[]` for the same reason as `{}`
+        // (untyped). `[] of String?` is a permissive default that
+        // matches the lowered IR's typical usage (errors arrays,
+        // accumulator strings). Type-mismatched call sites surface a
+        // Crystal error and we fix the source there.
+        return "[] of String?".to_string();
+    }
     let parts: Vec<String> = elements.iter().map(emit_expr).collect();
     format!("[{}]", parts.join(", "))
 }
@@ -302,7 +310,15 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
         .collect();
     if braced {
         if parts.is_empty() {
-            "{}".to_string()
+            // Crystal rejects bare `{}` because it can't infer Hash vs
+            // NamedTuple types. The transpiled framework runtime uses
+            // empty hashes as default args (`def initialize(hash = {})`)
+            // and as accumulators. `{} of Symbol => String?` is a
+            // permissive default that matches the lowered IR's typical
+            // usage (Rails Hash with symbol keys, nilable string values);
+            // call sites that need different element types will surface
+            // a Crystal type error and we'll fix the source there.
+            "{} of Symbol => String?".to_string()
         } else {
             format!("{{ {} }}", parts.join(", "))
         }
@@ -342,8 +358,28 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     let m = method.as_str();
+    // `recv[idx]` and `recv[idx] = value` rendering. Always emits
+    // index-syntax even when receiver is `self` — Ruby's parser shapes
+    // `self[k]` as `Send { recv: SelfRef, method: "[]", args: [k] }`,
+    // which the SelfRef-collapse below would render as the bare token
+    // `[](k)` and Crystal would parse as a malformed empty-array
+    // literal. Same reasoning for `self[k] = v` → `Send { method:
+    // "[]=", args: [k, v] }`. Drop into index syntax explicitly.
+    if (m == "[]" || m == "[]=") && !args_s.is_empty() {
+        let recv_s = match recv {
+            Some(r) if matches!(&*r.node, ExprNode::SelfRef) => "self".to_string(),
+            Some(r) => emit_expr(r),
+            None => "self".to_string(),
+        };
+        if m == "[]=" && args_s.len() == 2 {
+            return format!("{recv_s}[{}] = {}", args_s[0], args_s[1]);
+        }
+        return format!("{recv_s}[{}]", args_s.join(", "));
+    }
+
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
+        && !is_crystal_keyword(m)
     {
         if args_s.is_empty() {
             return method.to_string();
@@ -407,6 +443,60 @@ fn is_binary_operator(m: &str) -> bool {
             | "&"
             | "|"
             | "^"
+    )
+}
+
+/// True when `m` collides with a Crystal reserved word and so cannot
+/// appear as a bare method name. The collapse `self.method → method`
+/// is suppressed for these to keep the explicit `self.` prefix —
+/// `self.class.X` works in Crystal where `class.X` would be parsed as
+/// an inline class definition.
+fn is_crystal_keyword(m: &str) -> bool {
+    matches!(
+        m,
+        "class"
+            | "module"
+            | "def"
+            | "end"
+            | "if"
+            | "else"
+            | "elsif"
+            | "case"
+            | "when"
+            | "do"
+            | "begin"
+            | "rescue"
+            | "ensure"
+            | "while"
+            | "until"
+            | "return"
+            | "yield"
+            | "next"
+            | "break"
+            | "true"
+            | "false"
+            | "nil"
+            | "self"
+            | "super"
+            | "then"
+            | "in"
+            | "of"
+            | "as"
+            | "unless"
+            | "type"
+            | "struct"
+            | "abstract"
+            | "alias"
+            | "include"
+            | "extend"
+            | "fun"
+            | "lib"
+            | "macro"
+            | "private"
+            | "protected"
+            | "select"
+            | "with"
+            | "raise"
     )
 }
 
