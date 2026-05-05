@@ -15,10 +15,10 @@ module ActionController
     # are populated by the dispatcher before invoking the action.
     def params: () -> Parameters
     def params=: (Parameters) -> Parameters
-    def session: () -> Hash[Symbol, untyped]
-    def session=: (Hash[Symbol, untyped]) -> Hash[Symbol, untyped]
-    def flash: () -> Hash[Symbol, untyped]
-    def flash=: (Hash[Symbol, untyped]) -> Hash[Symbol, untyped]
+    def session: () -> ActiveSupport::HashWithIndifferentAccess
+    def session=: (ActiveSupport::HashWithIndifferentAccess) -> ActiveSupport::HashWithIndifferentAccess
+    def flash: () -> ActiveSupport::HashWithIndifferentAccess
+    def flash=: (ActiveSupport::HashWithIndifferentAccess) -> ActiveSupport::HashWithIndifferentAccess
     def request_method: () -> String
     def request_method=: (String) -> String
     def request_path: () -> String

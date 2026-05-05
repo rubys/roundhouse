@@ -354,10 +354,18 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
     // Framework runtime files in dependency order. Each must be
     // loaded before any file that `include`s its module.
     const RUNTIME_ORDER: &[&str] = &[
+        "hash_with_indifferent_access",
         "inflector",
-        "errors",
+        // validations → active_record_base → errors keeps the
+        // forward-ref chain resolvable at parse time. Validations
+        // module is included by Base (parse-time `include`); Base is
+        // referenced by errors' RecordInvalid as a property type
+        // (parse-time class macro); errors is used by Base's body
+        // `raise RecordNotFound/RecordInvalid` (lazy method-body
+        // resolution).
         "validations",
         "active_record_base",
+        "errors",
         "parameters",
         "router",
         "action_controller_base",

@@ -236,6 +236,36 @@ fn render_class(lc: &LibraryClass) -> String {
     let mut properties: Vec<(String, String)> = Vec::new();
     let mut accessor_method_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // First pass: detect which ivars `initialize` directly assigns
+    // (used both for ivar nilability AND property nilability —
+    // Crystal's strict null check applies the same rule to both).
+    let mut init_assigned: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for m in &lc.methods {
+        if m.name.as_str() == "initialize"
+            && matches!(m.receiver, crate::dialect::MethodReceiver::Instance)
+        {
+            collect_initialize_assignments(&m.body, &mut init_assigned);
+        }
+    }
+
+    // Field names that the framework parent (`ActiveRecord::Base`)
+    // already declares — every model extends ActiveRecord::Base
+    // transitively, so re-declaring these in the subclass trips
+    // Crystal's "instance variable already declared" error. Same set
+    // TS uses (typescript.rs::INHERITED_FIELD_NAMES) — kept aligned
+    // because both targets share the same ActiveRecord::Base shape.
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    let extends_active_record_base = matches!(lc.parent.as_ref(), Some(p) if {
+        let raw = p.0.as_str();
+        // Either explicitly `ActiveRecord::Base` OR an
+        // ApplicationRecord-style intermediate that itself extends
+        // ActiveRecord::Base. The fixture `ApplicationRecord` is
+        // emitted as `class ApplicationRecord < ActiveRecord::Base`
+        // (synthesized when missing); other models extend that.
+        raw == "ActiveRecord::Base" || raw == "ApplicationRecord"
+    });
+
     for m in &lc.methods {
         match m.kind {
             AccessorKind::AttributeReader => {
@@ -248,16 +278,37 @@ fn render_class(lc: &LibraryClass) -> String {
                 if mname.ends_with('?') || mname.ends_with('!') {
                     continue;
                 }
+                // Skip inherited fields — re-declaring would conflict
+                // with the parent's declaration. Still mark as accessor
+                // so the explicit getter/setter `def`s also drop (the
+                // parent already provides them).
+                if extends_active_record_base
+                    && INHERITED_FIELD_NAMES.contains(&mname)
+                {
+                    accessor_method_names.insert(mname.to_string());
+                    accessor_method_names.insert(format!("{mname}="));
+                    continue;
+                }
                 let ty = match m.signature.as_ref() {
                     Some(crate::ty::Ty::Fn { ret, .. }) => super::ty::crystal_ty(ret),
                     _ => "String".to_string(),
                 };
-                let ty_nilable = if ty.ends_with('?') || ty == "Nil" {
-                    ty
-                } else {
+                // Append `?` only when initialize doesn't assign this
+                // property — Crystal's strict null check requires
+                // either every-init-path-assigns OR a nilable
+                // declaration. attr_accessors that are populated
+                // post-construct (controllers' `request_method`,
+                // dispatch-set; views' yield body, etc.) need the
+                // nilable form.
+                let needs_nilable = !init_assigned.contains(mname)
+                    && !ty.ends_with('?')
+                    && ty != "Nil";
+                let final_ty = if needs_nilable {
                     format!("{ty}?")
+                } else {
+                    ty
                 };
-                properties.push((mname.to_string(), ty_nilable));
+                properties.push((mname.to_string(), final_ty));
                 accessor_method_names.insert(mname.to_string());
             }
             AccessorKind::AttributeWriter => {
@@ -278,6 +329,9 @@ fn render_class(lc: &LibraryClass) -> String {
         collect_ivar_assignments(&m.body, &mut ivars);
     }
     ivars.retain(|name, _| !properties.iter().any(|(p, _)| p == name));
+
+    // `init_assigned` was already populated in the property pass.
+    let initialize_assigned = init_assigned;
 
     // For modules whose methods are all class-level (Ruby's
     // `module_function` pattern — view_helpers.rb being the canonical
@@ -312,13 +366,29 @@ fn render_class(lc: &LibraryClass) -> String {
     // is more uniformly determined.
     if !is_class_var_module {
         for (name, ty) in &ivars {
+            // Same inherited-field skip as the property pass.
+            if extends_active_record_base
+                && INHERITED_FIELD_NAMES.contains(&name.as_str())
+            {
+                continue;
+            }
             let ty_s = super::ty::crystal_ty(ty);
-            let ty_nilable = if ty_s.ends_with('?') || ty_s == "Nil" {
-                ty_s
-            } else {
+            // Append `?` (nilable) only when initialize doesn't
+            // assign this ivar directly. Crystal's strict null
+            // checking requires either every-path-initializes or
+            // a nilable declaration; declaring non-nilable an ivar
+            // that's set later in another method (controllers'
+            // action-set ivars are the canonical case) trips
+            // a class-declaration error.
+            let needs_nilable = !initialize_assigned.contains(name)
+                && !ty_s.ends_with('?')
+                && ty_s != "Nil";
+            let final_ty = if needs_nilable {
                 format!("{ty_s}?")
+            } else {
+                ty_s
             };
-            writeln!(s, "{body_pad}{ivar_prefix}{name} : {ty_nilable}").unwrap();
+            writeln!(s, "{body_pad}{ivar_prefix}{name} : {final_ty}").unwrap();
             wrote_header_lines = true;
         }
     }
@@ -374,6 +444,30 @@ fn is_skipped_method(
         }
     }
     false
+}
+
+/// Walk an Expr collecting just the names of ivars assigned directly
+/// inside `initialize` (or its top-level Seq). Used to decide whether
+/// an ivar declaration needs the nilable `?` suffix in Crystal —
+/// every-path-assigned ivars stay non-nilable. Conservative: doesn't
+/// recurse into conditional branches or method bodies, which matches
+/// Crystal's "directly initialized" rule.
+fn collect_initialize_assignments(
+    e: &Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use crate::expr::LValue;
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, .. } => {
+            out.insert(name.as_str().to_string());
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_initialize_assignments(e, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Walk an Expr collecting `@ivar = value` assignments, keyed by ivar

@@ -66,7 +66,7 @@ module Roundhouse
   # Concrete sqlite-backed adapter implementing the API
   # `ActiveRecord::Base` (transpiled from runtime/ruby/active_record/
   # base.rb) calls. Method names + arities match the Ruby surface;
-  # row results come back as `Hash(Symbol, DB::Any)` matching Crystal's
+  # row results come back as `Hash(String, DB::Any)` matching Crystal's
   # crystal-db return shape.
   class SqliteAdapter
     private def conn
@@ -74,12 +74,12 @@ module Roundhouse
     end
 
     def all(table_name : String)
-      rows = [] of Hash(Symbol, DB::Any)
+      rows = [] of Hash(String, DB::Any)
       conn.query("SELECT * FROM #{table_name}") do |rs|
         rs.column_count.times { rs.column_name(0) } # warm up metadata
-        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        names = (0...rs.column_count).map { |i| rs.column_name(i) }
         rs.each do
-          h = {} of Symbol => DB::Any
+          h = {} of String => DB::Any
           names.each_with_index { |n, i| h[n] = rs.read }
           rows << h
         end
@@ -90,9 +90,9 @@ module Roundhouse
     def find(table_name : String, id)
       row = nil
       conn.query("SELECT * FROM #{table_name} WHERE id = ? LIMIT 1", id) do |rs|
-        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        names = (0...rs.column_count).map { |i| rs.column_name(i) }
         rs.each do
-          h = {} of Symbol => DB::Any
+          h = {} of String => DB::Any
           names.each_with_index { |n, i| h[n] = rs.read }
           row = h
         end
@@ -100,16 +100,16 @@ module Roundhouse
       row
     end
 
-    def where(table_name : String, conditions : Hash(Symbol, _))
+    def where(table_name : String, conditions : Hash(String, _))
       keys = conditions.keys
-      rows = [] of Hash(Symbol, DB::Any)
+      rows = [] of Hash(String, DB::Any)
       return rows if keys.empty?
       where_clause = keys.map { |k| "#{k} = ?" }.join(" AND ")
       args = keys.map { |k| conditions[k].as(DB::Any) }
       conn.query("SELECT * FROM #{table_name} WHERE #{where_clause}", args: args) do |rs|
-        names = (0...rs.column_count).map { |i| rs.column_name(i).to_sym }
+        names = (0...rs.column_count).map { |i| rs.column_name(i) }
         rs.each do
-          h = {} of Symbol => DB::Any
+          h = {} of String => DB::Any
           names.each_with_index { |n, i| h[n] = rs.read }
           rows << h
         end
@@ -130,7 +130,7 @@ module Roundhouse
       n > 0
     end
 
-    def insert(table_name : String, attributes : Hash(Symbol, _)) : Int64
+    def insert(table_name : String, attributes : Hash(String, _)) : Int64
       keys = attributes.keys
       cols = keys.map(&.to_s).join(", ")
       placeholders = (["?"] * keys.size).join(", ")
@@ -139,7 +139,7 @@ module Roundhouse
       conn.query_one("SELECT last_insert_rowid()", as: Int64)
     end
 
-    def update(table_name : String, id, attributes : Hash(Symbol, _)) : Nil
+    def update(table_name : String, id, attributes : Hash(String, _)) : Nil
       keys = attributes.keys
       return if keys.empty?
       sets = keys.map { |k| "#{k} = ?" }.join(", ")

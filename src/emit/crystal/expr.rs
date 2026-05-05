@@ -41,7 +41,30 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Ivar { name } => format!("@{name}"),
         ExprNode::SelfRef => "self".to_string(),
         ExprNode::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
+            // Top-level framework module references need an explicit
+            // `::` prefix when the call site is INSIDE the same module
+            // (Crystal looks up `ActiveRecord` nested-first and finds
+            // nothing, then tries outer scope — but reports the failed
+            // nested lookup as `ActiveRecord::ActiveRecord:Module`).
+            // Bare references to framework modules outside their own
+            // namespace also benefit from the `::` prefix as a no-op
+            // safety. Limited to a known list of framework module
+            // names; app-level Const refs (`Article`, `Comment`, etc.)
+            // emit unprefixed.
+            let joined = path
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            let first = path.first().map(|s| s.as_str()).unwrap_or("");
+            if matches!(
+                first,
+                "ActiveRecord" | "ActionController" | "ActionView" | "ActionDispatch" | "ActiveSupport"
+            ) {
+                format!("::{joined}")
+            } else {
+                joined
+            }
         }
         ExprNode::Hash { entries, braced } => emit_hash(entries, *braced),
         ExprNode::Array { elements, style } => emit_array(elements, style),
@@ -151,7 +174,7 @@ fn emit_node(n: &ExprNode) -> String {
                 format!("yield {}", args_s.join(", "))
             }
         }
-        ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+        ExprNode::Raise { value } => emit_raise(value),
         ExprNode::RescueModifier { expr, fallback } => {
             format!("{} rescue {}", emit_expr(expr), emit_expr(fallback))
         }
@@ -327,14 +350,16 @@ fn emit_hash(entries: &[(Expr, Expr)], braced: bool) -> String {
     if braced {
         if parts.is_empty() {
             // Crystal rejects bare `{}` because it can't infer Hash vs
-            // NamedTuple types. `Hash(String, String?)` is the most
-            // permissive default that accepts both string-literal and
-            // string-converted keys (Crystal forbids dynamic Symbol
-            // creation, so the transpiled router/parameters drop
-            // `.to_sym` calls and stay string-keyed). Call sites that
-            // need other element types surface a Crystal type error
+            // NamedTuple types. `Hash(String, String)` matches what
+            // the body-typer infers for `@h = {}` ivar declarations
+            // (avoiding declaration/assignment-type mismatches at the
+            // class header) and covers the typical Rails-shape case.
+            // Crystal forbids dynamic Symbol creation, so transpiled
+            // router/parameters drop `.to_sym` calls and stay
+            // string-keyed. Call sites needing nilable values or
+            // other element types will surface a Crystal type error
             // and we fix the source there.
-            "{} of String => String?".to_string()
+            "{} of String => String".to_string()
         } else {
             format!("{{ {} }}", parts.join(", "))
         }
@@ -377,6 +402,15 @@ pub(super) fn emit_send_base(
     // collections (Array, String, Hash) use `size` not `length`;
     // Ruby has both as aliases. Translate at the call site so
     // emitted code is Crystal-idiomatic.
+    // Ruby's `raise Klass, "msg"` is a 2-arg form that Crystal doesn't
+    // accept (Crystal's `raise` is single-arg: an Exception or a
+    // String). Translate `raise X, "msg"` to `raise X.new("msg")`
+    // before any other rewrite. Detected at the bare-method (no recv)
+    // call site because the Ruby parser shapes this as a `Send`, not
+    // an `ExprNode::Raise`.
+    if recv.is_none() && method.as_str() == "raise" && args_s.len() == 2 {
+        return format!("raise {}.new({})", args_s[0], args_s[1]);
+    }
     let m = match method.as_str() {
         "length" => "size",
         // Crystal: starts_with? / ends_with? (note plural).
@@ -483,6 +517,24 @@ fn is_binary_operator(m: &str) -> bool {
             | "|"
             | "^"
     )
+}
+
+/// Translate Ruby's `raise Klass, "msg"` (parsed as Send `raise` with
+/// two args) to Crystal's `raise Klass.new("msg")`. Single-arg raises
+/// (`raise "msg"` or `raise exc`) pass through unchanged.
+fn emit_raise(value: &Expr) -> String {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*value.node {
+        if method.as_str() == "raise" && args.len() == 2 {
+            // Inner Send shape: `raise(Klass, "msg")`. Convert.
+            let klass_s = emit_expr(&args[0]);
+            let msg_s = emit_expr(&args[1]);
+            return format!("raise {klass_s}.new({msg_s})");
+        }
+    }
+    // Heuristic fallback: an Apply or Send-with-recv that produces
+    // a (Klass, msg) pair would still need handling; for now just
+    // emit the single-value form.
+    format!("raise {}", emit_expr(value))
 }
 
 fn is_setter_method(m: &str) -> bool {

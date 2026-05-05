@@ -27,8 +27,8 @@ module Roundhouse
     @@layout : Proc(String, String)? = nil
     @@routes : Array(NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)) = [] of NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
-    @@session : Hash(Symbol, String) = {} of Symbol => String
-    @@flash : Hash(Symbol, String) = {} of Symbol => String
+    @@session : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new
+    @@flash : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new
 
     def self.start(
       schema_sql : String,
@@ -98,11 +98,13 @@ module Roundhouse
         return
       end
 
-      # Build merged params (path + query + body), all symbol-keyed.
-      merged = {} of Symbol => String?
-      path_params.each { |k, v| merged[k] = v }
-      context.request.query_params.each { |k, v| merged[k.to_sym] = v }
-      body_params.each { |k, v| merged[k.to_sym] = v }
+      # Build merged params (path + query + body), String-keyed.
+      # HWIA stores String keys internally; controllers' `@params[:id]`
+      # access goes through HWIA's `[]` which normalizes via `Symbol#to_s`.
+      merged = {} of String => String
+      path_params.each { |k, v| merged[k.to_s] = v.to_s }
+      context.request.query_params.each { |k, v| merged[k] = v }
+      body_params.each { |k, v| merged[k] = v }
 
       ctrl = ctrl_class.new
       ctrl.params = ActionController::Parameters.new(merged)
@@ -124,8 +126,8 @@ module Roundhouse
 
       # Carry flash forward exactly once: post-redirect, the next
       # request reads the flash, the request after that sees fresh.
-      flash_for_response = ctrl.flash || {} of Symbol => String
-      @@flash = {} of Symbol => String
+      flash_for_response = ctrl.flash || ActiveSupport::HashWithIndifferentAccess.new
+      @@flash = ActiveSupport::HashWithIndifferentAccess.new
 
       status = ctrl.status || 200i64
       body = ctrl.body || ""

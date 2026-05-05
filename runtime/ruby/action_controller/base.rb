@@ -33,8 +33,8 @@ module ActionController
 
     def initialize
       @params  = ActionController::Parameters.new({})
-      @session = {}
-      @flash   = {}
+      @session = ActiveSupport::HashWithIndifferentAccess.new
+      @flash   = ActiveSupport::HashWithIndifferentAccess.new
       @status  = 200
       @body    = ""
       @location = nil
