@@ -147,6 +147,58 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    /// Walk the resolved method's signature and flip a trailing
+    /// `kwargs: true` Hash to `kwargs: false` when the last param is
+    /// positional (Required/Optional) with `Ty::Hash` type. Ruby's
+    /// implicit kwargs-to-Hash collection doesn't survive into Crystal/
+    /// strict targets — the IR has to commit one way or the other.
+    /// Methods declared with `Keyword`/`KeywordRest` last params stay
+    /// kwargs (the bare named-args call shape); methods declared with
+    /// `opts = {}` (positional Hash) get the rewrite.
+    pub(super) fn normalize_trailing_kwargs(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        args: &mut [crate::expr::Expr],
+    ) {
+        use crate::expr::ExprNode;
+        use crate::ty::ParamKind;
+        let Some(last) = args.last_mut() else { return };
+        let ExprNode::Hash { kwargs, .. } = &mut *last.node else { return };
+        if !*kwargs {
+            return;
+        }
+        let Some(Ty::Class { id, .. }) = recv_ty else { return };
+        let mut current_id: Option<&ClassId> = Some(id);
+        let mut seen = 0usize;
+        let sig: Option<&Ty> = loop {
+            let Some(cid) = current_id else { break None };
+            seen += 1;
+            if seen > 32 {
+                break None;
+            }
+            let Some(cls) = self.classes().get(cid) else { break None };
+            if let Some(s) = cls
+                .instance_methods
+                .get(method)
+                .or_else(|| cls.class_methods.get(method))
+            {
+                break Some(s);
+            }
+            current_id = cls.parent.as_ref();
+        };
+        let Some(Ty::Fn { params, .. }) = sig else { return };
+        let Some(last_param) = params.last() else { return };
+        let last_kind_positional = matches!(
+            last_param.kind,
+            ParamKind::Required | ParamKind::Optional
+        );
+        let last_ty_is_hash = matches!(last_param.ty, Ty::Hash { .. });
+        if last_kind_positional && last_ty_is_hash {
+            *kwargs = false;
+        }
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,

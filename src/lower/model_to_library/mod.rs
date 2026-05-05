@@ -655,9 +655,26 @@ fn insert_default(map: &mut HashMap<Symbol, Ty>, name: &str, sig: Ty) {
 /// broadcasts expansion + block-form callbacks actually emit.
 fn broadcasts_class_info() -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
-    let kwargs = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let sig = fn_sig(vec![(Symbol::from("opts"), kwargs)], Ty::Nil);
+    // `Broadcasts.{append,prepend,replace,remove}` takes a kwargs bag —
+    // declared as `**opts` in Ruby/Spinel (Hash-collected), as named
+    // params in Crystal, as an options object in TS. Tag the signature
+    // param as `KeywordRest` so the body-typer's
+    // `normalize_trailing_kwargs` pass leaves the trailing `kwargs:
+    // true` Hash alone (it renders as bare named-args at the call
+    // site, which every target dispatches correctly: Ruby kwargs →
+    // Hash, Crystal NamedTuple → named params, TS object literal).
     use crate::dialect::AccessorKind;
+    let opts_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let sig = Ty::Fn {
+        params: vec![crate::ty::Param {
+            name: Symbol::from("opts"),
+            ty: opts_ty,
+            kind: crate::ty::ParamKind::KeywordRest,
+        }],
+        block: None,
+        ret: Box::new(Ty::Nil),
+        effects: crate::effect::EffectSet::pure(),
+    };
     for name in ["prepend", "replace", "remove", "append"] {
         info.class_methods.insert(Symbol::from(name), sig.clone());
         info.class_method_kinds.insert(Symbol::from(name), AccessorKind::Method);

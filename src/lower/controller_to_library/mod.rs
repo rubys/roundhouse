@@ -315,26 +315,58 @@ fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action])
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
     let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let opts = vec![(Symbol::from("opts"), any_hash.clone())];
 
     // Terminals — render/redirect/head/render_404 all return Nil.
+    // The framework runtime declares these with named keyword params
+    // (`render(html, status: 200)`, `redirect_to(path, notice: nil,
+    // alert: nil, status: :found)`), so the trailing kwargs Hash
+    // SHOULD stay as bare named-args at the call site. Use a
+    // `KeywordRest` `**opts` shape so the body-typer's
+    // normalize_trailing_kwargs treats the trailing Hash as kwargs
+    // (kept), not as a positional Hash (flipped). The simplification
+    // doesn't matter for typing — we don't check per-key types of
+    // controller render options today.
+    let kw_rest_opts = || -> Ty {
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("opts"),
+                ty: any_hash.clone(),
+                kind: crate::ty::ParamKind::KeywordRest,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::pure(),
+        }
+    };
+    let positional_with_kwargs = |first_name: &str, first_ty: Ty| -> Ty {
+        Ty::Fn {
+            params: vec![
+                crate::ty::Param {
+                    name: Symbol::from(first_name),
+                    ty: first_ty,
+                    kind: crate::ty::ParamKind::Required,
+                },
+                crate::ty::Param {
+                    name: Symbol::from("opts"),
+                    ty: any_hash.clone(),
+                    kind: crate::ty::ParamKind::KeywordRest,
+                },
+            ],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::pure(),
+        }
+    };
     info.instance_methods
         .entry(Symbol::from("render"))
-        .or_insert_with(|| fn_sig(opts.clone(), Ty::Nil));
+        .or_insert_with(|| positional_with_kwargs("html", Ty::Untyped));
     info.instance_methods
         .entry(Symbol::from("redirect_to"))
-        .or_insert_with(|| {
-            fn_sig(
-                vec![
-                    (Symbol::from("location"), Ty::Untyped),
-                    (Symbol::from("opts"), any_hash.clone()),
-                ],
-                Ty::Nil,
-            )
-        });
+        .or_insert_with(|| positional_with_kwargs("location", Ty::Untyped));
     info.instance_methods
         .entry(Symbol::from("head"))
         .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
+    let _ = kw_rest_opts; // helper retained for future zero-positional kwargs callees
 
     // Implicit-`params` — actions read `@params` (the lowerer rewrote
     // bare `params` → `@params`) which the typer should treat as a

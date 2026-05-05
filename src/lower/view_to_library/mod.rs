@@ -470,8 +470,22 @@ pub(crate) fn insert_framework_stubs(
     // remember to add it themselves.
     let _ = any_hash; // captured by html_helpers above
     let mut bc = crate::analyze::ClassInfo::default();
-    let kwargs = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let bc_sig = fn_sig(vec![(Symbol::from("opts"), kwargs)], Ty::Nil);
+    // Broadcasts.* takes a kwargs bag (`**opts`); see
+    // `model_to_library::broadcasts_class_info` for the rationale on
+    // marking the param `KeywordRest` so the body-typer's
+    // normalize_trailing_kwargs leaves the call's `kwargs: true` flag
+    // alone (preserves the bare named-args call shape across targets).
+    let opts_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let bc_sig = Ty::Fn {
+        params: vec![crate::ty::Param {
+            name: Symbol::from("opts"),
+            ty: opts_ty,
+            kind: crate::ty::ParamKind::KeywordRest,
+        }],
+        block: None,
+        ret: Box::new(Ty::Nil),
+        effects: crate::effect::EffectSet::pure(),
+    };
     for name in ["prepend", "replace", "remove", "append"] {
         bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
     }

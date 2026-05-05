@@ -115,7 +115,7 @@ fn article_renders_validate_with_positional_helpers() {
         "{src}",
     );
     assert!(
-        src.contains("validates_length_of(:body, @body, minimum: 10)"),
+        src.contains("validates_length_of(:body, @body, { minimum: 10 })"),
         "{src}",
     );
 }
@@ -125,7 +125,7 @@ fn article_renders_has_many_reader_and_dependent_destroy() {
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
     assert!(
-        src.contains("def comments") && src.contains("Comment.where(article_id: @id)"),
+        src.contains("def comments") && src.contains("Comment.where({ article_id: @id })"),
         "{src}",
     );
     assert!(
@@ -140,7 +140,7 @@ fn comment_renders_belongs_to_with_fk_guard() {
     let src = find(&files, "comment.rb");
     assert!(src.contains("class Comment < ApplicationRecord"), "{src}");
     assert!(src.contains("def article"), "{src}");
-    assert!(src.contains("Article.find_by(id: @article_id)"), "{src}");
+    assert!(src.contains("Article.find_by({ id: @article_id })"), "{src}");
 }
 
 #[test]

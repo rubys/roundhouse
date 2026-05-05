@@ -437,6 +437,20 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                 }
+                // Source-level kwargs (`f(a: 1, b: 2)`) parse as a
+                // trailing `KeywordHash` (`kwargs: true`). Ruby
+                // implicitly forwards them to either an `**opts`/named
+                // parameter OR an `opts = {}` positional Hash. Strict-
+                // typed targets need to commit. Resolve the method's
+                // declared signature: when the last param is positional
+                // (`Required`/`Optional`) with Hash type, flip the
+                // kwargs Hash to `kwargs: false` so emit renders as an
+                // explicit `{ ... }` literal at the positional slot.
+                // Methods whose last param is `Keyword`/`KeywordRest`
+                // keep `kwargs: true` so emit renders bare named args
+                // (Crystal NamedTuple-friendly, TS object-spread-
+                // friendly via the named-param shape).
+                self.normalize_trailing_kwargs(recv_ty.as_ref(), method, args);
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref())
             }
 
