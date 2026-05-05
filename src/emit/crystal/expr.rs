@@ -18,7 +18,23 @@ use crate::ident::Symbol;
 use super::shared::{escape_ident, indent_lines};
 
 pub fn emit_expr(e: &Expr) -> String {
-    emit_node(&e.node)
+    let raw = emit_node(&e.node);
+    // Crystal's strict-typing flow analysis flushes ivar narrowing on
+    // any intervening method call. Even after `@article = Article.find(...)`,
+    // the next `Comment.from_params(...)` resets `@article` to its
+    // declared `Article?` shape. The body-typer's Seq walk threads
+    // ivar bindings forward, so by the time we reach a downstream
+    // `@article` read, `e.ty` is the narrowed non-nilable type.
+    // Emit `@article.not_nil!` at those reads to bridge the gap —
+    // safe (the typer's narrowing is sound) and idiomatic Crystal.
+    // Only applied to Ivar reads typed as a concrete `Ty::Class` —
+    // primitive ivars (counters, flags) and unions stay unwrapped.
+    if let ExprNode::Ivar { .. } = &*e.node {
+        if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Class { .. })) {
+            return format!("{raw}.not_nil!");
+        }
+    }
+    raw
 }
 
 /// Public entry point used by `runtime_loader::crystal_units` for
@@ -418,11 +434,44 @@ pub(super) fn emit_send_base(
     if recv.is_none() && method.as_str() == "raise" && args_s.len() == 2 {
         return format!("raise {}.new({})", args_s[0], args_s[1]);
     }
+    // Ruby `Time` stdlib → Crystal `Time` stdlib bridges.
+    //
+    // - `Time.now.utc` (Ruby: current time, then convert to UTC) →
+    //   `Time.utc` (Crystal: class method returning current UTC time).
+    //   Detected as the outer `.utc` Send whose receiver is `Time.now`.
+    // - `<expr>.iso8601` (Ruby: ISO-8601 string) → `<expr>.to_rfc3339`
+    //   (Crystal's spelling of the same format).
+    // Both come from `runtime/ruby/active_record/base.rb`'s
+    // `fill_timestamps` chain `Time.now.utc.iso8601`. Spinel/Ruby pass
+    // through; only Crystal needs the rewrite since its stdlib uses
+    // different method names.
+    if method.as_str() == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Send { recv: Some(inner), method: inner_m, args: inner_args, .. } = &*r.node {
+                if inner_m.as_str() == "now" && inner_args.is_empty() {
+                    if let ExprNode::Const { path } = &*inner.node {
+                        if path.last().map(|s| s.as_str()) == Some("Time") {
+                            return "Time.utc".to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if method.as_str() == "iso8601" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("{}.to_rfc3339", emit_expr(r));
+        }
+    }
     let m = match method.as_str() {
         "length" => "size",
-        // Crystal: starts_with? / ends_with? (note plural).
+        // Crystal: starts_with? / ends_with? / includes? (note plural).
+        // `include?` is method-only — the bare `include` Ruby keyword
+        // for module mixin lowers to `LibraryClass::includes`, not
+        // a Send, so it's never seen here.
         "start_with?" => "starts_with?",
         "end_with?" => "ends_with?",
+        "include?" => "includes?",
         other => other,
     };
     // Ruby's `String#to_sym` dynamically creates Symbols; Crystal

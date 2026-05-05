@@ -146,7 +146,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     // Models → src/models/<stem>.cr (one per LibraryClass, including
-    // synthesized siblings like `<Model>Row`).
+    // synthesized siblings like `<Model>Row`). Mirrors the TS pipeline:
+    // a preliminary view lowering seeds the model registry's
+    // `Views::*` entries; the model lowerer returns a registry the
+    // controller/view lowerers extend so cross-class dispatch
+    // (`Article.find(...)`, `Views::Articles.index(...)`) types
+    // through.
     let params_specs_full =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
@@ -155,10 +160,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             .map(|(r, s)| (r.clone(), s.fields.clone()))
             .collect();
 
-    let model_lcs = crate::lower::lower_models_to_library_classes_with_params(
+    let preliminary_views: Vec<crate::dialect::LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .collect();
+    let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
+
+    let route_helper_funcs_for_extras = crate::lower::lower_routes_to_library_functions(app);
+    let route_helper_extras = crate::lower::extras_from_funcs(&route_helper_funcs_for_extras);
+
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,
-        Vec::new(),
+        view_extras,
         &params_specs,
     );
 
@@ -226,10 +241,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
+    // Re-lower views with the model registry so view bodies dispatch
+    // models correctly (`@article.title` etc.). Used both to emit the
+    // view classes (below) AND to feed the controller lowerer's
+    // class registry.
+    let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.clone().into_iter().collect();
+    view_lower_extras.extend(route_helper_extras.clone());
+    let view_lcs =
+        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras);
+
     // Controllers → src/controllers/<stem>.cr; synthesized
     // `<Resource>Params` siblings route to src/models/.
+    let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
+    controller_extras.extend(route_helper_extras);
     let controller_lcs =
-        crate::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new());
+        crate::lower::lower_controllers_to_library_classes(&app.controllers, controller_extras);
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())
@@ -255,11 +284,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     // Views → src/views/<dir>/<base>.cr (one per template; partials
-    // keep their leading underscore).
-    for v in &app.views {
-        let lc = crate::lower::lower_view_to_library_class(v, app);
+    // keep their leading underscore). `view_lcs` was lowered above
+    // with the model registry so each view body's model dispatches
+    // type. Pair them with the corresponding `View` so we get the
+    // right output path.
+    for (v, lc) in app.views.iter().zip(view_lcs.iter()) {
         let out_path = view_output_path(v.name.as_str());
-        files.push(library::emit_library_class_decl(&lc, app, out_path));
+        files.push(library::emit_library_class_decl(lc, app, out_path));
     }
 
     // RouteHelpers → src/route_helpers.cr.

@@ -29,6 +29,7 @@ pub mod controller_to_library;
 pub mod controller_walk;
 pub mod fixture_to_library;
 pub mod importmap_to_library;
+pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
@@ -56,6 +57,7 @@ pub use model_to_library::{
 };
 pub use fixture_to_library::{lower_fixtures_to_library_classes, rewrite_fixture_calls};
 pub use importmap_to_library::lower_importmap_to_library_functions;
+pub use library_extras::{extras_from_funcs, extras_from_lcs};
 pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
 };
