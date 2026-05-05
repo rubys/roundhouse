@@ -69,7 +69,8 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog runtime/ruby runti
 	# runtime/spinel/ — spinel-target primitive runtime (DB adapters,
 	# CGI I/O, broadcasts log).
 	# Selective: runtime/ruby/test/ is roundhouse-side test fixturing.
-	cp -r runtime/ruby/active_record runtime/ruby/action_view \
+	cp -r runtime/ruby/active_record runtime/ruby/active_support \
+	      runtime/ruby/action_view \
 	      runtime/ruby/action_controller runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
