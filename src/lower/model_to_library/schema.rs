@@ -628,21 +628,37 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
     let name = Symbol::from("name");
     let value = Symbol::from("value");
 
+    // Each branch assigns the untyped `value` param to a typed @ivar.
+    // Wrap the RHS in a Cast IR node carrying the column's declared
+    // type so strict-typed targets (Crystal `.as(T)`, future Rust
+    // `try_into`) bridge the dispatch. Ruby/Spinel emit unwraps Cast
+    // as the inner value (no cast operator); TS no-ops or emits
+    // `(value as T)` depending on width.
     let arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()
-        .map(|c| crate::expr::Arm {
-            pattern: crate::expr::Pattern::Lit {
-                value: Literal::Sym { value: c.name.clone() },
-            },
-            guard: None,
-            body: Expr::new(
+        .map(|c| {
+            let col_ty = ty_of_column(&c.col_type);
+            let casted_value = Expr::new(
                 Span::synthetic(),
-                ExprNode::Assign {
-                    target: LValue::Ivar { name: c.name.clone() },
+                ExprNode::Cast {
                     value: var_ref(value.clone()),
+                    target_ty: col_ty,
                 },
-            ),
+            );
+            crate::expr::Arm {
+                pattern: crate::expr::Pattern::Lit {
+                    value: Literal::Sym { value: c.name.clone() },
+                },
+                guard: None,
+                body: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: c.name.clone() },
+                        value: casted_value,
+                    },
+                ),
+            }
         })
         .collect();
 
