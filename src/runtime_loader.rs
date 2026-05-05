@@ -25,11 +25,45 @@
 //! and preludes.
 
 use crate::dialect::{LibraryClass, MethodDef};
-use crate::emit::typescript::{emit_expr_for_runtime, emit_library_class, emit_module};
+use crate::expr::Expr;
 use crate::runtime_src::{
     parse_library_with_rbs, parse_methods_with_rbs, parse_module_constant_exprs,
 };
 use std::path::PathBuf;
+
+/// Per-target emission hooks. Each target plugs in its own
+/// `Module`-mode + `Library`-mode + per-expression renderer plus its
+/// import syntax. The `transpile_entry` driver and the `RuntimeEntry`
+/// table shape are shared.
+///
+/// `format_import` formats one `(name_clause, source_module)` pair as
+/// the target's import line — `import { X } from "Y";\n` for TS,
+/// `require "Y"\n` for Crystal, etc.
+pub struct TargetEmit {
+    pub emit_module: fn(&[MethodDef]) -> Result<String, String>,
+    pub emit_library_class: fn(&LibraryClass) -> Result<String, String>,
+    pub emit_expr_for_runtime: fn(&Expr) -> String,
+    pub format_import: fn(name: &str, source: &str) -> String,
+    /// Format a top-level constant declaration. TS: `const NAME = VALUE;`.
+    /// Crystal: `NAME = VALUE` (no `const` keyword, no terminator).
+    pub format_constant: fn(name: &str, value_expr: &str) -> String,
+}
+
+const TS_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::typescript::emit_module,
+    emit_library_class: crate::emit::typescript::emit_library_class,
+    emit_expr_for_runtime: crate::emit::typescript::emit_expr_for_runtime,
+    format_import: ts_format_import,
+    format_constant: ts_format_constant,
+};
+
+fn ts_format_import(name: &str, source: &str) -> String {
+    format!("import {{ {name} }} from \"{source}\";\n")
+}
+
+fn ts_format_constant(name: &str, value: &str) -> String {
+    format!("const {name} = {value};")
+}
 
 /// Strategy: each entry picks one of two pipelines.
 ///
@@ -232,20 +266,28 @@ where
 {
     let mut out = Vec::with_capacity(TYPESCRIPT_RUNTIME.len());
     for entry in TYPESCRIPT_RUNTIME {
-        let unit = transpile_entry(entry, &mut transform)?;
+        let unit = transpile_entry(entry, &TS_TARGET, "//", &mut transform)?;
         out.push(unit);
     }
     Ok(out)
 }
 
-fn transpile_entry<F>(entry: &RuntimeEntry, transform: &mut F) -> Result<RuntimeUnit, String>
+/// `comment_prefix` selects the target's line-comment marker (TS:
+/// `//`, Crystal: `#`). The header lines are prefixed with this so
+/// the generated file's first lines are valid in the target language.
+fn transpile_entry<F>(
+    entry: &RuntimeEntry,
+    target: &TargetEmit,
+    comment_prefix: &str,
+    transform: &mut F,
+) -> Result<RuntimeUnit, String>
 where
     F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
 {
     let (emitted, classes, functions) = match entry.mode {
         Mode::Module => {
             let methods = parse_methods_with_rbs(entry.rb_src, entry.rbs_src)?;
-            let body = emit_module(&methods)?;
+            let body = (target.emit_module)(&methods)?;
             (body, Vec::new(), methods)
         }
         Mode::Library => {
@@ -261,14 +303,19 @@ where
             // so methods that reference them resolve. Same source
             // walked by `parse_module_constants` for typing — these
             // two views need to stay in sync.
+            //
+            // Constant declaration syntax is target-specific (TS:
+            // `const NAME = ...;`, Crystal: `NAME = ...`). Targets
+            // that don't have a syntax for top-level constants in
+            // their library file would need a different approach;
+            // both currently-supported targets accept the form.
             let constants = parse_module_constant_exprs(entry.rb_src)
                 .unwrap_or_default();
             let mut body = String::new();
             for (name, value) in &constants {
                 body.push_str(&format!(
-                    "const {} = {};\n",
-                    name.as_str(),
-                    emit_expr_for_runtime(value),
+                    "{}\n",
+                    (target.format_constant)(name.as_str(), &(target.emit_expr_for_runtime)(value)),
                 ));
             }
             if !constants.is_empty() {
@@ -278,7 +325,7 @@ where
                 if i > 0 {
                     body.push('\n');
                 }
-                body.push_str(&emit_library_class(c)?);
+                body.push_str(&(target.emit_library_class)(c)?);
             }
             (body, classes, Vec::new())
         }
@@ -286,16 +333,17 @@ where
 
     let mut import_block = String::new();
     for (name, source) in entry.imports {
-        import_block.push_str(&format!("import {{ {name} }} from \"{source}\";\n"));
+        import_block.push_str(&(target.format_import)(name, source));
     }
     if !import_block.is_empty() {
         import_block.push('\n');
     }
 
     let header = format!(
-        "// Generated from {} at app emit time.\n\
-         // Do not edit by hand — edit the source `.rb` and re-run emit.\n\n",
+        "{cp} Generated from {} at app emit time.\n\
+         {cp} Do not edit by hand — edit the source `.rb` and re-run emit.\n\n",
         entry.rb_path,
+        cp = comment_prefix,
     );
 
     let content = format!("{header}{import_block}{}{}", entry.prelude, emitted);
