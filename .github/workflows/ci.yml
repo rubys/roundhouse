@@ -292,37 +292,29 @@ jobs:
       - name: scripts/compare crystal
         run: scripts/compare crystal
 
-  # compare-typescript: TS server boots and serves pages, but the
-  # rendered <head> diverges from Rails (extra `<meta>` and `<link>`
-  # tags Rails injects via asset pipeline / CSRF / importmap that the
-  # TS emitter doesn't yet replicate). 0/5 paths match as of
-  # 2026-05-04. Re-enable once the head divergence is closed —
-  # toolchain-typescript above is the working node:test gate in the
-  # meantime.
-  #
-  # compare-typescript:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - uses: ruby/setup-ruby@v1
-  #       with:
-  #         ruby-version: '3.4'
-  #         bundler-cache: true
-  #         working-directory: ./fixtures/real-blog
-  #     - name: Install Node
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - name: scripts/compare typescript
-  #       run: scripts/compare typescript
+  compare-typescript:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: scripts/compare typescript
+        run: scripts/compare typescript
 
   compare-go:
     needs: generate-fixture
@@ -454,7 +446,7 @@ jobs:
       - toolchain-spinel
       - compare-rust
       - compare-crystal
-      # compare-typescript: disabled during TS rewrite
+      - compare-typescript
       - compare-go
       - compare-elixir
       - compare-python

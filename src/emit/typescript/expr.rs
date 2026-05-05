@@ -814,13 +814,21 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            // TS ternary `cond ? a : b`. `emit_expr` is always called in
-            // an expression position; controller/view emitters have
-            // their own statement-form If handlers.
+            // TS ternary `cond ? a : b`, always parenthesized. JS's
+            // `?:` has lower precedence than `||`/`&&`/comparisons, so
+            // an unparenthesized ternary inside e.g. `x || (a ? b : c)`
+            // miscompiles — the outer `||` binds first and the ternary
+            // ends up testing `x || a` instead of `a`. Ruby's `||`
+            // binds tighter than `?:` too, but Ruby callers express
+            // the intended grouping with explicit parens; the emit
+            // here can't see those parens, so wrap unconditionally.
+            // `emit_expr` is always called in an expression position;
+            // controller/view emitters have their own statement-form
+            // If handlers.
             let cond_s = emit_expr(cond);
             let then_s = emit_expr(then_branch);
             let else_s = emit_expr(else_branch);
-            format!("{cond_s} ? {then_s} : {else_s}")
+            format!("({cond_s} ? {then_s} : {else_s})")
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;

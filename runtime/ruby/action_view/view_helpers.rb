@@ -187,16 +187,22 @@ module ViewHelpers
     # The importmap-script's JSON is pretty-printed with 2-space indent
     # to match Rails' `:pretty` JSON output. Both sides are semantically
     # identical; the text comparison checks character-for-character.
+    # Build the JSON via string concatenation (rather than `%(...)` with
+    # `\n` escapes + `#{var}` interpolation): the TS transpiler renders
+    # the latter as a template literal that bakes the Ruby source-line
+    # indent into the output, breaking byte-for-byte parity with Rails'
+    # pretty-printed importmap. Concat-form transpiles to a flat string
+    # with `\n` escapes and matches Rails exactly.
     if pins.nil? || pins.empty?
-      json = %({\n  "imports": {\n    "@hotwired/turbo": "/assets/turbo.min.js"\n  }\n})
+      json = "{\n  \"imports\": {\n    \"@hotwired/turbo\": \"/assets/turbo.min.js\"\n  }\n}"
       return %(<script type="importmap" data-turbo-track="reload">) + json + %(</script>) +
         "\n" +
         %(<link rel="modulepreload" href="/assets/turbo.min.js">) +
         "\n" +
         %(<script type="module">import "@hotwired/turbo"</script>)
     end
-    import_lines = pins.map { |p| %(    "#{p[:name]}": "#{p[:path]}") }.join(",\n")
-    json = %({\n  "imports": {\n#{import_lines}\n  }\n})
+    import_lines = pins.map { |p| "    \"#{p[:name]}\": \"#{p[:path]}\"" }.join(",\n")
+    json = "{\n  \"imports\": {\n" + import_lines + "\n  }\n}"
     parts = []
     parts << %(<script type="importmap" data-turbo-track="reload">) + json + %(</script>)
     pins.each do |p|

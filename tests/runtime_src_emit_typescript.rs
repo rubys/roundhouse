@@ -21,10 +21,13 @@ end
 ";
 
 // Matches runtime/typescript/view_helpers.ts:383-385 (the function
-// body) plus the wrapping `export function` signature line.
+// body) plus the wrapping `export function` signature line. Ternary
+// is parenthesized — see the comment in `emit_expr`'s `If` arm:
+// JS's `?:` binds looser than `||`/`&&`/comparisons, so wrapping
+// unconditionally preserves Ruby's expression-level grouping.
 const EXPECTED_TS: &str = "\
 export function pluralize(count: number, word: string): string {
-  return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+  return (count === 1 ? `1 ${word}` : `${count} ${word}s`);
 }
 ";
 

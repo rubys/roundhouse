@@ -453,6 +453,21 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
     if has_routes {
         s.push_str("import { Routes } from \"./app/routes.js\";\n");
     }
+    // The application layout transpiles to a `(body) => string` function
+    // exported as `application` from `app/views/layouts/application.ts`.
+    // Wiring it into `startServer({ layout })` makes the dispatcher wrap
+    // each response in the real Rails-shaped <head>/<body> instead of
+    // server.ts's fallback shell.
+    let has_layout = app
+        .views
+        .iter()
+        .any(|v| v.name.as_str() == "layouts/application");
+    if has_layout {
+        s.push_str(
+            "import { application as renderLayoutsApplication } \
+             from \"./app/views/layouts/application.js\";\n",
+        );
+    }
     for c in &app.controllers {
         let stem = crate::naming::snake_case(c.name.0.as_str());
         let class_name = c.name.0.as_str();
@@ -469,6 +484,9 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
     }
     if has_seeds {
         s.push_str("  seeds: () => Seeds.run(),\n");
+    }
+    if has_layout {
+        s.push_str("  layout: renderLayoutsApplication,\n");
     }
     if has_routes {
         s.push_str("  routes: Routes.table(),\n");
