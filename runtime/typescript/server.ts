@@ -141,7 +141,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   // Merge: path params + query string + form/json body.
-  const merged: Record<string, any> = { ...match.path_params };
+  // path_params is an HWIA — spread its underlying String-keyed hash
+  // via `.to_h()` so keys merge as plain entries (`{...hwia}` would
+  // spread the wrapper's own `data` field, not the hash contents).
+  const merged: Record<string, any> = { ...match.path_params.to_h() };
   for (const [k, v] of url.searchParams) merged[k] = v;
   Object.assign(merged, params);
 
