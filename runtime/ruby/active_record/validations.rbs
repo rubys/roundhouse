@@ -11,21 +11,17 @@ module ActiveRecord
     # `value` is `untyped` because columns hold any type (String,
     # Integer, Float, Array, …); the body narrows via `is_a?(String)`
     # / `is_a?(Array)` etc., which the analyzer's narrowing.rs picks up.
+    # Each `validates_*_of` takes attr_name + value positionally and an
+    # optional opts Hash. Positional opts (rather than kwargs) keeps the
+    # call shape uniform across every transpile target — TS/Crystal
+    # consume the opts as a record/Hash anyway, and CRuby's kwargs vs.
+    # Hash distinction is the only one strict enough to ArgumentError.
     def validates_presence_of: (Symbol attr_name, untyped value) -> void
     def validates_absence_of: (Symbol attr_name, untyped value) -> void
-    def validates_length_of: (Symbol attr_name, untyped value, ?minimum: Integer?, ?maximum: Integer?, ?is: Integer?) -> void
-    def validates_numericality_of: (Symbol attr_name, untyped value, ?greater_than: Numeric?, ?less_than: Numeric?, ?only_integer: bool) -> void
-
-    # `within` is the inclusion list. Real callers pass `Array[String]`
-    # / `Array[Symbol]` / `Range[Integer]`; spinel-blog only exercises
-    # `Array[String]` per the fixture, so narrow to that. Widen if a
-    # future fixture forces it.
-    def validates_inclusion_of: (Symbol attr_name, untyped value, within: Array[String]) -> void
-
-    # `with` is the format pattern — Regexp at the Ruby level. The body
-    # uses `with.match?` which body-typer resolves via the
-    # universal_method table.
-    def validates_format_of: (Symbol attr_name, untyped value, with: Regexp) -> void
+    def validates_length_of: (Symbol attr_name, untyped value, ?Hash[Symbol, untyped] opts) -> void
+    def validates_numericality_of: (Symbol attr_name, untyped value, ?Hash[Symbol, untyped] opts) -> void
+    def validates_inclusion_of: (Symbol attr_name, untyped value, ?Hash[Symbol, untyped] opts) -> void
+    def validates_format_of: (Symbol attr_name, untyped value, ?Hash[Symbol, untyped] opts) -> void
 
     # `belongs_to` presence (Rails 5+ default). `fk_value` is the
     # foreign-key ivar (Integer); `target_class` is the model the FK

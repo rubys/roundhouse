@@ -39,8 +39,11 @@ module ActiveRecord
       errors << "#{attr_name} must be blank" if present
     end
 
-    def validates_length_of(attr_name, value, minimum: nil, maximum: nil, is: nil)
+    def validates_length_of(attr_name, value, opts = {})
       return if value.nil?
+      minimum = opts[:minimum]
+      maximum = opts[:maximum]
+      is = opts[:is]
       # Single-predicate per branch so the analyzer's narrowing
       # extract (which recognizes one is_a? per branch, not BoolOp
       # chains) types each then-arm cleanly: value: Str → Int,
@@ -63,21 +66,26 @@ module ActiveRecord
       errors << "#{attr_name} is the wrong length (should be #{is})" if !is.nil? && len != is
     end
 
-    def validates_numericality_of(attr_name, value, greater_than: nil, less_than: nil, only_integer: false)
+    def validates_numericality_of(attr_name, value, opts = {})
       if value.nil? || !value.is_a?(Numeric)
         errors << "#{attr_name} is not a number"
         return
       end
+      greater_than = opts[:greater_than]
+      less_than    = opts[:less_than]
+      only_integer = opts[:only_integer]
       errors << "#{attr_name} must be greater than #{greater_than}" if !greater_than.nil? && value <= greater_than
       errors << "#{attr_name} must be less than #{less_than}" if !less_than.nil? && value >= less_than
       errors << "#{attr_name} must be an integer" if only_integer && !value.is_a?(Integer)
     end
 
-    def validates_inclusion_of(attr_name, value, within:)
+    def validates_inclusion_of(attr_name, value, opts = {})
+      within = opts[:within]
       errors << "#{attr_name} is not included in the list" unless within.include?(value)
     end
 
-    def validates_format_of(attr_name, value, with:)
+    def validates_format_of(attr_name, value, opts = {})
+      with = opts[:with]
       ok = value.is_a?(String) && with.match?(value)
       errors << "#{attr_name} is invalid" unless ok
     end
