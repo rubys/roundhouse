@@ -1,5 +1,6 @@
 require_relative "../test_helper"
 require "models/article"
+require "models/article_params"
 require "models/comment"
 require "broadcasts"
 
@@ -25,7 +26,15 @@ class ArticleBroadcastsTest < Minitest::Test
     article = Article.new(title: "Initial", body: "Some body content here.")
     article.save
     Broadcasts.reset_log!
-    article.update(title: "Renamed")
+    # `Article#update` is the strong-params-typed variant: takes an
+    # `ArticleParams`, not a Hash. Construct one explicitly here so the
+    # update-broadcast assertion exercises the same path the controller
+    # uses (`@article.update(article_params)`). Rails-idiom Hash kwargs
+    # would route to `synth_update`'s Hash-shape variant, which the
+    # typed lowering doesn't emit when strong params are present.
+    p = ArticleParams.new
+    p.title = "Renamed"
+    article.update(p)
     entries = Broadcasts.log.select { |e| e[:stream] == "articles" }
     assert_equal 1, entries.length
     assert_equal :replace, entries.first[:action]

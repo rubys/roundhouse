@@ -86,7 +86,12 @@ class ViewsArticlesTest < Minitest::Test
   end
 
   def test_index_displays_notice_when_provided
-    html = Views::Articles.index([@article], notice: "Article saved")
+    # The lowered view uses positional `notice = nil` (Param dialect
+    # doesn't carry keyword variants today; see
+    # `project_lowered_ir_gaps_for_runnability`). Rails-idiom
+    # `notice: "x"` would land as a Hash bound to the `notice` slot,
+    # escaping to `{notice: "x"}` in the rendered HTML.
+    html = Views::Articles.index([@article], "Article saved")
     assert_includes html, %(id="notice")
     assert_includes html, ">Article saved</p>"
   end
@@ -128,9 +133,12 @@ class ViewsArticlesTest < Minitest::Test
   end
 
   def test_show_subscribes_to_comments_stream
-    html = Views::Articles.show(@article)
-    # base64(JSON("article_<id>_comments")); only id=1 is in test fixtures.
-    assert_equal 1, @article.id
+    # Use the fixture article (id=1) so the asserted base64 stream-name
+    # is stable. Setup's `@article` saves on top of the loaded fixtures
+    # and ends up at id=3, which would shift the encoded stream-name.
+    fixture_article = ArticlesFixtures.one
+    html = Views::Articles.show(fixture_article)
+    # base64(JSON("article_1_comments")) → ImFydGljbGVfMV9jb21tZW50cyI=
     assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--unsigned")
   end
 

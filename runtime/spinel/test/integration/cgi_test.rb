@@ -193,10 +193,14 @@ class CgiIntegrationTest < Minitest::Test
     article = Article.new(title: "Host", body: "Body long enough to satisfy validations.")
     article.save
     body = "comment%5Bcommenter%5D=Alice&comment%5Bbody%5D=Nice+post"
+    # Assert that the new comment lives under the new article rather
+    # than `Comment.count == 1` — fixtures preload 2 comments under the
+    # other articles, so the global count is 3 after this POST.
+    before = Comment.where(article_id: article.id).length
     res = cgi(method: "POST", path: "/articles/#{article.id}/comments", body: body)
     assert_equal 302, res.status
     assert_equal "/articles/#{article.id}", res.location
-    assert_equal 1, Comment.count
+    assert_equal before + 1, Comment.where(article_id: article.id).length
   end
 
   # ── flash via cookies ────────────────────────────────────────────

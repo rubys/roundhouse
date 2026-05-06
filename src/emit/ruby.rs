@@ -422,13 +422,30 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 out_path,
                 &fixture_siblings,
             );
-            // Test files need the bootstrap (minitest/autorun + LOAD_PATH
-            // + SqliteAdapter setup) before any model require resolves;
+            // Test files need the bootstrap (minitest/autorun + runtime
+            // requires + adapter setup) before any model require resolves;
             // prepend the require before the body-derived require headers.
-            emitted.content = format!(
-                "require_relative \"../test_helper\"\n{}",
-                emitted.content,
-            );
+            //
+            // Also prepend explicit `require_relative` for every fixture
+            // file. Test_helper's `FixtureLoader.load_all!` walks
+            // `Object.constants` for `*Fixtures` modules; under spinel
+            // AOT (no dynamic `Dir[…]` + `require`), each fixture must be
+            // statically required from somewhere in the require chain
+            // that spinel follows from the test file root. Injecting at
+            // every test file guarantees coverage regardless of which
+            // fixtures the body itself names.
+            let mut preamble = String::from("require_relative \"../test_helper\"\n");
+            for (_, anchor) in &fixture_siblings {
+                // Test files live at `test/{models,controllers}/…`,
+                // fixture anchors at `test/fixtures/<stem>`, so the
+                // relative path from a test file's dir is always
+                // `../fixtures/<stem>`.
+                let stem = anchor
+                    .strip_prefix("test/fixtures/")
+                    .unwrap_or(anchor.as_str());
+                writeln!(preamble, "require_relative \"../fixtures/{stem}\"").unwrap();
+            }
+            emitted.content = format!("{preamble}{}", emitted.content);
             files.push(emitted);
         }
     }

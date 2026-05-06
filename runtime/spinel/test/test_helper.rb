@@ -1,24 +1,17 @@
 require "minitest/autorun"
 
-# ROOT is the project root. Two callers, two locations:
-# 1. Overlay flow: this file is copied verbatim to <out>/test/test_helper.rb
-#    (by `make spinel-transpile` or `tests/spinel_toolchain.rs`) — `__dir__`
-#    is `<out>/test/`, so `..` gives `<out>/`. Correct.
-# 2. Standalone flow: this file is loaded via the bridge at
-#    fixtures/spinel-blog/test/test_helper.rb, whose `__dir__` is the
-#    fixture's `test/`. The bridge sets ROOT before require_relative; this
-#    guard preserves the bridge's value instead of recomputing from the
-#    canonical's `__dir__` (which would point at `runtime/spinel/`).
-ROOT = File.expand_path("..", __dir__) unless defined?(ROOT)
-$LOAD_PATH.unshift(File.join(ROOT, "runtime"))
-$LOAD_PATH.unshift(File.join(ROOT, "app"))
-$LOAD_PATH.unshift(File.join(ROOT, "config"))
-
-require "in_memory_adapter"
-require "active_record"
-require "schema"
-require "action_dispatch"
-require "action_controller"
+# Copied verbatim to <out>/test/test_helper.rb (by `make spinel-transpile`
+# or `tests/spinel_toolchain.rs`). `__dir__` is `<out>/test/`, so the
+# `require_relative` paths walk up one level to reach `runtime/`, `config/`,
+# and `test/fixtures/`. `require_relative` (not bare `require` + LOAD_PATH)
+# is mandatory because spinel's AOT model only follows static
+# `require_relative` chains — bare `require` with `$LOAD_PATH` lookup is a
+# CRuby-only mechanism that the AOT compiler cannot resolve.
+require_relative "../runtime/in_memory_adapter"
+require_relative "../runtime/active_record"
+require_relative "../config/schema"
+require_relative "../runtime/action_dispatch"
+require_relative "../runtime/action_controller"
 
 # One-time global setup: configure the pure-Ruby in-memory adapter
 # (Hash-of-Hashes; no FFI, no sqlite3 gem), load the schema, and wire
@@ -52,13 +45,18 @@ end
 # available regardless of which test file required which subset.
 # Mirrors Rails's "all fixtures load on each test" convention — a test
 # that destroys an article expects its associated comments to exist
-# even when its `require_relative` block names only `articles`. The
-# glob is intentionally cheap (a handful of files) and silent when the
-# directory doesn't exist (e.g. for the standalone spinel-blog suite,
-# which has no `test/fixtures/*.rb`).
-fixtures_dir = File.join(ROOT, "test", "fixtures")
-if File.directory?(fixtures_dir)
-  Dir[File.join(fixtures_dir, "*.rb")].sort.each { |f| require f }
+# even when its `require_relative` block names only `articles`.
+#
+# Under spinel AOT, dynamic `Dir[…]` + `require` is unavailable; emit
+# instead injects explicit `require_relative` lines for each fixture
+# into every test file's preamble (see `src/emit/ruby.rs`). This block
+# is a CRuby-side fallback that's idempotent when the explicit emit
+# paths already loaded the fixtures.
+if defined?(File) && File.respond_to?(:directory?)
+  fixtures_dir = File.expand_path("fixtures", __dir__)
+  if File.directory?(fixtures_dir)
+    Dir[File.join(fixtures_dir, "*.rb")].sort.each { |f| require f }
+  end
 end
 
 # Walks `Object.constants` for `*Fixtures` modules and dispatches their
@@ -201,7 +199,7 @@ module RequestDispatch
   end
 
   def dispatch_request(method, path, params)
-    require "routes"
+    require_relative "../config/routes"
     ViewHelpers.reset_slots!
     matched = Router.match(method, path, Routes.table)
     raise "No route matches #{method} #{path}" if matched.nil?
