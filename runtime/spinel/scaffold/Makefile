@@ -81,6 +81,53 @@ test:
 lint:
 	bundle exec rake lint
 
+# ── Spinel-compiled tests ────────────────────────────────────────
+#
+# Each test compiles to its own binary; running each in turn is the
+# test suite. The 4 model + controller tests are the same suites
+# `tests/spinel_toolchain.rs` runs under CRuby — same source, swapped
+# runner. Test files are emitted by `emit_spinel`; the binary list
+# is hard-coded here to match.
+#
+# `make spinel-test` builds + runs all four. A failure aborts on the
+# first non-zero exit (per `||` short-circuit) so the offending test
+# is surfaced without scrolling through the rest.
+#
+# Per-test rule pattern: `<dir>/<stem>` depends on `<dir>/<stem>.rb`
+# and produces a binary at `$(BUILD)/<dir>/<stem>`. Two-step (compile
+# then run) so a build-only check (`make spinel-test-build`) can
+# succeed independently of execution.
+
+SPINEL_TESTS := \
+	test/models/article_test \
+	test/models/comment_test \
+	test/controllers/articles_controller_test \
+	test/controllers/comments_controller_test
+
+SPINEL_TEST_BINS := $(addprefix $(BUILD)/,$(SPINEL_TESTS))
+SPINEL_TEST_RBS  := $(addsuffix .rb,$(SPINEL_TESTS))
+
+$(BUILD)/test/%: test/%.rb $(RUBY_SRC)
+	@mkdir -p $(dir $@)
+	$(SPINEL) $< -o $@
+
+.PHONY: spinel-test spinel-test-build cruby-test
+spinel-test-build: $(SPINEL_TEST_BINS)
+
+spinel-test: $(SPINEL_TEST_BINS)
+	@for t in $(SPINEL_TEST_BINS); do \
+	  echo "==> $$t"; ./$$t || exit 1; \
+	done
+
+# Same 4 tests, CRuby runner. Symmetric pair to `spinel-test` —
+# same source files, different runtime. Useful as a baseline gate
+# before flipping to spinel-compiled binaries: a regression in the
+# emitted Ruby surfaces here first.
+cruby-test:
+	@for t in $(SPINEL_TEST_RBS); do \
+	  echo "==> $$t"; bundle exec ruby $$t || exit 1; \
+	done
+
 # ── Dev workflow ─────────────────────────────────────────────────
 
 # Runs the dev server — pure-Ruby HTTP+WebSocket front end that
