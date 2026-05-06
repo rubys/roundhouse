@@ -438,28 +438,22 @@ jobs:
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
-  # static HTML/CSS/JS from site/. Gated on every toolchain and
-  # compare job so a broken target never publishes a misleading
-  # manifest.
+  # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at
+  # rubys.github.io/roundhouse/browse/<target>.tgz are matz's primary
+  # extraction surface for spinel-side bug repros — they need to
+  # publish *current emit* even when per-target toolchain/compare jobs
+  # fail (broken emit is exactly what's interesting to investigate).
+  #
+  # So build-site only gates on (a) the fixture being available, and
+  # (b) the lib's own non-ignored test suite (a sanity check that the
+  # build-site binary itself isn't catastrophically broken). It does
+  # not gate on toolchain-* or compare-* — a flaky elixir CI run or a
+  # known-broken target shouldn't stall the archive workflow.
   # -------------------------------------------------------------------
   build-site:
     needs:
+      - generate-fixture
       - unit
-      - toolchain-rust
-      # - toolchain-crystal  # disabled during Crystal rip-and-replace
-      - toolchain-typescript
-      - framework-tests-typescript
-      - toolchain-go
-      - toolchain-elixir
-      - toolchain-python
-      - toolchain-spinel
-      - compare-rust
-      # - compare-crystal  # disabled during Crystal rip-and-replace
-      - compare-typescript
-      - compare-go
-      - compare-elixir
-      - compare-python
-      - compare-spinel
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
