@@ -710,11 +710,20 @@ fn view_module_id(dir: &str) -> ClassId {
 /// resolve through primitive method tables (Array / String / Hash)
 /// that don't need a class registry.
 fn type_method_body(method: &mut MethodDef) {
-    let empty_classes: std::collections::HashMap<
+    // Seed the registry with framework stubs (ViewHelpers,
+    // RouteHelpers, FormBuilder, ...) so the body-typer's bare-Const
+    // expansion can resolve `ViewHelpers.dom_id(...)` to the full
+    // path `ActionView::ViewHelpers.dom_id(...)`. The single-view
+    // lowerer is invoked from the Spinel/Ruby per-view emit path
+    // where no shared cross-class registry exists; without these
+    // stubs, the rewrite fails silently and Ruby gets bare refs
+    // that can't resolve under nested-module lexical scope.
+    let mut classes: std::collections::HashMap<
         crate::ident::ClassId,
         crate::analyze::ClassInfo,
     > = std::collections::HashMap::new();
-    let typer = crate::analyze::BodyTyper::new(&empty_classes);
+    insert_framework_stubs(&mut classes);
+    let typer = crate::analyze::BodyTyper::new(&classes);
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {

@@ -182,6 +182,12 @@ module ActionDispatch
 end
 
 module RequestDispatch
+  # Bring `ActionView::ViewHelpers` and `ActionDispatch::Router` into
+  # scope as bare `ViewHelpers` / `Router` for the request-dispatch
+  # body — matches Ruby's `include` idiom for nested-module access.
+  include ActionView
+  include ActionDispatch
+
   def get(path, params: {})
     dispatch_request("GET", path, params)
   end

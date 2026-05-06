@@ -4,6 +4,10 @@ require "models/comment"
 require "views"
 
 class ViewsArticlesTest < Minitest::Test
+  # Bring `ActionView::ViewHelpers` into scope as bare `ViewHelpers`
+  # — matches Ruby's `include` idiom for nested-module access.
+  include ActionView
+
   def setup
     SchemaSetup.reset!
     ViewHelpers.reset_slots!

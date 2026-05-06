@@ -1138,18 +1138,18 @@ fn lowered_index_view_rewrites_view_helpers() {
     let src = find(&files, "app/views/articles/index.rb");
     // `<%= turbo_stream_from "articles" %>` → ViewHelpers call.
     assert!(
-        src.contains("ViewHelpers.turbo_stream_from(\"articles\")"),
+        src.contains("ActionView::ViewHelpers.turbo_stream_from(\"articles\")"),
         "expected ViewHelpers.turbo_stream_from rewrite; got:\n{src}",
     );
     // `<% content_for :title, "Articles" %>` → ViewHelpers setter.
     assert!(
-        src.contains("ViewHelpers.content_for_set(:title, \"Articles\")"),
+        src.contains("ActionView::ViewHelpers.content_for_set(:title, \"Articles\")"),
         "expected ViewHelpers.content_for_set rewrite; got:\n{src}",
     );
     // `<%= link_to "New article", new_article_path, class: "..." %>`
     // → ViewHelpers.link_to with path-helper rewrite.
     assert!(
-        src.contains("ViewHelpers.link_to"),
+        src.contains("ActionView::ViewHelpers.link_to"),
         "expected ViewHelpers.link_to rewrite; got:\n{src}",
     );
     assert!(
@@ -1181,7 +1181,7 @@ fn lowered_index_view_auto_escapes_bare_interpolation() {
     // `<%= notice %>` is a bare interpolation (not a recognized
     // helper), so emission funnels through ViewHelpers.html_escape.
     assert!(
-        src.contains("ViewHelpers.html_escape(notice)"),
+        src.contains("ActionView::ViewHelpers.html_escape(notice)"),
         "expected html_escape on bare `notice` interpolation; got:\n{src}",
     );
 }
@@ -1236,13 +1236,13 @@ fn lowered_article_partial_renders_dom_id_with_and_without_prefix() {
     let src = find(&files, "app/views/articles/_article.rb");
     // `<%= dom_id(article) %>` → 1-arg form.
     assert!(
-        src.contains("ViewHelpers.dom_id(article)"),
+        src.contains("ActionView::ViewHelpers.dom_id(article)"),
         "expected 1-arg dom_id; got:\n{src}",
     );
     // `<%= dom_id(article, :comments_count) %>` → 2-arg form preserves
     // the symbol prefix.
     assert!(
-        src.contains("ViewHelpers.dom_id(article, :comments_count)"),
+        src.contains("ActionView::ViewHelpers.dom_id(article, :comments_count)"),
         "expected 2-arg dom_id with sym prefix; got:\n{src}",
     );
 }
@@ -1269,7 +1269,7 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
     // html_escape. link_to / button_to / dom_id stay raw because they
     // already return escape-correct output.
     assert!(
-        src.contains("ViewHelpers.html_escape(ViewHelpers.truncate(article.body, length: 100))"),
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.truncate(article.body, length: 100))"),
         "expected html_escape-wrapped truncate; got:\n{src}",
     );
 }
@@ -1282,18 +1282,18 @@ fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
     // bare local record. Lowering rewrites to `RouteHelpers
     // .article_path(article.id)`.
     assert!(
-        src.contains("ViewHelpers.link_to(article.title, RouteHelpers.article_path(article.id)"),
+        src.contains("ActionView::ViewHelpers.link_to(article.title, RouteHelpers.article_path(article.id)"),
         "expected link_to(text, RouteHelpers.article_path(article.id), …); got:\n{src}",
     );
     // `<%= link_to "Show", article, ... %>` — same pattern, literal text.
     assert!(
-        src.contains("ViewHelpers.link_to(\"Show\", RouteHelpers.article_path(article.id)"),
+        src.contains("ActionView::ViewHelpers.link_to(\"Show\", RouteHelpers.article_path(article.id)"),
         "expected `Show` link to article record; got:\n{src}",
     );
     // `<%= link_to "Edit", edit_article_path(article), ... %>` —
     // path-helper URL with bare-local arg → `article.id`.
     assert!(
-        src.contains("ViewHelpers.link_to(\"Edit\", RouteHelpers.edit_article_path(article.id)"),
+        src.contains("ActionView::ViewHelpers.link_to(\"Edit\", RouteHelpers.edit_article_path(article.id)"),
         "expected `Edit` link with edit_article_path(article.id); got:\n{src}",
     );
 }
@@ -1306,7 +1306,7 @@ fn lowered_article_partial_button_to_record_with_options() {
     // ButtonTo classifier produces a `RouteHelpers.article_path(.id)`
     // URL and threads the opts hash through unchanged.
     assert!(
-        src.contains("ViewHelpers.button_to(\"Destroy\", RouteHelpers.article_path(article.id)"),
+        src.contains("ActionView::ViewHelpers.button_to(\"Destroy\", RouteHelpers.article_path(article.id)"),
         "expected button_to with article_path; got:\n{src}",
     );
     assert!(
@@ -1339,7 +1339,7 @@ fn lowered_form_partial_form_with_capture_uses_inner_body_accumulator() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
     assert!(
-        src.contains("io << ViewHelpers.form_with(model: article"),
+        src.contains("io << ActionView::ViewHelpers.form_with(model: article"),
         "expected outer io append of form_with; got:\n{src}",
     );
     assert!(
@@ -1427,7 +1427,7 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
     // errors-each adapter rewrite (spinel-runtime errors are plain
     // Strings, no `full_message` method). Auto-escape still applies.
     assert!(
-        src.contains("body << ViewHelpers.html_escape(error)"),
+        src.contains("body << ActionView::ViewHelpers.html_escape(error)"),
         "expected html_escape on bare `error` (full_message stripped); got:\n{src}",
     );
     assert!(
@@ -1478,7 +1478,7 @@ fn lowered_comment_partial_nested_url_array_to_path_helper() {
     let src = find(&files, "app/views/comments/_comment.rb");
     assert!(
         src.contains(
-            "ViewHelpers.button_to(\"Delete\", RouteHelpers.article_comment_path(comment.article_id, comment.id)"
+            "ActionView::ViewHelpers.button_to(\"Delete\", RouteHelpers.article_comment_path(comment.article_id, comment.id)"
         ),
         "expected nested-array URL → article_comment_path with FK + id; got:\n{src}",
     );
@@ -1490,11 +1490,11 @@ fn lowered_comment_partial_auto_escape_on_attrs() {
     let src = find(&files, "app/views/comments/_comment.rb");
     // Bare-attr interpolations get html_escape on the way to io.
     assert!(
-        src.contains("ViewHelpers.html_escape(comment.commenter)"),
+        src.contains("ActionView::ViewHelpers.html_escape(comment.commenter)"),
         "expected html_escape(comment.commenter); got:\n{src}",
     );
     assert!(
-        src.contains("ViewHelpers.html_escape(comment.body)"),
+        src.contains("ActionView::ViewHelpers.html_escape(comment.body)"),
         "expected html_escape(comment.body); got:\n{src}",
     );
 }
@@ -1539,7 +1539,7 @@ fn lowered_show_view_turbo_stream_from_with_string_interp() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("ViewHelpers.turbo_stream_from(\"article_#{article.id}_comments\")"),
+        src.contains("ActionView::ViewHelpers.turbo_stream_from(\"article_#{article.id}_comments\")"),
         "expected turbo_stream_from with interpolated channel; got:\n{src}",
     );
 }
@@ -1556,7 +1556,7 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("ViewHelpers.form_with(model: Comment.new"),
+        src.contains("ActionView::ViewHelpers.form_with(model: Comment.new"),
         "expected form_with with nested-array model rewritten to child; got:\n{src}",
     );
     assert!(
@@ -1592,7 +1592,7 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
         "expected form.submit with positional label preserved; got:\n{src}",
     );
     assert!(
-        !src.contains("ViewHelpers.html_escape(form."),
+        !src.contains("ActionView::ViewHelpers.html_escape(form."),
         "FormBuilder calls should not be html_escape-wrapped; got:\n{src}",
     );
 }
@@ -1633,7 +1633,7 @@ fn lowered_layout_view_yield_slot_uses_get_slot() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << ViewHelpers.get_slot(:head)"),
+        src.contains("io << ActionView::ViewHelpers.get_slot(:head)"),
         "expected `ViewHelpers.get_slot(:head)` for yielded slot; got:\n{src}",
     );
 }
@@ -1644,15 +1644,15 @@ fn lowered_layout_view_head_helpers() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << ViewHelpers.csrf_meta_tags"),
+        src.contains("io << ActionView::ViewHelpers.csrf_meta_tags"),
         "expected csrf_meta_tags rewrite; got:\n{src}",
     );
     assert!(
-        src.contains("io << ViewHelpers.csp_meta_tag"),
+        src.contains("io << ActionView::ViewHelpers.csp_meta_tag"),
         "expected csp_meta_tag rewrite; got:\n{src}",
     );
     assert!(
-        src.contains("io << ViewHelpers.javascript_importmap_tags"),
+        src.contains("io << ActionView::ViewHelpers.javascript_importmap_tags"),
         "expected javascript_importmap_tags rewrite; got:\n{src}",
     );
 }
@@ -1668,11 +1668,11 @@ fn lowered_layout_view_stylesheet_link_tag_expands_app_sym() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("ViewHelpers.stylesheet_link_tag(\"application\""),
+        src.contains("ActionView::ViewHelpers.stylesheet_link_tag(\"application\""),
         "expected `application` stylesheet link; got:\n{src}",
     );
     assert!(
-        src.contains("ViewHelpers.stylesheet_link_tag(\"tailwind\""),
+        src.contains("ActionView::ViewHelpers.stylesheet_link_tag(\"tailwind\""),
         "expected `tailwind` stylesheet link; got:\n{src}",
     );
     assert!(
@@ -1696,7 +1696,7 @@ fn lowered_layout_view_content_for_default_via_bool_op() {
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
         src.contains(
-            "ViewHelpers.html_escape(ViewHelpers.content_for_get(:title) || \"Real Blog\")"
+            "ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.content_for_get(:title) || \"Real Blog\")"
         ),
         "expected nested helper rewrite under BoolOp + outer html_escape; got:\n{src}",
     );
@@ -1745,7 +1745,7 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
     // arg is the bare local record (post-ivar-rewrite), so it
     // resolves to `RouteHelpers.article_path(article.id)`.
     assert!(
-        src.contains("ViewHelpers.link_to(\"Show this article\", RouteHelpers.article_path(article.id)"),
+        src.contains("ActionView::ViewHelpers.link_to(\"Show this article\", RouteHelpers.article_path(article.id)"),
         "expected link_to(text, RouteHelpers.article_path(article.id)) for record-ref URL; got:\n{src}",
     );
 }

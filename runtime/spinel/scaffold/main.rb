@@ -35,6 +35,11 @@ require_relative "app/views"
 
 module Main
   module_function
+  # Bring `ActionView::ViewHelpers` and `ActionDispatch::Router`
+  # into scope as bare `ViewHelpers` / `Router` for the dispatch
+  # body — matches Ruby's `include` idiom for nested-module access.
+  include ActionView
+  include ActionDispatch
 
   # Dispatch one request. Pure function over (env, stdin, stdout) — no
   # global I/O. Tests construct env hashes + StringIO and call this
