@@ -430,21 +430,37 @@ fn every_runtime_method_body_is_fully_typed() {
         };
         for (class_id, methods) in per_file {
             // parse_app_signatures returns fully-qualified names
-            // (`ActiveRecord::Broadcasts`), but the body-typer builds
-            // `Ty::Class { id }` using just the last segment of a
-            // Const path. Strip to the last segment so lookups match.
-            let entry = class_registry.entry(short_id(&class_id)).or_default();
-            for (name, ty) in methods {
-                // The dispatch table's value is the call's *result* type,
-                // not the method's signature object. parse_app_signatures
-                // returns Ty::Fn { params, ret, .. }; unwrap to ret so a
-                // bare-name call like `table_name` resolves to Ty::Str
-                // (its return) rather than Ty::Fn (the function value).
-                let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => *ret,
-                    other => other,
-                };
-                entry.instance_methods.insert(name, ret_ty);
+            // (`ActiveRecord::Broadcasts`); the body-typer's Const arm
+            // also builds `Ty::Class { id }` with the full path. Key
+            // the registry on the full path so lookups match. Also
+            // alias under the last segment so source-level bare
+            // refs (`Article.find(...)`) resolve through the same
+            // entry — the Const arm produces a single-segment Ty
+            // for those.
+            let short = short_id(&class_id);
+            let methods_vec: Vec<(roundhouse::ident::Symbol, Ty)> = methods
+                .into_iter()
+                .map(|(name, ty)| {
+                    let ret_ty = match ty {
+                        Ty::Fn { ret, .. } => *ret,
+                        other => other,
+                    };
+                    (name, ret_ty)
+                })
+                .collect();
+            for (name, ret_ty) in &methods_vec {
+                class_registry
+                    .entry(class_id.clone())
+                    .or_default()
+                    .instance_methods
+                    .insert(name.clone(), ret_ty.clone());
+                if short != class_id {
+                    class_registry
+                        .entry(short.clone())
+                        .or_default()
+                        .instance_methods
+                        .insert(name.clone(), ret_ty.clone());
+                }
             }
         }
 
@@ -487,6 +503,38 @@ fn every_runtime_method_body_is_fully_typed() {
             for (name, ty) in included_methods {
                 entry.instance_methods.entry(name).or_insert(ty);
             }
+        }
+    }
+
+    // Phase 1.6: re-mirror methods between fully-qualified entries
+    // and their last-segment aliases. The include-flattening pass
+    // above keys on `short_id` (parse_app_includes returns the
+    // including class as fully-qualified but the included module
+    // as bare), so the merged-in methods only land on the short
+    // alias. Body-typer dispatches via full-path `Ty::Class { id }`
+    // (the Const arm builds the joined path), so without this
+    // re-mirror, the included methods are invisible at the actual
+    // dispatch site.
+    let class_keys: Vec<ClassId> = class_registry.keys().cloned().collect();
+    for key in &class_keys {
+        let raw = key.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw);
+        if last == raw {
+            continue;
+        }
+        let short = ClassId(roundhouse::ident::Symbol::new(last));
+        let short_methods: Vec<(roundhouse::ident::Symbol, Ty)> =
+            match class_registry.get(&short) {
+                Some(info) => info
+                    .instance_methods
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                None => continue,
+            };
+        let entry = class_registry.entry(key.clone()).or_default();
+        for (name, ty) in short_methods {
+            entry.instance_methods.entry(name).or_insert(ty);
         }
     }
 

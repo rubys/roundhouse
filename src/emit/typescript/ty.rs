@@ -49,7 +49,13 @@ fn ts_class_ty(id: &ClassId) -> String {
         "Hash" => return "Record<string, any>".into(),
         _ => {}
     }
-    raw.into()
+    // Module-qualified class refs (`ActiveRecord::Base`) collapse to
+    // the bare last segment for TS — TS doesn't have `::` in
+    // identifiers, and the import resolver already pulls the class
+    // in from its file path. Each emitted module imports the
+    // unqualified class name.
+    let last = raw.rsplit("::").next().unwrap_or(raw);
+    last.into()
 }
 
 fn class_is_temporal(id: &ClassId) -> bool {

@@ -16,8 +16,9 @@ use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_all_classes, find_all_modules,
-    find_first_class, flatten_statements, module_name_path, symbol_value,
+    class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
+    find_all_modules_with_scope, find_first_class, flatten_statements, module_name_path,
+    symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -54,11 +55,13 @@ pub fn ingest_library_classes(
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();
-    for class in find_all_classes(&root) {
-        out.push(library_class_from_node(&class, file)?);
+    for (scope, class) in find_all_classes_with_scope(&root) {
+        out.push(library_class_from_node_with_scope(&class, &scope, file)?);
     }
-    for module in find_all_modules(&root) {
-        out.push(library_class_from_module_node(&module, file)?);
+    for (scope, module) in find_all_modules_with_scope(&root) {
+        out.push(library_class_from_module_node_with_scope(
+            &module, &scope, file,
+        )?);
     }
     Ok(out)
 }
@@ -67,11 +70,28 @@ pub(super) fn library_class_from_node(
     class: &ruby_prism::ClassNode<'_>,
     file: &str,
 ) -> IngestResult<LibraryClass> {
+    library_class_from_node_with_scope(class, &[], file)
+}
+
+/// Build a LibraryClass for a class declaration, prepending the
+/// enclosing module path (`scope`) to the class's own constant-path
+/// name. `module ActiveRecord; class Base` becomes `ClassId
+/// ("ActiveRecord::Base")`. Top-level classes (empty scope) keep
+/// their bare name. The fully-qualified ClassId aligns with the
+/// shape RBS scope tracking now produces — body-typer registry
+/// keys + RBS-derived `Ty::Class { id }` use the same path string.
+pub(super) fn library_class_from_node_with_scope(
+    class: &ruby_prism::ClassNode<'_>,
+    scope: &[String],
+    file: &str,
+) -> IngestResult<LibraryClass> {
     let name_path = class_name_path(class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "library class name must be a simple constant or path".into(),
     })?;
-    let owner = ClassId(Symbol::from(name_path.join("::")));
+    let mut full_path: Vec<String> = scope.to_vec();
+    full_path.extend(name_path);
+    let owner = ClassId(Symbol::from(full_path.join("::")));
 
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
@@ -94,15 +114,18 @@ pub(super) fn library_class_from_node(
 /// `is_module: true` and `parent: None`. The `is_module` flag is
 /// load-bearing: callers using `include` on the result need it to be
 /// emitted as `module`, not `class`, or Ruby will raise TypeError.
-fn library_class_from_module_node(
+fn library_class_from_module_node_with_scope(
     module: &ruby_prism::ModuleNode<'_>,
+    scope: &[String],
     file: &str,
 ) -> IngestResult<LibraryClass> {
     let name_path = module_name_path(module).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "library module name must be a simple constant or path".into(),
     })?;
-    let owner = ClassId(Symbol::from(name_path.join("::")));
+    let mut full_path: Vec<String> = scope.to_vec();
+    full_path.extend(name_path);
+    let owner = ClassId(Symbol::from(full_path.join("::")));
 
     let (includes, methods) = walk_decl_body(module.body(), &owner, file, false)?;
     Ok(LibraryClass {

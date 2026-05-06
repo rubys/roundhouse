@@ -37,9 +37,18 @@ pub fn parse_signatures(source: &str) -> Result<Signatures, String> {
 
     for decl in signature.declarations().iter() {
         match decl {
-            Node::Class(class) => collect_members(class.members().iter(), &mut out)?,
-            Node::Module(module) => collect_members(module.members().iter(), &mut out)?,
-            Node::Interface(iface) => collect_members(iface.members().iter(), &mut out)?,
+            Node::Class(class) => {
+                let scope = class.name().name().as_str().to_string();
+                collect_members(class.members().iter(), &mut out, Some(&scope))?;
+            }
+            Node::Module(module) => {
+                let scope = module.name().name().as_str().to_string();
+                collect_members(module.members().iter(), &mut out, Some(&scope))?;
+            }
+            Node::Interface(iface) => {
+                let scope = iface.name().name().as_str().to_string();
+                collect_members(iface.members().iter(), &mut out, Some(&scope))?;
+            }
             _ => {}
         }
     }
@@ -176,7 +185,7 @@ fn collect_class_methods<'a, I: Iterator<Item = Node<'a>>>(
         match member {
             Node::MethodDefinition(method) => {
                 let name = Symbol::new(method.name().as_str());
-                let ty = method_signature_ty(&method)?;
+                let ty = method_signature_ty(&method, Some(class_name))?;
                 out.entry(class_id.clone()).or_default().insert(name, ty);
             }
             // Nested class/module inside this one — recurse with the
@@ -200,6 +209,7 @@ fn namespace_join(parent: Option<&str>, name: &str) -> String {
 fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
     members: I,
     out: &mut Signatures,
+    scope: Option<&str>,
 ) -> Result<(), String> {
     for member in members {
         match member {
@@ -208,21 +218,26 @@ fn collect_members<'a, I: Iterator<Item = Node<'a>>>(
                 if method_is_abstract(&method) {
                     out.abstract_methods.insert(name.clone());
                 }
-                let ty = method_signature_ty(&method)?;
+                let ty = method_signature_ty(&method, scope)?;
                 out.methods.push((name, ty));
             }
             // Nested class / module / interface — recurse so methods
             // defined inside get collected into the same flat table.
             // Mirrors `parse_methods` on the Ruby side, which walks
             // into class/module bodies to collect their `def`s.
+            // Scope deepens to include the enclosing path so bare
+            // class refs inside qualify correctly.
             Node::Class(class) => {
-                collect_members(class.members().iter(), out)?;
+                let nested_scope = namespace_join(scope, class.name().name().as_str());
+                collect_members(class.members().iter(), out, Some(&nested_scope))?;
             }
             Node::Module(module) => {
-                collect_members(module.members().iter(), out)?;
+                let nested_scope = namespace_join(scope, module.name().name().as_str());
+                collect_members(module.members().iter(), out, Some(&nested_scope))?;
             }
             Node::Interface(iface) => {
-                collect_members(iface.members().iter(), out)?;
+                let nested_scope = namespace_join(scope, iface.name().name().as_str());
+                collect_members(iface.members().iter(), out, Some(&nested_scope))?;
             }
             _ => {}
         }
@@ -246,7 +261,10 @@ fn method_is_abstract(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> bool
     false
 }
 
-fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Result<Ty, String> {
+fn method_signature_ty(
+    method: &ruby_rbs::node::MethodDefinitionNode<'_>,
+    scope: Option<&str>,
+) -> Result<Ty, String> {
     let mut overloads = method.overloads().iter();
     let first = overloads
         .next()
@@ -288,6 +306,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
         ParamKind::Required,
         &method_name,
         "required",
+        scope,
     )?;
     collect_function_params(
         fn_type.optional_positionals().iter(),
@@ -295,6 +314,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
         ParamKind::Optional,
         &method_name,
         "optional",
+        scope,
     )?;
 
     // `*rest` positional. Prism-rbs models this as a single optional
@@ -313,7 +333,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("rest"));
-        let elem_ty = ty_from_node(&fn_param.type_())?;
+        let elem_ty = ty_from_node(&fn_param.type_(), scope)?;
         let ty = Ty::Array { elem: Box::new(elem_ty) };
         params.push(Param { name, ty, kind: ParamKind::Rest });
     }
@@ -324,6 +344,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
         ParamKind::Required,
         &method_name,
         "trailing",
+        scope,
     )?;
 
     // Required keywords: `k: Ty` (no default marker on the RBS side).
@@ -335,7 +356,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
                 name.as_str()
             ));
         };
-        let ty = ty_from_node(&fn_param.type_())?;
+        let ty = ty_from_node(&fn_param.type_(), scope)?;
         params.push(Param {
             name,
             ty,
@@ -352,7 +373,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
                 name.as_str()
             ));
         };
-        let ty = ty_from_node(&fn_param.type_())?;
+        let ty = ty_from_node(&fn_param.type_(), scope)?;
         params.push(Param {
             name,
             ty,
@@ -374,7 +395,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("opts"));
-        let value_ty = ty_from_node(&fn_param.type_())?;
+        let value_ty = ty_from_node(&fn_param.type_(), scope)?;
         let ty = Ty::Hash {
             key: Box::new(Ty::Sym),
             value: Box::new(value_ty),
@@ -386,7 +407,7 @@ fn method_signature_ty(method: &ruby_rbs::node::MethodDefinitionNode<'_>) -> Res
         });
     }
 
-    let ret = ty_from_node(&fn_type.return_type())?;
+    let ret = ty_from_node(&fn_type.return_type(), scope)?;
 
     // Block signature: `{ (...) -> T }` — captured on method_type, not
     // fn_type. For now we only surface its presence via the block
@@ -427,6 +448,7 @@ fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
     kind: ParamKind,
     method_name: &str,
     category: &str,
+    scope: Option<&str>,
 ) -> Result<(), String> {
     // Placeholder prefix for unnamed positionals. Keep "arg" for the
     // required/optional/trailing cases so the existing convention
@@ -441,23 +463,118 @@ fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
             .name()
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new(format!("arg{idx}")));
-        let ty = ty_from_node(&fn_param.type_())?;
+        let ty = ty_from_node(&fn_param.type_(), scope)?;
         out.push(Param { name, ty, kind: kind.clone() });
     }
     Ok(())
 }
 
-fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {
+/// Resolve a `TypeNameNode` to a fully-qualified class path string,
+/// honoring the lexical scope. Three cases:
+///
+/// 1. Absolute (`::Foo::Bar`) — leading `::` in source. The author
+///    intentionally bypasses lexical scope. Use the path as-is,
+///    drop the leading `::`.
+/// 2. Already-qualified bare (`Foo::Bar`) — non-empty namespace path
+///    in the parsed node. The author wrote multiple segments; the
+///    inner segments don't get re-qualified by enclosing scope.
+///    Use as-is.
+/// 3. Bare last-segment (`Bar`) — empty namespace, not absolute.
+///    The reference is implicit — prepend the enclosing scope so
+///    `Bar` inside `module M; class X` resolves to `M::Bar`.
+fn qualify_class_ref(
+    type_name: &ruby_rbs::node::TypeNameNode<'_>,
+    scope: Option<&str>,
+) -> String {
+    let bare_name = type_name.name().as_str().to_string();
+    let ns = type_name.namespace();
+    let path_segments: Vec<String> = ns
+        .path()
+        .iter()
+        .filter_map(|seg| {
+            if let Node::Symbol(s) = seg {
+                Some(s.as_str().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if ns.absolute() {
+        // `::Foo::Bar` — explicit top-level. Use path-as-written
+        // joined with the bare name; ignore enclosing scope.
+        if path_segments.is_empty() {
+            bare_name
+        } else {
+            format!("{}::{bare_name}", path_segments.join("::"))
+        }
+    } else if !path_segments.is_empty() {
+        // `Foo::Bar` — multi-segment. Treat as already-qualified;
+        // don't double-prefix with scope.
+        format!("{}::{bare_name}", path_segments.join("::"))
+    } else if is_builtin_class_name(&bare_name) {
+        // Builtins (`Integer`, `Array`, `Hash`, ...) live at the
+        // top level in every Ruby program — they never absorb
+        // enclosing module scope. `map_class_instance` will
+        // recognize the bare name and produce the corresponding
+        // primitive `Ty`; prefixing with scope would produce
+        // `ActiveRecord::Array` and miss the primitive table.
+        bare_name
+    } else {
+        // Bare `Bar` — implicit lexical reference. Ruby's scope chain
+        // walks UP from the innermost enclosing class: `Bar` inside
+        // `class A` looks for `A::Bar`, then top-level `Bar`. We
+        // don't have a class registry to check existence, so we
+        // approximate: drop the innermost segment from `scope` and
+        // prepend that. This makes:
+        //   - `Article` inside `class Article` → `Article` (self).
+        //   - `Base` inside `module ActiveRecord; class Base` →
+        //     `ActiveRecord::Base` (self via enclosing module).
+        //   - `B` inside `module M; class A` (sibling) → `M::B`.
+        //   - `D` inside `module Outer::Inner; class C` (sibling)
+        //     → `Outer::Inner::D`.
+        // The few cases that need the innermost-path prefix
+        // (e.g. a nested-class ref that resolves INSIDE the
+        // enclosing class) remain rare; the source author writes
+        // the qualified form for those.
+        let prefix = scope
+            .and_then(|s| s.rsplit_once("::").map(|(parent, _)| parent))
+            .unwrap_or("");
+        if prefix.is_empty() {
+            bare_name
+        } else {
+            format!("{prefix}::{bare_name}")
+        }
+    }
+}
+
+/// Names mapped by `map_class_instance` to primitive `Ty` variants.
+/// They live at the top level in Ruby; bare references should never
+/// absorb enclosing module scope.
+fn is_builtin_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Integer"
+            | "Float"
+            | "String"
+            | "Symbol"
+            | "TrueClass"
+            | "FalseClass"
+            | "NilClass"
+            | "Array"
+            | "Hash"
+    )
+}
+
+fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
     match node {
         Node::ClassInstanceType(class_type) => {
-            let name_sym = class_type.name().name();
-            let name = name_sym.as_str();
+            let qualified = qualify_class_ref(&class_type.name(), scope);
             let args: Vec<Ty> = class_type
                 .args()
                 .iter()
-                .map(|n| ty_from_node(&n))
+                .map(|n| ty_from_node(&n, scope))
                 .collect::<Result<_, _>>()?;
-            Ok(map_class_instance(name, args))
+            Ok(map_class_instance(&qualified, args))
         }
         Node::BoolType(_) => Ok(Ty::Bool),
         Node::NilType(_) => Ok(Ty::Nil),
@@ -472,14 +589,14 @@ fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {
         // at emit time.
         Node::AnyType(_) => Ok(Ty::Untyped),
         Node::OptionalType(opt) => {
-            let inner = ty_from_node(&opt.type_())?;
+            let inner = ty_from_node(&opt.type_(), scope)?;
             Ok(union_of(vec![inner, Ty::Nil]))
         }
         Node::UnionType(u) => {
             let variants: Vec<Ty> = u
                 .types()
                 .iter()
-                .map(|n| ty_from_node(&n))
+                .map(|n| ty_from_node(&n, scope))
                 .collect::<Result<_, _>>()?;
             Ok(union_of(variants))
         }
@@ -487,7 +604,7 @@ fn ty_from_node(node: &Node<'_>) -> Result<Ty, String> {
             let elems: Vec<Ty> = t
                 .types()
                 .iter()
-                .map(|n| ty_from_node(&n))
+                .map(|n| ty_from_node(&n, scope))
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple { elems })
         }

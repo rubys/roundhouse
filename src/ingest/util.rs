@@ -76,35 +76,68 @@ pub(super) fn find_first_class<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Clas
 /// `runtime/active_record/errors.rb`).
 pub(super) fn find_all_classes<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ClassNode<'pr>> {
     let mut out = Vec::new();
-    collect_classes(node, &mut out);
+    collect_classes(node, &[], &mut |_, c| out.push(c));
     out
 }
 
-fn collect_classes<'pr>(node: &Node<'pr>, out: &mut Vec<ruby_prism::ClassNode<'pr>>) {
+/// Same as `find_all_classes` but pairs each class with its enclosing
+/// module path (as written in the source). `module ActiveRecord; class
+/// Base` produces `(["ActiveRecord"], ClassNode<Base>)` so callers can
+/// build the fully-qualified `ClassId("ActiveRecord::Base")`. Top-
+/// level classes have an empty enclosing path.
+pub(super) fn find_all_classes_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Vec<(Vec<String>, ruby_prism::ClassNode<'pr>)> {
+    let mut out = Vec::new();
+    collect_classes(node, &[], &mut |scope, c| {
+        out.push((scope.to_vec(), c));
+    });
+    out
+}
+
+fn collect_classes<'pr, F: FnMut(&[String], ruby_prism::ClassNode<'pr>)>(
+    node: &Node<'pr>,
+    scope: &[String],
+    out: &mut F,
+) {
     if let Some(c) = node.as_class_node() {
-        // Save body before moving `c` into the Vec; body() borrows `c`
-        // but the returned Node is tied to the tree's lifetime, so it
-        // outlives the move.
+        // Save body before moving `c` into the callback; body() borrows
+        // `c` but the returned Node is tied to the tree's lifetime, so
+        // it outlives the move.
         let body = c.body();
-        out.push(c);
+        // Compute the inner scope BEFORE moving `c` — scope for
+        // nested classes/modules inside `c`'s body should include
+        // `c`'s own name (the bare segment as written in source).
+        let mut inner = scope.to_vec();
+        if let Some(name_path) = class_name_path(&c) {
+            inner.extend(name_path);
+        }
+        out(scope, c);
         if let Some(b) = body {
-            collect_classes(&b, out);
+            collect_classes(&b, &inner, out);
         }
         return;
     }
     if let Some(p) = node.as_program_node() {
-        collect_classes(&p.statements().as_node(), out);
+        collect_classes(&p.statements().as_node(), scope, out);
         return;
     }
     if let Some(s) = node.as_statements_node() {
         for stmt in s.body().iter() {
-            collect_classes(&stmt, out);
+            collect_classes(&stmt, scope, out);
         }
         return;
     }
     if let Some(m) = node.as_module_node() {
+        // Push the module's name onto the scope before descending —
+        // bare class declarations inside qualify with the module
+        // path.
+        let mut inner = scope.to_vec();
+        if let Some(name_path) = module_name_path(&m) {
+            inner.extend(name_path);
+        }
         if let Some(body) = m.body() {
-            collect_classes(&body, out);
+            collect_classes(&body, &inner, out);
         }
     }
 }
@@ -128,34 +161,59 @@ pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<S
 /// known.
 pub(super) fn find_all_modules<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ModuleNode<'pr>> {
     let mut out = Vec::new();
-    collect_modules(node, &mut out);
+    collect_modules(node, &[], &mut |_, m| out.push(m));
     out
 }
 
-fn collect_modules<'pr>(node: &Node<'pr>, out: &mut Vec<ruby_prism::ModuleNode<'pr>>) {
+/// Same as `find_all_modules` but pairs each module with its enclosing
+/// scope path (as written in the source).
+pub(super) fn find_all_modules_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
+    let mut out = Vec::new();
+    collect_modules(node, &[], &mut |scope, m| {
+        out.push((scope.to_vec(), m));
+    });
+    out
+}
+
+fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
+    node: &Node<'pr>,
+    scope: &[String],
+    out: &mut F,
+) {
     if let Some(m) = node.as_module_node() {
         let body = m.body();
+        // Compute inner scope before moving `m`.
+        let mut inner = scope.to_vec();
+        if let Some(name_path) = module_name_path(&m) {
+            inner.extend(name_path);
+        }
         if module_has_direct_def(&m) {
-            out.push(m);
+            out(scope, m);
         }
         if let Some(b) = body {
-            collect_modules(&b, out);
+            collect_modules(&b, &inner, out);
         }
         return;
     }
     if let Some(c) = node.as_class_node() {
+        let mut inner = scope.to_vec();
+        if let Some(name_path) = class_name_path(&c) {
+            inner.extend(name_path);
+        }
         if let Some(body) = c.body() {
-            collect_modules(&body, out);
+            collect_modules(&body, &inner, out);
         }
         return;
     }
     if let Some(p) = node.as_program_node() {
-        collect_modules(&p.statements().as_node(), out);
+        collect_modules(&p.statements().as_node(), scope, out);
         return;
     }
     if let Some(s) = node.as_statements_node() {
         for stmt in s.body().iter() {
-            collect_modules(&stmt, out);
+            collect_modules(&stmt, scope, out);
         }
     }
 }

@@ -126,19 +126,35 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Lit { value } => lit_ty(value),
 
             ExprNode::Const { path } => {
-                let name = path.last().cloned().unwrap_or_else(|| Symbol::from("?"));
+                let last = path.last().cloned().unwrap_or_else(|| Symbol::from("?"));
                 // Module/class-level constants seeded by the registry
                 // builder. `STATUS_CODES = { ok: 200, ... }` lands here
                 // typed `Hash[Sym, Int]` (not `Class { STATUS_CODES }`),
                 // so subsequent dispatch on `STATUS_CODES.fetch(...)`
                 // resolves through hash_method.
-                if let Some(ty) = ctx.constants.get(&name) {
+                if let Some(ty) = ctx.constants.get(&last) {
                     return ty.clone();
                 }
-                // Fall back to class-by-name (Const refers to a class
-                // or module the registry knows about). Most user-class
-                // references land here.
-                Ty::Class { id: ClassId(name), args: vec![] }
+                // Fall back to class-by-name. Build the Ty::Class
+                // ClassId from the FULL path (`ActiveSupport::
+                // HashWithIndifferentAccess` for `Const { path:
+                // ["ActiveSupport", "HashWithIndifferentAccess"]
+                // }`), matching the fully-qualified shape RBS scope
+                // tracking + ingest now produce. Single-segment
+                // refs (`Article`, `Comment`, etc.) keep their bare
+                // form. The registry-builder aliases full-path
+                // entries under their last segment too, so source-
+                // level bare references (`Parameters.new(...)` from
+                // inside any module) still resolve.
+                let joined_path = path
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                Ty::Class {
+                    id: ClassId(Symbol::from(joined_path)),
+                    args: vec![],
+                }
             }
 
             ExprNode::Var { name, .. } => ctx

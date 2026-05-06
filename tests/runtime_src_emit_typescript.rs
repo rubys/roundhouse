@@ -75,8 +75,8 @@ fn errors_rb_transpiles_to_typescript_classes() {
 
     let not_found = classes
         .iter()
-        .find(|c| c.name.0.as_str() == "RecordNotFound")
-        .expect("RecordNotFound");
+        .find(|c| c.name.0.as_str() == "ActiveRecord::RecordNotFound")
+        .expect("ActiveRecord::RecordNotFound");
     let nf_ts = emit_library_class(not_found).expect("emit RecordNotFound");
     assert!(
         nf_ts.contains("export class RecordNotFound extends Error"),
@@ -85,8 +85,8 @@ fn errors_rb_transpiles_to_typescript_classes() {
 
     let invalid = classes
         .iter()
-        .find(|c| c.name.0.as_str() == "RecordInvalid")
-        .expect("RecordInvalid");
+        .find(|c| c.name.0.as_str() == "ActiveRecord::RecordInvalid")
+        .expect("ActiveRecord::RecordInvalid");
     let inv_ts = emit_library_class(invalid).expect("emit RecordInvalid");
     assert!(
         inv_ts.contains("export class RecordInvalid extends Error"),

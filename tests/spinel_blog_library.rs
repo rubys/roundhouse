@@ -34,8 +34,9 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     let classes = ingest_library_classes(&source, &path_str)
         .expect("ingest_library_classes returned Err");
 
-    // Both classes from errors.rb should land. Names are last-segment
-    // (Prism reports the syntactic name; module nesting is implicit).
+    // Both classes from errors.rb should land. Names are fully-
+    // qualified — `ingest_library_classes` walks enclosing module
+    // nesting and prepends the path to each class's syntactic name.
     assert_eq!(
         classes.len(),
         2,
@@ -44,8 +45,8 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
     );
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
-    assert!(names.contains(&"RecordNotFound"), "names: {names:?}");
-    assert!(names.contains(&"RecordInvalid"), "names: {names:?}");
+    assert!(names.contains(&"ActiveRecord::RecordNotFound"), "names: {names:?}");
+    assert!(names.contains(&"ActiveRecord::RecordInvalid"), "names: {names:?}");
 
     // Both inherit from StandardError. is_module = false.
     for lc in &classes {
@@ -59,8 +60,8 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     // synthesized getter and the source-defined initialize.
     let invalid = classes
         .iter()
-        .find(|c| c.name.0.as_str() == "RecordInvalid")
-        .expect("RecordInvalid present");
+        .find(|c| c.name.0.as_str() == "ActiveRecord::RecordInvalid")
+        .expect("ActiveRecord::RecordInvalid present");
     let method_names: Vec<&str> = invalid.methods.iter().map(|m| m.name.as_str()).collect();
     assert!(
         method_names.contains(&"record"),
@@ -177,7 +178,7 @@ fn validations_rb_ingests_mixin_module() {
     );
 
     let v = &classes[0];
-    assert_eq!(v.name.0.as_str(), "Validations");
+    assert_eq!(v.name.0.as_str(), "ActiveRecord::Validations");
     assert!(v.is_module, "Validations is a mixin module");
     assert!(v.parent.is_none());
 
@@ -243,7 +244,7 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
 
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
     assert!(names.contains(&"ActiveRecord"), "expected ActiveRecord module; got {names:?}");
-    assert!(names.contains(&"Base"), "expected Base class; got {names:?}");
+    assert!(names.contains(&"ActiveRecord::Base"), "expected Base class; got {names:?}");
 
     // ActiveRecord module surfaces because of the class << self block.
     let ar = classes.iter().find(|c| c.name.0.as_str() == "ActiveRecord").unwrap();
@@ -261,7 +262,7 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
     }
 
     // Base class assertions.
-    let base = classes.iter().find(|c| c.name.0.as_str() == "Base").unwrap();
+    let base = classes.iter().find(|c| c.name.0.as_str() == "ActiveRecord::Base").unwrap();
     assert!(!base.is_module);
     assert!(base.parent.is_none(), "Base has no explicit superclass");
     assert!(

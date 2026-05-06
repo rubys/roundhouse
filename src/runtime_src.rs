@@ -279,21 +279,15 @@ pub fn parse_library_with_rbs(
             .map(|s| s.abstract_methods)
             .unwrap_or_default();
 
-    // Normalize RBS sig keys to last-segment so they line up with
-    // `ingest_library_classes`'s last-segment names.
-    let sigs_by_last_seg: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
+    // Both `parse_app_signatures` (RBS) and `ingest_library_classes`
+    // (Ruby) now produce fully-qualified ClassIds (e.g.
+    // `ActiveRecord::Base`), so the lookup is direct. The prior
+    // last-segment normalization was a workaround for the bare-name
+    // collision between RBS and ingest; both sides have caught up.
+    let sigs_by_full_path: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
         sigs_by_class
             .into_iter()
-            .map(|(cid, m)| {
-                let last = cid
-                    .0
-                    .as_str()
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                (last, m)
-            })
+            .map(|(cid, m)| (cid.0.as_str().to_string(), m))
             .collect();
 
     // Step 1: marry signatures to methods (with arity check + abstract-
@@ -309,7 +303,7 @@ pub fn parse_library_with_rbs(
     // After this loop every method has its `signature` populated.
     for lc in &mut library_classes {
         let class_name = lc.name.0.as_str().to_string();
-        let mut class_sigs = sigs_by_last_seg
+        let mut class_sigs = sigs_by_full_path
             .get(&class_name)
             .cloned()
             .unwrap_or_default();

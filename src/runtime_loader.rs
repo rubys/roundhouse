@@ -89,8 +89,24 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
 
 /// Wrap `body` in `module Foo ... end` (or nested forms for compound
 /// names like `A::B`). Empty namespace returns the body unchanged.
+///
+/// As of the RBS scope-tracking change, LibraryClass names carry the
+/// fully-qualified path (`ActiveRecord::Base`) and `render_class`
+/// wraps each class in its own `module Namespace` chain. Wrapping
+/// HERE on top of that produced double-nested modules. Detect
+/// pre-wrapped bodies (any line starts with `module <first-segment>`)
+/// and skip the outer wrap; constants emit at indent 0 outside any
+/// module, so we re-wrap them via `module Namespace ... end` and
+/// concatenate the (already-wrapped) class bodies after.
 fn crystal_wrap_namespace(namespace: &str, body: &str) -> String {
     if namespace.is_empty() {
+        return body.to_string();
+    }
+    let first_seg = namespace.split("::").next().unwrap_or(namespace);
+    let already_wraps = body
+        .lines()
+        .any(|l| l.starts_with(&format!("module {first_seg}")));
+    if already_wraps {
         return body.to_string();
     }
     let segments: Vec<&str> = namespace.split("::").collect();

@@ -214,13 +214,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             .iter()
             .flat_map(|u| {
                 u.classes.iter().flat_map(move |c| {
+                    // LibraryClass.name now carries the fully-qualified
+                    // path (`ActiveRecord::Base`) post the RBS scope-
+                    // tracking refactor. Register under the full path
+                    // AND under the last-segment alias — body-typer's
+                    // Const arm resolves `Const { path: ["Base"] }`
+                    // (bare app-level reference) as `ClassId("Base")`,
+                    // and treeshake needs the alias to find the class.
+                    let raw = c.name.0.as_str();
                     let mut entries = vec![(c.name.clone(), c)];
-                    if !u.namespace.is_empty() {
-                        let qualified = crate::ident::ClassId(crate::ident::Symbol::from(
-                            format!("{}::{}", u.namespace, c.name.0.as_str()),
+                    let last = raw.rsplit("::").next().unwrap_or(raw);
+                    if last != raw {
+                        entries.push((
+                            crate::ident::ClassId(crate::ident::Symbol::from(last)),
+                            c,
                         ));
-                        entries.push((qualified, c));
                     }
+                    let _ = u.namespace; // namespace is now baked into c.name
                     entries
                 })
             })
@@ -656,7 +666,14 @@ fn emit_test_setup_ts(
 pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String, String> {
     use crate::dialect::{AccessorKind, MethodReceiver};
 
-    let class_name = class.name.0.as_str();
+    // The IR's LibraryClass.name is now the fully-qualified class
+    // path (`ActiveRecord::RecordInvalid`); TS doesn't allow `::` in
+    // identifiers, and each class file is imported by its bare name.
+    // Drop to the last segment for the surface declaration. The
+    // module path survives via the per-target import-resolution
+    // pass — `runtime/typescript/errors.ts` exports `RecordInvalid`.
+    let raw_name = class.name.0.as_str();
+    let class_name = raw_name.rsplit("::").next().unwrap_or(raw_name);
     let mut out = String::new();
 
     // Identify attribute readers/writers by the lowerer-recorded
