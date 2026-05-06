@@ -3,11 +3,13 @@ require "in_memory_adapter"
 require "models/article"
 require "models/comment"
 
-# Tests that InMemoryAdapter satisfies the same contract SqliteAdapter
-# does, exercised via the Article/Comment models. Each test swaps
-# ActiveRecord.adapter to InMemoryAdapter for the duration, then
-# restores the SqliteAdapter so other tests in the suite are
-# unaffected.
+# Tests that InMemoryAdapter satisfies the 10-method adapter contract
+# (the same contract SqliteAdapter implements when FFI is available),
+# exercised via the Article/Comment models. The test_helper now
+# defaults the suite-wide adapter to InMemoryAdapter, so the
+# setup/teardown swap+restore is a no-op in practice — kept so this
+# file stays usable when the suite-wide default is something else
+# (e.g., SqliteAdapter for FFI-friendly environments).
 class InMemoryAdapterTest < Minitest::Test
   def setup
     @prior_adapter = ActiveRecord.adapter

@@ -14,20 +14,22 @@ $LOAD_PATH.unshift(File.join(ROOT, "runtime"))
 $LOAD_PATH.unshift(File.join(ROOT, "app"))
 $LOAD_PATH.unshift(File.join(ROOT, "config"))
 
-require "sqlite_adapter"
+require "in_memory_adapter"
 require "active_record"
 require "schema"
 require "action_dispatch"
 require "action_controller"
 
-# One-time global setup: configure the adapter against an in-memory
-# SQLite database, load the schema, and wire ActiveRecord.adapter to
-# point at it. Per-test isolation comes from `SchemaSetup.reset!` —
-# called from each test class's `setup` block — which truncates the
-# tables but leaves the schema intact.
-SqliteAdapter.configure(":memory:")
-Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
-ActiveRecord.adapter = SqliteAdapter
+# One-time global setup: configure the pure-Ruby in-memory adapter
+# (Hash-of-Hashes; no FFI, no sqlite3 gem), load the schema, and wire
+# ActiveRecord.adapter to point at it. Per-test isolation comes from
+# `SchemaSetup.reset!` — called from each test class's `setup` block —
+# which truncates the tables but leaves the schema intact. Choosing
+# InMemoryAdapter over SqliteAdapter keeps the test path FFI-free,
+# matching the eventual Spinel-compiled binary's runtime constraints.
+InMemoryAdapter.configure
+Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
+ActiveRecord.adapter = InMemoryAdapter
 
 module SchemaSetup
   module_function
@@ -35,8 +37,8 @@ module SchemaSetup
   TABLES = %w[articles comments].freeze
 
   # Adapter-agnostic: dispatches through ActiveRecord.adapter.truncate
-  # so tests work whether the adapter is SqliteAdapter or
-  # InMemoryAdapter (or any future adapter conforming to the API).
+  # so tests work whether the adapter is InMemoryAdapter (default)
+  # or any future adapter conforming to the API.
   # Re-loads fixtures after truncate so each test sees the canonical
   # rows; emitted `<Plural>Fixtures._fixtures_load!` methods carry the
   # YAML-derived `<Class>.new({...}).save` calls.
