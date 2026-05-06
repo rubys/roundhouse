@@ -92,9 +92,6 @@ module ViewHelpers
   # values are String/Integer/nil/Hash (nested for data:/aria:).
   def self.render_attrs: (Hash[untyped, untyped] attrs) -> String
 
-  # `h` is any Hash; result has String keys with the same values.
-  def self.stringify_keys: (Hash[untyped, untyped] h) -> Hash[String, untyped]
-
   # ── form builder (yielded by form_with) ─────────────────────────
   class FormBuilder
     # Constructor takes the four pieces of form state.

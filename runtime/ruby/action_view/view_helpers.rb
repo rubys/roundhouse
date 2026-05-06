@@ -106,7 +106,7 @@ module ViewHelpers
   # ── HTML element helpers ─────────────────────────────────────────
 
   def link_to(text, href, opts = {})
-    attrs = render_attrs({ "href" => href }.merge(stringify_keys(opts)))
+    attrs = render_attrs({ href: href }.merge(opts))
     "<a#{attrs}>#{html_escape(text)}</a>"
   end
 
@@ -116,15 +116,15 @@ module ViewHelpers
     inner_opts = opts.dup
     inner_opts.delete(:method)
     inner_opts.delete(:form_class)
-    form_attrs = { "action" => href, "method" => "post" }
+    form_attrs = { action: href, method: "post" }
     # Rails' `button_to` defaults the form class to `button_to` when
     # the caller doesn't pass one — match that so the cross-target
     # compare sees the same `class` attribute set.
     # `.to_s` narrows the `opts[k]` union (Hash/Symbol/String/...)
     # to String for strict-typed targets. Ruby `String#to_s` is a no-op;
     # `||` short-circuits before `.to_s` runs on a real String value.
-    form_attrs["class"] = (form_class || "button_to").to_s
-    button_attrs = render_attrs({ "type" => "submit" }.merge(stringify_keys(inner_opts)))
+    form_attrs[:class] = (form_class || "button_to").to_s
+    button_attrs = render_attrs({ type: "submit" }.merge(inner_opts))
     method_input = if !method.nil? && method.to_s != "post"
                      %(<input type="hidden" name="_method" value="#{method}">)
                    else
@@ -166,7 +166,7 @@ module ViewHelpers
 
   def stylesheet_link_tag(name, opts = {})
     href = "/assets/#{name}.css"
-    attrs = render_attrs({ "rel" => "stylesheet", "href" => href }.merge(stringify_keys(opts)))
+    attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts))
     "<link#{attrs}>"
   end
 
@@ -242,21 +242,21 @@ module ViewHelpers
     attr_reader :model, :model_name, :action
 
     def label(field, opts = {})
-      attrs = ViewHelpers.render_attrs({ "for" => "#{@model_name}_#{field}" }.merge(ViewHelpers.stringify_keys(opts)))
+      attrs = ViewHelpers.render_attrs({ for: "#{@model_name}_#{field}" }.merge(opts))
       "<label#{attrs}>#{ViewHelpers.html_escape(field.to_s.capitalize)}</label>"
     end
 
     def text_field(field, opts = {})
       value = @model[field]
       base = {
-        "type" => "text",
-        "name" => "#{@model_name}[#{field}]",
-        "id" => "#{@model_name}_#{field}",
+        type: "text",
+        name: "#{@model_name}[#{field}]",
+        id: "#{@model_name}_#{field}",
       }
       # Rails omits the `value` attribute entirely when the field is
       # nil/empty; only render it when there's a non-empty value.
-      base["value"] = value.to_s unless value.nil? || value.to_s.empty?
-      attrs = ViewHelpers.render_attrs(base.merge(ViewHelpers.stringify_keys(opts)))
+      base[:value] = value.to_s unless value.nil? || value.to_s.empty?
+      attrs = ViewHelpers.render_attrs(base.merge(opts))
       "<input#{attrs}>"
     end
 
@@ -264,9 +264,9 @@ module ViewHelpers
       value = @model[field]
       attrs = ViewHelpers.render_attrs(
         {
-          "name" => "#{@model_name}[#{field}]",
-          "id" => "#{@model_name}_#{field}",
-        }.merge(ViewHelpers.stringify_keys(opts))
+          name: "#{@model_name}[#{field}]",
+          id: "#{@model_name}_#{field}",
+        }.merge(opts)
       )
       "<textarea#{attrs}>#{ViewHelpers.html_escape(value)}</textarea>"
     end
@@ -275,13 +275,17 @@ module ViewHelpers
       text = label || (@method == :patch ? "Update #{@model_name.capitalize}" : "Create #{@model_name.capitalize}")
       # Rails appends `data-disable-with="<value>"` to submit inputs so
       # turbo prevents a double-submit while the request is in flight.
+      # Quoted-Symbol form preserves the `data-disable-with` hyphenation
+      # — Symbol-keyed bases keep merge type-compatible with Symbol-
+      # keyed `opts` while letting render_attrs see hyphenated names
+      # through `k.to_s`.
       attrs = ViewHelpers.render_attrs(
         {
-          "type" => "submit",
-          "name" => "commit",
-          "value" => text,
-          "data-disable-with" => text,
-        }.merge(ViewHelpers.stringify_keys(opts))
+          type: "submit",
+          name: "commit",
+          value: text,
+          :"data-disable-with" => text,
+        }.merge(opts)
       )
       "<input#{attrs}>"
     end
@@ -309,8 +313,8 @@ module ViewHelpers
     # form_with output; mirror it so cross-target compare sees the
     # same attribute set.
     attrs = render_attrs(
-      { "action" => action, "accept-charset" => "UTF-8", "method" => form_method }
-        .merge(stringify_keys(opts))
+      { action: action, :"accept-charset" => "UTF-8", method: form_method }
+        .merge(opts)
     )
     "<form#{attrs}>#{method_input}#{auth_token_input}#{body}</form>"
   end
@@ -324,27 +328,29 @@ module ViewHelpers
   # matching Rails ActionView's tag helper. Underscores in the inner key
   # become hyphens (turbo_confirm → turbo-confirm). Non-hash values render
   # as-is via html_escape.
+  # Render an HTML attribute hash as ` name="val"` pairs. Accepts
+  # Symbol-or-String keys uniformly via `k.to_s` at the iteration
+  # boundary — callers pass Symbol-keyed `opts` straight through
+  # without an upfront stringify pass. Nested hashes (`data: {
+  # turbo_confirm: ... }`) render as `data-turbo-confirm="…"`;
+  # underscores in the inner key map to hyphens to match Rails'
+  # tag-helper convention.
   def render_attrs(attrs)
     return "" if attrs.empty?
     pairs = []
     attrs.each do |k, v|
       next if v.nil?
+      name = k.to_s
       if v.is_a?(Hash)
         v.each do |inner_k, inner_v|
           next if inner_v.nil?
           inner_name = inner_k.to_s.tr("_", "-")
-          pairs << " #{k}-#{inner_name}=\"#{html_escape(inner_v)}\""
+          pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v)}\""
         end
       else
-        pairs << " #{k}=\"#{html_escape(v)}\""
+        pairs << " #{name}=\"#{html_escape(v)}\""
       end
     end
     pairs.join
-  end
-
-  def stringify_keys(h)
-    out = {}
-    h.each { |k, v| out[k.to_s] = v }
-    out
   end
 end

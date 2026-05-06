@@ -107,6 +107,17 @@ fn is_empty_branch(e: &Expr) -> bool {
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
+/// Map Ruby stdlib type names that don't exist in Crystal to their
+/// Crystal analogs. `Integer` (abstract integer in Ruby) maps to
+/// `Int` (abstract integer in Crystal — parent of Int8…Int128).
+/// Used at Const emit; only fires for single-segment Consts.
+fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
+    match name {
+        "Integer" => Some("Int"),
+        _ => None,
+    }
+}
+
 /// Resolve a bare framework class name to its fully-qualified Crystal
 /// module path. The body-typer's class registry holds aliases under
 /// the last-segment name (`ViewHelpers`, `Parameters`, ...), but
@@ -166,6 +177,9 @@ fn emit_node(n: &ExprNode) -> String {
             if path.len() == 1 {
                 if let Some(qualified) = qualify_bare_framework(first) {
                     return qualified.to_string();
+                }
+                if let Some(replacement) = rewrite_stdlib_const(first) {
+                    return replacement.to_string();
                 }
             }
             joined
@@ -497,7 +511,15 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
         .iter()
         .map(|(k, v)| {
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                return format!(":{} => {}", value.as_str(), emit_expr(v));
+                let name = value.as_str();
+                // Hyphenated/special-character symbols need the
+                // quoted form (`:"data-disable-with"`); plain idents
+                // use the bare form (`:foo`). Same convention Ruby
+                // and Crystal share.
+                if is_simple_ident(name) {
+                    return format!(":{name} => {}", emit_expr(v));
+                }
+                return format!(":{name:?} => {}", emit_expr(v));
             }
             format!("{} => {}", emit_expr(k), emit_expr(v))
         })

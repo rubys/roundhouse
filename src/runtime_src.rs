@@ -857,7 +857,7 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
     // optional) and the method body's `name.<method>` calls trip on
     // undefined when callers omit the arg. Framework code like
     // `def label(field, opts = {})` relies on the default reaching
-    // `stringify_keys(opts)` as `{}`, not undefined.
+    // the merge / iteration sites as `{}`, not undefined.
     for opt in params_node.optionals().iter() {
         let op = opt.as_optional_parameter_node().ok_or_else(|| {
             format!("method `{method_name}`: unexpected optional-parameter shape")

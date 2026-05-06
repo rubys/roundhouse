@@ -1269,7 +1269,7 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
     // html_escape. link_to / button_to / dom_id stay raw because they
     // already return escape-correct output.
     assert!(
-        src.contains("ViewHelpers.html_escape(ViewHelpers.truncate(article.body, { length: 100 }))"),
+        src.contains("ViewHelpers.html_escape(ViewHelpers.truncate(article.body, length: 100))"),
         "expected html_escape-wrapped truncate; got:\n{src}",
     );
 }

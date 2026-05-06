@@ -381,6 +381,31 @@ pub(crate) fn insert_framework_stubs(
             fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
         );
     }
+    // Override the loose shim for helpers whose last param is an
+    // explicit `opts = {}` positional Hash. The body-typer's
+    // normalize_trailing_kwargs uses the last param's TYPE to decide
+    // whether a trailing kwargs Hash should flip to an explicit Hash
+    // literal at the call site (Crystal doesn't auto-collect kwargs
+    // into a Hash positional). With `Ty::Untyped`, normalize can't
+    // tell — declare `Ty::Hash` so it can. Helpers with named-
+    // keyword params (truncate, dom_id, ...) keep the loose shim:
+    // their kwargs DON'T flip and bind to the right named slot under
+    // Crystal's named-arg dispatch.
+    let opts_hash_helpers: &[(&str, &[(&str, &Ty)])] = &[
+        ("link_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
+        ("button_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
+        ("stylesheet_link_tag", &[("name", &Ty::Str), ("opts", &any_hash)]),
+    ];
+    for (name, params) in opts_hash_helpers {
+        let param_pairs: Vec<(Symbol, Ty)> = params
+            .iter()
+            .map(|(n, t)| (Symbol::from(*n), (*t).clone()))
+            .collect();
+        vh.class_methods.insert(
+            Symbol::from(*name),
+            fn_sig(param_pairs, Ty::Str),
+        );
+    }
     // form_with yields a FormBuilder to its block — register with
     // `block: Some(FormBuilder)` so the typer's block_params_for
     // binds `|form|` to FormBuilder when encountered.
@@ -929,29 +954,6 @@ impl ViewCtx {
     }
 }
 
-/// View helpers (`button_to`, `link_to`, `stylesheet_link_tag`, etc.)
-/// declare their option-bag as a single trailing positional `opts =
-/// {}` Hash parameter — not as kwargs. The Ruby parser shapes the
-/// caller's `helper "...", path, k1: v1, k2: v2` as a trailing
-/// `KeywordHash` (our `kwargs: true`) which Ruby implicitly collects
-/// into the `opts` Hash. Crystal doesn't auto-collect kwargs into a
-/// Hash — kwargs become a NamedTuple, mismatch with the helper's
-/// `opts : Hash(...)` param. Flip the trailing Hash's `kwargs` flag
-/// to `false` so it emits as an explicit Hash literal at the call
-/// site, matching `opts : Hash` in every target. Inner Hashes keep
-/// their original flag (e.g. `data: { turbo_confirm: ... }` — the
-/// inner braces ARE explicit, kwargs: false already).
-fn hash_args_to_explicit(mut args: Vec<Expr>) -> Vec<Expr> {
-    if let Some(last) = args.last_mut() {
-        if let ExprNode::Hash { kwargs, .. } = &mut *last.node {
-            if *kwargs {
-                *kwargs = false;
-            }
-        }
-    }
-    args
-}
-
 // ── small IR constructors ────────────────────────────────────────
 
 /// `<accumulator> = String.new` — synthesized once per template body.
@@ -990,7 +992,14 @@ pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
         Span::synthetic(),
         ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
     );
-    send(Some(recv), method, hash_args_to_explicit(args), None, true)
+    // Trailing-kwargs vs explicit-Hash decision happens in the body
+    // typer's `normalize_trailing_kwargs` — it consults the receiver
+    // class's resolved method signature and flips `kwargs: true →
+    // false` only for callees declared with positional Hash params
+    // (link_to / button_to / stylesheet_link_tag etc. take `opts =
+    // {}`). Keyword-param helpers (truncate, etc.) keep `kwargs:
+    // true` so they bind to the right named slot.
+    send(Some(recv), method, args, None, true)
 }
 
 pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
