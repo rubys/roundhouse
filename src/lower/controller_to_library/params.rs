@@ -14,8 +14,8 @@
 //!
 //!   def self.from_raw(params)
 //!     instance = new
-//!     instance.title = params.fetch(:title, "")
-//!     instance.body  = params.fetch(:body, "")
+//!     instance.title = params.fetch("title", "")
+//!     instance.body  = params.fetch("body", "")
 //!     instance
 //!   end
 //! end
@@ -347,7 +347,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
     }
 }
 
-/// `def self.from_raw(params); instance = new; instance.f = params.fetch(:f, ""); …; instance; end`
+/// `def self.from_raw(params); instance = new; instance.f = params.fetch("f", ""); …; instance; end`
 ///
 /// The fetch-with-default-empty-string shape is what spinel's strong
 /// params handles cleanly: missing keys collapse to "" rather than nil,
@@ -381,7 +381,10 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     ));
 
     for field in fields {
-        // params.fetch(:field, "")
+        // params.fetch("field", "") — string key matches HWIA#to_h's
+        // String-keyed output (HWIA stores keys as strings internally;
+        // `to_h` exposes the inner storage). Symbol keys would fall
+        // through to the default and silently produce empty fields.
         let fetch_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -393,7 +396,9 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 args: vec![
                     Expr::new(
                         Span::synthetic(),
-                        ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
+                        ExprNode::Lit {
+                            value: Literal::Str { value: field.as_str().to_string() },
+                        },
                     ),
                     Expr::new(
                         Span::synthetic(),
@@ -424,7 +429,7 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         ExprNode::Var { id: VarId(0), name: instance },
     ));
 
-    let params_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let params_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
         name: Symbol::from("from_raw"),
@@ -513,10 +518,12 @@ fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Exp
             parenthesized: true,
         },
     );
-    // `.to_h` — coerce Parameters → Hash[Symbol, untyped] so from_raw's
-    // `params.fetch(:k, "")` dispatches against Hash#fetch (typed by
+    // `.to_h` — coerce Parameters → Hash[String, untyped] so from_raw's
+    // `params.fetch("k", "")` dispatches against Hash#fetch (typed by
     // the default's String) rather than Parameters#fetch (which still
-    // returns sp_RbVal under spinel pending matz/spinel#207).
+    // returns sp_RbVal under spinel pending matz/spinel#207). HWIA
+    // stores keys as Strings; to_h exposes the inner storage, so
+    // from_raw uses String-keyed fetches to match.
     // `to_h` is a Method-kind member on Parameters — synthesize the
     // Send with `parenthesized: true` so per-target emit produces the
     // call form (`params.require(...).to_h()`) instead of the
