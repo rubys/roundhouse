@@ -145,6 +145,19 @@ pub fn lower_controllers_to_library_classes(
             value: Box::new(Ty::Untyped),
         },
     );
+    // `@flash` is also framework-guaranteed: the render-rewrite emits
+    // `@flash[:notice]` / `@flash[:alert]` as args to every Views
+    // call, and `redirect_to`'s lowering writes `@flash[:notice] = …`
+    // when the source had `notice: …`. ActionController's runtime
+    // constructs a HashWithIndifferentAccess; expose it as a
+    // Sym→Untyped Hash so `@flash[:k]` typechecks at every read site.
+    framework_ivars.insert(
+        Symbol::from("flash"),
+        Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Untyped),
+        },
+    );
 
     let mut out = Vec::new();
     for (mut methods, controller) in all_methods {

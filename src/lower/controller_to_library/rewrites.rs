@@ -47,10 +47,19 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
                 ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
                 _ => return None,
             };
-            let view_args: Vec<Expr> = ivars
+            let mut view_args: Vec<Expr> = ivars
                 .iter()
                 .map(|n| ivar(n.as_str(), e.span))
                 .collect();
+            // Every view's signature carries `notice = nil, alert = nil`
+            // as trailing extra params (uniform shape; see
+            // `view_to_library/extra_params.rs`). Pass `@flash[:notice]`
+            // and `@flash[:alert]` from the controller so views that
+            // render flash messages receive them. Views that don't
+            // reference flash get unused-local args — harmless under
+            // any target's emit.
+            view_args.push(flash_lookup(e.span, "notice"));
+            view_args.push(flash_lookup(e.span, "alert"));
             let view_call = Expr::new(
                 e.span,
                 ExprNode::Send {
@@ -1040,4 +1049,24 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
 
 fn ivar(name: &str, span: Span) -> Expr {
     Expr::new(span, ExprNode::Ivar { name: Symbol::from(name) })
+}
+
+/// `@flash[:<key>]` — used by render-rewrite to pass the controller's
+/// flash slots through to view extra_params.
+fn flash_lookup(span: Span, key: &str) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar("flash", span)),
+            method: Symbol::from("[]"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit {
+                    value: Literal::Sym { value: Symbol::from(key) },
+                },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    )
 }

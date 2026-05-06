@@ -757,7 +757,7 @@ fn controllers_index_synthesizes_render_views_call() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.index(@articles))"),
+        src.contains("render(Views::Articles.index(@articles, @flash[:notice], @flash[:alert]))"),
         "expected synthesized Views::Articles.index call; got:\n{src}",
     );
 }
@@ -770,12 +770,12 @@ fn controllers_show_views_call_pulls_ivars_from_filter_targets() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.show(@article))"),
-        "expected Views::Articles.show(@article); got:\n{src}",
+        src.contains("render(Views::Articles.show(@article, @flash[:notice], @flash[:alert]))"),
+        "expected Views::Articles.show(@article, ...flash...); got:\n{src}",
     );
     assert!(
-        src.contains("render(Views::Articles.edit(@article))"),
-        "expected Views::Articles.edit(@article); got:\n{src}",
+        src.contains("render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]))"),
+        "expected Views::Articles.edit(@article, ...flash...); got:\n{src}",
     );
 }
 
@@ -787,8 +787,8 @@ fn controllers_new_action_views_call_uses_action_name_not_method_name() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.new(@article))"),
-        "expected Views::Articles.new(@article); got:\n{src}",
+        src.contains("render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]))"),
+        "expected Views::Articles.new(@article, ...flash...); got:\n{src}",
     );
     assert!(
         !src.contains("Views::Articles.new_action"),
@@ -804,12 +804,12 @@ fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.new(@article), status: :unprocessable_entity)"),
+        src.contains("render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)"),
         "expected Views call in create's else branch; got:\n{src}",
     );
     // update has the parallel `render :edit, status: :unprocessable_entity`.
     assert!(
-        src.contains("render(Views::Articles.edit(@article), status: :unprocessable_entity)"),
+        src.contains("render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)"),
         "expected Views call in update's else branch; got:\n{src}",
     );
 }
@@ -1225,8 +1225,8 @@ fn lowered_article_partial_emits_module_method_signature() {
     );
     // Partial methods take the singular form of the directory.
     assert!(
-        src.contains("def self.article(article)"),
-        "expected `def self.article(article)`; got:\n{src}",
+        src.contains("def self.article(article, notice = nil, alert = nil)"),
+        "expected `def self.article(article, notice, alert)`; got:\n{src}",
     );
 }
 
@@ -1324,8 +1324,8 @@ fn lowered_form_partial_emits_module_method() {
         "expected nested `module Views; module Articles`; got:\n{src}",
     );
     assert!(
-        src.contains("def self.form(article)"),
-        "expected `def self.form(article)`; got:\n{src}",
+        src.contains("def self.form(article, notice = nil, alert = nil)"),
+        "expected `def self.form(article, notice, alert)`; got:\n{src}",
     );
 }
 
@@ -1461,8 +1461,8 @@ fn lowered_comment_partial_emits_module_method() {
         "expected nested `module Views; module Comments`; got:\n{src}",
     );
     assert!(
-        src.contains("def self.comment(comment)"),
-        "expected `def self.comment(comment)`; got:\n{src}",
+        src.contains("def self.comment(comment, notice = nil, alert = nil)"),
+        "expected `def self.comment(comment, notice, alert)`; got:\n{src}",
     );
 }
 
@@ -1610,8 +1610,8 @@ fn lowered_layout_view_emits_module_method() {
     // Layouts take an explicit `body` parameter — bare `<%= yield %>`
     // in the source resolves to this local.
     assert!(
-        src.contains("def self.application(body)"),
-        "expected `def self.application(body)`; got:\n{src}",
+        src.contains("def self.application(body, notice = nil, alert = nil)"),
+        "expected `def self.application(body, notice, alert)`; got:\n{src}",
     );
 }
 
@@ -1719,8 +1719,8 @@ fn lowered_new_view_dispatches_named_partial() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/new.rb");
     assert!(
-        src.contains("def self.new(article)"),
-        "expected `def self.new(article)`; got:\n{src}",
+        src.contains("def self.new(article, notice = nil, alert = nil)"),
+        "expected `def self.new(article, notice, alert)`; got:\n{src}",
     );
     assert!(
         src.contains("io << Views::Articles.form(article)"),
@@ -1733,8 +1733,8 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/edit.rb");
     assert!(
-        src.contains("def self.edit(article)"),
-        "expected `def self.edit(article)`; got:\n{src}",
+        src.contains("def self.edit(article, notice = nil, alert = nil)"),
+        "expected `def self.edit(article, notice, alert)`; got:\n{src}",
     );
     // Same shared partial as `new.html.erb`.
     assert!(

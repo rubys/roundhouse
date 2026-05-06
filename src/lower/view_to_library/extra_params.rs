@@ -10,8 +10,18 @@ use crate::expr::{Expr, ExprNode, InterpPart};
 /// `notice` / `alert` (Rails flash helpers parsed as bare Sends). They
 /// surface as positional params on the emitted method so the body
 /// type-checks under spinel-blog's runtime.
+///
+/// `notice` and `alert` are *always* included in the result (in that
+/// order) regardless of body usage, so every view's signature has a
+/// uniform shape: `(<main_arg>, notice = nil, alert = nil)`. The
+/// controller→view rewrite (`rewrite_render_to_views`) relies on this
+/// uniform shape to unconditionally pass `@flash[:notice]` /
+/// `@flash[:alert]` at the matching positions — without it, the
+/// controller would need view-specific signature knowledge to decide
+/// whether to pass each flash slot. Cost is two unused locals per
+/// view that doesn't reference flash; emit-side it's negligible.
 pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<String> = vec!["notice".to_string(), "alert".to_string()];
     let mut bound: Vec<String> = Vec::new();
     if !arg_name.is_empty() {
         bound.push(arg_name.to_string());
