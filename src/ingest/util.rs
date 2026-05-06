@@ -69,22 +69,14 @@ pub(super) fn find_first_class<'pr>(node: &Node<'pr>) -> Option<ruby_prism::Clas
     None
 }
 
-/// Collect every `class` declaration reachable from `node`, descending
-/// through `program`, `statements`, and `module` bodies. Source-order
-/// preserved. Used by the library-shape ingest path where one file
-/// can declare multiple classes (e.g.
-/// `runtime/active_record/errors.rb`).
-pub(super) fn find_all_classes<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ClassNode<'pr>> {
-    let mut out = Vec::new();
-    collect_classes(node, &[], &mut |_, c| out.push(c));
-    out
-}
-
-/// Same as `find_all_classes` but pairs each class with its enclosing
-/// module path (as written in the source). `module ActiveRecord; class
-/// Base` produces `(["ActiveRecord"], ClassNode<Base>)` so callers can
-/// build the fully-qualified `ClassId("ActiveRecord::Base")`. Top-
-/// level classes have an empty enclosing path.
+/// Collect every `class` declaration reachable from `node`, paired
+/// with its enclosing module path (as written in the source).
+/// `module ActiveRecord; class Base` produces `(["ActiveRecord"],
+/// ClassNode<Base>)` so callers can build the fully-qualified
+/// `ClassId("ActiveRecord::Base")`. Top-level classes have an empty
+/// enclosing path. Source-order preserved. Used by the library-
+/// shape ingest path where one file can declare multiple classes
+/// (e.g. `runtime/active_record/errors.rb`).
 pub(super) fn find_all_classes_with_scope<'pr>(
     node: &Node<'pr>,
 ) -> Vec<(Vec<String>, ruby_prism::ClassNode<'pr>)> {
@@ -151,22 +143,16 @@ pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<S
 /// at least one direct `def` in its body. Modules with only nested
 /// classes/modules (pure namespace wrappers like `module ActiveRecord`
 /// in errors.rb) are skipped — their nested decls are already picked
-/// up by `find_all_classes` / recursive `find_all_modules` calls.
+/// up via the recursive walk into class/module bodies.
 ///
+/// Each module is paired with its enclosing-scope path (as written
+/// in the source) so callers can build the fully-qualified ClassId.
 /// Used by the library-shape ingest path to lower modules-as-
 /// namespaces (e.g. `module Inflector with def self.pluralize`) into
 /// LibraryClass with no parent. Mixin semantics (modules whose
 /// instance methods are `include`d into classes) are not handled
 /// here — they need a separate lowering when the include site is
 /// known.
-pub(super) fn find_all_modules<'pr>(node: &Node<'pr>) -> Vec<ruby_prism::ModuleNode<'pr>> {
-    let mut out = Vec::new();
-    collect_modules(node, &[], &mut |_, m| out.push(m));
-    out
-}
-
-/// Same as `find_all_modules` but pairs each module with its enclosing
-/// scope path (as written in the source).
 pub(super) fn find_all_modules_with_scope<'pr>(
     node: &Node<'pr>,
 ) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {

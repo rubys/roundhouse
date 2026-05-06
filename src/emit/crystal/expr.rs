@@ -118,25 +118,6 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Resolve a bare framework class name to its fully-qualified Crystal
-/// module path. The body-typer's class registry holds aliases under
-/// the last-segment name (`ViewHelpers`, `Parameters`, ...), but
-/// Crystal's namespace resolution needs the parent module spelled
-/// out at every reference site that isn't itself nested inside the
-/// home module. Returns `None` when the bare name isn't a known
-/// framework class — caller falls back to the unqualified spelling.
-fn qualify_bare_framework(name: &str) -> Option<&'static str> {
-    match name {
-        "HashWithIndifferentAccess" => Some("::ActiveSupport::HashWithIndifferentAccess"),
-        "Parameters" => Some("::ActionController::Parameters"),
-        "ParameterMissing" => Some("::ActionController::ParameterMissing"),
-        "Router" => Some("::ActionDispatch::Router"),
-        "ViewHelpers" => Some("::ActionView::ViewHelpers"),
-        "FormBuilder" => Some("::ActionView::FormBuilder"),
-        _ => None,
-    }
-}
-
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
@@ -149,11 +130,9 @@ fn emit_node(n: &ExprNode) -> String {
             // (Crystal looks up `ActiveRecord` nested-first and finds
             // nothing, then tries outer scope — but reports the failed
             // nested lookup as `ActiveRecord::ActiveRecord:Module`).
-            // Bare references to framework modules outside their own
-            // namespace also benefit from the `::` prefix as a no-op
-            // safety. Limited to a known list of framework module
-            // names; app-level Const refs (`Article`, `Comment`, etc.)
-            // emit unprefixed.
+            // Multi-segment paths whose first element is a known
+            // framework module qualify to absolute (`::ActiveRecord::
+            // Base`); single-segment app refs (`Article`) stay bare.
             let joined = path
                 .iter()
                 .map(|s| s.to_string())
@@ -166,18 +145,7 @@ fn emit_node(n: &ExprNode) -> String {
             ) {
                 return format!("::{joined}");
             }
-            // Bare last-segment refs to framework classes whose home
-            // module is elsewhere — `ViewHelpers` lives under
-            // `ActionView`, `HashWithIndifferentAccess` under
-            // `ActiveSupport`, etc. The body-typer registers an alias
-            // under the bare name so dispatch resolves, but Crystal
-            // namespace lookup needs the qualified path. Re-attach
-            // when we see a single-segment Const matching one of
-            // these known names.
             if path.len() == 1 {
-                if let Some(qualified) = qualify_bare_framework(first) {
-                    return qualified.to_string();
-                }
                 if let Some(replacement) = rewrite_stdlib_const(first) {
                     return replacement.to_string();
                 }
