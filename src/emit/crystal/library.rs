@@ -356,15 +356,40 @@ fn render_class(lc: &LibraryClass) -> String {
         wrote_header_lines = true;
     }
     // Class-var modules (`module_function` style — view_helpers.rb)
-    // share state across `def self.X` methods. Crystal's class-var
-    // type inference picks up types from the union of all assignments,
-    // and an explicit narrow declaration here can over-constrain (e.g.
-    // `@@slots = {}` with `Hash(String, String)` declared but the
-    // bodies using both Symbol and String keys). Skip the declaration
-    // for class-var-modules and let Crystal infer; the explicit
-    // declaration is still useful for instance ivars where the type
-    // is more uniformly determined.
-    if !is_class_var_module {
+    // share state across `def self.X` methods. The Ruby source's
+    // module-body `@var = {}` initializer is dropped at ingest time
+    // (top-level statements outside `def`/constants don't survive),
+    // so Crystal sees the class var only via in-method assignments —
+    // making it nilable until the first call. `@@var[k] = v` then
+    // fails: Crystal complains `[]=` is undefined for `Nil`. Emit
+    // explicit `@@var : Hash(K, V) = {} of K => V` declarations,
+    // deriving K/V from index-assignment sites in the method bodies
+    // (`@@var[k] = v` carries `k.ty` and `v.ty` post body-typer).
+    // Falls back to `Hash(String, String)` when no index assignment
+    // is found — same default the empty-Hash literal emit picks.
+    let mut classvar_hash_types: indexmap::IndexMap<String, (String, String)> =
+        indexmap::IndexMap::new();
+    if is_class_var_module {
+        let mut classvar_index_types: indexmap::IndexMap<String, (crate::ty::Ty, crate::ty::Ty)> =
+            indexmap::IndexMap::new();
+        for m in &lc.methods {
+            collect_classvar_index_types(&m.body, &mut classvar_index_types);
+        }
+        for (name, _ty) in &ivars {
+            let (k_ty, v_ty) = classvar_index_types.get(name).cloned().unwrap_or_else(|| {
+                (crate::ty::Ty::Str, crate::ty::Ty::Str)
+            });
+            let k_s = super::ty::crystal_ty(&k_ty);
+            let v_s = super::ty::crystal_ty(&v_ty);
+            writeln!(
+                s,
+                "{body_pad}@@{name} : Hash({k_s}, {v_s}) = {{}} of {k_s} => {v_s}",
+            )
+            .unwrap();
+            wrote_header_lines = true;
+            classvar_hash_types.insert(name.clone(), (k_s, v_s));
+        }
+    } else {
         for (name, ty) in &ivars {
             // Same inherited-field skip as the property pass.
             if extends_active_record_base
@@ -405,7 +430,28 @@ fn render_class(lc: &LibraryClass) -> String {
             writeln!(s).unwrap();
         }
         first = false;
-        let body = emit_method_impl(m);
+        let mut body = emit_method_impl(m);
+        // For class-var modules, post-process the emitted body to
+        // align in-method empty-Hash assignments (`@@var = {} of
+        // String => String` from emit_hash's default) with the
+        // class-var declared type. `reset_slots!` style methods
+        // need to reassign matching the declared `Hash(K, V)`; the
+        // default `Hash(String, String)` would clash. Cheap string
+        // replace — the pattern is unambiguous (literal `{} of
+        // String => String` only emits as the empty-Hash default).
+        if !classvar_hash_types.is_empty() {
+            for (name, (k_s, v_s)) in &classvar_hash_types {
+                let from = format!(
+                    "@@{name} = {{}} of String => String",
+                );
+                let to = format!(
+                    "@@{name} = {{}} of {k_s} => {v_s}",
+                );
+                if body.contains(&from) {
+                    body = body.replace(&from, &to);
+                }
+            }
+        }
         for line in body.lines() {
             if line.is_empty() {
                 writeln!(s).unwrap();
@@ -466,6 +512,141 @@ fn collect_initialize_assignments(
                 collect_initialize_assignments(e, out);
             }
         }
+        _ => {}
+    }
+}
+
+/// Walk an Expr collecting `@ivar[k] = v` (index-assign on Ivar) sites,
+/// keyed by ivar name. Returns `(key_ty, value_ty)` pairs derived from
+/// the post-typing IR — used by the class-var declaration emit to size
+/// `@@var : Hash(K, V)` precisely. First match wins; multi-method
+/// disagreement falls through to the first encountered shape (rare in
+/// the framework runtime).
+fn collect_classvar_index_types(
+    e: &Expr,
+    out: &mut indexmap::IndexMap<String, (crate::ty::Ty, crate::ty::Ty)>,
+) {
+    use crate::expr::LValue;
+    if let ExprNode::Assign {
+        target: LValue::Index { recv, index },
+        value,
+    } = &*e.node
+    {
+        if let ExprNode::Ivar { name } = &*recv.node {
+            let key_ty = index.ty.clone().unwrap_or(crate::ty::Ty::Str);
+            let val_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Str);
+            out.entry(name.as_str().to_string())
+                .or_insert((key_ty, val_ty));
+        }
+    }
+    // Also handle `Send { method: "[]=" , recv: Ivar, args: [k, v] }`
+    // — Ruby's parser sometimes shapes `@var[k] = v` this way.
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
+        if method.as_str() == "[]=" && args.len() == 2 {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                let key_ty = args[0].ty.clone().unwrap_or(crate::ty::Ty::Str);
+                let val_ty = args[1].ty.clone().unwrap_or(crate::ty::Ty::Str);
+                out.entry(name.as_str().to_string())
+                    .or_insert((key_ty, val_ty));
+            }
+        }
+    }
+    visit_subexprs_for_classvar(e, |c| collect_classvar_index_types(c, out));
+}
+
+fn visit_subexprs_for_classvar(e: &Expr, mut f: impl FnMut(&Expr)) {
+    use crate::expr::LValue;
+    match &*e.node {
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                f(recv);
+            }
+            f(value);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                f(r);
+            }
+            for a in args {
+                f(a);
+            }
+            if let Some(b) = block {
+                f(b);
+            }
+        }
+        ExprNode::Apply { fun, args, block } => {
+            f(fun);
+            for a in args {
+                f(a);
+            }
+            if let Some(b) = block {
+                f(b);
+            }
+        }
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                f(k);
+                f(v);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for el in elements {
+                f(el);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        ExprNode::Let { value, body, .. } => {
+            f(value);
+            f(body);
+        }
+        ExprNode::Lambda { body, .. } => f(body),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            f(cond);
+            f(then_branch);
+            f(else_branch);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            f(scrutinee);
+            for arm in arms {
+                f(&arm.body);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                f(e);
+            }
+        }
+        ExprNode::Yield { args } => {
+            for a in args {
+                f(a);
+            }
+        }
+        ExprNode::Raise { value } => f(value),
+        ExprNode::RescueModifier { expr, fallback } => {
+            f(expr);
+            f(fallback);
+        }
+        ExprNode::Return { value } => f(value),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            f(body);
+            for r in rescues {
+                f(&r.body);
+            }
+            if let Some(e) = else_branch {
+                f(e);
+            }
+            if let Some(e) = ensure {
+                f(e);
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            f(cond);
+            f(body);
+        }
+        ExprNode::Cast { value, .. } => f(value),
         _ => {}
     }
 }
