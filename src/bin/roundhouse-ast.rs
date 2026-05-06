@@ -13,7 +13,7 @@
 //! roundhouse-ast --stage prism -e '@x.y do end' # see what Prism produced
 //! roundhouse-ast --stage compile-erb view.erb   # see compiler's Ruby output
 //! roundhouse-ast --stage emit-ruby -e '"a#{x}"' # round-trip one expression
-//! roundhouse-ast --round-trip view.erb          # full ingest→emit→ingest diff
+//! roundhouse-ast --round-trip -e 'a + b'        # ingest→emit→ingest diff
 //! roundhouse-ast --stages -e 'form.label :x'    # run every stage, dump each
 //! ```
 //!
@@ -203,11 +203,15 @@ fn run(args: &Args) -> Result<(), String> {
     };
 
     if args.round_trip {
-        return if is_erb {
-            run_round_trip_erb(&raw_source)
-        } else {
-            run_round_trip_expr(&compiled)
-        };
+        if is_erb {
+            return Err(
+                "--round-trip is only supported for plain Ruby snippets; ERB \
+                 reconstruction was removed when the spinel emit pipeline \
+                 dropped the parsed-AST emitter."
+                    .into(),
+            );
+        }
+        return run_round_trip_expr(&compiled);
     }
 
     let stages: Vec<Stage> = if args.all_stages {
@@ -312,29 +316,6 @@ fn run_round_trip_expr(compiled_ruby: &str) -> Result<(), String> {
         format!("re-ingest of emitted Ruby failed: {e}\n--- emitted Ruby ---\n{emitted}")
     })?;
     compare_ir("ingest → emit-ruby → ingest", &first, &second, &emitted)
-}
-
-/// ERB round-trip: compile the template, ingest to a view body,
-/// reconstruct the template via the view-emitter path, re-compile
-/// and re-ingest, compare IRs. This matches the pipeline that
-/// `ir_is_fixed_under_emit_ingest` exercises for a whole app, but
-/// scoped to one file.
-fn run_round_trip_erb(erb_source: &str) -> Result<(), String> {
-    let compiled_1 = erb::compile_erb(erb_source);
-    let first = ingest_snippet(&compiled_1)?;
-    let reconstructed_erb = ruby_emit::reconstruct_erb(&first);
-    let compiled_2 = erb::compile_erb(&reconstructed_erb);
-    let second = ingest_snippet(&compiled_2).map_err(|e| {
-        format!(
-            "re-ingest of reconstructed ERB failed: {e}\n--- reconstructed ERB ---\n{reconstructed_erb}"
-        )
-    })?;
-    compare_ir(
-        "compile-erb → ingest → reconstruct-erb → compile-erb → ingest",
-        &first,
-        &second,
-        &reconstructed_erb,
-    )
 }
 
 fn compare_ir(

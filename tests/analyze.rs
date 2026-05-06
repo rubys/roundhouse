@@ -1586,19 +1586,3 @@ fn analysis_is_idempotent() {
     assert_eq!(first, app, "analyzer must be idempotent");
 }
 
-#[test]
-fn ruby_emit_is_type_invariant() {
-    // Ruby is dynamic: `a + b` dispatches at runtime, so the Ruby emitter
-    // never needs types to pick an operation. Running the analyzer must
-    // therefore leave Ruby emission unchanged.
-    //
-    // This test is SPECIFIC to the Ruby emitter. Typed targets (Rust, Go,
-    // typed TypeScript) will emit differently depending on operand types —
-    // that's the whole point of the type system. Do NOT generalize this
-    // assertion across emitters.
-    use roundhouse::emit::ruby;
-    let unanalyzed = ingest_app(fixture_path()).expect("ingest");
-    let mut analyzed = unanalyzed.clone();
-    Analyzer::new(&analyzed).analyze(&mut analyzed);
-    assert_eq!(ruby::emit(&unanalyzed), ruby::emit(&analyzed));
-}

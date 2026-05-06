@@ -1,40 +1,31 @@
-//! Ruby emitter: App → a set of Ruby source files.
+//! Ruby emitter: App → spinel-shape Ruby source files.
 //!
-//! The reverse direction of Prism ingest. Together they form the round-trip
-//! forcing function: Ruby source → IR → Ruby source should preserve semantics.
-//!
-//! Organized into one submodule per output kind. Cross-cutting helpers live
-//! in `shared`; expression emission lives in `expr` and is reused by all the
-//! per-form modules.
+//! Mirrors the Crystal emitter's structure: lowered IR (LibraryClass) is
+//! the single input, and emission is uniform across Rails components
+//! (models, controllers, views, routes, schema all flow through
+//! `library::emit_library_class_decl`). No parsed-AST emit path —
+//! per the convergence decision, source-equivalence round-trip is no
+//! longer a goal; compile-equivalence via Spinel is. Cross-cutting
+//! helpers live in `shared`; expression emission lives in `expr`.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::dialect::{MethodDef, MethodReceiver};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 
 /// Canonical spinel test bootstrap. Single source of truth for what
 /// the emitted spinel project's `test/test_helper.rb` should contain.
 const SPINEL_TEST_HELPER: &str =
     include_str!("../../runtime/spinel/test/test_helper.rb");
 
-mod controller;
 mod expr;
-mod fixture;
-mod importmap;
 mod library;
-mod model;
-mod route;
-mod schema;
-mod seeds;
 mod shared;
-mod test;
-mod view;
 
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
-pub use view::reconstruct_erb;
 
 /// Emit a single `MethodDef` as Ruby source (trailing newline included).
 /// The signature and effects are not emitted — they belong to the RBS
@@ -219,14 +210,55 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// dispatcher (synthesizing before-action filters as conditional calls
 /// and case-dispatching to per-action methods) plus the public actions
 /// and private filter targets as ordinary methods. Output is one
-/// `app/controllers/<name>.rb` per controller.
-///
-/// What this pass DOESN'T cover (each is a follow-on lowerer): action-
-/// body rewrites such as `params` → `@params`, polymorphic
-/// `redirect_to @x` → `RouteHelpers.x_path(@x.id)`, and
-/// `Article.includes(:foo).order(...)` → `.all` + in-memory sort.
+/// `app/controllers/<name>.rb` per non-synthesized class; tagged
+/// synthesized siblings (`<Resource>Params` holders) route to
+/// `app/models/<name>.rb` because they're plain holders, not request
+/// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    controller::emit_lowered_controllers(app)
+    let lcs = lower_controllers_for_spinel(app);
+    emit_lowered_controllers_from_lcs(&lcs, app)
+}
+
+/// Bulk lower controllers in spinel-shape. Synthesized siblings
+/// (`<Resource>Params`) ride alongside the controller classes in the
+/// returned vec.
+fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
+    crate::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new())
+}
+
+/// Render pre-lowered controller `LibraryClass`es to one
+/// `app/controllers/<stem>.rb` per non-synthesized class plus
+/// `app/models/<stem>.rb` for tagged synthesized siblings.
+fn emit_lowered_controllers_from_lcs(
+    lcs: &[LibraryClass],
+    app: &App,
+) -> Vec<EmittedFile> {
+    let synthesized: Vec<(String, String)> = lcs
+        .iter()
+        .filter(|lc| lc.origin.is_some())
+        .map(|lc| {
+            let name = lc.name.0.as_str().to_string();
+            let stem = crate::naming::snake_case(&name);
+            (name, format!("app/models/{stem}"))
+        })
+        .collect();
+
+    lcs.iter()
+        .map(|lc| {
+            let file_stem = crate::naming::snake_case(lc.name.0.as_str());
+            let out_path = if lc.origin.is_some() {
+                PathBuf::from(format!("app/models/{file_stem}.rb"))
+            } else {
+                PathBuf::from(format!("app/controllers/{file_stem}.rb"))
+            };
+            library::emit_library_class_decl_with_synthesized(
+                lc,
+                app,
+                out_path,
+                &synthesized,
+            )
+        })
+        .collect()
 }
 
 /// Lower each `app.views` entry through `view_to_library` and emit
@@ -420,44 +452,3 @@ fn test_file_stem(class_name: &str) -> String {
     crate::naming::snake_case(stem)
 }
 
-pub fn emit(app: &App) -> Vec<EmittedFile> {
-    let mut files = Vec::new();
-    if !app.schema.tables.is_empty() {
-        files.push(schema::emit_schema(&app.schema));
-    }
-    for m in &app.models {
-        files.push(model::emit_model(m));
-    }
-    for c in &app.controllers {
-        files.push(controller::emit_controller(c));
-    }
-    files.push(route::emit_routes(&app.routes));
-    for v in &app.views {
-        files.push(view::emit_view(v));
-    }
-    for tm in &app.test_modules {
-        files.push(test::emit_test_module(tm));
-    }
-    for f in &app.fixtures {
-        files.push(fixture::emit_fixture(f));
-    }
-    if let Some(seeds) = &app.seeds {
-        files.push(seeds::emit_seeds(seeds));
-    }
-    if let Some(im) = &app.importmap {
-        files.push(importmap::emit_importmap(im));
-    }
-    // Preserve the discovered stylesheet list for round-trip by
-    // emitting placeholder `.css` files. The content is empty on
-    // purpose — the files act as a manifest that re-ingest
-    // rediscovers, nothing more. A production Ruby emit would
-    // copy real stylesheet content; we're aiming at IR fidelity
-    // here, not asset pipeline reproduction.
-    for name in &app.stylesheets {
-        files.push(EmittedFile {
-            path: PathBuf::from(format!("app/assets/stylesheets/{name}.css")),
-            content: String::new(),
-        });
-    }
-    files
-}
