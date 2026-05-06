@@ -15,9 +15,7 @@ use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver};
 
 /// Canonical spinel test bootstrap. Single source of truth for what
-/// the emitted spinel project's `test/test_helper.rb` should contain;
-/// the bridge at `fixtures/spinel-blog/test/test_helper.rb` and the
-/// overlay flow both route to this same content.
+/// the emitted spinel project's `test/test_helper.rb` should contain.
 const SPINEL_TEST_HELPER: &str =
     include_str!("../../runtime/spinel/test/test_helper.rb");
 
@@ -258,11 +256,10 @@ fn view_output_path(view_name: &str) -> PathBuf {
 
 /// Spinel-shape emit: lowered IR rendered as runnable Ruby. Composes
 /// the five `emit_lowered_*` functions into a single project — schema,
-/// routes, models, controllers, views — matching `fixtures/spinel-blog`'s
-/// directory shape. The natural validation target of the lowering
-/// pipeline (per `project_lowerers_first_validate_via_spinel.md`):
-/// CRuby executes the output, and spinel-blog's hand-written tests
-/// serve as the contract until spinel grows its own test runner.
+/// routes, models, controllers, views — laid out under the spinel
+/// target's directory shape (app/, config/, test/). The natural
+/// validation target of the lowering pipeline: CRuby executes the
+/// output until spinel grows its own test runner.
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(emit_lowered_schema(app));

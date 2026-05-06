@@ -1,13 +1,15 @@
-# spinel-blog
+# spinel-target blog
 
 A complete blog application — models with validations and associations,
 Hotwire-style Turbo Stream broadcasts, controllers with strong
 parameters and flash, layouts styled with Tailwind — implemented in
 pure CRuby with no metaprogramming and no Rails dependency at runtime.
-The shape Roundhouse's Ruby emitter targets, and the runtime scaffold
-the transpile pipeline overlays its output onto. The seed for
-compiling the same blog into a native binary via
+The shape Roundhouse's Ruby emitter targets. The seed for compiling
+the same blog into a native binary via
 [Spinel](https://github.com/matz/spinel).
+
+This README ships in `runtime/spinel/scaffold/` and is copied verbatim
+into each emitted spinel project.
 
 This is a working specimen, not a framework. Read it to see what
 "Rails-shape Ruby without metaprogramming" actually looks like
@@ -112,7 +114,7 @@ refresh.
 ## Architecture
 
 ```
-fixtures/spinel-blog/
+<emitted spinel project>/
   app/
     controllers/                 ApplicationController + Articles + Comments
     models/                      ApplicationRecord + Article + Comment + ArticleParams (typed param factories)

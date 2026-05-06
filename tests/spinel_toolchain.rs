@@ -17,10 +17,12 @@
 //!     cargo test --test spinel_toolchain -- --ignored --nocapture
 //!
 //! Layout: emit lowered files into a scratch dir overlaid on a copy of
-//! `fixtures/spinel-blog/{runtime,test,config,Gemfile,Gemfile.lock,
-//! main.rb,Rakefile,server,tools}` (plus `app/views.rb` — a hand-written
-//! aggregator we don't yet emit), then `bundle exec ruby` each
-//! model/controller test against the emitted code.
+//! `runtime/spinel/scaffold/` (Gemfile, inner Makefile, main.rb,
+//! app/views.rb — a hand-written aggregator we don't yet emit, server/,
+//! tools/), `runtime/spinel/test/` (target-specific tests), plus the
+//! framework Ruby + spinel primitives flattened into `runtime/`. Then
+//! `bundle exec ruby` each model/controller test against the emitted
+//! code.
 //!
 //! Suites validated: article + comment model tests, articles + comments
 //! controller tests. article_broadcasts and the views suite have known
@@ -39,7 +41,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 }
 
 /// Recursively copy a tree. Used to seed the scratch dir with
-/// spinel-blog scaffolding before overlaying emitted files.
+/// runtime/spinel scaffolding before overlaying emitted files.
 fn copy_tree(src: &Path, dst: &Path) {
     if src.is_dir() {
         std::fs::create_dir_all(dst).expect("mkdir");
@@ -55,42 +57,33 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// Build the scratch project: spinel-blog scaffold + emitted spinel
+/// Build the scratch project: runtime/spinel scaffold + emitted spinel
 /// app/. Returns the scratch path.
-fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
+fn generate_project(fixture: &Path, scratch: &Path) {
     if scratch.exists() {
         std::fs::remove_dir_all(scratch).expect("clean scratch");
     }
     std::fs::create_dir_all(scratch).expect("create scratch");
 
-    // Scaffolding from spinel-blog. `app/views.rb` is the hand-written
-    // aggregator (`module Views; require_relative ... end`); the rest
-    // are the runtime, test suite, etc. Gemfile is NOT copied — we
-    // point bundler at spinel-blog's via BUNDLE_GEMFILE so the gem
-    // cache from ruby/setup-ruby (which runs `bundle install` against
-    // fixtures/spinel-blog) is reused.
-    for entry in ["runtime", "test", "config", "server", "tools", "main.rb", "Rakefile"] {
-        let src = scaffold.join(entry);
-        if src.exists() {
-            copy_tree(&src, &scratch.join(entry));
-        }
-    }
-    std::fs::create_dir_all(scratch.join("app")).expect("mkdir app");
-    std::fs::copy(
-        scaffold.join("app/views.rb"),
-        scratch.join("app/views.rb"),
-    )
-    .expect("copy app/views.rb");
+    // Verbatim scaffold (Gemfile, inner Makefile, main.rb, app/views.rb,
+    // app/assets/tailwind.css, server/, tools/, .gitignore). Bundler
+    // resolves against the scratch's own Gemfile via BUNDLE_GEMFILE in
+    // assert_test_passes.
+    let scaffold = Path::new("runtime/spinel/scaffold");
+    copy_tree(scaffold, scratch);
 
-    // Replace the bridge `.rb` files in scratch/runtime/ with the
-    // canonical files from runtime/{ruby,spinel}/. The bridges in
-    // fixtures/spinel-blog/runtime/ route to ../../../runtime/{ruby,spinel}/
-    // — which doesn't resolve from the scratch dir. The scratch
-    // simulates the eventual Spinel-target layout where runtime/ is
-    // a flat tree of framework code (ruby) + primitive runtime (spinel).
+    // Target-specific tests (broadcasts/cgi_io/in_memory_adapter at the
+    // top level + integration/views/models/tools subdirs).
+    copy_tree(Path::new("runtime/spinel/test"), &scratch.join("test"));
+
+    // Runtime: framework Ruby + spinel target primitives, both flat
+    // under scratch/runtime/. The scratch simulates the eventual
+    // Spinel-target layout where runtime/ is a flat tree of framework
+    // code (ruby) + primitive runtime (spinel).
     let runtime_ruby = Path::new("runtime/ruby");
     for entry in [
         "active_record",
+        "active_support",
         "action_view",
         "action_controller",
         "action_dispatch",
@@ -128,8 +121,8 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
     }
     // Emit the spinel-shape app/ from real-blog and write into scratch.
     // emit_spinel writes its own `test/test_helper.rb` from the canonical
-    // at `runtime/spinel/test/`, overwriting the bridge that was copied
-    // in by the spinel-blog scaffold above.
+    // at `runtime/spinel/test/`, overwriting the copy laid down above
+    // (same content; harmless).
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     for file in ruby::emit_spinel(&app) {
@@ -150,9 +143,9 @@ fn generate_project(fixture: &Path, scaffold: &Path, scratch: &Path) {
 }
 
 /// Run a single test file via `bundle exec ruby -Itest -I.` and assert
-/// it exits zero. Bundler resolves against `fixtures/spinel-blog/Gemfile`
-/// (set via BUNDLE_GEMFILE) so the gem cache populated by CI's
-/// ruby/setup-ruby step is reused.
+/// it exits zero. Bundler resolves against
+/// `runtime/spinel/scaffold/Gemfile` (set via BUNDLE_GEMFILE) so the
+/// gem cache populated by CI's ruby/setup-ruby step is reused.
 fn assert_test_passes(scratch: &Path, gemfile: &Path, test_path: &str) {
     let output = Command::new("bundle")
         .env("BUNDLE_GEMFILE", gemfile)
@@ -179,14 +172,13 @@ fn assert_test_passes(scratch: &Path, gemfile: &Path, test_path: &str) {
 #[ignore]
 fn real_blog_spinel_tests_pass() {
     let fixture = Path::new("fixtures/real-blog");
-    let scaffold = Path::new("fixtures/spinel-blog");
     let scratch = scratch_dir("real-blog");
-    generate_project(fixture, scaffold, &scratch);
+    generate_project(fixture, &scratch);
 
-    // Absolute path to spinel-blog's Gemfile so BUNDLE_GEMFILE works
+    // Absolute path to the scaffold's Gemfile so BUNDLE_GEMFILE works
     // regardless of the spawned process's cwd.
-    let gemfile = std::fs::canonicalize(scaffold.join("Gemfile"))
-        .expect("canonicalize spinel-blog Gemfile");
+    let gemfile = std::fs::canonicalize("runtime/spinel/scaffold/Gemfile")
+        .expect("canonicalize scaffold Gemfile");
 
     for test in [
         "test/models/article_test.rb",

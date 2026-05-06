@@ -1,4 +1,4 @@
-require_relative "../test_helper"
+require_relative "test_helper"
 require "in_memory_adapter"
 require "models/article"
 require "models/comment"

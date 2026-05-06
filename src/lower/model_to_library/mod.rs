@@ -3,10 +3,11 @@
 //! is a flat sequence of `MethodDef`s — the universal IR shape every
 //! emitter consumes (see `project_universal_post_lowering_ir.md`).
 //!
-//! The output target is `fixtures/spinel-blog/app/models/<model>.rb`:
-//! explicit method bodies (`def title; @title; end`, `def comments;
-//! Comment.where(article_id: @id); end`, `def validate;
-//! validates_presence_of(:title) { @title }; end`), no Rails DSL.
+//! The output target is the emitted `app/models/<model>.rb` in the
+//! spinel-shape tree: explicit method bodies (`def title; @title;
+//! end`, `def comments; Comment.where(article_id: @id); end`, `def
+//! validate; validates_presence_of(:title) { @title }; end`), no
+//! Rails DSL.
 //!
 //! This module is pure: input is one `Model` plus the app `Schema`, output
 //! is one `LibraryClass`. No side-effects, no per-target choices. Per-Rails-

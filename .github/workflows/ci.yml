@@ -204,12 +204,11 @@ jobs:
   # -------------------------------------------------------------------
   # Spinel toolchain. Methodology asymmetry vs. the other toolchain
   # jobs: Spinel doesn't yet have its own test runner, so this job
-  # emits ONLY the lowered app/ from real-blog and runs spinel-blog's
-  # hand-written tests (fixtures/spinel-blog/test/) over the emitted
+  # emits the lowered app/ from real-blog plus the target-specific
+  # tests from runtime/spinel/test/, then runs them over the emitted
   # output via CRuby (Spinel is a Ruby subset). Other toolchain jobs
   # emit both app + tests and run the emitted tests; the swap will
-  # happen here once Spinel grows a runner. See
-  # `project_spinel_test_asymmetry`.
+  # happen here once Spinel grows a runner.
   toolchain-spinel:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -226,7 +225,7 @@ jobs:
         with:
           ruby-version: '3.4'
           bundler-cache: true
-          working-directory: ./fixtures/spinel-blog
+          working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored
         run: cargo test --test spinel_toolchain -- --ignored --nocapture
 
@@ -403,11 +402,11 @@ jobs:
 
   # -------------------------------------------------------------------
   # compare-spinel: same DOM-diff harness as the other compare-* jobs,
-  # but the spinel target uses CRuby + the spinel-blog dev server (no
+  # but the spinel target uses CRuby + the scaffold dev server (no
   # native compile yet — that's gated on Spinel itself growing the
   # surface area roundhouse emits). Two ruby/setup-ruby steps run:
   # the first sets up the Rails-side bundle for the reference server,
-  # the second sets up the spinel-blog bundle the dev server uses.
+  # the second sets up the scaffold bundle the dev server uses.
   # -------------------------------------------------------------------
   compare-spinel:
     needs: generate-fixture
@@ -430,7 +429,7 @@ jobs:
         with:
           ruby-version: '3.4'
           bundler-cache: true
-          working-directory: ./fixtures/spinel-blog
+          working-directory: ./runtime/spinel/scaffold
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

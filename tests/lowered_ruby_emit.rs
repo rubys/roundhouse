@@ -1,10 +1,9 @@
 //! Regression test for the lower → Ruby emit pipeline. Drives
 //! `emit_lowered_models` against `fixtures/real-blog` and asserts the
-//! emitted source matches the universal post-lowering shape. The hand-
-//! written `fixtures/spinel-blog/app/models/*.rb` is the visual
-//! reference; this test asserts structural equivalents (key methods
-//! present with the right body shapes) rather than byte-for-byte match,
-//! so surface-formatting churn doesn't ripple in.
+//! emitted source matches the universal post-lowering shape. The test
+//! asserts structural equivalents (key methods present with the right
+//! body shapes) rather than byte-for-byte match, so surface-formatting
+//! churn doesn't ripple in.
 //!
 //! See `project_lowerers_first_validate_via_spinel.md` — Spinel is the
 //! validation target for the lowering pipeline; per-target emitter

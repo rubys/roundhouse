@@ -3,11 +3,11 @@
 //! shape every emitter consumes (see
 //! `project_universal_post_lowering_ir.md`).
 //!
-//! The output target is `fixtures/spinel-blog/app/controllers/<name>.rb`:
-//! a synthesized `process_action(action_name)` dispatcher that
-//! conditionally invokes before-action filters and case-dispatches to
-//! per-action methods, plus the public actions and the private filter
-//! targets as ordinary methods.
+//! The output target is the emitted `app/controllers/<name>.rb` in the
+//! spinel-shape tree: a synthesized `process_action(action_name)`
+//! dispatcher that conditionally invokes before-action filters and
+//! case-dispatches to per-action methods, plus the public actions and
+//! the private filter targets as ordinary methods.
 //!
 //! What this pass does NOT do (each is a separate follow-on lowerer):
 //!

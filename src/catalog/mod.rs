@@ -640,7 +640,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     // ---- Per-model accessors ----
     // These methods exist on every model. The lowerer emits typed
     // per-column bodies into each model class (no reflective base
-    // implementation in scope today; see `fixtures/spinel-blog/`).
+    // implementation in scope today).
     // Cataloguing the contract here keeps the analyzer's per-model
     // registry honest: callers like `article[:title]` resolve
     // regardless of which model class the body lives on.

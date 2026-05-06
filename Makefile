@@ -39,12 +39,15 @@ compare-spinel:
 # ── Spinel demo: transpile real-blog to a runnable spinel-shape app ──
 #
 # Produces $(SPINEL_OUT) by overlaying lowered output from real-blog
-# on top of a verbatim copy of fixtures/spinel-blog/. The runtime,
-# dev server, Gemfile, Makefile, main.rb, app/views.rb, and
-# tailwind.css come from the spinel-blog scaffold; the lowered emit
-# replaces the hand-written app/{models,controllers,views} and
-# config/{schema,routes}.rb. The result is runnable: `make spinel-dev`
-# delegates to the inner Makefile's `dev` target → server boots on :3000.
+# on top of the spinel-target scaffold (runtime/spinel/scaffold/) and
+# runtime trees. Scaffold provides Gemfile, inner Makefile, main.rb,
+# app/views.rb, app/assets/tailwind.css, server/dev_server.rb, tools/,
+# .gitignore. Runtime is framework Ruby (runtime/ruby/) plus spinel
+# target primitives (runtime/spinel/*.rb). Lowered emit fills
+# app/{models,controllers,views}, config/{schema,routes}.rb, and
+# test/{test_helper,models,controllers,fixtures}. The result is
+# runnable: `make spinel-dev` delegates to the inner Makefile's `dev`
+# target → server boots on :3000.
 #
 # This is the same scaffold-overlay-emit pattern that
 # `tests/spinel_toolchain.rs` uses for the toolchain CI job; the
@@ -52,33 +55,29 @@ compare-spinel:
 
 SPINEL_OUT ?= build/transpiled-blog
 
-$(SPINEL_OUT)/.stamp: fixtures/real-blog fixtures/spinel-blog runtime/ruby runtime/spinel
+$(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	rm -rf $(SPINEL_OUT)
 	mkdir -p $(SPINEL_OUT)
-	cp -r fixtures/spinel-blog/. $(SPINEL_OUT)/
-	# Replace the bridge `.rb` files in $(SPINEL_OUT)/runtime/ with
-	# the canonical files from runtime/{ruby,spinel}/. The bridges in
-	# fixtures/spinel-blog/runtime/ exist so the standalone fixture's
-	# main.rb / test_helper.rb find runtime code via the same
-	# `require_relative "runtime/X"` shape; in the emitted demo the
-	# runtime lives in a flat `runtime/` tree (the eventual Spinel-
-	# target layout) so we overwrite the bridges here.
-	#
-	# runtime/ruby/ — framework Ruby (transpiled per-target source-of-
-	# truth; lands as-is for spinel since spinel runs Ruby AOT).
-	# runtime/spinel/ — spinel-target primitive runtime (DB adapters,
-	# CGI I/O, broadcasts log).
-	# Selective: runtime/ruby/test/ is roundhouse-side test fixturing.
+	# Verbatim scaffold for the output tree.
+	cp -r runtime/spinel/scaffold/. $(SPINEL_OUT)/
+	# Target-specific tests (broadcasts/cgi_io/in_memory_adapter +
+	# integration/views/models/tools subdirs). emit_spinel layers
+	# test/{test_helper,models/{article,comment}_test,controllers/*,
+	# fixtures/*} on top via the JSON explode below.
+	mkdir -p $(SPINEL_OUT)/test
+	cp -r runtime/spinel/test/. $(SPINEL_OUT)/test/
+	# Runtime: framework Ruby (runtime/ruby/) + spinel target
+	# primitives (runtime/spinel/*.rb). Both land flat under
+	# $(SPINEL_OUT)/runtime/. runtime/ruby/test/ is roundhouse-side
+	# test fixturing — not emitted here.
+	mkdir -p $(SPINEL_OUT)/runtime
 	cp -r runtime/ruby/active_record runtime/ruby/active_support \
-	      runtime/ruby/action_view \
-	      runtime/ruby/action_controller runtime/ruby/action_dispatch \
+	      runtime/ruby/action_view runtime/ruby/action_controller \
+	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
 	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
 	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
-	# (The canonical `test/test_helper.rb` is emitted by emit_spinel —
-	# it replaces the bridge that the verbatim spinel-blog copy above
-	# put in place. No overlay needed here.)
 	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
