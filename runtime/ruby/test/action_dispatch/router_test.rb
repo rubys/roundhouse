@@ -9,6 +9,11 @@ require_relative "../test_helper"
 # A regression test against that shape would have caught the
 # transpile bug before it shipped.
 class RouterTest < Minitest::Test
+  # Bring `ActionDispatch::Router` into scope as `Router` for test
+  # readability — the source declares the canonical Rails-style nested
+  # path; bare refs from app code follow Ruby's `include` convention.
+  include ActionDispatch
+
   TABLE = [
     { method: "GET",    pattern: "/articles",     controller: :articles_controller, action: :index   },
     { method: "GET",    pattern: "/articles/:id", controller: :articles_controller, action: :show    },

@@ -86,6 +86,36 @@ pub struct ClassInfo {
     pub parent: Option<crate::ident::ClassId>,
 }
 
+/// Resolve a single-segment Const ref (like `Const { path:
+/// ["HashWithIndifferentAccess"] }` from app source) to a fully-
+/// qualified ClassId by walking the class registry. Returns the
+/// fully-qualified `Symbol` when exactly one registry key matches —
+/// "matches" meaning the key has `::` separator(s) AND the last
+/// segment equals `name`. App-class single-segment keys (`Article`,
+/// `Comment`) don't match (no `::`), so they stay bare. Multiple
+/// matches (rare — would be e.g. `ActiveRecord::Base` and
+/// `ActionController::Base`) leave the ref bare too — body-typer
+/// can't disambiguate without lexical scope, and the bare form
+/// still types via the registry's last-segment alias entry.
+fn expand_bare_const(
+    name: &Symbol,
+    classes: &HashMap<ClassId, ClassInfo>,
+) -> Option<Symbol> {
+    let target = name.as_str();
+    let suffix = format!("::{target}");
+    let mut found: Option<&str> = None;
+    for key in classes.keys() {
+        let raw = key.0.as_str();
+        if raw.contains("::") && raw.ends_with(&suffix) {
+            if found.is_some() {
+                return None; // ambiguous
+            }
+            found = Some(raw);
+        }
+    }
+    found.map(Symbol::from)
+}
+
 /// Reusable body-type walker. Holds a borrow of the dispatch table so
 /// repeated `analyze_expr` calls reuse the same lookup structures
 /// without cloning.
@@ -135,17 +165,36 @@ impl<'a> BodyTyper<'a> {
                 if let Some(ty) = ctx.constants.get(&last) {
                     return ty.clone();
                 }
-                // Fall back to class-by-name. Build the Ty::Class
-                // ClassId from the FULL path (`ActiveSupport::
-                // HashWithIndifferentAccess` for `Const { path:
-                // ["ActiveSupport", "HashWithIndifferentAccess"]
-                // }`), matching the fully-qualified shape RBS scope
-                // tracking + ingest now produce. Single-segment
-                // refs (`Article`, `Comment`, etc.) keep their bare
-                // form. The registry-builder aliases full-path
-                // entries under their last segment too, so source-
-                // level bare references (`Parameters.new(...)` from
-                // inside any module) still resolve.
+                // Build a Ty::Class ClassId from the path. For multi-
+                // segment writes (`ActiveSupport::HashWithIndifferentAccess`)
+                // use the joined path verbatim. For single-segment app-
+                // source refs (`Parameters.new(...)`, `HashWithIndifferentAccess.new`),
+                // try to expand bare → fully-qualified by walking the
+                // class registry: if exactly one fully-qualified entry
+                // (key contains `::`) ends with `::<name>`, swap in the
+                // full path AND REWRITE THE IR PATH so per-target emit
+                // sees the canonical form (Crystal's `Const` arm reads
+                // the path field, not the type annotation; rewriting
+                // makes a single emit pass produce `::ActionView::
+                // ViewHelpers.dom_id(...)` from a source-bare Const).
+                // App classes (`Article`, `Comment` — single-segment
+                // registry keys) stay bare. Mirrors Ruby's lexical
+                // lookup walking up to top-level — but driven by the
+                // registry rather than the AST scope chain.
+                if path.len() == 1 {
+                    if let Some(qualified) = expand_bare_const(&last, self.classes()) {
+                        let segments: Vec<Symbol> = qualified
+                            .as_str()
+                            .split("::")
+                            .map(Symbol::from)
+                            .collect();
+                        *path = segments;
+                        return Ty::Class {
+                            id: ClassId(qualified),
+                            args: vec![],
+                        };
+                    }
+                }
                 let joined_path = path
                     .iter()
                     .map(|s| s.as_str())

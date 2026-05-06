@@ -331,7 +331,7 @@ pub(crate) fn insert_framework_stubs(
     };
 
     let form_builder_ty = Ty::Class {
-        id: ClassId(Symbol::from("FormBuilder")),
+        id: ClassId(Symbol::from("ActionView::ViewHelpers::FormBuilder")),
         args: vec![],
     };
 
@@ -433,7 +433,12 @@ pub(crate) fn insert_framework_stubs(
         );
     }
     tag_all_method(&mut vh);
-    classes.insert(ClassId(Symbol::from("ViewHelpers")), vh);
+    // Canonical Rails-style nested path; body-typer's Const-arm
+    // bare-name expansion swaps `Const { path: ["ViewHelpers"] }`
+    // (from app/view source code) to the full path via this registry
+    // entry. Lowerer-synthesized refs (`view_helpers_call`) also
+    // resolve through the same key.
+    classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
 
     // RouteHelpers — every `_path` / `_url` helper returns String.
     // Catch-all: the typer's `Class { id }` lookup returns Untyped if
@@ -574,7 +579,7 @@ pub(crate) fn insert_framework_stubs(
         );
     }
     tag_all_method(&mut fb);
-    classes.insert(ClassId(Symbol::from("FormBuilder")), fb);
+    classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers::FormBuilder")), fb);
 
     // ErrorCollection — what `record.errors` returns. `each` yields
     // a String message (Spinel-shape: errors are stored as flat
@@ -617,7 +622,7 @@ pub(crate) fn insert_framework_stubs(
     // undefined.
     let mut params_cls = crate::analyze::ClassInfo::default();
     let untyped_hash = Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) };
-    let params_ty = Ty::Class { id: ClassId(Symbol::from("Parameters")), args: vec![] };
+    let params_ty = Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![] };
     params_cls.instance_methods.insert(
         Symbol::from("[]"),
         fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
@@ -672,7 +677,7 @@ pub(crate) fn insert_framework_stubs(
         fn_sig(vec![], Ty::Bool),
     );
     tag_all_method(&mut params_cls);
-    classes.insert(ClassId(Symbol::from("Parameters")), params_cls);
+    classes.insert(ClassId(Symbol::from("ActionController::Parameters")), params_cls);
 }
 
 // ── view-name → module / arg / method helpers ────────────────────

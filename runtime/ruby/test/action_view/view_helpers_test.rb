@@ -6,6 +6,11 @@ require_relative "../test_helper"
 # Article (which couples to a schema + DB). Same coverage on the
 # framework surface.
 class ViewHelpersTest < Minitest::Test
+  # Bring `ActionView::ViewHelpers` into scope as `ViewHelpers` for
+  # test readability — the source declares the canonical nested
+  # path; bare refs from app code follow Ruby's `include` convention.
+  include ActionView
+
   # Smallest record-shaped object the helpers need: `id` for
   # dom_id, `class.name` for record_dom_prefix's downcase, `[]`
   # for FormBuilder field lookups (model[:title]). Override `name`

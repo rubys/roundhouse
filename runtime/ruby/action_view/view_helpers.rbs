@@ -7,113 +7,115 @@
 # `ViewHelpers.foo(...)` and as `foo(...)` from inside a module that
 # has `extend ViewHelpers`. We declare them as `self.` methods —
 # the call sites in spinel-blog use the qualified form.
-module ViewHelpers
-  # ── slot store (content_for / yield) ────────────────────────────
-  # Module-level @slots holds the slot hash. Declared as a method
-  # signature for the body-typer so reads like `@slots[slot]`
-  # resolve through the instance_methods table; the actual write
-  # happens at module-eval time (`@slots = {}`) and via
-  # content_for_set.
-
-  def self.reset_slots!: () -> void
-  def self.content_for_set: (Symbol slot, String value) -> void
-  def self.content_for_get: (Symbol slot) -> String?
-  def self.get_slot: (Symbol slot) -> String
-  def self.get_yield: () -> String
-  def self.set_yield: (String content) -> void
-
-  # ── escaping / formatting ───────────────────────────────────────
-
-  # `s` is genuinely polymorphic (String, Integer, nil — anything the
-  # caller's interpolation produces). Body returns "" for nil and
-  # `s.to_s.gsub(...)` otherwise; result is always String.
-  def self.html_escape: (untyped s) -> String
-
-  # `length:` and `omission:` are keyword args with defaults. `s`
-  # accepts nil; result is always String.
-  def self.truncate: (untyped s, ?length: Integer, ?omission: String) -> String
-
-  # ── DOM helpers ─────────────────────────────────────────────────
-  # Three call shapes:
-  #   dom_id(record)                  — prefix is a record, suffix nil
-  #   dom_id(record, :comments_count) — record + Symbol/String suffix
-  #   dom_id("article", 42)           — explicit String prefix + id
-  # `prefix` is genuinely polymorphic (record OR String); `id_or_suffix`
-  # is nil/Symbol/String/Integer. Result is always String.
-  def self.dom_id: (untyped prefix, ?untyped id_or_suffix) -> String
-
-  # `record.class.name.downcase` — record is a model instance;
-  # accessing `.class.name` works on any object, so accept untyped.
-  def self.record_dom_prefix: (untyped record) -> String
-
-  # ── HTML element helpers ────────────────────────────────────────
-  # `text` is the link/button label (any value html_escape can stringify).
-  # `href` is the URL path. `opts` is the attribute hash (Symbol or
-  # String keys; values flatten through render_attrs).
-  def self.link_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
-  def self.button_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
-
-  def self.csrf_meta_tags: () -> String
-  def self.csp_meta_tag: () -> String
-
-  # `name` is the asset stem (e.g., "application" → /assets/application.css).
-  def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
-
-  # `pins` is the importmap pin array (each entry a Hash[Symbol, String]
-  # with `:name` and `:path`). When nil/empty, falls back to a Turbo-only
-  # shape. `entry` is the JS module entrypoint name.
-  def self.javascript_importmap_tags: (
-    ?Array[Hash[Symbol, String]]? pins,
-    ?String entry
-  ) -> String
-
-  # `stream` is genuinely polymorphic — Rails' turbo_stream_from
-  # accepts a String channel name OR an Array (composed channel).
-  # JSON.generate handles either, so untyped here.
-  def self.turbo_stream_from: (untyped stream) -> String
-
-  # ── form_with ───────────────────────────────────────────────────
-  # `model` is the record (Base subclass instance); `model_name` is
-  # the form-prefix string ("article", "comment"); `action` is the
-  # submit URL; `method` is :get / :post / :patch / :delete; `opts`
-  # is the form-attribute hash. Block yields a FormBuilder; block
-  # returns the form body String. Body-typer threads the block
-  # return through the form-wrapping concatenation.
-  def self.form_with: (
-    model: untyped,
-    model_name: String,
-    action: String,
-    ?method: Symbol,
-    ?opts: Hash[Symbol, untyped]
-  ) { (FormBuilder) -> String } -> String
-
-  # ── attribute rendering (public for FormBuilder) ────────────────
-  # `attrs` is a Hash whose keys are Symbol or String and whose
-  # values are String/Integer/nil/Hash (nested for data:/aria:).
-  def self.render_attrs: (Hash[untyped, untyped] attrs) -> String
-
-  # ── form builder (yielded by form_with) ─────────────────────────
-  class FormBuilder
-    # Constructor takes the four pieces of form state.
-    def initialize: (
-      untyped model,
-      String model_name,
-      String action,
-      Symbol method
-    ) -> void
-
-    # `attr_reader` — getters only.
-    def model: () -> untyped
-    def model_name: () -> String
-    def action: () -> String
-
-    # Each emit method returns the rendered HTML String. `field` is
-    # the attribute name (Symbol). `opts` is the per-element attribute
-    # hash. `submit`'s `label` defaults to a method-aware string when
-    # omitted.
-    def label: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-    def text_field: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-    def text_area: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-    def submit: (?String? label, ?Hash[Symbol, untyped] opts) -> String
+module ActionView
+  module ViewHelpers
+    # ── slot store (content_for / yield) ────────────────────────────
+    # Module-level @slots holds the slot hash. Declared as a method
+    # signature for the body-typer so reads like `@slots[slot]`
+    # resolve through the instance_methods table; the actual write
+    # happens at module-eval time (`@slots = {}`) and via
+    # content_for_set.
+  
+    def self.reset_slots!: () -> void
+    def self.content_for_set: (Symbol slot, String value) -> void
+    def self.content_for_get: (Symbol slot) -> String?
+    def self.get_slot: (Symbol slot) -> String
+    def self.get_yield: () -> String
+    def self.set_yield: (String content) -> void
+  
+    # ── escaping / formatting ───────────────────────────────────────
+  
+    # `s` is genuinely polymorphic (String, Integer, nil — anything the
+    # caller's interpolation produces). Body returns "" for nil and
+    # `s.to_s.gsub(...)` otherwise; result is always String.
+    def self.html_escape: (untyped s) -> String
+  
+    # `length:` and `omission:` are keyword args with defaults. `s`
+    # accepts nil; result is always String.
+    def self.truncate: (untyped s, ?length: Integer, ?omission: String) -> String
+  
+    # ── DOM helpers ─────────────────────────────────────────────────
+    # Three call shapes:
+    #   dom_id(record)                  — prefix is a record, suffix nil
+    #   dom_id(record, :comments_count) — record + Symbol/String suffix
+    #   dom_id("article", 42)           — explicit String prefix + id
+    # `prefix` is genuinely polymorphic (record OR String); `id_or_suffix`
+    # is nil/Symbol/String/Integer. Result is always String.
+    def self.dom_id: (untyped prefix, ?untyped id_or_suffix) -> String
+  
+    # `record.class.name.downcase` — record is a model instance;
+    # accessing `.class.name` works on any object, so accept untyped.
+    def self.record_dom_prefix: (untyped record) -> String
+  
+    # ── HTML element helpers ────────────────────────────────────────
+    # `text` is the link/button label (any value html_escape can stringify).
+    # `href` is the URL path. `opts` is the attribute hash (Symbol or
+    # String keys; values flatten through render_attrs).
+    def self.link_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
+    def self.button_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
+  
+    def self.csrf_meta_tags: () -> String
+    def self.csp_meta_tag: () -> String
+  
+    # `name` is the asset stem (e.g., "application" → /assets/application.css).
+    def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
+  
+    # `pins` is the importmap pin array (each entry a Hash[Symbol, String]
+    # with `:name` and `:path`). When nil/empty, falls back to a Turbo-only
+    # shape. `entry` is the JS module entrypoint name.
+    def self.javascript_importmap_tags: (
+      ?Array[Hash[Symbol, String]]? pins,
+      ?String entry
+    ) -> String
+  
+    # `stream` is genuinely polymorphic — Rails' turbo_stream_from
+    # accepts a String channel name OR an Array (composed channel).
+    # JSON.generate handles either, so untyped here.
+    def self.turbo_stream_from: (untyped stream) -> String
+  
+    # ── form_with ───────────────────────────────────────────────────
+    # `model` is the record (Base subclass instance); `model_name` is
+    # the form-prefix string ("article", "comment"); `action` is the
+    # submit URL; `method` is :get / :post / :patch / :delete; `opts`
+    # is the form-attribute hash. Block yields a FormBuilder; block
+    # returns the form body String. Body-typer threads the block
+    # return through the form-wrapping concatenation.
+    def self.form_with: (
+      model: untyped,
+      model_name: String,
+      action: String,
+      ?method: Symbol,
+      ?opts: Hash[Symbol, untyped]
+    ) { (FormBuilder) -> String } -> String
+  
+    # ── attribute rendering (public for FormBuilder) ────────────────
+    # `attrs` is a Hash whose keys are Symbol or String and whose
+    # values are String/Integer/nil/Hash (nested for data:/aria:).
+    def self.render_attrs: (Hash[untyped, untyped] attrs) -> String
+  
+    # ── form builder (yielded by form_with) ─────────────────────────
+    class FormBuilder
+      # Constructor takes the four pieces of form state.
+      def initialize: (
+        untyped model,
+        String model_name,
+        String action,
+        Symbol method
+      ) -> void
+  
+      # `attr_reader` — getters only.
+      def model: () -> untyped
+      def model_name: () -> String
+      def action: () -> String
+  
+      # Each emit method returns the rendered HTML String. `field` is
+      # the attribute name (Symbol). `opts` is the per-element attribute
+      # hash. `submit`'s `label` defaults to a method-aware string when
+      # omitted.
+      def label: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
+      def text_field: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
+      def text_area: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
+      def submit: (?String? label, ?Hash[Symbol, untyped] opts) -> String
+    end
   end
 end

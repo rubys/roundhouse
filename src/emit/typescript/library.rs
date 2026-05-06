@@ -1084,8 +1084,26 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
     use crate::expr::LValue;
     match &*e.node {
         ExprNode::Const { path } => {
-            if let Some(first) = path.first() {
-                out.insert(first.as_str().to_string());
+            // Mirror the Const-emit framework-prefix drop: framework-
+            // namespace paths (`ActionView::ViewHelpers`,
+            // `ActionView::ViewHelpers::FormBuilder`) collapse to the
+            // last segment — that's the imported name. Other
+            // multi-segment paths (`Views::Articles` — a real nested
+            // object) collect the FIRST segment as the import root.
+            const FRAMEWORK_NAMESPACES: &[&str] = &[
+                "ActionController",
+                "ActiveRecord",
+                "ActionView",
+                "ActionDispatch",
+                "ActiveSupport",
+            ];
+            let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+            if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+                if let Some(last) = segs.last() {
+                    out.insert((*last).to_string());
+                }
+            } else if let Some(first) = segs.first() {
+                out.insert((*first).to_string());
             }
         }
         ExprNode::Send { recv, args, block, .. } => {

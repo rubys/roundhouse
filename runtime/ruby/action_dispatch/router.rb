@@ -7,64 +7,66 @@
 # from the DSL declarations.
 require_relative "../active_support/hash_with_indifferent_access"
 
-module Router
-  module_function
-
-  # Match a request against the route table. Returns a hash with
-  # :controller, :action, :path_params on success; nil otherwise.
-  #
-  # Index-style loop (not `table.each do |...| ... return ... end`)
-  # so the cross-target lowering doesn't have to model "return from
-  # enclosing method out of an iterator block" — JS `forEach` can't
-  # break out of the surrounding function and the body-walker would
-  # silently strip the early-return.
-  def match(method, path, table)
-    method_upcase = method.to_s.upcase
-    i = 0
-    while i < table.length
-      route = table[i]
-      # `route[:*]` reads return the Hash's value-type union; the
-      # lowerer-emitted route table is `Hash[Symbol, String | Symbol]`.
-      # `.to_s` on String-typed fields narrows the union to String for
-      # strict-typed targets (Crystal); in Ruby, `String#to_s` returns
-      # self — no-op. Same for Symbol-typed fields and `.to_sym`
-      # downstream (Ruby no-op; Crystal targets drop it as part of the
-      # to_sym Send rewrite).
-      if route[:method].to_s == method_upcase
-        params = match_pattern(route[:pattern].to_s, path)
-        unless params.nil?
-          return {
-            controller: route[:controller],
-            action:     route[:action],
-            path_params: params,
-          }
+module ActionDispatch
+  module Router
+    module_function
+  
+    # Match a request against the route table. Returns a hash with
+    # :controller, :action, :path_params on success; nil otherwise.
+    #
+    # Index-style loop (not `table.each do |...| ... return ... end`)
+    # so the cross-target lowering doesn't have to model "return from
+    # enclosing method out of an iterator block" — JS `forEach` can't
+    # break out of the surrounding function and the body-walker would
+    # silently strip the early-return.
+    def match(method, path, table)
+      method_upcase = method.to_s.upcase
+      i = 0
+      while i < table.length
+        route = table[i]
+        # `route[:*]` reads return the Hash's value-type union; the
+        # lowerer-emitted route table is `Hash[Symbol, String | Symbol]`.
+        # `.to_s` on String-typed fields narrows the union to String for
+        # strict-typed targets (Crystal); in Ruby, `String#to_s` returns
+        # self — no-op. Same for Symbol-typed fields and `.to_sym`
+        # downstream (Ruby no-op; Crystal targets drop it as part of the
+        # to_sym Send rewrite).
+        if route[:method].to_s == method_upcase
+          params = match_pattern(route[:pattern].to_s, path)
+          unless params.nil?
+            return {
+              controller: route[:controller],
+              action:     route[:action],
+              path_params: params,
+            }
+          end
         end
+        i += 1
       end
-      i += 1
+      nil
     end
-    nil
-  end
-
-  # Match a path against a pattern containing `:name` segments.
-  # Returns an HWIA of captured params (String-keyed internally,
-  # accepts Symbol-or-String access via `[](:id)` / `["id"]`), or nil
-  # if no match. No regex; segment-by-segment compare.
-  def match_pattern(pattern, path)
-    pattern_parts = pattern.split("/")
-    path_parts    = path.split("/")
-    return nil if pattern_parts.length != path_parts.length
-    params = ActiveSupport::HashWithIndifferentAccess.new
-    i = 0
-    while i < pattern_parts.length
-      pp = pattern_parts[i]
-      ap = path_parts[i]
-      if pp.start_with?(":")
-        params[pp[1..]] = ap
-      elsif pp != ap
-        return nil
+  
+    # Match a path against a pattern containing `:name` segments.
+    # Returns an HWIA of captured params (String-keyed internally,
+    # accepts Symbol-or-String access via `[](:id)` / `["id"]`), or nil
+    # if no match. No regex; segment-by-segment compare.
+    def match_pattern(pattern, path)
+      pattern_parts = pattern.split("/")
+      path_parts    = path.split("/")
+      return nil if pattern_parts.length != path_parts.length
+      params = ActiveSupport::HashWithIndifferentAccess.new
+      i = 0
+      while i < pattern_parts.length
+        pp = pattern_parts[i]
+        ap = path_parts[i]
+        if pp.start_with?(":")
+          params[pp[1..]] = ap
+        elsif pp != ap
+          return nil
+        end
+        i += 1
       end
-      i += 1
+      params
     end
-    params
   end
 end

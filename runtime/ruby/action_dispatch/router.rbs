@@ -1,20 +1,22 @@
 # Path router: matches (method, path) against a hand-written route
 # table and resolves to (controller, action, path_params).
-module Router
-  # Match a request against the route table. Returns a hash with
-  # :controller, :action, :path_params on success; nil otherwise.
-  # `table` is `Array[Hash[Symbol, untyped]]`.
-  def self.match: (
-    String method,
-    String path,
-    Array[Hash[Symbol, untyped]] table
-  ) -> Hash[Symbol, untyped]?
-
-  # Match a path against a `:name`-segment pattern. Returns an HWIA
-  # of captured params (String-keyed internally; Symbol-or-String
-  # access works via `[]`), or nil if no match.
-  def self.match_pattern: (
-    String pattern,
-    String path
-  ) -> ActiveSupport::HashWithIndifferentAccess?
+module ActionDispatch
+  module Router
+    # Match a request against the route table. Returns a hash with
+    # :controller, :action, :path_params on success; nil otherwise.
+    # `table` is `Array[Hash[Symbol, untyped]]`.
+    def self.match: (
+      String method,
+      String path,
+      Array[Hash[Symbol, untyped]] table
+    ) -> Hash[Symbol, untyped]?
+  
+    # Match a path against a `:name`-segment pattern. Returns an HWIA
+    # of captured params (String-keyed internally; Symbol-or-String
+    # access works via `[]`), or nil if no match.
+    def self.match_pattern: (
+      String pattern,
+      String path
+    ) -> ActiveSupport::HashWithIndifferentAccess?
+  end
 end

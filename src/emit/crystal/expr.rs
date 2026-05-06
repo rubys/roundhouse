@@ -118,6 +118,7 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
     }
 }
 
+
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),

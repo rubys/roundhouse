@@ -775,15 +775,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {
             // Ruby `Foo::Bar` gets joined with `.` for TS access.
-            // Two cases need surgery:
-            //
-            //   1. Module-wrapper prefixes (`ActionController`,
-            //      `ActiveRecord`, `ActionView`) — Ruby uses these
-            //      to namespace classes; TS emits the inner class
-            //      flat at module scope, so `ActionController::Parameters`
-            //      should reach `Parameters` (the imported name).
-            //   2. Other multi-segment paths pass through (e.g.
-            //      `Views::Articles` is a real nested object in TS).
+            // Framework-namespace paths (`ActionView::ViewHelpers`,
+            // `ActionView::ViewHelpers::FormBuilder`) collapse to the
+            // last segment — TS emits each runtime class flat at its
+            // file's module scope and imports the bare name. The
+            // import collector mirrors this collapse, so the call
+            // site reaches the imported name directly. Other paths
+            // (e.g. `Views::Articles` — a real nested object) pass
+            // through joined.
             let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
             const FRAMEWORK_NAMESPACES: &[&str] = &[
                 "ActionController",
@@ -793,7 +792,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 "ActiveSupport",
             ];
             if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
-                segs[1..].join(".")
+                segs.last().copied().unwrap_or("").to_string()
             } else {
                 segs.join(".")
             }
