@@ -237,9 +237,20 @@ fn dedupe_last_wins(files: Vec<(String, String)>) -> Vec<(String, String)> {
     map.into_iter().collect()
 }
 
+/// Directory names that are dev/build-only and must not appear in
+/// the emitted output. Matches the scaffold's `.gitignore`-shape
+/// (build/static/node_modules/tmp/package.json) plus `vendor/` and
+/// `coverage/`, which the scaffold doesn't gitignore (since git
+/// ignores them via global rules) but CI's `bundler-cache: true`
+/// populates with read-only gem trees that EACCES the explode step.
+const SKIP_DIRS: &[&str] = &[
+    "vendor", "node_modules", "build", "static", "tmp", "coverage", "log", ".bundle",
+];
+
 /// Walk `src` recursively, collecting every readable text file as
-/// `(prefix + relative_path, content)`. Skips dotfiles and unreadable
-/// (binary) files — same convention as `walk_ruby`.
+/// `(prefix + relative_path, content)`. Skips dotfiles, unreadable
+/// (binary) files, and well-known dev/build directories listed in
+/// `SKIP_DIRS`.
 fn walk_dir_into(
     src: &Path,
     prefix: &str,
@@ -259,6 +270,9 @@ fn walk_dir_into(
             }
             let path = entry.path();
             let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
+            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
+                continue;
+            }
             let nested = format!("{sub_prefix}{name_str}");
             if ty.is_dir() {
                 stack.push((path, format!("{nested}/")));
