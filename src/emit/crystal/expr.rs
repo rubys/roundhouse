@@ -614,6 +614,28 @@ pub(super) fn emit_send_base(
             return format!("{}.to_rfc3339", emit_expr(r));
         }
     }
+    // Ruby `JSON.generate(obj)` → Crystal `obj.to_json`. Both produce
+    // a JSON String from a serializable value, but Crystal exposes
+    // the API as an instance method rather than a module function.
+    // Pattern-match the source-shape `JSON.generate(x)` Send (recv =
+    // Const JSON, single arg) and rewrite to the receiver-flipped
+    // form. `JSON.parse` keeps the same shape in both.
+    if method.as_str() == "generate" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("JSON") {
+                    return format!("{}.to_json", emit_expr(&args[0]));
+                }
+            }
+        }
+    }
+    // Ruby `Base64.{strict_encode64,encode64,...}` → Crystal's
+    // `Base64.{strict_encode,encode,...}` (drop the `64` suffix —
+    // Crystal's Base64 module dropped it for ergonomics).
+    let base64_recv = matches!(
+        recv,
+        Some(r) if matches!(&*r.node, ExprNode::Const { path } if path.last().map(|s| s.as_str()) == Some("Base64"))
+    );
     let m = match method.as_str() {
         "length" => "size",
         // Crystal: starts_with? / ends_with? / includes? (note plural).
@@ -623,6 +645,12 @@ pub(super) fn emit_send_base(
         "start_with?" => "starts_with?",
         "end_with?" => "ends_with?",
         "include?" => "includes?",
+        "strict_encode64" if base64_recv => "strict_encode",
+        "strict_decode64" if base64_recv => "strict_decode",
+        "encode64" if base64_recv => "encode",
+        "decode64" if base64_recv => "decode",
+        "urlsafe_encode64" if base64_recv => "urlsafe_encode",
+        "urlsafe_decode64" if base64_recv => "urlsafe_decode",
         other => other,
     };
     // Ruby's `String#to_sym` dynamically creates Symbols; Crystal
@@ -822,7 +850,19 @@ pub(super) fn emit_literal(l: &Literal) -> String {
     match l {
         Literal::Nil => "nil".to_string(),
         Literal::Bool { value } => value.to_string(),
-        Literal::Int { value } => value.to_string(),
+        Literal::Int { value } => {
+            // Crystal integer literals default to `Int32`. Roundhouse's
+            // `Ty::Int` maps to `Int64` (Rails-style 64-bit IDs on
+            // sqlite/MySQL — see `crystal_ty`); typed slots like
+            // `@id : Int64?` and `@status : Int64?` therefore reject
+            // a bare-literal `200` (Int32). Suffix every integer
+            // literal with `_i64` so the literal type matches the
+            // surrounding declared type. Crystal Int64 still
+            // implicitly converts to `Int` (the abstract parent
+            // accepted by `Array#[]`, `Hash#[]`, etc.), so call sites
+            // expecting `Int32` parameters aren't affected.
+            format!("{value}_i64")
+        }
         Literal::Float { value } => {
             let s = value.to_string();
             if s.contains('.') {

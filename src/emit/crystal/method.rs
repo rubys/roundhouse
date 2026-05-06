@@ -36,7 +36,21 @@ pub fn emit_method(m: &MethodDef) -> String {
     let params = render_params(m, annotate);
     let ret_clause = if annotate {
         if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
-            format!(" : {}", crystal_ty(ret))
+            // Drop the return-type annotation when the declared
+            // return references the enclosing class — these are
+            // self-typed methods (RBS `instance` / `self` types,
+            // which the Roundhouse RBS parser doesn't have first-
+            // class. AR Base's `def self.all : Array[Base]` is the
+            // canonical case. Article inherits `all`; Crystal's
+            // strict-typing infers `Array(Article)` per-subclass-
+            // call, but a literal `Array(Base)` annotation rejects
+            // that (Array is invariant). Letting Crystal infer
+            // per-subclass produces the right per-class type.
+            if returns_enclosing_class(ret, m.enclosing_class.as_ref()) {
+                String::new()
+            } else {
+                format!(" : {}", crystal_ty(ret))
+            }
         } else {
             String::new()
         }
@@ -135,4 +149,24 @@ fn sig_has_untyped(sig: &Ty) -> bool {
         return true;
     };
     params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
+}
+
+/// True when the return type references the enclosing class — direct
+/// (`Ty::Class { id == enclosing }`), wrapped in Array (`Array<Self>`),
+/// wrapped in a `Self | Nil` Union (`SelfOrNil`), or nested under
+/// these. Mirrors RBS's `instance` / `self` self-type concept; used
+/// to opt out of the Crystal return-type annotation so per-subclass
+/// inference can narrow the result to the actual subclass type.
+fn returns_enclosing_class(ret: &Ty, enclosing: Option<&crate::ident::Symbol>) -> bool {
+    let Some(enclosing) = enclosing else {
+        return false;
+    };
+    match ret {
+        Ty::Class { id, .. } => id.0.as_str() == enclosing.as_str(),
+        Ty::Array { elem } => returns_enclosing_class(elem, Some(enclosing)),
+        Ty::Union { variants } => variants
+            .iter()
+            .any(|v| returns_enclosing_class(v, Some(enclosing))),
+        _ => false,
+    }
 }
