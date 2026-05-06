@@ -17,6 +17,25 @@ serde_yaml_ng = "0.10"
 indexmap = { version = "2", features = ["serde"] }
 ruby-prism = "1.9.0"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# (none yet)
+
+[build-dependencies]
+# (none yet)
+
+# Build-site archive generation. Excluded from the WASM build since
+# `build-site` is a host-only binary.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tar]
+version = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.flate2]
+version = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.zip]
+version = "2"
+default-features = false
+features = ["deflate"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ruby-rbs = "0.3"
 
