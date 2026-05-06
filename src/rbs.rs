@@ -813,6 +813,228 @@ end
         assert!(out.is_empty());
     }
 
+    // ── scope-aware class-ref resolution ────────────────────────────
+    //
+    // RBS class refs in signatures should qualify to their enclosing
+    // module path, mirroring Ruby's lexical scoping. Without this,
+    // `def find: () -> Base` written inside `module ActiveRecord` lands
+    // in the IR as `ClassId("Base")`, dropping the module path. Per-
+    // target emit (Crystal `::ActiveRecord::Base`, TS imports keyed by
+    // file path, etc.) then has to maintain its own qualify-table —
+    // the cost grows linearly with the framework runtime. Resolving
+    // at parse time keeps the IR canonical and the emitters dumb.
+    //
+    // These tests fail until `rbs.rs::map_class_instance` is updated
+    // to consume a scope stack from `ty_from_node`'s parser context.
+
+    /// Helper: pull the return-type ClassId for a single-method
+    /// `(class_name, method_name)` pair from a multi-class app sigs map.
+    fn return_class_id(
+        out: &std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, Ty>>,
+        class_path: &str,
+        method: &str,
+    ) -> Option<String> {
+        let methods = out.get(&ClassId(Symbol::from(class_path)))?;
+        let ty = methods.get(&Symbol::from(method))?;
+        let Ty::Fn { ret, .. } = ty else { return None };
+        match &**ret {
+            Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
+            Ty::Array { elem } => match &**elem {
+                Ty::Class { id, .. } => Some(format!("Array<{}>", id.0.as_str())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn app_sigs_bare_self_class_ref_qualifies_to_enclosing_module() {
+        // The canonical case: `Base` inside `module ActiveRecord`
+        // refers to `ActiveRecord::Base`. RBS's `def self.find: () ->
+        // Base` should land in the IR as `Ty::Class { id:
+        // "ActiveRecord::Base" }`.
+        let src = "\
+module ActiveRecord
+  class Base
+    def self.find: (Integer id) -> Base
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "ActiveRecord::Base", "find").as_deref(),
+            Some("ActiveRecord::Base"),
+            "bare `Base` ref inside module ActiveRecord should qualify to ActiveRecord::Base",
+        );
+    }
+
+    #[test]
+    fn app_sigs_bare_class_ref_in_param_qualifies() {
+        // Same scope behavior in parameter position. `(Base)` inside
+        // `module ActiveRecord` qualifies to `ActiveRecord::Base`.
+        let src = "\
+module ActiveRecord
+  class Base
+    def self.from_record: (Base record) -> String
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let methods = out.get(&ClassId(Symbol::from("ActiveRecord::Base"))).expect("Base methods");
+        let ty = &methods[&Symbol::from("from_record")];
+        let Ty::Fn { params, .. } = ty else { panic!("expected Ty::Fn") };
+        match &params[0].ty {
+            Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "ActiveRecord::Base"),
+            other => panic!("expected Class(ActiveRecord::Base), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_sigs_array_of_bare_class_qualifies() {
+        // `Array[Base]` inside `module ActiveRecord; class Base` →
+        // `Array<ActiveRecord::Base>`. Generics carry through scope
+        // lookup recursively.
+        let src = "\
+module ActiveRecord
+  class Base
+    def self.all: () -> Array[Base]
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "ActiveRecord::Base", "all").as_deref(),
+            Some("Array<ActiveRecord::Base>"),
+            "Array[Base] inside module ActiveRecord should qualify to Array<ActiveRecord::Base>",
+        );
+    }
+
+    #[test]
+    fn app_sigs_already_qualified_ref_stays_qualified() {
+        // When the RBS source writes `Other::B` explicitly, don't
+        // double-prefix it with the enclosing module. Already-qualified
+        // refs pass through unchanged.
+        let src = "\
+module M
+  class A
+    def self.f: () -> Other::B
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "M::A", "f").as_deref(),
+            Some("Other::B"),
+            "already-qualified `Other::B` should not double-prefix to `M::Other::B`",
+        );
+    }
+
+    #[test]
+    fn app_sigs_top_level_class_ref_stays_unqualified() {
+        // App classes (no enclosing module) keep their bare name.
+        // Backwards-compat: existing `ClassId(Symbol::from("Article"))`
+        // usage continues to match.
+        let src = "\
+class Article
+  def self.find: (Integer id) -> Article
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "Article", "find").as_deref(),
+            Some("Article"),
+            "top-level Article should stay as `Article`, not get a synthetic prefix",
+        );
+    }
+
+    #[test]
+    fn app_sigs_sibling_class_ref_qualifies_to_shared_module() {
+        // `module M; class A; def f: () -> B; end; class B; ...; end`
+        // — bare `B` inside A's method should resolve to `M::B`
+        // (the sibling class in the same module). Forward references
+        // are fine — RBS doesn't require declaration order.
+        let src = "\
+module M
+  class A
+    def self.peer: () -> B
+  end
+
+  class B
+    def self.greeting: () -> String
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "M::A", "peer").as_deref(),
+            Some("M::B"),
+            "sibling class ref inside same module should qualify to `M::B`",
+        );
+    }
+
+    #[test]
+    fn app_sigs_nested_module_qualifies_to_innermost_path() {
+        // `module Outer; module Inner; class C; def f: () -> D` —
+        // bare `D` resolves to the innermost-then-up scope. Simplest
+        // viable rule: prepend the immediate enclosing module/class
+        // path. If the source author needs a different scope, they
+        // write the qualified form (`Outer::D`).
+        //
+        // In this test, `D` is declared inside `Outer::Inner` as a
+        // sibling of `C`, so the innermost-prepend rule produces
+        // `Outer::Inner::D` — the correct lexical resolution.
+        let src = "\
+module Outer
+  module Inner
+    class C
+      def self.f: () -> D
+    end
+
+    class D
+      def self.g: () -> String
+    end
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        assert_eq!(
+            return_class_id(&out, "Outer::Inner::C", "f").as_deref(),
+            Some("Outer::Inner::D"),
+            "bare `D` inside Outer::Inner::C should qualify to Outer::Inner::D",
+        );
+    }
+
+    #[test]
+    fn app_sigs_optional_bare_class_qualifies() {
+        // `Base?` (optional) inside `module ActiveRecord; class Base`
+        // → `Union<Class("ActiveRecord::Base"), Nil>`. Optionals
+        // expand to unions; the inner class ref qualifies via the
+        // same rule.
+        let src = "\
+module ActiveRecord
+  class Base
+    def self.find_by: (Integer id) -> Base?
+  end
+end
+";
+        let out = parse_app_signatures(src).expect("parses");
+        let methods = out.get(&ClassId(Symbol::from("ActiveRecord::Base"))).expect("Base methods");
+        let ty = &methods[&Symbol::from("find_by")];
+        let Ty::Fn { ret, .. } = ty else { panic!("expected Ty::Fn") };
+        let Ty::Union { variants } = &**ret else {
+            panic!("expected Union, got {ret:?}");
+        };
+        let class_id = variants.iter().find_map(|v| match v {
+            Ty::Class { id, .. } => Some(id.0.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            class_id,
+            Some("ActiveRecord::Base"),
+            "optional `Base?` should still qualify the class ref to ActiveRecord::Base",
+        );
+    }
+
     // ── parse_app_includes ──────────────────────────────────────────
 
     #[test]
