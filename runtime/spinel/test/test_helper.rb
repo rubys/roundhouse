@@ -25,8 +25,6 @@ Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
 ActiveRecord.adapter = InMemoryAdapter
 
 module SchemaSetup
-  module_function
-
   TABLES = %w[articles comments].freeze
 
   # Adapter-agnostic: dispatches through ActiveRecord.adapter.truncate
@@ -35,7 +33,7 @@ module SchemaSetup
   # Re-loads fixtures after truncate so each test sees the canonical
   # rows; emitted `<Plural>Fixtures._fixtures_load!` methods carry the
   # YAML-derived `<Class>.new({...}).save` calls.
-  def reset!
+  def self.reset!
     TABLES.each { |t| ActiveRecord.adapter.truncate(t) }
     FixtureLoader.load_all!
   end
@@ -67,8 +65,6 @@ end
 # get a no-op, so the standalone spinel-blog suite (which seeds inline)
 # is unaffected.
 module FixtureLoader
-  module_function
-
   # Alphabetical sort approximates parent-before-child for the
   # Articles → Comments shape (belongs_to FK validation requires the
   # parent row to exist when the child saves). Topological ordering by
@@ -78,7 +74,7 @@ module FixtureLoader
   # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
   # constants like Ruby 3.4's `SortedSet` (which raises on access via
   # autoload) don't get touched while scanning for fixture modules.
-  def load_all!
+  def self.load_all!
     Object.constants.sort.each do |c|
       next unless c.to_s.end_with?("Fixtures")
       mod = Object.const_get(c)

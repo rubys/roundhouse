@@ -22,8 +22,6 @@
 # Keeps the spinel-subset envelope clean: basic regex, string ops,
 # Hash mutation. No metaprogramming.
 module CgiIo
-  module_function
-
   REASON_PHRASES = {
     200 => "OK",
     201 => "Created",
@@ -42,7 +40,7 @@ module CgiIo
 
   # Parse a CGI request from the given env hash + body-readable IO.
   # Returns: { method:, path:, params:, cookies: }.
-  def parse_request(env, stdin)
+  def self.parse_request(env, stdin)
     method = (env["REQUEST_METHOD"] || "GET").upcase
     path   = env["PATH_INFO"] || "/"
     query  = env["QUERY_STRING"] || ""
@@ -80,7 +78,7 @@ module CgiIo
 
   # Write a CGI response to the given writable IO. `set_cookies` is
   # `{ name => value | nil }`; nil clears the cookie via Max-Age=0.
-  def write_response(io, status, body, location: nil, content_type: "text/html; charset=utf-8", set_cookies: {})
+  def self.write_response(io, status, body, location: nil, content_type: "text/html; charset=utf-8", set_cookies: {})
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
@@ -103,7 +101,7 @@ module CgiIo
   # Parse a `Cookie:` header value into a Hash[Symbol => String].
   # The `; ` separator between cookies is RFC 6265 standard; tolerate
   # extra whitespace around the `=` and around separators.
-  def parse_cookies(header)
+  def self.parse_cookies(header)
     out = {}
     return out if header.nil? || header.empty?
     header.split(";").each do |pair|
@@ -122,7 +120,7 @@ module CgiIo
   # Parse a `key1=val1&key2=val2&article[title]=hello` body into a
   # nested-hash structure. Mutates the passed-in hash so multiple
   # sources (query string + body) can be merged.
-  def parse_form_into(input, into)
+  def self.parse_form_into(input, into)
     return if input.empty?
     input.split("&").each do |pair|
       next if pair.empty?
@@ -138,7 +136,7 @@ module CgiIo
 
   # `article[title]` → into[:article][:title] = val
   # `id` → into[:id] = val
-  def assign_form_pair(into, raw_key, val)
+  def self.assign_form_pair(into, raw_key, val)
     open_bracket = raw_key.index("[")
     if open_bracket.nil?
       into[raw_key.to_sym] = val
@@ -157,7 +155,7 @@ module CgiIo
   # encode everything else as `%XX`. Used for cookie values; cookies
   # are Latin-1 in the wire format but our values are ASCII for the
   # demo, so byte-by-byte is sufficient.
-  def url_encode(s)
+  def self.url_encode(s)
     out = String.new
     s.to_s.each_byte do |b|
       if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
@@ -178,7 +176,7 @@ module CgiIo
   # comparisons against UTF-8 literals. Force the result back to UTF-8.
   # Spinel itself "assumes UTF-8/ASCII" per its README, so this
   # encoding dance is a CRuby-only concern.
-  def url_decode(s)
+  def self.url_decode(s)
     out = String.new
     i = 0
     n = s.length

@@ -14,25 +14,23 @@
 # (TABLES, NEXT_ID) rather than module @ivars, mirroring the pattern
 # used in `runtime/broadcasts.rb`.
 module InMemoryAdapter
-  module_function
-
   TABLES  = {}
   NEXT_ID = Hash.new(0)
 
-  def configure(_path = nil)
+  def self.configure(_path = nil)
     TABLES.clear
     NEXT_ID.clear
   end
 
-  def all(table)
+  def self.all(table)
     rows_for(table).values
   end
 
-  def find(table, id)
+  def self.find(table, id)
     rows_for(table)[id.to_i]
   end
 
-  def where(table, conditions)
+  def self.where(table, conditions)
     all(table).select do |row|
       match = true
       conditions.each { |k, v| match = false if row[k.to_s] != v }
@@ -40,15 +38,15 @@ module InMemoryAdapter
     end
   end
 
-  def count(table)
+  def self.count(table)
     rows_for(table).size
   end
 
-  def exists?(table, id)
+  def self.exists?(table, id)
     rows_for(table).key?(id.to_i)
   end
 
-  def insert(table, attrs)
+  def self.insert(table, attrs)
     NEXT_ID[table] += 1
     id = NEXT_ID[table]
     row = { "id" => id }
@@ -57,17 +55,17 @@ module InMemoryAdapter
     id
   end
 
-  def update(table, id, attrs)
+  def self.update(table, id, attrs)
     row = rows_for(table)[id.to_i]
     return if row.nil?
     attrs.each { |k, v| row[k.to_s] = v }
   end
 
-  def delete(table, id)
+  def self.delete(table, id)
     rows_for(table).delete(id.to_i)
   end
 
-  def truncate(table)
+  def self.truncate(table)
     TABLES[table] = {}
     NEXT_ID[table] = 0
   end
@@ -76,12 +74,12 @@ module InMemoryAdapter
   # no constraints, no indexes. Only the table name matters: parsed
   # out so subsequent calls don't error on a missing key. CREATE INDEX
   # statements are silent no-ops.
-  def execute_ddl(sql)
+  def self.execute_ddl(sql)
     return unless sql =~ /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i
     TABLES[$1] ||= {}
   end
 
-  def rows_for(name)
+  def self.rows_for(name)
     TABLES[name] = {} unless TABLES.key?(name)
     TABLES[name]
   end

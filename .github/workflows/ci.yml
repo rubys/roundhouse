@@ -240,15 +240,6 @@ jobs:
         # Scratch path matches `scratch_dir("real-blog")` in
         # tests/spinel_toolchain.rs (= `std::env::temp_dir()` joined,
         # which is `/tmp` on ubuntu-latest with no TMPDIR set).
-        #
-        # `continue-on-error: true` — surfacing only. 22 known
-        # violations across the shipped tree (mostly module_function
-        # in framework Ruby; Thread/Mutex in the CRuby dev server;
-        # eval/const_get in test_helper). Until those are rewritten
-        # or excluded, the lint reports but doesn't block. Switch to
-        # hard-gate by removing this flag once the violation count
-        # reaches zero.
-        continue-on-error: true
         run: bundle exec rubocop --format github .
         working-directory: /tmp/roundhouse-spinel-real-blog
         env:
@@ -425,41 +416,42 @@ jobs:
       - name: scripts/compare python
         run: scripts/compare python
 
-  # -------------------------------------------------------------------
-  # compare-spinel: same DOM-diff harness as the other compare-* jobs,
-  # but the spinel target uses CRuby + the scaffold dev server (no
-  # native compile yet — that's gated on Spinel itself growing the
-  # surface area roundhouse emits). Two ruby/setup-ruby steps run:
-  # the first sets up the Rails-side bundle for the reference server,
-  # the second sets up the scaffold bundle the dev server uses.
-  # -------------------------------------------------------------------
-  compare-spinel:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./runtime/spinel/scaffold
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: scripts/compare spinel
-        run: scripts/compare spinel
+  # compare-spinel: temporarily disabled. Backed by the CRuby
+  # scaffold dev server (`server/dev_server.rb`), which has been
+  # retired alongside the rubocop_spinel cleanup — its Thread/Mutex/
+  # module_function usage is fundamentally outside the spinel
+  # subset. Native HTTP is staged for civetweb in collaboration
+  # with the spinel team once the backend lands. Re-enable once
+  # the civetweb-backed dev server is in place. See memory:
+  # project_ruby_dev_server_retirement.
+  #
+  # compare-spinel:
+  #   needs: generate-fixture
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: real-blog-fixture
+  #     - name: Extract fixture
+  #       run: tar -xzf real-blog.tar.gz
+  #     - uses: ruby/setup-ruby@v1
+  #       with:
+  #         ruby-version: '3.4'
+  #         bundler-cache: true
+  #         working-directory: ./fixtures/real-blog
+  #     - uses: ruby/setup-ruby@v1
+  #       with:
+  #         ruby-version: '3.4'
+  #         bundler-cache: true
+  #         working-directory: ./runtime/spinel/scaffold
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #     - name: scripts/compare spinel
+  #       run: scripts/compare spinel
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

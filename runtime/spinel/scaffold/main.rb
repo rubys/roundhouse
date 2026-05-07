@@ -34,10 +34,13 @@ end
 require_relative "app/views"
 
 module Main
-  module_function
   # Bring `ActionView::ViewHelpers` and `ActionDispatch::Router`
   # into scope as bare `ViewHelpers` / `Router` for the dispatch
   # body — matches Ruby's `include` idiom for nested-module access.
+  # `include` is module-level constant resolution here, not the
+  # mixin-instance-methods sense; with `module_function` retired
+  # the singleton methods (`Main.run`, etc.) still see the brought-
+  # in constants through their lexical scope.
   include ActionView
   include ActionDispatch
 
@@ -45,7 +48,7 @@ module Main
   # global I/O. Tests construct env hashes + StringIO and call this
   # directly; the script path at the bottom of this file calls it
   # with real ENV + $stdin + $stdout.
-  def run(env, stdin, stdout)
+  def self.run(env, stdin, stdout)
     ViewHelpers.reset_slots!
     Broadcasts.reset_log!
 
@@ -114,7 +117,7 @@ module Main
   # references as values, so the route table stores symbols and this
   # case turns the symbol back into an instance via direct
   # constructor calls (statically resolvable; no `.send`).
-  def instantiate_controller(sym)
+  def self.instantiate_controller(sym)
     case sym
     when :articles then ArticlesController.new
     when :comments then CommentsController.new
@@ -135,7 +138,7 @@ module Main
   # The eventual Spinel-target build uses InMemoryAdapter (no FFI
   # required); leave that as the unset-env fallback so the
   # Spinel-compiled binary still has a working default.
-  def configure_default_adapter!
+  def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
     if !db_path.nil? && !db_path.empty?

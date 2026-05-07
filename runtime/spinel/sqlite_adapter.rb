@@ -7,52 +7,50 @@ require "sqlite3"
 # handles surface in the API; no prepared-statement caching is exposed;
 # no connection-pool concept leaks through.
 module SqliteAdapter
-  module_function
-
   @db = nil
 
-  def configure(database_path)
+  def self.configure(database_path)
     @db = SQLite3::Database.new(database_path)
     @db.results_as_hash = true
   end
 
-  def db
+  def self.db
     raise "SqliteAdapter not configured; call SqliteAdapter.configure(path) first" if @db.nil?
     @db
   end
 
-  def execute(sql, params = [])
+  def self.execute(sql, params = [])
     rows = db.execute(sql, params)
     rows.map { |row| symbolize_row(row) }
   end
 
-  def all(table)
+  def self.all(table)
     execute("SELECT * FROM #{table}")
   end
 
-  def find(table, id)
+  def self.find(table, id)
     rows = execute("SELECT * FROM #{table} WHERE id = ? LIMIT 1", [id])
     rows.first
   end
 
-  def where(table, conditions)
+  def self.where(table, conditions)
     where_clause, values = build_where(conditions)
     sql = "SELECT * FROM #{table}"
     sql += " WHERE #{where_clause}" unless where_clause.empty?
     execute(sql, values)
   end
 
-  def count(table)
+  def self.count(table)
     rows = db.execute("SELECT COUNT(*) AS n FROM #{table}")
     rows.first["n"].to_i
   end
 
-  def exists?(table, id)
+  def self.exists?(table, id)
     rows = db.execute("SELECT 1 FROM #{table} WHERE id = ? LIMIT 1", [id])
     !rows.empty?
   end
 
-  def insert(table, attrs)
+  def self.insert(table, attrs)
     cols = attrs.keys
     placeholders = cols.map { "?" }.join(", ")
     sql = "INSERT INTO #{table} (#{cols.join(", ")}) VALUES (#{placeholders})"
@@ -60,13 +58,13 @@ module SqliteAdapter
     db.last_insert_row_id
   end
 
-  def update(table, id, attrs)
+  def self.update(table, id, attrs)
     assigns = attrs.keys.map { |k| "#{k} = ?" }.join(", ")
     sql = "UPDATE #{table} SET #{assigns} WHERE id = ?"
     db.execute(sql, attrs.values + [id])
   end
 
-  def delete(table, id)
+  def self.delete(table, id)
     db.execute("DELETE FROM #{table} WHERE id = ?", [id])
   end
 
@@ -74,12 +72,12 @@ module SqliteAdapter
   # delete and the autoincrement-counter reset so subsequent inserts
   # start from id=1 — InMemoryAdapter#truncate has the same effect
   # by clearing its NEXT_ID hash.
-  def truncate(table)
+  def self.truncate(table)
     db.execute("DELETE FROM #{table}")
     db.execute("DELETE FROM sqlite_sequence WHERE name = ?", [table])
   end
 
-  def execute_ddl(sql)
+  def self.execute_ddl(sql)
     db.execute_batch(sql)
   end
 

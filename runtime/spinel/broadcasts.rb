@@ -9,46 +9,46 @@
 # constants and array mutation; module-level instance variables are
 # more uncertain, so we deliberately use the constant form.
 module Broadcasts
-  module_function
-
   LOG = []
 
-  def reset_log!
+  def self.reset_log!
     LOG.clear
   end
 
-  def log
+  def self.log
     LOG.dup
   end
 
-  def append(stream:, target:, html:)
+  def self.append(stream:, target:, html:)
     record(action: :append, stream: stream, target: target, html: html)
   end
 
-  def prepend(stream:, target:, html:)
+  def self.prepend(stream:, target:, html:)
     record(action: :prepend, stream: stream, target: target, html: html)
   end
 
-  def replace(stream:, target:, html:)
+  def self.replace(stream:, target:, html:)
     record(action: :replace, stream: stream, target: target, html: html)
   end
 
-  def remove(stream:, target:)
+  def self.remove(stream:, target:)
     record(action: :remove, stream: stream, target: target, html: "")
   end
 
-  def record(action:, stream:, target:, html:)
+  def self.record(action:, stream:, target:, html:)
     entry = { action: action, stream: stream, target: target, html: html }
     LOG << entry
     write_to_disk(entry) unless ENV["BROADCAST_DIR"].to_s.empty?
     nil
   end
 
-  # File-based IPC for the dev server (`server/dev_server.rb`). When
-  # ENV["BROADCAST_DIR"] is set, every broadcast is also written as a
-  # `.frag` file in that directory. The dev server's filesystem
-  # watcher consumes these files and fans out the contents over
-  # WebSockets to subscribed Turbo clients.
+  # File-based IPC for a future native HTTP front end (civetweb,
+  # tracked under project_ruby_dev_server_retirement memory). When
+  # ENV["BROADCAST_DIR"] is set, every broadcast is also written as
+  # a `.frag` file in that directory; a watcher process consumes
+  # them and fans out the contents over WebSockets to subscribed
+  # Turbo clients. The previous CRuby dev server that owned this
+  # contract was retired in the rubocop_spinel cleanup.
   #
   # Filename: <safe_stream>__<microsecond_ts>.frag
   #   - stream name encodes which subscribers receive this fragment
@@ -58,7 +58,7 @@ module Broadcasts
   # Content: the rendered <turbo-stream> HTML, as produced by
   # render_fragment — no JSON envelope (the dev server constructs
   # the ActionCable wire-format envelope when forwarding to WS).
-  def write_to_disk(entry)
+  def self.write_to_disk(entry)
     dir = ENV["BROADCAST_DIR"]
     return if dir.nil? || dir.empty?
     fragment = render_fragment(action: entry[:action], target: entry[:target], html: entry[:html])
@@ -77,7 +77,7 @@ module Broadcasts
   # Compose the actual <turbo-stream> markup. Pure: doesn't touch the
   # log — used by tests and (eventually) by transport layers that
   # need to ship the fragment over the wire.
-  def render_fragment(action:, target:, html: "")
+  def self.render_fragment(action:, target:, html: "")
     if action == :remove
       %(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
     else

@@ -6,7 +6,6 @@
 #   make build       — spinel main.rb → build/blog (requires spinel on PATH)
 #   make test        — bundle exec rake test
 #   make lint        — bundle exec rake lint (spinel-subset linter)
-#   make dev         — run server/dev_server.rb (HTTP + WebSocket + watcher)
 #   make run         — single-shot CRuby smoke (REQUEST_METHOD=GET PATH_INFO=/articles)
 #   make clean       — rm -rf build/ static/
 #
@@ -130,11 +129,12 @@ cruby-test:
 
 # ── Dev workflow ─────────────────────────────────────────────────
 
-# Runs the dev server — pure-Ruby HTTP+WebSocket front end that
-# dispatches requests to main.rb and forwards broadcasts over
-# WebSockets to subscribed Turbo clients.
-dev: assets
-	bundle exec ruby server/dev_server.rb
+# `make dev` (CRuby HTTP+WebSocket dev server) was retired alongside
+# server/dev_server.rb in the lint-spinel cleanup; the dev server's
+# Thread/Mutex/module_function usage is fundamentally outside the
+# spinel subset. Native HTTP is staged for civetweb in collaboration
+# with the spinel team once the backend lands. See memory:
+# project_ruby_dev_server_retirement.
 
 # Single-shot CGI smoke (renders a full page to stdout). Useful for
 # eyeballing layout/asset wiring.

@@ -9,8 +9,6 @@ require_relative "../active_support/hash_with_indifferent_access"
 
 module ActionDispatch
   module Router
-    module_function
-  
     # Match a request against the route table. Returns a hash with
     # :controller, :action, :path_params on success; nil otherwise.
     #
@@ -19,7 +17,7 @@ module ActionDispatch
     # enclosing method out of an iterator block" — JS `forEach` can't
     # break out of the surrounding function and the body-walker would
     # silently strip the early-return.
-    def match(method, path, table)
+    def self.match(method, path, table)
       method_upcase = method.to_s.upcase
       i = 0
       while i < table.length
@@ -50,7 +48,7 @@ module ActionDispatch
     # Returns an HWIA of captured params (String-keyed internally,
     # accepts Symbol-or-String access via `[](:id)` / `["id"]`), or nil
     # if no match. No regex; segment-by-segment compare.
-    def match_pattern(pattern, path)
+    def self.match_pattern(pattern, path)
       pattern_parts = pattern.split("/")
       path_parts    = path.split("/")
       return nil if pattern_parts.length != path_parts.length

@@ -13,8 +13,6 @@
 # This keeps the runtime small and free of class-name-keyed dispatch.
 module ActionView
   module ViewHelpers
-    module_function
-  
     # ── slot store (content_for / yield) ─────────────────────────────
     #
     # Module-level state. In CRuby this is a single shared hash; in a
@@ -23,28 +21,28 @@ module ActionView
     # constraint anyway), module state is fine.
     @slots = {}
   
-    def reset_slots!
+    def self.reset_slots!
       @slots = {}
     end
   
-    def content_for_set(slot, value)
+    def self.content_for_set(slot, value)
       @slots[slot] = value
       nil
     end
   
-    def content_for_get(slot)
+    def self.content_for_get(slot)
       @slots[slot]
     end
 
-    def get_slot(slot)
+    def self.get_slot(slot)
       @slots[slot] || ""
     end
 
-    def get_yield
+    def self.get_yield
       @slots[:__body__] || ""
     end
   
-    def set_yield(content)
+    def self.set_yield(content)
       @slots[:__body__] = content
       nil
     end
@@ -67,12 +65,12 @@ module ActionView
   
     HTML_ESCAPE_PATTERN = /[&<>"']/.freeze
   
-    def html_escape(s)
+    def self.html_escape(s)
       return "" if s.nil?
       s.to_s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
   
-    def truncate(s, length: 30, omission: "...")
+    def self.truncate(s, length: 30, omission: "...")
       return "" if s.nil?
       str = s.to_s
       return str if str.length <= length
@@ -83,7 +81,7 @@ module ActionView
   
     # ── DOM helpers ──────────────────────────────────────────────────
   
-    def dom_id(prefix, id_or_suffix = nil)
+    def self.dom_id(prefix, id_or_suffix = nil)
       if id_or_suffix.nil?
         # `dom_id(article)` — pass a record
         "#{record_dom_prefix(prefix)}_#{prefix.id}"
@@ -99,19 +97,19 @@ module ActionView
       end
     end
   
-    def record_dom_prefix(record)
+    def self.record_dom_prefix(record)
       # Singularized class name; for the blog we just lowercase.
       record.class.name.downcase
     end
   
     # ── HTML element helpers ─────────────────────────────────────────
   
-    def link_to(text, href, opts = {})
+    def self.link_to(text, href, opts = {})
       attrs = render_attrs({ href: href }.merge(opts))
       "<a#{attrs}>#{html_escape(text)}</a>"
     end
   
-    def button_to(text, href, opts = {})
+    def self.button_to(text, href, opts = {})
       # Use `.fetch(k, nil)` instead of bare `opts[:k]`: Ruby's Hash#[]
       # returns nil for missing keys, but Crystal's strict Hash#[]
       # raises KeyError. fetch-with-default produces nil-on-missing in
@@ -157,7 +155,7 @@ module ActionView
     # diff appears against Rails for purely formatting reasons.) The
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
-    def csrf_meta_tags
+    def self.csrf_meta_tags
       %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />)
     end
   
@@ -165,11 +163,11 @@ module ActionView
     # behavior and the other targets' runtimes (Rust / Python / Elixir
     # all return "" here). Production deployment with CSP wired would
     # plug a real nonce in.
-    def csp_meta_tag
+    def self.csp_meta_tag
       ""
     end
   
-    def stylesheet_link_tag(name, opts = {})
+    def self.stylesheet_link_tag(name, opts = {})
       href = "/assets/#{name}.css"
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts))
       "<link#{attrs}>"
@@ -186,7 +184,7 @@ module ActionView
     # for the hand-written standalone specimen, before Roundhouse ingests
     # an importmap — fall back to a Turbo-only shape so the fixture stays
     # runnable on its own.
-    def javascript_importmap_tags(pins = nil, entry = "application")
+    def self.javascript_importmap_tags(pins = nil, entry = "application")
       # Lines joined by `\n` only (no indent) — matches Rails' helper
       # output where each preload link / bootstrap script is flush left
       # in the source. The first line lands at the layout's source-indent
@@ -227,7 +225,7 @@ module ActionView
     # emit `--unsigned` (matches the other targets' runtimes), and
     # the compare harness's existing ignore rule strips the suffix
     # so the unsigned base64 value matches Rails' signed value.
-    def turbo_stream_from(stream)
+    def self.turbo_stream_from(stream)
       require "base64"
       require "json"
       encoded = Base64.strict_encode64(JSON.generate(stream))
@@ -299,7 +297,7 @@ module ActionView
     # `form_with(model:, model_name:, action:, method:) { |f| ... }` —
     # yields a FormBuilder whose body the block builds; wraps that body
     # in a <form> element with the right action + method.
-    def form_with(model:, model_name:, action:, method: :post, opts: {})
+    def self.form_with(model:, model_name:, action:, method: :post, opts: {})
       builder = FormBuilder.new(model, model_name, action, method)
       body = yield(builder)
       method_str = method.to_s
@@ -340,7 +338,7 @@ module ActionView
     # turbo_confirm: ... }`) render as `data-turbo-confirm="…"`;
     # underscores in the inner key map to hyphens to match Rails'
     # tag-helper convention.
-    def render_attrs(attrs)
+    def self.render_attrs(attrs)
       return "" if attrs.empty?
       pairs = []
       attrs.each do |k, v|

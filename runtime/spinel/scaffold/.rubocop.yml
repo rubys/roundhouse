@@ -20,6 +20,18 @@ AllCops:
   TargetRubyVersion: 3.3
   NewCops: disable
   DisabledByDefault: true
+  # CRuby-only test harness. `Object.const_get` + `eval(string_expr)`
+  # in FixtureLoader.load_all! and assert_difference/assert_no_difference
+  # are real spinel-subset violations, but this file is the test-side
+  # bootstrap that runs only under CRuby today. Replacing the const_get
+  # scan needs an explicit fixture registry (emitter-contract change);
+  # replacing eval needs assert_difference to take a block instead of a
+  # string (changes every emitted call site). Both are tracked as
+  # follow-ups; until then this file is excluded from the spinel-subset
+  # gate. Slated for full replacement when spinel grows its own test
+  # runner.
+  Exclude:
+    - test/test_helper.rb
 
 Spinel/Unsupported:
   Enabled: true
