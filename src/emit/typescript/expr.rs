@@ -1260,11 +1260,51 @@ pub(super) fn emit_send_with_parens(
     // after the await resolves. Without parens, `await x.find(id).save`
     // parses as `await (x.find(id).save)` (property access binds
     // tighter than await) — silently wrong.
-    if is_async_method_name(method) {
-        format!("(await {result})")
-    } else {
-        result
+    if !is_async_method_name(method) {
+        return result;
     }
+    // Self-type narrowing cast injection: `emit_send_with_parens_inner`
+    // emits `(<send_expr> as <Class>)` for `Article.find/all/where/...`
+    // calls so a Base-typed result narrows to Article at the call site.
+    // For an async send, the await needs to land INSIDE the cast paren
+    // — `((await <send_expr>) as <Class>)` — so the cast applies to
+    // the resolved value. The outer-wrap form `(await (<send_expr> as
+    // <Class>))` reads as casting `Promise<Class>` to `Class`, which
+    // TypeScript rejects (TS2352). Detect the cast shape and rewrite
+    // when present; fall through to the simple wrap otherwise.
+    if let Some(injected) = inject_await_inside_cast(&result) {
+        return injected;
+    }
+    format!("(await {result})")
+}
+
+/// If `s` is a parenthesized cast expression `(<expr> as <type>)`,
+/// return `((await <expr>) as <type>)`. The split is found at paren
+/// depth zero so a nested cast doesn't fool us. Returns `None` when
+/// `s` doesn't match the pattern.
+fn inject_await_inside_cast(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return None;
+    }
+    let middle = &trimmed[1..trimmed.len() - 1];
+    let bytes = middle.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b' ' if depth == 0 && middle[i..].starts_with(" as ") => {
+                let before = &middle[..i];
+                let after = &middle[i + 4..];
+                return Some(format!("((await {before}) as {after})"));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn emit_send_with_parens_inner(

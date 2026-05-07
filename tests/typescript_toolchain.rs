@@ -142,6 +142,63 @@ fn real_blog_tsc_passes() {
     assert_tsc_passes("real-blog", &scratch);
 }
 
+/// libsql variant: emit real-blog under node-async, type-check
+/// the result. Forcing function for the libsql runtime + async-
+/// coloring emit path. Diagnostic for now (does NOT assert
+/// success) — first run is expected to surface gaps in the
+/// async-emit pipeline that need iterative fixes.
+#[test]
+#[ignore]
+fn dump_real_blog_libsql_tsc_errors() {
+    use roundhouse::profile::DeploymentProfile;
+
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog-libsql-dump");
+    if scratch.exists() {
+        std::fs::remove_dir_all(&scratch).expect("clean scratch");
+    }
+    std::fs::create_dir_all(&scratch).expect("create scratch");
+
+    let mut app = ingest_app(fixture).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::node_async());
+    for file in &files {
+        let path = scratch.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write");
+    }
+
+    let install = Command::new("npm")
+        .arg("install")
+        .arg("--silent")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .current_dir(&scratch)
+        .output()
+        .expect("run npm install");
+    if !install.status.success() {
+        eprintln!(
+            "npm install failed:\n{}",
+            String::from_utf8_lossy(&install.stderr)
+        );
+        return;
+    }
+
+    let output = Command::new("./node_modules/.bin/tsc")
+        .arg("-p")
+        .arg(".")
+        .arg("--noEmit")
+        .current_dir(&scratch)
+        .output()
+        .expect("run tsc");
+
+    println!("=== tsc exit status: {} ===", output.status);
+    println!("=== stdout ===\n{}", String::from_utf8_lossy(&output.stdout));
+    println!("=== stderr ===\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
 #[test]
 #[ignore]
 fn real_blog_node_test_passes() {
