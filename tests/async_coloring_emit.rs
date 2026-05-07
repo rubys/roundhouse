@@ -71,6 +71,27 @@ fn gate_1_node_sync_byte_equal_to_emit_real_blog() {
 
 #[test]
 #[ignore]
+fn dump_libsql_runtime_real_blog() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::node_async());
+    for f in &files {
+        let p = f.path.to_string_lossy();
+        if p == "package.json" {
+            println!("=== {p} (full) ===");
+            for line in f.content.lines() {
+                println!("  {line}");
+            }
+        } else if p == "src/juntos.ts" || p == "src/server.ts" {
+            println!("=== {p} (first 8 lines) ===");
+            for line in f.content.lines().take(8) {
+                println!("  {line}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore]
 fn dump_async_lines_real_blog() {
     // Run with: cargo test --test async_coloring_emit dump_async_lines_real_blog -- --ignored --nocapture
     let app = analyzed("fixtures/real-blog");
@@ -165,4 +186,65 @@ fn gate_2_node_async_emits_async_and_await() {
             );
         }
     }
+
+    // Profile-aware runtime selection: node-async ships the libsql
+    // variants of juntos.ts and server.ts (not better-sqlite3).
+    let juntos = files
+        .iter()
+        .find(|f| f.path.to_str() == Some("src/juntos.ts"))
+        .expect("src/juntos.ts should be emitted");
+    assert!(
+        juntos.content.contains("LibsqlActiveRecordAdapter"),
+        "node-async juntos.ts should be the libsql variant"
+    );
+    assert!(
+        juntos.content.contains("@libsql/client"),
+        "node-async juntos.ts should import @libsql/client"
+    );
+    // Negative: no actual import of better-sqlite3. (References
+    // in comments are fine — the libsql variant references the
+    // sqlite variant in context-explaining commentary.)
+    for line in juntos.content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("*") || trimmed.starts_with("/*") {
+            continue;
+        }
+        assert!(
+            !line.contains("better-sqlite3"),
+            "node-async juntos.ts must not import better-sqlite3 in code: {line}"
+        );
+    }
+    let server = files
+        .iter()
+        .find(|f| f.path.to_str() == Some("src/server.ts"))
+        .expect("src/server.ts should be emitted");
+    assert!(
+        server.content.contains("createClient"),
+        "node-async server.ts should use libsql createClient"
+    );
+    for line in server.content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("*") || trimmed.starts_with("/*") {
+            continue;
+        }
+        assert!(
+            !line.contains("better-sqlite3"),
+            "node-async server.ts must not import better-sqlite3 in code: {line}"
+        );
+    }
+
+    // package.json picks the right DB dependency.
+    let pkg = files
+        .iter()
+        .find(|f| f.path.to_str() == Some("package.json"))
+        .expect("package.json should be emitted");
+    assert!(
+        pkg.content.contains("@libsql/client"),
+        "node-async package.json should depend on @libsql/client; got:\n{}",
+        pkg.content,
+    );
+    assert!(
+        !pkg.content.contains("better-sqlite3"),
+        "node-async package.json must not depend on better-sqlite3"
+    );
 }

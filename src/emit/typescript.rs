@@ -21,31 +21,37 @@ use super::EmittedFile;
 use crate::App;
 use crate::ty::Ty;
 
-const JUNTOS_STUB_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
+const JUNTOS_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
+const JUNTOS_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/juntos-libsql.ts");
+const SERVER_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
+const SERVER_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/server-libsql.ts");
+const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 
-/// Framework runtime files inlined at the canonical `src/<name>.ts`
-/// path. Internal cross-imports use `./<name>.js` so emitting all of
-/// them under the same flat directory satisfies module resolution.
-/// Excludes `juntos.ts` (mapped via tsconfig path alias) and
-/// `minitest.ts` (lives under `test/_runtime/`); both are handled
-/// separately by their own emit slots.
-/// Hand-written TS runtime files, baked in via `include_str!` and
-/// shipped as-is. These are target-specific primitives (DB adapter
-/// shim, HTTP server glue, test runner adapter) that don't have a
-/// Ruby source — they're authored directly for TS.
-///
-/// The transpile-from-Ruby files (active_record_base, validations,
-/// errors, parameters, router, action_controller_base, inflector)
-/// are no longer here — they're produced inline at emit time by
-/// `crate::runtime_loader::typescript_units(...)` (option (c)).
-const RUNTIME_FILES: &[(&str, &str)] = &[
-    (
-        "src/broadcasts.ts",
-        include_str!("../../runtime/typescript/broadcasts.ts"),
-    ),
-    ("src/server.ts", include_str!("../../runtime/typescript/server.ts")),
-];
+/// Pick the `juntos.ts` runtime variant for the active deployment
+/// profile. Sync profiles (`node-sync`) get the better-sqlite3-
+/// backed adapter; async profiles (`node-async`, future Workers/
+/// browser variants) get the libsql-backed adapter. The choice is
+/// keyed on `active_extern_async_names()` being non-empty — that's
+/// the signal `emit_with_profile` plants when the profile's
+/// adapter has async-seeded methods.
+fn juntos_source_for_active_profile() -> &'static str {
+    if crate::analyze::async_color::active_extern_async_names().is_empty() {
+        JUNTOS_SQLITE_SOURCE
+    } else {
+        JUNTOS_LIBSQL_SOURCE
+    }
+}
+
+/// Pick the `server.ts` runtime variant for the active profile —
+/// same selection rule as `juntos_source_for_active_profile`.
+fn server_source_for_active_profile() -> &'static str {
+    if crate::analyze::async_color::active_extern_async_names().is_empty() {
+        SERVER_SQLITE_SOURCE
+    } else {
+        SERVER_LIBSQL_SOURCE
+    }
+}
 
 mod expr;
 mod library;
@@ -99,19 +105,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(package::emit_tsconfig_json(app));
     files.push(EmittedFile {
         path: PathBuf::from("src/juntos.ts"),
-        content: JUNTOS_STUB_SOURCE.to_string(),
+        content: juntos_source_for_active_profile().to_string(),
     });
 
     // Framework runtime files: hand-written TS primitives (HTTP
     // server, DB adapter shim, test runner glue) are inlined as-is
     // from `runtime/typescript/`. Layout: flat under `src/`;
-    // internal cross-imports use `./<name>.js`.
-    for (path, content) in RUNTIME_FILES {
-        files.push(EmittedFile {
-            path: PathBuf::from(*path),
-            content: (*content).to_string(),
-        });
-    }
+    // internal cross-imports use `./<name>.js`. server.ts swaps
+    // between the better-sqlite3 + libsql variants based on the
+    // active profile (same selection rule as juntos.ts).
+    files.push(EmittedFile {
+        path: PathBuf::from("src/broadcasts.ts"),
+        content: BROADCASTS_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/server.ts"),
+        content: server_source_for_active_profile().to_string(),
+    });
 
     // (Transpile-from-Ruby runtime emit deferred to AFTER the
     // lowering pipeline so the tree-shake walker can use the

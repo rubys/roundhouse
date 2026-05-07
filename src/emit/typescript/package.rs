@@ -10,32 +10,29 @@ use crate::App;
 /// tsc can resolve `node:test` / `node:assert/strict` imports in the
 /// emitted spec files. The tsconfig `paths` alias resolves `"juntos"`
 /// to our local stub.
+///
+/// Dependency set switches with the active deployment profile: sync
+/// profiles ship `better-sqlite3` + its types; async profiles
+/// (`node-async` and downstream) ship `@libsql/client` (no
+/// `@types/...` package — libsql ships its own type defs). Keyed on
+/// `active_extern_async_names()` being non-empty, the same signal
+/// the runtime-source selection uses.
 pub(super) fn emit_package_json() -> EmittedFile {
-    let content = "\
-{
-  \"name\": \"app\",
-  \"version\": \"0.1.0\",
-  \"private\": true,
-  \"type\": \"module\",
-  \"scripts\": {
-    \"start\": \"tsx main.ts\"
-  },
-  \"dependencies\": {
-    \"better-sqlite3\": \"^11.5.0\",
-    \"ws\": \"^8.18.0\"
-  },
-  \"devDependencies\": {
-    \"@types/node\": \"^20\",
-    \"@types/better-sqlite3\": \"^7.6.0\",
-    \"@types/ws\": \"^8.5.0\",
-    \"typescript\": \"5.7.3\",
-    \"tsx\": \"4.19.2\"
-  }
-}
-";
+    let async_profile = !crate::analyze::async_color::active_extern_async_names().is_empty();
+    let (db_dep, db_types_dep) = if async_profile {
+        ("    \"@libsql/client\": \"^0.14.0\",", "")
+    } else {
+        (
+            "    \"better-sqlite3\": \"^11.5.0\",",
+            "    \"@types/better-sqlite3\": \"^7.6.0\",\n",
+        )
+    };
+    let content = format!(
+        "{{\n  \"name\": \"app\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"start\": \"tsx main.ts\"\n  }},\n  \"dependencies\": {{\n{db_dep}\n    \"ws\": \"^8.18.0\"\n  }},\n  \"devDependencies\": {{\n    \"@types/node\": \"^20\",\n{db_types_dep}    \"@types/ws\": \"^8.5.0\",\n    \"typescript\": \"5.7.3\",\n    \"tsx\": \"4.19.2\"\n  }}\n}}\n",
+    );
     EmittedFile {
         path: PathBuf::from("package.json"),
-        content: content.to_string(),
+        content,
     }
 }
 
