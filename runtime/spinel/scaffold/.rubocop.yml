@@ -20,17 +20,31 @@ AllCops:
   TargetRubyVersion: 3.3
   NewCops: disable
   DisabledByDefault: true
-  # CRuby-only test harness. `Object.const_get` + `eval(string_expr)`
-  # in FixtureLoader.load_all! and assert_difference/assert_no_difference
-  # are real spinel-subset violations, but this file is the test-side
-  # bootstrap that runs only under CRuby today. Replacing the const_get
-  # scan needs an explicit fixture registry (emitter-contract change);
-  # replacing eval needs assert_difference to take a block instead of a
-  # string (changes every emitted call site). Both are tracked as
-  # follow-ups; until then this file is excluded from the spinel-subset
-  # gate. Slated for full replacement when spinel grows its own test
-  # runner.
   Exclude:
+    # vendor/bundle/ contains rubocop_spinel's own .rubocop.yml
+    # (used for linting the gem's own source — declares
+    # `plugins: [standard-custom, standard-performance,
+    # rubocop-performance]`). When CI's bundler-cache: true vendors
+    # gems into scaffold/vendor/bundle/, the toolchain test copies
+    # that into the scratch tree; rubocop walks up from files inside
+    # the gem dir, finds the gem's config, and tries to require
+    # standard-custom (which isn't in our bundle). Excluding
+    # vendor/ keeps lint scope to our shipped tree only. Standard
+    # rubocop idiom; node_modules/ and tmp/ also excluded by
+    # convention even though we don't use them today.
+    - vendor/**/*
+    - node_modules/**/*
+    - tmp/**/*
+    # CRuby-only test harness. `Object.const_get` + `eval(string_expr)`
+    # in FixtureLoader.load_all! and assert_difference/assert_no_difference
+    # are real spinel-subset violations, but this file is the test-side
+    # bootstrap that runs only under CRuby today. Replacing the const_get
+    # scan needs an explicit fixture registry (emitter-contract change);
+    # replacing eval needs assert_difference to take a block instead of a
+    # string (changes every emitted call site). Both are tracked as
+    # follow-ups; until then this file is excluded from the spinel-subset
+    # gate. Slated for full replacement when spinel grows its own test
+    # runner.
     - test/test_helper.rb
     # active_record/base.rb uses the idiomatic
     # `class << self; attr_accessor :adapter` pattern. Spinel itself
