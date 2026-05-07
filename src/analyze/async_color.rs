@@ -212,7 +212,9 @@ pub fn propagate_global_with_externs(
                 if method.is_async {
                     continue;
                 }
-                if body_calls_async(&method.body, &async_names) {
+                let param_names: HashSet<Symbol> =
+                    method.params.iter().map(|p| p.name.clone()).collect();
+                if body_calls_async_with_params(&method.body, &async_names, &param_names) {
                     method.is_async = true;
                     marked_this_pass += 1;
                 }
@@ -222,7 +224,9 @@ pub fn propagate_global_with_externs(
             if func.is_async {
                 continue;
             }
-            if body_calls_async(&func.body, &async_names) {
+            let param_names: HashSet<Symbol> =
+                func.params.iter().map(|p| p.name.clone()).collect();
+            if body_calls_async_with_params(&func.body, &async_names, &param_names) {
                 func.is_async = true;
                 marked_this_pass += 1;
             }
@@ -281,14 +285,96 @@ fn collect_async_method_names(classes: &[LibraryClass]) -> HashSet<Symbol> {
 }
 
 /// Returns true if `expr` (or any subexpression) contains a
-/// `Send` whose method name is in `async_names`. Walks every
-/// Expr-bearing variant of `ExprNode`. Lambda bodies are
-/// traversed as part of the enclosing method.
+/// `Send` whose method name is in `async_names` AND whose
+/// receiver isn't a known-sync type. Walks every Expr-bearing
+/// variant of `ExprNode`. Lambda bodies are traversed as part of
+/// the enclosing method.
 fn body_calls_async(expr: &Expr, async_names: &HashSet<Symbol>) -> bool {
+    body_calls_async_with_params(expr, async_names, &HashSet::new())
+}
+
+/// Variant that takes the enclosing method's parameter names.
+/// Bare `Send { recv: None, method }` whose method matches one of
+/// the parameter names is treated as a Var read (Ruby's
+/// implicit-self resolves to the local), not a method dispatch —
+/// so it doesn't trigger async marking.
+///
+/// This is the fix for view-function bodies where the parameter
+/// `article` appears as `Send { recv: None, method: "article" }`
+/// in the lowered IR (a long-standing lowerer quirk that emits
+/// the right Var read at TS emit time but leaves the IR shape
+/// ambiguous). Without the filter, every view function with an
+/// `article` parameter triggers async marking against the async
+/// `Views::Articles#article` partial-renderer, cascading through
+/// the entire view + model + controller + fixture graph.
+fn body_calls_async_with_params(
+    expr: &Expr,
+    async_names: &HashSet<Symbol>,
+    param_names: &HashSet<Symbol>,
+) -> bool {
     walk_expr(expr, &mut |e| match &*e.node {
-        ExprNode::Send { method, .. } => async_names.contains(method),
+        ExprNode::Send { recv, method, .. } => {
+            if !async_names.contains(method) {
+                return false;
+            }
+            // Bare `Send` with no receiver where method matches a
+            // parameter name is a Var read disguised as a Send —
+            // skip.
+            if recv.is_none() && param_names.contains(method) {
+                return false;
+            }
+            !recv_is_known_sync(recv.as_ref(), method.as_str())
+        }
         _ => false,
     })
+}
+
+/// Receiver-aware filter for async propagation. Returns `true` when
+/// the receiver's resolved type is a class we know dispatches a sync
+/// method for `method` regardless of the name appearing in the
+/// async-method set. Today's exclusion set covers the common name
+/// collisions between AR adapter methods (count/update/find/delete)
+/// and (a) `ErrorCollection` / `Errors` (the AR errors hash, has
+/// `count`, `any?`, `[]`, etc.); (b) `HashWithIndifferentAccess` /
+/// `Parameters` (the request params shim, has `update`, `delete`,
+/// `fetch`, `find`); (c) Array / String / Hash builtins. Without
+/// this filter, `article.errors.count` in a view body propagates
+/// async-coloring through the entire view-method graph and
+/// cascades into `new` (the new.html.erb template's emitted
+/// function name) being marked, which then over-marks every
+/// `*.new()` call across models, controllers, fixtures, and tests.
+///
+/// Conservative: defaults to `false` (don't filter) when the recv
+/// type isn't populated. The propagation pass treats `false` as
+/// "could be async, mark the caller", so wrong-side errors are
+/// over-marks rather than missed marks.
+fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
+    let Some(recv) = recv else {
+        return false;
+    };
+    let Some(ty) = &recv.ty else {
+        return false;
+    };
+    use crate::ty::Ty;
+    match ty {
+        Ty::Array { .. } | Ty::Hash { .. } | Ty::Str => true,
+        Ty::Class { id, .. } => {
+            let raw = id.0.as_str();
+            let last = raw.rsplit("::").next().unwrap_or(raw);
+            matches!(
+                last,
+                "ErrorCollection"
+                    | "Errors"
+                    | "HashWithIndifferentAccess"
+                    | "Parameters"
+                    | "Array"
+                    | "Hash"
+                    | "String"
+                    | "Symbol"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Returns true if `expr` (or any subexpression) contains a `Send`

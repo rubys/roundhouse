@@ -69,6 +69,330 @@ fn gate_1_node_sync_byte_equal_to_emit_real_blog() {
     assert_byte_equal("real-blog", &baseline, &with_profile);
 }
 
+/// Diagnostic: dumps every method marked async by propagation
+/// against real-blog under the node-async extern list, plus the
+/// first async-matching Send found in each method's body. Useful
+/// for tracking down propagation over-marking; the
+/// receiver-aware filter (`recv_is_known_sync`) and the
+/// parameter-name filter (`body_calls_async_with_params`) were
+/// both diagnosed via this dump.
+#[test]
+#[ignore]
+fn dump_propagation_marks_real_blog() {
+    use roundhouse::analyze::async_color;
+    use roundhouse::expr::{Expr, ExprNode, LValue};
+    use roundhouse::profile::DeploymentProfile;
+    use std::collections::HashSet;
+
+    let app = analyzed("fixtures/real-blog");
+    let profile = DeploymentProfile::node_async();
+    let extern_names: Vec<&'static str> = profile.adapter().async_seed_methods().to_vec();
+
+    // Full pipeline reproduction.
+    let preliminary_views: Vec<roundhouse::dialect::LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| roundhouse::lower::lower_view_to_library_class(v, &app))
+        .collect();
+    let view_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
+        preliminary_views
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    roundhouse::lower::class_info_from_library_class(c),
+                )
+            })
+            .collect();
+    let mut route_helper_funcs = roundhouse::lower::lower_routes_to_library_functions(&app);
+    let params_specs_full =
+        roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs_simple: std::collections::BTreeMap<roundhouse::ident::Symbol, Vec<roundhouse::ident::Symbol>> =
+        params_specs_full
+            .iter()
+            .map(|(r, s)| (r.clone(), s.fields.clone()))
+            .collect();
+    let (mut model_lcs, model_registry) = roundhouse::lower::lower_models_with_registry_and_params(
+        &app.models,
+        &app.schema,
+        view_extras,
+        &params_specs_simple,
+    );
+
+    let mut view_lower_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
+        model_registry.clone().into_iter().collect();
+    let mut view_lcs = roundhouse::lower::lower_views_to_library_classes(
+        &app.views,
+        &app,
+        view_lower_extras.clone(),
+    );
+    let view_extras2: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
+        view_lcs
+            .iter()
+            .map(|c| (c.name.clone(), roundhouse::lower::class_info_from_library_class(c)))
+            .collect();
+    let mut controller_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    controller_extras.extend(view_extras2);
+    let mut controller_lcs = roundhouse::lower::lower_controllers_to_library_classes(
+        &app.controllers,
+        controller_extras,
+    );
+    let mut fixture_lcs = roundhouse::lower::lower_fixtures_to_library_classes(&app);
+
+    let mut all_classes: Vec<roundhouse::dialect::LibraryClass> = Vec::new();
+    let m_len = model_lcs.len();
+    let v_len = view_lcs.len();
+    let c_len = controller_lcs.len();
+    let _fx_len = fixture_lcs.len();
+    all_classes.append(&mut model_lcs);
+    all_classes.append(&mut view_lcs);
+    all_classes.append(&mut controller_lcs);
+    all_classes.append(&mut fixture_lcs);
+
+    async_color::propagate_global_with_externs(
+        &mut all_classes,
+        &mut route_helper_funcs,
+        &extern_names,
+    );
+
+    let _ = view_lower_extras;
+    let _ = (v_len, c_len);
+
+    // Build the after-set of async method names — across ALL classes
+    // (model + view + controller + fixture) plus the extern set, plus
+    // route_helper_funcs.
+    let mut async_names: HashSet<String> = all_classes
+        .iter()
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| m.is_async)
+                .map(|m| m.name.as_str().to_string())
+        })
+        .collect();
+    async_names.extend(
+        route_helper_funcs
+            .iter()
+            .filter(|f| f.is_async)
+            .map(|f| f.name.as_str().to_string()),
+    );
+    async_names.extend(extern_names.iter().map(|s| s.to_string()));
+
+    println!("=== Class names ===");
+    for c in &all_classes {
+        println!("  {}", c.name.0);
+    }
+    // Dump every Send method name in Views::Articles#form for diagnosis.
+    let form_class = all_classes.iter().find(|c| {
+        c.name.0.as_str().contains("Articles") && c.methods.iter().any(|m| m.name.as_str() == "form")
+    });
+    if let Some(c) = form_class {
+        if let Some(form_method) = c.methods.iter().find(|m| m.name.as_str() == "form") {
+            println!("=== Sends in Views::Articles#form body ===");
+            let mut sends: Vec<(String, Option<String>)> = Vec::new();
+            collect_sends(&form_method.body, &mut sends);
+            for (m, recv) in &sends {
+                println!("  Send method={m:?} recv={recv:?}");
+            }
+            fn collect_sends(e: &Expr, out: &mut Vec<(String, Option<String>)>) {
+                match &*e.node {
+                    ExprNode::Send { recv, method, args, block, .. } => {
+                        let recv_desc = recv
+                            .as_ref()
+                            .map(|r| format!("{:?}", std::mem::discriminant(&*r.node)));
+                        out.push((method.as_str().to_string(), recv_desc));
+                        if let Some(r) = recv {
+                            collect_sends(r, out);
+                        }
+                        for a in args {
+                            collect_sends(a, out);
+                        }
+                        if let Some(b) = block {
+                            collect_sends(b, out);
+                        }
+                    }
+                    ExprNode::Seq { exprs } => exprs.iter().for_each(|x| collect_sends(x, out)),
+                    ExprNode::If { cond, then_branch, else_branch } => {
+                        collect_sends(cond, out);
+                        collect_sends(then_branch, out);
+                        collect_sends(else_branch, out);
+                    }
+                    ExprNode::Assign { value, .. } => collect_sends(value, out),
+                    ExprNode::Lambda { body, .. } => collect_sends(body, out),
+                    ExprNode::BoolOp { left, right, .. } => {
+                        collect_sends(left, out);
+                        collect_sends(right, out);
+                    }
+                    ExprNode::Let { value, body, .. } => {
+                        collect_sends(value, out);
+                        collect_sends(body, out);
+                    }
+                    ExprNode::Cast { value, .. } => collect_sends(value, out),
+                    ExprNode::Return { value } => collect_sends(value, out),
+                    ExprNode::Hash { entries, .. } => {
+                        for (k, v) in entries {
+                            collect_sends(k, out);
+                            collect_sends(v, out);
+                        }
+                    }
+                    ExprNode::Array { elements, .. } => {
+                        for x in elements {
+                            collect_sends(x, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    println!("=== Full-pipeline async marks (real-blog) ===");
+    println!("extern: {extern_names:?}");
+    let mut sorted_async: Vec<&String> = async_names.iter().collect();
+    sorted_async.sort();
+    println!("async name set: {sorted_async:?}");
+    println!("--- which classes own each async name? ---");
+    for name in &sorted_async {
+        let owners: Vec<String> = all_classes
+            .iter()
+            .filter_map(|c| {
+                c.methods
+                    .iter()
+                    .find(|m| m.is_async && m.name.as_str() == name.as_str())
+                    .map(|_| c.name.0.as_str().to_string())
+            })
+            .collect();
+        let func_owner = route_helper_funcs
+            .iter()
+            .any(|f| f.is_async && f.name.as_str() == name.as_str());
+        if !owners.is_empty() || func_owner {
+            println!("  `{name}` → {owners:?} (func={func_owner})");
+        }
+    }
+    println!("--- models (first {m_len} classes in all_classes) ---");
+    for class in all_classes.iter().take(m_len) {
+        for m in &class.methods {
+            if !m.is_async {
+                continue;
+            }
+            let trigger = first_async_send_name(&m.body, &async_names);
+            match trigger {
+                Some(t) => println!("  {}#{}  ← Send to `{t}`", class.name.0, m.name),
+                None => println!(
+                    "  {}#{}  ← NO ASYNC SEND IN BODY (over-mark candidate!)",
+                    class.name.0, m.name
+                ),
+            }
+        }
+    }
+    println!("--- non-models (controllers/views/fixtures) ---");
+    for class in all_classes.iter().skip(m_len) {
+        for m in &class.methods {
+            if !m.is_async {
+                continue;
+            }
+            let trigger = first_async_send_name(&m.body, &async_names);
+            match trigger {
+                Some(t) => println!("  {}#{}  ← Send to `{t}`", class.name.0, m.name),
+                None => println!(
+                    "  {}#{}  ← NO ASYNC SEND IN BODY (over-mark candidate!)",
+                    class.name.0, m.name
+                ),
+            }
+        }
+    }
+
+    fn first_async_send_name(body: &Expr, async_names: &HashSet<String>) -> Option<String> {
+        let mut found: Option<String> = None;
+        walk(body, async_names, &mut found);
+        found
+    }
+    fn walk(e: &Expr, async_names: &HashSet<String>, found: &mut Option<String>) {
+        if found.is_some() {
+            return;
+        }
+        match &*e.node {
+            ExprNode::Send { recv, method, args, block, .. } => {
+                if async_names.contains(method.as_str()) {
+                    *found = Some(method.as_str().to_string());
+                    return;
+                }
+                if let Some(r) = recv {
+                    walk(r, async_names, found);
+                }
+                for a in args {
+                    walk(a, async_names, found);
+                }
+                if let Some(b) = block {
+                    walk(b, async_names, found);
+                }
+            }
+            ExprNode::Seq { exprs } => exprs.iter().for_each(|x| walk(x, async_names, found)),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond, async_names, found);
+                walk(then_branch, async_names, found);
+                walk(else_branch, async_names, found);
+            }
+            ExprNode::Assign { target, value } => {
+                walk_lvalue(target, async_names, found);
+                walk(value, async_names, found);
+            }
+            ExprNode::Lambda { body, .. } => walk(body, async_names, found),
+            ExprNode::BoolOp { left, right, .. } => {
+                walk(left, async_names, found);
+                walk(right, async_names, found);
+            }
+            ExprNode::Let { value, body, .. } => {
+                walk(value, async_names, found);
+                walk(body, async_names, found);
+            }
+            ExprNode::Cast { value, .. } => walk(value, async_names, found),
+            ExprNode::Return { value } => walk(value, async_names, found),
+            ExprNode::Apply { fun, args, block } => {
+                walk(fun, async_names, found);
+                for a in args {
+                    walk(a, async_names, found);
+                }
+                if let Some(b) = block {
+                    walk(b, async_names, found);
+                }
+            }
+            ExprNode::Array { elements, .. } => {
+                for x in elements {
+                    walk(x, async_names, found);
+                }
+            }
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    walk(k, async_names, found);
+                    walk(v, async_names, found);
+                }
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                walk(scrutinee, async_names, found);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        walk(g, async_names, found);
+                    }
+                    walk(&a.body, async_names, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_lvalue(lv: &LValue, async_names: &HashSet<String>, found: &mut Option<String>) {
+        match lv {
+            LValue::Attr { recv, .. } => walk(recv, async_names, found),
+            LValue::Index { recv, index } => {
+                walk(recv, async_names, found);
+                walk(index, async_names, found);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn dump_libsql_runtime_real_blog() {
