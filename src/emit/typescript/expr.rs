@@ -53,6 +53,19 @@ pub(crate) fn is_async_method_name(name: &str) -> bool {
     })
 }
 
+/// Insert additional names into the active async-method set without
+/// stack-saving the previous value. The TS emit pipeline calls this
+/// after global runtime+app propagation has discovered names beyond
+/// the original adapter-seed extern (e.g. `save`, `destroy` on
+/// `Base` propagate to async via `insert`/`update`/`delete`; user
+/// model methods like `Article#comments` propagate via `where`).
+/// Without these names in the set, call sites like `this.save()` or
+/// `this.comments()` wouldn't get wrapped with `(await ...)` even
+/// though the resolved method is async.
+pub(crate) fn extend_async_methods(extra: std::collections::HashSet<crate::ident::Symbol>) {
+    ASYNC_METHOD_NAMES.with(|cell| cell.borrow_mut().extend(extra));
+}
+
 /// True iff `expr` (or any descendant) contains a `Send` whose
 /// method name is in the active async set. Used by Lambda emit to
 /// decide whether the lambda needs an `async` prefix and by HOF
@@ -60,6 +73,86 @@ pub(crate) fn is_async_method_name(name: &str) -> bool {
 /// a `for...of` IIFE.
 pub(super) fn body_has_async_send(expr: &Expr) -> bool {
     crate::analyze::async_color::expr_contains_async_send(expr, is_async_method_name)
+}
+
+// Enclosing-method parameter names ------------------------------------
+//
+// Mirrors the propagation pass's parameter-name filter at emit time.
+// A bare `Send { recv: None, method }` whose method matches one of
+// the enclosing method's parameter names is a Var read disguised as a
+// Send (Ruby implicit-self resolves to the local). Without this filter
+// at emit time, view-function bodies whose parameter is named `article`
+// — which collides with `Views::Articles#article` (a partial-renderer
+// async-marked method) — emit `(await article)` for every parameter
+// reference and tsc rejects them with TS1308 (await outside async fn).
+//
+// Set by `with_method_params` around each method/function body emit;
+// cleared on return so nested method emits don't see stale names.
+
+std::thread_local! {
+    static CURRENT_METHOD_PARAMS: std::cell::RefCell<std::collections::HashSet<crate::ident::Symbol>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Run `f` with `params` as the active enclosing-method parameter
+/// name set. Stack-saves and restores so nested emits (HOF blocks,
+/// rescue arms, etc.) don't drop their enclosing context.
+pub(crate) fn with_method_params<F, R>(
+    params: std::collections::HashSet<crate::ident::Symbol>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = CURRENT_METHOD_PARAMS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), params));
+    let r = f();
+    CURRENT_METHOD_PARAMS.with(|cell| *cell.borrow_mut() = prev);
+    r
+}
+
+/// True iff `name` matches a parameter of the currently-emitting
+/// method. Used by the await-wrap site to skip wrapping bare Sends
+/// (recv:None) whose name shadows an enclosing parameter.
+pub(crate) fn is_enclosing_param_name(name: &str) -> bool {
+    CURRENT_METHOD_PARAMS.with(|cell| {
+        let set = cell.borrow();
+        set.iter().any(|s| s.as_str() == name)
+    })
+}
+
+/// Receiver-aware filter at emit time. Mirrors
+/// `crate::analyze::async_color::recv_is_known_sync` — if the
+/// receiver's resolved type is one of the known-sync containers
+/// (Array/Hash/Str + framework value classes that share AR adapter
+/// method names), the await wrap is suppressed. Defaults to `false`
+/// (no filter) when the receiver type isn't populated, matching
+/// the propagation pass.
+fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
+    let Some(recv) = recv else {
+        return false;
+    };
+    let Some(ty) = &recv.ty else {
+        return false;
+    };
+    match ty {
+        Ty::Array { .. } | Ty::Hash { .. } | Ty::Str => true,
+        Ty::Class { id, .. } => {
+            let raw = id.0.as_str();
+            let last = raw.rsplit("::").next().unwrap_or(raw);
+            matches!(
+                last,
+                "ErrorCollection"
+                    | "Errors"
+                    | "HashWithIndifferentAccess"
+                    | "Parameters"
+                    | "Array"
+                    | "Hash"
+                    | "String"
+                    | "Symbol"
+            )
+        }
+        _ => false,
+    }
 }
 
 // Body + expressions ---------------------------------------------------
@@ -1261,6 +1354,27 @@ pub(super) fn emit_send_with_parens(
     // parses as `await (x.find(id).save)` (property access binds
     // tighter than await) — silently wrong.
     if !is_async_method_name(method) {
+        return result;
+    }
+    // Receiver-aware filter: mirror the propagation-side
+    // `recv_is_known_sync` check so emit doesn't wrap a Hash/Array/
+    // ErrorCollection/Parameters-typed receiver with `(await ...)`
+    // for an AR-adapter-named method. `inner_opts.delete("method")`
+    // (recv ty Hash) emits as a sync IIFE — without this filter we
+    // wrap the IIFE with `(await ...)` and tsc rejects it because
+    // the enclosing method (correctly NOT propagated to async by
+    // the same filter on the prop side) isn't async.
+    if recv_is_known_sync_at_emit(recv) {
+        return result;
+    }
+    // Parameter-name filter: a bare `Send { recv: None, method }`
+    // whose method matches an enclosing parameter name is a Var
+    // read (Ruby implicit-self), not a method dispatch. Without
+    // this, a view function with parameter `article` emits every
+    // `article` reference as `(await article)` (because
+    // `Views::Articles#article` is in the async set under the same
+    // name) and tsc rejects each.
+    if recv.is_none() && is_enclosing_param_name(method) {
         return result;
     }
     // Self-type narrowing cast injection: `emit_send_with_parens_inner`

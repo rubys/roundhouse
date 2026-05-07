@@ -183,7 +183,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let mut fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
 
-    let test_lowered: Vec<crate::lower::LoweredTestModule> = if app.test_modules.is_empty() {
+    let mut test_lowered: Vec<crate::lower::LoweredTestModule> = if app.test_modules.is_empty() {
         Vec::new()
     } else {
         let mut test_extras = controller_extras;
@@ -243,6 +243,67 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
 
     let extern_async_names = crate::analyze::async_color::active_extern_async_names();
+
+    // Async coloring (Phase 4): expand the extern async-name set with
+    // every method the runtime itself propagates to async. Without
+    // this, app-side propagation only sees the adapter seed methods
+    // (`all`, `find`, `where`, `count`, `exists?`, `insert`, `update`,
+    // `delete`) and misses the runtime methods that propagate from
+    // those seeds — `Base#save` (calls insert/update), `Base#destroy`
+    // (calls delete), `Base#reload`, etc. The result was that
+    // `Article#update { return this.save(); }` didn't propagate to
+    // async because `save` wasn't in the extern set; this fix closes
+    // the runtime → app propagation gap.
+    //
+    // Implementation: parse the runtime once, run a global propagation
+    // across all runtime classes (which catches both within-file and
+    // cross-runtime-file chains — `Validations#valid?` calling
+    // `Base#errors` etc.), then collect every method marked async.
+    // Those names join the adapter seeds as the expanded extern set
+    // used by app propagation, runtime per-file propagation (so
+    // chains like Validations → Base.save propagate during the actual
+    // emit pass too), and the emit-time `ASYNC_METHOD_NAMES` thread-
+    // local consulted by Send-site `(await ...)` wrapping.
+    let runtime_units_seed = crate::runtime_loader::typescript_units(|_, c| c)
+        .expect("runtime transpile parse failed");
+    let mut runtime_seed_classes: Vec<crate::dialect::LibraryClass> = runtime_units_seed
+        .iter()
+        .flat_map(|u| u.classes.iter().cloned())
+        .collect();
+    if !extern_async_names.is_empty() {
+        crate::analyze::async_color::propagate_with_externs(
+            &mut runtime_seed_classes,
+            &extern_async_names,
+        );
+    }
+    let mut expanded_extern_storage: Vec<String> =
+        extern_async_names.iter().map(|s| s.to_string()).collect();
+    for class in &runtime_seed_classes {
+        for method in &class.methods {
+            if !method.is_async {
+                continue;
+            }
+            let name = method.name.as_str().to_string();
+            if !expanded_extern_storage.contains(&name) {
+                expanded_extern_storage.push(name);
+            }
+        }
+    }
+    let expanded_extern_refs: Vec<&str> =
+        expanded_extern_storage.iter().map(|s| s.as_str()).collect();
+
+    // Inject runtime-discovered async names into the emit-time
+    // thread-local so call sites like `this.save()` wrap with
+    // `(await ...)`. App-marked names get added below after app
+    // propagation runs.
+    if !expanded_extern_storage.is_empty() {
+        let extra: std::collections::HashSet<crate::ident::Symbol> = expanded_extern_storage
+            .iter()
+            .map(|s| crate::ident::Symbol::from(s.as_str()))
+            .collect();
+        expr::extend_async_methods(extra);
+    }
+
     let mut route_helper_funcs = route_helper_funcs;
     if !extern_async_names.is_empty() {
         // Capture lengths BEFORE `append` drains each source Vec —
@@ -278,8 +339,46 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         crate::analyze::async_color::propagate_global_with_externs(
             &mut all_classes,
             &mut all_funcs,
-            &extern_async_names,
+            &expanded_extern_refs,
         );
+        // Collect every name the global pass marked async. Combined
+        // with the runtime-derived names already injected into
+        // `ASYNC_METHOD_NAMES` above, this is the complete set the
+        // emit-time `is_async_method_name` lookup needs to wrap call
+        // sites. App-marked names (e.g. `Article#comments` whose body
+        // calls `Comment.where(...)`) reach this path; without
+        // injecting them, `this.comments()` callers don't get
+        // `(await ...)` wrapping and tsc rejects the chained access.
+        let mut app_async_extra: std::collections::HashSet<crate::ident::Symbol> =
+            std::collections::HashSet::new();
+        for class in &all_classes {
+            for method in &class.methods {
+                if method.is_async {
+                    app_async_extra.insert(method.name.clone());
+                }
+            }
+        }
+        for func in &all_funcs {
+            if func.is_async {
+                app_async_extra.insert(func.name.clone());
+            }
+        }
+        // Fold app-marked names into the runtime-side extern set too,
+        // so the runtime emit's per-file propagation pass sees them.
+        // Without this, `Base#is_valid` (in `active_record_base.ts`)
+        // calling `this.validate()` doesn't propagate to async even
+        // though the app-side `Comment#validate` was marked async via
+        // a `validates_belongs_to` call. The result was emit wrapping
+        // `(await this.validate())` inside a non-async `is_valid()`.
+        for sym in &app_async_extra {
+            let n = sym.as_str().to_string();
+            if !expanded_extern_storage.contains(&n) {
+                expanded_extern_storage.push(n);
+            }
+        }
+        if !app_async_extra.is_empty() {
+            expr::extend_async_methods(app_async_extra);
+        }
         let mut fiter = all_funcs.into_iter();
         route_helper_funcs = fiter.by_ref().take(rh_len).collect();
         seeds_funcs = fiter.by_ref().take(sd_len).collect();
@@ -295,6 +394,36 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         fixture_lcs = iter.by_ref().take(fx_len).collect();
         test_lcs = iter.by_ref().take(tc_len).collect();
         test_inner_lcs = iter.collect();
+
+        // Sync is_async flags from the propagated test_lcs /
+        // test_inner_lcs (clones used for propagation) back to
+        // test_lowered, which the emit pass at the bottom of this
+        // function reads from. Without this writeback, propagation
+        // marks `test_creates_an_article(...)` async but emit uses
+        // the unmarked `test_lowered.test_class` clone — every test
+        // method body containing `await ArticlesFixtures.one()`
+        // tsc-rejects with TS1308 (await outside async function).
+        for (idx, lc) in test_lcs.iter().enumerate() {
+            if let Some(target) = test_lowered.get_mut(idx) {
+                for (mi, m) in lc.methods.iter().enumerate() {
+                    if let Some(t) = target.test_class.methods.get_mut(mi) {
+                        t.is_async = m.is_async;
+                    }
+                }
+            }
+        }
+        let mut tic_iter = test_inner_lcs.iter();
+        for lowered in test_lowered.iter_mut() {
+            for ic_target in lowered.inner_classes.iter_mut() {
+                if let Some(ic_src) = tic_iter.next() {
+                    for (mi, m) in ic_src.methods.iter().enumerate() {
+                        if let Some(t) = ic_target.methods.get_mut(mi) {
+                            t.is_async = m.is_async;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
@@ -306,15 +435,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     all_app_classes.extend(test_lcs.iter().cloned());
     all_app_classes.extend(test_inner_lcs.iter().cloned());
 
-    // First pass: parse-only to get the runtime classes for
-    // reachability. `typescript_units` parses + emits in one step;
-    // we need to seed the reachability walker with the runtime's
-    // own classes so cross-references between (e.g.) Base and
-    // Validations resolve. The parse happens twice — once here for
-    // reachability, once below for the actual emit. Cheap (~10ms
-    // for the framework runtime).
-    let runtime_units_seed = crate::runtime_loader::typescript_units(|_, c| c)
-        .expect("runtime transpile parse failed");
+    // First pass: reuse the runtime parse from the async-expansion
+    // step above. `typescript_units` parses + emits in one step; we
+    // need the runtime's own classes for reachability so cross-
+    // references between (e.g.) Base and Validations resolve. The
+    // expansion-step parse already paid for this, so we reuse
+    // `runtime_units_seed` rather than parsing a third time.
     // Build the runtime alias list: each LibraryClass appears under
     // its simple name AND its qualified name (`ActiveRecord::Base`).
     // Two `Base` classes (one from AR, one from ActionController)
@@ -377,26 +503,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &extra_roots,
     );
 
-    // Snapshot `extern_async_names` for the runtime transform closure.
-    // The closure captures by move, so a per-call clone keeps it
-    // alive across all per-file invocations.
-    let extern_async_names_for_runtime = extern_async_names.clone();
+    // Snapshot the EXPANDED extern names for the runtime transform
+    // closure. The closure captures by move, so the owning Vec<String>
+    // is cloned once per call and dereferenced to &[&str] inside.
+    // Using the expanded set (adapter seeds + every method the seed-
+    // pass propagation marked async) lets cross-runtime-file chains
+    // propagate during the actual emit pass — `Validations#valid?`
+    // calling `Base#save` now sees `save` in extern and marks
+    // `valid?` async. Without this, the per-file pass would only see
+    // direct adapter-method calls within a single runtime file.
+    let extern_for_runtime: Vec<String> = expanded_extern_storage.clone();
     let runtime_units = crate::runtime_loader::typescript_units(move |_path, classes| {
         let mut classes: Vec<_> = classes
             .into_iter()
             .map(|c| crate::treeshake::filter_runtime_class(&c, &reach))
             .collect();
-        // Per-file async propagation. The runtime files are
-        // processed one at a time here, so cross-file chains
-        // (Base.foo → Validations.bar → adapter.baz) won't fully
-        // propagate — only direct extern calls within a single
-        // file mark its methods. Acceptable for Phase 3 because
-        // the AR pattern (Base.all calls adapter.all) is direct.
-        if !extern_async_names_for_runtime.is_empty() {
-            crate::analyze::async_color::propagate_with_externs(
-                &mut classes,
-                &extern_async_names_for_runtime,
-            );
+        if !extern_for_runtime.is_empty() {
+            let refs: Vec<&str> = extern_for_runtime.iter().map(|s| s.as_str()).collect();
+            crate::analyze::async_color::propagate_with_externs(&mut classes, &refs);
         }
         classes
     })
@@ -680,10 +804,22 @@ fn emit_test_setup_ts(
     app: &App,
     fixture_lcs: &[crate::dialect::LibraryClass],
 ) -> EmittedFile {
+    // Same selection rule as `juntos_source_for_active_profile` /
+    // `server_source_for_active_profile`: under any async profile
+    // (libsql today, D1/IndexedDB tomorrow) the test runtime can't
+    // import better-sqlite3 — its native module isn't reachable in
+    // the worker/browser/edge variants and even on Node it's the
+    // wrong adapter shape. Switch to the libsql `setupTestDb` path.
+    let async_profile = !crate::analyze::async_color::active_extern_async_names().is_empty();
+
     let mut s = String::new();
     s.push_str("// Generated by Roundhouse.\n");
-    s.push_str("import Database from \"better-sqlite3\";\n\n");
-    s.push_str("import { installDb } from \"../../src/juntos.js\";\n");
+    if async_profile {
+        s.push_str("import { setupTestDb } from \"../../src/juntos.js\";\n");
+    } else {
+        s.push_str("import Database from \"better-sqlite3\";\n\n");
+        s.push_str("import { installDb } from \"../../src/juntos.js\";\n");
+    }
 
     let has_schema = !app.schema.tables.is_empty();
     if has_schema {
@@ -714,16 +850,29 @@ fn emit_test_setup_ts(
     }
 
     s.push('\n');
-    s.push_str("const db = new Database(\":memory:\");\n");
-    if has_schema {
-        s.push_str("for (const stmt of Schema.statements()) {\n");
-        s.push_str("  db.exec(stmt);\n");
-        s.push_str("}\n");
+    if async_profile {
+        // libsql path: schema + DB install rolled into the async
+        // helper. `setupTestDb` opens an in-memory libsql Client,
+        // runs the DDL one statement at a time (libsql doesn't
+        // support multi-statement execute), and calls `installDb`
+        // for us. Top-level `await` is fine in an ES module.
+        if has_schema {
+            s.push_str("await setupTestDb(Schema.statements().join(\";\"));\n");
+        } else {
+            s.push_str("await setupTestDb(\"\");\n");
+        }
+    } else {
+        s.push_str("const db = new Database(\":memory:\");\n");
+        if has_schema {
+            s.push_str("for (const stmt of Schema.statements()) {\n");
+            s.push_str("  db.exec(stmt);\n");
+            s.push_str("}\n");
+        }
+        // installDb wires the SqliteActiveRecordAdapter onto
+        // ActiveRecord.adapter (juntos.ts) so framework Ruby's
+        // `ActiveRecord.adapter.find/all/...` resolves.
+        s.push_str("installDb(db);\n");
     }
-    // installDb wires the SqliteActiveRecordAdapter onto
-    // ActiveRecord.adapter (juntos.ts) so framework Ruby's
-    // `ActiveRecord.adapter.find/all/...` resolves.
-    s.push_str("installDb(db);\n");
 
     if has_routes {
         s.push_str("installRoutes(\n");
@@ -1441,18 +1590,25 @@ fn emit_class_member(
         crate::emit::typescript::library::rewrite_for_class_method(&m.body, raw_name)
     };
 
-    let body = if is_constructor {
-        // TS constructors implicitly return the constructed instance;
-        // an explicit `return <expr>` on the last statement of a Ruby
-        // `def initialize` would replace `this` with the expression's
-        // value (e.g. `return this.errors = []` → constructor returns
-        // an array, breaking `instanceof` and method dispatch). Emit
-        // body as void so the trailing-statement-becomes-return
-        // transform is suppressed.
-        emit_constructor_body(&rewritten, &Ty::Nil, has_parent)
-    } else {
-        expr::emit_body(&rewritten, &ret_ty)
-    };
+    // Set enclosing-method parameter names so the await-wrap site
+    // can suppress wrapping bare Sends whose name shadows a param
+    // (e.g. view function `_form(article)` referencing `article`).
+    let param_set: std::collections::HashSet<crate::ident::Symbol> =
+        m.params.iter().map(|p| p.name.clone()).collect();
+    let body = expr::with_method_params(param_set, || {
+        if is_constructor {
+            // TS constructors implicitly return the constructed instance;
+            // an explicit `return <expr>` on the last statement of a Ruby
+            // `def initialize` would replace `this` with the expression's
+            // value (e.g. `return this.errors = []` → constructor returns
+            // an array, breaking `instanceof` and method dispatch). Emit
+            // body as void so the trailing-statement-becomes-return
+            // transform is suppressed.
+            emit_constructor_body(&rewritten, &Ty::Nil, has_parent)
+        } else {
+            expr::emit_body(&rewritten, &ret_ty)
+        }
+    });
 
     if is_constructor {
         writeln!(out, "constructor({}) {{", param_list.join(", ")).unwrap();
@@ -1568,7 +1724,9 @@ pub fn emit_library_function(
     // bare Sends emit as plain function calls (resolved against
     // imports), and `super` doesn't apply since there's no inheritance.
     let rewritten = crate::emit::typescript::library::rewrite_for_free_function(&func.body);
-    let body = expr::emit_body(&rewritten, &ret_ty);
+    let param_set: std::collections::HashSet<crate::ident::Symbol> =
+        func.params.iter().map(|p| p.name.clone()).collect();
+    let body = expr::with_method_params(param_set, || expr::emit_body(&rewritten, &ret_ty));
 
     // Async coloring (Phase 3): same gating as `emit_class_member`,
     // minus the attribute-slot exemption (free functions can't be
@@ -1845,7 +2003,9 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
         .collect();
 
-    let body = expr::emit_body(&m.body, ret);
+    let param_set: std::collections::HashSet<crate::ident::Symbol> =
+        m.params.iter().map(|p| p.name.clone()).collect();
+    let body = expr::with_method_params(param_set, || expr::emit_body(&m.body, ret));
 
     // Async coloring (Phase 3): same gating as `emit_class_member`,
     // skipping attribute slots. Module-level methods can't be
