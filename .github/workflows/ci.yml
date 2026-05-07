@@ -114,11 +114,13 @@ jobs:
   #     - name: cargo test --test crystal_toolchain -- --ignored
   #       run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  # toolchain-typescript: tsc parity + node:test on real-blog. The
-  # filter `real_blog` excludes the still-aspirational tiny_blog
-  # gate (broken on main, pre-existing) and the diagnostic
-  # `dump_transpiled_blog_tsc_errors` non-asserting helper. Drop the
-  # filter once tiny_blog reaches parity.
+  # toolchain-typescript: tsc parity + node:test on real-blog,
+  # under both the default (`node-sync`, better-sqlite3) profile
+  # AND the `node-async` libsql profile that exercises async
+  # coloring. The filter `real_blog` excludes the still-
+  # aspirational tiny_blog gate (broken on main, pre-existing) and
+  # the diagnostic `dump_transpiled_blog_tsc_errors` non-asserting
+  # helper. Drop the filter once tiny_blog reaches parity.
   toolchain-typescript:
     needs: generate-fixture
     runs-on: ubuntu-latest

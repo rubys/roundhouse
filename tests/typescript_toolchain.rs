@@ -42,6 +42,29 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn generate_project_with_profile(
+    fixture_path: &Path,
+    out: &Path,
+    profile: &roundhouse::profile::DeploymentProfile,
+) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let mut app = ingest_app(fixture_path).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = typescript::emit_with_profile(&app, profile);
+
+    for file in &files {
+        let path = out.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write emitted file");
+    }
+}
+
 fn assert_tsc_passes(fixture: &str, scratch: &Path) {
     // Install declared devDependencies (`@types/node`) so tsc can
     // resolve `node:test` / `node:assert/strict` in the emitted specs.
@@ -142,61 +165,20 @@ fn real_blog_tsc_passes() {
     assert_tsc_passes("real-blog", &scratch);
 }
 
-/// libsql variant: emit real-blog under node-async, type-check
-/// the result. Forcing function for the libsql runtime + async-
-/// coloring emit path. Diagnostic for now (does NOT assert
-/// success) — first run is expected to surface gaps in the
-/// async-emit pipeline that need iterative fixes.
+/// libsql (`node-async`) profile: emit real-blog with async coloring
+/// active, type-check the result. Forcing function for the libsql
+/// runtime + async-emit pipeline — every regression in the
+/// runtime↔app propagation handshake or the emit-time await-wrap
+/// filters surfaces here as a tsc error.
 #[test]
 #[ignore]
-fn dump_real_blog_libsql_tsc_errors() {
+fn real_blog_libsql_tsc_passes() {
     use roundhouse::profile::DeploymentProfile;
 
     let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog-libsql-dump");
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch).expect("clean scratch");
-    }
-    std::fs::create_dir_all(&scratch).expect("create scratch");
-
-    let mut app = ingest_app(fixture).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
-    let files = typescript::emit_with_profile(&app, &DeploymentProfile::node_async());
-    for file in &files {
-        let path = scratch.join(&file.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir");
-        }
-        std::fs::write(&path, &file.content).expect("write");
-    }
-
-    let install = Command::new("npm")
-        .arg("install")
-        .arg("--silent")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .current_dir(&scratch)
-        .output()
-        .expect("run npm install");
-    if !install.status.success() {
-        eprintln!(
-            "npm install failed:\n{}",
-            String::from_utf8_lossy(&install.stderr)
-        );
-        return;
-    }
-
-    let output = Command::new("./node_modules/.bin/tsc")
-        .arg("-p")
-        .arg(".")
-        .arg("--noEmit")
-        .current_dir(&scratch)
-        .output()
-        .expect("run tsc");
-
-    println!("=== tsc exit status: {} ===", output.status);
-    println!("=== stdout ===\n{}", String::from_utf8_lossy(&output.stdout));
-    println!("=== stderr ===\n{}", String::from_utf8_lossy(&output.stderr));
+    let scratch = scratch_dir("real-blog-libsql-tsc");
+    generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
+    assert_tsc_passes("real-blog (libsql)", &scratch);
 }
 
 #[test]
