@@ -49,8 +49,19 @@ struct Cli {
     reference: String,
 
     /// Target server base URL (roundhouse-emitted, e.g. TS-node).
+    /// Mutually exclusive with --target-cmd.
     #[arg(long, default_value = "http://localhost:3000")]
     target: String,
+
+    /// Target invocation command (CGI-shape: stdout carries
+    /// `Status:`-prefixed headers + body). Per-path: env vars
+    /// REQUEST_METHOD, PATH_INFO, QUERY_STRING, CONTENT_LENGTH,
+    /// CONTENT_TYPE are populated; cwd inherited. Used when the
+    /// target has no live HTTP server — e.g., spinel emits a CGI-
+    /// dispatch main.rb but no server (project_ruby_dev_server_-
+    /// retirement). Mutually exclusive with --target.
+    #[arg(long, conflicts_with = "target")]
+    target_cmd: Option<String>,
 
     /// URL paths to compare. Repeatable.
     #[arg(long = "path", num_args = 1.., required = true)]
@@ -89,7 +100,7 @@ fn main() -> Result<()> {
     let mut failures: Vec<report::Failure> = Vec::new();
 
     for path in &cli.paths {
-        match compare_one(&client, &cli.reference, &cli.target, path, &config) {
+        match compare_one(&client, &cli.reference, &cli.target, cli.target_cmd.as_deref(), path, &config) {
             Ok(None) => {
                 println!("  {path} ... \x1b[32mmatch\x1b[0m");
                 pass += 1;
@@ -123,16 +134,23 @@ fn compare_one(
     client: &reqwest::blocking::Client,
     reference: &str,
     target: &str,
+    target_cmd: Option<&str>,
     path: &str,
     config: &Config,
 ) -> Result<Option<report::Failure>> {
     let ref_url = join_url(reference, path);
-    let tgt_url = join_url(target, path);
-
     let ref_resp = fetch::get(client, &ref_url)
         .with_context(|| format!("fetch reference {ref_url}"))?;
-    let tgt_resp = fetch::get(client, &tgt_url)
-        .with_context(|| format!("fetch target {tgt_url}"))?;
+
+    let tgt_resp = match target_cmd {
+        Some(cmd) => fetch::shell(cmd, path)
+            .with_context(|| format!("shell target {path}"))?,
+        None => {
+            let tgt_url = join_url(target, path);
+            fetch::get(client, &tgt_url)
+                .with_context(|| format!("fetch target {tgt_url}"))?
+        }
+    };
 
     // Status divergence is its own failure — a 200 vs 404 on the
     // same path is a routing or resource-state mismatch we want to

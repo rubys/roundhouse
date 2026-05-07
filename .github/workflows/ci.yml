@@ -416,42 +416,41 @@ jobs:
       - name: scripts/compare python
         run: scripts/compare python
 
-  # compare-spinel: temporarily disabled. Backed by the CRuby
-  # scaffold dev server (`server/dev_server.rb`), which has been
-  # retired alongside the rubocop_spinel cleanup — its Thread/Mutex/
-  # module_function usage is fundamentally outside the spinel
-  # subset. Native HTTP is staged for civetweb in collaboration
-  # with the spinel team once the backend lands. Re-enable once
-  # the civetweb-backed dev server is in place. See memory:
-  # project_ruby_dev_server_retirement.
-  #
-  # compare-spinel:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - uses: ruby/setup-ruby@v1
-  #       with:
-  #         ruby-version: '3.4'
-  #         bundler-cache: true
-  #         working-directory: ./fixtures/real-blog
-  #     - uses: ruby/setup-ruby@v1
-  #       with:
-  #         ruby-version: '3.4'
-  #         bundler-cache: true
-  #         working-directory: ./runtime/spinel/scaffold
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - name: scripts/compare spinel
-  #       run: scripts/compare spinel
+  # compare-spinel: DOM-diff via per-request shell-out to main.rb
+  # (CGI shape: ENV in, response on stdout). No live target server —
+  # the previous CRuby dev_server.rb was retired in the rubocop_spinel
+  # cleanup; main.rb is spinel-subset clean and produces the same
+  # HTTP response shape as a server would. Per-path Ruby startup
+  # (~1s × 5 paths) is the cost; the eventual spinel-compiled binary
+  # invocation will close that gap. See project_ruby_dev_server_-
+  # retirement memory.
+  compare-spinel:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: scripts/compare spinel
+        run: scripts/compare spinel
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

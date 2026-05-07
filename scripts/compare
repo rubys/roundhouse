@@ -332,64 +332,76 @@ wait_for_port "http://localhost:$RAILS_PORT/articles" "rails" || {
 }
 ok "rails up"
 
-# -------- 7. start target --------
+# -------- 7. start target / build cmd --------
 
-step "starting $TARGET on :$TARGET_PORT"
-case "$TARGET" in
-    python)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" uv run python3 -m app >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    go)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    crystal)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    elixir)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e 'App.Main.run' >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    typescript)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" npm start >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    rust)
-        (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./target/release/app >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-    spinel)
-        # Spinel-shape Ruby runs through CRuby's dev server. BLOG_DB
-        # points at the staged seeded SQLite (relative to BUILD_DIR);
-        # BUNDLE_GEMFILE points at the scaffold's Gemfile so the
-        # bundler-cache from CI's ruby/setup-ruby step is reused.
-        (cd "$BUILD_DIR" && \
-            PORT="$TARGET_PORT" \
-            BLOG_DB=tmp/blog.sqlite3 \
-            BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" \
-            bundle exec ruby server/dev_server.rb >"$TARGET_LOG" 2>&1) &
-        TARGET_PID=$!
-        ;;
-esac
-wait_for_port "http://localhost:$TARGET_PORT/articles" "$TARGET" || {
-    echo "--- $TARGET log ---" >&2
-    tail -20 "$TARGET_LOG" >&2
-    exit 1
-}
-ok "$TARGET up"
+# Spinel runs without a live server: each request invokes main.rb
+# as a one-shot CGI dispatcher (env vars in, CGI-shape response on
+# stdout). BLOG_DB points at the staged seeded SQLite so state
+# persists across per-request invocations; BUNDLE_GEMFILE points
+# at the scaffold's Gemfile so CI's bundler-cache is reused. The
+# previous CRuby dev_server.rb was retired in the rubocop_spinel
+# cleanup (see project_ruby_dev_server_retirement memory).
+TARGET_CMD=""
+if [[ "$TARGET" == "spinel" ]]; then
+    TARGET_CMD="cd \"$BUILD_DIR\" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE=\"$REPO_ROOT/runtime/spinel/scaffold/Gemfile\" bundle exec ruby main.rb"
+fi
+
+if [[ -z "$TARGET_CMD" ]]; then
+    step "starting $TARGET on :$TARGET_PORT"
+    case "$TARGET" in
+        python)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" uv run python3 -m app >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        go)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        crystal)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        elixir)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e 'App.Main.run' >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        typescript)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" npm start >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        rust)
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" ./target/release/app >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+    esac
+    wait_for_port "http://localhost:$TARGET_PORT/articles" "$TARGET" || {
+        echo "--- $TARGET log ---" >&2
+        tail -20 "$TARGET_LOG" >&2
+        exit 1
+    }
+    ok "$TARGET up"
+else
+    ok "$TARGET cmd-mode (no server boot)"
+fi
 
 # -------- 8. run compare --------
 
 echo
-step "compare (reference=http://localhost:$RAILS_PORT target=http://localhost:$TARGET_PORT)"
+if [[ -n "$TARGET_CMD" ]]; then
+    step "compare (reference=http://localhost:$RAILS_PORT target=cmd)"
+else
+    step "compare (reference=http://localhost:$RAILS_PORT target=http://localhost:$TARGET_PORT)"
+fi
 echo
 
 compare_args=(
     --reference "http://localhost:$RAILS_PORT"
-    --target "http://localhost:$TARGET_PORT"
 )
+if [[ -n "$TARGET_CMD" ]]; then
+    compare_args+=(--target-cmd "$TARGET_CMD")
+else
+    compare_args+=(--target "http://localhost:$TARGET_PORT")
+fi
 for p in "${PATHS[@]}"; do
     compare_args+=(--path "$p")
 done
