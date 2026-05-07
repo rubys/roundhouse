@@ -3,17 +3,8 @@ require_relative "validations"
 require "time"
 
 module ActiveRecord
-  # Module-level adapter handle. `class << self; attr_accessor :adapter`
-  # would be the idiomatic Ruby form — spinel itself supports that
-  # pattern (matz/spinel#126), but rubocop_spinel 0.1.0 doesn't yet
-  # allow it. Explicit accessor methods sidestep the tooling lag and
-  # work identically.
-  def self.adapter
-    @adapter
-  end
-
-  def self.adapter=(value)
-    @adapter = value
+  class << self
+    attr_accessor :adapter
   end
 
   # Base class for all models. Designed to contain *zero* metaprogramming:

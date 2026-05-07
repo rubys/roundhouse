@@ -32,6 +32,16 @@ AllCops:
   # runner.
   Exclude:
     - test/test_helper.rb
+    # active_record/base.rb uses the idiomatic
+    # `class << self; attr_accessor :adapter` pattern. Spinel itself
+    # accepts this (matz/spinel#126); rubocop_spinel 0.1.0 doesn't
+    # yet have the allowance — refactoring to explicit `def self.x`
+    # accessors broke the TS emitter (which treats attr_accessor
+    # call sites as property access, def self.x as method call,
+    # and the two diverged). Excluded until rubocop_spinel publishes
+    # the singleton-accessor allowance OR the TS emitter is taught
+    # to handle both shapes uniformly.
+    - runtime/active_record/base.rb
 
 Spinel/Unsupported:
   Enabled: true
