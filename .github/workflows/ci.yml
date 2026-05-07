@@ -236,6 +236,40 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored
         run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      # TEMP DIAGNOSTIC — pin down where `standard-custom` enters
+      # rubocop's plugin list on ubuntu-latest. Revert once
+      # identified.
+      - name: standard-custom diagnostic
+        if: always()
+        working-directory: /tmp/roundhouse-spinel-real-blog
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/runtime/spinel/scaffold/Gemfile
+        run: |
+          echo "=== rubocop configs found anywhere on FS ==="
+          find / -name '.rubocop.yml' 2>/dev/null | head -30 | while read f; do
+            echo "--- $f ---"
+            cat "$f" 2>/dev/null | head -20
+          done
+          echo
+          echo "=== home/etc rubocop configs ==="
+          for f in /etc/rubocop.yml /etc/rubocop /root/.rubocop.yml /home/runner/.rubocop.yml ~/.config/rubocop/config.yml; do
+            if [ -e "$f" ]; then echo "--- $f ---"; cat "$f"; fi
+          done
+          echo
+          echo "=== Gem.loaded_specs with default_lint_roller_plugin ==="
+          bundle exec ruby -e 'puts Gem.loaded_specs.values.select { |s| s.metadata["default_lint_roller_plugin"] }.map { |s| "#{s.name} #{s.version}" }'
+          echo
+          echo "=== Gem.find_files for standard-custom ==="
+          bundle exec ruby -e 'puts Gem.find_files("standard-custom")'
+          echo
+          echo "=== System gem list (standard|rubocop) ==="
+          gem list | grep -iE "standard|rubocop" || echo "(none in system gems)"
+          echo
+          echo "=== Bundled gem list (standard|rubocop) ==="
+          bundle list 2>&1 | grep -iE "standard|rubocop" || echo "(none in bundle)"
+          echo
+          echo "=== ENV for rubocop-relevant vars ==="
+          env | grep -iE "BUNDLE|RUBOCOP|RUBY|GEM" | sort
       - name: bundle exec rubocop (spinel-subset lint on emitted tree)
         # Scratch path matches `scratch_dir("real-blog")` in
         # tests/spinel_toolchain.rs (= `std::env::temp_dir()` joined,
