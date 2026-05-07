@@ -415,17 +415,21 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
 /// touches the existing instance's slots.
 fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     let row = Symbol::from("row");
-    let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    // String-keyed row to match SqliteAdapter / InMemoryAdapter row
+    // shape (mirrors `synth_row_from_raw`). Crystal/TS can't dynamically
+    // create Symbol keys at runtime; Spinel adapters skip the
+    // historical `to_sym` step, so all targets see String keys.
+    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
 
     let mut stmts: Vec<Expr> = Vec::new();
     for col in &table.columns {
-        // row[:<col>] — Hash index lookup keyed on the column symbol.
+        // row["<col>"] — Hash index lookup keyed on the column-name string.
         let key = with_ty(
             Expr::new(
                 Span::synthetic(),
-                ExprNode::Lit { value: Literal::Sym { value: col.name.clone() } },
+                ExprNode::Lit { value: Literal::Str { value: col.name.as_str().to_string() } },
             ),
-            Ty::Sym,
+            Ty::Str,
         );
         let lookup = Expr::new(
             Span::synthetic(),
@@ -437,7 +441,7 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: false,
             },
         );
-        // self.<col>= = row[:<col>]
+        // self.<col>= = row["<col>"]
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
