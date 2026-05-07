@@ -333,7 +333,10 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "",
         out_path: "src/view_helpers.ts",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        // FormBuilder.model is RBS-typed `ActiveRecord::Base`; the
+        // emit surfaces `model: Base` on the field + constructor.
+        // Type-only — runtime never instantiates Base directly.
+        imports: &[("type Base", "./active_record_base.js")],
         prelude: NO_PRELUDE,
         // Roots for the hand-written server.ts that calls into
         // ViewHelpers directly. Suffix-renames apply (`reset_slots!`
