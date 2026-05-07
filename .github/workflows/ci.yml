@@ -209,6 +209,14 @@ jobs:
   # output via CRuby (Spinel is a Ruby subset). Other toolchain jobs
   # emit both app + tests and run the emitted tests; the swap will
   # happen here once Spinel grows a runner.
+  #
+  # Second leg (rubocop_spinel) lints the same scratch tree the cargo
+  # test produces — the shipped tree (scaffold + runtime + lowered
+  # emit) — for spinel-subset compliance. CRuby silently accepts
+  # patterns spinel rejects (eval, extend, module_function, bare
+  # `send`, `class << self`, etc.); this is the static gate that
+  # catches them. Interim while spinel itself isn't yet runnable as
+  # a target.
   toolchain-spinel:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -228,6 +236,23 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored
         run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      - name: bundle exec rubocop (spinel-subset lint on emitted tree)
+        # Scratch path matches `scratch_dir("real-blog")` in
+        # tests/spinel_toolchain.rs (= `std::env::temp_dir()` joined,
+        # which is `/tmp` on ubuntu-latest with no TMPDIR set).
+        #
+        # `continue-on-error: true` — surfacing only. 22 known
+        # violations across the shipped tree (mostly module_function
+        # in framework Ruby; Thread/Mutex in the CRuby dev server;
+        # eval/const_get in test_helper). Until those are rewritten
+        # or excluded, the lint reports but doesn't block. Switch to
+        # hard-gate by removing this flag once the violation count
+        # reaches zero.
+        continue-on-error: true
+        run: bundle exec rubocop --format github .
+        working-directory: /tmp/roundhouse-spinel-real-blog
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/runtime/spinel/scaffold/Gemfile
 
   toolchain-python:
     needs: generate-fixture

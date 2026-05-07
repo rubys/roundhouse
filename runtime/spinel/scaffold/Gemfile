@@ -4,6 +4,16 @@ gem "sqlite3"
 gem "minitest"
 gem "rake"
 
+# Spinel-subset compliance gate (CI). Runs against the shipped tree
+# (scaffold + runtime + lowered emit) after toolchain-spinel emits
+# into the scratch dir; catches reflection/concurrency/singleton-class
+# patterns spinel rejects but CRuby silently accepts. Interim while
+# spinel itself isn't yet runnable as a target.
+group :development do
+  gem "rubocop", "~> 1.86"
+  gem "rubocop_spinel", "~> 0.1"
+end
+
 # Build-only: turbo-rails is installed for its bundled `turbo.min.js`
 # asset (read by the Makefile from the gem's directory). Nothing in
 # this fixture's runtime ever `require`s it, and the spinel-compiled

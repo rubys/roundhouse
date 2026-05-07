@@ -1,0 +1,25 @@
+# Spinel-subset compliance gate. Single cop: Spinel/Unsupported
+# (rubocop_spinel) — bans the surface spinel rejects (eval,
+# class_eval, method_missing, extend, module_function, Thread/Mutex,
+# bare `send`, `class << self`, etc.) that CRuby silently accepts.
+#
+# Copied verbatim into the toolchain-spinel scratch dir (alongside
+# scaffold/, runtime/, and the lowered emit) by spinel_toolchain.rs.
+# `bundle exec rubocop` from the scratch root then lints the entire
+# shipped tree, catching both source drift in runtime/ruby/ and
+# lowering bugs in emit_spinel output.
+#
+# Run locally:
+#   cargo test --test spinel_toolchain -- --ignored --nocapture
+#   cd $TMPDIR/roundhouse-spinel-real-blog && bundle exec rubocop
+
+plugins:
+  - rubocop_spinel
+
+AllCops:
+  TargetRubyVersion: 3.3
+  NewCops: disable
+  DisabledByDefault: true
+
+Spinel/Unsupported:
+  Enabled: true
