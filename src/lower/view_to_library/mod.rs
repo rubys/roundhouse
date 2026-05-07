@@ -547,13 +547,21 @@ pub(crate) fn insert_framework_stubs(
     // FormBuilder — instance methods called on the block param `form`
     // inside `form_with do |form| ... end`. Each helper renders one
     // input/label/button and returns a string.
+    //
+    // Signature shape: `(field, opts = {})` for label/text_field/etc.
+    // — last param is a positional Hash so the body-typer's
+    // normalize_trailing_kwargs flips a `class: "..."` kwargs hash to
+    // `kwargs: false`. Without that, Crystal sees `form.label(:x,
+    // class: "...")` as a real keyword arg and rejects it (the
+    // emitted Crystal signature is `(field, opts = {} of String =>
+    // String)` — positional only). `submit` shifts: `(label,
+    // opts)` — both positional, with the second a Hash.
     let mut fb = crate::analyze::ClassInfo::default();
-    let fb_inputs = [
+    let fb_field_helpers = [
         "label",
         "text_field",
         "text_area",
         "select",
-        "submit",
         "hidden_field",
         "checkbox",
         "check_box",
@@ -570,14 +578,33 @@ pub(crate) fn insert_framework_stubs(
         "phone_field",
         "search_field",
         "fields_for",
-        "object_name",
     ];
-    for name in fb_inputs {
+    for name in fb_field_helpers {
         fb.instance_methods.insert(
             Symbol::from(name),
-            fn_sig(vec![(Symbol::from("args"), untyped.clone())], Ty::Str),
+            fn_sig(
+                vec![
+                    (Symbol::from("field"), Ty::Sym),
+                    (Symbol::from("opts"), any_hash.clone()),
+                ],
+                Ty::Str,
+            ),
         );
     }
+    fb.instance_methods.insert(
+        Symbol::from("submit"),
+        fn_sig(
+            vec![
+                (Symbol::from("label"), Ty::Str),
+                (Symbol::from("opts"), any_hash.clone()),
+            ],
+            Ty::Str,
+        ),
+    );
+    fb.instance_methods.insert(
+        Symbol::from("object_name"),
+        fn_sig(vec![], Ty::Str),
+    );
     tag_all_method(&mut fb);
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers::FormBuilder")), fb);
 
@@ -678,6 +705,58 @@ pub(crate) fn insert_framework_stubs(
     );
     tag_all_method(&mut params_cls);
     classes.insert(ClassId(Symbol::from("ActionController::Parameters")), params_cls);
+
+    // ActiveSupport::HashWithIndifferentAccess — what `controller.flash`
+    // is. Controllers read `flash[:notice]` / write
+    // `flash[:notice] = "..."`. The transpiled HWIA class wraps a
+    // String-keyed inner Hash with Symbol↔String coercion at the [] /
+    // []= boundary. Body-typer needs the methods registered so the
+    // dispatch resolves to a known signature instead of falling
+    // through to Untyped.
+    let mut hwia_cls = crate::analyze::ClassInfo::default();
+    hwia_cls.instance_methods.insert(
+        Symbol::from("[]"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("[]="),
+        fn_sig(
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)],
+            Ty::Untyped,
+        ),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("has_key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("fetch"),
+        fn_sig(
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::Untyped)],
+            Ty::Untyped,
+        ),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("delete"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("empty?"),
+        fn_sig(vec![], Ty::Bool),
+    );
+    hwia_cls.instance_methods.insert(
+        Symbol::from("to_h"),
+        fn_sig(vec![], untyped_hash.clone()),
+    );
+    tag_all_method(&mut hwia_cls);
+    classes.insert(
+        ClassId(Symbol::from("ActiveSupport::HashWithIndifferentAccess")),
+        hwia_cls,
+    );
 }
 
 // ── view-name → module / arg / method helpers ────────────────────

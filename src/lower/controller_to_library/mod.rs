@@ -140,9 +140,9 @@ pub fn lower_controllers_to_library_classes(
         std::collections::HashMap::new();
     framework_ivars.insert(
         Symbol::from("params"),
-        Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Untyped),
+        Ty::Class {
+            id: ClassId(Symbol::from("ActionController::Parameters")),
+            args: vec![],
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -153,9 +153,9 @@ pub fn lower_controllers_to_library_classes(
     // Sym→Untyped Hash so `@flash[:k]` typechecks at every read site.
     framework_ivars.insert(
         Symbol::from("flash"),
-        Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Untyped),
+        Ty::Class {
+            id: ClassId(Symbol::from("ActiveSupport::HashWithIndifferentAccess")),
+            args: vec![],
         },
     );
 

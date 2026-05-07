@@ -494,14 +494,14 @@ fn row_from_table(table: &Table) -> Row {
 }
 
 fn ty_of_column(t: &ColumnType) -> Ty {
+    // Date/DateTime/Time map to `Ty::Str` — see
+    // `lower::model_to_library::ty_of_column` for the rationale.
     match t {
         ColumnType::Integer | ColumnType::BigInt => Ty::Int,
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => {
-            Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] }
-        }
+        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
         ColumnType::Binary => Ty::Str,
         ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
         ColumnType::Reference { .. } => Ty::Int,

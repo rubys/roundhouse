@@ -53,6 +53,24 @@ module ActiveRecord
       {}
     end
 
+    # Column-name indexer. Subclasses override with a per-column case
+    # dispatch over the typed ivars (each model has a fixed set of
+    # columns from the schema). The Base implementation raises so a
+    # call on a record without a per-column override surfaces as an
+    # error rather than silently returning nil.
+    #
+    # Defined here so abstract callers (FormBuilder.text_field's
+    # `@model[field]`) type-check against `ActiveRecord::Base` at the
+    # call site; Crystal needs the method to exist on the static type
+    # for the call to compile.
+    def [](_name)
+      raise NotImplementedError, "[] must be overridden by subclass"
+    end
+
+    def []=(_name, _value)
+      raise NotImplementedError, "[]= must be overridden by subclass"
+    end
+
     # Subclasses override to mutate state from a row hash. Error
     # message intentionally omits `self.class.name` — `.name`-style
     # reflection diverges across the 7 targets (`this.constructor.name`

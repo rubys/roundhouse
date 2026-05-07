@@ -42,18 +42,13 @@ module ActiveRecord
     def attributes: () -> Hash[Symbol, untyped]
     def assign_from_row: (Hash[Symbol, untyped] _row) -> void
 
-    # `[]/[]=` are NOT defined on Base directly — subclasses
-    # provide their column-specific indexer. Declared here as
-    # contract so `fill_timestamps`'s `self[:updated_at] = now` /
-    # `self[:created_at].nil?` resolve through dispatch. Value
-    # type is `untyped` because columns hold any type (String,
-    # Integer, Float, …). The `%a{abstract}` annotation tells the
-    # orphan check that base.rb intentionally has no body for these
-    # — subclasses (per-model emitted classes) supply the concrete
-    # column-specific indexer.
-    %a{abstract}
+    # `[]/[]=` are defined on Base as raise-NotImplementedError
+    # markers; subclasses (per-model emitted classes) override with
+    # their column-specific indexer. The Base body is required so
+    # callers typed against `ActiveRecord::Base` (FormBuilder.text_
+    # field's `@model[field]`) compile under static targets like
+    # Crystal — the static type needs the method to exist.
     def []: (Symbol name) -> untyped
-    %a{abstract}
     def []=: (Symbol name, untyped value) -> untyped
 
     # Persistence state — backed by `@persisted` / `@destroyed`.

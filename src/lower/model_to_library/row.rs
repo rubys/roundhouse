@@ -41,7 +41,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::{
-    class_const, fn_sig, is_id_column, lit_int, lit_sym, seq, ty_of_column, var_ref, with_ty,
+    class_const, fn_sig, is_id_column, lit_int, lit_str, seq, ty_of_column, var_ref, with_ty,
 };
 
 /// Synthesize the per-model `<Model>Row` LibraryClasses for every model
@@ -176,12 +176,19 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
 
     for col in &table.columns {
         let col_ty = ty_of_column(&col.col_type);
+        // String-keyed lookup (`row["id"]`) instead of symbol-keyed
+        // (`row[:id]`). Adapter rows arrive as `Hash[Str, _]` — Crystal
+        // and TS can't dynamically create Symbols at runtime, so the
+        // adapter returns String keys; Spinel matches by leaving keys
+        // as Strings (`runtime/spinel/sqlite_adapter.rb` skips the
+        // historical `to_sym` step). Keeping the IR uniformly String-
+        // keyed avoids a target-specific Symbol↔String mismatch.
         let lookup = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(row.clone())),
                 method: Symbol::from("[]"),
-                args: vec![lit_sym(col.name.clone())],
+                args: vec![lit_str(col.name.as_str().to_string())],
                 block: None,
                 parenthesized: false,
             },
@@ -230,7 +237,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
 
     stmts.push(var_ref(instance));
 
-    let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
         name: Symbol::from("from_raw"),

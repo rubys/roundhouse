@@ -17,6 +17,25 @@ use crate::ident::Symbol;
 
 use super::shared::{escape_ident, indent_lines};
 
+thread_local! {
+    /// True while rendering the body of a synth `[]` reader. The
+    /// auto-`.not_nil!` Ivar bridge below would crash on unset
+    /// columns of fresh-from-`new` records; suppress it for the
+    /// duration of the index-reader body. `emit_method` toggles this
+    /// flag on entry to a method named `[]` and clears on exit.
+    static SUPPRESS_IVAR_NOT_NIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn with_suppressed_ivar_not_nil<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = SUPPRESS_IVAR_NOT_NIL.with(|c| c.replace(true));
+    let r = f();
+    SUPPRESS_IVAR_NOT_NIL.with(|c| c.set(prev));
+    r
+}
+
 pub fn emit_expr(e: &Expr) -> String {
     let raw = emit_node(&e.node);
     // Crystal's strict-typing flow analysis flushes ivar narrowing on
@@ -39,7 +58,9 @@ pub fn emit_expr(e: &Expr) -> String {
     // what the body-typer guarantees.
     if let ExprNode::Ivar { .. } = &*e.node {
         if let Some(ty) = e.ty.as_ref() {
-            if is_non_nilable_concrete(ty) {
+            if is_non_nilable_concrete(ty)
+                && !SUPPRESS_IVAR_NOT_NIL.with(|c| c.get())
+            {
                 return format!("{raw}.not_nil!");
             }
         }
@@ -73,6 +94,23 @@ pub fn emit_expr(e: &Expr) -> String {
 fn is_non_nilable_primitive(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym)
+}
+
+/// Strip a trailing `Nil` variant from a binary `Union { T, Nil }`,
+/// returning the `T` arm. Larger unions and non-union types pass
+/// through unchanged. Used to see through ivar reads that the body-
+/// typer surfaced as nilable (`@slots` first read observes nil).
+fn unwrap_nilable_union(ty: &crate::ty::Ty) -> &crate::ty::Ty {
+    use crate::ty::Ty;
+    if let Ty::Union { variants } = ty {
+        if variants.len() == 2 {
+            let nil_idx = variants.iter().position(|v| matches!(v, Ty::Nil));
+            if let Some(idx) = nil_idx {
+                return &variants[1 - idx];
+            }
+        }
+    }
+    ty
 }
 
 /// True for Ty variants that emit as non-nilable concrete Crystal types.
@@ -357,10 +395,22 @@ fn emit_node(n: &ExprNode) -> String {
             s
         }
         ExprNode::Cast { value, target_ty } => {
-            // Crystal `.as(T)` — runtime-checked downcast. Wraps the
-            // value in parens so chained casts and operator-precedence
-            // edges (`a + b.as(Int64)`) parse correctly.
-            format!("({}).as({})", emit_expr(value), super::ty::crystal_ty(target_ty))
+            // Crystal `.as?(T).not_nil!` — runtime-checked downcast
+            // that survives Crystal's per-call-site monomorphization.
+            // Plain `.as(T)` rejects at compile time when the value's
+            // monomorphized type can't be `T` (e.g., a model's `[]=`
+            // method called from `fill_timestamps` with `value: String`
+            // can't cast to `Int64` for the `:id` arm — even if that
+            // arm is unreachable for that call). `.as?(T)` returns
+            // `T?` regardless of static type and is decided at
+            // runtime; `.not_nil!` then re-asserts non-nil on the
+            // expected branch. Wraps the value in parens so chained
+            // casts and operator-precedence edges parse correctly.
+            format!(
+                "({}).as?({}).not_nil!",
+                emit_expr(value),
+                super::ty::crystal_ty(target_ty)
+            )
         }
     }
 }
@@ -387,6 +437,26 @@ fn emit_bool_op(
         BoolOpKind::Or => "||",
         BoolOpKind::And => "&&",
     };
+    // Hash#[] safety bridge for `||`-default idiom: Ruby's
+    // `hash[k] || default` returns the default for missing keys
+    // because Hash#[] returns nil there. Crystal's strict Hash#[]
+    // raises KeyError instead — the LHS never gets a chance to be
+    // nil. Detect the pattern at emit (LHS is `Hash#[](k)` Send) and
+    // rewrite to `hash[k]?` so the missing-key path returns nil and
+    // `||` falls through to the default. Only the read-form `[]` is
+    // rewritten — `[]=` and other methods keep their shape.
+    if matches!(op, BoolOpKind::Or) {
+        if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*left.node {
+            if method.as_str() == "[]" && !args.is_empty() {
+                let recv_ty = recv.ty.as_ref().map(unwrap_nilable_union);
+                if matches!(recv_ty, Some(crate::ty::Ty::Hash { .. })) {
+                    let recv_s = emit_expr(recv);
+                    let arg_strs: Vec<String> = args.iter().map(emit_expr).collect();
+                    return format!("{}[{}]? {} {}", recv_s, arg_strs.join(", "), op_s, emit_expr(right));
+                }
+            }
+        }
+    }
     format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
 }
 
@@ -607,6 +677,20 @@ pub(super) fn emit_send_base(
     );
     let m = match method.as_str() {
         "length" => "size",
+        // Ruby `Array#count` (no args) → element count. Crystal's
+        // `Enumerable#count` requires either an item to match or a
+        // block — `arr.count` (no args) doesn't compile. Rewrite to
+        // `size`. The argful form (`count(item)`) passes through
+        // unchanged below.
+        "count" if args_s.is_empty() => "size",
+        // Ruby `Hash#key?(k)` exists; Crystal's stdlib Hash uses
+        // `has_key?(k)` (with `key?` not exposed for direct dispatch).
+        // Rewrite at the call site so transpiled Ruby (HWIA's
+        // explicit key presence check) compiles. `include?` is also
+        // valid on Crystal Hash but already gets rewritten via
+        // include? → includes? above for String/Array; Hash is the
+        // outlier we route here directly.
+        "key?" => "has_key?",
         // Crystal: starts_with? / ends_with? / includes? (note plural).
         // `include?` is method-only — the bare `include` Ruby keyword
         // for module mixin lowers to `LibraryClass::includes`, not
@@ -642,16 +726,64 @@ pub(super) fn emit_send_base(
     // `[](k)` and Crystal would parse as a malformed empty-array
     // literal. Same reasoning for `self[k] = v` → `Send { method:
     // "[]=", args: [k, v] }`. Drop into index syntax explicitly.
+    //
+    // Symbol-key → String-key auto-conversion: when the receiver is a
+    // bound name (Var/Ivar/Send result) typed as `Hash` and the index
+    // is a Symbol literal, emit the String form. Crystal's
+    // SqliteAdapter returns `Hash(String, DB::Any)` rows; the IR
+    // types row params as `Hash[Sym, Untyped]` (matching Ruby's
+    // symbol-keyed convention), so the Symbol literal at the [] site
+    // would dispatch String-keyed Crystal Hash#[] with a Symbol arg
+    // and KeyError. Ruby sources that read a row via `row[:id]`
+    // transparently route through this conversion. Hash literal
+    // receivers (`{:a => 1}[:a]`) skip — those Hashes are actually
+    // Symbol-keyed at runtime.
     if (m == "[]" || m == "[]=") && !args_s.is_empty() {
         let recv_s = match recv {
             Some(r) if matches!(&*r.node, ExprNode::SelfRef) => "self".to_string(),
             Some(r) => emit_expr(r),
             None => "self".to_string(),
         };
-        if m == "[]=" && args_s.len() == 2 {
-            return format!("{recv_s}[{}] = {}", args_s[0], args_s[1]);
+        // Hash receiver behavior bridges Ruby/Crystal divergence:
+        //   - Symbol-literal index on a `Hash[Str, V]` recv: convert
+        //     `:k` → `"k"`. Adapter rows are `Hash(String, DB::Any)`
+        //     at runtime; `row[:id]` would dispatch
+        //     `Hash(String,V)#[](Symbol)` and KeyError.
+        //   - Read on any Hash recv: emit `[k]?` instead of `[k]`.
+        //     Ruby Hash#[] returns nil for missing keys; Crystal
+        //     Hash#[] raises. The transpiled framework runtime
+        //     (button_to's `opts[:method]`, ViewHelpers helpers)
+        //     relies on the nil-default. Hash literals with the same
+        //     IR type get the same treatment, which is right — a
+        //     missing key on `{ :a => 1 }[:b]` should be nil-shaped,
+        //     not crash, to match Ruby. `[]?` returns `V?`, which
+        //     propagates as a nilable type to the call site (the
+        //     receiver's typed call sites already wrap `.not_nil!`
+        //     where required).
+        // Treat `T` and `T | Nil` uniformly: the body-typer often
+        // surfaces ivars as `Union { Hash, Nil }` (e.g., `@slots` in
+        // ViewHelpers reads can observe nil before the first
+        // assignment). The recv emit may already have wrapped with
+        // `.not_nil!`, but the IR's `e.ty` is still nilable. Strip a
+        // trailing `Nil` from a binary union so the key-conversion
+        // detection below sees through the nilable.
+        let recv_ty = recv.and_then(|r| r.ty.as_ref()).map(unwrap_nilable_union);
+        let recv_str_keyed = matches!(
+            recv_ty,
+            Some(crate::ty::Ty::Hash { key, .. }) if matches!(**key, crate::ty::Ty::Str)
+        );
+        let mut converted: Vec<String> = args_s.clone();
+        if recv_str_keyed {
+            for (idx, a) in args.iter().enumerate() {
+                if let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node {
+                    converted[idx] = format!("\"{}\"", value.as_str());
+                }
+            }
         }
-        return format!("{recv_s}[{}]", args_s.join(", "));
+        if m == "[]=" && converted.len() == 2 {
+            return format!("{recv_s}[{}] = {}", converted[0], converted[1]);
+        }
+        return format!("{recv_s}[{}]", converted.join(", "));
     }
 
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))

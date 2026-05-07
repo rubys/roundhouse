@@ -35,7 +35,7 @@ module InMemoryAdapter
   def where(table, conditions)
     all(table).select do |row|
       match = true
-      conditions.each { |k, v| match = false if row[k.to_sym] != v }
+      conditions.each { |k, v| match = false if row[k.to_s] != v }
       match
     end
   end
@@ -51,8 +51,8 @@ module InMemoryAdapter
   def insert(table, attrs)
     NEXT_ID[table] += 1
     id = NEXT_ID[table]
-    row = { id: id }
-    attrs.each { |k, v| row[k.to_sym] = v }
+    row = { "id" => id }
+    attrs.each { |k, v| row[k.to_s] = v }
     rows_for(table)[id] = row
     id
   end
@@ -60,7 +60,7 @@ module InMemoryAdapter
   def update(table, id, attrs)
     row = rows_for(table)[id.to_i]
     return if row.nil?
-    attrs.each { |k, v| row[k.to_sym] = v }
+    attrs.each { |k, v| row[k.to_s] = v }
   end
 
   def delete(table, id)

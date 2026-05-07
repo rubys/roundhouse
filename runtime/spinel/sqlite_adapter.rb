@@ -84,13 +84,15 @@ module SqliteAdapter
   end
 
   # Internal: SQLite3::Database with results_as_hash=true returns rows
-  # carrying both string keys and integer indexes; strip to symbol-keyed
-  # hashes before handing back. Stays in spinel-subset Ruby (no
-  # `transform_keys(&:to_sym)` block-symbol shorthand).
+  # carrying both string keys and integer indexes; strip to string-keyed
+  # hashes before handing back. (Was symbol-keyed; switched to String
+  # to match the Crystal/TS adapter shape — Crystal can't dynamically
+  # create Symbols at runtime, and the IR's `<Model>Row.from_raw`
+  # boundary now uses String keys uniformly.)
   def self.symbolize_row(row)
     out = {}
     row.each do |key, val|
-      out[key.to_sym] = val if key.is_a?(String)
+      out[key] = val if key.is_a?(String)
     end
     out
   end

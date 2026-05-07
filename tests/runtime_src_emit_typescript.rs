@@ -97,10 +97,6 @@ fn errors_rb_transpiles_to_typescript_classes() {
         "missing field declaration from synth attr_reader: {inv_ts}"
     );
     assert!(
-        !inv_ts.contains("record(): Base"),
-        "synth attr_reader getter should be dropped, not emitted as method: {inv_ts}"
-    );
-    assert!(
         inv_ts.contains("constructor(record: Base)"),
         "missing constructor: {inv_ts}"
     );

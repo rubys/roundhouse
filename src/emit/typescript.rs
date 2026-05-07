@@ -774,16 +774,12 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         let raw = p.0.as_str();
         match raw {
             "StandardError" => "Error".to_string(),
-            "ActiveRecord::Base" => "ActiveRecordBase".to_string(),
             // Test parents — runtime adapter exports both names.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
-            // Controller base — runtime exports `Base`; the import is
-            // aliased in render_imports so the extends clause reads
-            // `extends ActionControllerBase`.
-            "ActionController::Base" | "ActionController::API" => {
-                "ActionControllerBase".to_string()
-            }
+            // All other framework parents (`ActiveRecord::Base`,
+            // `ActionController::Base`, mixins) collapse to the last
+            // segment — the imported name in their .ts file.
             _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
         }
     });

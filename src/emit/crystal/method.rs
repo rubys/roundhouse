@@ -60,7 +60,19 @@ pub fn emit_method(m: &MethodDef) -> String {
 
     let mut out = String::new();
     writeln!(out, "def {prefix}{}{params}{ret_clause}", m.name).unwrap();
-    let body_text = emit_expr(&m.body);
+    // Synth `[]` index reader body: per-arm `@field` reads must NOT
+    // get the auto-`.not_nil!` Ivar bridge — fresh-from-`.new` records
+    // have unset ivars, and the bridge would crash on lookup. Crystal
+    // emit toggles a thread-local flag for the duration of this
+    // method's body. Other methods (initialize, action handlers,
+    // etc.) keep the bridge — its narrowing is sound there.
+    let body_text = if m.name.as_str() == "[]"
+        && matches!(m.receiver, MethodReceiver::Instance)
+    {
+        super::expr::with_suppressed_ivar_not_nil(|| emit_expr(&m.body))
+    } else {
+        emit_expr(&m.body)
+    };
     // Crystal disallows `@ivar` references inside `def self.X` (class
     // methods on a metaclass). Ruby's `module_function` shares ivars
     // across class methods; the Crystal analog is `@@class_var`.
@@ -87,8 +99,34 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let bytes = body.as_bytes();
     let mut i = 0;
+    // Track whether we're inside a string literal (`"..."`). The
+    // promoter walks raw emitted Crystal text — JSON-bearing strings
+    // (`"@hotwired/turbo-rails"` in the importmap) must not get the
+    // `@`→`@@` rewrite, or the JSON ships malformed at runtime. Skip
+    // characters inside strings; track escapes so an embedded `\"`
+    // doesn't close the string prematurely.
+    let mut in_string = false;
+    let mut string_escape = false;
     while i < bytes.len() {
         let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            i += 1;
+            if string_escape {
+                string_escape = false;
+            } else if c == b'\\' {
+                string_escape = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
         if c == b'@' && i + 1 < bytes.len() {
             let next = bytes[i + 1];
             // Already `@@` — emit as-is, advance past both.

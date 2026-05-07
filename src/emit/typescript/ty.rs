@@ -49,11 +49,11 @@ fn ts_class_ty(id: &ClassId) -> String {
         "Hash" => return "Record<string, any>".into(),
         _ => {}
     }
-    // Module-qualified class refs (`ActiveRecord::Base`) collapse to
-    // the bare last segment for TS — TS doesn't have `::` in
-    // identifiers, and the import resolver already pulls the class
-    // in from its file path. Each emitted module imports the
-    // unqualified class name.
+    // Module-qualified class refs collapse to the bare last segment —
+    // that's the import name in the corresponding .ts file. Within
+    // the defining file (`src/active_record_base.ts` defining `class
+    // Base`), the bare name is the class itself; in importing files,
+    // `import { Base }` brings it into scope under the same name.
     let last = raw.rsplit("::").next().unwrap_or(raw);
     last.into()
 }

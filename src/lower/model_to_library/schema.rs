@@ -670,18 +670,59 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         },
     );
 
+    // Value/return types are a union of every column's type. Crystal
+    // needs the value param annotated with this union so the per-arm
+    // `.as(ColTy)` cast is provably reachable from the static type —
+    // without it, Crystal narrows `value` to whatever single type
+    // call sites pass and refuses casts to other column types. Return
+    // is the same union (the case expression yields the assigned
+    // value's per-arm type). Other targets either ignore the
+    // annotation (Spinel/Ruby) or render the union equivalently.
+    let value_ty = column_union_ty(table);
+    // The case expression has no `else` arm, so Crystal infers the
+    // return as the value-union plus Nil (unmatched name → Nil). Add
+    // Nil to the declared return so the annotation matches.
+    let return_ty = match &value_ty {
+        Ty::Union { variants } => {
+            let mut vs = variants.clone();
+            vs.push(Ty::Nil);
+            Ty::Union { variants: vs }
+        }
+        single => Ty::Union {
+            variants: vec![single.clone(), Ty::Nil],
+        },
+    };
+
     MethodDef {
         name: Symbol::from("[]="),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(name.clone()), Param::positional(value.clone())],
         body,
         signature: Some(fn_sig(
-            vec![(name, Ty::Sym), (value, Ty::Untyped)],
-            Ty::Untyped,
+            vec![(name, Ty::Sym), (value, value_ty)],
+            return_ty,
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
+    }
+}
+
+fn column_union_ty(table: &Table) -> Ty {
+    use std::collections::BTreeSet;
+    let mut variants: Vec<Ty> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for col in &table.columns {
+        let ty = ty_of_column(&col.col_type);
+        let key = format!("{ty:?}");
+        if seen.insert(key) {
+            variants.push(ty);
+        }
+    }
+    if variants.len() == 1 {
+        variants.into_iter().next().unwrap()
+    } else {
+        Ty::Union { variants }
     }
 }
 

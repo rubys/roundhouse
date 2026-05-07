@@ -642,15 +642,16 @@ fn controllers_articles_requires_referenced_models_from_models_dir() {
 #[test]
 fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
     // `params.expect(:id)` (Rails 8 single-symbol form) lowers to
-    // `@params[:id].to_i`. Spinel doesn't have Rails' magic `params`
-    // method; request params are a plain Hash on `@params` whose
-    // values are strings, so the path :id needs `.to_i` for AR's
-    // integer PK.
+    // `@params.fetch(:id, "0").to_i`. Spinel doesn't have Rails' magic
+    // `params` method; request params arrive on `@params` (a Parameters
+    // wrapper) whose values are strings. `.fetch(:id, "0")` returns
+    // non-nil (Crystal's strict `String#to_i` rejects nil receivers);
+    // missing-id-as-unsaved-sentinel maps to integer 0.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.find(@params[:id].to_i)"),
-        "expected `@params[:id].to_i` lowering; got:\n{src}",
+        src.contains("Article.find(@params.fetch(:id, \"0\").to_i)"),
+        "expected `@params.fetch(:id, \"0\").to_i` lowering; got:\n{src}",
     );
     assert!(
         !src.contains("params.expect(:id)"),
@@ -1029,7 +1030,7 @@ fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
 #[test]
 fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
     // `@comment = @article.comments.find(params.expect(:id))` lowers to
-    //   @comment = Comment.find(@params[:id].to_i)
+    //   @comment = Comment.find(@params.fetch(:id, "0").to_i)
     //   if @comment.article_id != @article.id
     //     head(:not_found)
     //     return
@@ -1039,7 +1040,7 @@ fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("@comment = Comment.find(@params[:id].to_i)"),
+        src.contains("@comment = Comment.find(@params.fetch(:id, \"0\").to_i)"),
         "expected direct Comment.find lookup; got:\n{src}",
     );
     assert!(
@@ -1383,32 +1384,37 @@ fn lowered_form_partial_form_builder_methods() {
         "expected form.label dispatch; got:\n{src}",
     );
     // `form.text_field :title, class: [...]` collapses the array to a
-    // single string. The base + the FIRST hash key are joined; the
-    // first hash key is the no-errors variant by convention in
-    // real-blog (`border-gray-400 focus:outline-blue-600`), so the
-    // 5 default compare paths (none of which exercise an error
-    // re-render) match Rails byte-for-byte. Failure-path renders
-    // would show stale class composition; the spinel-blog test
-    // suite covers them via hand-written assertions today.
+    // single string and folds the kwargs into a positional Hash
+    // (FormBuilder.text_field's signature ends in `opts = {}`, so the
+    // body-typer's normalize_trailing_kwargs flips kwargs=false). The
+    // base + the FIRST hash key are joined; the first hash key is the
+    // no-errors variant by convention in real-blog
+    // (`border-gray-400 focus:outline-blue-600`), so the 5 default
+    // compare paths (none of which exercise an error re-render) match
+    // Rails byte-for-byte. Failure-path renders would show stale class
+    // composition; the spinel-blog test suite covers them via
+    // hand-written assertions today.
     assert!(
-        src.contains("body << form.text_field(:title, class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\")"),
-        "expected form.text_field with class-array collapsed to base + first hash key; got:\n{src}",
+        src.contains("body << form.text_field(:title, { class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\" })"),
+        "expected form.text_field with class-array collapsed to base + first hash key in opts hash; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → `form.text_area(:body,
-    // rows: 4, ...)` — alias normalized to underscore form.
+    // { rows: 4, ... })` — alias normalized to underscore form, kwargs
+    // folded into positional Hash literal.
     assert!(
-        src.contains("body << form.text_area(:body, rows: 4"),
-        "expected form.textarea aliased to text_area; got:\n{src}",
+        src.contains("body << form.text_area(:body, { rows: 4"),
+        "expected form.textarea aliased to text_area with opts hash; got:\n{src}",
     );
     assert!(
         !src.contains("form.textarea("),
         "form.textarea alias should not survive; got:\n{src}",
     );
-    // `form.submit class: "..."` → `form.submit(nil, class: "...")` —
-    // leading `nil` inserted when no positional arg was provided.
+    // `form.submit class: "..."` → `form.submit(nil, { class: "..." })`
+    // — leading `nil` inserted when no positional arg was provided;
+    // kwargs folded into positional Hash literal.
     assert!(
-        src.contains("body << form.submit(nil, class: "),
-        "expected leading-nil insertion on form.submit; got:\n{src}",
+        src.contains("body << form.submit(nil, { class: "),
+        "expected leading-nil insertion on form.submit with opts hash; got:\n{src}",
     );
 }
 
@@ -1572,24 +1578,27 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
         "expected method :post (Class.new is never persisted); got:\n{src}",
     );
     // FormBuilder dispatch — direct sends, not wrapped in html_escape.
+    // Trailing kwargs fold into positional Hash literal (FormBuilder
+    // signature ends in `opts = {}`, see normalize_trailing_kwargs).
     assert!(
-        src.contains("body << form.label(:commenter, class: \"block font-medium\")"),
-        "expected form.label dispatch; got:\n{src}",
+        src.contains("body << form.label(:commenter, { class: \"block font-medium\" })"),
+        "expected form.label dispatch with opts hash; got:\n{src}",
     );
     assert!(
-        src.contains("body << form.text_field(:commenter, class: \"block w-full border rounded p-2\")"),
-        "expected form.text_field dispatch; got:\n{src}",
+        src.contains("body << form.text_field(:commenter, { class: \"block w-full border rounded p-2\" })"),
+        "expected form.text_field dispatch with opts hash; got:\n{src}",
     );
     assert!(
-        src.contains("body << form.text_area(:body, rows: 3"),
-        "expected form.text_area dispatch (with textarea→text_area alias); got:\n{src}",
+        src.contains("body << form.text_area(:body, { rows: 3"),
+        "expected form.text_area dispatch with opts hash (with textarea→text_area alias); got:\n{src}",
     );
     // `form.submit "Add Comment", class: "..."` — a positional
     // String already, so no leading-nil insertion (unlike
-    // `form.submit class: "..."` in articles/_form.rb).
+    // `form.submit class: "..."` in articles/_form.rb). Kwargs still
+    // fold into the trailing positional Hash.
     assert!(
-        src.contains("body << form.submit(\"Add Comment\", class: "),
-        "expected form.submit with positional label preserved; got:\n{src}",
+        src.contains("body << form.submit(\"Add Comment\", { class: "),
+        "expected form.submit with positional label preserved + opts hash; got:\n{src}",
     );
     assert!(
         !src.contains("ActionView::ViewHelpers.html_escape(form."),

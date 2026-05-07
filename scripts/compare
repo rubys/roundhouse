@@ -144,7 +144,7 @@ case "$TARGET" in
         ;;
     crystal)
         BUILD_DIR="/tmp/rh-cr-pass2"
-        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        DB_DEST="$BUILD_DIR/db/development.sqlite3"
         ;;
     elixir)
         BUILD_DIR="/tmp/rh-ex-pass2"

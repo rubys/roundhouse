@@ -41,7 +41,12 @@ module ActiveSupport
     # `[]` / `[]=` stay as one-line delegators so Ruby idiom
     # (`hwia[:k]`) keeps working under CRuby and Spinel.
     def get(key)
-      @data[key.to_s]
+      # Explicit key-presence check so Crystal's strict Hash#[] doesn't
+      # raise on missing keys — Ruby Hash#[] returns nil silently, and
+      # transpiled call sites (`@flash[:notice]`) rely on that.
+      k = key.to_s
+      return @data[k] if @data.key?(k)
+      nil
     end
 
     def set(key, value)

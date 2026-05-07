@@ -35,11 +35,11 @@ module ActionView
     def content_for_get(slot)
       @slots[slot]
     end
-  
+
     def get_slot(slot)
       @slots[slot] || ""
     end
-  
+
     def get_yield
       @slots[:__body__] || ""
     end
@@ -112,8 +112,12 @@ module ActionView
     end
   
     def button_to(text, href, opts = {})
-      method = opts[:method]
-      form_class = opts[:form_class]
+      # Use `.fetch(k, nil)` instead of bare `opts[:k]`: Ruby's Hash#[]
+      # returns nil for missing keys, but Crystal's strict Hash#[]
+      # raises KeyError. fetch-with-default produces nil-on-missing in
+      # both. Same Ruby semantics, target-portable shape.
+      method = opts.fetch(:method, nil)
+      form_class = opts.fetch(:form_class, nil)
       inner_opts = opts.dup
       inner_opts.delete(:method)
       inner_opts.delete(:form_class)

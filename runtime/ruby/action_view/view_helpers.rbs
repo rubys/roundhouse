@@ -95,16 +95,22 @@ module ActionView
   
     # ── form builder (yielded by form_with) ─────────────────────────
     class FormBuilder
-      # Constructor takes the four pieces of form state.
+      # Constructor takes the four pieces of form state. `model` is
+      # any AR record (`ActiveRecord::Base` is the closed supertype
+      # every app model inherits transitively); use the abstract Base
+      # type so strict-typed targets can declare the field as
+      # `ActiveRecord::Base` and accept any subclass via covariant
+      # assignment. `@model[field]` dispatches via Base's abstract
+      # `[]` to the per-model implementation.
       def initialize: (
-        untyped model,
+        ActiveRecord::Base model,
         String model_name,
         String action,
         Symbol method
       ) -> void
-  
+
       # `attr_reader` — getters only.
-      def model: () -> untyped
+      def model: () -> ActiveRecord::Base
       def model_name: () -> String
       def action: () -> String
   

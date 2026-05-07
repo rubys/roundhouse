@@ -654,16 +654,15 @@ fn render_imports_with_companions(
     }
     let parent_to_ref = |raw: &str| -> String {
         match raw {
-            "ActiveRecord::Base" => "ActiveRecordBase".to_string(),
             "StandardError" => String::new(),
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
-            "ActionController::Base" | "ActionController::API" => {
-                "ActionControllerBase".to_string()
-            }
-            // Mixins emitted as `extends` for include directives —
-            // names like `ActiveRecord::Validations` need the last
-            // segment looked up against the runtime catalog below.
+            // All other framework parents (`ActiveRecord::Base`,
+            // `ActionController::Base`, mixins like `ActiveRecord::
+            // Validations`) collapse to the last segment — the
+            // imported name in the matching .ts file. The TS Const
+            // emit + ts_class_ty use the same convention so type
+            // refs and import names stay aligned.
             _ => raw.rsplit("::").next().unwrap_or(raw).to_string(),
         }
     };
@@ -704,6 +703,25 @@ fn render_imports_with_companions(
         refs.remove(companion.name.0.as_str());
     }
 
+    // Pre-walk canonical parent paths to disambiguate the bare-`Base`
+    // import target. `ActionController::Base` and `ActiveRecord::Base`
+    // both collapse to `Base` in `refs`, but they live in different
+    // runtime files. The parent slot carries the canonical full path
+    // before collapsing — inspect it here to route the import.
+    let mut base_is_controller: bool = false;
+    if let Some(p) = &lc.parent {
+        if p.0.as_str() == "ActionController::Base" {
+            base_is_controller = true;
+        }
+    }
+    for companion in companions {
+        if let Some(p) = &companion.parent {
+            if p.0.as_str() == "ActionController::Base" {
+                base_is_controller = true;
+            }
+        }
+    }
+
     let mut juntos_imports: Vec<String> = Vec::new();
     let mut model_imports: Vec<(String, String)> = Vec::new();
     let mut runtime_imports: Vec<String> = Vec::new();
@@ -726,15 +744,16 @@ fn render_imports_with_companions(
             juntos_imports.push(r);
         } else if r == "Test" || r == "TestCase" {
             runtime_imports.push(r);
-        } else if r == "ActionControllerBase" {
-            controller_base_import = true;
-        } else if r == "ActiveRecordBase" {
-            // Transpiled framework Base — `ApplicationRecord extends Base`
-            // resolves through this aliased import. Same pattern as
-            // ActionControllerBase: the runtime exports `Base` from
-            // `src/active_record_base.ts`; the alias keeps the
-            // `extends` clause readable.
-            active_record_base_import = true;
+        } else if r == "Base" {
+            // Bare `Base` — disambiguate via canonical parent inspection
+            // above. ApplicationController extends ActionController::Base
+            // → controller_base_import; everything else (record-typed
+            // params, ApplicationRecord) → active_record_base_import.
+            if base_is_controller {
+                controller_base_import = true;
+            } else {
+                active_record_base_import = true;
+            }
         } else if r == "ActiveRecord" {
             // Bare `ActiveRecord` — the namespace class in
             // `src/active_record_base.ts` carrying the static
@@ -875,27 +894,19 @@ fn render_imports_with_companions(
         writeln!(s, "import {{ {n} }} from \"{import_path}\";").unwrap();
     }
     if controller_base_import {
-        // ActionController::Base lives in the runtime as `Base` from
-        // `src/action_controller_base.ts`; import-as-rename so the
-        // emitted `extends ActionControllerBase` reads cleanly.
         let runtime_path = relative_to_root(out_path, "src/action_controller_base.js");
-        writeln!(
-            s,
-            "import {{ Base as ActionControllerBase }} from \"{runtime_path}\";",
-        )
-        .unwrap();
+        writeln!(s, "import {{ Base }} from \"{runtime_path}\";").unwrap();
     }
     if active_record_base_import || active_record_namespace_import {
         // ActiveRecord::Base lives in the runtime as `Base` from
-        // `src/active_record_base.ts`; aliased so the emitted
-        // `extends ActiveRecordBase` reads cleanly. The `ActiveRecord`
-        // namespace class (with the `static adapter` slot) lives in
-        // the same file; both names ride a single import statement
-        // when either is referenced.
+        // `src/active_record_base.ts`. The `ActiveRecord` namespace
+        // class (with the `static adapter` slot) lives in the same
+        // file; both names ride a single import statement when either
+        // is referenced.
         let runtime_path = relative_to_root(out_path, "src/active_record_base.js");
         let names = match (active_record_base_import, active_record_namespace_import) {
-            (true, true) => "Base as ActiveRecordBase, ActiveRecord",
-            (true, false) => "Base as ActiveRecordBase",
+            (true, true) => "Base, ActiveRecord",
+            (true, false) => "Base",
             (false, true) => "ActiveRecord",
             (false, false) => unreachable!(),
         };
@@ -967,11 +978,27 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
     use crate::ty::Ty;
     match ty {
         Ty::Class { id, args } => {
-            // Take the first `::`-separated segment, matching how
-            // `collect_class_refs` handles Const paths.
+            // Mirror `collect_class_refs` (Const-position): framework-
+            // namespace ClassIds (`ActiveRecord::Base`, `ActionView::
+            // ViewHelpers::FormBuilder`) collapse to the last segment
+            // — the imported name in the matching .ts runtime file.
+            // App classes (no `::`) pass through with their first
+            // segment as the import root.
+            const FRAMEWORK_NAMESPACES: &[&str] = &[
+                "ActionController",
+                "ActiveRecord",
+                "ActionView",
+                "ActionDispatch",
+                "ActiveSupport",
+            ];
             let raw = id.0.as_str();
-            let first = raw.split("::").next().unwrap_or(raw);
-            out.insert(first.to_string());
+            let segs: Vec<&str> = raw.split("::").collect();
+            let segment = if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+                segs.last().copied().unwrap_or(raw)
+            } else {
+                segs.first().copied().unwrap_or(raw)
+            };
+            out.insert(segment.to_string());
             for a in args {
                 collect_ty_class_refs(a, out);
             }

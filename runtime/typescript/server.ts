@@ -25,6 +25,7 @@ import Database from "better-sqlite3";
 
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
+import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { ViewHelpers } from "./view_helpers.js";
 
@@ -157,7 +158,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const controller = new ctrlClass();
     controller.params = new Parameters(merged);
     controller.session = sessionStore;
-    controller.flash = flashStore;
+    // Wrap the persisted flashStore in an HWIA so the controller's
+    // typed-as-HashWithIndifferentAccess `flash` property dispatches
+    // correctly (`flash.get("notice")` etc.). The plain-object store
+    // survives across requests; HWIA wraps per-request.
+    controller.flash = new HashWithIndifferentAccess(flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
     await controller.process_action(match.action);
@@ -167,7 +172,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // empty flash. Mirror that with a per-request swap — keep the
     // current flash if the action set anything, replace with a
     // fresh hash for the next request.
-    flashStore = controller.flash ?? {};
+    flashStore = controller.flash ? controller.flash.to_h() : {};
     response = {
       body: controller.body,
       status: controller.status,
