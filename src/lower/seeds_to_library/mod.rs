@@ -43,6 +43,7 @@ pub fn lower_seeds_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         body,
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
+        is_async: false,
     }]
 }
 

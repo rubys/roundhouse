@@ -296,6 +296,7 @@ fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> Method
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
+        is_async: false,
     }
 }
 

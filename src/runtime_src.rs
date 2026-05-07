@@ -745,6 +745,7 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         effects: EffectSet::pure(),
         enclosing_class: enclosing.map(Symbol::new),
         kind: crate::dialect::AccessorKind::AttributeReader,
+        is_async: false,
     }
 }
 
@@ -778,6 +779,7 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         effects: EffectSet::pure(),
         enclosing_class: enclosing.map(Symbol::new),
         kind: crate::dialect::AccessorKind::AttributeWriter,
+        is_async: false,
     }
 }
 
@@ -817,6 +819,7 @@ fn method_def_from(
         // this, but `attr_*` calls go through synthesize_reader/writer
         // above with explicit kinds; bare `def` is overwhelmingly Method.
         kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
     })
 }
 

@@ -310,6 +310,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
+        is_async: false,
     }
 }
 
@@ -344,6 +345,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeWriter,
+        is_async: false,
     }
 }
 
@@ -440,6 +442,7 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
+        is_async: false,
     }
 }
 

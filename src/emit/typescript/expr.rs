@@ -7,6 +7,61 @@ use super::naming::{ts_field_name, ts_method_name};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
 
+// Async-name set ------------------------------------------------------
+//
+// Phase 3 of async coloring: the TS emitter prepends `(await ...)` to
+// Send sites whose method name is in the active deployment profile's
+// async-method set. The set is thread-local because the existing
+// emit pipeline is shaped as a deeply-nested call tree of pure
+// functions — threading a context object through every signature
+// would bloat the diff. The thread-local is set once at the public
+// `emit_with_profile` entrypoint and cleared on exit; every other
+// emit function reads it via `is_async_method_name` without knowing
+// about it.
+//
+// Empty set (the default and the `node-sync` profile state) → no
+// `await` ever emitted → emit byte-equivalent to pre-Phase-3
+// (Gate 1).
+
+std::thread_local! {
+    static ASYNC_METHOD_NAMES: std::cell::RefCell<std::collections::HashSet<crate::ident::Symbol>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Run `f` with `names` as the active async-method set. The previous
+/// value is restored on return — supports nested calls (one level of
+/// nesting today; reserved for future re-entrant emit).
+pub(crate) fn with_async_methods<F, R>(
+    names: std::collections::HashSet<crate::ident::Symbol>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = ASYNC_METHOD_NAMES.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), names));
+    let r = f();
+    ASYNC_METHOD_NAMES.with(|cell| *cell.borrow_mut() = prev);
+    r
+}
+
+/// True iff `name` is in the active async-method set. Send-site
+/// callers consult this to decide whether to wrap with `(await ...)`.
+pub(crate) fn is_async_method_name(name: &str) -> bool {
+    ASYNC_METHOD_NAMES.with(|cell| {
+        let set = cell.borrow();
+        set.iter().any(|s| s.as_str() == name)
+    })
+}
+
+/// True iff `expr` (or any descendant) contains a `Send` whose
+/// method name is in the active async set. Used by Lambda emit to
+/// decide whether the lambda needs an `async` prefix and by HOF
+/// emit to decide whether to rewrite a `.map`/`.each`/etc. call to
+/// a `for...of` IIFE.
+pub(super) fn body_has_async_send(expr: &Expr) -> bool {
+    crate::analyze::async_color::expr_contains_async_send(expr, is_async_method_name)
+}
+
 // Body + expressions ---------------------------------------------------
 
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
@@ -878,10 +933,26 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::SelfRef => "this".to_string(),
         ExprNode::Lambda { params, body, .. } => {
             let params_s: Vec<String> = params.iter().map(|p| p.as_str().to_string()).collect();
-            let header = match params.len() {
-                0 => "()".to_string(),
-                1 => params_s[0].clone(),
-                _ => format!("({})", params_s.join(", ")),
+            // Async coloring (Phase 3): a Lambda whose body contains
+            // a Send to a name in the active async set must itself
+            // be `async`, otherwise the inner `(await ...)` emit
+            // sites are syntax errors (`await` is only legal inside
+            // an async function or top-level module). When the
+            // lambda is async, the single-param "no-paren" form is
+            // unsafe — TS accepts `async x => x` but a number of
+            // tools (ts-morph, prettier configs in the wild) trip
+            // on it; always paren the params when async to keep
+            // emit boring.
+            let body_async = body_has_async_send(body);
+            let async_prefix = if body_async { "async " } else { "" };
+            let header = if body_async && params.len() == 1 {
+                format!("({})", params_s[0])
+            } else {
+                match params.len() {
+                    0 => "()".to_string(),
+                    1 => params_s[0].clone(),
+                    _ => format!("({})", params_s.join(", ")),
+                }
             };
             // Multi-statement bodies need a block form so each
             // statement separates cleanly. Single-expression bodies
@@ -898,7 +969,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                     let reassigned = collect_reassigned(body);
                     let mut declared: std::collections::HashSet<crate::ident::Symbol> =
                         std::collections::HashSet::new();
-                    let mut out = format!("{header} => {{ ");
+                    let mut out = format!("{async_prefix}{header} => {{ ");
                     for (i, e) in exprs.iter().enumerate() {
                         let stmt = emit_stmt_with_state(
                             e,
@@ -916,7 +987,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                     return out;
                 }
             }
-            format!("{header} => {}", emit_expr(body))
+            format!("{async_prefix}{header} => {}", emit_expr(body))
         }
         ExprNode::Return { value } => {
             // Expression-position return is rare — typically the
@@ -1052,12 +1123,151 @@ pub(super) fn emit_send_with_block(
     let Some(blk) = block else {
         return emit_send_with_parens(recv, method, args, parenthesized);
     };
+    // Async HOF rewrite (Phase 3): if the receiver is an array
+    // (or array-like) AND the method is a known higher-order
+    // operation AND the block body contains async sends, rewrite
+    // to a `for...of` IIFE so awaits land in the iteration order
+    // they'd run in Ruby. Without this, `.map(async x => ...)`
+    // produces `Promise<R>[]` (parallel-pending) instead of `R[]`,
+    // and `.filter(async x => ...)` doesn't await predicates at
+    // all (the JS array methods don't introspect their callbacks).
+    if let Some(rewritten) = try_emit_async_hof(recv, method, args, blk) {
+        return rewritten;
+    }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
     emit_send_with_parens(recv, method, &all_args, true)
 }
 
+/// HOF rewrites for blocks containing async sends. Returns
+/// `Some(rewrite)` when the (method, block) shape matches a known
+/// HOF and the block body has at least one async Send; otherwise
+/// `None` (caller falls back to the standard chained-call emit).
+///
+/// Each rewrite produces an `(await (async () => { ... })())`
+/// expression so the IIFE's Promise return is awaited at the call
+/// site — the surrounding async-coloring machinery doesn't know
+/// `each`/`map`/etc are now async (they aren't in the extern set),
+/// so the rewrite must own the outer `await`.
+fn try_emit_async_hof(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: &Expr,
+) -> Option<String> {
+    // Block must be a Lambda — that's the only shape carrying
+    // params + body in a way we can splice into a for-of header.
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return None;
+    };
+    if !body_has_async_send(body) {
+        return None;
+    }
+    let recv = recv?;
+
+    // Single-param HOFs: `each`, `map`, `filter`/`select`,
+    // `reject`, `find`, `any?`, `all?`. The bound name from the
+    // block's `params[0]` becomes the for-of binding; the body
+    // emits with that name in scope (the body-typer already
+    // assigned the right VarId at ingest, so emit_expr will pick
+    // it up).
+    let recv_s = emit_expr(recv);
+    let single_param = || -> Option<String> {
+        let p = params.first()?.as_str().to_string();
+        Some(p)
+    };
+    let body_s = || emit_expr(body);
+
+    match method {
+        "each" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ for (const {p} of {recv_s}) {{ {body}; }} }})())",
+                body = body_s(),
+            ))
+        }
+        "map" | "collect" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) __r.push({body}); return __r; }})())",
+                body = body_s(),
+            ))
+        }
+        "filter" | "select" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) if ({body}) __r.push({p}); return __r; }})())",
+                body = body_s(),
+            ))
+        }
+        "reject" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) if (!({body})) __r.push({p}); return __r; }})())",
+                body = body_s(),
+            ))
+        }
+        "find" | "detect" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ for (const {p} of {recv_s}) if ({body}) return {p}; return undefined; }})())",
+                body = body_s(),
+            ))
+        }
+        "any?" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ for (const {p} of {recv_s}) if ({body}) return true; return false; }})())",
+                body = body_s(),
+            ))
+        }
+        "all?" if args.is_empty() => {
+            let p = single_param()?;
+            Some(format!(
+                "(await (async () => {{ for (const {p} of {recv_s}) if (!({body})) return false; return true; }})())",
+                body = body_s(),
+            ))
+        }
+        "reduce" | "inject" if args.len() == 1 && params.len() == 2 => {
+            // `arr.reduce(init) { |acc, x| op }` — accumulator
+            // pattern. `params[0]` is the accumulator name,
+            // `params[1]` is the element.
+            let acc = params[0].as_str().to_string();
+            let elem = params[1].as_str().to_string();
+            let init_s = emit_expr(&args[0]);
+            Some(format!(
+                "(await (async () => {{ let {acc} = {init_s}; for (const {elem} of {recv_s}) {acc} = {body}; return {acc}; }})())",
+                body = body_s(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn emit_send_with_parens(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    parenthesized: bool,
+) -> String {
+    let result = emit_send_with_parens_inner(recv, method, args, parenthesized);
+    // Async coloring (Phase 3): wrap with `(await ...)` when the
+    // method name is in the active deployment profile's async set.
+    // Wrapping with parens preserves precedence at every use site —
+    // `(await x.find(id)).save` correctly applies `await` to the
+    // inner Send before chaining `.save`, and
+    // `(await x.find(id)) ?? new Post()` correctly applies `??`
+    // after the await resolves. Without parens, `await x.find(id).save`
+    // parses as `await (x.find(id).save)` (property access binds
+    // tighter than await) — silently wrong.
+    if is_async_method_name(method) {
+        format!("(await {result})")
+    } else {
+        result
+    }
+}
+
+fn emit_send_with_parens_inner(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
@@ -2100,3 +2310,177 @@ fn ts_binop(method: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod async_hof_tests {
+    use super::*;
+    use crate::expr::{BlockStyle, Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn synth_var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    fn synth_send(recv: Option<Expr>, method: &str, args: Vec<Expr>, block: Option<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn synth_lambda(params: Vec<&str>, body: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: params.into_iter().map(Symbol::from).collect(),
+                block_param: None,
+                body,
+                block_style: BlockStyle::Brace,
+            },
+        )
+    }
+
+    fn with_async<F: FnOnce() -> R, R>(names: &[&str], f: F) -> R {
+        let set: std::collections::HashSet<Symbol> =
+            names.iter().map(|s| Symbol::from(*s)).collect();
+        with_async_methods(set, f)
+    }
+
+    #[test]
+    fn each_with_async_block_rewrites_to_for_of() {
+        // arr.each { |x| x.save } → for...of IIFE awaited.
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(
+            out.starts_with("(await (async () => {"),
+            "expected await IIFE prefix in: {out}"
+        );
+        assert!(out.contains("for (const x of arr)"), "got: {out}");
+        assert!(out.contains("(await x.save())"), "got: {out}");
+    }
+
+    #[test]
+    fn map_with_async_block_pushes_into_accumulator() {
+        // arr.map { |x| x.save } → IIFE that pushes into __r.
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "map", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(out.contains("const __r = []"), "got: {out}");
+        assert!(out.contains("__r.push((await x.save()))"), "got: {out}");
+        assert!(out.contains("return __r"), "got: {out}");
+    }
+
+    #[test]
+    fn filter_with_async_predicate_rewrites_correctly() {
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "filter", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(
+            out.contains("if ((await x.save())) __r.push(x)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn reject_with_async_predicate_negates() {
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "reject", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(
+            out.contains("if (!((await x.save()))) __r.push(x)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn find_returns_first_match() {
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "find", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(out.contains("return x"), "got: {out}");
+        assert!(out.contains("return undefined"), "got: {out}");
+    }
+
+    #[test]
+    fn any_returns_boolean() {
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "any?", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(out.contains("return true"), "got: {out}");
+        assert!(out.contains("return false"), "got: {out}");
+    }
+
+    #[test]
+    fn reduce_threads_accumulator() {
+        // arr.reduce(0) { |acc, x| acc + x.save }
+        let init = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: crate::expr::Literal::Int { value: 0 } },
+        );
+        // body: Send(method="+", recv=acc, args=[x.save])
+        let acc_plus_save = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(synth_var("acc")),
+                method: Symbol::from("+"),
+                args: vec![synth_send(Some(synth_var("x")), "save", vec![], None)],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let block = synth_lambda(vec!["acc", "x"], acc_plus_save);
+        let send = synth_send(Some(synth_var("arr")), "reduce", vec![init], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        assert!(out.contains("let acc = 0"), "got: {out}");
+        assert!(out.contains("for (const x of arr)"), "got: {out}");
+        assert!(out.contains("acc ="), "got: {out}");
+        assert!(out.contains("return acc"), "got: {out}");
+    }
+
+    #[test]
+    fn no_rewrite_when_block_has_no_async() {
+        // arr.each { |x| x.foo } where foo is NOT async → emit
+        // falls through to the standard chained-call path.
+        let body = synth_send(Some(synth_var("x")), "foo", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
+        let out = with_async(&["save"], || emit_expr(&send));
+        // No await + IIFE pattern; standard each path emits forEach
+        // (Array-specific) or the default callback shape.
+        assert!(
+            !out.starts_with("(await (async () => {"),
+            "expected NO rewrite for sync-block each, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sync_profile_no_rewrites() {
+        // Empty async set → no rewrite even on a HOF method.
+        let body = synth_send(Some(synth_var("x")), "save", vec![], None);
+        let block = synth_lambda(vec!["x"], body);
+        let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
+        let out = with_async(&[], || emit_expr(&send));
+        assert!(
+            !out.starts_with("(await (async () => {"),
+            "sync profile must not rewrite, got: {out}"
+        );
+    }
+}
+

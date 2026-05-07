@@ -484,6 +484,7 @@ fn action_to_method(
         effects: a.effects.clone(),
         enclosing_class: Some(controller.name.0.clone()),
         kind: AccessorKind::Method,
+        is_async: false,
     }
 }
 

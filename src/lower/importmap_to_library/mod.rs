@@ -59,6 +59,7 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             body: pins_body,
             signature: Some(fn_sig(vec![], pins_ty)),
             effects: EffectSet::default(),
+            is_async: false,
         },
         LibraryFunction {
             module_path,
@@ -67,6 +68,7 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             body: lit_str("application".to_string()),
             signature: Some(fn_sig(vec![], Ty::Str)),
             effects: EffectSet::default(),
+            is_async: false,
         },
     ]
 }

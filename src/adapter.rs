@@ -87,6 +87,27 @@ pub trait DatabaseAdapter: Send + Sync {
         let _ = effect;
         false
     }
+
+    /// Names of methods on the runtime AR adapter object (e.g.
+    /// `ActiveRecord.adapter.all`, `ActiveRecord.adapter.find`)
+    /// that this backend implements asynchronously. These are the
+    /// **seed set** for the function-coloring pass: every method
+    /// that calls one of these — directly or transitively —
+    /// becomes async. The propagation pass in `analyze/` reads
+    /// this list, marks matching methods on the adapter's
+    /// `LibraryClass` with `is_async=true`, and fixed-points
+    /// through the call graph.
+    ///
+    /// Returns an empty slice for sync backends (the default).
+    /// Async backends override to list every method on their
+    /// adapter object whose return value is a Promise / future.
+    /// The seed list is small (~8 methods today: all, find,
+    /// where, count, exists?, insert, update, delete) and stable
+    /// — adapter surfaces only grow when AR primitives are
+    /// added.
+    fn async_seed_methods(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// The default adapter: SQLite semantics. Accepts the full AR query
@@ -174,6 +195,17 @@ impl DatabaseAdapter for SqliteAsyncAdapter {
             effect,
             crate::effect::Effect::DbRead { .. } | crate::effect::Effect::DbWrite { .. },
         )
+    }
+
+    fn async_seed_methods(&self) -> &'static [&'static str] {
+        // Mirrors the AR adapter object surface called from
+        // runtime/ruby/active_record/base.rb. When a new AR
+        // primitive lands (e.g. `update_all`, `pluck`) and the
+        // adapter object grows a method, add it here.
+        &[
+            "all", "find", "where", "count", "exists?",
+            "insert", "update", "delete",
+        ]
     }
 }
 

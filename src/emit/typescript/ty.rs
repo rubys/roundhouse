@@ -32,6 +32,21 @@ pub fn ts_return_ty(ty: &Ty) -> String {
     }
 }
 
+/// Render a `Ty` for the return slot of an `async` TS function or
+/// method — wraps `ts_return_ty` in `Promise<...>`. `Promise<void>`
+/// is the canonical TS shape for an async function with no return
+/// value (`await`-ing one yields `undefined`, which is what the
+/// caller sees from a void await).
+///
+/// `ts_return_ty` already maps `Ty::Nil` → `void` at the outermost
+/// level; this helper inherits that and wraps the result, so a
+/// `Ty::Nil` return on an async method emits `Promise<void>` (not
+/// `Promise<null>`). Inner Nil positions stay `null` per the
+/// non-async behavior.
+pub fn ts_async_return_ty(ty: &Ty) -> String {
+    format!("Promise<{}>", ts_return_ty(ty))
+}
+
 fn ts_class_ty(id: &ClassId) -> String {
     let raw = id.0.as_str();
     if class_is_temporal(id) {

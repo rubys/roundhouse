@@ -54,5 +54,6 @@ pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction
         body,
         signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
         effects: EffectSet::default(),
+        is_async: false,
     }]
 }

@@ -53,7 +53,7 @@ mod naming;
 mod package;
 mod ty;
 
-pub use ty::{ts_return_ty, ts_ty};
+pub use ty::{ts_async_return_ty, ts_return_ty, ts_ty};
 
 /// Public re-export so `runtime_loader` can render module-level
 /// constant values (`HTML_ESCAPES = { ... }.freeze` from
@@ -62,6 +62,28 @@ pub use ty::{ts_return_ty, ts_ty};
 /// expression emitter every method body does.
 pub fn emit_expr_for_runtime(e: &crate::expr::Expr) -> String {
     expr::emit_expr(e)
+}
+
+/// Emit a TypeScript project for `app` under the named deployment
+/// `profile`. The profile selects the DB adapter and HTTP shim;
+/// `node_sync` (the implicit profile that `emit(app)` uses) leaves
+/// emit byte-equivalent to pre-Phase-3 — no `async`, no `await`.
+/// `node_async` (or any profile whose adapter has a non-empty
+/// `async_seed_methods()` list) runs propagation across lowered
+/// classes and emits `async`/`await` at the colored sites.
+pub fn emit_with_profile(
+    app: &App,
+    profile: &crate::profile::DeploymentProfile,
+) -> Vec<EmittedFile> {
+    use std::collections::HashSet;
+    let extern_names: Vec<&'static str> = profile.adapter().async_seed_methods().to_vec();
+    let async_set: HashSet<crate::ident::Symbol> = extern_names
+        .iter()
+        .map(|s| crate::ident::Symbol::from(*s))
+        .collect();
+    crate::analyze::async_color::with_extern_async_names(extern_names, || {
+        expr::with_async_methods(async_set, || emit(app))
+    })
 }
 
 /// Emit a TypeScript project for `app`. Every artifact (models,
@@ -124,7 +146,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             .iter()
             .map(|(r, s)| (r.clone(), s.fields.clone()))
             .collect();
-    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+    let (mut model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,
         view_extras,
@@ -134,7 +156,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     view_lower_extras.extend(route_helper_extras.clone());
-    let view_lcs = crate::lower::lower_views_to_library_classes(
+    let mut view_lcs = crate::lower::lower_views_to_library_classes(
         &app.views,
         app,
         view_lower_extras,
@@ -144,12 +166,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     controller_extras.extend(library::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
-    let controller_lcs = crate::lower::lower_controllers_to_library_classes(
+    let mut controller_lcs = crate::lower::lower_controllers_to_library_classes(
         &app.controllers,
         controller_extras.clone(),
     );
 
-    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+    let mut fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
 
     let test_lowered: Vec<crate::lower::LoweredTestModule> = if app.test_modules.is_empty() {
         Vec::new()
@@ -164,7 +186,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             test_extras,
         )
     };
-    let test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
+    let mut test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
         .iter()
         .map(|m| m.test_class.clone())
         .collect();
@@ -172,7 +194,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // need to be reachable for treeshake (so methods on Validatable
     // aren't dropped) but get emitted INSIDE each test file rather
     // than as their own files.
-    let test_inner_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
+    let mut test_inner_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
         .iter()
         .flat_map(|m| m.inner_classes.iter().cloned())
         .collect();
@@ -186,6 +208,85 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // uses get dropped from `validations.ts`. Conservative on
     // untyped Sends — keeps the method on every class that defines
     // it, never wrong.
+    // Async coloring (Phase 3): when `with_extern_async_names` is
+    // set by `emit_with_profile`, propagate `is_async` GLOBALLY
+    // across all app class Vecs and route-helper functions. One
+    // unified pass means cross-Vec chains (controller method →
+    // model helper → extern) converge in a single fixed-point
+    // iteration. Empty extern list (the default / sync profile)
+    // makes this a no-op, preserving pre-Phase-3 emit byte-for-byte
+    // (Gate 1). Test classes are propagated alongside model + view
+    // + controller + fixture so a test method calling a colored
+    // helper picks up `async` correctly. `test_inner_lcs` carries
+    // user-defined inner classes (Validatable etc.) — same Vec
+    // shape, same propagation.
+    // Hoist late-built LibraryFunction Vecs so propagation can see
+    // them. `seeds_funcs` in particular calls AR (`Article.create!`
+    // etc.) and must propagate. The other three (routes_dispatch,
+    // importmap, schema) are pure routing/static-data helpers, so
+    // propagation is a no-op for them — but threading them in
+    // keeps the algorithm uniform and Future Rails patterns won't
+    // surprise us.
+    let mut seeds_funcs = crate::lower::lower_seeds_to_library_functions(app);
+    let mut routes_dispatch_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    let mut importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    let mut schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+
+    let extern_async_names = crate::analyze::async_color::active_extern_async_names();
+    let mut route_helper_funcs = route_helper_funcs;
+    if !extern_async_names.is_empty() {
+        // Capture lengths BEFORE `append` drains each source Vec —
+        // we need them to split the merged Vec back into the
+        // original per-category Vecs after propagation.
+        let m_len = model_lcs.len();
+        let v_len = view_lcs.len();
+        let c_len = controller_lcs.len();
+        let fx_len = fixture_lcs.len();
+        let tc_len = test_lcs.len();
+        // tc_inner_len recovered as the remainder (no need to record).
+        let mut all_classes: Vec<crate::dialect::LibraryClass> = Vec::new();
+        all_classes.append(&mut model_lcs);
+        all_classes.append(&mut view_lcs);
+        all_classes.append(&mut controller_lcs);
+        all_classes.append(&mut fixture_lcs);
+        all_classes.append(&mut test_lcs);
+        all_classes.append(&mut test_inner_lcs);
+        // Stitch all functions together for one global pass; split
+        // back like the classes below.
+        let rh_len = route_helper_funcs.len();
+        let sd_len = seeds_funcs.len();
+        let rd_len = routes_dispatch_funcs.len();
+        let im_len = importmap_funcs.len();
+        let sc_len = schema_funcs.len();
+        let _ = (rh_len, sd_len, rd_len, im_len, sc_len);
+        let mut all_funcs: Vec<crate::dialect::LibraryFunction> = Vec::new();
+        all_funcs.append(&mut route_helper_funcs);
+        all_funcs.append(&mut seeds_funcs);
+        all_funcs.append(&mut routes_dispatch_funcs);
+        all_funcs.append(&mut importmap_funcs);
+        all_funcs.append(&mut schema_funcs);
+        crate::analyze::async_color::propagate_global_with_externs(
+            &mut all_classes,
+            &mut all_funcs,
+            &extern_async_names,
+        );
+        let mut fiter = all_funcs.into_iter();
+        route_helper_funcs = fiter.by_ref().take(rh_len).collect();
+        seeds_funcs = fiter.by_ref().take(sd_len).collect();
+        routes_dispatch_funcs = fiter.by_ref().take(rd_len).collect();
+        importmap_funcs = fiter.by_ref().take(im_len).collect();
+        schema_funcs = fiter.collect();
+        // Split back in append order. `take(N)` consumes exactly N
+        // elements; the trailing `collect()` picks up the rest.
+        let mut iter = all_classes.into_iter();
+        model_lcs = iter.by_ref().take(m_len).collect();
+        view_lcs = iter.by_ref().take(v_len).collect();
+        controller_lcs = iter.by_ref().take(c_len).collect();
+        fixture_lcs = iter.by_ref().take(fx_len).collect();
+        test_lcs = iter.by_ref().take(tc_len).collect();
+        test_inner_lcs = iter.collect();
+    }
+
     let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
         Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
     all_app_classes.extend(model_lcs.iter().cloned());
@@ -266,11 +367,28 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &extra_roots,
     );
 
-    let runtime_units = crate::runtime_loader::typescript_units(|_path, classes| {
-        classes
+    // Snapshot `extern_async_names` for the runtime transform closure.
+    // The closure captures by move, so a per-call clone keeps it
+    // alive across all per-file invocations.
+    let extern_async_names_for_runtime = extern_async_names.clone();
+    let runtime_units = crate::runtime_loader::typescript_units(move |_path, classes| {
+        let mut classes: Vec<_> = classes
             .into_iter()
             .map(|c| crate::treeshake::filter_runtime_class(&c, &reach))
-            .collect()
+            .collect();
+        // Per-file async propagation. The runtime files are
+        // processed one at a time here, so cross-file chains
+        // (Base.foo → Validations.bar → adapter.baz) won't fully
+        // propagate — only direct extern calls within a single
+        // file mark its methods. Acceptable for Phase 3 because
+        // the AR pattern (Base.all calls adapter.all) is direct.
+        if !extern_async_names_for_runtime.is_empty() {
+            crate::analyze::async_color::propagate_with_externs(
+                &mut classes,
+                &extern_async_names_for_runtime,
+            );
+        }
+        classes
     })
     .expect("runtime transpile failed (Ruby source error)");
     for unit in runtime_units {
@@ -280,7 +398,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    let schema_funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
     if !schema_funcs.is_empty() {
         files.push(library::emit_module_file(
             &schema_funcs,
@@ -297,7 +414,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
-    let routes_dispatch_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
     if !routes_dispatch_funcs.is_empty() {
         files.push(library::emit_module_file(
             &routes_dispatch_funcs,
@@ -306,7 +422,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
-    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     if !importmap_funcs.is_empty() {
         files.push(library::emit_module_file(
             &importmap_funcs,
@@ -316,7 +431,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     let has_seeds = app.seeds.is_some();
-    let seeds_funcs = crate::lower::lower_seeds_to_library_functions(app);
     if !seeds_funcs.is_empty() {
         files.push(library::emit_module_file(
             &seeds_funcs,
@@ -1338,10 +1452,28 @@ fn emit_class_member(
         } else {
             ""
         };
-        let ret_s = ts_return_ty(&ret_ty);
+        // Async coloring (Phase 3): prepend `async` for methods the
+        // propagation pass colored. Skip attribute slots — TS getters
+        // and setters can't be `async`. The propagation pass also
+        // produces a `SyncSlotViolation` for these cases so the
+        // build can fail loudly instead of silently dropping the
+        // marker. Constructors handled in the `is_constructor`
+        // branch above (which never gets `async`).
+        let emit_async = m.is_async
+            && !matches!(
+                m.kind,
+                crate::dialect::AccessorKind::AttributeReader
+                    | crate::dialect::AccessorKind::AttributeWriter
+            );
+        let async_keyword = if emit_async { "async " } else { "" };
+        let ret_s = if emit_async {
+            ts_async_return_ty(&ret_ty)
+        } else {
+            ts_return_ty(&ret_ty)
+        };
         writeln!(
             out,
-            "{prefix}{}({}): {} {{",
+            "{prefix}{async_keyword}{}({}): {} {{",
             mname,
             param_list.join(", "),
             ret_s
@@ -1428,11 +1560,19 @@ pub fn emit_library_function(
     let rewritten = crate::emit::typescript::library::rewrite_for_free_function(&func.body);
     let body = expr::emit_body(&rewritten, &ret_ty);
 
-    let ret_s = ts_return_ty(&ret_ty);
+    // Async coloring (Phase 3): same gating as `emit_class_member`,
+    // minus the attribute-slot exemption (free functions can't be
+    // attribute readers/writers).
+    let async_keyword = if func.is_async { "async " } else { "" };
+    let ret_s = if func.is_async {
+        ts_async_return_ty(&ret_ty)
+    } else {
+        ts_return_ty(&ret_ty)
+    };
     let mut out = String::new();
     writeln!(
         out,
-        "export function {}({}): {} {{",
+        "export {async_keyword}function {}({}): {} {{",
         mname,
         param_list.join(", "),
         ret_s
@@ -1695,13 +1835,27 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
         .collect();
 
-    let ret_s = ts_return_ty(ret);
     let body = expr::emit_body(&m.body, ret);
 
+    // Async coloring (Phase 3): same gating as `emit_class_member`,
+    // skipping attribute slots. Module-level methods can't be
+    // constructors so no special-case here.
+    let emit_async = m.is_async
+        && !matches!(
+            m.kind,
+            crate::dialect::AccessorKind::AttributeReader
+                | crate::dialect::AccessorKind::AttributeWriter
+        );
+    let async_keyword = if emit_async { "async " } else { "" };
+    let ret_s = if emit_async {
+        ts_async_return_ty(ret)
+    } else {
+        ts_return_ty(ret)
+    };
     let mut out = String::new();
     writeln!(
         out,
-        "export function {}({}): {} {{",
+        "export {async_keyword}function {}({}): {} {{",
         m.name,
         param_list.join(", "),
         ret_s

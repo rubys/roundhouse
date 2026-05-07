@@ -82,6 +82,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             Ty::Array { elem: Box::new(route_hash_ty.clone()) },
         )),
         effects: EffectSet::default(),
+        is_async: false,
     });
 
     if let Some(r) = root_routes.first() {
@@ -93,6 +94,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             body: root_body,
             signature: Some(fn_sig(vec![], route_hash_ty)),
             effects: EffectSet::default(),
+            is_async: false,
         });
     }
 
@@ -197,6 +199,7 @@ fn build_helper_function(
         body,
         signature: Some(fn_sig(sig_params, Ty::Str)),
         effects: EffectSet::default(),
+        is_async: false,
     }
 }
 

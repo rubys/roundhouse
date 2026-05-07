@@ -165,6 +165,7 @@ pub fn flatten_lcs_to_functions(
                 body: m.body.clone(),
                 signature: m.signature.clone(),
                 effects: m.effects.clone(),
+                is_async: m.is_async,
             });
         }
     }
@@ -284,6 +285,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         effects: EffectSet::default(),
         enclosing_class: Some(module_id.0.clone()),
         kind: AccessorKind::Method,
+        is_async: false,
     };
 
     // Run the body-typer over the lowered body so per-target emitters

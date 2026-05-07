@@ -59,6 +59,7 @@ pub(super) fn synthesize_process_action(
         effects: EffectSet::default(),
         enclosing_class: Some(enclosing_class),
         kind: AccessorKind::Method,
+        is_async: false,
     }
 }
 

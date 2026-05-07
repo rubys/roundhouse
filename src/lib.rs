@@ -22,6 +22,7 @@ pub mod ident;
 pub mod ingest;
 pub mod lower;
 pub mod naming;
+pub mod profile;
 pub mod query;
 pub mod rbs;
 pub mod runtime_loader;
@@ -34,6 +35,7 @@ pub mod vfs;
 
 pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};
 pub use app::App;
+pub use profile::{Database, DeploymentProfile, HttpShim, ProfileError, Target};
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,
     Dependent, Filter, FilterKind, HttpMethod, MethodDef, MethodReceiver, Model, ModelBodyItem,

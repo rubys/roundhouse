@@ -346,6 +346,15 @@ pub struct MethodDef {
     /// don't tag themselves.
     #[serde(default)]
     pub kind: AccessorKind,
+    /// True when this method must be awaited (TS `async`, Rust
+    /// `async fn`, Python `async def`). Set by Phase 1's seed
+    /// pass for methods named in the active deployment profile's
+    /// adapter manifest, and grown by Phase 2's fixed-point
+    /// propagation through the call graph. Always `false` under
+    /// the default `node-sync` profile — the seed list is empty,
+    /// nothing propagates, emit is unchanged.
+    #[serde(default)]
+    pub is_async: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -480,6 +489,14 @@ pub struct LibraryFunction {
     pub signature: Option<crate::ty::Ty>,
     #[serde(default, skip_serializing_if = "is_pure_effects")]
     pub effects: crate::effect::EffectSet,
+    /// Set by Phase 2's async-color propagation when this function's
+    /// body calls (transitively) a method in the active deployment
+    /// profile's adapter manifest. Drives `export async function`
+    /// emission and `Promise<T>` return-type wrapping. Defaults to
+    /// false, so non-async profiles emit byte-equivalent to pre-
+    /// Phase-3.
+    #[serde(default)]
+    pub is_async: bool,
 }
 
 fn is_pure_effects(e: &crate::effect::EffectSet) -> bool {

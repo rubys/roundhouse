@@ -48,6 +48,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,
+        is_async: false,
     });
 }
 

@@ -164,6 +164,7 @@ fn synthesize_module_lc(
             effects: f.effects.clone(),
             enclosing_class: Some(module_id.0.clone()),
             kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
         })
         .collect();
     LibraryClass {
@@ -474,6 +475,7 @@ fn render_imports_for_function(
                     .join("::"),
             )),
             kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
         }],
         origin: None,
     };
