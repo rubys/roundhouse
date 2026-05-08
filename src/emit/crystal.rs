@@ -67,6 +67,9 @@ const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
 const CR_CABLE_SOURCE: &str = include_str!("../../runtime/crystal/cable.cr");
 const CR_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/crystal/test_support.cr");
 const CR_BROADCASTS_SOURCE: &str = include_str!("../../runtime/crystal/broadcasts.cr");
+// Minitest-shaped Crystal Test base class (`RoundhouseTest`). Emitted
+// as `src/test_helper.cr` whenever the App carries test_modules.
+const CR_TEST_HELPER_SOURCE: &str = include_str!("../../runtime/crystal/test_helper.cr");
 
 /// Emit a full Crystal project for `app`. Composes the lowered-IR
 /// emit pipeline (mirrors Spinel's `emit_spinel`).
@@ -316,6 +319,60 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             app,
             PathBuf::from("src/seeds.cr"),
         ));
+    }
+
+    // Test modules — one `spec/<stem>_spec.cr` per ingested
+    // TestModule, plus `src/test_helper.cr` (the `RoundhouseTest`
+    // Minitest analog) when any tests are present. Inner classes
+    // (`class Validatable; …; end` declared inside the test class)
+    // and class-body constants (`TABLE = […]`) hoist to file scope
+    // above the test class — same pattern as the Ruby/Spinel emit
+    // (see `src/emit/ruby.rs::emit_spinel`). Crystal's compiler does
+    // whole-program analysis on the spec build, so per-spec require
+    // headers aren't needed beyond the test_helper itself.
+    if !app.test_modules.is_empty() {
+        use std::fmt::Write as _;
+        files.push(EmittedFile {
+            path: PathBuf::from("src/test_helper.cr"),
+            content: CR_TEST_HELPER_SOURCE.to_string(),
+        });
+        let test_lowered = crate::lower::lower_test_modules_with_inner(
+            &app.test_modules,
+            &app.fixtures,
+            &app.models,
+            Vec::new(),
+        );
+        for lowered in &test_lowered {
+            let lc = &lowered.test_class;
+            let class_name = lc.name.0.as_str();
+            let stem = crate::naming::snake_case(
+                class_name.strip_suffix("Test").unwrap_or(class_name),
+            );
+            let out_path = PathBuf::from(format!("spec/{stem}_spec.cr"));
+            let mut content = String::new();
+            content.push_str("require \"../src/test_helper\"\n");
+            content.push_str("require \"../src/app\"\n\n");
+            // Hoist class-body constants to file scope first — Crystal
+            // top-level constants are visible everywhere below them,
+            // mirroring the Ruby `TABLE = [...]` lift in spinel emit.
+            for (name, value) in &lowered.constants {
+                let value_s = expr::emit_expr(value);
+                writeln!(content, "{} = {}", name.as_str(), value_s).unwrap();
+            }
+            if !lowered.constants.is_empty() {
+                content.push('\n');
+            }
+            // Inner classes hoist next, above the test class proper.
+            for inner in &lowered.inner_classes {
+                content.push_str(&library::emit_library_class_decl(inner, app, PathBuf::new()).content);
+                content.push('\n');
+            }
+            content.push_str(&library::emit_library_class_decl(lc, app, out_path.clone()).content);
+            files.push(EmittedFile {
+                path: out_path,
+                content,
+            });
+        }
     }
 
     // src/app.cr — aggregator that requires every emitted .cr file

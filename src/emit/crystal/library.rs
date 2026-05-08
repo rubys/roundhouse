@@ -776,6 +776,14 @@ fn collect_ivar_assignments(
 pub(super) fn crystal_parent_name(ruby_name: &str) -> String {
     match ruby_name {
         "StandardError" | "RuntimeError" => "Exception".to_string(),
+        // Test parents collapse to the hand-written Crystal Minitest
+        // analog. `runtime/crystal/test_helper.cr`'s `RoundhouseTest`
+        // provides the assert_*/refute_* surface and a `macro
+        // inherited` that registers each `test_*` method as a Spec
+        // `it` block.
+        "Minitest::Test"
+        | "ActiveSupport::TestCase"
+        | "ActionDispatch::IntegrationTest" => "RoundhouseTest".to_string(),
         _ => ruby_name.to_string(),
     }
 }
