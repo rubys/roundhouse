@@ -1,0 +1,405 @@
+// Roundhouse TypeScript main-thread runtime — SharedWorker client bridge.
+//
+// Loaded into the browser tab from the emitted `main.ts` entry. Runs
+// strictly on the main thread — never imported by `server-worker.ts`
+// or `db_worker.ts`. Its job is narrow:
+//
+//   1. Spawn the SharedWorker (URL read from `<meta
+//      name="juntos-worker">` injected at build time by the Vite
+//      manifest plugin).
+//   2. Send the SharedWorker its initial config — most importantly
+//      the dedicated DB Worker URL (also a fingerprinted manifest
+//      lookup, in `<meta name="juntos-db-worker">`).
+//   3. Intercept Turbo's `turbo:before-fetch-request` events,
+//      serialize them over MessagePort, await the SharedWorker's
+//      Response, and feed Turbo a synthetic `Response` so the
+//      navigation/form submit completes as if it had hit a real
+//      HTTP server.
+//   4. Run the Chrome workaround: when the SharedWorker can't
+//      construct a `Worker` directly (Chrome doesn't expose the
+//      constructor inside `SharedWorkerGlobalScope`), it sends us a
+//      `create-db-worker` request + a fresh MessageChannel port; we
+//      create the Worker on its behalf and wire the channel.
+//   5. Subscribe to BroadcastChannel-backed Turbo Streams via the
+//      `juntos-stream-source` custom element — when the
+//      SharedWorker renders a view containing `turbo_stream_from`,
+//      it returns a `<juntos-stream-source channel="...">` element
+//      and `connectedCallback` subscribes here.
+//
+// No view helpers, no Router, no controller dispatch — those all
+// live in the SharedWorker. This file is the *transport* between
+// Turbo (in the tab) and the SharedWorker (cross-tab application).
+
+// ── Types ──
+
+interface ResponsePayload {
+  id: string;
+  type: "response";
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  binary?: boolean;
+}
+
+interface ReadyPayload {
+  type: "ready";
+}
+
+interface ErrorPayload {
+  type: "error";
+  error: string;
+}
+
+interface CreateDbWorkerPayload {
+  type: "create-db-worker";
+  url: string;
+}
+
+type IncomingMessage = ResponsePayload | ReadyPayload | ErrorPayload | CreateDbWorkerPayload;
+
+interface PendingResolver {
+  resolve: (data: ResponsePayload) => void;
+}
+
+// ── WorkerBridge: MessagePort fetch correlation ──
+
+class WorkerBridge {
+  private port: MessagePort;
+  private pending = new Map<string, PendingResolver>();
+  private _ready: Promise<void>;
+  private _readyResolve!: () => void;
+  private _readyReject!: (e: Error) => void;
+
+  constructor(worker: SharedWorker) {
+    this.port = worker.port;
+
+    this._ready = new Promise((resolve, reject) => {
+      this._readyResolve = resolve;
+      this._readyReject = reject;
+    });
+
+    worker.onerror = (e: ErrorEvent | Event) => {
+      console.error("[juntos] SharedWorker error:", e);
+      this._readyReject(new Error("SharedWorker failed to load"));
+    };
+
+    this.port.onmessage = (event: MessageEvent) => {
+      const data = event.data as IncomingMessage;
+      if (data.type === "ready") {
+        this._readyResolve();
+        return;
+      }
+      if (data.type === "error") {
+        console.error("[juntos] SharedWorker initialization error:", data.error);
+        this._readyReject(new Error(data.error));
+        return;
+      }
+      if (data.type === "create-db-worker") {
+        this.handleCreateDbWorker(data.url, event.ports[0]);
+        return;
+      }
+      if (data.type === "response" && data.id) {
+        const resolver = this.pending.get(data.id);
+        if (resolver) {
+          this.pending.delete(data.id);
+          resolver.resolve(data);
+        }
+      }
+    };
+
+    this.port.start();
+  }
+
+  /** Resolves once the SharedWorker has finished initialization
+   *  (DB Worker spawned, schema applied, seeds run). */
+  waitForReady(): Promise<void> {
+    return this._ready;
+  }
+
+  /** Send a fetch-shaped request to the SharedWorker, await the
+   *  serialized Response. */
+  fetch(
+    method: string,
+    url: string,
+    headers: Record<string, string>,
+    body: string | null,
+  ): Promise<ResponsePayload> {
+    return new Promise((resolve) => {
+      const id = crypto.randomUUID();
+      this.pending.set(id, { resolve });
+      this.port.postMessage({ id, type: "fetch", method, url, headers, body });
+    });
+  }
+
+  /** Chrome workaround: SharedWorker asks us (the main thread) to
+   *  create the dedicated DB Worker on its behalf and wire it to a
+   *  MessageChannel port we received in the same message. */
+  private handleCreateDbWorker(url: string, workerPort: MessagePort | undefined): void {
+    if (!workerPort) {
+      this.port.postMessage({ type: "db-worker-error", error: "no MessagePort received" });
+      return;
+    }
+    try {
+      const dbWorker = new Worker(url, { type: "module" });
+      dbWorker.onmessage = (e: MessageEvent) => workerPort.postMessage(e.data);
+      workerPort.onmessage = (e: MessageEvent) => dbWorker.postMessage(e.data);
+      workerPort.start();
+      this.port.postMessage({ type: "db-worker-created" });
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      this.port.postMessage({ type: "db-worker-error", error });
+    }
+  }
+}
+
+// ── Turbo Streams via BroadcastChannel ──
+//
+// SharedWorker-rendered views emit `<juntos-stream-source channel="X">`
+// when they call `turbo_stream_from(X)`. Inserting that element into
+// the DOM triggers `connectedCallback`, which subscribes to channel
+// X on this tab — incoming `<turbo-stream>` fragments are handed to
+// `Turbo.renderStreamMessage`.
+
+declare const Turbo: {
+  renderStreamMessage?: (html: string) => void;
+  visit?: (location: string, options?: { action?: "advance" | "replace" | "restore" }) => void;
+};
+
+class TurboBroadcast {
+  private static channels = new Map<string, BroadcastChannel>();
+
+  private static getChannel(name: string): BroadcastChannel {
+    let ch = this.channels.get(name);
+    if (!ch) {
+      ch = new BroadcastChannel(name);
+      this.channels.set(name, ch);
+    }
+    return ch;
+  }
+
+  static subscribe(channelName: string): void {
+    const channel = this.getChannel(channelName);
+    channel.onmessage = (event: MessageEvent) => {
+      const html = String(event.data);
+      if (html.startsWith("<turbo-stream") && typeof Turbo !== "undefined" && Turbo.renderStreamMessage) {
+        Turbo.renderStreamMessage(html);
+      }
+    };
+  }
+
+  static unsubscribe(channelName: string): void {
+    const channel = this.channels.get(channelName);
+    if (channel) {
+      channel.close();
+      this.channels.delete(channelName);
+    }
+  }
+}
+
+function defineStreamSourceElement(): void {
+  if (typeof customElements === "undefined") return;
+  if (customElements.get("juntos-stream-source")) return;
+  customElements.define("juntos-stream-source", class extends HTMLElement {
+    connectedCallback(): void {
+      const channel = this.getAttribute("channel");
+      if (channel) TurboBroadcast.subscribe(channel);
+    }
+    disconnectedCallback(): void {
+      const channel = this.getAttribute("channel");
+      if (channel) TurboBroadcast.unsubscribe(channel);
+    }
+  });
+}
+
+// ── Public entry: startClient() ──
+
+export interface StartClientOptions {
+  /** Override the meta-tag URLs (mostly for tests). */
+  workerUrl?: string;
+  dbWorkerUrl?: string;
+}
+
+let _bridge: WorkerBridge | null = null;
+
+export async function startClient(opts: StartClientOptions = {}): Promise<void> {
+  if (!globalThis.SharedWorker) {
+    const msg =
+      "This app requires SharedWorker support (Chrome 80+, Firefox 114+, Safari 18.2+). " +
+      "Please use a supported browser, or rebuild without -t worker.";
+    console.error("[juntos]", msg);
+    const el = document.getElementById("loading") ?? document.body;
+    el.innerHTML = `<p style="color: red; padding: 20px;">${escapeHtml(msg)}</p>`;
+    return;
+  }
+
+  const workerUrl =
+    opts.workerUrl ??
+    document.querySelector<HTMLMetaElement>('meta[name="juntos-worker"]')?.content ??
+    "/worker.js";
+  const dbWorkerUrl =
+    opts.dbWorkerUrl ??
+    document.querySelector<HTMLMetaElement>('meta[name="juntos-db-worker"]')?.content ??
+    "/db_worker.js";
+
+  const tabId = crypto.randomUUID();
+
+  let worker: SharedWorker;
+  try {
+    worker = new SharedWorker(workerUrl, { type: "module", name: "juntos" });
+  } catch (e) {
+    showError(e);
+    return;
+  }
+
+  worker.port.postMessage({ type: "config", dbWorkerUrl, tabId });
+
+  // Announce close so the SharedWorker can release our port and, if
+  // we're hosting the dedicated DB Worker (Chrome workaround), pick
+  // a different tab to host the respawn.
+  const lifecycle = new BroadcastChannel("juntos:lifecycle");
+  window.addEventListener("beforeunload", () => {
+    lifecycle.postMessage({ type: "tab-closing", tabId });
+  });
+
+  defineStreamSourceElement();
+
+  _bridge = new WorkerBridge(worker);
+
+  try {
+    await _bridge.waitForReady();
+  } catch (e) {
+    showError(e);
+    return;
+  }
+
+  installTurboIntercept(_bridge);
+
+  const loadingEl = document.getElementById("loading");
+  const appEl = document.getElementById("app");
+  if (loadingEl) loadingEl.style.display = "none";
+  if (appEl) appEl.style.display = "block";
+
+  console.log("[juntos] Worker client bridge started");
+}
+
+// ── Turbo intercept ──
+
+function installTurboIntercept(bridge: WorkerBridge): void {
+  document.addEventListener("turbo:before-fetch-request", async (event: Event) => {
+    const detail = (event as CustomEvent<{
+      url: string;
+      fetchOptions: {
+        method?: string;
+        body?: BodyInit | null;
+        headers?: Record<string, string>;
+      };
+      fetchRequest?: { response: Promise<Response> };
+      resume: () => void;
+    }>).detail;
+
+    const fetchOptions = detail.fetchOptions;
+    const method = (fetchOptions.method ?? "GET").toUpperCase();
+    const url = new URL(detail.url);
+
+    // Same-origin only — let the browser handle cross-origin requests.
+    if (url.origin !== location.origin) return;
+
+    event.preventDefault();
+
+    const bodyString = await serializeBody(fetchOptions.body);
+
+    const headers: Record<string, string> = {
+      cookie: document.cookie,
+      accept: pickHeader(fetchOptions.headers, "accept") ?? "text/html",
+      "content-type":
+        pickHeader(fetchOptions.headers, "content-type") ??
+        "application/x-www-form-urlencoded",
+    };
+
+    const response = await bridge.fetch(method, url.href, headers, bodyString);
+
+    // Apply Set-Cookie from response (flash, session).
+    const setCookie = response.headers["set-cookie"];
+    if (setCookie) document.cookie = setCookie;
+
+    // 301/302 redirects: hand to Turbo.visit so it animates.
+    if ((response.status === 301 || response.status === 302) && typeof Turbo !== "undefined" && Turbo.visit) {
+      const loc = response.headers.location ?? response.headers.Location;
+      if (loc) {
+        Turbo.visit(loc);
+        return;
+      }
+    }
+
+    detail.fetchRequest = {
+      response: Promise.resolve(
+        new Response(response.body, {
+          status: response.status,
+          headers: response.headers,
+        }),
+      ),
+    };
+    detail.resume();
+  });
+}
+
+// ── Helpers ──
+
+async function serializeBody(body: BodyInit | null | undefined): Promise<string | null> {
+  if (body == null) return null;
+  if (typeof body === "string") return body;
+  if (body instanceof URLSearchParams) return body.toString();
+  if (body instanceof FormData) {
+    // Convert File entries to data URIs so they survive postMessage
+    // (Files don't structured-clone through URLSearchParams).
+    for (const [key, value] of body.entries()) {
+      if (value instanceof File && value.size > 0) {
+        const dataURI = await fileToDataURI(value);
+        body.set(key, `datauri:${value.name}:${dataURI}`);
+      }
+    }
+    return new URLSearchParams(body as unknown as Record<string, string>).toString();
+  }
+  // Blob / ArrayBuffer / etc. — best effort: stringify via Response.
+  try {
+    return await new Response(body).text();
+  } catch {
+    return null;
+  }
+}
+
+function fileToDataURI(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader error"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function pickHeader(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | undefined {
+  if (!headers) return undefined;
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
+function showError(e: unknown): void {
+  const err = e instanceof Error ? e : new Error(String(e));
+  const el = document.getElementById("loading") ?? document.body;
+  el.innerHTML = `<p style="color: red; padding: 20px;">Error: ${escapeHtml(err.message)}</p>` +
+    `<pre>${escapeHtml(err.stack ?? "")}</pre>`;
+  console.error(err);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
