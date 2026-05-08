@@ -1,0 +1,17 @@
+{
+  "name": "roundhouse-browser-smoke",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Browser smoke tests for roundhouse's TypeScript+SharedWorker target. Emits real-blog under the worker profile, builds with Vite, drives Turbo navigation in headless Chromium, asserts no 500s. Catches framework-runtime portability gaps (Node-isms in transpiled output) as CI-red.",
+  "scripts": {
+    "prebuild": "node scripts/prebuild.mjs",
+    "build": "echo prebuild already ran",
+    "test": "npm run prebuild && playwright test",
+    "test-only": "playwright test",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.0"
+  }
+}

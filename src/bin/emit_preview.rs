@@ -8,12 +8,13 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let target = take_flag(&mut args, "--target").unwrap_or_else(|| "typescript".into());
     let profile = take_flag(&mut args, "--profile");
+    let out_override = take_flag(&mut args, "--out");
     let fixture = args.first().cloned().unwrap_or_else(|| "fixtures/real-blog".into());
 
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
 
-    let (files, out_dir) = match target.as_str() {
+    let (files, default_out_dir) = match target.as_str() {
         "typescript" | "ts" => {
             // `--profile` is only meaningful for the typescript
             // target — other targets don't yet branch on profile.
@@ -46,6 +47,11 @@ fn main() {
         other => panic!("unknown target: {other}"),
     };
 
+    // `--out <path>` overrides the per-target default. Used by test
+    // harnesses (tests/browser_smoke) to keep emitted output under
+    // their own controlled directory rather than the shared /tmp
+    // path where two harnesses could clobber each other.
+    let out_dir = out_override.as_deref().unwrap_or(default_out_dir);
     let out = Path::new(out_dir);
     if out.exists() { std::fs::remove_dir_all(out).ok(); }
     std::fs::create_dir_all(out).ok();
