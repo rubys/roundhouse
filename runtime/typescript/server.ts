@@ -69,23 +69,42 @@ class CableServer {
 
 // ── Form data parsing ──────────────────────────────────────────
 
-/** Parse `application/x-www-form-urlencoded` body into a flat
- *  object. Rails scaffold forms send data in this format; this
- *  parser handles the shapes we need (`article[title]=...&
- *  article[body]=...&_method=delete`) without an external
- *  dependency. Keys with `[nested]` brackets become the literal
- *  bracketed string — the emitter's controller code already
- *  reads `context.params["article[title]"]` directly. */
-function parseFormData(body: string): Record<string, string> {
-  const out: Record<string, string> = {};
+/** Parse `application/x-www-form-urlencoded` body. Rails scaffold
+ *  forms send data as `article[title]=...&article[body]=...&
+ *  _method=delete`; this parser handles those shapes without an
+ *  external dependency.
+ *
+ *  One-level bracket nesting is unwrapped: the form key
+ *  `article[title]` produces `out.article.title`, matching what the
+ *  emitted controller's `params.require("article")` expects (it
+ *  reads a nested HashWithIndifferentAccess at the parent key, not
+ *  a literal bracketed flat key). Top-level keys without brackets
+ *  pass through unchanged. */
+function parseFormData(body: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
   for (const pair of body.split("&")) {
     if (!pair) continue;
     const eq = pair.indexOf("=");
     const key = decodeURIComponent((eq < 0 ? pair : pair.slice(0, eq)).replace(/\+/g, " "));
     const val = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, " "));
-    out[key] = val;
+    setNestedParam(out, key, val);
   }
   return out;
+}
+
+function setNestedParam(out: Record<string, unknown>, key: string, val: string): void {
+  const match = key.match(/^([^[]+)\[([^\]]+)\]$/);
+  if (match) {
+    const [, parent, field] = match;
+    let bucket = out[parent];
+    if (!bucket || typeof bucket !== "object") {
+      bucket = {};
+      out[parent] = bucket;
+    }
+    (bucket as Record<string, unknown>)[field] = val;
+  } else {
+    out[key] = val;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -108,7 +127,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   let method = (req.method ?? "GET").toUpperCase();
 
   // Collect form body for non-GET requests.
-  let params: Record<string, string> = {};
+  let params: Record<string, unknown> = {};
   if (method !== "GET" && method !== "HEAD") {
     const raw = await readBody(req);
     const contentType = req.headers["content-type"] ?? "";
@@ -118,7 +137,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       try { params = JSON.parse(raw); } catch { /* ignore malformed */ }
     }
     // Method override: POST with `_method=delete` dispatches as DELETE.
-    const override = (params._method ?? "").toUpperCase();
+    // `_method` is always a top-level (non-nested) key, so the
+    // `unknown` typing is safe to coerce here.
+    const override = String(params._method ?? "").toUpperCase();
     if (method === "POST" && (override === "DELETE" || override === "PATCH" || override === "PUT")) {
       method = override;
       delete params._method;

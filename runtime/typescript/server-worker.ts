@@ -345,17 +345,38 @@ function sendDbInit(database: string): Promise<void> {
 }
 
 // ── Form data parsing (parallel to server-libsql.ts) ──
+//
+// Same shape as `server.ts` / `server-libsql.ts` — Rails one-level
+// bracket nesting (`article[title]` → `out.article.title`) so the
+// emitted controller's `params.require("article")` lookup hits a
+// nested HashWithIndifferentAccess. Kept in sync across the three
+// server runtime variants.
 
-function parseFormData(body: string): Record<string, string> {
-  const out: Record<string, string> = {};
+function parseFormData(body: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
   for (const pair of body.split("&")) {
     if (!pair) continue;
     const eq = pair.indexOf("=");
     const key = decodeURIComponent((eq < 0 ? pair : pair.slice(0, eq)).replace(/\+/g, " "));
     const val = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, " "));
-    out[key] = val;
+    setNestedParam(out, key, val);
   }
   return out;
+}
+
+function setNestedParam(out: Record<string, unknown>, key: string, val: string): void {
+  const match = key.match(/^([^[]+)\[([^\]]+)\]$/);
+  if (match) {
+    const [, parent, field] = match;
+    let bucket = out[parent];
+    if (!bucket || typeof bucket !== "object") {
+      bucket = {};
+      out[parent] = bucket;
+    }
+    (bucket as Record<string, unknown>)[field] = val;
+  } else {
+    out[key] = val;
+  }
 }
 
 // ── Request dispatch ──

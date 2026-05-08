@@ -74,16 +74,36 @@ class CableServer {
 
 // ── Form data parsing ──────────────────────────────────────────
 
-function parseFormData(body: string): Record<string, string> {
-  const out: Record<string, string> = {};
+// Same shape as `server.ts::parseFormData` — Rails one-level
+// bracket nesting (`article[title]` → `out.article.title`) so the
+// emitted controller's `params.require("article")` lookup hits a
+// nested HashWithIndifferentAccess. Kept in sync between the
+// node-sync and node-async server runtime files.
+function parseFormData(body: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
   for (const pair of body.split("&")) {
     if (!pair) continue;
     const eq = pair.indexOf("=");
     const key = decodeURIComponent((eq < 0 ? pair : pair.slice(0, eq)).replace(/\+/g, " "));
     const val = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, " "));
-    out[key] = val;
+    setNestedParam(out, key, val);
   }
   return out;
+}
+
+function setNestedParam(out: Record<string, unknown>, key: string, val: string): void {
+  const match = key.match(/^([^[]+)\[([^\]]+)\]$/);
+  if (match) {
+    const [, parent, field] = match;
+    let bucket = out[parent];
+    if (!bucket || typeof bucket !== "object") {
+      bucket = {};
+      out[parent] = bucket;
+    }
+    (bucket as Record<string, unknown>)[field] = val;
+  } else {
+    out[key] = val;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -101,7 +121,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   let method = (req.method ?? "GET").toUpperCase();
 
-  let params: Record<string, string> = {};
+  let params: Record<string, unknown> = {};
   if (method !== "GET" && method !== "HEAD") {
     const raw = await readBody(req);
     const contentType = req.headers["content-type"] ?? "";
@@ -110,7 +130,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     } else if (contentType.includes("application/json") && raw) {
       try { params = JSON.parse(raw); } catch { /* ignore malformed */ }
     }
-    const override = (params._method ?? "").toUpperCase();
+    const override = String(params._method ?? "").toUpperCase();
     if (method === "POST" && (override === "DELETE" || override === "PATCH" || override === "PUT")) {
       method = override;
       delete params._method;

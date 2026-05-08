@@ -25,9 +25,14 @@ interface SharedWorkerResponse {
  *  message, return the parsed response. */
 async function probeSharedWorker(
   page: import("@playwright/test").Page,
-  args: { method: string; path: string; body?: string | null },
+  args: {
+    method: string;
+    path: string;
+    body?: string | null;
+    headers?: Record<string, string>;
+  },
 ): Promise<SharedWorkerResponse> {
-  return await page.evaluate(async ({ method, path, body }) => {
+  return await page.evaluate(async ({ method, path, body, headers }) => {
     const meta = document.querySelector<HTMLMetaElement>(
       'meta[name="juntos-worker"]',
     );
@@ -51,6 +56,16 @@ async function probeSharedWorker(
       );
       const id = crypto.randomUUID();
       let readySeen = false;
+      const sendFetch = () => {
+        sw.port.postMessage({
+          id,
+          type: "fetch",
+          method,
+          url: new URL(path, location.origin).href,
+          headers: headers ?? {},
+          body: body ?? null,
+        });
+      };
 
       sw.port.addEventListener("message", (event) => {
         const data = event.data as
@@ -60,14 +75,7 @@ async function probeSharedWorker(
 
         if (data.type === "ready") {
           readySeen = true;
-          sw.port.postMessage({
-            id,
-            type: "fetch",
-            method,
-            url: new URL(path, location.origin).href,
-            headers: {},
-            body: body ?? null,
-          });
+          sendFetch();
           return;
         }
         if (data.type === "error") {
@@ -87,16 +95,7 @@ async function probeSharedWorker(
       // the fetch anyway after a short delay — the SharedWorker
       // accepts fetch messages once ready.
       setTimeout(() => {
-        if (!readySeen) {
-          sw.port.postMessage({
-            id,
-            type: "fetch",
-            method,
-            url: new URL(path, location.origin).href,
-            headers: {},
-            body: body ?? null,
-          });
-        }
+        if (!readySeen) sendFetch();
       }, 500);
     });
   }, args);
@@ -153,5 +152,57 @@ test.describe("SharedWorker target — real-blog", () => {
     if (response.status === 200) {
       expect(response.headers["content-type"] ?? "").toContain("text/html");
     }
+  });
+
+  test("POST /articles round-trips form body + creates record", async ({ page }) => {
+    // POST exercises a different surface from GET: form-encoded body
+    // parsing in dispatchRequest, controller.create → Article.new
+    // → ActiveRecord.adapter.insert (which round-trips MessagePort
+    // to the dedicated DB Worker), validations, redirect_to with
+    // flash. Many framework-runtime portability gaps surface here
+    // that a GET wouldn't trip.
+    //
+    // article model requires title + body (>= 10 chars). Body
+    // shape matches Rails permit `article: [:title, :body]`.
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => document.getElementById("loading")?.style.display === "none",
+      null,
+      { timeout: 15_000 },
+    );
+
+    const body =
+      "article%5Btitle%5D=Smoke+test+article" +
+      "&article%5Bbody%5D=This+article+was+posted+from+the+smoke+harness.";
+
+    const response = await probeSharedWorker(page, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    expect(
+      response.status,
+      `SharedWorker returned ${response.status}: ${response.body.slice(0, 300)}`,
+    ).toBeLessThan(500);
+
+    // Happy path: redirect to the created article. 302/303 is a
+    // strong signal that the controller's create flow succeeded
+    // end-to-end (validations passed, insert succeeded, redirect
+    // built). A 422 here would indicate validation failure — also
+    // not a 5xx, but suggests our form-encoded body didn't reach
+    // the controller correctly.
+    expect(
+      [302, 303],
+      `expected redirect; got ${response.status} body=${response.body.slice(0, 200)}`,
+    ).toContain(response.status);
+
+    const location = response.headers["location"] ?? response.headers["Location"];
+    expect(location, "redirect should set Location header").toBeTruthy();
+    expect(location, `Location should point at /articles/<id>; got ${location}`).toMatch(
+      /^\/articles\/\d+$/,
+    );
   });
 });
