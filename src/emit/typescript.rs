@@ -946,12 +946,19 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
 /// the fingerprinted SharedWorker + dedicated DB Worker URLs.
 fn emit_index_html() -> EmittedFile {
     let content = "<!DOCTYPE html>
-<html>
+<html lang=\"en\">
   <head>
     <meta charset=\"utf-8\">
     <title>Roundhouse App</title>
     <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
     <link rel=\"icon\" href=\"data:,\">
+    <!-- Tells Turbo Drive to use morphdom-style head reconciliation
+         on full-page navigations instead of the default replace
+         behavior. Without this, the head difference between this
+         empty shell and the application layout's response forces
+         Turbo into a full page reload — which restarts main.ts and
+         re-fires auto-visit, infinite loop. Same fix juntos uses. -->
+    <meta name=\"turbo-refresh-method\" content=\"morph\">
     <!-- Worker URLs are rewritten by vite.config.ts's manifest plugin
          at build time. The Vite dev server resolves them through the
          manifest virtual module. -->

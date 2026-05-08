@@ -219,6 +219,25 @@ export interface StartClientOptions {
   dbWorkerUrl?: string;
 }
 
+/** Stable global slot for the SharedWorker URLs + readiness flag.
+ *  After the initial render swaps the document head, the
+ *  `<meta name="juntos-worker">` tags from index.html are gone —
+ *  they're not in the application layout's head. Tests + any
+ *  late code that needs to spawn a fresh SharedWorker port read
+ *  from here instead of the DOM. The values are captured before
+ *  any document mutation. */
+interface JuntosGlobal {
+  workerUrl: string;
+  dbWorkerUrl: string;
+  ready: boolean;
+}
+
+declare global {
+  interface Window {
+    __juntos__?: JuntosGlobal;
+  }
+}
+
 let _bridge: WorkerBridge | null = null;
 
 export async function startClient(opts: StartClientOptions = {}): Promise<void> {
@@ -240,6 +259,10 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
     opts.dbWorkerUrl ??
     document.querySelector<HTMLMetaElement>('meta[name="juntos-db-worker"]')?.content ??
     "/db_worker.js";
+
+  // Capture URLs before renderInitial swaps the head — once the
+  // layout's head replaces the index shell, the meta tags are gone.
+  window.__juntos__ = { workerUrl, dbWorkerUrl, ready: false };
 
   const tabId = crypto.randomUUID();
 
@@ -280,6 +303,118 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
   if (appEl) appEl.style.display = "block";
 
   console.log("[juntos] Worker client bridge started");
+
+  // Non-Turbo initial render. The index.html shell only has
+  // #loading + empty #app — the actual route content lives in the
+  // SharedWorker and only reaches the DOM after a fetch dispatches.
+  //
+  // Why not Turbo.visit here: the shell's minimal head (viewport +
+  // a few <meta> tags) and the layout's full head (importmap +
+  // Stimulus + Turbo module scripts + per-app meta tags) are
+  // structurally incompatible. Turbo Drive's head merge ends up
+  // re-running module scripts (or under `turbo-refresh-method=morph`,
+  // morphing in elements that fight with what main.ts already set
+  // up) and either loses state or — worse — triggers a full page
+  // reload that re-runs main.ts and re-fires the auto-visit, an
+  // infinite loop.
+  //
+  // First render bypasses Turbo: bridge.fetch directly, parse the
+  // layout-wrapped response, swap document.documentElement so the
+  // head + body both come from the layout. After this paint, head
+  // is a real layout head; subsequent Turbo intercept-driven
+  // navigations swap body without head conflict because both sides
+  // of the merge are now layout-shaped.
+  await renderInitial(_bridge);
+
+  if (window.__juntos__) window.__juntos__.ready = true;
+}
+
+async function renderInitial(bridge: WorkerBridge): Promise<void> {
+  const initialPath = location.pathname || "/";
+  let response;
+  try {
+    response = await bridge.fetch("GET", new URL(initialPath, location.origin).href, {
+      cookie: document.cookie,
+      accept: "text/html",
+    }, null);
+  } catch (e) {
+    console.error("[juntos] initial render fetch failed:", e);
+    return;
+  }
+
+  // Follow a single redirect (e.g. root→/articles); chained
+  // redirects fall through to a manual click on the final
+  // location string in the body, since runaway redirect chains
+  // are very likely a bug worth surfacing rather than papering
+  // over.
+  if (
+    (response.status === 301 || response.status === 302 || response.status === 303) &&
+    response.headers.location
+  ) {
+    const redirectTo = response.headers.location;
+    history.replaceState({}, "", redirectTo);
+    try {
+      response = await bridge.fetch("GET", new URL(redirectTo, location.origin).href, {
+        cookie: document.cookie,
+        accept: "text/html",
+      }, null);
+    } catch (e) {
+      console.error("[juntos] initial-render redirect fetch failed:", e);
+      return;
+    }
+  }
+
+  if (response.status >= 400) {
+    document.body.innerHTML = `<pre style="padding: 20px; color: #b00;">${escapeHtml(
+      `Initial render returned ${response.status}\n\n${response.body.slice(0, 2000)}`,
+    )}</pre>`;
+    return;
+  }
+
+  const contentType = response.headers["content-type"] ?? response.headers["Content-Type"] ?? "";
+  if (!contentType.includes("text/html")) {
+    console.warn("[juntos] initial render returned non-HTML content-type:", contentType);
+    return;
+  }
+
+  // Parse the layout-wrapped response. We need a full document
+  // parse (not just innerHTML) because the response includes
+  // <html>/<head>/<body> from the application layout.
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(response.body, "text/html");
+
+  // Swap the live <html>'s child structure. Replacing the entire
+  // documentElement is heavy-handed and breaks document.body
+  // listeners; replacing head + body individually is the
+  // conservative path. The script tags in the new body re-execute
+  // because the browser parses HTML strings into nodes; innerHTML
+  // assignment doesn't re-run scripts, so we adopt nodes manually
+  // for any <script> we want active (Stimulus controllers, Turbo
+  // bootstrapping if not already loaded).
+  document.head.replaceChildren(...Array.from(doc.head.childNodes));
+  document.body.replaceChildren(...Array.from(doc.body.childNodes));
+  reActivateScripts(document.body);
+  reActivateScripts(document.head);
+
+  // Update title (DOMParser preserves <title>, but innerHTML swap
+  // sometimes leaves the old title on the document object).
+  const newTitle = doc.querySelector("title")?.textContent;
+  if (newTitle) document.title = newTitle;
+}
+
+/** `innerHTML`/`replaceChildren` with parsed `<script>` nodes
+ *  doesn't actually execute them — the browser flags scripts
+ *  inserted that way as already-executed. Clone each script into a
+ *  fresh element to make it run. */
+function reActivateScripts(root: ParentNode): void {
+  for (const oldScript of Array.from(root.querySelectorAll("script"))) {
+    const newScript = document.createElement("script");
+    for (const { name, value } of Array.from(oldScript.attributes)) {
+      newScript.setAttribute(name, value);
+    }
+    if (oldScript.textContent) newScript.textContent = oldScript.textContent;
+    oldScript.replaceWith(newScript);
+  }
 }
 
 // ── Turbo intercept ──
