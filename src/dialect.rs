@@ -790,6 +790,14 @@ pub struct TestModule {
     /// inline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constants: Vec<(Symbol, Expr)>,
+    /// Module includes at test-class scope — `include ActionDispatch`,
+    /// `include ActionView`, `include ActionView::ViewHelpers`. The
+    /// Ruby spinel emit replays them verbatim so bare-name refs
+    /// (`Router`, `FormBuilder`) resolve under CRuby. The TS emit
+    /// resolves the same refs via its framework-namespace
+    /// import-stripper, so the field is informational only there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<ClassId>,
 }
 
 /// A single `test "name" do ... end` block. `name` is the literal

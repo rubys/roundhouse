@@ -376,7 +376,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             .iter()
             .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
             .collect();
-        let test_lcs = crate::lower::lower_test_modules_to_library_classes(
+        let test_lowered = crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,
             &app.models,
@@ -395,7 +395,8 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 (name, format!("test/fixtures/{stem}"))
             })
             .collect();
-        for lc in &test_lcs {
+        for lowered in &test_lowered {
+            let lc = &lowered.test_class;
             let class_name = lc.name.0.as_str();
             let stem = test_file_stem(class_name);
             let dir = if class_name.ends_with("ControllerTest") {
@@ -422,6 +423,46 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 out_path,
                 &fixture_siblings,
             );
+            // Class-body constant assignments (`TABLE = [...]`) hoist
+            // to file scope above the test class so bare-name refs
+            // inside test methods resolve. CRuby's lexical constant
+            // lookup finds top-level constants from anywhere; the
+            // emitted form preserves the test's original semantics
+            // without nesting back inside the class.
+            if !lowered.constants.is_empty() {
+                let mut consts_block = String::new();
+                for (name, value) in &lowered.constants {
+                    let value_s = super::ruby::expr::emit_expr(value);
+                    writeln!(consts_block, "{} = {}", name.as_str(), value_s).unwrap();
+                }
+                consts_block.push('\n');
+                emitted.content = splice_after_requires(&emitted.content, &consts_block);
+            }
+            // Inner classes (declared inside the test class body in
+            // Ruby — `class Validatable; include …; end` inside
+            // ValidationsTest) hoist to file scope above the test
+            // class body so test methods that reference them by bare
+            // name resolve. CRuby would also accept the original
+            // nested form, but the IR has already flattened them via
+            // `lower_test_modules_with_inner`; emitting at file scope
+            // mirrors the TS pattern and keeps both targets aligned.
+            if !lowered.inner_classes.is_empty() {
+                let mut companion_block = String::new();
+                for inner in &lowered.inner_classes {
+                    let inner_emitted = library::emit_library_class_decl_with_synthesized(
+                        inner,
+                        app,
+                        PathBuf::from("test").join(format!("{}_inner.rb", test_file_stem(inner.name.0.as_str()))),
+                        &fixture_siblings,
+                    );
+                    companion_block.push_str(&strip_require_headers(&inner_emitted.content));
+                    companion_block.push('\n');
+                }
+                // Splice companions ahead of the main class body but
+                // after the file-level `require_relative` headers
+                // produced by `emit_library_class_decl_with_synthesized`.
+                emitted.content = splice_after_requires(&emitted.content, &companion_block);
+            }
             // Test files need the bootstrap (minitest/autorun + runtime
             // requires + adapter setup) before any model require resolves;
             // prepend the require before the body-derived require headers.
@@ -451,6 +492,62 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     }
 
     files
+}
+
+/// Drop the leading `require_relative "..."` lines from an emitted
+/// class file's content, leaving just the class body. Used when
+/// splicing a companion class into a host file — the host already
+/// emits its own require headers, and the companion's headers would
+/// either duplicate or land in the wrong order.
+fn strip_require_headers(content: &str) -> String {
+    let mut lines = content.lines();
+    let mut body_start = 0usize;
+    let mut idx = 0usize;
+    for line in content.lines() {
+        idx += line.len() + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("require_relative ") || trimmed.is_empty() {
+            body_start = idx;
+            continue;
+        }
+        break;
+    }
+    let _ = lines; // silence lint
+    content[body_start..].to_string()
+}
+
+/// Insert `block` into `content` right after the trailing
+/// `require_relative` headers (and the blank line that separates
+/// them from the body). When `content` has no requires, the block
+/// is prepended.
+fn splice_after_requires(content: &str, block: &str) -> String {
+    let mut split_at = 0usize;
+    let mut idx = 0usize;
+    let mut last_require_end = 0usize;
+    for line in content.lines() {
+        let line_end = idx + line.len() + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("require_relative ") {
+            last_require_end = line_end;
+        } else if trimmed.is_empty() && last_require_end > 0 && last_require_end == idx {
+            // Blank line directly after the last require — splice
+            // after this blank so spacing reads naturally.
+            split_at = line_end;
+            break;
+        } else if !trimmed.is_empty() {
+            split_at = last_require_end;
+            break;
+        }
+        idx = line_end;
+    }
+    if split_at == 0 {
+        split_at = last_require_end;
+    }
+    if split_at == 0 {
+        return format!("{block}\n{content}");
+    }
+    let (head, tail) = content.split_at(split_at);
+    format!("{head}{block}\n{tail}")
 }
 
 /// `ArticlesFixtures` → `articles` (strip Fixtures suffix, snake_case).

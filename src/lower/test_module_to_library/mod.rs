@@ -267,7 +267,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         name: tm.name.clone(),
         is_module: false,
         parent: tm.parent.clone(),
-        includes: Vec::new(),
+        includes: tm.includes.clone(),
         methods,
         origin: None,
     }

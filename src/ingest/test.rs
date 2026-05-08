@@ -51,6 +51,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
     let mut inner_classes: Vec<crate::dialect::LibraryClass> = Vec::new();
     let mut helpers: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
+    let mut includes: Vec<ClassId> = Vec::new();
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
@@ -98,6 +99,25 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
                 helpers.push(m);
                 continue;
             }
+            // `include ModName` at class-body scope. Captured for
+            // the spinel emit to replay verbatim so bare-name refs
+            // (`Router`, `FormBuilder`) resolve under CRuby. TS emit
+            // ignores these — its framework-namespace import-stripper
+            // handles the same refs by a different mechanism.
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && constant_id_str(&call.name()) == "include"
+                {
+                    if let Some(args) = call.arguments() {
+                        for arg in args.arguments().iter() {
+                            if let Some(path) = constant_path_of(&arg) {
+                                includes.push(ClassId(Symbol::from(path.join("::"))));
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             // Class-level constant assignment — `TABLE = [...]`,
             // `Article = Struct.new(...)`. Captured here so the test
             // emit can hoist them to file scope as `const NAME =
@@ -125,6 +145,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         inner_classes,
         helpers,
         constants,
+        includes,
     }))
 }
 
