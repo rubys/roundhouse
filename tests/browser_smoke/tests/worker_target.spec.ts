@@ -299,6 +299,73 @@ test.describe("SharedWorker target — real-blog", () => {
     );
   });
 
+  test("DELETE via _method override removes article + redirects to /articles", async ({
+    page,
+  }) => {
+    // Rails forms can't issue DELETE directly, so the scaffold form
+    // POSTs with `_method=delete` and the dispatcher rewrites the
+    // method (server-worker.ts dispatchRequest, mirror of
+    // server.ts handleRequest). Two server-side surfaces exercise
+    // here that no other probe covers:
+    //
+    //   - the _method-override branch in dispatchRequest
+    //   - controller.destroy → ActiveRecord.adapter.delete (UPDATE/
+    //     DELETE was never round-tripped before — only INSERT)
+    //
+    // Seed the test by creating an article first so we have a
+    // real id to delete (self-contained; doesn't depend on
+    // fixtures / seeds in the database state).
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => document.getElementById("loading")?.style.display === "none",
+      null,
+      { timeout: 15_000 },
+    );
+
+    // 1. Create.
+    const createBody =
+      "article%5Btitle%5D=Article+to+delete" +
+      "&article%5Bbody%5D=Will+be+removed+by+the+DELETE+probe.";
+    const create = await probeSharedWorker(page, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: createBody,
+    });
+    expect(create.status, `create POST returned ${create.status}`).toBeLessThan(400);
+    const createdLocation =
+      create.headers["location"] ?? create.headers["Location"] ?? "";
+    const idMatch = createdLocation.match(/^\/articles\/(\d+)$/);
+    expect(idMatch, `create should redirect to /articles/<id>; got "${createdLocation}"`).not.toBeNull();
+    const id = idMatch![1];
+
+    // 2. Delete via POST + _method override.
+    const deleteResponse = await probeSharedWorker(page, {
+      method: "POST",
+      path: `/articles/${id}`,
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "_method=delete",
+    });
+
+    expect(
+      deleteResponse.status,
+      `DELETE returned ${deleteResponse.status}: ${deleteResponse.body.slice(0, 300)}`,
+    ).toBeLessThan(500);
+    expect(
+      [302, 303],
+      `expected redirect after destroy; got ${deleteResponse.status}`,
+    ).toContain(deleteResponse.status);
+
+    const redirectTo =
+      deleteResponse.headers["location"] ?? deleteResponse.headers["Location"];
+    expect(redirectTo, "destroy should redirect").toBeTruthy();
+    expect(
+      redirectTo,
+      `destroy should redirect to /articles index; got ${redirectTo}`,
+    ).toBe("/articles");
+  });
+
   test("POST /articles with invalid params returns 422 (not 5xx, not redirect)", async ({
     page,
   }) => {
