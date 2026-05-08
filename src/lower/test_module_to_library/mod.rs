@@ -31,6 +31,10 @@ use crate::ty::Ty;
 pub struct LoweredTestModule {
     pub test_class: LibraryClass,
     pub inner_classes: Vec<LibraryClass>,
+    /// Class-body constant assignments captured by `ingest_test_file`.
+    /// Per-target emit hoists them to file scope (TS: `const NAME =
+    /// <value>`) so test methods can reference them by bare name.
+    pub constants: Vec<(crate::ident::Symbol, crate::expr::Expr)>,
 }
 
 /// Bulk entry. Lower every test module against a shared class
@@ -218,6 +222,7 @@ pub fn lower_test_modules_with_inner(
         out.push(LoweredTestModule {
             test_class: lc.clone(),
             inner_classes: std::mem::take(&mut typed_inner_per_module[idx]),
+            constants: test_modules[idx].constants.clone(),
         });
     }
     out

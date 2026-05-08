@@ -100,3 +100,66 @@ fn validations_test_passes_under_tsx() {
         "validations",
     );
 }
+
+#[test]
+#[ignore]
+fn ar_base_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/active_record/base_test.rb"),
+        "ar_base",
+    );
+}
+
+#[test]
+#[ignore]
+fn errors_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/active_record/errors_test.rb"),
+        "errors",
+    );
+}
+
+#[test]
+#[ignore]
+fn parameters_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/parameters_test.rb"),
+        "parameters",
+    );
+}
+
+#[test]
+#[ignore]
+fn ac_base_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/base_test.rb"),
+        "ac_base",
+    );
+}
+
+#[test]
+#[ignore]
+fn router_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_dispatch/router_test.rb"),
+        "router",
+    );
+}
+
+#[test]
+#[ignore]
+fn view_helpers_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
+        "view_helpers",
+    );
+}
+
+#[test]
+#[ignore]
+fn inflector_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/inflector_test.rb"),
+        "inflector",
+    );
+}

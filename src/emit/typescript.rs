@@ -723,12 +723,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // body in Ruby) hoist to file scope as companions; share
             // the test file's import header so framework dependencies
             // (`Validations`, `ActiveRecordBase`, etc.) resolve.
-            let mut emitted = library::emit_class_file_with_companions(
+            let mut emitted = library::emit_class_file_full(
                 lc,
                 app,
                 out_path.clone(),
                 &[],
                 &lowered.inner_classes,
+                &lowered.constants,
             );
 
             emitted.content.push('\n');

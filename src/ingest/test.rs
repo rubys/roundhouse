@@ -50,6 +50,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
     let mut setup: Option<Expr> = None;
     let mut inner_classes: Vec<crate::dialect::LibraryClass> = Vec::new();
     let mut helpers: Vec<MethodDef> = Vec::new();
+    let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
@@ -97,6 +98,21 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
                 helpers.push(m);
                 continue;
             }
+            // Class-level constant assignment — `TABLE = [...]`,
+            // `Article = Struct.new(...)`. Captured here so the test
+            // emit can hoist them to file scope as `const NAME =
+            // <value>`, which matches Ruby's lexical constant
+            // resolution for bare references inside test methods.
+            if let Some(cw) = stmt.as_constant_write_node() {
+                let const_name = std::str::from_utf8(cw.name().as_slice())
+                    .ok()
+                    .map(Symbol::from);
+                if let Some(const_name) = const_name {
+                    let value = ingest_expr(&cw.value(), file)?;
+                    constants.push((const_name, value));
+                }
+                continue;
+            }
         }
     }
 
@@ -108,6 +124,7 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         setup,
         inner_classes,
         helpers,
+        constants,
     }))
 }
 

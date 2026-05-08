@@ -965,6 +965,20 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             ];
             if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
                 segs.last().copied().unwrap_or("").to_string()
+            } else if segs.len() == 1 {
+                // Ruby builtin error classes — collapse to JS `Error`
+                // wherever they appear as Const references (not just
+                // in `raise`). Without this, `assert_operator(X, :<,
+                // StandardError)` and similar idioms emit a bare
+                // `StandardError` that's neither in scope nor
+                // importable. Same name list as the `raise` lowering
+                // below.
+                match segs[0] {
+                    "StandardError" | "RuntimeError" | "ArgumentError"
+                    | "TypeError" | "NameError" | "NoMethodError"
+                    | "NotImplementedError" | "KeyError" | "IndexError" => "Error".to_string(),
+                    _ => segs[0].to_string(),
+                }
             } else {
                 segs.join(".")
             }

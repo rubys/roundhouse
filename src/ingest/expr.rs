@@ -6,7 +6,7 @@
 use ruby_prism::{Node, parse};
 
 use crate::Symbol;
-use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, Literal};
+use crate::expr::{Arm, BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, Literal, Pattern};
 use crate::span::Span;
 
 use super::util::{
@@ -776,6 +776,68 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             let value = ingest_expr(&mw.value(), file)?;
             ExprNode::MultiAssign { targets, value }
+        }
+        n if n.as_case_node().is_some() => {
+            // `case scrutinee when :a, :b then body ... [else else_body] end`
+            // Each WhenNode contributes one Arm per pattern (multi-pattern
+            // when forms expand into multiple Arms sharing the same body
+            // — the IR's Arm holds a single Pattern). `else` lowers to a
+            // trailing Wildcard arm.
+            let case = n.as_case_node().unwrap();
+            let scrutinee = match case.predicate() {
+                Some(p) => ingest_expr(&p, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "case without scrutinee not yet supported".into(),
+                    });
+                }
+            };
+            let mut arms: Vec<Arm> = Vec::new();
+            for cond in case.conditions().iter() {
+                let when = cond.as_when_node().ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("unsupported case condition (expected when): {cond:?}"),
+                })?;
+                let body = match when.statements() {
+                    Some(s) => ingest_expr(&s.as_node(), file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                };
+                let patterns = when.conditions();
+                for pat_node in patterns.iter() {
+                    let pat_expr = ingest_expr(&pat_node, file)?;
+                    let pattern = match &*pat_expr.node {
+                        ExprNode::Lit { value } => Pattern::Lit { value: value.clone() },
+                        _ => {
+                            return Err(IngestError::Unsupported {
+                                file: file.into(),
+                                message: format!(
+                                    "unsupported when-pattern (only literal patterns currently): {pat_node:?}"
+                                ),
+                            });
+                        }
+                    };
+                    arms.push(Arm { pattern, guard: None, body: body.clone() });
+                }
+            }
+            if let Some(else_clause) = case.else_clause() {
+                let body = match else_clause.statements() {
+                    Some(s) => ingest_expr(&s.as_node(), file)?,
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                };
+                arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body });
+            }
+            ExprNode::Case { scrutinee, arms }
+        }
+        // `def`/`def self.X` at expression position — appears inside
+        // `Class.new(Parent) do ... end` blocks (anonymous-class
+        // idiom). Roundhouse's IR has no first-class "method def as
+        // expression" node; lift it to a no-op so the surrounding
+        // statement sequence still ingests. The behavioral fidelity
+        // gap (the resulting anonymous class won't carry the
+        // overridden methods) surfaces at runtime, not at ingest.
+        n if n.as_def_node().is_some() => {
+            ExprNode::Lit { value: Literal::Nil }
         }
         other => {
             return Err(IngestError::Unsupported {

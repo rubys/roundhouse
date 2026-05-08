@@ -782,6 +782,14 @@ pub struct TestModule {
     /// class. Empty when the file has no helpers (the typical case).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub helpers: Vec<MethodDef>,
+    /// Class-body constant assignments — `TABLE = [...]`, `SCHEMA =
+    /// {...}` declared at test-class scope. Lifted to file-scope
+    /// `const NAME = <value>` declarations during emit so test methods
+    /// can reference them as bare names (mirrors Ruby's lexical
+    /// constant lookup). Empty for tests that don't declare constants
+    /// inline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constants: Vec<(Symbol, Expr)>,
 }
 
 /// A single `test "name" do ... end` block. `name` is the literal

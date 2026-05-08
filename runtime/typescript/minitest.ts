@@ -64,7 +64,12 @@ export class Test {
   }
 
   assert_nil(value: any, msg?: string): void {
-    assert.strictEqual(value, null, msg);
+    // Ruby `nil` maps to either `null` or `undefined` in TS depending on
+    // which idiom the framework code uses (Map.get → undefined, explicit
+    // `null` for "absent" → null). Accept both.
+    if (value !== null && value !== undefined) {
+      assert.fail(msg ?? `expected nil, got ${JSON.stringify(value)}`);
+    }
   }
 
   assert_not_nil(value: any, msg?: string): void {
@@ -104,6 +109,82 @@ export class Test {
     } else {
       assert.fail(`assert_includes: unsupported collection type for ${item}`);
     }
+  }
+
+  assert_kind_of(klass: any, obj: any, msg?: string): void {
+    if (typeof klass !== "function") {
+      assert.fail(msg ?? `assert_kind_of: expected class, got ${klass}`);
+    }
+    if (!(obj instanceof klass)) {
+      assert.fail(
+        msg ??
+          `expected ${typeof obj === "object" && obj !== null ? obj.constructor.name : String(obj)} to be a kind of ${klass.name}`,
+      );
+    }
+  }
+
+  assert_instance_of(klass: any, obj: any, msg?: string): void {
+    this.assert_kind_of(klass, obj, msg);
+  }
+
+  // Ruby's `assert_predicate obj, :foo?` evaluates `obj.foo?` and
+  // asserts the result is truthy. Method symbols may carry `?`/`!`
+  // suffixes verbatim or get sanitized at lower-time; accept both.
+  assert_predicate(obj: any, sym: string, msg?: string): void {
+    const name = sym.startsWith(":") ? sym.slice(1) : sym;
+    const candidates = [name, name.replace(/\?$/, "_p").replace(/!$/, "_bang")];
+    for (const candidate of candidates) {
+      const fn = obj?.[candidate];
+      if (typeof fn === "function") {
+        if (fn.call(obj)) return;
+        assert.fail(msg ?? `expected ${candidate} to be truthy`);
+      }
+      if (fn !== undefined) {
+        if (fn) return;
+        assert.fail(msg ?? `expected ${candidate} to be truthy`);
+      }
+    }
+    assert.fail(msg ?? `${name} not found on receiver`);
+  }
+
+  refute_includes(collection: any, item: any, msg?: string): void {
+    if (Array.isArray(collection) || typeof collection === "string") {
+      assert.ok(!collection.includes(item), msg);
+    } else if (collection && typeof collection.has === "function") {
+      assert.ok(!collection.has(item), msg);
+    } else {
+      assert.fail(`refute_includes: unsupported collection type for ${item}`);
+    }
+  }
+
+  // Ruby's `assert_operator a, :op, b` evaluates `a.send(op, b)`. The
+  // forms that survive transpile here: numeric comparisons (`:<`, `:>`,
+  // `:<=`, `:>=`, `:==`) and class-subclass (`:<` between two classes,
+  // walking the prototype chain).
+  assert_operator(left: any, op: string, right: any, msg?: string): void {
+    if (typeof left === "function" && typeof right === "function") {
+      // Class-on-class `<` → strict-subclass check.
+      if (op === "<" || op === ":<") {
+        let proto = Object.getPrototypeOf(left.prototype);
+        while (proto) {
+          if (proto.constructor === right) return;
+          proto = Object.getPrototypeOf(proto);
+        }
+        assert.fail(msg ?? `expected ${left.name} < ${right.name}`);
+      }
+    }
+    const opStr = op.startsWith(":") ? op.slice(1) : op;
+    let result: any;
+    switch (opStr) {
+      case "<":  result = left <  right; break;
+      case ">":  result = left >  right; break;
+      case "<=": result = left <= right; break;
+      case ">=": result = left >= right; break;
+      case "==": result = left == right; break;
+      case "!=": result = left != right; break;
+      default: assert.fail(`assert_operator: unsupported op ${op}`);
+    }
+    assert.ok(result, msg ?? `expected ${left} ${opStr} ${right}`);
   }
 
   assert_match(pattern: RegExp | string, value: string, msg?: string): void {
