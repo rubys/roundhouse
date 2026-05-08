@@ -78,27 +78,11 @@ export class Test {
   }
 
   assert_empty(collection: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.strictEqual(collection.length, 0, msg);
-    } else if (collection && typeof collection.size === "number") {
-      assert.strictEqual(collection.size, 0, msg);
-    } else if (collection && typeof collection === "object") {
-      assert.strictEqual(Object.keys(collection).length, 0, msg);
-    } else {
-      assert.fail(`assert_empty: unsupported collection type for ${collection}`);
-    }
+    assert.strictEqual(collectionSize(collection, "assert_empty"), 0, msg);
   }
 
   assert_not_empty(collection: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.notStrictEqual(collection.length, 0, msg);
-    } else if (collection && typeof collection.size === "number") {
-      assert.notStrictEqual(collection.size, 0, msg);
-    } else if (collection && typeof collection === "object") {
-      assert.notStrictEqual(Object.keys(collection).length, 0, msg);
-    } else {
-      assert.fail(`assert_not_empty: unsupported collection type for ${collection}`);
-    }
+    assert.notStrictEqual(collectionSize(collection, "assert_not_empty"), 0, msg);
   }
 
   assert_includes(collection: any, item: any, msg?: string): void {
@@ -128,11 +112,23 @@ export class Test {
   }
 
   // Ruby's `assert_predicate obj, :foo?` evaluates `obj.foo?` and
-  // asserts the result is truthy. Method symbols may carry `?`/`!`
-  // suffixes verbatim or get sanitized at lower-time; accept both.
+  // asserts the result is truthy. The TS emit renames Ruby
+  // predicate methods (`def persisted?` → `is_persisted()`) and
+  // bang methods (`def save!` → `save_bang()`); the symbol arrives
+  // here in either the original or sanitized form. Try the
+  // common name shapes in order: bare, `is_<name>` (predicate),
+  // `<name>_p` (older sanitization), `<name>_bang`. Also accept
+  // a property of the same name (attribute reader / declared field).
   assert_predicate(obj: any, sym: string, msg?: string): void {
-    const name = sym.startsWith(":") ? sym.slice(1) : sym;
-    const candidates = [name, name.replace(/\?$/, "_p").replace(/!$/, "_bang")];
+    const raw = sym.startsWith(":") ? sym.slice(1) : sym;
+    const stripped = raw.replace(/[?!]$/, "");
+    const candidates = [
+      raw,
+      stripped,
+      `is_${stripped}`,
+      `${stripped}_p`,
+      `${stripped}_bang`,
+    ];
     for (const candidate of candidates) {
       const fn = obj?.[candidate];
       if (typeof fn === "function") {
@@ -144,7 +140,31 @@ export class Test {
         assert.fail(msg ?? `expected ${candidate} to be truthy`);
       }
     }
-    assert.fail(msg ?? `${name} not found on receiver`);
+    assert.fail(msg ?? `${raw} not found on receiver`);
+  }
+
+  refute_predicate(obj: any, sym: string, msg?: string): void {
+    const raw = sym.startsWith(":") ? sym.slice(1) : sym;
+    const stripped = raw.replace(/[?!]$/, "");
+    const candidates = [
+      raw,
+      stripped,
+      `is_${stripped}`,
+      `${stripped}_p`,
+      `${stripped}_bang`,
+    ];
+    for (const candidate of candidates) {
+      const fn = obj?.[candidate];
+      if (typeof fn === "function") {
+        if (!fn.call(obj)) return;
+        assert.fail(msg ?? `expected ${candidate} to be falsy`);
+      }
+      if (fn !== undefined) {
+        if (!fn) return;
+        assert.fail(msg ?? `expected ${candidate} to be falsy`);
+      }
+    }
+    assert.fail(msg ?? `${raw} not found on receiver`);
   }
 
   refute_includes(collection: any, item: any, msg?: string): void {
@@ -256,6 +276,15 @@ export class Test {
 
   flunk(msg?: string): void {
     assert.fail(msg ?? "flunked");
+  }
+
+  // Ruby `sleep N` (seconds) — busy-wait so the surrounding test
+  // method stays sync. Only used by the few framework tests that
+  // need timestamp granularity (`sleep 0.01` between two saves);
+  // not a performance concern at the call rates we hit.
+  sleep(seconds: number): void {
+    const end = Date.now() + seconds * 1000;
+    while (Date.now() < end) {}
   }
 
   // ── ActionDispatch::IntegrationTest surface ──────────────────
@@ -419,6 +448,29 @@ const RESPONSE_SYMBOLS: Record<string, number> = {
  *  appears in matching HTML. `#id` → `id="id"`, `.class` →
  *  `class"`, bare tag → `<tag`. Compound selectors split and pick
  *  the first chunk. */
+/** Robust collection-size probe used by assert_empty / assert_not_empty.
+ *  Accepts: arrays, strings, classes with `length()` method (HWIA),
+ *  classes with numeric `size` property (Map/Set), plain objects
+ *  (counts own enumerable keys). */
+function collectionSize(collection: any, label: string): number {
+  if (Array.isArray(collection) || typeof collection === "string") {
+    return collection.length;
+  }
+  if (collection && typeof collection.length === "function") {
+    return collection.length();
+  }
+  if (collection && typeof collection.size === "number") {
+    return collection.size;
+  }
+  if (collection && typeof collection.length === "number") {
+    return collection.length;
+  }
+  if (collection && typeof collection === "object") {
+    return Object.keys(collection).length;
+  }
+  assert.fail(`${label}: unsupported collection type for ${collection}`);
+}
+
 function selectorFragment(selector: string): string {
   const first = selector.split(/\s+/)[0] ?? "";
   if (first.startsWith("#")) return `id="${first.slice(1)}"`;

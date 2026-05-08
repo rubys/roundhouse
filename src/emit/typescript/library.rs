@@ -701,6 +701,7 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("ParameterMissing", "parameters"),
     ("RecordNotFound", "errors"),
     ("RecordInvalid", "errors"),
+    ("FormBuilder", "view_helpers"),
 ];
 
 /// Compute the import block for a class: scan method bodies for Const

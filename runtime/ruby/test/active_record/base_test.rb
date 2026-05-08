@@ -22,7 +22,7 @@ class BaseTest < Minitest::Test
       it = new
       it.id = row[:id]
       it.title = row[:title]
-      it.mark_persisted!
+      it.mark_persisted!()
       it
     end
 
@@ -37,7 +37,7 @@ class BaseTest < Minitest::Test
 
   def setup
     ActiveRecord.adapter = FrameworkTestAdapter
-    FrameworkTestAdapter.reset_all!
+    FrameworkTestAdapter.reset_all!()
     FrameworkTestAdapter.create_table("items", columns: [:id, :title])
   end
 
@@ -53,7 +53,7 @@ class BaseTest < Minitest::Test
   def test_save_marks_persisted
     item = Item.new
     item.title = "Hi"
-    assert item.save
+    assert item.save()
     assert_predicate item, :persisted?
     refute_predicate item, :new_record?
   end
@@ -61,14 +61,14 @@ class BaseTest < Minitest::Test
   def test_save_assigns_id
     item = Item.new
     item.title = "Hi"
-    item.save
+    item.save()
     refute_equal 0, item.id
   end
 
   # ── class-level finders ─────────────────────────────────────
 
   def test_find_returns_instance_for_existing_row
-    a = Item.new; a.title = "A"; a.save
+    a = Item.new; a.title = "A"; a.save()
     found = Item.find(a.id)
     assert_kind_of Item, found
     assert_equal "A", found.title
@@ -81,8 +81,8 @@ class BaseTest < Minitest::Test
   end
 
   def test_find_by_returns_first_match_or_nil
-    a = Item.new; a.title = "A"; a.save
-    b = Item.new; b.title = "B"; b.save
+    a = Item.new; a.title = "A"; a.save()
+    b = Item.new; b.title = "B"; b.save()
 
     found = Item.find_by(title: "B")
     assert_equal b.id, found.id
@@ -92,9 +92,9 @@ class BaseTest < Minitest::Test
   end
 
   def test_where_filters_to_matching_rows
-    a = Item.new; a.title = "A"; a.save
-    b = Item.new; b.title = "B"; b.save
-    c = Item.new; c.title = "A"; c.save
+    a = Item.new; a.title = "A"; a.save()
+    b = Item.new; b.title = "B"; b.save()
+    c = Item.new; c.title = "A"; c.save()
 
     matches = Item.where(title: "A")
     assert_equal 2, matches.length
@@ -102,65 +102,65 @@ class BaseTest < Minitest::Test
   end
 
   def test_all_returns_every_row
-    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save }
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
     assert_equal 3, Item.all.length
   end
 
   def test_count_matches_all_size
-    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save }
+    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
     assert_equal 2, Item.count
   end
 
   def test_exists_returns_true_for_present_id_false_for_absent
-    a = Item.new; a.title = "A"; a.save
+    a = Item.new; a.title = "A"; a.save()
     assert Item.exists?(a.id)
     refute Item.exists?(a.id + 9999)
   end
 
   def test_last_returns_highest_id_or_nil_when_empty
     assert_nil Item.last
-    a = Item.new; a.title = "A"; a.save
-    b = Item.new; b.title = "B"; b.save
+    a = Item.new; a.title = "A"; a.save()
+    b = Item.new; b.title = "B"; b.save()
     assert_equal b.id, Item.last.id
   end
 
   # ── update + destroy ────────────────────────────────────────
 
   def test_save_updates_existing_record
-    a = Item.new; a.title = "Original"; a.save
+    a = Item.new; a.title = "Original"; a.save()
     fetched = Item.find(a.id)
     fetched.title = "Updated"
-    fetched.save
+    fetched.save()
     refetched = Item.find(a.id)
     assert_equal "Updated", refetched.title
   end
 
   def test_destroy_removes_row_and_marks_destroyed
-    a = Item.new; a.title = "Doomed"; a.save
-    a.destroy
+    a = Item.new; a.title = "Doomed"; a.save()
+    a.destroy()
     assert_predicate a, :destroyed?
     assert_raises(ActiveRecord::RecordNotFound) { Item.find(a.id) }
   end
 
   def test_destroy_on_unpersisted_returns_self_without_touching_db
     item = Item.new
-    item.destroy
+    item.destroy()
     refute_predicate item, :destroyed?
   end
 
   def test_reload_refreshes_from_db
-    a = Item.new; a.title = "First"; a.save
+    a = Item.new; a.title = "First"; a.save()
     # Mutate via a separate fetch to simulate concurrent change.
     other = Item.find(a.id)
     other.title = "Second"
-    other.save
+    other.save()
 
-    a.reload
+    a.reload()
     assert_equal "Second", a.title
   end
 
   def test_destroy_all_removes_every_row
-    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save }
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
     Item.destroy_all
     assert_equal 0, Item.count
   end
@@ -186,14 +186,25 @@ class BaseTest < Minitest::Test
     assert_equal "Made", h.title
   end
 
-  def test_create_bang_raises_record_invalid_when_save_fails
-    klass = Class.new(HashItem) do
-      def self.table_name = "items"
-      def validate
-        @errors << "boom"
-      end
+  # Named subclass instead of `Class.new(HashItem) do … end` —
+  # anonymous-class-with-block isn't representable in roundhouse's
+  # IR (no first-class "method def at expression position" node);
+  # a lexical subclass keeps the test's spirit AND transpiles
+  # naturally to a TS class.
+  class FailingHashItem < HashItem
+    def self.table_name = "items"
+    def validate
+      # Explicit `.push(...)` — the bare `@errors << x` shovel form
+      # falls through to bit-shift in TS emit when the receiver type
+      # is unknown. `errors` (the attr_reader) returns the underlying
+      # Array under both CRuby and TS (the TS emit produces a field
+      # of the same name; bare-name access is field access).
+      errors.push("boom")
     end
-    err = assert_raises(ActiveRecord::RecordInvalid) { klass.create!(title: "x") }
+  end
+
+  def test_create_bang_raises_record_invalid_when_save_fails
+    err = assert_raises(ActiveRecord::RecordInvalid) { FailingHashItem.create!(title: "x") }
     assert_match(/Validation failed/, err.message)
   end
 
@@ -211,7 +222,7 @@ class BaseTest < Minitest::Test
       t.title = row[:title]
       t.created_at = row[:created_at]
       t.updated_at = row[:updated_at]
-      t.mark_persisted!
+      t.mark_persisted!()
       t
     end
 
@@ -240,7 +251,7 @@ class BaseTest < Minitest::Test
     FrameworkTestAdapter.create_table("stamped", columns: [:id, :title, :created_at, :updated_at])
     t = Timestamped.new
     t.title = "T"
-    t.save
+    t.save()
     refute_nil t.created_at
     refute_nil t.updated_at
   end
@@ -249,11 +260,11 @@ class BaseTest < Minitest::Test
     FrameworkTestAdapter.create_table("stamped", columns: [:id, :title, :created_at, :updated_at])
     t = Timestamped.new
     t.title = "T"
-    t.save
+    t.save()
     original_created = t.created_at
     sleep 0.01 # so the timestamp string actually advances
     t.title = "T2"
-    t.save
+    t.save()
     assert_equal original_created, t.created_at
   end
 end

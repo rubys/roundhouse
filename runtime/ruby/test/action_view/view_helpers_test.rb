@@ -6,10 +6,14 @@ require_relative "../test_helper"
 # Article (which couples to a schema + DB). Same coverage on the
 # framework surface.
 class ViewHelpersTest < Minitest::Test
-  # Bring `ActionView::ViewHelpers` into scope as `ViewHelpers` for
-  # test readability — the source declares the canonical nested
-  # path; bare refs from app code follow Ruby's `include` convention.
+  # Bring `ActionView::ViewHelpers` into scope as `ViewHelpers`
+  # for test readability AND `ActionView::ViewHelpers::FormBuilder`
+  # into scope as bare `FormBuilder`. The TS emit treats the latter
+  # as a top-level export (each framework class collapses to its
+  # leaf name, sibling exports), so the bare-name reference matches
+  # what the transpile produces.
   include ActionView
+  include ActionView::ViewHelpers
 
   # Smallest record-shaped object the helpers need: `id` for
   # dom_id, `class.name` for record_dom_prefix's downcase, `[]`
@@ -219,7 +223,7 @@ class ViewHelpersTest < Minitest::Test
 
   def test_form_builder_label
     article = Article.new(0, "x", "y")
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
+    builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.label(:title)
     assert_includes out, %(for="article_title")
     assert_includes out, ">Title</label>"
@@ -227,14 +231,14 @@ class ViewHelpersTest < Minitest::Test
 
   def test_form_builder_text_field_uses_model_value
     article = Article.new(0, "Hello", "y")
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
+    builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.text_field(:title)
     assert_includes out, %(value="Hello")
   end
 
   def test_form_builder_text_field_handles_nil_value
     article = Article.new(0, nil, nil)
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
+    builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.text_field(:title)
     # Rails omits the `value` attribute when the field is nil/empty
     # rather than emitting `value=""`; spinel matches.
@@ -244,7 +248,7 @@ class ViewHelpersTest < Minitest::Test
 
   def test_form_builder_text_area
     article = Article.new(0, "x", "Hello body")
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
+    builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.text_area(:body)
     assert_includes out, %(name="article[body]")
     assert_includes out, ">Hello body</textarea>"
@@ -252,7 +256,7 @@ class ViewHelpersTest < Minitest::Test
 
   def test_form_builder_submit_default_label_for_post
     article = Article.new(0, "x", "y")
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles", :post)
+    builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.submit
     assert_includes out, %(value="Create Article")
     assert_includes out, %(data-disable-with="Create Article")
@@ -260,7 +264,7 @@ class ViewHelpersTest < Minitest::Test
 
   def test_form_builder_submit_default_label_for_patch
     article = Article.new(1, "x", "y")
-    builder = ViewHelpers::FormBuilder.new(article, "article", "/articles/1", :patch)
+    builder = FormBuilder.new(article, "article", "/articles/1", :patch)
     out = builder.submit
     assert_includes out, %(value="Update Article")
   end

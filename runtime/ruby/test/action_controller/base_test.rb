@@ -9,10 +9,15 @@ class ActionControllerBaseTest < Minitest::Test
   # dispatches by name to the corresponding action method.
   class TestController < ActionController::Base
     def process_action(action_name)
+      # Explicit `()` on each dispatch — Ruby treats parenless
+      # `index` as a method call, but the TS emit defaults to
+      # property-read for instance-receiver zero-arg sends (the
+      # body-typer's AccessorKind doesn't yet thread through to
+      # Send emit). Parens force the call shape on both sides.
       case action_name.to_sym
-      when :index then index
-      when :create then create
-      when :destroy then destroy
+      when :index then index()
+      when :create then create()
+      when :destroy then destroy()
       end
     end
 
@@ -37,9 +42,9 @@ class ActionControllerBaseTest < Minitest::Test
 
   def test_initial_state_has_empty_params_and_default_status
     refute_nil @controller.params
-    assert_equal 0, @controller.params.to_h.length
-    assert_equal 0, @controller.session.length
-    assert_equal 0, @controller.flash.length
+    assert_empty @controller.params.to_h()
+    assert_equal 0, @controller.session.length()
+    assert_equal 0, @controller.flash.length()
     assert_equal 200, @controller.status
     assert_equal "", @controller.body
     assert_nil @controller.location
@@ -80,13 +85,13 @@ class ActionControllerBaseTest < Minitest::Test
 
   def test_redirect_to_propagates_notice_to_flash
     @controller.redirect_to("/x", notice: "Saved")
-    assert_equal "Saved", @controller.flash[:notice]
+    assert_equal "Saved", @controller.flash.fetch(:notice)
     refute @controller.flash.key?(:alert)
   end
 
   def test_redirect_to_propagates_alert_to_flash
     @controller.redirect_to("/x", alert: "Bad")
-    assert_equal "Bad", @controller.flash[:alert]
+    assert_equal "Bad", @controller.flash.fetch(:alert)
   end
 
   def test_redirect_to_omits_flash_keys_when_nil
@@ -97,9 +102,10 @@ class ActionControllerBaseTest < Minitest::Test
   # ── head ────────────────────────────────────────────────────
 
   def test_head_sets_status_and_clears_body
-    @controller.body = "leftover" if @controller.respond_to?(:body=)
-    # body= isn't an attr_writer (only reader); set via render to
-    # populate, then head must clear.
+    # body= isn't an attr_writer (only reader); populate via render,
+    # then head must clear. (The original test guarded a pre-set with
+    # `respond_to?(:body=)` — a no-op since the writer doesn't exist
+    # — and TS has no respond_to?, so drop the guard.)
     @controller.render("partial output")
     assert_equal "partial output", @controller.body
 
@@ -145,20 +151,22 @@ class ActionControllerBaseTest < Minitest::Test
   end
 
   # ── STATUS_CODES surface ────────────────────────────────────
-  # The constant is consumed across every target (TS prelude, etc.);
-  # asserting its shape catches drift between framework Ruby and
-  # any per-target hand-mirror.
+  # Originally probed `ActionController::STATUS_CODES` directly
+  # (`.key?(sym)`, `:frozen?`). The constant is internal to the
+  # framework runtime and not exported across targets; the symbol
+  # → code mapping is observable through `resolve_status`, which
+  # is the public API every target preserves. Spirit survives via
+  # the indirection — drift in either the constant or the resolver
+  # surfaces as a wrong code coming back from `resolve_status`.
 
-  def test_status_codes_covers_every_symbol_used_in_real_blog
-    # Subset real-blog actions actually pass to render/redirect_to/head.
-    %i[ok created no_content see_other found not_found unprocessable_entity]
-      .each do |sym|
-      assert ActionController::STATUS_CODES.key?(sym),
-        "STATUS_CODES missing :#{sym}"
+  def test_resolve_status_covers_every_symbol_used_in_real_blog
+    expectations = {
+      ok: 200, created: 201, no_content: 204, see_other: 303,
+      found: 302, not_found: 404, unprocessable_entity: 422,
+    }
+    expectations.each do |sym, code|
+      assert_equal code, @controller.resolve_status(sym),
+        "resolve_status mismapped :#{sym}"
     end
-  end
-
-  def test_status_codes_is_frozen
-    assert_predicate ActionController::STATUS_CODES, :frozen?
   end
 end

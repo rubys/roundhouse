@@ -29,14 +29,14 @@ class RouterTest < Minitest::Test
     assert_equal :index, m[:action]
     # path_params is now an HWIA (String-keyed); empty for static
     # match. Compare via length rather than literal Hash equality.
-    assert_equal 0, m[:path_params].length
+    assert_equal 0, m[:path_params].length()
   end
 
   def test_matches_member_get_and_captures_id
     m = Router.match("GET", "/articles/42", TABLE)
     refute_nil m
     assert_equal :show, m[:action]
-    assert_equal "42", m[:path_params][:id]
+    assert_equal "42", m[:path_params].fetch(:id)
   end
 
   def test_method_must_match
@@ -52,7 +52,7 @@ class RouterTest < Minitest::Test
     m = Router.match("POST", "/articles/7/comments", TABLE)
     refute_nil m
     assert_equal :create, m[:action]
-    assert_equal "7", m[:path_params][:article_id]
+    assert_equal "7", m[:path_params].fetch(:article_id)
   end
 
   def test_captures_doubly_nested_resource_params
@@ -67,8 +67,8 @@ class RouterTest < Minitest::Test
     m = Router.match("DELETE", "/articles/7/comments/3", TABLE)
     refute_nil m
     assert_equal :destroy, m[:action]
-    assert_equal "7", m[:path_params][:article_id]
-    assert_equal "3", m[:path_params][:id]
+    assert_equal "7", m[:path_params].fetch(:article_id)
+    assert_equal "3", m[:path_params].fetch(:id)
   end
 
   def test_method_is_case_insensitive
@@ -96,7 +96,7 @@ class RouterTest < Minitest::Test
   # the other.
 
   def test_match_pattern_returns_empty_hash_for_pure_static_match
-    assert_equal 0, Router.match_pattern("/articles", "/articles").length
+    assert_equal 0, Router.match_pattern("/articles", "/articles").length()
   end
 
   def test_match_pattern_returns_nil_on_length_mismatch
@@ -112,14 +112,14 @@ class RouterTest < Minitest::Test
     h = Router.match_pattern("/articles/:id", "/articles/42")
     # HWIA accepts either Symbol or String access; assert via Symbol
     # form so the indifferent surface is exercised.
-    assert_equal "42", h[:id]
-    assert_equal 1, h.length
+    assert_equal "42", h.fetch(:id)
+    assert_equal 1, h.length()
   end
 
   def test_match_pattern_captures_multiple_params
     h = Router.match_pattern("/articles/:article_id/comments/:id", "/articles/7/comments/3")
-    assert_equal "7", h[:article_id]
-    assert_equal "3", h[:id]
-    assert_equal 2, h.length
+    assert_equal "7", h.fetch(:article_id)
+    assert_equal "3", h.fetch(:id)
+    assert_equal 2, h.length()
   end
 end

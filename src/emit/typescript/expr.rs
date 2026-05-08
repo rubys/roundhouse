@@ -1269,6 +1269,25 @@ pub(super) fn emit_send_with_block(
     let Some(blk) = block else {
         return emit_send_with_parens(recv, method, args, parenthesized);
     };
+    // `N.times { |i| body }` — JS Numbers have no `.times` method,
+    // so a fall-through emit produces `3.times(i => …)` which tsc
+    // (and esbuild's parser) reject as `3.t…`. Rewrite to a plain
+    // for loop that invokes the block as a lambda each iteration:
+    // the lambda emit already handles the body's own scope (Seq →
+    // emit_stmt_with_state declares locals as `const`/`let`).
+    // Sync bodies stay sync; the surrounding async-HOF rewrite
+    // handles async-body cases on its own.
+    if method == "times" && args.is_empty() && recv.is_some() {
+        if let ExprNode::Lambda { body, .. } = &*blk.node {
+            if !body_has_async_send(body) {
+                let count_s = emit_expr(recv.unwrap());
+                let block_s = emit_expr(blk);
+                return format!(
+                    "(() => {{ const __t = {block_s}; for (let __i = 0; __i < {count_s}; __i++) __t(__i); }})()"
+                );
+            }
+        }
+    }
     // Async HOF rewrite (Phase 3): if the receiver is an array
     // (or array-like) AND the method is a known higher-order
     // operation AND the block body contains async sends, rewrite
@@ -1279,6 +1298,35 @@ pub(super) fn emit_send_with_block(
     // all (the JS array methods don't introspect their callbacks).
     if let Some(rewritten) = try_emit_async_hof(recv, method, args, blk) {
         return rewritten;
+    }
+    // Sync HOF rewrite for predicate-style Ruby Array methods
+    // (`all?`/`any?`/`none?`) — the `?` sanitizer renames them to
+    // `is_all`/`is_any`/`is_none` which don't exist on JS Array.
+    // Restricted to predicates because the type-aware Array dispatch
+    // above (Ty::Array) handles `each`/`map`/`filter`/`find` for
+    // typed receivers; broadening this fallback to those methods
+    // misfires when the receiver is actually a Hash (`hash.each
+    // { |k, v| … }` — `Object.entries(...).forEach(...)` rather
+    // than `hash.forEach(...)`).
+    if args.is_empty() && recv.is_some() {
+        if let ExprNode::Lambda { body, .. } = &*blk.node {
+            if !body_has_async_send(body) {
+                let js_method = match method {
+                    "all?" => Some("every"),
+                    "any?" => Some("some"),
+                    "none?" => Some("__none"),
+                    _ => None,
+                };
+                if let Some(js) = js_method {
+                    let recv_s = emit_expr(recv.unwrap());
+                    let blk_s = emit_expr(blk);
+                    return match js {
+                        "__none" => format!("(!{recv_s}.some({blk_s}))"),
+                        _ => format!("{recv_s}.{js}({blk_s})"),
+                    };
+                }
+            }
+        }
     }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
