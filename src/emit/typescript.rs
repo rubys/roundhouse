@@ -1903,6 +1903,13 @@ fn emit_class_member(
             // body as void so the trailing-statement-becomes-return
             // transform is suppressed.
             emit_constructor_body(&rewritten, &Ty::Nil, has_parent)
+        } else if m.is_async {
+            // Yield emit consults `in_async_method()` to decide
+            // between `(await __block(...))` and `__block(...)`.
+            // Methods marked async (yield-with-capture, propagation
+            // via async sends, etc.) get the await; sync methods
+            // that yield without capturing get plain __block.
+            expr::with_async_method_context(|| expr::emit_body(&rewritten, &ret_ty))
         } else {
             expr::emit_body(&rewritten, &ret_ty)
         }

@@ -26,6 +26,30 @@ use crate::ty::Ty;
 std::thread_local! {
     static ASYNC_METHOD_NAMES: std::cell::RefCell<std::collections::HashSet<crate::ident::Symbol>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+    /// Whether the body currently being emitted belongs to an
+    /// `async`-marked method. The Yield emit reads this to decide
+    /// between `__block(...)` (sync method body, await would be a
+    /// parse error) and `(await __block(...))` (async method body,
+    /// caller may pass an async block whose result must resolve
+    /// before being string-interpolated).
+    static IN_ASYNC_METHOD: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Mark the current emit context as inside an async method body.
+/// `library.rs::emit_method_def` wraps the body emit with this when
+/// `method.is_async`. Restored on return.
+pub(crate) fn with_async_method_context<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IN_ASYNC_METHOD.with(|c| c.replace(true));
+    let r = f();
+    IN_ASYNC_METHOD.with(|c| c.set(prev));
+    r
+}
+
+pub(super) fn in_async_method() -> bool {
+    IN_ASYNC_METHOD.with(|c| c.get())
 }
 
 /// Run `f` with `names` as the active async-method set. The previous
@@ -1130,8 +1154,23 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // here we just call it. Yield always targets the enclosing
             // *method*, not surrounding lambdas, so a naive substitution
             // is safe — the caller arranges __block to be in scope.
+            //
+            // Awaited only when the enclosing method is async (the
+            // colorer marks methods that capture yield's return into
+            // a binding, like `body = yield(builder)` in form_with).
+            // Sync methods that yield-without-capture (e.g.
+            // HashWithIndifferentAccess#each — `yield k, v` with
+            // value discarded) get plain `__block(...)`; awaiting
+            // there would be a parse error since the function isn't
+            // async. Without the await in async methods, an async
+            // block returned `[object Promise]` instead of the
+            // rendered string into surrounding template strings.
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-            format!("__block({})", args_s.join(", "))
+            if in_async_method() {
+                format!("(await __block({}))", args_s.join(", "))
+            } else {
+                format!("__block({})", args_s.join(", "))
+            }
         }
         ExprNode::While { cond, body, until_form } => {
             // `while`/`until` at expression position is unusual —

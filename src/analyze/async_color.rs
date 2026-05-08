@@ -325,6 +325,36 @@ fn body_calls_async_with_params(
             }
             !recv_is_known_sync(recv.as_ref(), method.as_str())
         }
+        // Yield whose return value is captured into a local binding
+        // is potentially async — when the call site passes an async
+        // block, the yield resolves a Promise and the binding needs
+        // to be the awaited string. The form_with-shape helper:
+        //
+        //   def self.form_with(...)
+        //     body = yield(builder)        # ← captured: this rule
+        //     "<form ...>...#{body}..."
+        //   end
+        //
+        // (Local assignment lowers to `ExprNode::Assign { target:
+        // LValue::Var, value: Yield {...} }`; `Let` is the
+        // structural shadowing form for nested scopes.)
+        //
+        // Methods that yield without capturing (`def each ... yield
+        // k, v ... end`, where the block's return is discarded) are
+        // NOT marked — over-marking those (e.g. `HashWithIndifferent
+        // Access#each`) pollutes the cross-method async-name set
+        // with `each` and incorrectly wraps every Array `.each(...)`
+        // call site with `(await ...)`.
+        //
+        // Empty `async_names` short-circuits the whole rule so the
+        // sync profile (node-sync) is unaffected, preserving Gate 1
+        // byte equality.
+        ExprNode::Assign { value, .. } if !async_names.is_empty() => {
+            matches!(&*value.node, ExprNode::Yield { .. })
+        }
+        ExprNode::Let { value, .. } if !async_names.is_empty() => {
+            matches!(&*value.node, ExprNode::Yield { .. })
+        }
         _ => false,
     })
 }
