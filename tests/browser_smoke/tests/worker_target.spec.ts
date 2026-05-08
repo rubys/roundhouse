@@ -154,6 +154,99 @@ test.describe("SharedWorker target — real-blog", () => {
     }
   });
 
+  test("multi-tab BroadcastChannel: POST in tab A reaches tab B", async ({ browser }) => {
+    // The SharedWorker is shared across all tabs of the same origin
+    // (`name: "juntos"`). Article#broadcasts_to ->(_a) { "articles" }
+    // fires on insert; the SharedWorker's framework runtime calls
+    // `broadcast("articles", html)` which goes through
+    // juntos-worker.ts's default BroadcastChannel-backed broadcaster.
+    // Any tab subscribed to BroadcastChannel("articles") receives
+    // the turbo-stream HTML.
+    //
+    // This probe exercises the multi-tab story end-to-end without
+    // touching Turbo: tab B subscribes raw to BroadcastChannel,
+    // tab A POSTs to create, tab B asserts the broadcast arrived.
+    // No turbo-stream rendering, no DOM assertions — just "did the
+    // message cross from SharedWorker to a different tab?"
+
+    const context = await browser.newContext();
+    const tabA = await context.newPage();
+    const tabB = await context.newPage();
+
+    await Promise.all([
+      tabA.goto("/", { waitUntil: "domcontentloaded" }),
+      tabB.goto("/", { waitUntil: "domcontentloaded" }),
+    ]);
+
+    // Both bridges must reach ready before tab B can subscribe and
+    // tab A can POST through the dispatcher.
+    for (const tab of [tabA, tabB]) {
+      await tab.waitForFunction(
+        () => document.getElementById("loading")?.style.display === "none",
+        null,
+        { timeout: 15_000 },
+      );
+    }
+
+    // Tab B installs a BroadcastChannel listener BEFORE the POST so
+    // there's no race between the broadcast firing and the listener
+    // attaching.
+    await tabB.evaluate(() => {
+      (globalThis as { __received?: string[] }).__received = [];
+      const ch = new BroadcastChannel("articles");
+      ch.onmessage = (event) => {
+        (globalThis as { __received?: string[] }).__received!.push(
+          String(event.data),
+        );
+      };
+    });
+
+    // Tab A POSTs through its own SharedWorker port. The shared
+    // SharedWorker dispatches → controller.create → Article.create
+    // → broadcasts_to fires → broadcast("articles", "<turbo-stream
+    // ...>"). Tab B's BroadcastChannel receives.
+    const post = await probeSharedWorker(tabA, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body:
+        "article%5Btitle%5D=Multi-tab+broadcast+test" +
+        "&article%5Bbody%5D=Posted+from+tab+A+to+test+broadcast+to+tab+B.",
+    });
+
+    expect(
+      post.status,
+      `POST returned ${post.status}: ${post.body.slice(0, 200)}`,
+    ).toBeLessThan(400);
+
+    // Wait for tab B to see the broadcast. 5s is plenty — the
+    // broadcast posts synchronously after INSERT inside the
+    // SharedWorker; latency is just the postMessage hop to tab B.
+    await tabB.waitForFunction(
+      () => {
+        const r = (globalThis as { __received?: string[] }).__received;
+        return Array.isArray(r) && r.length > 0;
+      },
+      null,
+      { timeout: 5_000 },
+    );
+
+    const received = await tabB.evaluate(
+      () => (globalThis as { __received?: string[] }).__received ?? [],
+    );
+
+    expect(
+      received.length,
+      "tab B should receive at least one broadcast on 'articles' channel",
+    ).toBeGreaterThan(0);
+    expect(
+      received[0],
+      `first broadcast should be a turbo-stream fragment, got: ${received[0]?.slice(0, 200)}`,
+    ).toMatch(/<turbo-stream/);
+
+    await context.close();
+  });
+
   test("POST /articles round-trips form body + creates record", async ({ page }) => {
     // POST exercises a different surface from GET: form-encoded body
     // parsing in dispatchRequest, controller.create → Article.new

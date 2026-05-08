@@ -61,6 +61,15 @@ export function setBroadcaster(fn: Broadcaster | null): void {
   broadcaster = fn;
 }
 
+/** Forward a fragment to whoever is currently installed as the
+ *  broadcaster. Silent no-op if none is — matches juntos-libsql /
+ *  juntos-worker semantics. Called by `broadcasts.ts` via the
+ *  Broadcasts.{prepend,append,replace,remove} facade emitted from
+ *  the model lowerer's broadcasts_to expansion. */
+export function broadcast(stream: string, html: string): void {
+  broadcaster?.(stream, html);
+}
+
 
 // ── ActiveRecord adapter shim ──
 //
