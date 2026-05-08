@@ -181,6 +181,47 @@ fn real_blog_libsql_tsc_passes() {
     assert_tsc_passes("real-blog (libsql)", &scratch);
 }
 
+fn assert_node_test_passes(fixture: &str, scratch: &Path) {
+    let install = Command::new("npm")
+        .arg("install")
+        .arg("--silent")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .current_dir(scratch)
+        .output()
+        .expect("run npm install");
+    assert!(
+        install.status.success(),
+        "npm install failed for {fixture} node test at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr),
+    );
+
+    // Shell invocation so glob expansion picks up every test file —
+    // passing the directory confuses tsx/node:test when there's no
+    // index entry. tsx registers a module loader so `.ts` imports
+    // resolve at run time.
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
+        .current_dir(scratch)
+        .output()
+        .expect("run node --test via tsx");
+
+    assert!(
+        output.status.success(),
+        "node --test failed on emitted {fixture} at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 #[ignore]
 fn real_blog_node_test_passes() {
@@ -191,43 +232,26 @@ fn real_blog_node_test_passes() {
     let fixture = Path::new("fixtures/real-blog");
     let scratch = scratch_dir("real-blog-node");
     generate_project(fixture, &scratch);
+    assert_node_test_passes("real-blog", &scratch);
+}
 
-    // Shell invocation so glob expansion picks up every test file —
-    // passing the directory confuses tsx/node:test when there's no
-    // index entry. tsx registers a module loader so `.ts` imports
-    // resolve at run time.
-    let install = Command::new("npm")
-        .arg("install")
-        .arg("--silent")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .current_dir(&scratch)
-        .output()
-        .expect("run npm install");
-    assert!(
-        install.status.success(),
-        "npm install failed for real-blog node test at {}:\n\
-         \n=== stdout ===\n{}\n\
-         \n=== stderr ===\n{}",
-        scratch.display(),
-        String::from_utf8_lossy(&install.stdout),
-        String::from_utf8_lossy(&install.stderr),
-    );
+#[test]
+#[ignore]
+fn real_blog_libsql_node_test_passes() {
+    // libsql (`node-async`) profile: same forcing function as
+    // `real_blog_node_test_passes` but exercises the async-coloring
+    // emit path AND the libsql adapter at runtime. Every test
+    // method awaits its HTTP-style helpers (`this.get(...)` etc.)
+    // and AR calls (`Article.find(...)`); fixtures load through
+    // `await _fixtures_load_bang()` which executes inserts on a
+    // libsql in-memory client. Catches regressions in (a) the
+    // runtime↔app propagation handshake, (b) the test-runtime
+    // async surface (minitest.ts get/post/dispatch), and (c) the
+    // libsql adapter's actual SQL execution.
+    use roundhouse::profile::DeploymentProfile;
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
-        .current_dir(&scratch)
-        .output()
-        .expect("run node --test via tsx");
-
-    assert!(
-        output.status.success(),
-        "node --test failed on emitted real-blog at {}:\n\
-         \n=== stdout ===\n{}\n\
-         \n=== stderr ===\n{}",
-        scratch.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog-libsql-node");
+    generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
+    assert_node_test_passes("real-blog (libsql)", &scratch);
 }

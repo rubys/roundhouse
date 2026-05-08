@@ -27,6 +27,20 @@ const SERVER_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/server
 const SERVER_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/server-libsql.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
+const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
+    include_str!("../../runtime/typescript/minitest-async.ts");
+
+/// Pick the `minitest.ts` test-runtime variant for the active
+/// deployment profile. Same selection rule as the juntos / server
+/// pickers — async profiles get the variant whose
+/// `dispatch`/`get`/`post`/etc. await `process_action`.
+fn minitest_source_for_active_profile() -> &'static str {
+    if crate::analyze::async_color::active_extern_async_names().is_empty() {
+        MINITEST_RUNTIME_SOURCE
+    } else {
+        MINITEST_ASYNC_RUNTIME_SOURCE
+    }
+}
 
 /// Pick the `juntos.ts` runtime variant for the active deployment
 /// profile. Sync profiles (`node-sync`) get the better-sqlite3-
@@ -244,77 +258,78 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let extern_async_names = crate::analyze::async_color::active_extern_async_names();
 
-    // Async coloring (Phase 4): expand the extern async-name set with
-    // every method the runtime itself propagates to async. Without
-    // this, app-side propagation only sees the adapter seed methods
-    // (`all`, `find`, `where`, `count`, `exists?`, `insert`, `update`,
-    // `delete`) and misses the runtime methods that propagate from
-    // those seeds — `Base#save` (calls insert/update), `Base#destroy`
-    // (calls delete), `Base#reload`, etc. The result was that
-    // `Article#update { return this.save(); }` didn't propagate to
-    // async because `save` wasn't in the extern set; this fix closes
-    // the runtime → app propagation gap.
-    //
-    // Implementation: parse the runtime once, run a global propagation
-    // across all runtime classes (which catches both within-file and
-    // cross-runtime-file chains — `Validations#valid?` calling
-    // `Base#errors` etc.), then collect every method marked async.
-    // Those names join the adapter seeds as the expanded extern set
-    // used by app propagation, runtime per-file propagation (so
-    // chains like Validations → Base.save propagate during the actual
-    // emit pass too), and the emit-time `ASYNC_METHOD_NAMES` thread-
-    // local consulted by Send-site `(await ...)` wrapping.
+    // Async coloring (Phase 4): parse the runtime once and stage
+    // its classes for the global propagation pass below. The runtime
+    // and app classes propagate together so chains that cross the
+    // boundary in either direction reach a single fixed point —
+    // `Article#update { this.save() }` (app → runtime) and
+    // `Base#save { this.is_valid() }` (within runtime, but
+    // dependent on `validate` which Comment marks async on the app
+    // side) both converge before any emit reads `is_async`. The
+    // alias / extra-roots derivations below reuse this parse.
     let runtime_units_seed = crate::runtime_loader::typescript_units(|_, c| c)
         .expect("runtime transpile parse failed");
     let mut runtime_seed_classes: Vec<crate::dialect::LibraryClass> = runtime_units_seed
         .iter()
         .flat_map(|u| u.classes.iter().cloned())
         .collect();
-    if !extern_async_names.is_empty() {
-        crate::analyze::async_color::propagate_with_externs(
-            &mut runtime_seed_classes,
-            &extern_async_names,
-        );
-    }
     let mut expanded_extern_storage: Vec<String> =
         extern_async_names.iter().map(|s| s.to_string()).collect();
-    for class in &runtime_seed_classes {
-        for method in &class.methods {
-            if !method.is_async {
-                continue;
-            }
-            let name = method.name.as_str().to_string();
-            if !expanded_extern_storage.contains(&name) {
-                expanded_extern_storage.push(name);
+
+    // Test-runtime async surface. `runtime/typescript/minitest.ts`
+    // is hand-written (not in `typescript_units`), so its async
+    // methods don't reach propagation through the parsed-IR path.
+    // Under any async profile, `dispatch` awaits `process_action`
+    // (controllers are colored async), and the HTTP-style helpers
+    // (`get`/`post`/`put`/`patch`/`head`) await `dispatch`.
+    // `assert_difference` / `assert_no_difference` await both the
+    // count expression and the body block. Listing the names here
+    // gives propagation the shape it needs: test methods that call
+    // `this.get(...)` get marked async, and emit wraps the call.
+    // (`delete` is already in the AR adapter seed list — both the
+    // test-runtime `delete` and `Hash#delete` collide on the name,
+    // and the receiver-aware filter at emit time keeps `Hash#delete`
+    // from being awaited.)
+    if !extern_async_names.is_empty() {
+        for name in &[
+            "get",
+            "post",
+            "put",
+            "patch",
+            "head",
+            "assert_difference",
+            "assert_no_difference",
+        ] {
+            let s = name.to_string();
+            if !expanded_extern_storage.contains(&s) {
+                expanded_extern_storage.push(s);
             }
         }
-    }
-    let expanded_extern_refs: Vec<&str> =
-        expanded_extern_storage.iter().map(|s| s.as_str()).collect();
-
-    // Inject runtime-discovered async names into the emit-time
-    // thread-local so call sites like `this.save()` wrap with
-    // `(await ...)`. App-marked names get added below after app
-    // propagation runs.
-    if !expanded_extern_storage.is_empty() {
-        let extra: std::collections::HashSet<crate::ident::Symbol> = expanded_extern_storage
-            .iter()
-            .map(|s| crate::ident::Symbol::from(s.as_str()))
-            .collect();
-        expr::extend_async_methods(extra);
     }
 
     let mut route_helper_funcs = route_helper_funcs;
     if !extern_async_names.is_empty() {
         // Capture lengths BEFORE `append` drains each source Vec —
         // we need them to split the merged Vec back into the
-        // original per-category Vecs after propagation.
+        // original per-category Vecs after propagation. Runtime
+        // seed classes ride along in the same merged Vec so chains
+        // that cross the runtime↔app boundary in BOTH directions
+        // (Base#is_valid → Comment#validate, Article#update →
+        // Base#save) converge in a single fixed-point pass. Without
+        // including runtime classes here, `Base#is_valid` is marked
+        // async only by the per-file pass during runtime emit —
+        // those marks never reach the emit-time
+        // `ASYNC_METHOD_NAMES` thread-local, so `Base#save`'s call
+        // site `this.is_valid()` doesn't wrap with `(await ...)`
+        // and the emitted code awaits a Promise as if it were a
+        // boolean (always truthy).
         let m_len = model_lcs.len();
         let v_len = view_lcs.len();
         let c_len = controller_lcs.len();
         let fx_len = fixture_lcs.len();
         let tc_len = test_lcs.len();
-        // tc_inner_len recovered as the remainder (no need to record).
+        let tci_len = test_inner_lcs.len();
+        let rt_len = runtime_seed_classes.len();
         let mut all_classes: Vec<crate::dialect::LibraryClass> = Vec::new();
         all_classes.append(&mut model_lcs);
         all_classes.append(&mut view_lcs);
@@ -322,6 +337,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         all_classes.append(&mut fixture_lcs);
         all_classes.append(&mut test_lcs);
         all_classes.append(&mut test_inner_lcs);
+        all_classes.append(&mut runtime_seed_classes);
         // Stitch all functions together for one global pass; split
         // back like the classes below.
         let rh_len = route_helper_funcs.len();
@@ -336,48 +352,58 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         all_funcs.append(&mut routes_dispatch_funcs);
         all_funcs.append(&mut importmap_funcs);
         all_funcs.append(&mut schema_funcs);
+        let extern_refs: Vec<&str> =
+            expanded_extern_storage.iter().map(|s| s.as_str()).collect();
         crate::analyze::async_color::propagate_global_with_externs(
             &mut all_classes,
             &mut all_funcs,
-            &expanded_extern_refs,
+            &extern_refs,
         );
-        // Collect every name the global pass marked async. Combined
-        // with the runtime-derived names already injected into
-        // `ASYNC_METHOD_NAMES` above, this is the complete set the
+        // Collect every name the global pass marked async, across
+        // both runtime and app sides. This is the complete set the
         // emit-time `is_async_method_name` lookup needs to wrap call
-        // sites. App-marked names (e.g. `Article#comments` whose body
-        // calls `Comment.where(...)`) reach this path; without
-        // injecting them, `this.comments()` callers don't get
-        // `(await ...)` wrapping and tsc rejects the chained access.
-        let mut app_async_extra: std::collections::HashSet<crate::ident::Symbol> =
+        // sites — both app-marked names (`Article#comments` whose
+        // body calls `Comment.where(...)`) and runtime-marked names
+        // (`Base#save`, `Base#is_valid`, `Base#destroy`).
+        let mut all_async_names: std::collections::HashSet<crate::ident::Symbol> =
             std::collections::HashSet::new();
         for class in &all_classes {
             for method in &class.methods {
                 if method.is_async {
-                    app_async_extra.insert(method.name.clone());
+                    all_async_names.insert(method.name.clone());
                 }
             }
         }
         for func in &all_funcs {
             if func.is_async {
-                app_async_extra.insert(func.name.clone());
+                all_async_names.insert(func.name.clone());
             }
         }
-        // Fold app-marked names into the runtime-side extern set too,
-        // so the runtime emit's per-file propagation pass sees them.
-        // Without this, `Base#is_valid` (in `active_record_base.ts`)
-        // calling `this.validate()` doesn't propagate to async even
-        // though the app-side `Comment#validate` was marked async via
-        // a `validates_belongs_to` call. The result was emit wrapping
-        // `(await this.validate())` inside a non-async `is_valid()`.
-        for sym in &app_async_extra {
+        // Fold every marked name (runtime + app) into the runtime-
+        // side extern set, so the runtime emit's per-file
+        // propagation pass arrives at the same fixed point as the
+        // global pass when it re-parses the runtime sources.
+        for sym in &all_async_names {
             let n = sym.as_str().to_string();
             if !expanded_extern_storage.contains(&n) {
                 expanded_extern_storage.push(n);
             }
         }
-        if !app_async_extra.is_empty() {
-            expr::extend_async_methods(app_async_extra);
+        // Inject every async-known name into the emit-time thread-
+        // local. Two sources: (1) propagation results (`all_async_names`),
+        // and (2) `expanded_extern_storage`, which carries the
+        // adapter seeds AND hand-written runtime methods (the test-
+        // runtime async surface from `minitest.ts` — `get`/`post`/
+        // etc.) that propagation can't see because they're not in
+        // the parsed IR. Without (2), `(await this.get(...))` doesn't
+        // wrap because `get` is in extern but never in the async
+        // name set.
+        let mut emit_async_names = all_async_names;
+        for s in &expanded_extern_storage {
+            emit_async_names.insert(crate::ident::Symbol::from(s.as_str()));
+        }
+        if !emit_async_names.is_empty() {
+            expr::extend_async_methods(emit_async_names);
         }
         let mut fiter = all_funcs.into_iter();
         route_helper_funcs = fiter.by_ref().take(rh_len).collect();
@@ -393,7 +419,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         controller_lcs = iter.by_ref().take(c_len).collect();
         fixture_lcs = iter.by_ref().take(fx_len).collect();
         test_lcs = iter.by_ref().take(tc_len).collect();
-        test_inner_lcs = iter.collect();
+        test_inner_lcs = iter.by_ref().take(tci_len).collect();
+        runtime_seed_classes = iter.collect();
+        let _ = rt_len; // length only used for clarity; consumed via `collect()`.
 
         // Sync is_async flags from the propagated test_lcs /
         // test_inner_lcs (clones used for propagation) back to
@@ -648,7 +676,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !test_lcs.is_empty() {
         files.push(EmittedFile {
             path: PathBuf::from("test/_runtime/minitest.ts"),
-            content: MINITEST_RUNTIME_SOURCE.to_string(),
+            content: minitest_source_for_active_profile().to_string(),
         });
         files.push(emit_test_setup_ts(app, &fixture_lcs));
         for lowered in &test_lowered {
@@ -902,7 +930,18 @@ fn emit_test_setup_ts(
         s.push_str("// rollback) is a future improvement.\n");
         for lc in fixture_lcs {
             let class_name = lc.name.0.as_str();
-            s.push_str(&format!("{class_name}._fixtures_load_bang();\n"));
+            // Under async profiles `_fixtures_load_bang()` returns
+            // Promise<void> (it `save()`s rows through the libsql
+            // adapter). Top-level await is fine in an ES module —
+            // each test file imports setup.ts at module-init.
+            // Without awaiting, fixture rows aren't in the DB by
+            // the time tests start; `Comment.find(1)` then throws
+            // "Couldn't find Comment with id=1".
+            if async_profile {
+                s.push_str(&format!("await {class_name}._fixtures_load_bang();\n"));
+            } else {
+                s.push_str(&format!("{class_name}._fixtures_load_bang();\n"));
+            }
         }
     }
 
