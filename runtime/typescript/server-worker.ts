@@ -33,7 +33,11 @@
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
 import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
-import { installDb, execSQL, type ActionResponse } from "./juntos-worker.js";
+// Note: this file is emitted to `src/server.ts` and the
+// `juntos-worker.ts` source is emitted to `src/juntos.ts` — same
+// rename pattern as `juntos-libsql.ts` → `juntos.ts`. Imports
+// reference the emitted name.
+import { installDb, execSQL, type ActionResponse } from "./juntos.js";
 import { ViewHelpers } from "./view_helpers.js";
 
 // ── SharedWorker global scope declaration ──

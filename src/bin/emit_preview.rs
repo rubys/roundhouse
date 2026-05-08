@@ -2,20 +2,42 @@ use std::path::Path;
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::{crystal, elixir, go, python, rust, typescript};
 use roundhouse::ingest::ingest_app;
+use roundhouse::profile::DeploymentProfile;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let target = if let Some(i) = args.iter().position(|a| a == "--target") {
-        args.remove(i);
-        if i < args.len() { args.remove(i) } else { "typescript".into() }
-    } else {
-        "typescript".into()
-    };
+    let target = take_flag(&mut args, "--target").unwrap_or_else(|| "typescript".into());
+    let profile = take_flag(&mut args, "--profile");
     let fixture = args.first().cloned().unwrap_or_else(|| "fixtures/real-blog".into());
+
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
+
     let (files, out_dir) = match target.as_str() {
-        "typescript" | "ts" => (typescript::emit(&app), "/tmp/rh-ts-pass2"),
+        "typescript" | "ts" => {
+            // `--profile` is only meaningful for the typescript
+            // target — other targets don't yet branch on profile.
+            // `worker` (SharedWorker browser deployment) gets its
+            // own out_dir so a typescript build doesn't clobber it.
+            match profile.as_deref() {
+                Some("worker") => (
+                    typescript::emit_with_profile(&app, &DeploymentProfile::worker()),
+                    "/tmp/rh-ts-worker-pass2",
+                ),
+                Some("node-async") => (
+                    typescript::emit_with_profile(&app, &DeploymentProfile::node_async()),
+                    "/tmp/rh-ts-async-pass2",
+                ),
+                Some("node-sync") => (
+                    typescript::emit_with_profile(&app, &DeploymentProfile::node_sync()),
+                    "/tmp/rh-ts-pass2",
+                ),
+                None => (typescript::emit(&app), "/tmp/rh-ts-pass2"),
+                Some(other) => panic!(
+                    "unknown profile: {other} (valid: node-sync, node-async, worker)"
+                ),
+            }
+        }
         "crystal" | "cr" => (crystal::emit(&app), "/tmp/rh-cr-pass2"),
         "rust" | "rs" => (rust::emit(&app), "/tmp/rh-rs-pass2"),
         "python" | "py" => (python::emit(&app), "/tmp/rh-py-pass2"),
@@ -23,6 +45,7 @@ fn main() {
         "go" => (go::emit(&app), "/tmp/rh-go-pass2"),
         other => panic!("unknown target: {other}"),
     };
+
     let out = Path::new(out_dir);
     if out.exists() { std::fs::remove_dir_all(out).ok(); }
     std::fs::create_dir_all(out).ok();
@@ -32,4 +55,12 @@ fn main() {
         std::fs::write(&path, &f.content).expect("write");
     }
     println!("emitted {} files to {}", files.len(), out_dir);
+}
+
+/// Remove `--name <value>` from args and return the value, or None
+/// if the flag isn't present.
+fn take_flag(args: &mut Vec<String>, name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.remove(i);
+    if i < args.len() { Some(args.remove(i)) } else { None }
 }

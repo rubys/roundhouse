@@ -37,8 +37,14 @@ use roundhouse::emit::{self, EmittedFile};
 use roundhouse::ingest::ingest_app;
 use zip::write::SimpleFileOptions;
 
+// `typescript-worker` is the SharedWorker browser deployment of the
+// TypeScript target — same emit pipeline, picked via
+// `DeploymentProfile::worker()`. Listed alongside the language
+// targets so it shows up in the browse archive matrix; the per-
+// target dispatch in `run()` calls `emit_with_profile` for it.
 const TARGETS: &[&str] = &[
     "ruby", "spinel", "crystal", "elixir", "go", "python", "rust", "typescript",
+    "typescript-worker",
 ];
 
 fn main() -> ExitCode {
@@ -85,6 +91,10 @@ fn run(fixture: &Path, out: &Path) -> Result<(), String> {
             "python" => sort_files(emit::python::emit(&app)),
             "rust" => sort_files(emit::rust::emit(&app)),
             "typescript" => sort_files(emit::typescript::emit(&app)),
+            "typescript-worker" => sort_files(emit::typescript::emit_with_profile(
+                &app,
+                &roundhouse::profile::DeploymentProfile::worker(),
+            )),
             _ => unreachable!(),
         };
 
