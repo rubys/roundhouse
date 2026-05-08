@@ -164,6 +164,30 @@ jobs:
       - name: cargo test --test framework_tests_typescript -- --ignored
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
 
+  framework-tests-spinel:
+    # Per-target framework-test conformance gate for the Spinel
+    # target. Transpiles runtime/ruby/test/**/*_test.rb through
+    # ruby::emit_spinel and runs the result under CRuby (Spinel
+    # itself isn't yet end-to-end runnable for the framework
+    # runtime; CRuby is contract-equivalent for the Ruby subset
+    # Spinel emits). Catches per-target lowering regressions
+    # (test-class-shape rewrites, fixture refs, parent-class
+    # swap) that the source-side `framework_ruby_tests_pass`
+    # gate can't see because it runs the Ruby verbatim. Sibling
+    # of framework-tests-typescript above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - name: cargo test --test framework_tests_spinel -- --ignored
+        run: cargo test --test framework_tests_spinel -- --ignored --nocapture
+
   toolchain-go:
     needs: generate-fixture
     runs-on: ubuntu-latest
