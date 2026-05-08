@@ -49,7 +49,21 @@ pub fn emit_method(m: &MethodDef) -> String {
             if returns_enclosing_class(ret, m.enclosing_class.as_ref()) {
                 String::new()
             } else {
-                format!(" : {}", crystal_ty(ret))
+                // Method-name override: `length` and `size` on
+                // collection-shaped classes delegate to Crystal stdlib
+                // (`Hash#size`, `Array#size`) which returns `Int32`,
+                // not `Int64`. The RBS-side `() -> Integer` would map
+                // to `Int64` by default (Rails IDs are 64-bit), which
+                // mismatches the body. Override here so HWIA's
+                // `def length / def size` compile cleanly.
+                let mname = m.name.as_str();
+                if matches!(mname, "length" | "size")
+                    && matches!(&**ret, crate::ty::Ty::Int)
+                {
+                    " : Int32".to_string()
+                } else {
+                    format!(" : {}", crystal_ty(ret))
+                }
             }
         } else {
             String::new()

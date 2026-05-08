@@ -23,9 +23,14 @@ class RouterTest < Minitest::Test
     { method: "DELETE", pattern: "/articles/:article_id/comments/:id", controller: :comments_controller, action: :destroy },
   ].freeze
 
+  # Raise-if-nil instead of `refute_nil` because Crystal's flow
+  # analysis narrows `m` to non-nil after a raise-on-nil but not
+  # after a `refute_nil` call (the assertion is opaque to the
+  # compiler). CRuby behavior unchanged — both forms abort the
+  # test on a nil match.
   def test_matches_collection_get
     m = Router.match("GET", "/articles", TABLE)
-    refute_nil m
+    raise "expected match" if m.nil?
     assert_equal :index, m[:action]
     # path_params is now an HWIA (String-keyed); empty for static
     # match. Compare via length rather than literal Hash equality.
@@ -34,7 +39,7 @@ class RouterTest < Minitest::Test
 
   def test_matches_member_get_and_captures_id
     m = Router.match("GET", "/articles/42", TABLE)
-    refute_nil m
+    raise "expected match" if m.nil?
     assert_equal :show, m[:action]
     assert_equal "42", m[:path_params].fetch(:id)
   end
@@ -50,7 +55,7 @@ class RouterTest < Minitest::Test
 
   def test_captures_nested_resource_params
     m = Router.match("POST", "/articles/7/comments", TABLE)
-    refute_nil m
+    raise "expected match" if m.nil?
     assert_equal :create, m[:action]
     assert_equal "7", m[:path_params].fetch(:article_id)
   end
@@ -65,7 +70,7 @@ class RouterTest < Minitest::Test
     # finds a route, returning a non-nil match) would have
     # caught the regression at the framework level.
     m = Router.match("DELETE", "/articles/7/comments/3", TABLE)
-    refute_nil m
+    raise "expected match" if m.nil?
     assert_equal :destroy, m[:action]
     assert_equal "7", m[:path_params].fetch(:article_id)
     assert_equal "3", m[:path_params].fetch(:id)
@@ -73,7 +78,7 @@ class RouterTest < Minitest::Test
 
   def test_method_is_case_insensitive
     m = Router.match("get", "/articles", TABLE)
-    refute_nil m
+    raise "expected match" if m.nil?
     assert_equal :index, m[:action]
   end
 

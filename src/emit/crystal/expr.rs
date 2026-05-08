@@ -149,6 +149,24 @@ fn is_empty_branch(e: &Expr) -> bool {
 /// Crystal analogs. `Integer` (abstract integer in Ruby) maps to
 /// `Int` (abstract integer in Crystal — parent of Int8…Int128).
 /// Used at Const emit; only fires for single-segment Consts.
+/// True when `recv` is a framework hash-like class (`Parameters`,
+/// `HashWithIndifferentAccess`, `ActiveSupport::HashWithIndifferentAccess`)
+/// — these classes expose `key?` directly and shouldn't get the
+/// `key?` → `has_key?` Crystal-Hash rewrite.
+fn is_framework_hash_recv(recv: Option<&crate::expr::Expr>) -> bool {
+    let Some(r) = recv else { return false; };
+    let Some(ty) = r.ty.as_ref() else { return false; };
+    if let crate::ty::Ty::Class { id, .. } = ty {
+        let name = id.0.as_str();
+        let last = name.rsplit("::").next().unwrap_or(name);
+        return matches!(
+            last,
+            "Parameters" | "HashWithIndifferentAccess"
+        );
+    }
+    false
+}
+
 fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
     match name {
         "Integer" => Some("Int"),
@@ -691,12 +709,11 @@ pub(super) fn emit_send_base(
         "count" if args_s.is_empty() => "size",
         // Ruby `Hash#key?(k)` exists; Crystal's stdlib Hash uses
         // `has_key?(k)` (with `key?` not exposed for direct dispatch).
-        // Rewrite at the call site so transpiled Ruby (HWIA's
-        // explicit key presence check) compiles. `include?` is also
-        // valid on Crystal Hash but already gets rewritten via
-        // include? → includes? above for String/Array; Hash is the
-        // outlier we route here directly.
-        "key?" => "has_key?",
+        // Rewrite at the call site so transpiled Ruby Hash idioms
+        // compile — but framework classes (Parameters, HWIA) define
+        // `key?` explicitly as part of their API, so skip the
+        // rewrite when the receiver is one of those.
+        "key?" if !is_framework_hash_recv(recv) => "has_key?",
         // Crystal: starts_with? / ends_with? / includes? (note plural).
         // `include?` is method-only — the bare `include` Ruby keyword
         // for module mixin lowers to `LibraryClass::includes`, not
