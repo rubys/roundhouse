@@ -332,15 +332,25 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         ));
     }
 
+    // Lower fixtures up-front so the test_helper renderer can list them
+    // explicitly (replacing the source-side `Object.constants.sort.each`
+    // + `Object.const_get` scan, which violates the spinel subset).
+    // Same `fixture_lcs` is reused below for the per-fixture file emit
+    // and for `fixture_extras` synthesized siblings.
+    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+
     // Test bootstrap. The canonical content (LOAD_PATH wiring,
     // SqliteAdapter setup, RequestDispatch + ActionResponse +
     // SchemaSetup modules) lives at `runtime/spinel/test/test_helper.rb`
     // so the standalone fixture and overlay flows share one source.
-    // Emitted unconditionally — every spinel project carries the
-    // helper even when no test files are produced yet.
+    // The renderer rewrites `FixtureLoader.load_all!` to explicit
+    // `<X>Fixtures._fixtures_load!` calls per-app — see
+    // `render_test_helper`. Emitted unconditionally — every spinel
+    // project carries the helper even when no test files are produced
+    // yet.
     files.push(EmittedFile {
         path: PathBuf::from("test/test_helper.rb"),
-        content: SPINEL_TEST_HELPER.to_string(),
+        content: render_test_helper(&fixture_lcs),
     });
 
     // Test fixtures — one `<Plural>Fixtures` LibraryClass per YAML file
@@ -349,7 +359,6 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // emitted tests to consume via `ArticlesFixtures.one()` (the call
     // shape `lower_test_modules_to_library_classes` rewrites
     // `articles(:one)` to).
-    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
     for lc in &fixture_lcs {
         let stem = fixture_file_stem(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("test/fixtures/{stem}.rb"));
@@ -556,6 +565,53 @@ fn splice_after_requires(content: &str, block: &str) -> String {
 fn fixture_file_stem(class_name: &str) -> String {
     let stem = class_name.strip_suffix("Fixtures").unwrap_or(class_name);
     crate::naming::snake_case(stem)
+}
+
+/// Render `test/test_helper.rb`, substituting the source file's
+/// `Object.constants.sort.each` + `Object.const_get` scan in
+/// `FixtureLoader.load_all!` with explicit per-fixture calls. The
+/// scan was a CRuby-only convenience (the spinel subset rejects
+/// `Object.const_get` and `Object.constants`); we already know the
+/// fixture set at emit time, so emit the explicit list and let the
+/// source file keep the const_get fallback for hand-written non-emit
+/// uses.
+///
+/// Class names are sorted alphabetically — the same ordering the
+/// source-side scan used (which approximates parent-before-child for
+/// the `Articles → Comments` belongs_to shape; topological ordering
+/// is the principled fix once a fixture set exposes a non-alphabetic
+/// dependency).
+fn render_test_helper(fixture_lcs: &[LibraryClass]) -> String {
+    const SCAN_BLOCK: &str = "    Object.constants.sort.each do |c|
+      next unless c.to_s.end_with?(\"Fixtures\")
+      mod = Object.const_get(c)
+      next unless mod.is_a?(Module)
+      next unless mod.respond_to?(:_fixtures_load!)
+      mod._fixtures_load!
+    end";
+
+    debug_assert!(
+        SPINEL_TEST_HELPER.contains(SCAN_BLOCK),
+        "runtime/spinel/test/test_helper.rb FixtureLoader.load_all! body \
+         changed; update SCAN_BLOCK in render_test_helper"
+    );
+
+    let mut names: Vec<&str> = fixture_lcs.iter().map(|lc| lc.name.0.as_str()).collect();
+    names.sort_unstable();
+    let explicit = if names.is_empty() {
+        // Empty FixtureLoader.load_all! body: no fixtures to load.
+        // Keep the indentation consistent so the substitution result
+        // is still valid Ruby (a `def`/`end` with no statements).
+        String::from("    # no fixtures")
+    } else {
+        names
+            .iter()
+            .map(|name| format!("    {name}._fixtures_load!"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    SPINEL_TEST_HELPER.replace(SCAN_BLOCK, &explicit)
 }
 
 /// `ArticleTest` → `article`, `ArticlesControllerTest` →

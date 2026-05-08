@@ -35,16 +35,16 @@ AllCops:
     - vendor/**/*
     - node_modules/**/*
     - tmp/**/*
-    # CRuby-only test harness. `Object.const_get` + `eval(string_expr)`
-    # in FixtureLoader.load_all! and assert_difference/assert_no_difference
-    # are real spinel-subset violations, but this file is the test-side
-    # bootstrap that runs only under CRuby today. Replacing the const_get
-    # scan needs an explicit fixture registry (emitter-contract change);
-    # replacing eval needs assert_difference to take a block instead of a
-    # string (changes every emitted call site). Both are tracked as
-    # follow-ups; until then this file is excluded from the spinel-subset
-    # gate. Slated for full replacement when spinel grows its own test
-    # runner.
+    # Test bootstrap. The `Object.constants` + `Object.const_get` scan
+    # in FixtureLoader.load_all! has been replaced at emit time by
+    # explicit `<X>Fixtures._fixtures_load!` calls (see
+    # `src/emit/ruby.rs::render_test_helper`); the source file keeps
+    # the scan as a CRuby-only fallback for source-side framework_ruby
+    # _tests_pass. The remaining 4 `eval(string)` calls in
+    # assert_difference / assert_no_difference are still real subset
+    # violations — fix needs the helper to take a block / lambda
+    # instead of a string expression (changes every emit site that
+    # uses these assertions). Tracked as follow-up.
     - test/test_helper.rb
     # active_record/base.rb uses the idiomatic
     # `class << self; attr_accessor :adapter` pattern. Spinel itself

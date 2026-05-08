@@ -71,6 +71,14 @@ module FixtureLoader
   # belongs_to graph is the principled fix; defer until a fixture set
   # exposes a non-alphabetic dependency.
   #
+  # The `Object.constants` + `const_get` scan below is rewritten by
+  # `src/emit/ruby.rs::render_test_helper` into explicit
+  # `<X>Fixtures._fixtures_load!` calls per emitted spinel project.
+  # Spinel's AOT model rejects `Object.constants` and `Object.const_get`
+  # (no runtime constant table); the rewrite keeps the source-side
+  # framework_ruby_tests_pass gate working under stock CRuby while
+  # giving emitted projects a subset-clean equivalent.
+  #
   # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
   # constants like Ruby 3.4's `SortedSet` (which raises on access via
   # autoload) don't get touched while scanning for fixture modules.
