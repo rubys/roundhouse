@@ -298,4 +298,57 @@ test.describe("SharedWorker target — real-blog", () => {
       /^\/articles\/\d+$/,
     );
   });
+
+  test("POST /articles with invalid params returns 422 (not 5xx, not redirect)", async ({
+    page,
+  }) => {
+    // Article validations: title presence, body presence + minimum
+    // length 10 (see fixtures/real-blog/app/models/article.rb).
+    // Empty title + 4-char body fail both. Controller flow:
+    //   Article.new(article_params)
+    //   if @article.save  → redirect_to @article (302/303)
+    //   else              → render :new, status: :unprocessable_entity (422)
+    //
+    // This probe exercises the validation-failure path: form
+    // parsing reaches the controller (already covered by the create
+    // test), validations fire, the framework's HWIA-shaped errors
+    // populate, the re-render returns with status 422. Different
+    // failure modes get different statuses — 5xx means the
+    // controller crashed before validations ran; 302/303 means
+    // validations didn't fire; 422 is the happy "validation
+    // failure observable to the client" path.
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => document.getElementById("loading")?.style.display === "none",
+      null,
+      { timeout: 15_000 },
+    );
+
+    const body =
+      "article%5Btitle%5D=" + // empty title — fails presence
+      "&article%5Bbody%5D=tiny"; // 4 chars — fails minimum length 10
+
+    const response = await probeSharedWorker(page, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    expect(
+      response.status,
+      `validation-failure POST returned ${response.status}: ${response.body.slice(0, 300)}`,
+    ).toBe(422);
+
+    // No Location header on a 422 — it's a re-render, not a
+    // navigation. (Also asserts the path didn't accidentally take
+    // the success branch.)
+    const location =
+      response.headers["location"] ?? response.headers["Location"];
+    expect(location, "422 should not set Location").toBeFalsy();
+
+    // Body should be HTML (the re-rendered form).
+    expect(response.headers["content-type"] ?? "").toContain("text/html");
+  });
 });
