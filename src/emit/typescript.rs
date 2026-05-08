@@ -577,11 +577,58 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // `valid?` async. Without this, the per-file pass would only see
     // direct adapter-method calls within a single runtime file.
     let extern_for_runtime: Vec<String> = expanded_extern_storage.clone();
+    // Per-(class, method) async marks computed during global
+    // propagation (including the inheritance pass that pulls a
+    // parent method async when a subclass override is async). The
+    // runtime emit re-parses each runtime file fresh — without
+    // these marks, the inheritance-driven flips on (e.g.)
+    // `Base#instantiate` would be lost between the global pass
+    // and the per-file emit.
+    let runtime_async_marks: std::collections::HashSet<(crate::ident::ClassId, crate::ident::Symbol)> =
+        runtime_seed_classes
+            .iter()
+            .flat_map(|c| {
+                let cname = c.name.clone();
+                c.methods
+                    .iter()
+                    .filter(|m| m.is_async)
+                    .map(move |m| (cname.clone(), m.name.clone()))
+            })
+            .collect();
     let runtime_units = crate::runtime_loader::typescript_units(move |_path, classes| {
         let mut classes: Vec<_> = classes
             .into_iter()
             .map(|c| crate::treeshake::filter_runtime_class(&c, &reach))
             .collect();
+        // Pre-apply the async marks computed during global
+        // propagation. Match by ClassId equality first, falling
+        // back to last-segment match for the runtime/app namespace
+        // mismatch (`Base` vs `ActiveRecord::Base`).
+        if !runtime_async_marks.is_empty() {
+            for class in classes.iter_mut() {
+                let cname_raw = class.name.0.as_str();
+                let cname_last = cname_raw.rsplit("::").next().unwrap_or(cname_raw);
+                for method in class.methods.iter_mut() {
+                    if method.is_async {
+                        continue;
+                    }
+                    let exact = (class.name.clone(), method.name.clone());
+                    if runtime_async_marks.contains(&exact) {
+                        method.is_async = true;
+                        continue;
+                    }
+                    // Last-segment fallback.
+                    let by_last = runtime_async_marks.iter().any(|(cid, mname)| {
+                        let raw = cid.0.as_str();
+                        let last = raw.rsplit("::").next().unwrap_or(raw);
+                        last == cname_last && mname == &method.name
+                    });
+                    if by_last {
+                        method.is_async = true;
+                    }
+                }
+            }
+        }
         if !extern_for_runtime.is_empty() {
             let refs: Vec<&str> = extern_for_runtime.iter().map(|s| s.as_str()).collect();
             crate::analyze::async_color::propagate_with_externs(&mut classes, &refs);

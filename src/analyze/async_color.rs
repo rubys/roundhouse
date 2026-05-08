@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use crate::adapter::DatabaseAdapter;
-use crate::dialect::{AccessorKind, LibraryClass, LibraryFunction};
+use crate::dialect::{AccessorKind, LibraryClass, LibraryFunction, MethodDef};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Pattern};
 use crate::ident::{ClassId, Symbol};
 
@@ -231,6 +231,22 @@ pub fn propagate_global_with_externs(
                 marked_this_pass += 1;
             }
         }
+        // Inheritance pass: a subclass that overrides a parent method
+        // and is colored async forces the parent's same-named method
+        // to be async too. TS class-extends requires the static and
+        // instance sides to align across the inheritance chain — a
+        // sync `Base.instantiate(): Base` cannot be the supertype of
+        // an async `Article.instantiate(): Promise<Article>`.
+        let inh_marks = inheritance_async_marks(classes);
+        for (class_idx, method_name) in inh_marks {
+            let class = &mut classes[class_idx];
+            for method in class.methods.iter_mut() {
+                if method.name == method_name && !method.is_async {
+                    method.is_async = true;
+                    marked_this_pass += 1;
+                }
+            }
+        }
         result.iterations += 1;
         result.newly_marked += marked_this_pass;
         if marked_this_pass == 0 {
@@ -270,6 +286,126 @@ pub fn find_sync_slot_violations(classes: &[LibraryClass]) -> Vec<SyncSlotViolat
         }
     }
     out
+}
+
+/// Inheritance-aware async coloring. Walks the inheritance graph
+/// in both directions: when any class in a method's override chain
+/// is async, every other class in that chain must be async too.
+///
+/// Two-step per call:
+///   1. **Upward**: a subclass's async override forces ancestors with
+///      the same method name to be async (TS class-extends contract).
+///   2. **Downward**: an async method on an ancestor forces every
+///      sync override on a descendant to be async too — otherwise
+///      the descendant's override would have a sync signature where
+///      the parent declared async.
+///
+/// Skips structurally-sync slots (attribute readers/writers, the
+/// constructor) — `find_sync_slot_violations` reports those instead.
+///
+/// Class lookup is by exact `ClassId` equality, then falls back to
+/// last-segment match — accommodates the mix between fully-qualified
+/// names (`ActiveRecord::Base`) and bare names (`Base`) that lowerers
+/// produce for parent links.
+fn inheritance_async_marks(classes: &[LibraryClass]) -> Vec<(usize, Symbol)> {
+    let mut by_full: std::collections::HashMap<&ClassId, usize> =
+        std::collections::HashMap::new();
+    let mut by_last: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, c) in classes.iter().enumerate() {
+        by_full.insert(&c.name, i);
+        let raw = c.name.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        by_last.entry(last).or_insert(i);
+    }
+
+    let resolve_parent = |parent_id: &ClassId| -> Option<usize> {
+        if let Some(&idx) = by_full.get(parent_id) {
+            return Some(idx);
+        }
+        let raw = parent_id.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw);
+        by_last.get(last).copied()
+    };
+
+    // children_of[parent_idx] = list of class_idx whose parent is parent_idx.
+    let mut children_of: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, c) in classes.iter().enumerate() {
+        if let Some(pid) = c.parent.as_ref() {
+            if let Some(p_idx) = resolve_parent(pid) {
+                children_of.entry(p_idx).or_default().push(i);
+            }
+        }
+    }
+
+    let skip = |method: &MethodDef| -> bool {
+        if matches!(
+            method.kind,
+            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+        ) {
+            return true;
+        }
+        method.name.as_str() == "initialize"
+    };
+
+    let mut out: std::collections::HashSet<(usize, Symbol)> =
+        std::collections::HashSet::new();
+
+    for (i, class) in classes.iter().enumerate() {
+        for method in &class.methods {
+            if !method.is_async || skip(method) {
+                continue;
+            }
+            let m_name = method.name.clone();
+
+            // Upward: walk parent chain, recording every ancestor
+            // that defines the same method.
+            let mut chain_roots: Vec<usize> = vec![i];
+            let mut cursor = class.parent.as_ref();
+            while let Some(parent_id) = cursor {
+                let Some(parent_idx) = resolve_parent(parent_id) else { break };
+                let parent = &classes[parent_idx];
+                if parent
+                    .methods
+                    .iter()
+                    .any(|pm| pm.name == m_name && !skip(pm))
+                {
+                    chain_roots.push(parent_idx);
+                    for pm in &parent.methods {
+                        if pm.name == m_name && !pm.is_async && !skip(pm) {
+                            out.insert((parent_idx, m_name.clone()));
+                        }
+                    }
+                }
+                cursor = parent.parent.as_ref();
+            }
+
+            // Downward: from every node in the chain (the original
+            // class plus any ancestor that defines the method), walk
+            // all transitive descendants and mark sync overrides
+            // async. The walk visits each node at most once via the
+            // visited set.
+            let mut visited: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            let mut stack = chain_roots;
+            while let Some(idx) = stack.pop() {
+                if !visited.insert(idx) {
+                    continue;
+                }
+                let dc = &classes[idx];
+                for dm in &dc.methods {
+                    if dm.name == m_name && !dm.is_async && !skip(dm) {
+                        out.insert((idx, m_name.clone()));
+                    }
+                }
+                if let Some(kids) = children_of.get(&idx) {
+                    stack.extend(kids.iter().copied());
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
 }
 
 fn collect_async_method_names(classes: &[LibraryClass]) -> HashSet<Symbol> {
@@ -1066,6 +1202,63 @@ mod tests {
         let result = propagate_with_externs(&mut classes, &["all", "find"]);
         assert!(classes[0].methods[0].is_async);
         assert_eq!(result.newly_marked, 1);
+    }
+
+    #[test]
+    fn inheritance_pass_marks_parent_method_when_subclass_async() {
+        // Mirror the libsql AR shape: Base#instantiate is sync (its
+        // body just `raise`s — no async calls). A subclass's
+        // `instantiate` becomes async via call-graph propagation
+        // (it calls `from_row` which awaits the DB adapter). TS
+        // class-extends requires the parent method's signature to
+        // be assignable, so Base#instantiate must also be marked.
+        let mut classes = vec![
+            synth_class(
+                "Base",
+                vec![synth_method("instantiate"), synth_method("from_row")],
+            ),
+            {
+                let mut article = synth_class(
+                    "Article",
+                    vec![
+                        synth_method_with_body(
+                            "instantiate",
+                            synth_send("from_row", None, vec![]),
+                        ),
+                        {
+                            let mut m = synth_method_with_body(
+                                "from_row",
+                                synth_send("count", None, vec![]),
+                            );
+                            // Article#from_row calls the extern `count`,
+                            // so propagation marks it async; then
+                            // Article#instantiate becomes async via
+                            // its body's call to from_row.
+                            m
+                        },
+                    ],
+                );
+                article.parent = Some(ClassId(Symbol::from("Base")));
+                article
+            },
+        ];
+        let result = propagate_global_with_externs(&mut classes, &mut [], &["count"]);
+        assert!(
+            classes[1].methods[0].is_async,
+            "Article#instantiate should be async via call-graph"
+        );
+        assert!(
+            classes[0].methods[0].is_async,
+            "Base#instantiate should be async via inheritance pass"
+        );
+        // Base#from_row also gets pulled async — the subclass's
+        // override is async (call-graph), so the parent contract
+        // has to match for TS-extends to accept it.
+        assert!(
+            classes[0].methods[1].is_async,
+            "Base#from_row should be async via inheritance pass"
+        );
+        let _ = result;
     }
 
     #[test]

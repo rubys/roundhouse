@@ -448,23 +448,64 @@ pub fn parse_methods_with_rbs_in_ctx(
     classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Result<Vec<MethodDef>, String> {
     let mut methods = parse_methods(ruby_src)?;
-    let sigs = parse_signatures(rbs_src)?;
 
-    let abstract_methods: std::collections::HashSet<String> = sigs
-        .abstract_methods
-        .iter()
-        .map(|s| s.as_str().to_string())
-        .collect();
-    let mut sig_map: std::collections::HashMap<String, Ty> = sigs
-        .methods
-        .into_iter()
-        .map(|(n, ty)| (n.as_str().to_string(), ty))
-        .collect();
+    // Per-class signature maps. A flat name-keyed map collapses
+    // entries when the same method name appears in two classes
+    // (e.g. `initialize` on both RecordNotFound and RecordInvalid in
+    // active_record/errors). parse_app_signatures groups by the
+    // fully-qualified class id; we re-key by last segment to match
+    // Ruby's MethodDef.enclosing_class, which carries the bare
+    // class name. For module-flat / top-level defs (no enclosing
+    // class) we fall back to a name-keyed map built from
+    // parse_signatures.
+    let app_sigs = crate::rbs::parse_app_signatures(rbs_src)?;
+    let mut sig_by_class: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
+        std::collections::HashMap::new();
+    for (cid, sigs) in app_sigs {
+        let raw = cid.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        let entry = sig_by_class.entry(last).or_default();
+        for (n, ty) in sigs {
+            entry.insert(n, ty);
+        }
+    }
+
+    let flat_sigs = parse_signatures(rbs_src)?;
+    let abstract_methods: std::collections::HashSet<Symbol> =
+        flat_sigs.abstract_methods.iter().cloned().collect();
+    let mut flat_sig_map: std::collections::HashMap<Symbol, Ty> =
+        flat_sigs.methods.into_iter().collect();
+
+    // Names that satisfied a top-level (no enclosing class) Ruby def
+    // via flat lookup. These should also be skipped during the
+    // per-class orphan check — emit_method drops module wrappers, so
+    // a round-trip test re-parses with `enclosing_class = None` but
+    // the RBS sigs still live inside a `module M`.
+    let mut flat_matched_names: std::collections::HashSet<Symbol> =
+        std::collections::HashSet::new();
 
     for m in &mut methods {
-        let ty = sig_map.remove(m.name.as_str()).ok_or_else(|| {
-            format!("method `{}` has no matching RBS signature", m.name)
-        })?;
+        let ty = if let Some(enclosing) = &m.enclosing_class {
+            let class_key = enclosing.as_str();
+            let class_sigs = sig_by_class.get_mut(class_key).ok_or_else(|| {
+                format!(
+                    "class `{}` method `{}` has no matching RBS signature",
+                    class_key, m.name
+                )
+            })?;
+            class_sigs.remove(&m.name).ok_or_else(|| {
+                format!(
+                    "class `{}` method `{}` has no matching RBS signature",
+                    class_key, m.name
+                )
+            })?
+        } else {
+            let ty = flat_sig_map.remove(&m.name).ok_or_else(|| {
+                format!("method `{}` has no matching RBS signature", m.name)
+            })?;
+            flat_matched_names.insert(m.name.clone());
+            ty
+        };
 
         if let Ty::Fn { params, .. } = &ty {
             // RBS injects a synthetic Block-kind param into Ty::Fn
@@ -495,20 +536,33 @@ pub fn parse_methods_with_rbs_in_ctx(
         m.signature = Some(ty);
     }
 
-    // Drop signatures marked `%a{abstract}` from the orphan check.
-    // Abstract methods declare a contract that subclasses fulfill;
-    // the base class's .rb intentionally has no body for them.
-    for name in &abstract_methods {
-        sig_map.remove(name);
+    // Per-class orphan check, with abstract-method filtering applied
+    // uniformly across all classes (the flat parser is the only
+    // source of `%a{abstract}` markers). Also drop names already
+    // claimed by a top-level Ruby def (see `flat_matched_names`).
+    for (class_key, mut sigs) in sig_by_class {
+        for name in &abstract_methods {
+            sigs.remove(name);
+        }
+        for name in &flat_matched_names {
+            sigs.remove(name);
+        }
+        if !sigs.is_empty() {
+            let mut orphaned: Vec<String> = sigs.keys().map(|s| s.as_str().to_string()).collect();
+            orphaned.sort();
+            return Err(format!(
+                "class `{}`: RBS signature(s) with no matching Ruby method: {}",
+                class_key,
+                orphaned.join(", ")
+            ));
+        }
     }
-    if !sig_map.is_empty() {
-        let mut orphaned: Vec<String> = sig_map.keys().cloned().collect();
-        orphaned.sort();
-        return Err(format!(
-            "RBS signature(s) with no matching Ruby method: {}",
-            orphaned.join(", ")
-        ));
-    }
+    // Drop the flat name-keyed map — it's a fallback for top-level
+    // (module-flat) defs only. Runtime RBS files wrap declarations
+    // in classes/modules, so flat_sig_map's residue overlaps with
+    // sig_by_class entries already orphan-checked above; a separate
+    // flat orphan check would double-count.
+    drop(flat_sig_map);
 
     // Two-pass flow-sensitive ivar typing, mirroring the model-side
     // analyzer (`src/analyze/mod.rs`):
