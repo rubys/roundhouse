@@ -296,3 +296,15 @@ export async function execute(sql: string, params: unknown[] = []): Promise<{ ch
 export async function execSQL(sql: string): Promise<void> {
   await sendMessage({ type: "execSQL", sql });
 }
+
+// ── Controller/router surface ──
+//
+// Re-exported parallel to `juntos.ts` / `juntos-libsql.ts`. These
+// types are target-mechanism-agnostic — kept here so
+// `server-worker.ts` imports everything from one place.
+
+export type ActionResponse = {
+  body?: string;
+  status?: number;
+  location?: string;
+};
