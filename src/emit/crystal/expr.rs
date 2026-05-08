@@ -152,6 +152,12 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
     match name {
         "Integer" => Some("Int"),
+        // Ruby's StandardError / RuntimeError have no Crystal analog;
+        // collapse to `Exception` (the matching base class). Mirrors
+        // the parent-class swap in `crystal_parent_name`. Without
+        // this, `assert_operator(X, :<, StandardError)` and similar
+        // bare-Const refs leave an undefined name in the output.
+        "StandardError" | "RuntimeError" => Some("Exception"),
         _ => None,
     }
 }

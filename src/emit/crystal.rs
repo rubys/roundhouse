@@ -355,8 +355,68 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // Hoist class-body constants to file scope first — Crystal
             // top-level constants are visible everywhere below them,
             // mirroring the Ruby `TABLE = [...]` lift in spinel emit.
+            // `.freeze` calls strip out: Crystal Array/Hash literals
+            // are mutable by default and `.freeze` has no analog in
+            // the Crystal API; Ruby's `freeze` was protective, not
+            // semantic to the test.
             for (name, value) in &lowered.constants {
-                let value_s = expr::emit_expr(value);
+                let value_expr: &crate::expr::Expr = match &*value.node {
+                    crate::expr::ExprNode::Send { recv: Some(r), method, args, .. }
+                        if method.as_str() == "freeze" && args.is_empty() => r,
+                    _ => value,
+                };
+                // `NAME = Struct.new(:a, :b, :c) do ... end` → synthesize
+                // a Crystal class with positional constructor params
+                // bound to public properties. Mirrors the same lift in
+                // the TS emit; Crystal property declarations carry a
+                // type, so default to `String` (the most common case
+                // for the framework tests' Struct stand-ins; refine to
+                // typed fields when the body-typer knows better).
+                if let crate::expr::ExprNode::Send { recv, method, args, .. } = &*value_expr.node {
+                    let recv_is_struct = recv.as_ref().is_some_and(|r| {
+                        matches!(&*r.node, crate::expr::ExprNode::Const { path }
+                            if path.len() == 1 && path[0].as_str() == "Struct")
+                    });
+                    if recv_is_struct && method.as_str() == "new" {
+                        let fields: Vec<&str> = args
+                            .iter()
+                            .filter_map(|a| match &*a.node {
+                                crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !fields.is_empty() {
+                            writeln!(content, "class {}", name.as_str()).unwrap();
+                            for f in &fields {
+                                writeln!(content, "  property {f} : (String | Int32 | Nil)").unwrap();
+                            }
+                            write!(content, "  def initialize(").unwrap();
+                            let params = fields
+                                .iter()
+                                .map(|f| format!("@{f} : (String | Int32 | Nil) = nil"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            content.push_str(&params);
+                            writeln!(content, ")").unwrap();
+                            writeln!(content, "  end").unwrap();
+                            // `record[:field]` → `record.get(:field)` — the
+                            // Crystal emit's framework-class bracket-access
+                            // doesn't know about our Struct stand-ins, so
+                            // give them a `[]` accessor that maps to the
+                            // matching property.
+                            writeln!(content, "  def [](field : Symbol)").unwrap();
+                            writeln!(content, "    case field").unwrap();
+                            for f in &fields {
+                                writeln!(content, "    when :{f} then @{f}").unwrap();
+                            }
+                            writeln!(content, "    end").unwrap();
+                            writeln!(content, "  end").unwrap();
+                            writeln!(content, "end").unwrap();
+                            continue;
+                        }
+                    }
+                }
+                let value_s = expr::emit_expr(value_expr);
                 writeln!(content, "{} = {}", name.as_str(), value_s).unwrap();
             }
             if !lowered.constants.is_empty() {
