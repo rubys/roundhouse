@@ -1647,18 +1647,30 @@ fn emit_send_with_parens_inner(
             }
         }
     }
-    // Ruby stdlib `Base64.strict_encode64(x)` → Node
-    // `Buffer.from(x).toString("base64")`. `strict_encode64` differs
-    // from `encode64` only in not inserting newlines; `Buffer`'s
-    // base64 is already strict-shaped. The browser-side `btoa`
-    // alternative would be ASCII-only — `Buffer.from` handles
-    // arbitrary bytes correctly, matching Ruby's Base64 behavior.
+    // Ruby stdlib `Base64.strict_encode64(x)` → portable browser+
+    // Node form: UTF-8-encode via TextEncoder, byte-stringify via
+    // String.fromCharCode, base64 via globalThis.btoa.
+    //
+    // Why not `Buffer.from(x).toString("base64")`: Buffer is a Node
+    // global, undefined in browsers / SharedWorker / dedicated
+    // Worker. The portable path works everywhere — Node has `btoa`,
+    // `TextEncoder`, and `String.fromCharCode` as globals since 16,
+    // browsers always have. `strict_encode64` differs from
+    // `encode64` only in not inserting newlines; `btoa` is already
+    // strict-shaped (no line breaks), matching Ruby's behavior.
+    //
+    // The `String.fromCharCode(...arr)` spread has an argument-
+    // count limit (~100k on most engines), but real call sites
+    // here are small (turbo_stream_from channel identifiers, JSON
+    // keyed by short model names). If a site ever needs unbounded
+    // bytes, swap for a chunked loop in the framework runtime
+    // rather than complicating this emit.
     if method == "strict_encode64" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.len() == 1 && path[0].as_str() == "Base64" {
                     return format!(
-                        "Buffer.from({}).toString(\"base64\")",
+                        "btoa(String.fromCharCode(...new TextEncoder().encode({})))",
                         args_s[0],
                     );
                 }
