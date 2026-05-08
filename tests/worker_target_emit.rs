@@ -136,3 +136,151 @@ fn worker_profile_server_bytes_match_runtime_source() {
          runtime/typescript/server-worker.ts"
     );
 }
+
+// ── Stage C: entry-point + ecosystem files ───────────────────────────
+
+#[test]
+fn worker_profile_emits_three_entry_points() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::worker());
+
+    // Three Vite entries: main.ts (loads client.ts), worker.ts
+    // (loads server-worker.ts), and src/db_worker.ts (already
+    // emitted as a runtime file in Stage B). The dedicated DB
+    // Worker uses src/db_worker.ts directly as its rollup input —
+    // no separate project-root stub.
+    let main = find(&files, "main.ts").expect("main.ts");
+    assert!(
+        main.content.contains("startClient"),
+        "worker main.ts should call startClient: {}",
+        main.content,
+    );
+    assert!(
+        main.content.contains("@hotwired/turbo"),
+        "worker main.ts should import @hotwired/turbo for Drive navigation",
+    );
+    assert!(
+        !main.content.contains("startServer"),
+        "worker main.ts must NOT call startServer (node target)",
+    );
+
+    let worker = find(&files, "worker.ts").expect("worker.ts");
+    assert!(
+        worker.content.contains("startApplication"),
+        "worker.ts should call startApplication",
+    );
+    assert!(
+        worker.content.contains("./src/server.js"),
+        "worker.ts should import startApplication from ./src/server.js",
+    );
+
+    // src/db_worker.ts already covered by Stage B test above.
+}
+
+#[test]
+fn worker_profile_emits_index_html_with_meta_placeholders() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::worker());
+
+    let html = find(&files, "index.html").expect("index.html");
+    assert!(
+        html.content.contains("<meta name=\"juntos-worker\""),
+        "index.html should contain juntos-worker meta tag (manifest plugin rewrites it)",
+    );
+    assert!(
+        html.content.contains("<meta name=\"juntos-db-worker\""),
+        "index.html should contain juntos-db-worker meta tag",
+    );
+    assert!(
+        html.content.contains("/main.ts"),
+        "index.html should load /main.ts as a module entry",
+    );
+}
+
+#[test]
+fn worker_profile_emits_vite_config_with_three_inputs() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::worker());
+
+    let vite = find(&files, "vite.config.ts").expect("vite.config.ts");
+    assert!(
+        vite.content.contains("input: {"),
+        "vite.config.ts should have rollupOptions.input",
+    );
+    assert!(
+        vite.content.contains("main: resolve(\"index.html\")"),
+        "vite.config.ts should declare main entry (index.html)",
+    );
+    assert!(
+        vite.content.contains("worker: resolve(\"worker.ts\")"),
+        "vite.config.ts should declare worker entry (worker.ts)",
+    );
+    assert!(
+        vite.content.contains("db_worker: resolve(\"src/db_worker.ts\")"),
+        "vite.config.ts should declare db_worker entry (src/db_worker.ts)",
+    );
+    assert!(
+        vite.content.contains("manifest: true"),
+        "vite.config.ts should enable build.manifest",
+    );
+    assert!(
+        vite.content.contains("manifestMetaInjection"),
+        "vite.config.ts should include the manifest-meta-injection plugin",
+    );
+}
+
+#[test]
+fn worker_profile_package_json_uses_vite_not_tsx() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::worker());
+
+    let pkg = find(&files, "package.json").expect("package.json");
+    assert!(
+        pkg.content.contains("\"vite\""),
+        "worker package.json should depend on vite",
+    );
+    assert!(
+        pkg.content.contains("@hotwired/turbo"),
+        "worker package.json should depend on @hotwired/turbo",
+    );
+    assert!(
+        pkg.content.contains("@sqlite.org/sqlite-wasm"),
+        "worker package.json should depend on @sqlite.org/sqlite-wasm",
+    );
+    assert!(
+        !pkg.content.contains("better-sqlite3"),
+        "worker package.json must NOT include better-sqlite3 (node-only)",
+    );
+    assert!(
+        !pkg.content.contains("@libsql/client"),
+        "worker package.json must NOT include @libsql/client (node-only)",
+    );
+    assert!(
+        !pkg.content.contains("\"tsx\""),
+        "worker package.json must NOT include tsx (node-only runtime)",
+    );
+    assert!(
+        pkg.content.contains("\"dev\": \"vite\""),
+        "worker package.json should expose npm run dev → vite",
+    );
+    assert!(
+        pkg.content.contains("\"build\": \"vite build\""),
+        "worker package.json should expose npm run build → vite build",
+    );
+}
+
+#[test]
+fn node_profiles_do_not_emit_worker_ecosystem_files() {
+    let app = analyzed("fixtures/real-blog");
+    let async_files = typescript::emit_with_profile(&app, &DeploymentProfile::node_async());
+
+    assert!(find(&async_files, "worker.ts").is_none());
+    assert!(find(&async_files, "index.html").is_none());
+    assert!(find(&async_files, "vite.config.ts").is_none());
+
+    // Sanity: node profile still produces main.ts (the existing one,
+    // calling startServer, not startClient).
+    let main = find(&async_files, "main.ts").expect("node main.ts");
+    assert!(main.content.contains("startServer"));
+    assert!(!main.content.contains("startClient"));
+}
