@@ -292,7 +292,29 @@ fn render_class(lc: &LibraryClass) -> String {
                 }
                 let ty = match m.signature.as_ref() {
                     Some(crate::ty::Ty::Fn { ret, .. }) => super::ty::crystal_ty(ret),
-                    _ => "String".to_string(),
+                    _ => {
+                        // No signature — `attr_accessor` synth without
+                        // RBS annotation. Walk every method body in
+                        // this class for an `@<mname> = <expr>`
+                        // assignment and use the first non-Untyped
+                        // type seen. The default-fallback `String` is
+                        // wrong for accessors holding arrays / hashes
+                        // (e.g. `errors : Array(String)`), so this
+                        // ivar-driven inference is critical when the
+                        // RBS sidecar doesn't cover the test class.
+                        let target = format!("@{mname}");
+                        let mut probe: indexmap::IndexMap<String, crate::ty::Ty> =
+                            indexmap::IndexMap::new();
+                        for other in &lc.methods {
+                            collect_ivar_assignments(&other.body, &mut probe);
+                        }
+                        match probe.get(&target[1..]) {
+                            Some(t) if !matches!(t, crate::ty::Ty::Untyped) => {
+                                super::ty::crystal_ty(t)
+                            }
+                            _ => "String".to_string(),
+                        }
+                    }
                 };
                 // Append `?` only when initialize doesn't assign this
                 // property — Crystal's strict null check requires

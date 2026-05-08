@@ -65,39 +65,39 @@ class ValidationsTest < Minitest::Test
   # ── length ──────────────────────────────────────────────────
 
   def test_validates_length_of_passes_within_range
-    @subject.validates_length_of(:body, "abcdefghij", minimum: 5, maximum: 20)
+    @subject.validates_length_of(:body, "abcdefghij", {minimum: 5, maximum: 20})
     assert_empty @subject.errors
   end
 
   def test_validates_length_of_fails_below_minimum
-    @subject.validates_length_of(:body, "abc", minimum: 5)
+    @subject.validates_length_of(:body, "abc", {minimum: 5})
     assert_includes @subject.errors, "body is too short (minimum is 5)"
   end
 
   def test_validates_length_of_fails_above_maximum
-    @subject.validates_length_of(:body, "abcdefghij", maximum: 5)
+    @subject.validates_length_of(:body, "abcdefghij", {maximum: 5})
     assert_includes @subject.errors, "body is too long (maximum is 5)"
   end
 
   def test_validates_length_of_fails_on_wrong_exact_length
-    @subject.validates_length_of(:zip, "1234", is: 5)
+    @subject.validates_length_of(:zip, "1234", {is: 5})
     assert_includes @subject.errors, "zip is the wrong length (should be 5)"
   end
 
   def test_validates_length_of_passes_on_array
-    @subject.validates_length_of(:tags, [1, 2, 3], minimum: 1, maximum: 5)
+    @subject.validates_length_of(:tags, [1, 2, 3], {minimum: 1, maximum: 5})
     assert_empty @subject.errors
   end
 
   def test_validates_length_of_skips_on_nil_value
-    @subject.validates_length_of(:body, nil, minimum: 5)
+    @subject.validates_length_of(:body, nil, {minimum: 5})
     assert_empty @subject.errors
   end
 
   # ── numericality ────────────────────────────────────────────
 
   def test_validates_numericality_of_passes_on_int
-    @subject.validates_numericality_of(:age, 25, greater_than: 0)
+    @subject.validates_numericality_of(:age, 25, {greater_than: 0})
     assert_empty @subject.errors
   end
 
@@ -107,36 +107,36 @@ class ValidationsTest < Minitest::Test
   end
 
   def test_validates_numericality_of_fails_below_greater_than
-    @subject.validates_numericality_of(:age, 0, greater_than: 0)
+    @subject.validates_numericality_of(:age, 0, {greater_than: 0})
     assert_includes @subject.errors, "age must be greater than 0"
   end
 
   def test_validates_numericality_of_only_integer_rejects_float
-    @subject.validates_numericality_of(:count, 3.14, only_integer: true)
+    @subject.validates_numericality_of(:count, 3.14, {only_integer: true})
     assert_includes @subject.errors, "count must be an integer"
   end
 
   # ── inclusion ───────────────────────────────────────────────
 
   def test_validates_inclusion_of_passes_when_member
-    @subject.validates_inclusion_of(:status, "active", within: %w[active inactive])
+    @subject.validates_inclusion_of(:status, "active", {within: %w[active inactive]})
     assert_empty @subject.errors
   end
 
   def test_validates_inclusion_of_fails_when_not_member
-    @subject.validates_inclusion_of(:status, "deleted", within: %w[active inactive])
+    @subject.validates_inclusion_of(:status, "deleted", {within: %w[active inactive]})
     assert_includes @subject.errors, "status is not included in the list"
   end
 
   # ── format ──────────────────────────────────────────────────
 
   def test_validates_format_of_passes_on_match
-    @subject.validates_format_of(:zip, "12345", with: /\A\d{5}\z/)
+    @subject.validates_format_of(:zip, "12345", {with: /\A\d{5}\z/})
     assert_empty @subject.errors
   end
 
   def test_validates_format_of_fails_on_mismatch
-    @subject.validates_format_of(:zip, "abcd", with: /\A\d{5}\z/)
+    @subject.validates_format_of(:zip, "abcd", {with: /\A\d{5}\z/})
     assert_includes @subject.errors, "zip is invalid"
   end
 

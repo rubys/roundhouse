@@ -170,6 +170,11 @@ fn is_framework_hash_recv(recv: Option<&crate::expr::Expr>) -> bool {
 fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
     match name {
         "Integer" => Some("Int"),
+        // Crystal's parent for Int/Float is `Number`, not Ruby's
+        // `Numeric`. The framework runtime uses `is_a?(Numeric)` for
+        // the numericality validator's int+float check; rewrite the
+        // bare const so the predicate compiles.
+        "Numeric" => Some("Number"),
         // Ruby's StandardError / RuntimeError have no Crystal analog;
         // collapse to `Exception` (the matching base class). Mirrors
         // the parent-class swap in `crystal_parent_name`. Without
