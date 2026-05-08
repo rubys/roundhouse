@@ -174,8 +174,13 @@ class BaseTest < Minitest::Test
 
   class HashItem < Item
     def initialize(attrs = {})
-      super
-      @title = attrs[:title]
+      super()
+      # Use the property setter instead of `@title = ...` directly
+      # — Crystal infers a per-class `@title : String` here that
+      # conflicts with the parent's `@title : String?` (from Item's
+      # `attr_accessor :title`). The setter routes through the
+      # parent's already-typed property.
+      self.title = attrs[:title]
     end
   end
 
