@@ -23,8 +23,14 @@ use crate::ty::Ty;
 
 const JUNTOS_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
 const JUNTOS_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/juntos-libsql.ts");
+const JUNTOS_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/juntos-worker.ts");
 const SERVER_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/server.ts");
 const SERVER_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/server-libsql.ts");
+const SERVER_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/server-worker.ts");
+const CLIENT_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/client.ts");
+const DB_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/db_worker.ts");
+const SQLITE_WASM_ENGINE_SOURCE: &str =
+    include_str!("../../runtime/typescript/sqlite_wasm_engine.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
@@ -43,13 +49,17 @@ fn minitest_source_for_active_profile() -> &'static str {
 }
 
 /// Pick the `juntos.ts` runtime variant for the active deployment
-/// profile. Sync profiles (`node-sync`) get the better-sqlite3-
-/// backed adapter; async profiles (`node-async`, future Workers/
-/// browser variants) get the libsql-backed adapter. The choice is
-/// keyed on `active_extern_async_names()` being non-empty — that's
-/// the signal `emit_with_profile` plants when the profile's
-/// adapter has async-seeded methods.
+/// profile. Selection has two axes:
+///   - `http_shim == SharedWorker` → `juntos-worker.ts` (MessagePort-
+///     proxied AR adapter, BroadcastChannel-backed broadcaster).
+///   - Otherwise: sync profiles (`node-sync`) get better-sqlite3-
+///     backed adapter; async profiles (`node-async`, future server
+///     variants) get the libsql-backed adapter. Keyed on
+///     `active_extern_async_names()` being non-empty.
 fn juntos_source_for_active_profile() -> &'static str {
+    if crate::profile::active_http_shim() == crate::profile::HttpShim::SharedWorker {
+        return JUNTOS_WORKER_SOURCE;
+    }
     if crate::analyze::async_color::active_extern_async_names().is_empty() {
         JUNTOS_SQLITE_SOURCE
     } else {
@@ -60,6 +70,9 @@ fn juntos_source_for_active_profile() -> &'static str {
 /// Pick the `server.ts` runtime variant for the active profile —
 /// same selection rule as `juntos_source_for_active_profile`.
 fn server_source_for_active_profile() -> &'static str {
+    if crate::profile::active_http_shim() == crate::profile::HttpShim::SharedWorker {
+        return SERVER_WORKER_SOURCE;
+    }
     if crate::analyze::async_color::active_extern_async_names().is_empty() {
         SERVER_SQLITE_SOURCE
     } else {
@@ -101,8 +114,10 @@ pub fn emit_with_profile(
         .iter()
         .map(|s| crate::ident::Symbol::from(*s))
         .collect();
-    crate::analyze::async_color::with_extern_async_names(extern_names, || {
-        expr::with_async_methods(async_set, || emit(app))
+    crate::profile::with_active_profile(*profile, || {
+        crate::analyze::async_color::with_extern_async_names(extern_names, || {
+            expr::with_async_methods(async_set, || emit(app))
+        })
     })
 }
 
@@ -136,6 +151,27 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         path: PathBuf::from("src/server.ts"),
         content: server_source_for_active_profile().to_string(),
     });
+
+    // SharedWorker target: three additional runtime files reach the
+    // output. `client.ts` is the main-thread Turbo intercept bridge
+    // (loaded by the emitted `main.ts` entry); `db_worker.ts` runs
+    // inside the dedicated DB Worker; `sqlite_wasm_engine.ts` is
+    // its sqlite-wasm + opfs-sahpool backend. None are referenced
+    // by node-target builds.
+    if crate::profile::active_http_shim() == crate::profile::HttpShim::SharedWorker {
+        files.push(EmittedFile {
+            path: PathBuf::from("src/client.ts"),
+            content: CLIENT_WORKER_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("src/db_worker.ts"),
+            content: DB_WORKER_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("src/sqlite_wasm_engine.ts"),
+            content: SQLITE_WASM_ENGINE_SOURCE.to_string(),
+        });
+    }
 
     // (Transpile-from-Ruby runtime emit deferred to AFTER the
     // lowering pipeline so the tree-shake walker can use the

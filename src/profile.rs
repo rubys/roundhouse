@@ -21,6 +21,45 @@
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};
 
+// Active-profile thread-local ----------------------------------------
+//
+// `emit_with_profile(app, profile)` wraps the emit pipeline with
+// `with_active_profile(*profile, || ...)` so per-target picker
+// functions and entry-point emitters can read the active profile
+// without threading it through every helper signature. Mirrors the
+// `EXTERN_ASYNC_NAMES` pattern in `analyze/async_color.rs` — the
+// async list and the profile carry overlapping but distinct
+// information; keeping them as separate slots avoids forcing every
+// async-coloring caller to construct a full profile.
+
+std::thread_local! {
+    static ACTIVE_PROFILE: std::cell::RefCell<Option<DeploymentProfile>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `profile` installed as the active deployment
+/// profile. Restores the previous value on return.
+pub fn with_active_profile<F, R>(profile: DeploymentProfile, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = ACTIVE_PROFILE.with(|cell| cell.replace(Some(profile)));
+    let r = f();
+    ACTIVE_PROFILE.with(|cell| *cell.borrow_mut() = prev);
+    r
+}
+
+/// Snapshot of the active profile, if any. `None` outside an
+/// `emit_with_profile` scope (e.g. legacy `emit(app)` callers).
+pub fn active_profile() -> Option<DeploymentProfile> {
+    ACTIVE_PROFILE.with(|cell| *cell.borrow())
+}
+
+/// Convenience: the active HTTP shim, defaulting to `NodeHttp` when
+/// no profile is installed (matches pre-profile emit behavior).
+pub fn active_http_shim() -> HttpShim {
+    active_profile().map(|p| p.http_shim).unwrap_or(HttpShim::NodeHttp)
+}
+
 /// Compilation target — the language/runtime the emitter produces.
 /// Mirrors the per-target emitters under `src/emit/`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +120,16 @@ pub enum HttpShim {
     /// Cloudflare Workers fetch handler: `export default { fetch }`.
     CloudflareWorkers,
     /// Browser client-side router — no incoming HTTP, navigation
-    /// drives action dispatch.
+    /// drives action dispatch. Single-threaded: application logic +
+    /// DB run on the main thread.
     BrowserRouter,
+    /// SharedWorker three-tier browser deployment: main thread is a
+    /// thin Turbo-intercept transport, application logic runs in a
+    /// SharedWorker (request/response over MessagePort), DB runs in
+    /// a dedicated Worker (sqlite-wasm + OPFS). The
+    /// `runtime/typescript/{client,server-worker,juntos-worker,
+    /// db_worker,sqlite_wasm_engine}.ts` family.
+    SharedWorker,
 }
 
 /// A validated (target, database, http shim) triple. Construct via
@@ -162,6 +209,21 @@ impl DeploymentProfile {
         }
     }
 
+    /// SharedWorker three-tier browser profile: sqlite-wasm in a
+    /// dedicated DB Worker, application logic in a SharedWorker,
+    /// main thread is a thin Turbo-intercept bridge. All AR adapter
+    /// methods are async (every operation round-trips MessagePort
+    /// to the dedicated Worker), so async coloring fires the same
+    /// as `node_async`.
+    pub fn worker() -> Self {
+        Self {
+            name: "worker",
+            target: Target::TypeScript,
+            database: Database::SqliteAsync,
+            http_shim: HttpShim::SharedWorker,
+        }
+    }
+
     /// Re-validate. `new()` calls this; named constructors skip it
     /// (their inputs are known-valid). Exposed so callers that
     /// build a profile by struct literal can verify it.
@@ -171,6 +233,7 @@ impl DeploymentProfile {
             HttpShim::NodeHttp => None,
             HttpShim::CloudflareWorkers => Some(Target::TypeScript),
             HttpShim::BrowserRouter => Some(Target::TypeScript),
+            HttpShim::SharedWorker => Some(Target::TypeScript),
         };
         if let Some(required) = shim_target {
             if self.target != required {
@@ -204,7 +267,7 @@ impl DeploymentProfile {
         if self.database == Database::SqliteSync
             && matches!(
                 self.http_shim,
-                HttpShim::CloudflareWorkers | HttpShim::BrowserRouter
+                HttpShim::CloudflareWorkers | HttpShim::BrowserRouter | HttpShim::SharedWorker
             )
         {
             return Err(ProfileError::DatabaseUnreachable {
@@ -252,6 +315,65 @@ mod tests {
         assert!(p.validate().is_ok());
         assert_eq!(p.name, "node-async");
         assert!(p.database.is_async());
+    }
+
+    #[test]
+    fn worker_is_valid() {
+        let p = DeploymentProfile::worker();
+        assert!(p.validate().is_ok());
+        assert_eq!(p.name, "worker");
+        assert_eq!(p.target, Target::TypeScript);
+        assert_eq!(p.database, Database::SqliteAsync);
+        assert_eq!(p.http_shim, HttpShim::SharedWorker);
+        assert!(p.database.is_async());
+    }
+
+    #[test]
+    fn sync_sqlite_in_sharedworker_is_rejected() {
+        let err = DeploymentProfile::new(
+            "bogus-sync-in-sharedworker",
+            Target::TypeScript,
+            Database::SqliteSync,
+            HttpShim::SharedWorker,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProfileError::DatabaseUnreachable {
+                database: Database::SqliteSync,
+                http_shim: HttpShim::SharedWorker,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sharedworker_shim_on_non_typescript_is_rejected() {
+        let err = DeploymentProfile::new(
+            "bogus-sharedworker-rust",
+            Target::Rust,
+            Database::SqliteAsync,
+            HttpShim::SharedWorker,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProfileError::ShimRequiresTarget {
+                http_shim: HttpShim::SharedWorker,
+                required: Target::TypeScript,
+                got: Target::Rust,
+            }
+        ));
+    }
+
+    #[test]
+    fn worker_adapter_suspends_db() {
+        let p = DeploymentProfile::worker();
+        let a = p.adapter();
+        let e = crate::effect::Effect::DbRead {
+            table: crate::ident::TableRef(crate::ident::Symbol::from("articles")),
+        };
+        assert!(a.is_suspending_effect(&e));
     }
 
     #[test]
