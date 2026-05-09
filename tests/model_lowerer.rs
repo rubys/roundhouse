@@ -177,6 +177,44 @@ fn article_lowers_has_many_to_collection_reader() {
 }
 
 #[test]
+fn bulk_lowering_rewrites_has_many_proxy_via_arel() {
+    // The single-model lowerer (above) emits the `Comment.where(article_id:
+    // @id)` Send and stops there. The bulk lowerer additionally runs the
+    // Arel pass, which recognizes that Send (Comment is in the registry)
+    // and replaces it with the inline SELECT/hydrate Expr emitted by
+    // SqliteVisitor. The body should no longer be a top-level Send to
+    // Comment.where; instead a Seq starting with the prepare call. See
+    // project_arel_compile_time_first.md.
+    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let (lcs, _) = lower_models_with_registry(&app.models, &app.schema, vec![]);
+    let article = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Article")
+        .expect("Article in bulk-lowered output");
+    let comments = article
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "comments")
+        .expect("comments method present");
+
+    match &*comments.body.node {
+        roundhouse::ExprNode::Seq { exprs } => {
+            assert!(
+                exprs.len() >= 5,
+                "expected SELECT/hydrate Seq (stmt = prepare; results = []; while step? …; \
+                 finalize; results); got {} exprs",
+                exprs.len()
+            );
+        }
+        roundhouse::ExprNode::Send { method, .. } => panic!(
+            "Arel pass did not fire — comments body is still `Send {{ method: {} }}`",
+            method.as_str()
+        ),
+        other => panic!("comments body has unexpected shape: {other:?}"),
+    }
+}
+
+#[test]
 fn article_lowers_validate_method() {
     let lc = lower("Article");
     let validate = lc

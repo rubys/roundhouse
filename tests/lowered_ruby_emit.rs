@@ -121,11 +121,26 @@ fn article_renders_validate_with_positional_helpers() {
 
 #[test]
 fn article_renders_has_many_reader_and_dependent_destroy() {
+    // The has_many proxy body started as `Comment.where(article_id:
+    // @id)` and is rewritten by the Arel pass into an inline
+    // SELECT/hydrate over the Db primitive surface — the proxy now
+    // returns hydrated Comment instances directly without going
+    // through framework Ruby's Base#where (which Level-3 retired).
+    // See project_arel_compile_time_first.md.
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
+    assert!(src.contains("def comments"), "{src}");
     assert!(
-        src.contains("def comments") && src.contains("Comment.where({ article_id: @id })"),
-        "{src}",
+        src.contains("Db.prepare(") && src.contains("FROM comments"),
+        "expected Arel-emitted SELECT in `def comments`; got:\n{src}",
+    );
+    assert!(
+        src.contains("Db.escape_int(@id)"),
+        "expected runtime FK value to be escaped via Db.escape_int; got:\n{src}",
+    );
+    assert!(
+        src.contains("instance = Comment.new") && src.contains("Db.column_int(stmt, "),
+        "expected hydrate loop assigning into a fresh Comment; got:\n{src}",
     );
     assert!(
         src.contains("def before_destroy") && src.contains("comments.each"),
@@ -135,11 +150,30 @@ fn article_renders_has_many_reader_and_dependent_destroy() {
 
 #[test]
 fn comment_renders_belongs_to_with_fk_guard() {
+    // The belongs_to body started as `Article.find_by(id:
+    // @article_id)` and is rewritten by the Arel pass into a
+    // single-row SELECT/hydrate (LIMIT 1, nilable result). The fk
+    // guard `if @article_id == 0` still sits around the lookup.
     let files = lowered_real_blog();
     let src = find(&files, "comment.rb");
     assert!(src.contains("class Comment < ApplicationRecord"), "{src}");
     assert!(src.contains("def article"), "{src}");
-    assert!(src.contains("Article.find_by({ id: @article_id })"), "{src}");
+    assert!(
+        src.contains("Db.prepare(") && src.contains("FROM articles"),
+        "expected Arel-emitted SELECT in `def article`; got:\n{src}",
+    );
+    assert!(
+        src.contains("LIMIT 1"),
+        "find_by → Arel Select with LIMIT 1; got:\n{src}",
+    );
+    assert!(
+        src.contains("Db.escape_int(@article_id)"),
+        "expected runtime FK value to be escaped via Db.escape_int; got:\n{src}",
+    );
+    assert!(
+        src.contains("instance = Article.new"),
+        "expected hydrate to construct Article instance; got:\n{src}",
+    );
 }
 
 #[test]

@@ -17,6 +17,7 @@
 //! exercises the pattern. If it works, follow-ups cover query algebra,
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
+pub mod arel;
 pub mod associations;
 pub mod broadcasts;
 pub mod chain;

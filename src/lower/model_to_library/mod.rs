@@ -186,6 +186,15 @@ fn lower_models_inner(
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
+            // Arel pass — rewrite recognized AR call sites
+            // (`Comment.where(article_id: @id)`, `Article.find_by(id:
+            // @id)`, `Comment.all`, `Comment.count`, `Comment.exists?`)
+            // into inline SELECT/hydrate expansions over the `Db.*`
+            // primitive surface. Sends that don't match a static
+            // pattern are left as-is for the body-typer + emitter to
+            // handle (Phase 2 will route them to a runtime Arel
+            // module instead). See project_arel_compile_time_first.md.
+            crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
             type_method_body(method, &classes, table);
         }
         out.push(LibraryClass {
@@ -370,7 +379,7 @@ fn build_methods(
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
         // project_level_3_adapter_emit.md.
-        push_adapter_methods(&mut methods, &model.name, table);
+        push_adapter_methods(&mut methods, &model.name, table, schema);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
