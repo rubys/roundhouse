@@ -27,6 +27,7 @@ import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
 import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
+import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
 
 // ── Action Cable server ────────────────────────────────────────
@@ -393,6 +394,11 @@ function openDatabase(dbPath: string, schemaStatements: string[]): void {
   }
 
   installDb(db);
+  // Adopt the same connection for the Level-3 Db primitive surface
+  // so lowerer-emitted `_adapter_*` methods see the same rows as the
+  // legacy juntos AR adapter. Mirrors the Db.install(db) call the
+  // test setup.ts emit injects.
+  Db.install(db);
 }
 
 // ── Public entry point ─────────────────────────────────────────
