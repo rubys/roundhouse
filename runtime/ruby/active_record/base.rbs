@@ -67,6 +67,20 @@ module ActiveRecord
     # doesn't support those nodes yet).
     def self.all: () -> Array[Base]
     def self.find: (Integer id) -> Base
+    # Per-model `_adapter_*` Level-3 primitives — synthesized by the
+    # lowerer per concrete model. Declared here so public `Base.X`
+    # methods (find/all/save/destroy/count/exists?) can delegate via
+    # `self._adapter_X` and the body-typer resolves the call against
+    # the receiver class's emitted override. Underscore-prefix marks
+    # framework-internal; not part of the public AR API.
+    def self._adapter_find_by_id: (Integer id) -> Base?
+    def self._adapter_all: () -> Array[Base]
+    def self._adapter_insert: (Base instance) -> Integer
+    def self._adapter_update: (Integer id, Base instance) -> void
+    def self._adapter_delete: (Integer id) -> void
+    def self._adapter_count: () -> Integer
+    def self._adapter_exists_by_id?: (Integer id) -> bool
+    def self._adapter_truncate: () -> void
     def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
     def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
     def self.count: () -> Integer

@@ -48,6 +48,49 @@ module ActiveRecord
       raise NotImplementedError, "#{name}.instantiate must be overridden"
     end
 
+    # Per-model adapter primitives — public AR API delegates here.
+    # Default implementations route through the legacy
+    # `ActiveRecord.adapter.X` + `instantiate` path so subclasses that
+    # haven't received the lowerer's Level-3 emit (and tests on `Base`
+    # itself) keep working unchanged. The lowerer-emitted per-model
+    # overrides go straight to the typed `Db.prepare` / `Db.column_*`
+    # path — no Hash crossing the adapter boundary. Underscore-prefix
+    # marks framework-internal; not part of the public AR API.
+
+    def self._adapter_find_by_id(id)
+      row = ActiveRecord.adapter.find(table_name, id)
+      return nil if row.nil?
+      instantiate(row)
+    end
+
+    def self._adapter_all
+      ActiveRecord.adapter.all(table_name).map { |row| instantiate(row) }
+    end
+
+    def self._adapter_insert(instance)
+      ActiveRecord.adapter.insert(table_name, instance.attributes)
+    end
+
+    def self._adapter_update(id, instance)
+      ActiveRecord.adapter.update(table_name, id, instance.attributes)
+    end
+
+    def self._adapter_delete(id)
+      ActiveRecord.adapter.delete(table_name, id)
+    end
+
+    def self._adapter_count
+      ActiveRecord.adapter.count(table_name)
+    end
+
+    def self._adapter_exists_by_id?(id)
+      ActiveRecord.adapter.exists?(table_name, id)
+    end
+
+    def self._adapter_truncate
+      ActiveRecord.adapter.truncate(table_name)
+    end
+
     # Subclasses override to return an attribute hash for adapter writes.
     def attributes
       {}
@@ -102,13 +145,13 @@ module ActiveRecord
     # ---- Class-level CRUD -------------------------------------------
 
     def self.all
-      ActiveRecord.adapter.all(table_name).map { |row| instantiate(row) }
+      _adapter_all
     end
 
     def self.find(id)
-      row = ActiveRecord.adapter.find(table_name, id)
-      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if row.nil?
-      instantiate(row)
+      result = _adapter_find_by_id(id)
+      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if result.nil?
+      result
     end
 
     def self.find_by(conditions)
@@ -128,11 +171,11 @@ module ActiveRecord
     end
 
     def self.count
-      ActiveRecord.adapter.count(table_name)
+      _adapter_count
     end
 
     def self.exists?(id)
-      ActiveRecord.adapter.exists?(table_name, id)
+      _adapter_exists_by_id?(id)
     end
 
     def self.destroy_all
@@ -184,14 +227,14 @@ module ActiveRecord
       if new_record?
         before_create
         fill_timestamps(creating: true)
-        @id = ActiveRecord.adapter.insert(self.class.table_name, attributes)
+        @id = self.class._adapter_insert(self)
         @persisted = true
         after_create
         after_create_commit
       else
         before_update
         fill_timestamps(creating: false)
-        ActiveRecord.adapter.update(self.class.table_name, @id, attributes)
+        self.class._adapter_update(@id, self)
         after_update
         after_update_commit
       end
@@ -209,7 +252,7 @@ module ActiveRecord
     def destroy
       return self unless persisted?
       before_destroy
-      ActiveRecord.adapter.delete(self.class.table_name, @id)
+      self.class._adapter_delete(@id)
       @persisted = false
       @destroyed = true
       after_destroy
@@ -221,8 +264,15 @@ module ActiveRecord
     # Re-fetch the row by id and reassign all column slots. Mirrors
     # Rails' `record.reload` — used after a controller action that
     # updates the row, to refresh the in-memory copy. Returns self;
-    # silently no-ops when the row no longer exists (a more
-    # aggressive impl could raise RecordNotFound).
+    # silently no-ops when the row no longer exists.
+    #
+    # NOTE: still uses the legacy `ActiveRecord.adapter.find` Hash-
+    # returning path — the typed `_adapter_find_by_id` returns a
+    # whole instance, but `assign_from_row` (the per-model contract)
+    # expects a row Hash. Migrating reload to typed-instance copy
+    # requires either an `assign_from_instance` lowering or an
+    # `[]=`-based field copy that subclasses override (today's Item
+    # subclass in base_test doesn't override `[]`/`[]=`). Deferred.
     def reload
       row = ActiveRecord.adapter.find(self.class.table_name, @id)
       return self if row.nil?

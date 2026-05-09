@@ -7,34 +7,35 @@ require "minitest/autorun"
 # is mandatory because spinel's AOT model only follows static
 # `require_relative` chains — bare `require` with `$LOAD_PATH` lookup is a
 # CRuby-only mechanism that the AOT compiler cannot resolve.
-require_relative "../runtime/in_memory_adapter"
+require_relative "../runtime/db"
 require_relative "../runtime/active_record"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"
 require_relative "../runtime/action_controller"
 
-# One-time global setup: configure the pure-Ruby in-memory adapter
-# (Hash-of-Hashes; no FFI, no sqlite3 gem), load the schema, and wire
-# ActiveRecord.adapter to point at it. Per-test isolation comes from
-# `SchemaSetup.reset!` — called from each test class's `setup` block —
-# which truncates the tables but leaves the schema intact. Choosing
-# InMemoryAdapter over SqliteAdapter keeps the test path FFI-free,
-# matching the eventual Spinel-compiled binary's runtime constraints.
-InMemoryAdapter.configure
-Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
-ActiveRecord.adapter = InMemoryAdapter
+# One-time global setup: configure the Db primitive surface (cruby
+# shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3
+# gem; FFI shim under spinel-compiled binaries once matz/spinel#405
+# lands), load the schema via Db.exec, and rely on lowerer-emitted
+# per-model `_adapter_*` Level-3 primitives for all AR access. The
+# 12-method `ActiveRecord.adapter` shape is intentionally NOT wired —
+# any path that falls through to it surfaces a NoMethodError on nil
+# and tells us which AR call needs Level-3 emit next.
+#
+# Per-test isolation comes from `SchemaSetup.reset!` calling each
+# model's `_adapter_truncate`. Each model's lowered class has its
+# own truncate primitive (per-table DELETE).
+Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
 
 module SchemaSetup
-  TABLES = %w[articles comments].freeze
-
-  # Adapter-agnostic: dispatches through ActiveRecord.adapter.truncate
-  # so tests work whether the adapter is InMemoryAdapter (default)
-  # or any future adapter conforming to the API.
-  # Re-loads fixtures after truncate so each test sees the canonical
-  # rows; emitted `<Plural>Fixtures._fixtures_load!` methods carry the
-  # YAML-derived `<Class>.new({...}).save` calls.
+  # Per-model truncate via lowerer-emitted `_adapter_truncate`. The
+  # constant list is the same as before; flipping each table's
+  # truncate call from `ActiveRecord.adapter.truncate(t)` to
+  # `<Model>._adapter_truncate` is the per-model dispatch.
   def self.reset!
-    TABLES.each { |t| ActiveRecord.adapter.truncate(t) }
+    Article._adapter_truncate if defined?(Article)
+    Comment._adapter_truncate if defined?(Comment)
     FixtureLoader.load_all!
   end
 end
