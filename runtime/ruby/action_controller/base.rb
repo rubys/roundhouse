@@ -1,4 +1,5 @@
 require_relative "parameters"
+require_relative "../active_support/hash_with_indifferent_access"
 require_relative "../action_view"
 
 module ActionController

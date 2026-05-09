@@ -1,31 +1,40 @@
 module ActionController
-  # Strong-parameters analogue backed by HashWithIndifferentAccess.
-  # Keys arrive Symbol or String, normalized to String via
-  # `Symbol#to_s`. Most signatures take `untyped` keys; HWIA handles
-  # normalization.
+  # Strong-parameters analogue. Internal storage is a String-keyed
+  # Hash whose values are either flat `String` (form / query /
+  # path captures) or nested `Parameters` (resource-shaped bodies).
+  # Indifferent access is implemented via `key.to_s` in each
+  # accessor — no HWIA wrapper.
   class Parameters
-    def initialize: (?untyped hash) -> void
+    @hash: Hash[String, String | Parameters]
 
-    def get: (untyped key) -> untyped
-    def set: (untyped key, untyped value) -> untyped
-    def has?: (untyped key) -> bool
+    def initialize: (?Hash[untyped, untyped]? hash) -> void
 
-    def []: (untyped key) -> untyped
-    def []=: (untyped key, untyped value) -> untyped
+    def get: (String | Symbol key) -> (String | Parameters)?
+    def set: (String | Symbol key, String | Parameters value) -> (String | Parameters)
+    def normalize: (untyped value) -> (String | Parameters)
+    def has?: (String | Symbol key) -> bool
 
-    def key?: (untyped key) -> bool
+    def []: (String | Symbol key) -> (String | Parameters)?
+    def []=: (String | Symbol key, String | Parameters value) -> (String | Parameters)
 
-    def fetch: (untyped key, ?untyped default) -> untyped
+    def key?: (String | Symbol key) -> bool
+
+    def fetch: (String | Symbol key, ?String default) -> String
 
     def empty?: () -> bool
 
-    def to_h: () -> Hash[String, untyped]
+    # Returns the inner storage Hash. Nested Parameters values are
+    # left as-is — callers that want flat output chain `.to_h` per
+    # level. (Recursive unwrap would force the value type into a
+    # `String | Hash | Nil` union that strict targets can't commit
+    # to ergonomically.)
+    def to_h: () -> Hash[String, String | Parameters]
 
-    def merge: (untyped other_hash) -> Parameters
+    def merge: (Hash[untyped, untyped] other_hash) -> Parameters
 
-    def require: (untyped key) -> Parameters
+    def require: (String | Symbol key) -> Parameters
 
-    def permit: (Array[untyped] allowed_keys) -> Parameters
+    def permit: (Array[String | Symbol] allowed_keys) -> Parameters
   end
 
   class ParameterMissing < StandardError

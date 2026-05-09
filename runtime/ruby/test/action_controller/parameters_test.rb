@@ -21,10 +21,9 @@ class ParametersTest < Minitest::Test
   end
 
   def test_to_h_returns_plain_hash
-    # Heterogeneous values would force HWIA's value type into
-    # `untyped` for the Crystal emit (which collapses to `String`).
-    # All-String values keep the Hash shape concrete; spirit of the
-    # test (nested-Hash → nested-HWIA on insert) is preserved.
+    # `to_h` exposes the inner String-keyed Hash; nested Parameters
+    # values remain as Parameters (callers chain `.to_h` per level).
+    # Earlier HWIA-backed revisions used the same contract.
     p = ActionController::Parameters.new({title: "x", nested: { a: "1" }})
     h = p.to_h()
     assert_equal "x", h["title"]
