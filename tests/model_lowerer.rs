@@ -111,9 +111,23 @@ fn article_lowers_with_schema_methods() {
         );
     }
 
-    // Receiver checks: table_name, schema_columns, instantiate, from_row
-    // are class methods; everything else is instance.
-    let class_methods = ["table_name", "schema_columns", "instantiate", "from_row"];
+    // Receiver checks: table_name, schema_columns, instantiate, from_row,
+    // and the per-model `_adapter_*` Level-3 primitives are class methods;
+    // everything else is instance.
+    let class_methods = [
+        "table_name",
+        "schema_columns",
+        "instantiate",
+        "from_row",
+        "_adapter_find_by_id",
+        "_adapter_all",
+        "_adapter_insert",
+        "_adapter_update",
+        "_adapter_delete",
+        "_adapter_count",
+        "_adapter_exists_by_id?",
+        "_adapter_truncate",
+    ];
     for m in &lc.methods {
         let n = m.name.as_str();
         if class_methods.contains(&n) {

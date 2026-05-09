@@ -484,6 +484,70 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut inf);
     classes.insert(ClassId(Symbol::from("Inflector")), inf);
 
+    // Db — primitive surface the per-model `_adapter_*` Level-3
+    // emit calls into. Backend-agnostic (sqlite via cruby gem here,
+    // spinel-FFI sqlite planned, postgres/etc. siblings later); every
+    // shim satisfies this contract. Stmt handle is opaque (Integer
+    // here); per-target narrowing happens at emit time. See
+    // project_level_3_adapter_emit.md and runtime/ruby/db.rbs.
+    let mut db_info = crate::analyze::ClassInfo::default();
+    db_info.class_methods.insert(
+        Symbol::from("configure"),
+        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("close"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("exec"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("prepare"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("step?"),
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Bool),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_int"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Int,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_text"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("finalize"),
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("last_insert_rowid"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("changes"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_string"),
+        fn_sig(vec![(Symbol::from("s"), Ty::Str)], Ty::Str),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_int"),
+        fn_sig(vec![(Symbol::from("n"), Ty::Int)], Ty::Str),
+    );
+    tag_all_method(&mut db_info);
+    classes.insert(ClassId(Symbol::from("Db")), db_info);
+
     // String — register `new` returning Ty::Str so the lowered
     // `io = String.new` produces a Str-typed local; downstream
     // `io << X` then dispatches through the primitive str_method

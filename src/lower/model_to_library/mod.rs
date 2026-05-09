@@ -20,6 +20,7 @@
 //! explicitly; the rich `Model` dialect remains the input for emitters
 //! that haven't migrated.
 
+mod adapter_emit;
 mod schema;
 mod validations;
 mod associations;
@@ -39,6 +40,7 @@ use crate::ty::{Row, Ty};
 use self::associations::{push_association_methods, push_dependent_destroy};
 use self::broadcasts::push_broadcasts_methods;
 use self::markers::{push_block_callback_methods, push_unknown_marker_methods};
+use self::adapter_emit::push_adapter_methods;
 use self::schema::push_schema_methods;
 use self::validations::push_validate_method;
 
@@ -121,6 +123,10 @@ fn lower_models_inner(
         let info = build_class_info(model, methods, *table);
         classes.insert(name.clone(), info);
     }
+    // Register framework runtime stubs (Sqlite primitive surface, etc.)
+    // so model bodies that call into them — `Sqlite.prepare/step?/...` in
+    // the lowerer-emitted `_adapter_*` primitives — type cleanly.
+    crate::lower::view_to_library::insert_framework_stubs(&mut classes);
     // Register synthesized Row classes so dispatch on `Article.from_row(r)`
     // / `ArticleRow.from_raw(h)` resolves through the body-typer.
     for row_lc in &row_classes {
@@ -360,6 +366,11 @@ fn build_methods(
         let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
         let permitted_fields = params_specs.get(&resource).map(|v| v.as_slice());
         push_schema_methods(&mut methods, model, table, permitted_fields);
+        // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
+        // — typed methods that go directly from SQL composition to typed
+        // model instances over the `Sqlite` primitive surface. See
+        // project_level_3_adapter_emit.md.
+        push_adapter_methods(&mut methods, &model.name, table);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -604,6 +615,62 @@ fn build_class_info(
         &mut info.class_methods,
         "create!",
         fn_sig(vec![(Symbol::from("attrs"), any_hash)], owner_ty.clone()),
+    );
+
+    // Per-model Level-3 adapter primitives — the typed factories the
+    // lowerer emits in `adapter_emit.rs`. Registered at the Base level so
+    // public `Base#find/all/save/destroy/...` dispatch through `self.
+    // _adapter_X` typed against the receiver class; per-model emitted
+    // bodies override. Underscore-prefix signals framework-internal; not
+    // part of the public AR API.
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_find_by_id",
+        fn_sig(
+            vec![(Symbol::from("id"), Ty::Int)],
+            Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] },
+        ),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_all",
+        fn_sig(vec![], Ty::Array { elem: Box::new(owner_ty.clone()) }),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_insert",
+        fn_sig(vec![(Symbol::from("instance"), owner_ty.clone())], Ty::Int),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_update",
+        fn_sig(
+            vec![
+                (Symbol::from("id"), Ty::Int),
+                (Symbol::from("instance"), owner_ty.clone()),
+            ],
+            Ty::Nil,
+        ),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_delete",
+        fn_sig(vec![(Symbol::from("id"), Ty::Int)], Ty::Nil),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_count",
+        fn_sig(vec![], Ty::Int),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_exists_by_id?",
+        fn_sig(vec![(Symbol::from("id"), Ty::Int)], Ty::Bool),
+    );
+    insert_default(
+        &mut info.class_methods,
+        "_adapter_truncate",
+        fn_sig(vec![], Ty::Nil),
     );
 
     // Typed factory taking the synthesized `<Model>Row` (one typed slot
