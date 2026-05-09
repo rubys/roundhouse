@@ -274,6 +274,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_attr_writer(&spec.class_id, field));
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.fields));
+    methods.push(synth_to_h(&spec.class_id, &spec.fields));
 
     LibraryClass {
         name: spec.class_id.clone(),
@@ -439,6 +440,66 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         params: vec![Param::positional(params.clone())],
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }),
         signature: Some(fn_sig(vec![(params, params_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+    }
+}
+
+/// `def to_h; { "field1" => @field1, "field2" => @field2, … }; end` —
+/// returns a String-keyed Hash of the typed-struct's fields. Mirrors
+/// the `Parameters#to_h` surface so `permitted.to_h` keeps working
+/// after the lowerer rewrites `params.permit(...)` to typed-struct
+/// construction. Value type is `Str` (matching the synthesized
+/// attr_reader); strict targets see `Hash[String, String]`, no
+/// `untyped` channel.
+fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    let entries: Vec<(Expr, Expr)> = fields
+        .iter()
+        .map(|field| {
+            let key = Expr {
+                span: Span::synthetic(),
+                node: Box::new(ExprNode::Lit {
+                    value: Literal::Str { value: field.as_str().to_string() },
+                }),
+                ty: Some(Ty::Str),
+                effects: EffectSet::default(),
+                leading_blank_line: false,
+                diagnostic: None,
+            };
+            let value = Expr {
+                span: Span::synthetic(),
+                node: Box::new(ExprNode::Ivar { name: field.clone() }),
+                ty: Some(Ty::Str),
+                effects: EffectSet::default(),
+                leading_blank_line: false,
+                diagnostic: None,
+            };
+            (key, value)
+        })
+        .collect();
+    let hash = Expr {
+        span: Span::synthetic(),
+        node: Box::new(ExprNode::Hash { entries, kwargs: false }),
+        ty: Some(Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Str),
+        }),
+        effects: EffectSet::default(),
+        leading_blank_line: false,
+        diagnostic: None,
+    };
+    let ret_ty = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Str),
+    };
+    MethodDef {
+        name: Symbol::from("to_h"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: hash,
+        signature: Some(fn_sig(vec![], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
