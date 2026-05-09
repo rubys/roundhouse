@@ -535,6 +535,86 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
     format!("[{}]", parts.join(", "))
 }
 
+/// True when the call-site `recv.method(args...)` has a known Hash
+/// (not NamedTuple) param shape. Used to override the Hash literal
+/// emit's all-symbol-keys → NamedTuple default for arg positions
+/// where Crystal expects a runtime Hash. Targets specific framework
+/// constructors that take a `Hash[untyped, untyped]` per RBS.
+fn force_hash_form_for_arg(recv: Option<&Expr>, method: &Symbol) -> bool {
+    if method.as_str() != "new" {
+        return false;
+    }
+    let Some(r) = recv else { return false; };
+    let ExprNode::Const { path } = &*r.node else {
+        return false;
+    };
+    matches!(
+        path.last().map(|s| s.as_str()),
+        Some("Parameters") | Some("HashWithIndifferentAccess")
+    )
+}
+
+/// `emit_expr` variant that passes a "force Hash form" hint into the
+/// emitted Hash literal. The hint only fires for the immediate Hash
+/// literal at the arg position; deeper nested literals keep their
+/// own emit decision.
+fn emit_expr_with_form_hint(e: &Expr, force_hash: bool) -> String {
+    if !force_hash {
+        return emit_expr(e);
+    }
+    if let ExprNode::Hash { entries, kwargs } = &*e.node {
+        if !kwargs {
+            return emit_hash_forced(entries);
+        }
+    }
+    emit_expr(e)
+}
+
+/// Emit a Hash literal in hashrocket form, even when all keys are
+/// simple-ident Symbols (which would otherwise emit as NamedTuple
+/// shorthand). Used at call sites where Crystal's NamedTuple type
+/// would mismatch the receiver's expected `Hash[K, V]` parameter.
+/// Recurses into nested Hash literals so the entire literal tree
+/// stays in Hash form (`Parameters.new({:a => {:b => "c"}})`
+/// keeps `{:b => "c"}` as a Hash too — needed because the
+/// outer constructor walks values and re-wraps nested Hashes
+/// into Parameters at runtime).
+fn emit_hash_forced(entries: &[(Expr, Expr)]) -> String {
+    if entries.is_empty() {
+        return "{} of String => String".to_string();
+    }
+    let parts: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| {
+            let v_s = emit_expr_with_form_hint_forced(v);
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                let name = value.as_str();
+                if is_simple_ident(name) {
+                    return format!(":{name} => {v_s}");
+                }
+                return format!(":{:?} => {v_s}", name);
+            }
+            format!("{} => {v_s}", emit_expr(k))
+        })
+        .collect();
+    format!("{{{}}}", parts.join(", "))
+}
+
+/// Emit `e`, recursively forcing Hash-form inside any nested
+/// Hash literal. Mirrors the recursive-normalize semantics of
+/// `Parameters.new` / `HashWithIndifferentAccess.new` — the outer
+/// wrapper walks values and constructs nested Parameters/HWIA
+/// from each Hash; passing NamedTuple at any depth would break
+/// the recursion.
+fn emit_expr_with_form_hint_forced(e: &Expr) -> String {
+    if let ExprNode::Hash { entries, kwargs } = &*e.node {
+        if !kwargs {
+            return emit_hash_forced(entries);
+        }
+    }
+    emit_expr(e)
+}
+
 fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
     if kwargs {
         // Kwargs at call site → bare `key: value` shorthand. In Crystal
@@ -637,7 +717,10 @@ pub(super) fn emit_send_base(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method)))
+        .collect();
     // Ruby → Crystal method-name translations. Crystal stdlib
     // collections (Array, String, Hash) use `size` not `length`;
     // Ruby has both as aliases. Translate at the call site so

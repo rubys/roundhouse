@@ -22,12 +22,13 @@ class ParametersTest < Minitest::Test
 
   def test_to_h_returns_plain_hash
     # `to_h` exposes the inner String-keyed Hash; nested Parameters
-    # values remain as Parameters (callers chain `.to_h` per level).
-    # Earlier HWIA-backed revisions used the same contract.
+    # values remain as Parameters. Use `require(:nested)` for the
+    # typed extraction so strict-typed targets see Parameters
+    # (not the `String | Parameters` union from raw bracket access).
     p = ActionController::Parameters.new({title: "x", nested: { a: "1" }})
     h = p.to_h()
     assert_equal "x", h["title"]
-    assert_equal({ "a" => "1" }, h["nested"].to_h())
+    assert_equal({ "a" => "1" }, p.require(:nested).to_h())
   end
 
   def test_require_returns_nested_parameters

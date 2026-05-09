@@ -98,8 +98,13 @@ module ActionController
     # `params.require(:article)` — returns the nested Parameters.
     # Raises ParameterMissing when the value is nil, not Parameters
     # (i.e. a flat scalar), or an empty Parameters.
+    #
+    # `@hash.fetch(k, nil)` instead of `@hash[k]` so Crystal's
+    # strict `Hash#[]` (which raises KeyError on missing) doesn't
+    # short-circuit the ParameterMissing path. CRuby's `Hash#[]`
+    # returns nil; same effect.
     def require(key)
-      raw = @hash[key.to_s]
+      raw = @hash.fetch(key.to_s, nil)
       raise ParameterMissing, "param is missing or the value is empty: #{key}" if raw.nil?
       val = raw.is_a?(Parameters) ? raw : nil
       raise ParameterMissing, "param is missing or the value is empty: #{key}" if val.nil?
@@ -108,15 +113,20 @@ module ActionController
     end
 
     # `params.permit([:title, :body])` — returns filtered Parameters.
+    # Builds the result via `set` rather than an intermediate Hash
+    # so the typed value union (`String | Parameters`) flows
+    # cleanly. An intermediate `filtered = {}` infers as
+    # `Hash(String, String)` on strict targets and rejects the
+    # nested-Parameters value side.
     def permit(allowed_keys)
-      filtered = {}
+      result = Parameters.new
       i = 0
       while i < allowed_keys.length
         k = allowed_keys[i].to_s
-        filtered[k] = @hash[k] if @hash.key?(k)
+        result.set(k, @hash[k]) if @hash.key?(k)
         i += 1
       end
-      Parameters.new(filtered)
+      result
     end
   end
 end
