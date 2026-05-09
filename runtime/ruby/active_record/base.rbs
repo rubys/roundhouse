@@ -34,13 +34,13 @@ module ActiveRecord
     # contradict the declared return type.
     def self.table_name: () -> String
     def self.schema_columns: () -> Array[Symbol]
-    def self.instantiate: (Hash[Symbol, untyped] _row) -> Base
+    def self.instantiate: (Hash[String, untyped] _row) -> Base
 
     # Subclass-overridden instance API. `attributes` returns the
     # column hash for adapter writes; `assign_from_row` populates
     # state from a fetched row (raises in Base).
     def attributes: () -> Hash[Symbol, untyped]
-    def assign_from_row: (Hash[Symbol, untyped] _row) -> void
+    def assign_from_row: (Hash[String, untyped] _row) -> void
 
     # `[]/[]=` are defined on Base as raise-NotImplementedError
     # markers; subclasses (per-model emitted classes) override with

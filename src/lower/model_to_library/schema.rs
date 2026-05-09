@@ -231,9 +231,11 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     ]);
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    // The adapter returns Hash[Symbol, untyped]; that's the public
-    // signature of `instantiate`. Internal narrowing happens in the body.
-    let row_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    // Adapter rows are String-keyed across all targets (Crystal/TS can't
+    // dynamically create Symbols at runtime; Spinel adapters skip the
+    // historical `to_sym` step). Matches `synth_row_from_raw` and
+    // `synth_assign_from_row`. Internal narrowing happens in the body.
+    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("instantiate"),
         receiver: MethodReceiver::Class,
