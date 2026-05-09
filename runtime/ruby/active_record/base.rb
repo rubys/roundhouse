@@ -67,16 +67,26 @@ module ActiveRecord
       ActiveRecord.adapter.all(table_name).map { |row| instantiate(row) }
     end
 
-    def self._adapter_insert(instance)
-      ActiveRecord.adapter.insert(table_name, instance.attributes)
+    # _adapter_insert / _adapter_update / _adapter_delete are
+    # instance methods (not class methods) so Base#save / Base#destroy
+    # call them via implicit-self dispatch — bypassing the
+    # `self.class.<async_method>` chain that the TS emitter
+    # mishandles under the libsql async profile (the await lifts to
+    # the receiver Send and the Promise from the call is dropped).
+    # Lowerer-emitted per-model overrides go straight to `Db.exec` /
+    # `Db.last_insert_rowid`; these defaults route through the
+    # legacy adapter for hand-written subclasses (framework_ruby_unit
+    # `Item`).
+    def _adapter_insert
+      ActiveRecord.adapter.insert(self.class.table_name, attributes)
     end
 
-    def self._adapter_update(id, instance)
-      ActiveRecord.adapter.update(table_name, id, instance.attributes)
+    def _adapter_update
+      ActiveRecord.adapter.update(self.class.table_name, @id, attributes)
     end
 
-    def self._adapter_delete(id)
-      ActiveRecord.adapter.delete(table_name, id)
+    def _adapter_delete
+      ActiveRecord.adapter.delete(self.class.table_name, @id)
     end
 
     def self._adapter_count
@@ -91,18 +101,22 @@ module ActiveRecord
       ActiveRecord.adapter.truncate(table_name)
     end
 
-    # Refresh `instance`'s persisted columns from the DB (by id),
-    # writing back into `instance` rather than constructing a new
-    # one. Returns the same instance on success, nil when the row
-    # has been deleted. The lowerer-emitted per-model override goes
-    # straight to `Db.prepare` / per-column writes; this default
-    # routes through the legacy adapter for hand-written subclasses
-    # (framework_ruby_unit's `Item`).
-    def self._adapter_reload(instance)
-      row = ActiveRecord.adapter.find(table_name, instance.id)
+    # Refresh self's persisted columns from the DB (by @id), writing
+    # back into self rather than constructing a new instance. Returns
+    # self on success, nil when the row has been deleted. The lowerer-
+    # emitted per-model override goes straight to `Db.prepare` / per-
+    # column ivar writes; this default routes through the legacy
+    # adapter for hand-written subclasses (framework_ruby_unit's
+    # `Item`). Instance-method (not class-method) so call sites
+    # reach it via implicit-self dispatch — the class-method form
+    # trips an emit issue under the libsql async profile where the
+    # emitter mishandles `self.class.<async_method>` and lifts the
+    # await onto the receiver instead of the call.
+    def _adapter_reload
+      row = ActiveRecord.adapter.find(self.class.table_name, @id)
       return nil if row.nil?
-      instance.assign_from_row(row)
-      instance
+      assign_from_row(row)
+      self
     end
 
     # Subclasses override to return an attribute hash for adapter writes.
@@ -241,14 +255,14 @@ module ActiveRecord
       if new_record?
         before_create
         fill_timestamps(creating: true)
-        @id = self.class._adapter_insert(self)
+        @id = _adapter_insert
         @persisted = true
         after_create
         after_create_commit
       else
         before_update
         fill_timestamps(creating: false)
-        self.class._adapter_update(@id, self)
+        _adapter_update
         after_update
         after_update_commit
       end
@@ -266,7 +280,7 @@ module ActiveRecord
     def destroy
       return self unless persisted?
       before_destroy
-      self.class._adapter_delete(@id)
+      _adapter_delete
       @persisted = false
       @destroyed = true
       after_destroy
@@ -288,12 +302,14 @@ module ActiveRecord
     # `[]=`-based field copy that subclasses override (today's Item
     # subclass in base_test doesn't override `[]`/`[]=`). Deferred.
     def reload
-      # Delegates to the lowerer-emitted per-model `_adapter_reload`
-      # primitive, which re-reads the row by id and writes the
-      # column values back into `self` (preserving identity). Returns
-      # self on success, self unchanged when the row has been deleted
-      # (the primitive returns nil in that case; we collapse to self).
-      self.class._adapter_reload(self)
+      # Delegates to the lowerer-emitted (or Base default) per-model
+      # `_adapter_reload` instance primitive, which re-reads the row
+      # by `@id` and writes column values back into self (preserving
+      # identity). Implicit-self dispatch (no `self.class` chain) so
+      # async profiles emit `await _adapter_reload(this)` cleanly
+      # rather than awaiting the receiver Send. Returns self on
+      # success, self unchanged when the row has been deleted.
+      _adapter_reload
       self
     end
 

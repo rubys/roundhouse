@@ -33,6 +33,7 @@ const SQLITE_WASM_ENGINE_SOURCE: &str =
     include_str!("../../runtime/typescript/sqlite_wasm_engine.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
+const DB_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/db-libsql.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
     include_str!("../../runtime/typescript/minitest-async.ts");
@@ -65,6 +66,19 @@ fn juntos_source_for_active_profile() -> &'static str {
         JUNTOS_SQLITE_SOURCE
     } else {
         JUNTOS_LIBSQL_SOURCE
+    }
+}
+
+/// Pick the `db.ts` runtime variant for the active profile. Sync
+/// profiles get the better-sqlite3 wrap; async (libsql) profiles get
+/// the @libsql/client wrap whose `exec`/`prepare` return Promises.
+/// Same selection rule as the juntos / server pickers — profiles
+/// without a non-empty `active_extern_async_names()` are sync.
+fn db_source_for_active_profile() -> &'static str {
+    if crate::analyze::async_color::active_extern_async_names().is_empty() {
+        DB_SOURCE
+    } else {
+        DB_LIBSQL_SOURCE
     }
 }
 
@@ -148,14 +162,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),
     });
-    // Db primitive surface — sync better-sqlite3 wrap mirroring
-    // `runtime/spinel/db.rb`'s contract. Lowerer-emitted per-model
+    // Db primitive surface — profile-selected. Sync profiles get
+    // the better-sqlite3 wrap (`db.ts`); async (libsql) profiles
+    // get the @libsql/client wrap (`db-libsql.ts`) whose
+    // `exec`/`prepare` return Promises. Lowerer-emitted per-model
     // `_adapter_*` methods (and the Arel pass's inline SELECT
     // expansions) reach the database via this single namespace
     // export. See project_arel_compile_time_first.md.
     files.push(EmittedFile {
         path: PathBuf::from("src/db.ts"),
-        content: DB_SOURCE.to_string(),
+        content: db_source_for_active_profile().to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/server.ts"),

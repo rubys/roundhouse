@@ -38,6 +38,7 @@ import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
 import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
+import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
 
 // ── Action Cable server ────────────────────────────────────────
@@ -325,6 +326,11 @@ async function openDatabase(dbPath: string, schemaStatements: string[]): Promise
   }
 
   installDb(client);
+  // Adopt the same client for the Level-3 Db primitive surface so
+  // lowerer-emitted `_adapter_*` methods (Phase 1 Arel-rewritten
+  // SELECTs) see the same rows as the legacy juntos AR adapter.
+  // Mirrors the Db.install(db) call in server.ts (better-sqlite3).
+  Db.install(client);
   return client;
 }
 

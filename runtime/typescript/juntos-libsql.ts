@@ -57,6 +57,12 @@ export async function setupTestDb(schema_sql: string): Promise<void> {
     if (trimmed) await client.execute(trimmed);
   }
   installDb(client);
+  // Adopt the same client for the Level-3 Db primitive surface so
+  // lowerer-emitted `_adapter_*` methods (Phase 1 Arel-rewritten
+  // SELECTs) see the same rows as the legacy juntos AR adapter.
+  // Lazy import keeps the libsql variant out of sync-profile bundles.
+  const { Db } = await import("./db.js");
+  Db.install(client);
 }
 
 /** Signature for the server-side broadcaster. The server installs

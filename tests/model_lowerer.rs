@@ -121,13 +121,9 @@ fn article_lowers_with_schema_methods() {
         "from_row",
         "_adapter_find_by_id",
         "_adapter_all",
-        "_adapter_insert",
-        "_adapter_update",
-        "_adapter_delete",
         "_adapter_count",
         "_adapter_exists_by_id?",
         "_adapter_truncate",
-        "_adapter_reload",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();

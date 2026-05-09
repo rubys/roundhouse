@@ -198,13 +198,28 @@ impl DatabaseAdapter for SqliteAsyncAdapter {
     }
 
     fn async_seed_methods(&self) -> &'static [&'static str] {
-        // Mirrors the AR adapter object surface called from
-        // runtime/ruby/active_record/base.rb. When a new AR
-        // primitive lands (e.g. `update_all`, `pluck`) and the
-        // adapter object grows a method, add it here.
+        // Two surfaces seed async coloring under this adapter:
+        //
+        //   1. The legacy AR adapter object methods — Sends to
+        //      `ActiveRecord.adapter.<m>` from framework Ruby's
+        //      `Base#all`/`Base#find`/etc. delegation chain.
+        //
+        //   2. The Db primitive surface methods that are async in
+        //      the libsql variant (`Db.exec`, `Db.prepare`) — see
+        //      `runtime/typescript/db-libsql.ts`. The lowerer-
+        //      emitted `_adapter_*` bodies (per-model SELECT
+        //      composition + hydrate, Phase 1 Arel rewrites) Send
+        //      to these names; without seeding, the bodies stay
+        //      sync and the await never lands at call sites.
+        //
+        // When a new AR primitive lands (e.g. `update_all`, `pluck`)
+        // and the adapter object grows a method, add it here.
         &[
+            // Legacy AR adapter object surface.
             "all", "find", "where", "count", "exists?",
             "insert", "update", "delete",
+            // Db primitive surface (async in libsql variant).
+            "exec", "prepare",
         ]
     }
 }

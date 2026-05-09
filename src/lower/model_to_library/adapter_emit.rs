@@ -123,10 +123,14 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
     }
 }
 
+/// `def _adapter_insert` — instance method; reads ivars to compose
+/// the INSERT, returns last_insert_rowid. Instance-method (not
+/// class-method) so save() reaches it via implicit-self dispatch
+/// (`@id = _adapter_insert`) and the TS emitter places the libsql
+/// `await` on the call result rather than the receiver. See the
+/// reload comment for the underlying emit issue with
+/// `self.class.<async_method>`.
 fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let instance = Symbol::from("instance");
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
@@ -134,7 +138,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
-                expr: instance_field(&instance, &c.name),
+                expr: ivar_ref(&c.name),
                 ty: value_type_for_column(&c.col_type),
             },
         })
@@ -147,10 +151,10 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
 
     MethodDef {
         name: Symbol::from("_adapter_insert"),
-        receiver: MethodReceiver::Class,
-        params: vec![Param::positional(instance.clone())],
+        receiver: MethodReceiver::Instance,
+        params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(instance, owner_ty)], Ty::Int)),
+        signature: Some(fn_sig(vec![], Ty::Int)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -158,11 +162,9 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     }
 }
 
+/// `def _adapter_update` — instance method; reads ivars + @id.
+/// See `synth_adapter_insert` for the receiver-rationale.
 fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let id = Symbol::from("id");
-    let instance = Symbol::from("instance");
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
@@ -170,7 +172,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
-                expr: instance_field(&instance, &c.name),
+                expr: ivar_ref(&c.name),
                 ty: value_type_for_column(&c.col_type),
             },
         })
@@ -179,15 +181,15 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     let op = ArelOp::Update(Update {
         table: TableRef(table.name.clone()),
         assignments,
-        conditions: Some(eq_id_param(table, &id)),
+        conditions: Some(eq_id_ivar(table)),
     });
 
     MethodDef {
         name: Symbol::from("_adapter_update"),
-        receiver: MethodReceiver::Class,
-        params: vec![Param::positional(id.clone()), Param::positional(instance.clone())],
+        receiver: MethodReceiver::Instance,
+        params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(id, Ty::Int), (instance, owner_ty)], Ty::Nil)),
+        signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -195,20 +197,20 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     }
 }
 
+/// `def _adapter_delete` — instance method; reads @id.
+/// See `synth_adapter_insert` for the receiver-rationale.
 fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let id = Symbol::from("id");
-
     let op = ArelOp::Delete(Delete {
         table: TableRef(table.name.clone()),
-        conditions: Some(eq_id_param(table, &id)),
+        conditions: Some(eq_id_ivar(table)),
     });
 
     MethodDef {
         name: Symbol::from("_adapter_delete"),
-        receiver: MethodReceiver::Class,
-        params: vec![Param::positional(id.clone())],
+        receiver: MethodReceiver::Instance,
+        params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![(id, Ty::Int)], Ty::Nil)),
+        signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -283,30 +285,36 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
     }
 }
 
-/// `def self._adapter_reload(instance)` — SELECT-and-assign-into-passed-
-/// instance variant of `_adapter_find_by_id`. Returns the same instance
-/// when the row is still present, nil when the row has been deleted.
-/// Backs framework Ruby's `Base#reload`. Built inline (not through the
-/// visitor) because the visitor's single-hydrate shape always
-/// constructs a fresh `Owner.new`; reload needs to write into the
-/// caller's instance to preserve identity (`==` and downstream
-/// reference equality across the AR layer).
+/// `def _adapter_reload` — SELECT-and-assign-into-self variant of
+/// `_adapter_find_by_id`. Re-reads the row by `@id`, writes columns
+/// back into `self` (preserving identity); returns self when the row
+/// is still present, nil when it has been deleted. Backs framework
+/// Ruby's `Base#reload`.
 ///
-/// Generalizing the visitor with a "hydrate target = passed-in symbol"
-/// option is the right cleanup once a second use surfaces; for now,
-/// inline keeps the IR + visitor surface unchanged.
+/// Modelled as an INSTANCE method (not a class method) so callers
+/// reach it via implicit-self dispatch (`_adapter_reload`) rather
+/// than `self.class._adapter_reload(self)`. The class-method form
+/// trips an emit issue under the libsql async profile where the
+/// emitter mishandles `self.class.<async_method>` — it lifts the
+/// await to the receiver Send (`(await this.constructor).…`) and
+/// drops the Promise from the actual call.
+///
+/// Built inline (not through the visitor) because the visitor's
+/// single-hydrate shape always constructs a fresh `Owner.new`;
+/// reload needs to write into self. Generalizing the visitor with
+/// a "hydrate target = bare ivar / passed-in symbol" option is the
+/// right cleanup once a second use surfaces.
 fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
-    use crate::expr::{ArrayStyle, ExprNode, LValue, Literal};
+    use crate::expr::{ExprNode, LValue, Literal};
     use crate::span::Span;
 
-    let instance = Symbol::from("instance");
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from("Db"));
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     let nilable_owner = Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] };
 
-    // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(instance.id) + " LIMIT 1"
+    // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
     let cols_csv: String = table
         .columns
         .iter()
@@ -319,6 +327,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         cols_csv,
         table.name.as_str()
     ));
+    let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
     let escape_id = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -327,7 +336,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
                 ExprNode::Const { path: vec![Symbol::from("Db")] },
             )),
             method: Symbol::from("escape_int"),
-            args: vec![instance_field(&instance, &Symbol::from("id"))],
+            args: vec![id_ivar],
             block: None,
             parenthesized: true,
         },
@@ -347,7 +356,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
     );
 
-    // if Db.is_step(stmt) ; instance.<col> = Db.column_<int|text>(stmt, i) ; ... ; result = instance ; end
+    // if Db.step?(stmt) ; @<col> = Db.column_<int|text>(stmt, i) ; ... ; result = self ; end
     let mut if_body: Vec<Expr> = Vec::new();
     for (i, col) in table.columns.iter().enumerate() {
         let read_method = match ty_of_column(&col.col_type) {
@@ -361,26 +370,26 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         );
         if_body.push(Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref(&instance)),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
-                args: vec![read_call],
-                block: None,
-                parenthesized: false,
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col.name.clone() },
+                value: read_call,
             },
         ));
     }
     if_body.push(Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(var_ref(&instance)),
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
             method: Symbol::from("mark_persisted!"),
             args: vec![],
             block: None,
             parenthesized: true,
         },
     ));
-    if_body.push(arel_assign(&result, var_ref(&instance)));
+    if_body.push(arel_assign(
+        &result,
+        Expr::new(Span::synthetic(), ExprNode::SelfRef),
+    ));
 
     let if_expr = Expr::new(
         Span::synthetic(),
@@ -398,14 +407,13 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
             exprs: vec![stmt_assign, result_init, if_expr, finalize, var_ref(&result)],
         },
     );
-    let _ = ArrayStyle::Brackets; // silence the import; LValue used below
 
     MethodDef {
         name: Symbol::from("_adapter_reload"),
-        receiver: MethodReceiver::Class,
-        params: vec![Param::positional(instance.clone())],
+        receiver: MethodReceiver::Instance,
+        params: vec![],
         body,
-        signature: Some(fn_sig(vec![(instance, owner_ty)], nilable_owner)),
+        signature: Some(fn_sig(vec![], nilable_owner)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -486,12 +494,25 @@ fn arel_concat(segments: Vec<Expr>) -> Expr {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// `Eq(<table>.id, Runtime(<id-param>, Int))` — the WHERE shape
-/// shared by find_by_id / update / delete / exists_by_id?.
+/// `Eq(<table>.id, Runtime(<id-param>, Int))` — find_by_id /
+/// exists_by_id? shape (id arrives as a method param).
 fn eq_id_param(table: &Table, id_param: &Symbol) -> Predicate {
     Predicate::Eq(
         ColRef { table: TableRef(table.name.clone()), column: Symbol::from("id") },
         Value::Runtime { expr: var_ref(id_param), ty: ValueType::Int },
+    )
+}
+
+/// `Eq(<table>.id, Runtime(@id, Int))` — instance-method update /
+/// delete shape (id is read from the instance ivar). Used so save /
+/// destroy can dispatch to `_adapter_update` / `_adapter_delete` via
+/// implicit-self (`_adapter_update`) instead of the
+/// `self.class._adapter_update(@id, self)` chain that the TS emitter
+/// mishandles under the libsql async profile.
+fn eq_id_ivar(table: &Table) -> Predicate {
+    Predicate::Eq(
+        ColRef { table: TableRef(table.name.clone()), column: Symbol::from("id") },
+        Value::Runtime { expr: ivar_ref(&Symbol::from("id")), ty: ValueType::Int },
     )
 }
 
@@ -506,6 +527,10 @@ fn instance_field(instance: &Symbol, col_name: &Symbol) -> Expr {
             parenthesized: false,
         },
     )
+}
+
+fn ivar_ref(name: &Symbol) -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() })
 }
 
 fn var_ref(name: &Symbol) -> Expr {
