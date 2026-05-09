@@ -32,6 +32,7 @@ const DB_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/db_worker.
 const SQLITE_WASM_ENGINE_SOURCE: &str =
     include_str!("../../runtime/typescript/sqlite_wasm_engine.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
+const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
     include_str!("../../runtime/typescript/minitest-async.ts");
@@ -146,6 +147,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),
+    });
+    // Db primitive surface — sync better-sqlite3 wrap mirroring
+    // `runtime/spinel/db.rb`'s contract. Lowerer-emitted per-model
+    // `_adapter_*` methods (and the Arel pass's inline SELECT
+    // expansions) reach the database via this single namespace
+    // export. See project_arel_compile_time_first.md.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/db.ts"),
+        content: DB_SOURCE.to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/server.ts"),
@@ -1170,6 +1180,10 @@ fn emit_test_setup_ts(
     } else {
         s.push_str("import Database from \"better-sqlite3\";\n\n");
         s.push_str("import { installDb } from \"../../src/juntos.js\";\n");
+        // Level-3 primitive surface — adopts the same Database
+        // instance so lowerer-emitted `_adapter_*` methods see
+        // rows written by legacy juntos AR helpers (and vice versa).
+        s.push_str("import { Db } from \"../../src/db.js\";\n");
     }
 
     let has_schema = !app.schema.tables.is_empty();
@@ -1223,6 +1237,11 @@ fn emit_test_setup_ts(
         // ActiveRecord.adapter (juntos.ts) so framework Ruby's
         // `ActiveRecord.adapter.find/all/...` resolves.
         s.push_str("installDb(db);\n");
+        // Db.install(db) adopts the same connection for the
+        // Level-3 primitive surface (`Db.prepare`, `Db.step?`,
+        // `Db.column_*`, `Db.escape_int`, …). Both paths see the
+        // same in-memory DB.
+        s.push_str("Db.install(db);\n");
     }
 
     if has_routes {

@@ -702,6 +702,12 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("RecordNotFound", "errors"),
     ("RecordInvalid", "errors"),
     ("FormBuilder", "view_helpers"),
+    // Db primitive surface (`Db.prepare`, `Db.step?`, `Db.column_*`,
+    // `Db.escape_int`, `Db.last_insert_rowid`, …) backing the
+    // lowerer-emitted `_adapter_*` methods and the Arel pass's
+    // inline SELECT expansions. Sourced from `src/db.ts` (the
+    // sync better-sqlite3 wrap inlined in `emit::typescript::emit`).
+    ("Db", "db"),
 ];
 
 /// Compute the import block for a class: scan method bodies for Const
