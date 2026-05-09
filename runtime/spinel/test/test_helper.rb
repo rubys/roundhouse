@@ -7,7 +7,7 @@ require "minitest/autorun"
 # is mandatory because spinel's AOT model only follows static
 # `require_relative` chains — bare `require` with `$LOAD_PATH` lookup is a
 # CRuby-only mechanism that the AOT compiler cannot resolve.
-require_relative "../runtime/db"
+require_relative "../runtime/db_cruby"
 require_relative "../runtime/active_record"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"

@@ -112,12 +112,15 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "in_memory_adapter.rb",
         "cgi_io.rb",
         "broadcasts.rb",
-        // Db primitive surface — required by test_helper.rb
-        // (`require_relative "../runtime/db"`); backs the lowerer-
-        // emitted `_adapter_*` methods that landed in the Level-3
-        // emit slice (commit 8c22c8c) and the Arel pass that
-        // followed in Phase 1.
+        // Db primitive surface — `db.rb` is the FFI/libsqlite3
+        // variant (compiled spinel binaries use it via main.rb);
+        // `db_cruby.rb` is the sqlite3-gem variant that test_helper
+        // requires under stock CRuby. Both define `module Db` with
+        // the same external API; the spinel-toolchain test runs
+        // tests under CRuby so it consumes db_cruby, but ships db
+        // too because main.rb references it.
         "db.rb",
+        "db_cruby.rb",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),

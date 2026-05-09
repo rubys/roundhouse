@@ -16,6 +16,12 @@
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
 
 require_relative "runtime/in_memory_adapter"
+# Db primitive surface — backs the lowerer-emitted `_adapter_*`
+# methods (Level-3 emit + Phase 1 Arel inline-SELECT expansions).
+# Required before active_record so Base.rb's default `_adapter_*`
+# helpers and per-model overrides find `Db` at constant-resolution
+# time. See project_arel_compile_time_first.md.
+require_relative "runtime/db"
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
