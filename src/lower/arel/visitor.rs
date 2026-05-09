@@ -236,7 +236,33 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
 
     let mut segments: Vec<Expr> = vec![lit_str(format!("DELETE FROM {}", del.table.0.as_str()))];
     push_where_segments(&mut segments, del.conditions.as_ref(), table);
-    db_call(&db, "exec", vec![concat_chain(segments)])
+    let delete_call = db_call(&db, "exec", vec![concat_chain(segments)]);
+
+    // Truncate (Delete with no WHERE) — also reset the
+    // sqlite_sequence row for this table so the next INSERT picks up
+    // at id=1 instead of `max-id-ever-seen + 1`. Without this, fixture
+    // re-load between tests inserts at id=3, id=4, … and tests that
+    // assume id=1 (`Article.find(1)` from `ArticlesFixtures.one`)
+    // fail. The schema_sql emitter generates `INTEGER PRIMARY KEY
+    // AUTOINCREMENT` for every primary_key column, so sqlite_sequence
+    // is guaranteed to exist whenever this table has one — guard on
+    // that to avoid hitting "no such table: sqlite_sequence" on
+    // schemas with no AUTOINCREMENT tables. sqlite-specific —
+    // postgres / other backends would skip this branch in their own
+    // visitor.
+    let has_primary_key = table.columns.iter().any(|c| c.primary_key);
+    if del.conditions.is_none() && has_primary_key {
+        let reset = db_call(
+            &db,
+            "exec",
+            vec![lit_str(format!(
+                "DELETE FROM sqlite_sequence WHERE name = '{}'",
+                del.table.0.as_str()
+            ))],
+        );
+        return seq(vec![delete_call, reset]);
+    }
+    delete_call
 }
 
 // ---------------------------------------------------------------------------
@@ -711,13 +737,19 @@ mod tests {
 
     #[test]
     fn delete_no_conditions_is_truncate() {
+        // Truncate over an AUTOINCREMENT-bearing table emits a Seq:
+        // `Db.exec("DELETE FROM articles")` then
+        // `Db.exec("DELETE FROM sqlite_sequence WHERE name = 'articles'")`
+        // so the next INSERT restarts at id=1. Fixture has a
+        // primary_key column → both stmts emit.
         let (schema, _) = fixture_schema();
         let op = ArelOp::Delete(Delete {
             table: TableRef(Symbol::from("articles")),
             conditions: None,
         });
         let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
-        assert_eq!(outer_kind(&body), "send");
+        assert_eq!(outer_kind(&body), "seq");
+        assert_eq!(seq_len(&body), 2);
     }
 
     #[test]

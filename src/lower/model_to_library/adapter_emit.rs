@@ -60,6 +60,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_count(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema));
     methods.push(synth_adapter_truncate(owner, table, schema));
+    methods.push(synth_adapter_reload(owner, table));
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +281,205 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
         kind: AccessorKind::Method,
         is_async: false,
     }
+}
+
+/// `def self._adapter_reload(instance)` — SELECT-and-assign-into-passed-
+/// instance variant of `_adapter_find_by_id`. Returns the same instance
+/// when the row is still present, nil when the row has been deleted.
+/// Backs framework Ruby's `Base#reload`. Built inline (not through the
+/// visitor) because the visitor's single-hydrate shape always
+/// constructs a fresh `Owner.new`; reload needs to write into the
+/// caller's instance to preserve identity (`==` and downstream
+/// reference equality across the AR layer).
+///
+/// Generalizing the visitor with a "hydrate target = passed-in symbol"
+/// option is the right cleanup once a second use surfaces; for now,
+/// inline keeps the IR + visitor surface unchanged.
+fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
+    use crate::expr::{ArrayStyle, ExprNode, LValue, Literal};
+    use crate::span::Span;
+
+    let instance = Symbol::from("instance");
+    let stmt = Symbol::from("stmt");
+    let result = Symbol::from("result");
+    let db = ClassId(Symbol::from("Db"));
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] };
+
+    // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(instance.id) + " LIMIT 1"
+    let cols_csv: String = table
+        .columns
+        .iter()
+        .map(|c| c.name.as_str().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql_prefix = arel_lit_str(format!(
+        "SELECT {} FROM {} WHERE id = ",
+        cols_csv,
+        table.name.as_str()
+    ));
+    let escape_id = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("Db")] },
+            )),
+            method: Symbol::from("escape_int"),
+            args: vec![instance_field(&instance, &Symbol::from("id"))],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let sql_suffix = arel_lit_str(" LIMIT 1".to_string());
+    let sql_concat = arel_concat(vec![sql_prefix, escape_id, sql_suffix]);
+
+    // stmt = Db.prepare(sql)
+    let stmt_assign = arel_assign(
+        &stmt,
+        arel_db_call(&db, "prepare", vec![sql_concat]),
+    );
+
+    // result = nil
+    let result_init = arel_assign(
+        &result,
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+    );
+
+    // if Db.is_step(stmt) ; instance.<col> = Db.column_<int|text>(stmt, i) ; ... ; result = instance ; end
+    let mut if_body: Vec<Expr> = Vec::new();
+    for (i, col) in table.columns.iter().enumerate() {
+        let read_method = match ty_of_column(&col.col_type) {
+            Ty::Int => "column_int",
+            _ => "column_text",
+        };
+        let read_call = arel_db_call(
+            &db,
+            read_method,
+            vec![var_ref(&stmt), arel_lit_int(i as i64)],
+        );
+        if_body.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(&instance)),
+                method: Symbol::from(format!("{}=", col.name.as_str())),
+                args: vec![read_call],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+    if_body.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(&instance)),
+            method: Symbol::from("mark_persisted!"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        },
+    ));
+    if_body.push(arel_assign(&result, var_ref(&instance)));
+
+    let if_expr = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: arel_db_call(&db, "step?", vec![var_ref(&stmt)]),
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: if_body }),
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+
+    let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq {
+            exprs: vec![stmt_assign, result_init, if_expr, finalize, var_ref(&result)],
+        },
+    );
+    let _ = ArrayStyle::Brackets; // silence the import; LValue used below
+
+    MethodDef {
+        name: Symbol::from("_adapter_reload"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(instance.clone())],
+        body,
+        signature: Some(fn_sig(vec![(instance, owner_ty)], nilable_owner)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+    }
+}
+
+// Inline expr helpers used by synth_adapter_reload — the ones in
+// `super` are pub(super) but require helper visibility we don't want
+// to widen for one synth function. Naming-prefixed to avoid shadowing.
+fn arel_lit_str(s: String) -> Expr {
+    use crate::expr::{ExprNode, Literal};
+    use crate::span::Span;
+    let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: s } });
+    e.ty = Some(Ty::Str);
+    e
+}
+
+fn arel_lit_int(value: i64) -> Expr {
+    use crate::expr::{ExprNode, Literal};
+    use crate::span::Span;
+    let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value } });
+    e.ty = Some(Ty::Int);
+    e
+}
+
+fn arel_assign(name: &Symbol, value: Expr) -> Expr {
+    use crate::expr::{ExprNode, LValue};
+    use crate::ident::VarId;
+    use crate::span::Span;
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: name.clone() },
+            value,
+        },
+    )
+}
+
+fn arel_db_call(db: &ClassId, method: &str, args: Vec<Expr>) -> Expr {
+    use crate::expr::ExprNode;
+    use crate::span::Span;
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::Const {
+                path: db.0.as_str().split("::").map(Symbol::from).collect(),
+            })),
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
+fn arel_concat(segments: Vec<Expr>) -> Expr {
+    use crate::expr::ExprNode;
+    use crate::span::Span;
+    let mut iter = segments.into_iter();
+    let mut acc = iter.next().expect("arel_concat needs at least one segment");
+    for next in iter {
+        acc = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(acc),
+                method: Symbol::from("+"),
+                args: vec![next],
+                block: None,
+                parenthesized: false,
+            },
+        );
+    }
+    acc
 }
 
 // ---------------------------------------------------------------------------

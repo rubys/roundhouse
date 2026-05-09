@@ -81,6 +81,7 @@ module ActiveRecord
     def self._adapter_count: () -> Integer
     def self._adapter_exists_by_id?: (Integer id) -> bool
     def self._adapter_truncate: () -> void
+    def self._adapter_reload: (Base instance) -> Base?
     def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
     def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
     def self.count: () -> Integer

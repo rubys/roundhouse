@@ -112,6 +112,12 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "in_memory_adapter.rb",
         "cgi_io.rb",
         "broadcasts.rb",
+        // Db primitive surface — required by test_helper.rb
+        // (`require_relative "../runtime/db"`); backs the lowerer-
+        // emitted `_adapter_*` methods that landed in the Level-3
+        // emit slice (commit 8c22c8c) and the Arel pass that
+        // followed in Phase 1.
+        "db.rb",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),

@@ -91,6 +91,20 @@ module ActiveRecord
       ActiveRecord.adapter.truncate(table_name)
     end
 
+    # Refresh `instance`'s persisted columns from the DB (by id),
+    # writing back into `instance` rather than constructing a new
+    # one. Returns the same instance on success, nil when the row
+    # has been deleted. The lowerer-emitted per-model override goes
+    # straight to `Db.prepare` / per-column writes; this default
+    # routes through the legacy adapter for hand-written subclasses
+    # (framework_ruby_unit's `Item`).
+    def self._adapter_reload(instance)
+      row = ActiveRecord.adapter.find(table_name, instance.id)
+      return nil if row.nil?
+      instance.assign_from_row(row)
+      instance
+    end
+
     # Subclasses override to return an attribute hash for adapter writes.
     def attributes
       {}
@@ -274,9 +288,12 @@ module ActiveRecord
     # `[]=`-based field copy that subclasses override (today's Item
     # subclass in base_test doesn't override `[]`/`[]=`). Deferred.
     def reload
-      row = ActiveRecord.adapter.find(self.class.table_name, @id)
-      return self if row.nil?
-      assign_from_row(row)
+      # Delegates to the lowerer-emitted per-model `_adapter_reload`
+      # primitive, which re-reads the row by id and writes the
+      # column values back into `self` (preserving identity). Returns
+      # self on success, self unchanged when the row has been deleted
+      # (the primitive returns nil in that case; we collapse to self).
+      self.class._adapter_reload(self)
       self
     end
 
