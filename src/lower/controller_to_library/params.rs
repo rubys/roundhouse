@@ -615,3 +615,82 @@ fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Exp
         },
     )
 }
+
+/// Rewrite `<typed-params>[:field]` to `<typed-params>.field` for any
+/// receiver typed as a synthesized `<Resource>Params` class. The
+/// synthesized class has typed `attr_reader` accessors per permitted
+/// field; calling them via field access (instead of `[]` bracket
+/// dispatch) gets strict-typed targets concrete typed dispatch
+/// without going through the heterogeneous-Hash channel that
+/// `[]` would imply.
+///
+/// Run AFTER body typing — the receiver's `.ty` annotation is what
+/// drives the rewrite. Falls through silently when the receiver
+/// isn't typed as a known `<Resource>Params` class, or when the
+/// literal key isn't a permitted field.
+///
+/// Stage 3 of the Parameters specialization plan (see
+/// `project_parameters_specialization_plan.md`). Stage 1 was the
+/// `permit → typed-struct synthesis`; stage 2 enriched the
+/// synthesized class API; this stage closes the loop so existing
+/// `permitted[:title]`-shape call sites in test bodies / view
+/// bodies dispatch through the typed accessor.
+pub fn rewrite_typed_bracket_to_field(
+    expr: &Expr,
+    specs: &BTreeMap<Symbol, ParamsSpec>,
+) -> Expr {
+    use crate::ty::Ty;
+    // Build a quick `class_id -> permitted-fields-set` lookup so the
+    // walker can validate the literal key is one of the permitted
+    // fields before rewriting.
+    let mut permitted_fields: std::collections::HashMap<
+        ClassId,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for spec in specs.values() {
+        let mut set = std::collections::HashSet::new();
+        for f in &spec.fields {
+            set.insert(f.as_str().to_string());
+        }
+        permitted_fields.insert(spec.class_id.clone(), set);
+    }
+
+    map_expr(expr, &|e| {
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
+            return None;
+        };
+        if method.as_str() != "[]" || args.len() != 1 {
+            return None;
+        }
+        let recv_class_id = match recv.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => id,
+            _ => return None,
+        };
+        let fields = permitted_fields.get(recv_class_id)?;
+        let key = match &*args[0].node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => return None,
+        };
+        if !fields.contains(&key) {
+            return None;
+        }
+        // Synthesize `recv.<field>` — a zero-arg Send to the typed
+        // attr_reader. Carries the receiver's type forward and drops
+        // the bracket-key arg.
+        Some(Expr {
+            span: e.span,
+            node: Box::new(ExprNode::Send {
+                recv: Some(recv.clone()),
+                method: Symbol::from(key),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            }),
+            ty: Some(Ty::Str),
+            effects: e.effects.clone(),
+            leading_blank_line: e.leading_blank_line,
+            diagnostic: None,
+        })
+    })
+}

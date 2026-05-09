@@ -163,6 +163,15 @@ pub fn lower_controllers_to_library_classes(
     for (mut methods, controller) in all_methods {
         for method in &mut methods {
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            // Stage 3: now that bodies are typed, rewrite
+            // `<typed-params>[:field]` → `<typed-params>.field`.
+            // Re-type after the rewrite so the synthesized
+            // attr_reader Send carries its return type and any
+            // chained dispatch picks up the concrete `Str`.
+            method.body = self::params::rewrite_typed_bracket_to_field(
+                &method.body, &params_specs,
+            );
+            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
         }
         out.push(LibraryClass {
             name: controller.name.clone(),
