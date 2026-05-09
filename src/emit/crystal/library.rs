@@ -444,6 +444,30 @@ fn render_class(lc: &LibraryClass) -> String {
         writeln!(s).unwrap();
     }
 
+    // For each instance ivar declared as a typed Hash (`@data :
+    // Hash(K, V)`), build the rewrite pair so the methods loop
+    // below can align `@<name> = {} of String => String` (emit_hash's
+    // default for empty literals) with the declared Hash(K, V).
+    // Same pattern the class-var loop above already handles for
+    // `@@<name>`. Without this, the class header declares the
+    // widened Hash type but `def initialize; @data = {}; end`
+    // emits the default-typed empty literal and Crystal rejects.
+    let mut ivar_hash_types: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    for (name, ty) in &ivars {
+        if let crate::ty::Ty::Hash { key, value } = ty {
+            // Skip when the value type collapses to the default
+            // `String` (Untyped/Var fall back there); the
+            // unconditional rewrite would be a no-op.
+            if !matches!(&**value, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }) {
+                ivar_hash_types.insert(
+                    name.clone(),
+                    (super::ty::crystal_ty(key), super::ty::crystal_ty(value)),
+                );
+            }
+        }
+    }
+
     let mut first = true;
     for m in &lc.methods {
         if is_skipped_method(m, &accessor_method_names) {
@@ -469,6 +493,23 @@ fn render_class(lc: &LibraryClass) -> String {
                 );
                 let to = format!(
                     "@@{name} = {{}} of {k_s} => {v_s}",
+                );
+                if body.contains(&from) {
+                    body = body.replace(&from, &to);
+                }
+            }
+        }
+        // Same realignment for instance ivars — see `ivar_hash_types`
+        // above. `@data = {} of String => String` (emit_hash's
+        // default) becomes `@data = {} of K => V` matching the
+        // header declaration.
+        if !ivar_hash_types.is_empty() {
+            for (name, (k_s, v_s)) in &ivar_hash_types {
+                let from = format!(
+                    "@{name} = {{}} of String => String",
+                );
+                let to = format!(
+                    "@{name} = {{}} of {k_s} => {v_s}",
                 );
                 if body.contains(&from) {
                     body = body.replace(&from, &to);
@@ -689,6 +730,52 @@ fn collect_ivar_assignments(
             out.insert(name.as_str().to_string(), ty);
             collect_ivar_assignments(value, out);
         }
+        // `@ivar[k] = v` — Ruby parses this as a `Send` to `[]=`
+        // with the ivar as receiver. The ivar is a Hash whose value
+        // type includes `v`'s type; widen the existing entry so
+        // Crystal's strict typing picks up the actual stored types
+        // instead of collapsing to the empty-literal default
+        // (`@data = {}` typed as `Hash<Untyped, Untyped>` →
+        // `Hash(String, String)` at emit). Catches the HWIA pattern
+        // `@data[k.to_s] = normalize_value(v)`.
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                if let Some(v_ty) = &args[1].ty {
+                    let key = name.as_str().to_string();
+                    // Only widen when the existing entry is already
+                    // Hash-typed. If the ivar was assigned a typed
+                    // class instance (e.g. `@hash = HWIA.new(...)`),
+                    // overwriting with `Hash<String, V>` would
+                    // mis-declare the ivar — the class instance has
+                    // its own `[]=` method that just happens to
+                    // share the name. The widening exists to grow
+                    // empty-Hash-literal types from observed
+                    // assignments, not to retype class instances.
+                    if let Some(crate::ty::Ty::Hash { key: k, value: existing }) = out.get(&key) {
+                        let widened = crate::ty::Ty::Hash {
+                            key: k.clone(),
+                            value: Box::new(union_widen(existing, v_ty)),
+                        };
+                        out.insert(key, widened);
+                    } else if !out.contains_key(&key) {
+                        // Fresh Hash entry with the assigned value type.
+                        out.insert(
+                            key,
+                            crate::ty::Ty::Hash {
+                                key: Box::new(crate::ty::Ty::Str),
+                                value: Box::new(v_ty.clone()),
+                            },
+                        );
+                    }
+                }
+            }
+            collect_ivar_assignments(recv, out);
+            for a in args {
+                collect_ivar_assignments(a, out);
+            }
+        }
         ExprNode::Assign { target, value } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 collect_ivar_assignments(recv, out);
@@ -789,6 +876,39 @@ fn collect_ivar_assignments(
     }
 }
 
+
+/// Widen `existing` to also accept `incoming`. If `existing` already
+/// covers `incoming` (subset/equal), returns `existing` clone;
+/// otherwise produces a `Ty::Union` joining the variants. Used by
+/// the ivar-assignment walker to grow a Hash's value-type from
+/// the empty-literal `Untyped` to the actual union of stored types.
+fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty::Ty {
+    use crate::ty::Ty;
+    if matches!(existing, Ty::Untyped) {
+        return incoming.clone();
+    }
+    if existing == incoming {
+        return existing.clone();
+    }
+    let mut variants: Vec<Ty> = match existing {
+        Ty::Union { variants } => variants.clone(),
+        other => vec![other.clone()],
+    };
+    let incoming_variants: Vec<Ty> = match incoming {
+        Ty::Union { variants } => variants.clone(),
+        other => vec![other.clone()],
+    };
+    for v in incoming_variants {
+        if !variants.contains(&v) {
+            variants.push(v);
+        }
+    }
+    if variants.len() == 1 {
+        variants.into_iter().next().unwrap()
+    } else {
+        Ty::Union { variants }
+    }
+}
 
 /// Map Ruby exception-class parents to their Crystal equivalents.
 /// Ruby's `StandardError`/`RuntimeError` correspond to Crystal's
