@@ -1596,6 +1596,43 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
                 out.insert(name.clone(), merged);
             }
         }
+        // `@hash[k] = v` parses as Send to `[]=` with @hash as the
+        // receiver. The Hash literal `@hash = {}` only seeds key/value
+        // as fresh type variables; the actual stored value-type lives
+        // in the `[]=` writes. Widen so downstream reads (`raw =
+        // @hash[k]`) get a concrete element type instead of TyVar.
+        // Mirrors `crystal::library::collect_ivar_assignments`.
+        ExprNode::Send { recv: Some(recv), method, args, block, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                if let Some(v_ty) = &args[1].ty {
+                    widen_hash_ivar_value(out, name, v_ty);
+                }
+            }
+            extract_ivar_assignments(recv, out);
+            for a in args {
+                extract_ivar_assignments(a, out);
+            }
+            if let Some(b) = block {
+                extract_ivar_assignments(b, out);
+            }
+        }
+        // Walk into other Send forms so nested `[]=` writes (e.g.
+        // inside a method-chain receiver or arg expression) still
+        // get found. Cheap; the special-case above already handles
+        // the widening — this is purely recursive descent.
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                extract_ivar_assignments(r, out);
+            }
+            for a in args {
+                extract_ivar_assignments(a, out);
+            }
+            if let Some(b) = block {
+                extract_ivar_assignments(b, out);
+            }
+        }
         ExprNode::Seq { exprs } => {
             for e in exprs {
                 extract_ivar_assignments(e, out);
@@ -1604,6 +1641,13 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
         ExprNode::If { then_branch, else_branch, .. } => {
             extract_ivar_assignments(then_branch, out);
             extract_ivar_assignments(else_branch, out);
+        }
+        // `while cond; body; end` — body may contain `@hash[k] = v`
+        // (Parameters' initialize loop). Without this arm, ivar
+        // value-type widening from `[]=` writes inside loops is
+        // invisible.
+        ExprNode::While { body, .. } => {
+            extract_ivar_assignments(body, out);
         }
         ExprNode::RescueModifier { expr, fallback } => {
             extract_ivar_assignments(expr, out);
@@ -1639,6 +1683,64 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
         ExprNode::Return { value } => extract_ivar_assignments(value, out),
         _ => {}
     }
+}
+
+/// Widen an existing Hash ivar's value-type to include `incoming`.
+///
+/// Only fires when the existing entry is `Hash { .. }` — if the ivar
+/// was assigned a typed class instance (e.g. `@hash = Foo.new`), the
+/// class's own `[]=` method shouldn't retype the ivar to a generic
+/// Hash. The widening exists to grow empty-Hash-literal types from
+/// observed `[]=` writes, not to retype class instances.
+///
+/// When the existing value-side is a fresh type variable (`Ty::Var`),
+/// it's replaced rather than unioned — the variable came from the
+/// empty-literal `{}` and carries no information. Same for the key
+/// side: a TyVar key collapses to `Str` since `[]=` writes use
+/// `key.to_s` strings in the runtime conventions here.
+fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming: &Ty) {
+    let Some(existing) = out.get(name) else {
+        // No prior entry — seed a fresh Hash[Str, incoming]. Matches
+        // the Crystal collector's "fresh entry" branch.
+        out.insert(
+            name.clone(),
+            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(incoming.clone()) },
+        );
+        return;
+    };
+    let Ty::Hash { key, value } = existing else {
+        return;
+    };
+    let key = if matches!(**key, Ty::Var { .. }) {
+        Box::new(Ty::Str)
+    } else {
+        key.clone()
+    };
+    let value = if matches!(**value, Ty::Var { .. }) {
+        Box::new(incoming.clone())
+    } else if **value == *incoming {
+        value.clone()
+    } else {
+        let mut variants: Vec<Ty> = match value.as_ref() {
+            Ty::Union { variants } => variants.clone(),
+            other => vec![other.clone()],
+        };
+        let incoming_variants: Vec<Ty> = match incoming {
+            Ty::Union { variants } => variants.clone(),
+            other => vec![other.clone()],
+        };
+        for v in incoming_variants {
+            if !variants.contains(&v) {
+                variants.push(v);
+            }
+        }
+        if variants.len() == 1 {
+            Box::new(variants.into_iter().next().unwrap())
+        } else {
+            Box::new(Ty::Union { variants })
+        }
+    };
+    out.insert(name.clone(), Ty::Hash { key, value });
 }
 
 // Diagnostic emission -----------------------------------------------------
