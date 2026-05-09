@@ -1,0 +1,28 @@
+# Typing contract for the Db primitive surface — backend-agnostic.
+# Every Db shim (cruby/sqlite-gem, spinel-FFI/sqlite, future
+# postgres/etc.) satisfies this signature. See runtime/spinel/db.rb for
+# the description and project_level_3_adapter_emit.md for the
+# architectural role.
+#
+# `prepare` returns an opaque stmt handle that subsequent step?/column_*/
+# finalize calls take by reference. Under the cruby shim it's a per-call
+# Integer id; under the planned FFI shim it'll be a `:ptr`. Body-typer
+# treats it as Integer here — sufficient for the lowered IR; per-target
+# narrowing happens at emit time.
+module Db
+  def self.configure: (String) -> void
+  def self.close: () -> void
+  def self.exec: (String) -> void
+  def self.prepare: (String) -> Integer
+  def self.step?: (Integer) -> bool
+  def self.column_int: (Integer, Integer) -> Integer
+  def self.column_text: (Integer, Integer) -> String
+  def self.finalize: (Integer) -> void
+  def self.last_insert_rowid: () -> Integer
+  def self.changes: () -> Integer
+  # SQL-value escaping primitives. Lowerer-emitted code uses these
+  # to inline values into SQL strings (spinel FFI can't bind_text;
+  # the cruby gem also accepts inlined values).
+  def self.escape_string: (String) -> String
+  def self.escape_int: (Integer) -> String
+end
