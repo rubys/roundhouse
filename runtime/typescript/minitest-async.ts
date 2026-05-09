@@ -243,12 +243,10 @@ export class Test {
     if (!ctrlClass) {
       throw new Error(`no controller registered for ${match.controller}`);
     }
-    // path_params is now an `ActiveSupport::HashWithIndifferentAccess`
-    // (HWIA). Spread its underlying String-keyed hash via `.to_h()`
-    // so the keys merge into `merged` as plain entries — `{...hwia}`
-    // would spread the class's own properties (`data`), not the
-    // hash contents.
-    const merged: Record<string, any> = { ...match.path_params.to_h(), ...body };
+    // path_params is `Hash[String, String]` (URL captures) — spread
+    // directly. The earlier HWIA shape forced an `untyped` value
+    // channel that strict-typed targets couldn't compile against.
+    const merged: Record<string, any> = { ...match.path_params, ...body };
     const controller = new ctrlClass();
     controller.params = new Parameters(merged);
     controller.session = this.session;

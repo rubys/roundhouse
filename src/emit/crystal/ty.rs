@@ -48,7 +48,21 @@ pub fn crystal_ty(t: &Ty) -> String {
         // method-level Untyped annotations get stripped at the
         // `emit_method` boundary, so reaching this branch usually
         // indicates a deeper type that should have been resolved.
-        Ty::Untyped | Ty::Record { .. } | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
+        // Crystal's `NamedTuple(key: T, ...)` is the direct analog
+        // of an RBS record-literal type. Per-key types preserved,
+        // strict-typed access via `t[:key]`. Used by Router.match's
+        // typed return shape (`{controller: Symbol, action: Symbol,
+        // path_params: Hash[String, String]}`) — was previously
+        // collapsing to `String` and breaking strict-typed targets.
+        Ty::Record { row } => {
+            let parts: Vec<String> = row
+                .fields
+                .iter()
+                .map(|(name, ty)| format!("{}: {}", name.as_str(), crystal_ty(ty)))
+                .collect();
+            format!("NamedTuple({})", parts.join(", "))
+        }
+        Ty::Untyped | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
     }
 }
 

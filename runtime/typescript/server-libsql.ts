@@ -153,7 +153,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
-  const merged: Record<string, any> = { ...match.path_params.to_h() };
+  const merged: Record<string, any> = { ...match.path_params };
   for (const [k, v] of url.searchParams) merged[k] = v;
   Object.assign(merged, params);
 

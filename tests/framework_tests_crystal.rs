@@ -22,6 +22,35 @@ use roundhouse::emit::crystal;
 use roundhouse::ingest::ingest_test_file;
 use roundhouse::App;
 
+/// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
+/// `app.rbs_signatures`. Without this the test body-typer can't
+/// dispatch precisely against framework methods, and the strict-
+/// typed Crystal emit falls through to the default `Ty::Untyped →
+/// String` collapse. Same helper as `framework_tests_typescript`
+/// (intentional duplication — keeping each gate self-contained).
+fn load_framework_rbs(app: &mut App) {
+    let runtime_ruby = Path::new("runtime/ruby");
+    fn walk(dir: &Path, app: &mut App) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, app);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rbs") {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else { continue; };
+            let Ok(sigs) = roundhouse::rbs::parse_app_signatures(&source) else { continue; };
+            for (class_id, methods) in sigs {
+                app.rbs_signatures.entry(class_id).or_default().extend(methods);
+            }
+        }
+    }
+    walk(runtime_ruby, app);
+}
+
 fn scratch_dir(tag: &str) -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
@@ -44,6 +73,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
 
     let mut app = App::new();
     app.test_modules.push(test_module);
+    load_framework_rbs(&mut app);
     Analyzer::new(&app).analyze(&mut app);
 
     for file in crystal::emit(&app) {

@@ -516,7 +516,7 @@ impl<'a> BodyTyper<'a> {
                 // (Crystal NamedTuple-friendly, TS object-spread-
                 // friendly via the named-param shape).
                 self.normalize_trailing_kwargs(recv_ty.as_ref(), method, args);
-                self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref())
+                self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
             }
 
             ExprNode::If { cond, then_branch, else_branch } => {
@@ -568,6 +568,27 @@ impl<'a> BodyTyper<'a> {
                                     local_ctx.local_bindings.insert(name.clone(), ty);
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+                    // Diverging-then narrowing: `raise X if m.nil?` —
+                    // when the then-branch always diverges (Bottom),
+                    // control proceeds only via the else, so the
+                    // negated narrowing applies to subsequent stmts.
+                    // The TypeScript flow-narrowing analog Crystal
+                    // gets natively; this gives the body-typer the
+                    // same per-statement type tightening so the
+                    // emitter can dispatch on the narrowed type.
+                    if let ExprNode::If { cond, then_branch, else_branch } = &*e.node {
+                        let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
+                        let else_empty = match &*else_branch.node {
+                            ExprNode::Lit { value: crate::expr::Literal::Nil } => true,
+                            ExprNode::Seq { exprs } => exprs.is_empty(),
+                            _ => false,
+                        };
+                        if then_diverges && else_empty {
+                            if let Some(pred) = narrowing::extract_narrowing(cond) {
+                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
                     }

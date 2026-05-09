@@ -557,23 +557,36 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
             .collect();
         return parts.join(", ");
     }
-    // Real Hash literal → `{ :key => value, ... }` hashrocket form.
-    // Crystal's `{key: v}` shorthand creates a NamedTuple (compile-time
-    // fixed shape, distinct type), so we use the rocket form to force
-    // a runtime `Hash(...)`. Preserve the source key type:
-    //   - Symbol-typed keys → `:key => value` → Hash(Symbol, V)
-    //   - String-typed keys → `"key" => value` → Hash(String, V)
-    //   - Generic exprs     → `<expr> => value`
-    // Keeping Symbol keys in Crystal matches the framework runtime's
-    // expectations (`route[:method]` works against a `Hash(Symbol, V)`,
-    // and Crystal Symbols are static so the symbol set is closed —
-    // no dynamic-Symbol-creation concern at literal sites).
+    // Hash literal emit. Two forms:
+    //   - `{key: v, key2: v}` (NamedTuple shorthand) — used when
+    //     every key is a Symbol literal with a simple-ident name.
+    //     Crystal infers a NamedTuple type from the literal,
+    //     preserving per-key types. Required for typed-record
+    //     receivers (Router.match's typed return shape) where a
+    //     `Hash(Symbol, V)` value-union would collapse the per-key
+    //     types into the union.
+    //   - `{:key => v, "k" => v}` (hashrocket) — used otherwise.
+    //     Forces a runtime `Hash(...)` with key/value type unions.
+    // Empty hashes have no key-type evidence; default to
+    // `Hash(String, String)` so subsequent `[]=` writes typecheck.
     if entries.is_empty() {
-        // Crystal rejects bare `{}` because it can't infer Hash vs
-        // NamedTuple types. Default to `Hash(String, String)` —
-        // matches the body-typer's `@h = {}` ivar inference and the
-        // typical Rails-shape case.
         return "{} of String => String".to_string();
+    }
+    let all_symbol_simple_keys = entries.iter().all(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if is_simple_ident(value.as_str()))
+    });
+    if all_symbol_simple_keys {
+        let parts: Vec<String> = entries
+            .iter()
+            .map(|(k, v)| {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
+                    unreachable!()
+                };
+                format!("{}: {}", value.as_str(), emit_expr(v))
+            })
+            .collect();
+        return format!("{{{}}}", parts.join(", "));
     }
     let parts: Vec<String> = entries
         .iter()

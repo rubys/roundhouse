@@ -608,6 +608,28 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple { elems })
         }
+        // RBS record literal `{ key: T, ?optional: U }` → `Ty::Record`.
+        // `Ty::Record` is what strict-typed targets (Crystal, Rust)
+        // need to compile against typed-key dispatch — `Hash[Symbol,
+        // untyped]` collapses to `String` at the Crystal-emit
+        // boundary and loses per-key type information. Records keep
+        // each field's type tied to its key.
+        Node::RecordType(r) => {
+            use indexmap::IndexMap;
+            let mut fields: IndexMap<Symbol, Ty> = IndexMap::new();
+            for (key, value) in r.all_fields().iter() {
+                let name = match &key {
+                    Node::Symbol(s) => Symbol::new(s.as_str()),
+                    _ => return Err("record-type key is not a symbol".to_string()),
+                };
+                let Node::RecordFieldType(field) = value else {
+                    return Err("record-type value is not a RecordFieldType".to_string());
+                };
+                let ty = ty_from_node(&field.type_(), scope)?;
+                fields.insert(name, ty);
+            }
+            Ok(Ty::Record { row: crate::ty::Row { fields, rest: None } })
+        }
         other => Err(format!(
             "unsupported RBS type node: {}",
             type_node_kind(other)

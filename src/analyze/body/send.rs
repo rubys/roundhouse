@@ -204,6 +204,7 @@ impl<'a> BodyTyper<'a> {
         recv_ty: Option<&Ty>,
         method: &Symbol,
         block_ret: Option<&Ty>,
+        args: &[crate::expr::Expr],
     ) -> Ty {
         // `obj.class` is receiver-aware: our type system flattens the
         // class object and instances onto the same `Ty::Class { id }`,
@@ -354,6 +355,7 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
+            Some(Ty::Record { row }) => record_method(method, row, args),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Sym) => sym_method(method),
             Some(Ty::Int) => int_method(method),
@@ -375,7 +377,7 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let r = self.dispatch(Some(v), method, block_ret);
+                    let r = self.dispatch(Some(v), method, block_ret, args);
                     if !matches!(r, Ty::Var { .. }) {
                         resolved.push(r);
                     }
@@ -487,6 +489,47 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "to_a" => Ty::Array { elem: Box::new(elem.clone()) },
         "join" => Ty::Str,
+        _ => unknown(),
+    }
+}
+
+/// Method dispatch for `Ty::Record` receivers — fixed-shape rows
+/// (RBS record literals like `{action: Symbol, controller: Symbol,
+/// path_params: Hash[String, String]}`). Bracket access with a
+/// known Symbol/String literal key picks the matching field's type;
+/// `length`/`size`/`empty?` work generically. Falls back through to
+/// `hash_method` (treating the row as `Hash[Symbol|String, V_union]`)
+/// for everything else, so dynamic-key access still types via the
+/// value-union approximation.
+pub(super) fn record_method(
+    method: &Symbol,
+    row: &crate::ty::Row,
+    args: &[crate::expr::Expr],
+) -> Ty {
+    match method.as_str() {
+        "[]" if args.len() == 1 => {
+            // Literal-key bracket access → the field's exact type.
+            // Non-literal keys fall through to the value-union form.
+            if let crate::expr::ExprNode::Lit { value } = &*args[0].node {
+                let key_str = match value {
+                    crate::expr::Literal::Sym { value } => Some(value.clone()),
+                    crate::expr::Literal::Str { value } => Some(Symbol::from(value.as_str())),
+                    _ => None,
+                };
+                if let Some(k) = key_str {
+                    if let Some(field_ty) = row.fields.get(&k) {
+                        return field_ty.clone();
+                    }
+                }
+            }
+            // Unknown key → union of all field types + Nil.
+            let mut variants: Vec<Ty> = row.fields.values().cloned().collect();
+            variants.push(Ty::Nil);
+            Ty::Union { variants }
+        }
+        "length" | "size" | "count" => Ty::Int,
+        "empty?" | "any?" => Ty::Bool,
+        "keys" => Ty::Array { elem: Box::new(Ty::Sym) },
         _ => unknown(),
     }
 }

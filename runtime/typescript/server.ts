@@ -163,10 +163,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   // Merge: path params + query string + form/json body.
-  // path_params is an HWIA — spread its underlying String-keyed hash
-  // via `.to_h()` so keys merge as plain entries (`{...hwia}` would
-  // spread the wrapper's own `data` field, not the hash contents).
-  const merged: Record<string, any> = { ...match.path_params.to_h() };
+  // path_params is `Hash[String, String]` (URL captures) — spread
+  // directly. The earlier HWIA shape forced an `untyped` value
+  // channel that strict-typed targets couldn't compile against.
+  const merged: Record<string, any> = { ...match.path_params };
   for (const [k, v] of url.searchParams) merged[k] = v;
   Object.assign(merged, params);
 

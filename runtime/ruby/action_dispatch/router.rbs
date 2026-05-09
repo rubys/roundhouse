@@ -2,21 +2,26 @@
 # table and resolves to (controller, action, path_params).
 module ActionDispatch
   module Router
-    # Match a request against the route table. Returns a hash with
-    # :controller, :action, :path_params on success; nil otherwise.
-    # `table` is `Array[Hash[Symbol, untyped]]`.
+    # Match a request against the route table. Each row is a typed
+    # record `{method:, pattern:, controller:, action:}` — record
+    # types instead of `Hash[Symbol, untyped]` so strict-typed
+    # targets (Crystal, Rust) compile against per-key types and
+    # don't fall through to an `untyped` value channel.
     def self.match: (
       String method,
       String path,
-      Array[Hash[Symbol, untyped]] table
-    ) -> Hash[Symbol, untyped]?
+      Array[{ method: String, pattern: String, controller: Symbol, action: Symbol }] table
+    ) -> { controller: Symbol, action: Symbol, path_params: Hash[String, String] }?
   
-    # Match a path against a `:name`-segment pattern. Returns an HWIA
-    # of captured params (String-keyed internally; Symbol-or-String
-    # access works via `[]`), or nil if no match.
+    # Match a path against a `:name`-segment pattern. Returns a
+    # `Hash[String, String]` of captured params (URL segments are
+    # always strings), or nil if no match. The flat string-string
+    # shape replaces an earlier HWIA so strict-typed targets
+    # (Crystal, Rust) can compile against the route layer without
+    # falling through to an `untyped` value channel.
     def self.match_pattern: (
       String pattern,
       String path
-    ) -> ActiveSupport::HashWithIndifferentAccess?
+    ) -> Hash[String, String]?
   end
 end

@@ -5,7 +5,15 @@
 # `resources` DSL; in spinel-blog it's a flat data structure (see
 # `config/routes.rb`). The eventual transpiler reproduces this shape
 # from the DSL declarations.
-require_relative "../active_support/hash_with_indifferent_access"
+#
+# Path captures land as `Hash[String, String]` — URL segments are
+# always strings. Earlier revisions used `HashWithIndifferentAccess`
+# so callers could index by Symbol or String, but the indifferent
+# surface forced the value type into `untyped` across the framework
+# RBS and broke Crystal's strict typing (Rust would have refused
+# outright). The route table itself still uses Symbol keys for the
+# row shape (`{method:, pattern:, controller:, action:}`); only the
+# extracted captures are flat string-string.
 
 module ActionDispatch
   module Router
@@ -45,14 +53,16 @@ module ActionDispatch
     end
   
     # Match a path against a pattern containing `:name` segments.
-    # Returns an HWIA of captured params (String-keyed internally,
-    # accepts Symbol-or-String access via `[](:id)` / `["id"]`), or nil
-    # if no match. No regex; segment-by-segment compare.
+    # Returns a `Hash[String, String]` of captured params, or nil
+    # if no match. No regex; segment-by-segment compare. Captures
+    # are always string-to-string — URL segments are strings, and
+    # the typed-hash form survives strict-typed targets (Crystal,
+    # Rust). Callers index by string key (`params["id"]`).
     def self.match_pattern(pattern, path)
       pattern_parts = pattern.split("/")
       path_parts    = path.split("/")
       return nil if pattern_parts.length != path_parts.length
-      params = ActiveSupport::HashWithIndifferentAccess.new
+      params = {}
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]

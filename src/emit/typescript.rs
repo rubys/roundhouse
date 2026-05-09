@@ -239,6 +239,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let mut test_extras = controller_extras;
         test_extras.extend(library::extras_from_lcs(&controller_lcs));
         test_extras.extend(library::extras_from_lcs(&fixture_lcs));
+        // Framework runtime RBS — when the App carries
+        // `rbs_signatures` (loaded by `ingest_app` or the
+        // framework_tests gates), translate each `(class, method →
+        // Ty)` row into a ClassInfo extra so the test body-typer
+        // dispatches precisely against framework methods (e.g.
+        // `ActionDispatch::Router.match` returning a typed Record).
+        // Without this, RBS-declared signatures lived only in the
+        // analyzer's class registry and the test lowerer's separate
+        // typing pass couldn't see them.
+        for (class_id, methods) in &app.rbs_signatures {
+            let mut info = crate::analyze::ClassInfo::default();
+            for (m_name, m_ty) in methods {
+                info.instance_methods.insert(m_name.clone(), m_ty.clone());
+            }
+            test_extras.push((class_id.clone(), info));
+        }
         crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,

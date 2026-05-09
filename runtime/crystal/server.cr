@@ -98,7 +98,9 @@ module Roundhouse
       # contract guarantees these shapes; Crystal needs explicit casts.
       ctrl_sym = matched[:controller].as(Symbol)
       action = matched[:action].as(Symbol)
-      path_params = matched[:path_params].as(ActiveSupport::HashWithIndifferentAccess)
+      # path_params is now `Hash(String, String)` (URL captures) —
+      # earlier HWIA shape forced an `untyped` value channel.
+      path_params = matched[:path_params].as(Hash(String, String))
       ctrl_class = @@controllers[ctrl_sym]?
       if ctrl_class.nil?
         context.response.status_code = 500
@@ -107,11 +109,9 @@ module Roundhouse
         return
       end
 
-      # Build merged params (path + query + body), String-keyed.
-      # HWIA stores String keys internally; controllers' `@params[:id]`
-      # access goes through HWIA's `[]` which normalizes via `Symbol#to_s`.
+      # Build merged params (path + query + body), all String-keyed.
       merged = {} of String => String
-      path_params.each { |k, v| merged[k.to_s] = v.to_s }
+      path_params.each { |k, v| merged[k] = v }
       context.request.query_params.each { |k, v| merged[k] = v }
       body_params.each { |k, v| merged[k] = v }
 

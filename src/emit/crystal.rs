@@ -336,11 +336,27 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("src/test_helper.cr"),
             content: CR_TEST_HELPER_SOURCE.to_string(),
         });
+        // Framework runtime RBS — translate each `(class, method →
+        // Ty)` row into a ClassInfo extra so the test body-typer
+        // dispatches precisely against framework methods. Same
+        // pattern the TS emit uses (see typescript.rs); critical
+        // for Crystal because `Ty::Untyped` falls through to
+        // `String` at the emit boundary, so RBS-driven typing of
+        // the test body is what produces correct typed dispatch
+        // (e.g. NamedTuple receivers from typed Router.match).
+        let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = Vec::new();
+        for (class_id, methods) in &app.rbs_signatures {
+            let mut info = crate::analyze::ClassInfo::default();
+            for (m_name, m_ty) in methods {
+                info.instance_methods.insert(m_name.clone(), m_ty.clone());
+            }
+            test_extras.push((class_id.clone(), info));
+        }
         let test_lowered = crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,
             &app.models,
-            Vec::new(),
+            test_extras,
         );
         for lowered in &test_lowered {
             let lc = &lowered.test_class;
@@ -414,6 +430,45 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             writeln!(content, "end").unwrap();
                             continue;
                         }
+                    }
+                }
+                // Array-of-Hash-literals where every Hash has all
+                // Symbol-literal keys → emit as Array-of-NamedTuple
+                // so Crystal's type system sees a fixed-shape record.
+                // Used by test fixtures like router_test's TABLE
+                // constant; matches the typed `Array[{method:, ...}]`
+                // signature on `Router.match`. Hash form would
+                // produce `Array(Hash(Symbol, V))` which the typed
+                // signature rejects.
+                if let crate::expr::ExprNode::Array { elements, .. } = &*value_expr.node {
+                    let all_named_hashes = !elements.is_empty()
+                        && elements.iter().all(|el| {
+                            matches!(&*el.node, crate::expr::ExprNode::Hash { entries, .. }
+                                if !entries.is_empty()
+                                    && entries.iter().all(|(k, _)| matches!(&*k.node,
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { .. } })))
+                        });
+                    if all_named_hashes {
+                        let parts: Vec<String> = elements
+                            .iter()
+                            .map(|el| {
+                                let crate::expr::ExprNode::Hash { entries, .. } = &*el.node else {
+                                    unreachable!()
+                                };
+                                let inner: Vec<String> = entries
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        let crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*k.node else {
+                                            unreachable!()
+                                        };
+                                        format!("{}: {}", value.as_str(), expr::emit_expr(v))
+                                    })
+                                    .collect();
+                                format!("{{{}}}", inner.join(", "))
+                            })
+                            .collect();
+                        writeln!(content, "{} = [{}]", name.as_str(), parts.join(", ")).unwrap();
+                        continue;
                     }
                 }
                 let value_s = expr::emit_expr(value_expr);
