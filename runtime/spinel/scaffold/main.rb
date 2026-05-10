@@ -29,12 +29,15 @@ require_relative "runtime/sqlite_adapter"
 # helpers and per-model overrides find `Db` at constant-resolution
 # time. See project_arel_compile_time_first.md.
 require_relative "runtime/db"
-# Base64 + Importmap shims. Both are required before any framework
+# Base64 + JSON + Importmap shims. All required before any framework
 # Ruby file that references them so spinel-AOT's static resolver
-# sees them. The per-app config/importmap.rb (when emitted) reopens
-# Importmap with the source-derived pins/entry; Base64 has no per-
-# app override.
+# sees the constants. The per-app config/importmap.rb (when emitted)
+# reopens Importmap with the source-derived pins/entry; Base64 and
+# JSON have no per-app override. Under CRuby these shims override
+# the stdlib equivalents with semantically-identical implementations
+# for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
+require_relative "runtime/json"
 require_relative "runtime/importmap"
 require_relative "runtime/active_record"
 require_relative "config/schema"
