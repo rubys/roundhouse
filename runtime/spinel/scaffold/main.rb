@@ -16,6 +16,13 @@
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
 
 require_relative "runtime/in_memory_adapter"
+# SqliteAdapter is hoisted to top-level so the spinel-AOT compile
+# can statically resolve the `SqliteAdapter` constant referenced
+# from `Base#save` etc. via the adapter dispatcher. Under CRuby the
+# require is harmless (the gem-backed shim only opens a DB on
+# `configure`); under spinel the FFI-backed shim only emits when
+# `runtime/sqlite_adapter` is in the require graph.
+require_relative "runtime/sqlite_adapter"
 # Db primitive surface — backs the lowerer-emitted `_adapter_*`
 # methods (Level-3 emit + Phase 1 Arel inline-SELECT expansions).
 # Required before active_record so Base.rb's default `_adapter_*`
@@ -148,7 +155,6 @@ module Main
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
     if !db_path.nil? && !db_path.empty?
-      require_relative "runtime/sqlite_adapter"
       SqliteAdapter.configure(db_path)
       ActiveRecord.adapter = SqliteAdapter
       Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
