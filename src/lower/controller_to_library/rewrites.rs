@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::dialect::Action;
-use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, LValue, Literal};
+use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -431,139 +431,6 @@ pub(super) fn expand_find(
     );
 
     Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, if_stmt] })
-}
-
-// ---------------------------------------------------------------------------
-// `.includes(…)` drop. Rails' `.includes(:assoc)` is an eager-load
-// optimization on a relation; spinel models access associations lazily
-// at the call site (e.g. `belongs_to` lowered to `Class.find_by(...)`),
-// so the eager-load has no runtime equivalent and is dropped from any
-// chain it appears in. Correctness-equivalent under N+1 rather than
-// performance-equivalent.
-// ---------------------------------------------------------------------------
-
-pub(super) fn rewrite_drop_includes(expr: &Expr) -> Expr {
-    map_expr(expr, &|e| match &*e.node {
-        ExprNode::Send { recv: Some(inner), method, .. }
-            if method.as_str() == "includes" =>
-        {
-            // Replace the entire `.includes(...)` call with its receiver
-            // — the rest of the chain. Recurse so `.includes(...)` calls
-            // nested inside the recv get dropped too.
-            Some(rewrite_drop_includes(inner))
-        }
-        _ => None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// `.order(field: :dir)` → `.sort_by { |a| a.field.to_s }[.reverse]`.
-// Spinel doesn't have ActiveRecord::Relation; sort happens in memory
-// over the loaded array. The `.to_s` cast normalizes Time-like fields
-// (which spinel stores as strings) and is idempotent for strings.
-//
-// When the order call's receiver is a bare model Const (e.g. `Article`),
-// `.all` is prepended so the chain returns an Array to call `.sort_by`
-// on (`Article.sort_by { ... }` would fail; `Article.all.sort_by` is
-// the spinel idiom).
-// ---------------------------------------------------------------------------
-
-pub(super) fn rewrite_order_to_sort_by(expr: &Expr) -> Expr {
-    map_expr(expr, &|e| {
-        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else {
-            return None;
-        };
-        if method.as_str() != "order" || args.len() != 1 {
-            return None;
-        }
-        let ExprNode::Hash { entries, .. } = &*args[0].node else {
-            return None;
-        };
-        if entries.len() != 1 {
-            return None;
-        }
-        let (k, v) = &entries[0];
-        let ExprNode::Lit { value: Literal::Sym { value: field } } = &*k.node else {
-            return None;
-        };
-        let direction = match &*v.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-            _ => return None,
-        };
-        // Lower the recv first so nested order/includes are handled.
-        let recv_lowered = rewrite_order_to_sort_by(recv);
-        let sort_recv = match &*recv_lowered.node {
-            ExprNode::Const { .. } => Expr::new(
-                e.span,
-                ExprNode::Send {
-                    recv: Some(recv_lowered),
-                    method: Symbol::from("all"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            ),
-            _ => recv_lowered,
-        };
-        let a_var = Expr::new(
-            e.span,
-            ExprNode::Var { id: VarId(0), name: Symbol::from("a") },
-        );
-        let a_field = Expr::new(
-            e.span,
-            ExprNode::Send {
-                recv: Some(a_var),
-                method: field.clone(),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        let block_body = Expr::new(
-            e.span,
-            ExprNode::Send {
-                recv: Some(a_field),
-                method: Symbol::from("to_s"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        let block = Expr::new(
-            e.span,
-            ExprNode::Lambda {
-                params: vec![Symbol::from("a")],
-                block_param: None,
-                body: block_body,
-                block_style: BlockStyle::Brace,
-            },
-        );
-        let sort_by_call = Expr::new(
-            e.span,
-            ExprNode::Send {
-                recv: Some(sort_recv),
-                method: Symbol::from("sort_by"),
-                args: vec![],
-                block: Some(block),
-                parenthesized: false,
-            },
-        );
-        let result = if direction == "desc" {
-            Expr::new(
-                e.span,
-                ExprNode::Send {
-                    recv: Some(sort_by_call),
-                    method: Symbol::from("reverse"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            )
-        } else {
-            sort_by_call
-        };
-        Some(result)
-    })
 }
 
 // ---------------------------------------------------------------------------

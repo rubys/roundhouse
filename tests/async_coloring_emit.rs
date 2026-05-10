@@ -134,9 +134,10 @@ fn dump_propagation_marks_real_blog() {
     let mut controller_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
     controller_extras.extend(view_extras2);
-    let mut controller_lcs = roundhouse::lower::lower_controllers_to_library_classes(
+    let mut controller_lcs = roundhouse::lower::lower_controllers_with_arel(
         &app.controllers,
         controller_extras,
+        Some(&app.schema),
     );
     let mut fixture_lcs = roundhouse::lower::lower_fixtures_to_library_classes(&app);
 

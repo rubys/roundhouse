@@ -41,8 +41,8 @@ use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_
 use self::params::ParamsSpec;
 use self::process_action::synthesize_process_action;
 use self::rewrites::{
-    rewrite_assoc_through_parent_typed, rewrite_destroy_bang, rewrite_drop_includes,
-    rewrite_model_new_to_from_params, rewrite_order_to_sort_by, rewrite_params,
+    rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
+    rewrite_model_new_to_from_params, rewrite_params,
     rewrite_redirect_to, rewrite_render_to_views, rewrite_route_helpers,
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
@@ -192,18 +192,12 @@ pub fn lower_controllers_with_arel(
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             // Arel pass — when schema is provided, lift recognized
             // AR call chains into inline SELECT/hydrate over the Db
-            // primitive surface. Legacy chain rewrites
-            // (drop_includes / order_to_sort_by) run AFTER as a
-            // fallback for shapes Arel doesn't recognize.
+            // primitive surface. Re-type after so the body-typer's
+            // earlier annotations on the rewritten subtree refresh.
             if let Some(schema) = schema {
                 crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
-            method.body = rewrite_drop_includes(&method.body);
-            method.body = rewrite_order_to_sort_by(&method.body);
-            // Re-type unconditionally — the chain rewrites and the
-            // Arel pass both reshape the IR, leaving the body-typer's
-            // earlier annotations stale on whichever subtree changed.
-            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
         }
         out.push(LibraryClass {
             name: controller.name.clone(),

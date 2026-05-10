@@ -18,11 +18,10 @@ use roundhouse::dialect::{LibraryClass, MethodReceiver};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
 use roundhouse::lower::{
-    class_info_from_library_class, lower_controller_to_library_class,
-    lower_controllers_to_library_classes, lower_fixtures_to_library_classes,
-    lower_model_to_library_class, lower_models_to_library_classes,
-    lower_models_with_registry, lower_test_modules_to_library_classes,
-    lower_view_to_library_class, lower_views_to_library_classes,
+    class_info_from_library_class, lower_fixtures_to_library_classes,
+    lower_model_to_library_class, lower_models_with_registry,
+    lower_test_modules_to_library_classes, lower_view_to_library_class,
+    lower_views_to_library_classes,
 };
 
 fn fixture_path() -> &'static Path {
@@ -613,7 +612,11 @@ fn lowered_real_blog_typing_residual() {
     let mut controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     controller_extras.extend(build_class_info_extras(&view_lcs));
-    let controller_lcs = lower_controllers_to_library_classes(&app.controllers, controller_extras);
+    let controller_lcs = roundhouse::lower::lower_controllers_with_arel(
+        &app.controllers,
+        controller_extras,
+        Some(&app.schema),
+    );
 
     // Fixtures lower to ArticlesFixtures / CommentsFixtures classes;
     // test bodies' `articles(:one)` calls get rewritten to
