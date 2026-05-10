@@ -734,6 +734,26 @@ pub(super) fn emit_send_base(
     if recv.is_none() && method.as_str() == "raise" && args_s.len() == 2 {
         return format!("raise {}.new({})", args_s[0], args_s[1]);
     }
+    // Cross-target nil-safe Hash read: Ruby `h.fetch(key, nil)` returns
+    // the value or nil for missing key. Crystal's `Hash#fetch(K, V)`
+    // works for Hash recv — but the same source file may be reached
+    // with NamedTuple recv (call site passes `{a: 1}` literal), and
+    // `NamedTuple#fetch(K, V)` doesn't exist (only the block form
+    // does, and it widens the result type to the union of the
+    // NamedTuple's value types — useless for option-hash patterns).
+    // Translate to `recv[K]?` which works on both Hash and
+    // NamedTuple and returns a clean nilable. Only fires when the
+    // default arg is the literal `nil` so the source intent is
+    // unambiguous; other defaults flow through the standard
+    // `recv.fetch(K, default)` emit.
+    if method.as_str() == "fetch" && args.len() == 2 {
+        if let ExprNode::Lit { value: Literal::Nil } = &*args[1].node {
+            if let Some(r) = recv {
+                let recv_s = emit_expr(r);
+                return format!("{recv_s}[{}]?", args_s[0]);
+            }
+        }
+    }
     // `String.new` (no args) → `""`. Ruby/Spinel `String.new` produces
     // a fresh mutable empty String; Crystal `String.new` exists but
     // takes a Bytes/Slice argument — and Crystal Strings are immutable
@@ -822,6 +842,13 @@ pub(super) fn emit_send_base(
         "start_with?" => "starts_with?",
         "end_with?" => "ends_with?",
         "include?" => "includes?",
+        // Ruby `Regexp#match?(str)` → Crystal `Regex#matches?(str)`
+        // (note plural). Both predicate-only forms — return Bool.
+        // No receiver-type narrowing here: the only Ruby class with
+        // a `match?` method that takes a single String is Regexp;
+        // String#match?(re) also exists but we don't emit that
+        // pattern. Safe to translate unconditionally.
+        "match?" if args_s.len() == 1 => "matches?",
         "strict_encode64" if base64_recv => "strict_encode",
         "strict_decode64" if base64_recv => "strict_decode",
         "encode64" if base64_recv => "encode",
@@ -892,7 +919,18 @@ pub(super) fn emit_send_base(
         // trailing `Nil` from a binary union so the key-conversion
         // detection below sees through the nilable.
         let recv_ty = recv.and_then(|r| r.ty.as_ref()).map(unwrap_nilable_union);
-        let recv_str_keyed = matches!(
+        // Ivar Hash key types from the body-typer are unreliable —
+        // empty-hash initializers (`@slots = {}`) collapse to the
+        // `Hash<Str, Str>` default, even when subsequent writes use
+        // Symbol keys. The Crystal class-var declaration emit derives
+        // the type independently from `@var[k] = v` index-assign sites
+        // and gets it right (Hash<Symbol, V>); converting Symbol → Str
+        // here would mismatch that declaration. Adapter rows (the
+        // original motivation for the conversion) are method
+        // parameters / locals (Var), not Ivars, so this restriction
+        // doesn't lose coverage there.
+        let recv_is_ivar = matches!(recv.map(|r| &*r.node), Some(ExprNode::Ivar { .. }));
+        let recv_str_keyed = !recv_is_ivar && matches!(
             recv_ty,
             Some(crate::ty::Ty::Hash { key, .. }) if matches!(**key, crate::ty::Ty::Str)
         );
@@ -942,7 +980,23 @@ pub(super) fn emit_send_base(
             }
         }
         (Some(r), _) => {
-            let recv_s = emit_expr(r);
+            // Hash-flavored receiver methods: when the recv is a
+            // bare `{a: 1, b: 2}` literal and the method is one
+            // Crystal's NamedTuple doesn't bridge to Hash for
+            // (`merge` with a Hash arg is the canonical case —
+            // NamedTuple#merge requires another NamedTuple, not a
+            // Hash), force the recv literal into Hash form. Without
+            // this, `{href: href}.merge(opts)` collapses to
+            // `NamedTuple#merge(Hash)` which Crystal rejects. Ruby
+            // semantics: the literal is a Hash; merging with another
+            // Hash is fine. NamedTuple is a Crystal-only type.
+            let force_recv_hash = matches!(method.as_str(), "merge" | "merge!" | "update")
+                && matches!(&*r.node, ExprNode::Hash { kwargs: false, .. });
+            let recv_s = if force_recv_hash {
+                emit_expr_with_form_hint(r, true)
+            } else {
+                emit_expr(r)
+            };
             // Wrap low-precedence receivers (e.g. `a || b`, `a && b`,
             // assignments, ternaries) in parens so the dot binds to
             // the whole expression — `(a || b).to_s` not the natural

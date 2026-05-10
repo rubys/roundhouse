@@ -41,9 +41,17 @@ module ActiveRecord
 
     def validates_length_of(attr_name, value, opts = {})
       return if value.nil?
-      minimum = opts[:minimum]
-      maximum = opts[:maximum]
-      is = opts[:is]
+      # `fetch(key, nil)` instead of `opts[key]`: cross-target nil-
+      # safe read for option keys the caller may omit. Crystal's
+      # strict-typed NamedTuple call sites (`{minimum: 5}`) reject
+      # `[:is]` at compile time when `:is` isn't in the literal
+      # type; the Crystal emitter rewrites `fetch(K, nil)` to
+      # `[K]?` which returns nil on both NamedTuple and Hash. Ruby
+      # semantics unchanged (`Hash#fetch(k, nil)` returns nil for
+      # missing keys).
+      minimum = opts.fetch(:minimum, nil)
+      maximum = opts.fetch(:maximum, nil)
+      is = opts.fetch(:is, nil)
       # Single-predicate per branch so the analyzer's narrowing
       # extract (which recognizes one is_a? per branch, not BoolOp
       # chains) types each then-arm cleanly: value: Str → Int,
@@ -71,22 +79,22 @@ module ActiveRecord
         errors << "#{attr_name} is not a number"
         return
       end
-      greater_than = opts[:greater_than]
-      less_than    = opts[:less_than]
-      only_integer = opts[:only_integer]
+      greater_than = opts.fetch(:greater_than, nil)
+      less_than    = opts.fetch(:less_than, nil)
+      only_integer = opts.fetch(:only_integer, nil)
       errors << "#{attr_name} must be greater than #{greater_than}" if !greater_than.nil? && value <= greater_than
       errors << "#{attr_name} must be less than #{less_than}" if !less_than.nil? && value >= less_than
       errors << "#{attr_name} must be an integer" if only_integer && !value.is_a?(Integer)
     end
 
     def validates_inclusion_of(attr_name, value, opts = {})
-      within = opts[:within]
-      errors << "#{attr_name} is not included in the list" unless within.include?(value)
+      within = opts.fetch(:within, nil)
+      errors << "#{attr_name} is not included in the list" if !within.nil? && !within.include?(value)
     end
 
     def validates_format_of(attr_name, value, opts = {})
-      with = opts[:with]
-      ok = value.is_a?(String) && with.match?(value)
+      with = opts.fetch(:with, nil)
+      ok = !with.nil? && value.is_a?(String) && with.match?(value)
       errors << "#{attr_name} is invalid" unless ok
     end
 

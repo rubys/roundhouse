@@ -82,18 +82,22 @@ module ActionView
     # ── DOM helpers ──────────────────────────────────────────────────
   
     def self.dom_id(prefix, id_or_suffix = nil)
-      if id_or_suffix.nil?
+      # Discriminate on `prefix.is_a?(String)` first — Crystal's
+      # static type narrowing needs the type guard on `prefix` to
+      # know `prefix.id` is safe in the record branches. Ruby
+      # behavior is equivalent.
+      if prefix.is_a?(String)
+        # `dom_id("article", 42)` — explicit prefix + integer id
+        "#{prefix}_#{id_or_suffix}"
+      elsif id_or_suffix.nil?
         # `dom_id(article)` — pass a record
         "#{record_dom_prefix(prefix)}_#{prefix.id}"
-      elsif id_or_suffix.is_a?(Symbol) || id_or_suffix.is_a?(String)
+      else
         # `dom_id(article, :comments_count)` — record + suffix.
         # Rails puts the suffix BEFORE the model_name in the resulting
         # id (e.g. `comments_count_article_3`), not after — match that
         # order so cross-target compare passes.
         "#{id_or_suffix}_#{record_dom_prefix(prefix)}_#{prefix.id}"
-      else
-        # `dom_id("article", 42)` — explicit prefix + integer id
-        "#{prefix}_#{id_or_suffix}"
       end
     end
   
