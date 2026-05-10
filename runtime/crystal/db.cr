@@ -1,14 +1,18 @@
 # Roundhouse Crystal DB runtime — sqlite primitive layer plus the
 # `ActiveRecord.adapter` plug-in.
 #
-# Two responsibilities:
+# Three responsibilities:
 #   1. `Roundhouse::Db` — owns the sqlite3 connection. `open_production_db`
 #      is called from `Roundhouse::Server.start`; `setup_test_db` resets
 #      the connection between specs.
-#   2. `Roundhouse::SqliteAdapter` — implements the abstract API the
-#      transpiled `ActiveRecord::Base` calls (`all`, `find`, `where`,
-#      `insert`, `update`, `delete`, `count`, `exists?`). Server boot
-#      assigns an instance to `ActiveRecord.adapter`.
+#   2. `Roundhouse::ActiveRecordAdapter` — abstract base pinning the 9-
+#      method contract `runtime/ruby/active_record/base.rb` calls
+#      (`all`, `find`, `where`, `count`, `exists?`, `insert`, `update`,
+#      `delete`, `truncate`). Polymorphic slot so production sqlite,
+#      test in-memory, and future libsql/D1 implementations all plug
+#      into the same `ActiveRecord.adapter` setter.
+#   3. `Roundhouse::SqliteAdapter` — concrete sqlite implementation.
+#      Server boot assigns an instance to `ActiveRecord.adapter`.
 #
 # The `module ActiveRecord ... end` extension at the bottom adds the
 # `.adapter` getter/setter that the Ruby source's
@@ -63,12 +67,36 @@ module Roundhouse
     end
   end
 
-  # Concrete sqlite-backed adapter implementing the API
-  # `ActiveRecord::Base` (transpiled from runtime/ruby/active_record/
-  # base.rb) calls. Method names + arities match the Ruby surface;
-  # row results come back as `Hash(String, DB::Any)` matching Crystal's
-  # crystal-db return shape.
-  class SqliteAdapter
+  # Abstract adapter contract — the 9 methods `ActiveRecord::Base`
+  # (transpiled from runtime/ruby/active_record/base.rb) calls
+  # against `ActiveRecord.adapter`. Every concrete adapter (sqlite
+  # production, in-memory framework-test, future libsql/D1) inherits
+  # and implements these. Returns are intentionally untyped here —
+  # row shape (`Hash(String, DB::Any)` for sqlite, `Hash(String, _)`
+  # for the in-memory adapter) varies by implementation, but per-
+  # call-site Crystal inference threads the actual concrete type
+  # through to `instantiate(row)`.
+  #
+  # Test-helper methods (`create_table`, `drop_table`, `reset_all!`,
+  # `schema`) are NOT in the abstract — they're called directly on
+  # `FrameworkTestAdapter` (which has them as concrete methods),
+  # never via the `ActiveRecord.adapter` slot.
+  abstract class ActiveRecordAdapter
+    abstract def all(table_name : String)
+    abstract def find(table_name : String, id)
+    abstract def where(table_name : String, conditions : Hash(Symbol, _))
+    abstract def count(table_name : String) : Int64
+    abstract def exists?(table_name : String, id) : Bool
+    abstract def insert(table_name : String, attributes : Hash(Symbol, _)) : Int64
+    abstract def update(table_name : String, id, attributes : Hash(Symbol, _)) : Nil
+    abstract def delete(table_name : String, id) : Nil
+    abstract def truncate(table_name : String) : Nil
+  end
+
+  # Concrete sqlite-backed adapter. Method names + arities match the
+  # Ruby surface; row results come back as `Hash(String, DB::Any)`
+  # matching Crystal's crystal-db return shape.
+  class SqliteAdapter < ActiveRecordAdapter
     private def conn
       Roundhouse::Db.conn
     end
@@ -150,6 +178,10 @@ module Roundhouse
     def delete(table_name : String, id) : Nil
       conn.exec("DELETE FROM #{table_name} WHERE id = ?", id)
     end
+
+    def truncate(table_name : String) : Nil
+      conn.exec("DELETE FROM #{table_name}")
+    end
   end
 end
 
@@ -157,14 +189,18 @@ end
 # `class << self; attr_accessor :adapter; end` inside `module
 # ActiveRecord`; the transpiler doesn't yet emit module-metaclass
 # accessors. Re-opening the module here adds the missing surface.
+#
+# Slot is typed as the abstract base so any adapter implementation
+# (production sqlite, framework-test in-memory, future libsql/D1)
+# can plug in via `ActiveRecord.adapter = <impl>`.
 module ActiveRecord
-  @@adapter : Roundhouse::SqliteAdapter? = nil
+  @@adapter : Roundhouse::ActiveRecordAdapter? = nil
 
-  def self.adapter : Roundhouse::SqliteAdapter
+  def self.adapter : Roundhouse::ActiveRecordAdapter
     @@adapter.not_nil!
   end
 
-  def self.adapter=(value : Roundhouse::SqliteAdapter) : Roundhouse::SqliteAdapter
+  def self.adapter=(value : Roundhouse::ActiveRecordAdapter) : Roundhouse::ActiveRecordAdapter
     @@adapter = value
   end
 end

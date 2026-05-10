@@ -27,7 +27,12 @@ class BaseTest < Minitest::Test
     end
 
     def attributes
-      { title: @title }
+      # `.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
+      # conversion under Crystal's strict typing. The downstream
+      # `ActiveRecord.adapter.insert(table, attributes)` slot
+      # is typed `Hash(Symbol, _)`; without the conversion
+      # Crystal sees the literal as NamedTuple and rejects.
+      { title: @title }.to_h
     end
 
     def assign_from_row(row)
@@ -232,7 +237,7 @@ class BaseTest < Minitest::Test
     end
 
     def attributes
-      { title: @title, created_at: @created_at, updated_at: @updated_at }
+      { title: @title, created_at: @created_at, updated_at: @updated_at }.to_h
     end
 
     def assign_from_row(row)
