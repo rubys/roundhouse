@@ -545,11 +545,15 @@ fn is_skipped_method(
     }
     if m.name.as_str() == "initialize" && m.params.len() == 1 {
         // Heuristic: the lowerer-emitted shape takes a single `attrs`
-        // hash. User-defined initializers with explicit typed params
-        // would have multiple params (or a different param name) and
-        // would still emit through the normal path.
+        // hash AND carries a typed signature (the synthesizer attaches
+        // `Ty::Fn` with `Hash[Symbol, Untyped]`). User-written
+        // `initialize(attrs = {})` in test fixtures has no RBS sig
+        // attached → `signature` is None — those still emit through
+        // the normal path. Without the signature check, hand-written
+        // model fixtures defining `initialize` for `create(attrs)`
+        // would be silently dropped.
         let only_param = &m.params[0];
-        if only_param.as_str() == "attrs" {
+        if only_param.as_str() == "attrs" && m.signature.is_some() {
             return true;
         }
     }

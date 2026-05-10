@@ -92,7 +92,13 @@ abstract class RoundhouseTest
     fail(msg || "expected #{collection.inspect} not to include #{item.inspect}") if collection.includes?(item)
   end
 
-  def assert_match(pattern, value : String, msg : String? = nil) : Nil
+  # Accepts `String?` so callers can pass nilable values directly
+  # (e.g. `err.message` from a Crystal Exception returns `String?`);
+  # nil fails the assertion the same as a non-matching string.
+  def assert_match(pattern, value : String?, msg : String? = nil) : Nil
+    if value.nil?
+      fail(msg || "expected non-nil string to match #{pattern.inspect}")
+    end
     re = pattern.is_a?(Regex) ? pattern.as(Regex) : Regex.new(pattern.to_s)
     fail(msg || "expected #{value.inspect} to match #{re.inspect}") unless re.matches?(value)
   end

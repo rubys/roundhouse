@@ -827,7 +827,14 @@ pub(super) fn emit_send_base(
         // block — `arr.count` (no args) doesn't compile. Rewrite to
         // `size`. The argful form (`count(item)`) passes through
         // unchanged below.
-        "count" if args_s.is_empty() => "size",
+        //
+        // Skip the rewrite for Const receivers: `Item.count` is a
+        // class method (e.g. `ActiveRecord::Base.count` calls the
+        // adapter), not an Enumerable. `Item.size` would dispatch
+        // against the metaclass and not resolve.
+        "count" if args_s.is_empty()
+            && !matches!(recv, Some(r) if matches!(&*r.node, ExprNode::Const { .. }))
+            => "size",
         // Ruby `Hash#key?(k)` exists; Crystal's stdlib Hash uses
         // `has_key?(k)` (with `key?` not exposed for direct dispatch).
         // Rewrite at the call site so transpiled Ruby Hash idioms

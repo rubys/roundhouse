@@ -20,8 +20,25 @@ class BaseTest < Minitest::Test
 
     def self.instantiate(row)
       it = new
-      it.id = row[:id]
-      it.title = row[:title]
+      # Two cross-target patterns at play here:
+      #   1. String-keyed row access (`row["id"]`, not `row[:id]`).
+      #      Production sqlite adapters return `Hash<String, ...>`;
+      #      FrameworkTestAdapter (both Ruby and Crystal) matches
+      #      that key convention so test fixtures don't need to
+      #      branch on adapter shape.
+      #   2. Cell narrowing for typed setters. Crystal sees the cell
+      #      value as a wide union (DB::Any | TestCellValue); strict
+      #      `id`/`title` setters reject directly:
+      #        - `.to_s.to_i` — Ruby Integer + Crystal Int32 (auto-
+      #          coerced to Int64 at the typed setter call).
+      #        - bind `row["k"]` to a local var, then
+      #          `setter = local if local.is_a?(T)` — Crystal
+      #          narrows simple-variable guards even in postfix-if
+      #          form, but doesn't narrow arbitrary expressions
+      #          like `row["k"]` directly.
+      it.id = row["id"].to_s.to_i
+      title = row["title"]
+      it.title = title if title.is_a?(String)
       it.mark_persisted!()
       it
     end
@@ -36,7 +53,8 @@ class BaseTest < Minitest::Test
     end
 
     def assign_from_row(row)
-      @title = row[:title]
+      title = row["title"]
+      @title = title if title.is_a?(String)
     end
   end
 
@@ -90,6 +108,12 @@ class BaseTest < Minitest::Test
     b = Item.new; b.title = "B"; b.save()
 
     found = Item.find_by(title: "B")
+    # `raise if nil?` is the cross-target nullable narrowing idiom:
+    # Ruby raises with a clear message instead of crashing on
+    # `nil.id` later; Crystal narrows `found` to non-nil for the
+    # subsequent access. `found.try(&.id)` would also work but
+    # silently passes the assertion when the result IS nil.
+    raise "expected find_by to return non-nil" if found.nil?
     assert_equal b.id, found.id
 
     miss = Item.find_by(title: "Nope")
@@ -126,7 +150,9 @@ class BaseTest < Minitest::Test
     assert_nil Item.last
     a = Item.new; a.title = "A"; a.save()
     b = Item.new; b.title = "B"; b.save()
-    assert_equal b.id, Item.last.id
+    last = Item.last
+    raise "expected last to return non-nil after save" if last.nil?
+    assert_equal b.id, last.id
   end
 
   # ── update + destroy ────────────────────────────────────────
@@ -228,10 +254,15 @@ class BaseTest < Minitest::Test
     def self.schema_columns = [:id, :title, :created_at, :updated_at]
     def self.instantiate(row)
       t = new
-      t.id = row[:id]
-      t.title = row[:title]
-      t.created_at = row[:created_at]
-      t.updated_at = row[:updated_at]
+      # See BaseTest::Item.instantiate above for the cross-target
+      # row-cell narrowing rationale.
+      t.id = row["id"].to_s.to_i
+      title = row["title"]
+      created_at = row["created_at"]
+      updated_at = row["updated_at"]
+      t.title = title if title.is_a?(String)
+      t.created_at = created_at if created_at.is_a?(String)
+      t.updated_at = updated_at if updated_at.is_a?(String)
       t.mark_persisted!()
       t
     end
@@ -241,19 +272,33 @@ class BaseTest < Minitest::Test
     end
 
     def assign_from_row(row)
-      @title = row[:title]
-      @created_at = row[:created_at]
-      @updated_at = row[:updated_at]
+      title = row["title"]
+      created_at = row["created_at"]
+      updated_at = row["updated_at"]
+      @title = title if title.is_a?(String)
+      @created_at = created_at if created_at.is_a?(String)
+      @updated_at = updated_at if updated_at.is_a?(String)
     end
 
     # Base#fill_timestamps writes via `self[:col] = ...` — provide
-    # the index assignment.
+    # the index assignment. Hardcoded case dispatch (instead of
+    # Ruby's `send("#{key}=", value)` reflection) so the same source
+    # transpiles to strict-typed targets — Crystal/Spinel reject
+    # dynamic `send` since they can't statically resolve the method.
     def []=(key, value)
-      send("#{key}=", value)
+      case key
+      when :title then self.title = value
+      when :created_at then self.created_at = value
+      when :updated_at then self.updated_at = value
+      end
     end
 
     def [](key)
-      send(key)
+      case key
+      when :title then @title
+      when :created_at then @created_at
+      when :updated_at then @updated_at
+      end
     end
   end
 

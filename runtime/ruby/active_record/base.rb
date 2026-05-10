@@ -189,13 +189,19 @@ module ActiveRecord
       # require Ty::Array dispatch (`empty?`, `first`) — use
       # `length` and `[0]` which are JS-array-native and Ruby-
       # Array-native both. Same shape for every target.
-      rows = ActiveRecord.adapter.where(table_name, conditions)
+      #
+      # `.to_h` on `conditions`: no-op on a Ruby Hash, NamedTuple→
+      # Hash conversion under Crystal. Call sites that pass kwargs
+      # (`Item.find_by(title: "B")`) lift to NamedTuple in Crystal,
+      # but the adapter's `where` slot is typed `Hash(Symbol, _)`.
+      rows = ActiveRecord.adapter.where(table_name, conditions.to_h)
       return nil if rows.length == 0
       instantiate(rows[0])
     end
 
     def self.where(conditions)
-      ActiveRecord.adapter.where(table_name, conditions).map { |row| instantiate(row) }
+      # See `find_by` above for the `.to_h` rationale.
+      ActiveRecord.adapter.where(table_name, conditions.to_h).map { |row| instantiate(row) }
     end
 
     def self.count

@@ -93,8 +93,15 @@ module Roundhouse
     def insert(table_name : String, attributes : Hash(Symbol, _)) : Int64
       raise "table #{table_name} not created" unless @tables.has_key?(table_name)
       explicit = attributes[:id]?
+      # `to_s.to_i64` rather than `explicit.as(Int).to_i64`: the
+      # attributes Hash value type is `_` at the abstract-method
+      # boundary, so Crystal can't statically prove explicit is Int
+      # even when the caller is passing `id: 7`. The to_s detour
+      # handles every cell variant uniformly (Int → "7" → 7,
+      # String "7" → 7, nil → "" → 0 — caught by the nil guard
+      # above).
       id = if !explicit.nil? && explicit != 0
-             explicit.as(Int).to_i64
+             explicit.to_s.to_i64
            else
              (@next_ids[table_name]? || 0_i64) + 1_i64
            end

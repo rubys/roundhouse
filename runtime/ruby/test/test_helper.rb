@@ -28,13 +28,15 @@ require "inflector"
 
 # Tiny in-memory adapter satisfying the 12-method
 # `ActiveRecord::Base` contract. Mirrors the semantics of
-# `runtime/spinel/in_memory_adapter.rb`; reproduced here as a
+# `runtime/crystal/framework_test_adapter.cr`; reproduced here as a
 # minimal reference implementation so the framework tests don't
 # depend on a target-specific runtime tree.
 #
 # Storage shape: `tables[name] = { id_int => row_hash }`. Rows are
-# Symbol-keyed hashes (matches what framework Ruby reads from
-# `instantiate(row)`).
+# String-keyed hashes — matches the production sqlite adapters
+# across targets (Crystal SqliteAdapter returns `Hash(String, DB::Any)`,
+# TS adapters return `{[k: string]: V}`), so test fixtures can
+# `row["id"]` against rows from either adapter.
 module FrameworkTestAdapter
   module_function
 
@@ -77,9 +79,12 @@ module FrameworkTestAdapter
     (@tables[table] || {}).values
   end
 
+  # Conditions come in Symbol-keyed (the Hash<Symbol, _> contract
+  # ActiveRecord::Base#where passes through); rows are String-keyed.
+  # Compare via stringified keys.
   def where(table, conditions)
     all(table).select do |row|
-      conditions.all? { |k, v| row[k] == v }
+      conditions.all? { |k, v| row[k.to_s] == v }
     end
   end
 
@@ -95,14 +100,14 @@ module FrameworkTestAdapter
     raise "table #{table} not created" unless @tables.key?(table)
     id = (attrs[:id] && attrs[:id] != 0) ? attrs[:id] : (@next_ids[table] += 1)
     @next_ids[table] = [@next_ids[table], id].max
-    row = attrs.merge(id: id)
+    row = attrs.transform_keys(&:to_s).merge("id" => id)
     @tables[table][id] = row
     id
   end
 
   def update(table, id, attrs)
     return false unless @tables[table]&.key?(id)
-    row = @tables[table][id].merge(attrs).merge(id: id)
+    row = @tables[table][id].merge(attrs.transform_keys(&:to_s)).merge("id" => id)
     @tables[table][id] = row
     true
   end
