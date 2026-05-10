@@ -1,13 +1,12 @@
-//! Framework-test transpile gate (Spinel target, CRuby-mode).
+//! Framework-test transpile gate (Ruby target, CRuby/MRI runtime).
 //!
-//! Mirrors `framework_tests_typescript.rs` for the Spinel target.
-//! Spinel itself isn't yet runnable as an end-to-end binary for the
-//! framework runtime (12 residual C-emit errors against the current
-//! archive — see matz/spinel#379 chain), so this gate uses CRuby as
-//! the runtime: spinel is a Ruby subset, so the lowered test file
-//! plus the framework runtime files (copied verbatim from
-//! `runtime/ruby/`) execute correctly under stock Ruby. Same pattern
-//! `toolchain-spinel` already uses for real-blog.
+//! Mirrors `framework_tests_typescript.rs` for the Ruby target. The
+//! gate uses stock CRuby as the runtime: the emit function (still
+//! named `emit_spinel` for historical reasons) produces Ruby-shape
+//! output that runs verbatim under MRI. The future Spinel-AOT
+//! framework-tests job will run the same emit through the spinel
+//! binary when end-to-end runnable. Same pattern `toolchain-ruby`
+//! already uses for real-blog.
 //!
 //! What this catches that `framework_ruby_tests_pass` doesn't:
 //! transpile-fidelity gaps in the test-file lowering itself
@@ -18,7 +17,7 @@
 //!
 //! Marked `#[ignore]` while gaps close — run explicitly:
 //!
-//!     cargo test --test framework_tests_spinel -- --ignored --nocapture
+//!     cargo test --test framework_tests_ruby -- --ignored --nocapture
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,7 +31,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("roundhouse-framework-tests-spinel").join(tag)
+    base.join("roundhouse-framework-tests-ruby").join(tag)
 }
 
 /// Recursively copy a tree. Used to seed the scratch dir with

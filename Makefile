@@ -32,53 +32,54 @@ compare-rust:
 compare-ts:
 	scripts/compare typescript
 
-.PHONY: compare-spinel
-compare-spinel:
-	scripts/compare spinel
+.PHONY: compare-ruby
+compare-ruby:
+	scripts/compare ruby
 
-# ── Spinel demo: transpile real-blog to a runnable spinel-shape app ──
+# ── Ruby target: transpile real-blog to a runnable Ruby/CRuby app ──
 #
-# Produces $(SPINEL_OUT) by overlaying lowered output from real-blog
-# on top of the spinel-target scaffold (runtime/spinel/scaffold/) and
-# runtime trees. Scaffold provides Gemfile, inner Makefile, main.rb,
-# app/views.rb, app/assets/tailwind.css, server/dev_server.rb, tools/,
-# .gitignore. Runtime is framework Ruby (runtime/ruby/) plus spinel
-# target primitives (runtime/spinel/*.rb). Lowered emit fills
-# app/{models,controllers,views}, config/{schema,routes}.rb, and
-# test/{test_helper,models,controllers,fixtures}. The result is
-# runnable: `make spinel-dev` delegates to the inner Makefile's `dev`
-# target → server boots on :3000.
+# Produces $(RUBY_OUT) by overlaying lowered output from real-blog
+# on top of the Ruby-target scaffold (runtime/spinel/scaffold/, retained
+# under that path until a follow-up move) and runtime trees. Scaffold
+# provides Gemfile, inner Makefile, main.rb, app/views.rb,
+# app/assets/tailwind.css, tools/, .gitignore. Runtime is framework
+# Ruby (runtime/ruby/) plus per-target primitives currently still under
+# runtime/spinel/*.rb. Lowered emit fills app/{models,controllers,views},
+# config/{schema,routes}.rb, and test/{test_helper,models,controllers,
+# fixtures}. The result is runnable: `make ruby-dev` delegates to the
+# inner Makefile's `dev` target → server boots on :3000.
 #
 # This is the same scaffold-overlay-emit pattern that
-# `tests/spinel_toolchain.rs` uses for the toolchain CI job; the
-# difference is which target the inner Makefile is asked to run.
+# `tests/ruby_toolchain.rs` uses for the toolchain CI job. The eventual
+# Spinel-AOT target will reuse the same lowered emit through a parallel
+# job that invokes the spinel binary; not yet wired.
 
-SPINEL_OUT ?= build/transpiled-blog
+RUBY_OUT ?= build/transpiled-blog
 
-$(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
-	rm -rf $(SPINEL_OUT)
-	mkdir -p $(SPINEL_OUT)
+$(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
+	rm -rf $(RUBY_OUT)
+	mkdir -p $(RUBY_OUT)
 	# Verbatim scaffold for the output tree.
-	cp -r runtime/spinel/scaffold/. $(SPINEL_OUT)/
+	cp -r runtime/spinel/scaffold/. $(RUBY_OUT)/
 	# Target-specific tests (broadcasts/cgi_io/in_memory_adapter +
 	# integration/views/models/tools subdirs). emit_spinel layers
 	# test/{test_helper,models/{article,comment}_test,controllers/*,
 	# fixtures/*} on top via the JSON explode below.
-	mkdir -p $(SPINEL_OUT)/test
-	cp -r runtime/spinel/test/. $(SPINEL_OUT)/test/
-	# Runtime: framework Ruby (runtime/ruby/) + spinel target
+	mkdir -p $(RUBY_OUT)/test
+	cp -r runtime/spinel/test/. $(RUBY_OUT)/test/
+	# Runtime: framework Ruby (runtime/ruby/) + per-target
 	# primitives (runtime/spinel/*.rb). Both land flat under
-	# $(SPINEL_OUT)/runtime/. runtime/ruby/test/ is roundhouse-side
+	# $(RUBY_OUT)/runtime/. runtime/ruby/test/ is roundhouse-side
 	# test fixturing — not emitted here.
-	mkdir -p $(SPINEL_OUT)/runtime
+	mkdir -p $(RUBY_OUT)/runtime
 	cp -r runtime/ruby/active_record runtime/ruby/active_support \
 	      runtime/ruby/action_view runtime/ruby/action_controller \
 	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
-	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
-	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
-	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
+	      runtime/ruby/inflector.rb $(RUBY_OUT)/runtime/
+	cp runtime/spinel/*.rb $(RUBY_OUT)/runtime/
+	cargo run --release --bin build-site -- fixtures/real-blog $(RUBY_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
 	  m["files"].each do |f|; \
@@ -86,26 +87,26 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	    FileUtils.mkdir_p(File.dirname(p)); \
 	    File.write(p, f["content"]); \
 	  end' \
-	  $(SPINEL_OUT)/.emit/browse/spinel.json $(SPINEL_OUT)
-	rm -rf $(SPINEL_OUT)/.emit
+	  $(RUBY_OUT)/.emit/browse/spinel.json $(RUBY_OUT)
+	rm -rf $(RUBY_OUT)/.emit
 	# Seed the demo DB from real-blog's Rails-populated SQLite. The
 	# Rails-generated schema (varchar/text/datetime affinities) reads
-	# fine through spinel's SqliteAdapter; main.rb's Schema.load! is
-	# idempotent (CREATE TABLE IF NOT EXISTS) so it no-ops over the
-	# existing tables. Copy gives the demo three articles + comments
-	# out of the box; mutations land on the demo's copy, so real-blog
-	# stays pristine. `make clean-spinel` resets to seeded state.
-	mkdir -p $(SPINEL_OUT)/tmp
-	cp fixtures/real-blog/storage/development.sqlite3 $(SPINEL_OUT)/tmp/blog.sqlite3
-	touch $(SPINEL_OUT)/.stamp
+	# fine through SqliteAdapter; main.rb's Schema.load! is idempotent
+	# (CREATE TABLE IF NOT EXISTS) so it no-ops over the existing
+	# tables. Copy gives the demo three articles + comments out of
+	# the box; mutations land on the demo's copy, so real-blog stays
+	# pristine. `make clean-ruby` resets to seeded state.
+	mkdir -p $(RUBY_OUT)/tmp
+	cp fixtures/real-blog/storage/development.sqlite3 $(RUBY_OUT)/tmp/blog.sqlite3
+	touch $(RUBY_OUT)/.stamp
 
-.PHONY: spinel-transpile
-spinel-transpile: $(SPINEL_OUT)/.stamp
+.PHONY: ruby-transpile
+ruby-transpile: $(RUBY_OUT)/.stamp
 
-.PHONY: spinel-dev spinel-test spinel-run
-spinel-dev spinel-test spinel-run: spinel-transpile
-	cd $(SPINEL_OUT) && $(MAKE) $(patsubst spinel-%,%,$@)
+.PHONY: ruby-dev ruby-test ruby-run
+ruby-dev ruby-test ruby-run: ruby-transpile
+	cd $(RUBY_OUT) && $(MAKE) $(patsubst ruby-%,%,$@)
 
-.PHONY: clean-spinel
-clean-spinel:
-	rm -rf $(SPINEL_OUT)
+.PHONY: clean-ruby
+clean-ruby:
+	rm -rf $(RUBY_OUT)

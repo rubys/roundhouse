@@ -1,26 +1,27 @@
-//! Spinel toolchain integration test — runs CRuby over the emitted
-//! spinel-shape output (app + tests) to assert the lowering produces a
+//! Ruby toolchain integration test — runs CRuby/MRI over the emitted
+//! Ruby-shape output (app + tests) to assert the lowering produces a
 //! project that satisfies real-blog's test contract.
 //!
 //! Symmetry with other toolchain jobs: TypeScript / Rust / Crystal /
 //! etc. emit both the app AND its tests, then run the emitted tests
-//! against the emitted app. Spinel does the same — `emit_spinel`
-//! emits `test/test_helper.rb`, `test/fixtures/<plural>.rb`, and
+//! against the emitted app. The Ruby target does the same — the
+//! emit function (still named `emit_spinel` for historical reasons)
+//! produces `test/test_helper.rb`, `test/fixtures/<plural>.rb`, and
 //! `test/{models,controllers}/<stem>_test.rb` from real-blog's test
-//! sources. CRuby is the runtime (spinel is a Ruby subset; spinel's
-//! own test runner can swap in once it lands).
+//! sources. The future Spinel-AOT toolchain job will run the same
+//! emit through the spinel binary when end-to-end runnable.
 //!
 //! Marked `#[ignore]` so it doesn't run in the default `cargo test`
 //! sweep — the bundle install + Ruby invocation costs are CI-only.
 //! Run explicitly:
 //!
-//!     cargo test --test spinel_toolchain -- --ignored --nocapture
+//!     cargo test --test ruby_toolchain -- --ignored --nocapture
 //!
 //! Layout: emit lowered files into a scratch dir overlaid on a copy of
 //! `runtime/spinel/scaffold/` (Gemfile, inner Makefile, main.rb,
-//! app/views.rb — a hand-written aggregator we don't yet emit, server/,
-//! tools/), `runtime/spinel/test/` (target-specific tests), plus the
-//! framework Ruby + spinel primitives flattened into `runtime/`. Then
+//! app/views.rb — a hand-written aggregator we don't yet emit, tools/),
+//! `runtime/spinel/test/` (target-specific tests), plus the framework
+//! Ruby + per-target primitives flattened into `runtime/`. Then
 //! `bundle exec ruby` each model/controller test against the emitted
 //! code.
 //!
@@ -37,7 +38,7 @@ use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
+    std::env::temp_dir().join(format!("roundhouse-ruby-{tag}"))
 }
 
 /// Recursively copy a tree. Used to seed the scratch dir with

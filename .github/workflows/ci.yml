@@ -175,7 +175,7 @@ jobs:
     # strict-typing regressions (NamedTuple/Hash bridging,
     # nullable narrowing, etc.) before they cascade into real-blog
     # runtime failures. Sibling of framework-tests-typescript /
-    # framework-tests-spinel.
+    # framework-tests-ruby.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,17 +188,17 @@ jobs:
       - name: cargo test --test framework_tests_crystal -- --ignored
         run: cargo test --test framework_tests_crystal -- --ignored --nocapture
 
-  framework-tests-spinel:
-    # Per-target framework-test conformance gate for the Spinel
-    # target. Transpiles runtime/ruby/test/**/*_test.rb through
-    # ruby::emit_spinel and runs the result under CRuby (Spinel
-    # itself isn't yet end-to-end runnable for the framework
-    # runtime; CRuby is contract-equivalent for the Ruby subset
-    # Spinel emits). Catches per-target lowering regressions
-    # (test-class-shape rewrites, fixture refs, parent-class
-    # swap) that the source-side `framework_ruby_tests_pass`
-    # gate can't see because it runs the Ruby verbatim. Sibling
-    # of framework-tests-typescript above.
+  framework-tests-ruby:
+    # Per-target framework-test conformance gate for the Ruby target
+    # (CRuby/MRI). Transpiles runtime/ruby/test/**/*_test.rb through
+    # ruby::emit_spinel (named for historical reasons; emits the
+    # Ruby-shape output that runs under stock CRuby). Catches
+    # per-target lowering regressions (test-class-shape rewrites,
+    # fixture refs, parent-class swap) that the source-side
+    # `framework_ruby_tests_pass` gate can't see because it runs the
+    # Ruby verbatim. Sibling of framework-tests-typescript above. A
+    # future framework-tests-spinel job will run the same lowered
+    # emit through the spinel AOT compiler when end-to-end runnable.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -209,8 +209,8 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test framework_tests_spinel -- --ignored
-        run: cargo test --test framework_tests_spinel -- --ignored --nocapture
+      - name: cargo test --test framework_tests_ruby -- --ignored
+        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
 
   toolchain-go:
     needs: generate-fixture
@@ -252,22 +252,18 @@ jobs:
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
 
   # -------------------------------------------------------------------
-  # Spinel toolchain. Methodology asymmetry vs. the other toolchain
-  # jobs: Spinel doesn't yet have its own test runner, so this job
-  # emits the lowered app/ from real-blog plus the target-specific
-  # tests from runtime/spinel/test/, then runs them over the emitted
-  # output via CRuby (Spinel is a Ruby subset). Other toolchain jobs
-  # emit both app + tests and run the emitted tests; the swap will
-  # happen here once Spinel grows a runner.
+  # Ruby toolchain (CRuby/MRI). Emits the lowered app/ from real-blog
+  # plus the target-specific tests from runtime/spinel/test/, then
+  # runs them over the emitted output via stock CRuby. Verifies the
+  # Ruby-shape lowering produces a runnable Rails-shaped project; a
+  # future toolchain-spinel job will run the same emit through the
+  # spinel AOT compiler when end-to-end runnable.
   #
-  # Second leg (rubocop_spinel) lints the same scratch tree the cargo
-  # test produces — the shipped tree (scaffold + runtime + lowered
-  # emit) — for spinel-subset compliance. CRuby silently accepts
-  # patterns spinel rejects (eval, extend, module_function, bare
-  # `send`, `class << self`, etc.); this is the static gate that
-  # catches them. Interim while spinel itself isn't yet runnable as
-  # a target.
-  toolchain-spinel:
+  # The rubocop_spinel subset-compliance leg was removed when this
+  # job was renamed from toolchain-spinel — the gate now targets
+  # idiomatic Ruby, not the spinel subset. The lint can be reinstated
+  # against a dedicated toolchain-spinel job when that lands.
+  toolchain-ruby:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
@@ -284,16 +280,8 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test spinel_toolchain -- --ignored
-        run: cargo test --test spinel_toolchain -- --ignored --nocapture
-      - name: bundle exec rubocop (spinel-subset lint on emitted tree)
-        # Scratch path matches `scratch_dir("real-blog")` in
-        # tests/spinel_toolchain.rs (= `std::env::temp_dir()` joined,
-        # which is `/tmp` on ubuntu-latest with no TMPDIR set).
-        run: bundle exec rubocop --format github .
-        working-directory: /tmp/roundhouse-spinel-real-blog
-        env:
-          BUNDLE_GEMFILE: ${{ github.workspace }}/runtime/spinel/scaffold/Gemfile
+      - name: cargo test --test ruby_toolchain -- --ignored
+        run: cargo test --test ruby_toolchain -- --ignored --nocapture
 
   toolchain-python:
     needs: generate-fixture
@@ -466,15 +454,15 @@ jobs:
       - name: scripts/compare python
         run: scripts/compare python
 
-  # compare-spinel: DOM-diff via per-request shell-out to main.rb
-  # (CGI shape: ENV in, response on stdout). No live target server —
-  # the previous CRuby dev_server.rb was retired in the rubocop_spinel
-  # cleanup; main.rb is spinel-subset clean and produces the same
-  # HTTP response shape as a server would. Per-path Ruby startup
-  # (~1s × 5 paths) is the cost; the eventual spinel-compiled binary
-  # invocation will close that gap. See project_ruby_dev_server_-
-  # retirement memory.
-  compare-spinel:
+  # compare-ruby: DOM-diff via per-request shell-out to main.rb under
+  # CRuby (CGI shape: ENV in, response on stdout). No live target
+  # server — the previous CRuby dev_server.rb was retired in the
+  # rubocop_spinel cleanup; main.rb produces the same HTTP response
+  # shape as a server would. Per-path Ruby startup (~1s × 5 paths)
+  # is the cost. A future compare-spinel job will run the same emit
+  # through the spinel-compiled binary when end-to-end runnable.
+  # See project_ruby_dev_server_retirement memory.
+  compare-ruby:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
@@ -499,8 +487,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: scripts/compare spinel
-        run: scripts/compare spinel
+      - name: scripts/compare ruby
+        run: scripts/compare ruby
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

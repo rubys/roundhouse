@@ -9,12 +9,14 @@
 #
 # Usage:  scripts/compare [options] TARGET
 #
-#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr | elixir | ex | spinel | sp }
+#   TARGET ∈ { typescript | ts | rust | rs | python | py | go | crystal | cr | elixir | ex | ruby | rb }
 #     (others are emitted but no live server runtime yet; extend
 #     as targets grow.)
 #
-#   The `spinel` target produces Spinel-subset Ruby; the dev server
-#   uses CRuby until Spinel itself can compile the output.
+#   The `ruby` target produces Ruby-shape output runnable under stock
+#   CRuby/MRI. A future `spinel` target will run the same lowered
+#   emit through the spinel AOT compiler when it can compile the
+#   output; not yet wired.
 #
 # Options:
 #   --path PATH           URL path to compare (repeatable). Default:
@@ -104,9 +106,9 @@ case "$TARGET" in
     go)            TARGET=go ;;
     crystal|cr)    TARGET=crystal ;;
     elixir|ex)     TARGET=elixir ;;
-    spinel|sp)     TARGET=spinel ;;
+    ruby|rb)       TARGET=ruby ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, or spinel)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, or ruby)" >&2
         exit 2
         ;;
 esac
@@ -150,9 +152,9 @@ case "$TARGET" in
         BUILD_DIR="/tmp/rh-ex-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
-    spinel)
-        # Spinel reuses the demo's transpile output (Makefile target
-        # `spinel-transpile`), which lives under build/transpiled-blog/.
+    ruby)
+        # Ruby reuses the demo's transpile output (Makefile target
+        # `ruby-transpile`), which lives under build/transpiled-blog/.
         # The dev server reads BLOG_DB; the staged DB lands at
         # tmp/blog.sqlite3 inside that tree.
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog"
@@ -250,12 +252,12 @@ ok "compare tool ready"
 if (( SKIP_EMIT == 0 )); then
     step "regenerating target ($TARGET) → $BUILD_DIR"
     case "$TARGET" in
-        spinel)
-            # Spinel uses the workspace Makefile's spinel-transpile rule
+        ruby)
+            # Ruby uses the workspace Makefile's ruby-transpile rule
             # (cargo build-site + scaffold overlay + DB seed), which is
             # the same path the demo uses. Force a fresh stamp so changes
             # to runtime/spinel/ pick up.
-            (cd "$REPO_ROOT" && rm -rf "$BUILD_DIR" && make spinel-transpile >/dev/null)
+            (cd "$REPO_ROOT" && rm -rf "$BUILD_DIR" && make ruby-transpile >/dev/null)
             ;;
         *)
             (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
@@ -299,11 +301,11 @@ case "$TARGET" in
         step "building elixir target"
         (cd "$BUILD_DIR" && mix deps.get && MIX_ENV=prod mix compile)
         ;;
-    spinel)
+    ruby)
         # Tailwind + turbo.min.js. The inner Makefile (copied from
-        # runtime/spinel/scaffold/Makefile by spinel-transpile) handles
+        # runtime/spinel/scaffold/Makefile by ruby-transpile) handles
         # both: tailwindcss CLI for app.css, gem-dir copy for turbo JS.
-        step "building spinel assets (tailwind + turbo.min.js)"
+        step "building ruby assets (tailwind + turbo.min.js)"
         (cd "$BUILD_DIR" && BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" make assets >/dev/null)
         ;;
 esac
@@ -334,7 +336,7 @@ ok "rails up"
 
 # -------- 7. start target / build cmd --------
 
-# Spinel runs without a live server: each request invokes main.rb
+# Ruby runs without a live server: each request invokes main.rb
 # as a one-shot CGI dispatcher (env vars in, CGI-shape response on
 # stdout). BLOG_DB points at the staged seeded SQLite so state
 # persists across per-request invocations; BUNDLE_GEMFILE points
@@ -342,7 +344,7 @@ ok "rails up"
 # previous CRuby dev_server.rb was retired in the rubocop_spinel
 # cleanup (see project_ruby_dev_server_retirement memory).
 TARGET_CMD=""
-if [[ "$TARGET" == "spinel" ]]; then
+if [[ "$TARGET" == "ruby" ]]; then
     TARGET_CMD="cd \"$BUILD_DIR\" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE=\"$REPO_ROOT/runtime/spinel/scaffold/Gemfile\" bundle exec ruby main.rb"
 fi
 
