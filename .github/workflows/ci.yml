@@ -164,6 +164,30 @@ jobs:
       - name: cargo test --test framework_tests_typescript -- --ignored
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
 
+  framework-tests-crystal:
+    # Per-target framework-test conformance gate for the Crystal
+    # target. Transpiles runtime/ruby/test/**/*_test.rb through
+    # crystal::emit and runs the result under `crystal spec`.
+    # Independent of the real-blog fixture (each test builds a
+    # minimal in-process App with a single TestModule), so this
+    # parallelizes freely against generate-fixture / toolchain-*
+    # jobs. Catches per-target adapter contract drift and Crystal
+    # strict-typing regressions (NamedTuple/Hash bridging,
+    # nullable narrowing, etc.) before they cascade into real-blog
+    # runtime failures. Sibling of framework-tests-typescript /
+    # framework-tests-spinel.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - name: cargo test --test framework_tests_crystal -- --ignored
+        run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+
   framework-tests-spinel:
     # Per-target framework-test conformance gate for the Spinel
     # target. Transpiles runtime/ruby/test/**/*_test.rb through

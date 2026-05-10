@@ -375,7 +375,22 @@ fn render_class(lc: &LibraryClass) -> String {
     // skipped via `accessor_method_names`).
     let mut wrote_header_lines = false;
     for (name, ty) in &properties {
-        writeln!(s, "{body_pad}property {name} : {ty}").unwrap();
+        // Same parent-aware default-value treatment as the bare-ivar
+        // emit below: Crystal's strict null check applies across ALL
+        // reachable initialize methods (including the parent's).
+        // Subclasses that initialize @x in their own initialize but
+        // inherit a parent initialize that doesn't would otherwise
+        // trip the "indirect initialization" error. A type-appropriate
+        // default at the property declaration site satisfies the
+        // check uniformly.
+        let default_clause = if !ty.ends_with('?') && lc.parent.is_some() {
+            default_value_for_crystal_ty(ty)
+                .map(|v| format!(" = {v}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        writeln!(s, "{body_pad}property {name} : {ty}{default_clause}").unwrap();
         wrote_header_lines = true;
     }
     // Class-var modules (`module_function` style — view_helpers.rb)
@@ -434,9 +449,24 @@ fn render_class(lc: &LibraryClass) -> String {
             let final_ty = if needs_nilable {
                 format!("{ty_s}?")
             } else {
-                ty_s
+                ty_s.clone()
             };
-            writeln!(s, "{body_pad}{ivar_prefix}{name} : {final_ty}").unwrap();
+            // Crystal's strict null check applies across ALL reachable
+            // initialize methods (including inherited ones). When the
+            // class extends a parent that has its own initialize not
+            // assigning this ivar, declaring non-nilable + assigning
+            // only in the subclass's initialize trips the same error.
+            // Emit a type-appropriate default value at the declaration
+            // site so the parent's initialize path sees it pre-set —
+            // analogous to Crystal's own pattern for `property x : T = <default>`.
+            let default_clause = if !needs_nilable && lc.parent.is_some() {
+                default_value_for_crystal_ty(&ty_s)
+                    .map(|v| format!(" = {v}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            writeln!(s, "{body_pad}{ivar_prefix}{name} : {final_ty}{default_clause}").unwrap();
             wrote_header_lines = true;
         }
     }
@@ -558,6 +588,24 @@ fn is_skipped_method(
         }
     }
     false
+}
+
+/// Return a Crystal literal that serves as the "empty" / zero value
+/// for `ty_s` (an emitted Crystal type string). Used to satisfy
+/// strict null-check on subclass ivars whose parent's initialize
+/// doesn't assign them. Returns `None` for types that don't have an
+/// obvious default — caller falls back to declaring without a
+/// default (which leaves Crystal's null check active).
+fn default_value_for_crystal_ty(ty_s: &str) -> Option<String> {
+    match ty_s {
+        "String" => Some(r#""""#.to_string()),
+        "Int32" => Some("0".to_string()),
+        "Int64" => Some("0_i64".to_string()),
+        "Float32" => Some("0.0_f32".to_string()),
+        "Float64" => Some("0.0".to_string()),
+        "Bool" => Some("false".to_string()),
+        _ => None,
+    }
 }
 
 /// Walk an Expr collecting just the names of ivars assigned directly

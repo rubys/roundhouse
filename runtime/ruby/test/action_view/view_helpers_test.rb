@@ -5,6 +5,42 @@ require_relative "../test_helper"
 # the framework version uses lightweight stand-ins instead of
 # Article (which couples to a schema + DB). Same coverage on the
 # framework surface.
+# Smallest record-shaped object the helpers need: `id` for
+# dom_id, `class.name` for record_dom_prefix's downcase, `[]`
+# for FormBuilder field lookups (model[:title]). Subclasses
+# ActiveRecord::Base so it satisfies FormBuilder's typed
+# constructor under strict-typed targets (Crystal types
+# `model : ActiveRecord::Base`); `Struct.new` would yield a
+# standalone Struct that doesn't fit that slot. Defined at top
+# level (not nested under ViewHelpersTest) so `Article.name`
+# returns the bare "Article" in Ruby — `dom_id` then renders
+# `"article_<id>"` to match Rails. (TS/Crystal already see the
+# emit as a top-level class regardless of where the source
+# nested it.)
+class Article < ActiveRecord::Base
+  attr_accessor :title, :body
+
+  # String defaults (not nil) for `title`/`body` so Crystal's
+  # strict-typing infers @title/@body as `String`. The nil-handling
+  # text_field test below uses an explicit `""` value — equivalent
+  # to nil for the helper's value-omission contract (`text_field`
+  # omits the `value` attribute for nil OR empty).
+  def initialize(id = 0, title = "", body = "")
+    super()
+    self.id = id
+    @title = title
+    @body = body
+  end
+
+  def [](field)
+    case field
+    when :id then @id
+    when :title then @title
+    when :body then @body
+    end
+  end
+end
+
 class ViewHelpersTest < Minitest::Test
   # Bring `ActionView::ViewHelpers` into scope as `ViewHelpers`
   # for test readability AND `ActionView::ViewHelpers::FormBuilder`
@@ -14,18 +50,6 @@ class ViewHelpersTest < Minitest::Test
   # what the transpile produces.
   include ActionView
   include ActionView::ViewHelpers
-
-  # Smallest record-shaped object the helpers need: `id` for
-  # dom_id, `class.name` for record_dom_prefix's downcase, `[]`
-  # for FormBuilder field lookups (model[:title]). Override `name`
-  # on the singleton class so the nested `ViewHelpersTest::Article`
-  # path collapses to `"Article"` — the dom_id contract matches
-  # Rails' top-level convention regardless of where the test
-  # model lives in the constant tree.
-  Article = Struct.new(:id, :title, :body) do
-    def [](field) = send(field)
-    def self.name = "Article"
-  end
 
   def setup
     ViewHelpers.reset_slots!
@@ -178,7 +202,10 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_javascript_importmap_tags_with_explicit_pins
-    pins = [{ name: "app", path: "/assets/app.js" }]
+    # `.to_h` on each pin: Ruby no-op, Crystal converts the NamedTuple
+    # literal to Hash so the array element type matches the helper's
+    # `Array(Hash(Symbol, String))` parameter signature.
+    pins = [{ name: "app", path: "/assets/app.js" }.to_h]
     out = ViewHelpers.javascript_importmap_tags(pins, "app")
     assert_includes out, %("app": "/assets/app.js")
     assert_includes out, %(<link rel="modulepreload" href="/assets/app.js">)
@@ -237,7 +264,12 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_form_builder_text_field_handles_nil_value
-    article = Article.new(0, nil, nil)
+    # Empty string instead of explicit nil — Article's typed-string
+    # initializer rejects nil under strict-typed targets. The
+    # text_field helper omits the `value` attribute for nil OR
+    # empty alike, so the assertion below still verifies the
+    # value-omission contract.
+    article = Article.new(0, "", "")
     builder = FormBuilder.new(article, "article", "/articles", :post)
     out = builder.text_field(:title)
     # Rails omits the `value` attribute when the field is nil/empty

@@ -31,7 +31,11 @@ module ActionView
     end
   
     def self.content_for_get(slot)
-      @slots[slot]
+      # `fetch(slot, nil)` (which the Crystal emit lowers to
+      # `@@slots[slot]?`) — Ruby Hash#[] returns nil for missing
+      # keys, but Crystal's strict Hash#[] raises KeyError. Same
+      # cross-target nil-safe pattern used elsewhere.
+      @slots.fetch(slot, nil)
     end
 
     def self.get_slot(slot)
@@ -109,7 +113,14 @@ module ActionView
     # ── HTML element helpers ─────────────────────────────────────────
   
     def self.link_to(text, href, opts = {})
-      attrs = render_attrs({ href: href }.merge(opts))
+      # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
+      # conversion under Crystal. Call sites that use kwargs syntax
+      # (`link_to "Show", "/x", class: "btn"`) lift to NamedTuple
+      # in Crystal, but the receiver builds a Hash via `merge` —
+      # NamedTuple#merge can't take a Hash, and Hash#merge can't
+      # take a NamedTuple. Same `.to_h` pattern applies to every
+      # helper below that merges user opts into a default Hash.
+      attrs = render_attrs({ href: href }.merge(opts.to_h))
       "<a#{attrs}>#{html_escape(text)}</a>"
     end
   
@@ -120,10 +131,17 @@ module ActionView
       # both. Same Ruby semantics, target-portable shape.
       method = opts.fetch(:method, nil)
       form_class = opts.fetch(:form_class, nil)
-      inner_opts = opts.dup
+      # `opts.to_h.dup` rather than `opts.dup`: kwargs call sites
+      # (`button_to "X", "/y", method: :delete`) lift to NamedTuple
+      # in Crystal; NamedTuple has `dup` (no-op since immutable) but
+      # no `delete`. Convert to Hash first.
+      inner_opts = opts.to_h.dup
       inner_opts.delete(:method)
       inner_opts.delete(:form_class)
-      form_attrs = { action: href, method: "post" }
+      # `.to_h` makes form_attrs a Hash (Ruby no-op; Crystal converts
+       # the NamedTuple literal). Subsequent `[:class] = ...` mutation
+      # would fail on Crystal's immutable NamedTuple.
+      form_attrs = { action: href, method: "post" }.to_h
       # Rails' `button_to` defaults the form class to `button_to` when
       # the caller doesn't pass one — match that so the cross-target
       # compare sees the same `class` attribute set.
@@ -173,7 +191,7 @@ module ActionView
   
     def self.stylesheet_link_tag(name, opts = {})
       href = "/assets/#{name}.css"
-      attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts))
+      attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
     end
   
@@ -249,21 +267,24 @@ module ActionView
       attr_reader :model, :model_name, :action
   
       def label(field, opts = {})
-        attrs = ViewHelpers.render_attrs({ for: "#{@model_name}_#{field}" }.merge(opts))
+        attrs = ViewHelpers.render_attrs({ for: "#{@model_name}_#{field}" }.merge(opts.to_h))
         "<label#{attrs}>#{ViewHelpers.html_escape(field.to_s.capitalize)}</label>"
       end
   
       def text_field(field, opts = {})
         value = @model[field]
+        # `.to_h` makes base a Hash (Ruby no-op; Crystal converts).
+        # Subsequent `base[:value] = ...` mutation requires Hash;
+        # NamedTuple is immutable.
         base = {
           type: "text",
           name: "#{@model_name}[#{field}]",
           id: "#{@model_name}_#{field}",
-        }
+        }.to_h
         # Rails omits the `value` attribute entirely when the field is
         # nil/empty; only render it when there's a non-empty value.
         base[:value] = value.to_s unless value.nil? || value.to_s.empty?
-        attrs = ViewHelpers.render_attrs(base.merge(opts))
+        attrs = ViewHelpers.render_attrs(base.merge(opts.to_h))
         "<input#{attrs}>"
       end
   
@@ -273,7 +294,7 @@ module ActionView
           {
             name: "#{@model_name}[#{field}]",
             id: "#{@model_name}_#{field}",
-          }.merge(opts)
+          }.merge(opts.to_h)
         )
         "<textarea#{attrs}>#{ViewHelpers.html_escape(value)}</textarea>"
       end
@@ -292,7 +313,7 @@ module ActionView
             name: "commit",
             value: text,
             :"data-disable-with" => text,
-          }.merge(opts)
+          }.merge(opts.to_h)
         )
         "<input#{attrs}>"
       end
@@ -321,7 +342,7 @@ module ActionView
       # same attribute set.
       attrs = render_attrs(
         { action: action, :"accept-charset" => "UTF-8", method: form_method }
-          .merge(opts)
+          .merge(opts.to_h)
       )
       "<form#{attrs}>#{method_input}#{auth_token_input}#{body}</form>"
     end
