@@ -516,19 +516,6 @@ fn eq_id_ivar(table: &Table) -> Predicate {
     )
 }
 
-fn instance_field(instance: &Symbol, col_name: &Symbol) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(var_ref(instance)),
-            method: col_name.clone(),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
 fn ivar_ref(name: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() })
 }

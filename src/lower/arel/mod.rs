@@ -55,6 +55,62 @@ pub fn rewrite_arel_in_expr(
         }
     }
     walk_subexprs_mut(expr, &mut |e| rewrite_arel_in_expr(e, schema, registry));
+    // Post-pass: when an Arel rewrite landed a Seq in an Assign's
+    // value slot (e.g. `@articles = <multi-row hydrate Seq>`),
+    // hoist the Seq's leading stmts out into the enclosing Seq so
+    // the assignment binds to the Seq's final expression rather
+    // than chaining to the first stmt. Ruby `x = a; b; c` parses
+    // as `x = a` then `b` then `c` — the parens-grouped form
+    // `x = (a; b; c)` would also work but isn't what the Ruby
+    // emitter produces, so normalize structurally instead.
+    if let ExprNode::Seq { exprs } = &mut *expr.node {
+        hoist_seq_assigns(exprs);
+    }
+}
+
+/// Within a Seq's stmt list, replace any `Assign { target, value:
+/// Seq { inner_exprs } }` with the inner Seq's leading stmts
+/// followed by `Assign { target, value: <inner Seq's last expr> }`.
+/// Generic normalization — applies to any rewrite that lifts a
+/// multi-stmt expression into a value position.
+fn hoist_seq_assigns(stmts: &mut Vec<Expr>) {
+    let mut i = 0;
+    while i < stmts.len() {
+        let take_inner = matches!(
+            &*stmts[i].node,
+            ExprNode::Assign { value, .. } if matches!(&*value.node, ExprNode::Seq { .. })
+        );
+        if !take_inner {
+            i += 1;
+            continue;
+        }
+        // Decompose the Assign + inner Seq, then splice.
+        let assign = std::mem::replace(
+            &mut stmts[i],
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        );
+        let (target, inner_exprs) = match *assign.node {
+            ExprNode::Assign { target, value } => match *value.node {
+                ExprNode::Seq { exprs } => (target, exprs),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let mut leading = inner_exprs;
+        let last = leading.pop().expect("Seq with at least one expr");
+        let new_assign = Expr::new(
+            assign.span,
+            ExprNode::Assign { target, value: last },
+        );
+        // Replace the placeholder + insert leading stmts before it.
+        stmts.remove(i);
+        let added = leading.len();
+        for (j, stmt) in leading.into_iter().enumerate() {
+            stmts.insert(i + j, stmt);
+        }
+        stmts.insert(i + added, new_assign);
+        i += added + 1;
+    }
 }
 
 /// Mutable visitor for every direct sub-Expr of `expr`. Caller

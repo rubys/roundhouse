@@ -42,6 +42,14 @@ use super::ir::{
 /// `owner` is the model class the Send dispatches against; the
 /// caller (lowerer pass) hands it to the visitor so Select knows
 /// which model to hydrate.
+///
+/// Recognizes both base-shape Sends (`Model.where(...)`,
+/// `Model.find_by(...)`, `Model.all`, `Model.count`,
+/// `Model.exists?(...)`) and chain-shape Sends with trailing
+/// `.order(col: :dir)` / `.limit(n)` / `.includes(:assoc)`
+/// modifiers. The recursive arm walks the chain bottom-up: the
+/// innermost recv must resolve to a base-shape Send for the chain
+/// to lift to Arel.
 pub fn try_build_arel(
     send: &Expr,
     schema: &Schema,
@@ -50,6 +58,31 @@ pub fn try_build_arel(
     let ExprNode::Send { recv: Some(recv), method, args, .. } = send.node.as_ref() else {
         return None;
     };
+
+    // Chain-modifier arm — recurse into recv, layer this method on top.
+    // `try_chain_recv` lets a bare Const recv act as an implicit
+    // `Const.all` so `Article.order(...)` (Rails-style) and
+    // `Article.includes(:c).order(...)` both lift cleanly.
+    match method.as_str() {
+        "order" => {
+            let (op, owner) = try_chain_recv(recv, schema, registry)?;
+            return apply_order(op, args).map(|op| (op, owner));
+        }
+        "limit" => {
+            let (op, owner) = try_chain_recv(recv, schema, registry)?;
+            return apply_limit(op, args).map(|op| (op, owner));
+        }
+        // `includes(:assoc)` is a no-op chain link in the IR today —
+        // eager-loading / preload is Phase 3+ work. Drop the link
+        // and recurse so the rest of the chain still recognizes.
+        "includes" | "preload" | "eager_load" => {
+            return try_chain_recv(recv, schema, registry);
+        }
+        _ => {}
+    }
+
+    // Base arm — recv must be a Const that resolves to a model in the
+    // registry; method must be one of the base AR shapes we recognize.
     let class_id = const_to_class_id(recv, registry)?;
     let info = registry.get(&class_id)?;
     let table_ref = info.table.as_ref()?.clone();
@@ -64,6 +97,105 @@ pub fn try_build_arel(
         _ => None,
     }?;
     Some((op, class_id))
+}
+
+/// Treat the recv of a chain modifier as a recognizable Arel base.
+/// Two shapes count:
+///   - A Send `try_build_arel` already recognizes (`Model.where(...)`,
+///     another chain link).
+///   - A bare `Const` that resolves to a known model — implicit
+///     `.all` shape (Rails-style: `Article.order(...)` is the same
+///     as `Article.all.order(...)`).
+fn try_chain_recv(
+    recv: &Expr,
+    schema: &Schema,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Option<(ArelOp, ClassId)> {
+    if let Some((op, owner)) = try_build_arel(recv, schema, registry) {
+        return Some((op, owner));
+    }
+    // Implicit `.all` for bare-Const recv. `Article.order(...)` →
+    // `Article.all.order(...)`.
+    let class_id = const_to_class_id(recv, registry)?;
+    let info = registry.get(&class_id)?;
+    let table_ref = info.table.as_ref()?.clone();
+    let _ = schema.tables.get(&table_ref.0)?;
+    Some((ArelOp::Select(build_all(&table_ref)), class_id))
+}
+
+// ---------------------------------------------------------------------------
+// Chain modifiers — extend an existing ArelOp with order / limit
+// ---------------------------------------------------------------------------
+
+/// `.order(col: :dir, …)` — extract kwargs, append Order entries to
+/// the inner Select. Only Select takes orders; layering on
+/// Insert/Update/Delete returns None (silly but defensive).
+fn apply_order(op: ArelOp, args: &[Expr]) -> Option<ArelOp> {
+    let mut sel = match op {
+        ArelOp::Select(s) => s,
+        _ => return None,
+    };
+    let entries = single_kwargs_hash(args)?;
+    for (k, v) in entries {
+        let col_name = key_as_column_symbol(k)?;
+        let direction = direction_from_value(v)?;
+        sel.orders.push(super::ir::Order {
+            column: super::ir::ColRef {
+                table: sel.table.clone(),
+                column: col_name,
+            },
+            direction,
+        });
+    }
+    Some(ArelOp::Select(sel))
+}
+
+/// `.limit(n)` — single positional integer literal becomes the
+/// LimitSpec. Existing limits are overwritten (Rails semantics).
+fn apply_limit(op: ArelOp, args: &[Expr]) -> Option<ArelOp> {
+    let mut sel = match op {
+        ArelOp::Select(s) => s,
+        _ => return None,
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Int { value } } = args[0].node.as_ref() else {
+        return None;
+    };
+    if *value < 0 {
+        return None;
+    }
+    sel.limit = Some(super::ir::LimitSpec(*value as u64));
+    Some(ArelOp::Select(sel))
+}
+
+/// Common destructure for `.order(col: :dir, …)` /
+/// `.where(col: val, …)` — args must be exactly one kwargs hash.
+fn single_kwargs_hash(args: &[Expr]) -> Option<&Vec<(Expr, Expr)>> {
+    if args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Hash { entries, kwargs } = args[0].node.as_ref() else {
+        return None;
+    };
+    if !*kwargs || entries.is_empty() {
+        return None;
+    }
+    Some(entries)
+}
+
+/// `.order(col: :asc)` direction value is a Sym literal — anything
+/// else (interpolation, dynamic) falls out to runtime fallback.
+fn direction_from_value(v: &Expr) -> Option<super::ir::Direction> {
+    match v.node.as_ref() {
+        ExprNode::Lit { value: Literal::Sym { value } } => match value.as_str() {
+            "asc" | "ASC" => Some(super::ir::Direction::Asc),
+            "desc" | "DESC" => Some(super::ir::Direction::Desc),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +620,177 @@ mod tests {
                 ExprNode::Lit { value: Literal::Int { value: 1 } },
             )],
         );
+        assert!(try_build_arel(&send, &schema, &registry).is_none());
+    }
+
+    #[test]
+    fn recognizes_all_then_order_chain() {
+        // Comment.all.order(article_id: :desc)
+        let (schema, registry) = fixture();
+        let inner = make_send(const_recv("Comment"), "all", vec![]);
+        let kwargs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    lit_sym("article_id"),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from("desc") } },
+                    ),
+                )],
+                kwargs: true,
+            },
+        );
+        let send = make_send(inner, "order", vec![kwargs]);
+        let (op, _) = try_build_arel(&send, &schema, &registry).expect("should match");
+        match op {
+            ArelOp::Select(s) => {
+                assert!(matches!(s.columns, ColumnSpec::All));
+                assert_eq!(s.orders.len(), 1);
+                assert_eq!(s.orders[0].column.column.as_str(), "article_id");
+                assert!(matches!(s.orders[0].direction, super::super::ir::Direction::Desc));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn recognizes_includes_then_order_chain() {
+        // Comment.includes(:article).order(article_id: :asc) — includes
+        // is a no-op chain link; the recognizer drops it and proceeds.
+        let (schema, registry) = fixture();
+        let includes = make_send(
+            const_recv("Comment"),
+            "includes",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Sym { value: Symbol::from("article") } },
+            )],
+        );
+        // .includes leg alone: returns None (not a recognizable base on its own
+        // because it has no `Comment.<base>` underneath when called bare).
+        // To recognize, the chain needs a base — wrap in `.all` first.
+        let inner = make_send(const_recv("Comment"), "all", vec![]);
+        let with_includes = make_send(inner, "includes", vec![Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("article") } },
+        )]);
+        let kwargs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    lit_sym("article_id"),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from("asc") } },
+                    ),
+                )],
+                kwargs: true,
+            },
+        );
+        let send = make_send(with_includes, "order", vec![kwargs]);
+        let _ = includes; // raw `Comment.includes(...)` not exercised here
+        let (op, _) = try_build_arel(&send, &schema, &registry).expect("should match");
+        match op {
+            ArelOp::Select(s) => {
+                assert!(matches!(s.orders[0].direction, super::super::ir::Direction::Asc));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn recognizes_all_then_limit_chain() {
+        // Comment.all.limit(5)
+        let (schema, registry) = fixture();
+        let inner = make_send(const_recv("Comment"), "all", vec![]);
+        let send = make_send(
+            inner,
+            "limit",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: 5 } },
+            )],
+        );
+        let (op, _) = try_build_arel(&send, &schema, &registry).expect("should match");
+        match op {
+            ArelOp::Select(s) => {
+                assert_eq!(s.limit, Some(super::super::ir::LimitSpec(5)));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn recognizes_where_then_order_then_limit_chain() {
+        // Comment.where(article_id: 1).order(id: :desc).limit(10)
+        let (schema, registry) = fixture();
+        let where_kwargs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    lit_sym("article_id"),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Int { value: 1 } },
+                    ),
+                )],
+                kwargs: true,
+            },
+        );
+        let where_call = make_send(const_recv("Comment"), "where", vec![where_kwargs]);
+        let order_kwargs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    lit_sym("id"),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from("desc") } },
+                    ),
+                )],
+                kwargs: true,
+            },
+        );
+        let order_call = make_send(where_call, "order", vec![order_kwargs]);
+        let limit_call = make_send(
+            order_call,
+            "limit",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: 10 } },
+            )],
+        );
+        let (op, _) = try_build_arel(&limit_call, &schema, &registry).expect("should match");
+        match op {
+            ArelOp::Select(s) => {
+                assert!(s.conditions.is_some(), "where preserved");
+                assert_eq!(s.orders.len(), 1, "order preserved");
+                assert_eq!(s.limit, Some(super::super::ir::LimitSpec(10)));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn does_not_recognize_order_with_dynamic_direction() {
+        // Comment.all.order(article_id: var) — runtime variable as direction
+        let (schema, registry) = fixture();
+        let inner = make_send(const_recv("Comment"), "all", vec![]);
+        let kwargs = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    lit_sym("article_id"),
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("dir") },
+                    ),
+                )],
+                kwargs: true,
+            },
+        );
+        let send = make_send(inner, "order", vec![kwargs]);
         assert!(try_build_arel(&send, &schema, &registry).is_none());
     }
 

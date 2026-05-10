@@ -266,7 +266,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
     let controller_lcs =
-        crate::lower::lower_controllers_to_library_classes(&app.controllers, controller_extras);
+        crate::lower::lower_controllers_with_arel(&app.controllers, controller_extras, Some(&app.schema));
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())

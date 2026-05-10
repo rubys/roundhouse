@@ -222,8 +222,24 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
 /// Bulk lower controllers in spinel-shape. Synthesized siblings
 /// (`<Resource>Params`) ride alongside the controller classes in the
 /// returned vec.
+///
+/// Lowers models first so the model `ClassInfo`s land in the
+/// controller lowerer's registry as extras — the Arel pass needs
+/// them to resolve `Article.includes(...).order(...)` chain
+/// receivers to a TableRef.
 fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
-    crate::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new())
+    // Use lower_models_with_registry (not lower_models_to_library_classes
+    // + class_info_from_library_class) because the former returns
+    // ClassInfo with `table` set — the Arel pass needs `info.table`
+    // to map a Const recv to a TableRef when recognizing chains.
+    let (_, model_registry) = crate::lower::lower_models_with_registry(
+        &app.models,
+        &app.schema,
+        Vec::new(),
+    );
+    let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    crate::lower::lower_controllers_with_arel(&app.controllers, model_extras, Some(&app.schema))
 }
 
 /// Render pre-lowered controller `LibraryClass`es to one

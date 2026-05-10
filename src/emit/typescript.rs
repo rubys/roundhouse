@@ -252,9 +252,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     controller_extras.extend(library::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
-    let mut controller_lcs = crate::lower::lower_controllers_to_library_classes(
+    let mut controller_lcs = crate::lower::lower_controllers_with_arel(
         &app.controllers,
         controller_extras.clone(),
+        Some(&app.schema),
     );
 
     let mut fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);

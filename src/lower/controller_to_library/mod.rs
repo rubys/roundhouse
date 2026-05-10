@@ -62,6 +62,24 @@ pub fn lower_controllers_to_library_classes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
+    lower_controllers_with_arel(controllers, extras, None)
+}
+
+/// Variant that also accepts the app `Schema`. When provided, the
+/// Arel pass runs over each typed action body, lifting statically-
+/// resolvable AR call chains (`Article.includes(:c).order(col: :dir)`)
+/// into inline SELECT/hydrate expansions over the `Db` primitive
+/// surface. The legacy `rewrite_drop_includes` +
+/// `rewrite_order_to_sort_by` then run as a fallback for chains
+/// Arel doesn't recognize. See project_arel_compile_time_first.md.
+///
+/// `schema` None preserves legacy-only behavior — used by callers
+/// that don't need the SQL-level chain emission (tests, dump_ir).
+pub fn lower_controllers_with_arel(
+    controllers: &[Controller],
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    schema: Option<&crate::schema::Schema>,
+) -> Vec<LibraryClass> {
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -171,6 +189,20 @@ pub fn lower_controllers_to_library_classes(
             method.body = self::params::rewrite_typed_bracket_to_field(
                 &method.body, &params_specs,
             );
+            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            // Arel pass — when schema is provided, lift recognized
+            // AR call chains into inline SELECT/hydrate over the Db
+            // primitive surface. Legacy chain rewrites
+            // (drop_includes / order_to_sort_by) run AFTER as a
+            // fallback for shapes Arel doesn't recognize.
+            if let Some(schema) = schema {
+                crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+            }
+            method.body = rewrite_drop_includes(&method.body);
+            method.body = rewrite_order_to_sort_by(&method.body);
+            // Re-type unconditionally — the chain rewrites and the
+            // Arel pass both reshape the IR, leaving the body-typer's
+            // earlier annotations stale on whichever subtree changed.
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
         }
         out.push(LibraryClass {
@@ -566,9 +598,13 @@ fn lower_action_body(
         rewrite_model_new_to_from_params(&with_redirects, privs, params_specs);
     let with_assoc =
         rewrite_assoc_through_parent_typed(&with_from_params, privs, params_specs);
-    let with_no_includes = rewrite_drop_includes(&with_assoc);
-    let with_order = rewrite_order_to_sort_by(&with_no_includes);
-    let with_destroy = rewrite_destroy_bang(&with_order);
+    // The legacy chain rewrites (`rewrite_drop_includes` +
+    // `rewrite_order_to_sort_by`) used to land here. They've moved
+    // to a post-typing pass in the per-method loop so the Arel pass
+    // gets first crack at the original chain shape. Legacy stays as
+    // a fallback for anything Arel doesn't recognize. See
+    // project_arel_compile_time_first.md.
+    let with_destroy = rewrite_destroy_bang(&with_assoc);
     let with_routes = rewrite_route_helpers(&with_destroy);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The

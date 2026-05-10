@@ -916,33 +916,42 @@ fn controllers_index_drops_includes_from_chain() {
 }
 
 #[test]
-fn controllers_index_lowers_order_to_sort_by_with_reverse_for_desc() {
-    // `Article.includes(:comments).order(created_at: :desc)` lowers to
-    // `Article.all.sort_by { |a| a.created_at.to_s }.reverse`. The
-    // bare-Const recv gets `.all` prepended, the kwarg becomes a sort
-    // block, and `:desc` direction trails a `.reverse`.
+fn controllers_index_lowers_chain_to_inline_select_with_order_by() {
+    // `Article.includes(:comments).order(created_at: :desc)` lifts
+    // through the Arel pass into an inline SELECT/hydrate over the
+    // Db primitive surface. `.includes` drops as a no-op chain link
+    // (eager-loading deferred to Phase 3+); `.order(created_at:
+    // :desc)` becomes a SQL `ORDER BY created_at DESC` clause.
+    // Replaces the previous in-memory `Article.all.sort_by{…}.reverse`
+    // shape now that real-blog routes through Arel. See
+    // project_arel_compile_time_first.md.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.all"),
-        "expected `Article.all` after chain lowering; got:\n{src}",
+        src.contains("Db.prepare(") && src.contains("FROM articles"),
+        "expected Arel-emitted SELECT in `def index`; got:\n{src}",
     );
     assert!(
-        src.contains(".sort_by"),
-        "expected sort_by; got:\n{src}",
+        src.contains("ORDER BY created_at DESC"),
+        "expected SQL ORDER BY clause; got:\n{src}",
     );
     assert!(
-        src.contains("a.created_at.to_s"),
-        "expected `a.created_at.to_s` in sort block; got:\n{src}",
+        src.contains("instance = Article.new") && src.contains("Db.column_int(stmt, "),
+        "expected per-row hydrate loop into Article instances; got:\n{src}",
     );
+    // Surface forms that the legacy chain rewrites used to produce
+    // — these must NOT survive Arel's lift.
     assert!(
-        src.contains(".reverse"),
-        "expected `.reverse` for :desc direction; got:\n{src}",
+        !src.contains(".sort_by"),
+        "Arel emit should not fall back to in-memory sort_by; got:\n{src}",
     );
-    // The original `.order(...)` form must not survive.
     assert!(
         !src.contains(".order(created_at"),
-        "order(...) should be lowered to sort_by; got:\n{src}",
+        "raw .order(...) should be lifted, not surface in emit; got:\n{src}",
+    );
+    assert!(
+        !src.contains(".includes("),
+        "raw .includes(...) should be dropped by Arel chain pass; got:\n{src}",
     );
 }
 

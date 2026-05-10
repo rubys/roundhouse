@@ -288,10 +288,32 @@ fn compose_sql_select(sel: &Select, table: &Table) -> Expr {
         table.name.as_str()
     ))];
     push_where_segments(&mut segments, sel.conditions.as_ref(), table);
+    push_order_segment(&mut segments, &sel.orders);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));
     }
     concat_chain(segments)
+}
+
+/// Append `" ORDER BY col1 ASC, col2 DESC"` to the SQL composition
+/// when at least one order is present. Empty orders → no segment.
+/// Column names emit verbatim (single-table SELECTs only today;
+/// joins / aliases land later with the same path).
+fn push_order_segment(segments: &mut Vec<Expr>, orders: &[super::ir::Order]) {
+    if orders.is_empty() {
+        return;
+    }
+    let parts: Vec<String> = orders
+        .iter()
+        .map(|o| {
+            let dir = match o.direction {
+                super::ir::Direction::Asc => "ASC",
+                super::ir::Direction::Desc => "DESC",
+            };
+            format!("{} {}", o.column.column.as_str(), dir)
+        })
+        .collect();
+    segments.push(lit_str(format!(" ORDER BY {}", parts.join(", "))));
 }
 
 /// Append `" WHERE <pred-sql>"` segments if conditions are present.
@@ -750,6 +772,102 @@ mod tests {
         let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 2);
+    }
+
+    #[test]
+    fn select_with_order_emits_order_by_segment() {
+        // Article.all.order(created_at: :desc) — multi-hydrate Seq
+        // shape (no LIMIT), but the prepare's SQL string must carry
+        // the ORDER BY clause.
+        use crate::ident::TableRef;
+        let (schema, owner) = fixture_schema();
+        let op = ArelOp::Select(Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::All,
+            conditions: None,
+            orders: vec![super::super::ir::Order {
+                column: super::super::ir::ColRef {
+                    table: TableRef(Symbol::from("articles")),
+                    column: Symbol::from("title"),
+                },
+                direction: super::super::ir::Direction::Desc,
+            }],
+            limit: None,
+            joins: vec![],
+        });
+        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        // Walk the body to the prepare call's SQL literal and assert
+        // it carries " ORDER BY title DESC". The body is a Seq whose
+        // first stmt is `stmt = Db.prepare(<sql>)`.
+        let ExprNode::Seq { exprs } = body.node.as_ref() else {
+            panic!("expected Seq body");
+        };
+        let ExprNode::Assign { value: prepare_call, .. } = exprs[0].node.as_ref() else {
+            panic!("expected Assign");
+        };
+        let ExprNode::Send { args, .. } = prepare_call.node.as_ref() else {
+            panic!("expected Send to Db.prepare");
+        };
+        // The SQL is a concat chain; flatten and stringify literal segments.
+        fn flatten_lits(e: &Expr, out: &mut String) {
+            match e.node.as_ref() {
+                ExprNode::Lit { value: Literal::Str { value } } => out.push_str(value),
+                ExprNode::Send { recv: Some(left), args, .. } => {
+                    flatten_lits(left, out);
+                    for a in args { flatten_lits(a, out); }
+                }
+                _ => out.push_str("<expr>"),
+            }
+        }
+        let mut sql = String::new();
+        flatten_lits(&args[0], &mut sql);
+        assert!(sql.contains("ORDER BY title DESC"), "expected ORDER BY in:\n{sql}");
+    }
+
+    #[test]
+    fn select_with_two_orders_emits_csv_order_by() {
+        use crate::ident::TableRef;
+        let (schema, owner) = fixture_schema();
+        let op = ArelOp::Select(Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::All,
+            conditions: None,
+            orders: vec![
+                super::super::ir::Order {
+                    column: super::super::ir::ColRef {
+                        table: TableRef(Symbol::from("articles")),
+                        column: Symbol::from("title"),
+                    },
+                    direction: super::super::ir::Direction::Asc,
+                },
+                super::super::ir::Order {
+                    column: super::super::ir::ColRef {
+                        table: TableRef(Symbol::from("articles")),
+                        column: Symbol::from("id"),
+                    },
+                    direction: super::super::ir::Direction::Desc,
+                },
+            ],
+            limit: None,
+            joins: vec![],
+        });
+        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!() };
+        let ExprNode::Assign { value: prepare_call, .. } = exprs[0].node.as_ref() else { panic!() };
+        let ExprNode::Send { args, .. } = prepare_call.node.as_ref() else { panic!() };
+        fn flatten_lits(e: &Expr, out: &mut String) {
+            match e.node.as_ref() {
+                ExprNode::Lit { value: Literal::Str { value } } => out.push_str(value),
+                ExprNode::Send { recv: Some(left), args, .. } => {
+                    flatten_lits(left, out);
+                    for a in args { flatten_lits(a, out); }
+                }
+                _ => out.push_str("<expr>"),
+            }
+        }
+        let mut sql = String::new();
+        flatten_lits(&args[0], &mut sql);
+        assert!(sql.contains("ORDER BY title ASC, id DESC"), "expected CSV ORDER BY in:\n{sql}");
     }
 
     #[test]

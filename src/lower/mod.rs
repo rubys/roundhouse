@@ -50,6 +50,7 @@ pub use associations::{
 pub use chain::{collect_chain_modifiers, ChainModifier};
 pub use controller_to_library::{
     lower_controller_to_library_class, lower_controllers_to_library_classes,
+    lower_controllers_with_arel,
 };
 pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,
