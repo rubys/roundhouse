@@ -89,6 +89,14 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	  end' \
 	  $(RUBY_OUT)/.emit/browse/spinel.json $(RUBY_OUT)
 	rm -rf $(RUBY_OUT)/.emit
+	# Per-target Db shim selection. `runtime/spinel/` carries both
+	# variants — db.rb (FFI, for the future Spinel-AOT target) and
+	# db_cruby.rb (gem-backed, for CRuby/MRI). The Ruby target's
+	# emitted tree gets exactly one `db.rb` — the gem variant —
+	# so main.rb's `require_relative "runtime/db"` resolves to a
+	# CRuby-runnable shim. Applied after the manifest explode so
+	# it's the final state regardless of what the archive emitted.
+	mv $(RUBY_OUT)/runtime/db_cruby.rb $(RUBY_OUT)/runtime/db.rb
 	# Seed the demo DB from real-blog's Rails-populated SQLite. The
 	# Rails-generated schema (varchar/text/datetime affinities) reads
 	# fine through SqliteAdapter; main.rb's Schema.load! is idempotent

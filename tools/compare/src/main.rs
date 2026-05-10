@@ -125,6 +125,13 @@ fn main() -> Result<()> {
         for f in &failures {
             report::print_failure(f, cli.verbose);
         }
+    }
+    if fail > 0 {
+        // `failures` only collects body-diff failures (the `Ok(Some(_))`
+        // arm). `Err(_)` arms (target crashes, fetch errors, target
+        // command exits non-zero) increment `fail` but don't add a
+        // diff to report — exit on the broader signal so script
+        // wrappers can gate on it.
         std::process::exit(1);
     }
     Ok(())

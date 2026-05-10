@@ -1,13 +1,19 @@
 require "minitest/autorun"
 
-# Copied verbatim to <out>/test/test_helper.rb (by `make spinel-transpile`
-# or `tests/spinel_toolchain.rs`). `__dir__` is `<out>/test/`, so the
+# Copied verbatim to <out>/test/test_helper.rb (by `make ruby-transpile`
+# or `tests/ruby_toolchain.rs`). `__dir__` is `<out>/test/`, so the
 # `require_relative` paths walk up one level to reach `runtime/`, `config/`,
 # and `test/fixtures/`. `require_relative` (not bare `require` + LOAD_PATH)
 # is mandatory because spinel's AOT model only follows static
 # `require_relative` chains — bare `require` with `$LOAD_PATH` lookup is a
 # CRuby-only mechanism that the AOT compiler cannot resolve.
-require_relative "../runtime/db_cruby"
+#
+# The Ruby-target tree contains a single `runtime/db.rb` (gem-backed,
+# materialized from `runtime/spinel/db_cruby.rb` at transpile time);
+# the future Spinel-AOT target's tree will contain its own
+# `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
+# implementation.
+require_relative "../runtime/db"
 require_relative "../runtime/active_record"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"

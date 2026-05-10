@@ -113,15 +113,6 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "in_memory_adapter.rb",
         "cgi_io.rb",
         "broadcasts.rb",
-        // Db primitive surface — `db.rb` is the FFI/libsqlite3
-        // variant (compiled spinel binaries use it via main.rb);
-        // `db_cruby.rb` is the sqlite3-gem variant that test_helper
-        // requires under stock CRuby. Both define `module Db` with
-        // the same external API; the spinel-toolchain test runs
-        // tests under CRuby so it consumes db_cruby, but ships db
-        // too because main.rb references it.
-        "db.rb",
-        "db_cruby.rb",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),
@@ -129,6 +120,17 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         )
         .unwrap_or_else(|_| panic!("copy {entry}"));
     }
+    // Db primitive surface — the Ruby target gets the gem-backed
+    // variant (`db_cruby.rb` source) materialized as `db.rb` in the
+    // emitted tree so main.rb's `require_relative "runtime/db"`
+    // resolves to the CRuby-runnable shim. The FFI variant
+    // (`runtime/spinel/db.rb`) is reserved for a future Spinel-AOT
+    // target's tree; not shipped to the Ruby target.
+    std::fs::copy(
+        runtime_spinel.join("db_cruby.rb"),
+        scratch.join("runtime").join("db.rb"),
+    )
+    .expect("copy db_cruby.rb -> runtime/db.rb");
     // Emit the spinel-shape app/ from real-blog and write into scratch.
     // emit_spinel writes its own `test/test_helper.rb` from the canonical
     // at `runtime/spinel/test/`, overwriting the copy laid down above

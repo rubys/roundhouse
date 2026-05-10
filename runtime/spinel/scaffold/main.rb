@@ -154,14 +154,23 @@ module Main
   def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
+    # Db (the primitive surface backing lowerer-emitted `_adapter_*`)
+    # is configured unconditionally — `:memory:` when no BLOG_DB is
+    # supplied, the named path otherwise. The higher-level adapter
+    # slot (SqliteAdapter / InMemoryAdapter) handles the legacy
+    # dispatcher path; Level-3 per-model primitives go through Db
+    # directly and need it open before any model method runs.
     if !db_path.nil? && !db_path.empty?
+      Db.configure(db_path)
       SqliteAdapter.configure(db_path)
       ActiveRecord.adapter = SqliteAdapter
       Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
     else
+      Db.configure(":memory:")
       InMemoryAdapter.configure
       ActiveRecord.adapter = InMemoryAdapter
       Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
+      Schema.statements.each { |sql| Db.exec(sql) }
     end
   end
 end
