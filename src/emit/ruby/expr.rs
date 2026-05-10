@@ -355,6 +355,21 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     let m = method.as_str();
+    // Index-read (`recv[idx]`) and index-write (`recv[idx] = value`)
+    // Sends round-trip to bracket-syntax regardless of receiver shape
+    // — handled before the SelfRef-implicit shortcut, which would
+    // emit `[](idx)` / `[]=(idx, value)` (bare method-call to `[]` /
+    // `[]=`, not valid Ruby in those positions).
+    if m == "[]" && !args_s.is_empty() {
+        if let Some(r) = recv {
+            return format!("{}[{}]", emit_expr(r), args_s.join(", "));
+        }
+    }
+    if m == "[]=" && args_s.len() == 2 {
+        if let Some(r) = recv {
+            return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
+        }
+    }
     // SelfRef receivers come from the body-typer's self-dispatch
     // annotation. Ruby's idiomatic surface for self-dispatch is
     // implicit (`foo` not `self.foo`) for getters/methods — but
@@ -550,5 +565,58 @@ fn emit_pattern(p: &Pattern) -> String {
             if *rest { parts.push("**".into()); }
             format!("{{ {} }}", parts.join(", "))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::Literal;
+    use crate::ident::Symbol;
+    use crate::span::Span;
+
+    fn lit_sym(s: &str) -> Expr {
+        Expr::new(Span::default(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
+    }
+
+    fn lit_str(s: &str) -> Expr {
+        Expr::new(Span::default(), ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
+    }
+
+    fn self_ref() -> Expr {
+        Expr::new(Span::default(), ExprNode::SelfRef)
+    }
+
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    #[test]
+    fn self_index_write_emits_bracket_assign() {
+        // `Send { recv: SelfRef, method: "[]=", args: [:k, "v"] }`
+        // must emit as `self[:k] = "v"`, not `[]=(:k, "v")`. Surfaces
+        // when copy-pasting parsed Ruby method bodies (e.g. per-
+        // subclass specialization) — the SelfRef-implicit-receiver
+        // shortcut would otherwise render `[]=` as a bare method
+        // call which Ruby parses as a name, not an index assign.
+        let expr = send(Some(self_ref()), "[]=", vec![lit_sym("k"), lit_str("v")]);
+        assert_eq!(emit_expr(&expr), r#"self[:k] = "v""#);
+    }
+
+    #[test]
+    fn self_index_read_emits_bracket() {
+        // Mirror of the above for `[]`. `Send { recv: SelfRef,
+        // method: "[]", args: [:k] }` → `self[:k]`, not `[](:k)`.
+        let expr = send(Some(self_ref()), "[]", vec![lit_sym("k")]);
+        assert_eq!(emit_expr(&expr), "self[:k]");
     }
 }
