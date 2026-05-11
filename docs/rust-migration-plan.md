@@ -23,6 +23,41 @@ for full strategic context.
   the working state — `cargo test --test rust_toolchain -- --ignored`
   → 2/2 pass at this point.
 
+## Revision 2026-05-11 — Phase 2 narrowed, Phase 2.5 inserted
+
+A session that began Phase 2 (HWIA then Validations) surfaced a
+mismatch: 3 of the 9 originally-listed runtime files (HWIA,
+Validations, Parameters) exist to hand-roll polymorphism that
+typed targets (Rust, Crystal, strict TS) have natively. Forcing
+them through the per-target transpile path generates substantial
+trait-with-abstract-accessor + recv-type-aware-bridging machinery
+that no target actually wants. The 6 remaining files (`inflector`,
+`errors`, `view_helpers`, `router`, `active_record/base`,
+`action_controller/base`) are clean fits and transpile naturally.
+
+The revision narrows Phase 2 to those 6 files and inserts a new
+**Phase 2.5** with three sub-pieces that benefit Crystal/TS/Ruby
+in addition to Rust:
+
+- **(a) Validations lowerer.** `validates :title, presence: true`
+  expands to inline IR in the model's `validate` body, not a runtime
+  call into `validations.rb`. Legacy rust already produces this
+  exact shape (`if self.title.is_empty() { errors.push(...) }`),
+  proving the path. Error messages become string-literal constants;
+  column types stay typed. Drops `validations.rb` from
+  `RUST_RUNTIME` / `TYPESCRIPT_RUNTIME` / `CRYSTAL_RUNTIME`.
+- **(b) HWIA elimination from typed targets.** `@flash` and
+  `@session` (the only real HWIA consumers — zero app-level usage)
+  become per-app typed structs synthesized from controller usage.
+  `hash_with_indifferent_access.rb` stays as Ruby/Spinel helper
+  but drops from typed-target transpile. ~250 LOC compiler +
+  runtime removable.
+- **(c) Parameters specialization confirmation.** Per the existing
+  `project_parameters_specialization_plan` memory, per-resource
+  typed `<Resource>Params` structs are already staged; this
+  sub-piece verifies the path is on track and drops
+  `parameters.rb` from typed-target transpile when complete.
+
 ## Phase status
 
 | # | Phase | Days | Status |
@@ -30,18 +65,21 @@ for full strategic context.
 | 0 | Audit + tag | ½ | ✅ done |
 | 1 | Skeleton `rust2` parallel orchestrator | ½-1 | ✅ done |
 | 1.5 | Base/Validations inheritance spike | 1-2 | ✅ done — Option A (trait + composition) |
-| 2 | Framework runtime transpile (9 files, dependency-ordered) | 3-7 | next |
+| **2** | **Transpile 6 (was 9) runtime files**, dependency-ordered: inflector → errors → view_helpers → router → active_record/base → action_controller/base | 2-4 (was 3-7) | 1/6 done (inflector); HWIA work-in-progress paused after revision |
+| **2.5** | **Cross-target lowerer + HWIA elimination (NEW)** — (a) validations lowerer, (b) HWIA elimination, (c) Parameters specialization confirmation | 3-5 | not started — **recommended next** |
 | 3 | Hand-written primitive runtime + abstract adapter base | 2-3 | parallel-able with 2 |
 | 4 | `framework_tests_rust` gate (8/8 target) | 1-2 | blocked on 2+3 |
-| 5 | Per-file model/view/controller emit | 3-5 | blocked on 4 |
+| 5 | Per-file model/view/controller emit | 3-5 | blocked on 4 — validations/parameters/flash plumbing comes from 2.5 |
 | 6 | Real-blog parity via `rust2` | 2-4 | blocked on 5 |
 | 7 | Switchover commit + prune legacy | 1-2 | blocked on 6 |
 | 8 | Add `framework-tests-rust` CI; close out | ½ | blocked on 7 |
 
-Total estimate: **14-26 working days** (~3-5 weeks at sustainable
-pace). Crystal precedent was ~2 days for the rip-and-replace bulk;
-rust's borrow-checker + inheritance-decision + lifetime-annotation
-cascade pushes it 2-3× longer.
+Total estimate: **16-26 working days** (~3-5 weeks at sustainable
+pace). Phase 2.5's new work is partly offset by Phase 2's narrowing;
+upper bound unchanged, lower bound slightly higher. Crystal
+precedent was ~2 days for the rip-and-replace bulk; rust's
+borrow-checker + inheritance-decision + lifetime-annotation
+cascade still pushes it 2-3× longer.
 
 ## Phase 0 audit — `src/emit/rust/` + `src/emit/rust.rs`
 
@@ -68,25 +106,43 @@ Total 4,852 LOC across 13 files. Categories:
 - Salvage to new emit: ~700 LOC (controller.rs's generic infra + ty.rs + shared.rs + chunks of rust.rs orchestration).
 - Net deletion at Phase 7: ~3,150 LOC from emitter + ~1,500-2,000 LOC from `runtime/rust/{runtime.rs, view_helpers.rs}` retirement = **~4.6-5.1K LOC removed**, replaced by ~700 LOC ported infra + new generic emit (~2,000 LOC mirroring crystal's footprint).
 
-## Risk callouts (in priority order)
+## Risk callouts (revised, in priority order)
 
 1. **Phase 1.5 decision is foundational.** Affects every transpiled
    model AND every test fixture pattern. Getting it wrong forces
-   redo of phases 5-6. The spike exists specifically to de-risk this.
-2. **`include Module` has no rust precedent.** Phase 1.5 invents
-   the translation.
-3. **IR pressure on `Ty`.** Rust may need `Ty::Ref(Box<Ty>)` or
-   `Ty::Owned` vs `Ty::Borrowed`. Ripples to all targets. Test
-   crystal/ts still pass after each `src/ty.rs` change.
+   redo of phases 5-6. The spike picked Option A; the implementation
+   lands in Phase 2's `base.rb` and `action_controller/base.rb` work.
+2. ~~`include Module` has no rust precedent.~~ **Softened by revision.**
+   With Validations removed from transpile (Phase 2.5 a), `include
+   Validations` doesn't need a Rust analog. `include` for real mixins
+   (Comparable, Enumerable if any) is a smaller scope.
+3. ~~IR pressure on `Ty`.~~ **Softened by revision.** Most untyped-
+   erasure pain came from HWIA-typed receivers and Validations'
+   `untyped value` args. Eliminating those eliminates much of the
+   cross-target Ty ripple. `Ty::Untyped → serde_json::Value` (already
+   landed in `rust2/ty.rs`) is the load-bearing commit; further Ty
+   changes seem unlikely.
 4. **Async coloring deferred.** Default rusqlite (sync) inside async
    axum needs `tokio::task::spawn_blocking`. Out of scope for first
    migration.
 5. **Compile time in `tests/`** (project-root cargo convention).
    ~1-2s per file. Fine for 8 framework tests; defer writebook scale.
+6. **(NEW) Phase 2.5 coordination across targets.** Validations
+   lowerer + HWIA elimination benefit Crystal/TS/Ruby too — but those
+   targets currently route through `validations.rb` /
+   `hash_with_indifferent_access.rb` at runtime. Three rollout
+   options when 2.5 lands: (a) all targets switch atomically (one
+   big commit), (b) typed targets switch, Ruby/Spinel keep the
+   runtime module (dual paths), (c) staged per-target. **Open
+   question — pick when 2.5 starts.**
 
 ## Mid-stream decision points
 
-- End of Phase 1.5: lock A/B/C choice in writing before Phase 2 starts. ✅ See "Phase 1.5 result" below.
+- End of Phase 1.5: lock A/B/C choice in writing before Phase 2 starts. ✅ Option A — see "Phase 1.5 result" below.
+- **End of Phase 2.5:** are validations / HWIA fully removed from
+  rust2's transpile surface? If yes, Phase 2 finishes the easy 6
+  cleanly. If 2.5 surfaces structural issues, may need to pull back
+  AR::Base scope.
 - End of Phase 4: are cross-target source idioms holding, or do we
   need new ones for rust? Adding `.to_h`-style patches with no rust
   analog signals IR-needs-adjustment, not source.
