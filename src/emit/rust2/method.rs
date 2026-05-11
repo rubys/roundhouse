@@ -131,7 +131,18 @@ pub(super) fn emit_instance_method(
     } else {
         (sanitized.as_str(), Some(render_self_receiver(mutates_self)))
     };
-    let params = render_instance_params(m, receiver);
+    // Block-param injection: methods whose body uses `yield` get
+    // an explicit closure parameter `mut f: impl FnMut(...)`. The
+    // body's `yield x, y` sites then emit as `f(x, y)`.
+    //
+    // Arity + types come from the first observed Yield call in the
+    // body. The RBS signature carries a `block: Option<Box<Ty>>`
+    // slot, but the current RBS parser collapses block signatures
+    // to `Ty::Untyped` — until that improves, body-derived
+    // inference is the only signal. HWIA's `each` body yields
+    // `(k: String, v: serde_json::Value)`, which is what we want.
+    let block_param = find_yield_signature(&m.body).map(render_block_param_from_args);
+    let params = render_instance_params(m, receiver, block_param.as_deref());
     let ret_clause = if is_init {
         " -> Self".to_string()
     } else {
@@ -162,7 +173,11 @@ pub(super) fn emit_instance_method(
     Ok(out)
 }
 
-fn render_instance_params(m: &MethodDef, receiver: Option<&'static str>) -> String {
+fn render_instance_params(
+    m: &MethodDef,
+    receiver: Option<&'static str>,
+    block_param: Option<&str>,
+) -> String {
     let sig_params = match m.signature.as_ref() {
         Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
         _ => None,
@@ -179,5 +194,53 @@ fn render_instance_params(m: &MethodDef, receiver: Option<&'static str>) -> Stri
         };
         parts.push(rendered);
     }
+    if let Some(bp) = block_param {
+        parts.push(bp.to_string());
+    }
     format!("({})", parts.join(", "))
+}
+
+/// Render the closure-typed param for a yield-using method.
+/// `block_ty` is the Ty::Fn from the RBS signature's block slot.
+/// Emits `mut f: impl FnMut(P1, P2, ...)` — `mut` so the closure
+/// can be called repeatedly inside the body (Yield in a loop is the
+/// common case), `impl FnMut` so the call site can pass any closure
+/// matching the param types without forcing a generic on the type.
+/// Walk a method body for the first `Yield { args }` site and
+/// return its arg types. `None` means no Yield in the body — caller
+/// skips block-param injection entirely. Body-derived signature
+/// is consistent for a given method: Ruby's `yield a, b` shape
+/// doesn't vary across call sites of the same method, so first-hit
+/// arity is authoritative.
+fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
+    use crate::expr::ExprNode;
+    match &*body.node {
+        ExprNode::Yield { args } => {
+            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::Untyped)).collect())
+        }
+        ExprNode::Seq { exprs } => exprs.iter().find_map(find_yield_signature),
+        ExprNode::If { cond, then_branch, else_branch } => find_yield_signature(cond)
+            .or_else(|| find_yield_signature(then_branch))
+            .or_else(|| find_yield_signature(else_branch)),
+        ExprNode::While { cond, body, .. } => {
+            find_yield_signature(cond).or_else(|| find_yield_signature(body))
+        }
+        ExprNode::Send { recv, args, block, .. } => recv
+            .as_ref()
+            .and_then(find_yield_signature)
+            .or_else(|| args.iter().find_map(find_yield_signature))
+            .or_else(|| block.as_ref().and_then(find_yield_signature)),
+        ExprNode::Assign { value, .. } => find_yield_signature(value),
+        ExprNode::Return { value } => find_yield_signature(value),
+        _ => None,
+    }
+}
+
+/// Render `mut f: impl FnMut(P1, P2, ...)` from the inferred arg
+/// types. Empty arg list emits `mut f: impl FnMut()`. `mut` is
+/// uniformly applied so calling the closure inside a loop (the
+/// typical case) compiles without per-caller `mut` annotations.
+fn render_block_param_from_args(arg_tys: Vec<Ty>) -> String {
+    let ps: Vec<String> = arg_tys.iter().map(rust_param_ty).collect();
+    format!("mut f: impl FnMut({})", ps.join(", "))
 }
