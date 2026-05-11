@@ -84,7 +84,6 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     let runtime_ruby = Path::new("runtime/ruby");
     for entry in [
         "active_record",
-        "active_support",
         "action_view",
         "action_controller",
         "action_dispatch",

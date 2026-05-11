@@ -72,7 +72,7 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	# $(RUBY_OUT)/runtime/. runtime/ruby/test/ is roundhouse-side
 	# test fixturing — not emitted here.
 	mkdir -p $(RUBY_OUT)/runtime
-	cp -r runtime/ruby/active_record runtime/ruby/active_support \
+	cp -r runtime/ruby/active_record \
 	      runtime/ruby/action_view runtime/ruby/action_controller \
 	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
@@ -136,7 +136,7 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	mkdir -p $(SPINEL_OUT)/test
 	cp -r runtime/spinel/test/. $(SPINEL_OUT)/test/
 	mkdir -p $(SPINEL_OUT)/runtime
-	cp -r runtime/ruby/active_record runtime/ruby/active_support \
+	cp -r runtime/ruby/active_record \
 	      runtime/ruby/action_view runtime/ruby/action_controller \
 	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \

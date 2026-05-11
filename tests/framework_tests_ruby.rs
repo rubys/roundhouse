@@ -72,7 +72,6 @@ fn build_and_run(test_file: &Path, tag: &str) {
     std::fs::create_dir_all(&scratch_runtime).expect("mkdir runtime");
     for entry in [
         "active_record",
-        "active_support",
         "action_view",
         "action_controller",
         "action_dispatch",

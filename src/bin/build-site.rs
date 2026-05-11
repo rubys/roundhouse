@@ -178,7 +178,7 @@ fn ruby_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
 /// controllers,fixtures,test_helper}) plus the scaffold + runtime
 /// overlays that `make spinel-transpile` adds. Mirrors the Makefile's
 /// `cp -r runtime/spinel/scaffold/`, `cp -r runtime/spinel/test/`,
-/// `cp -r runtime/ruby/{active_record,active_support,action_view,
+/// `cp -r runtime/ruby/{active_record,action_view,
 /// action_controller,action_dispatch} runtime/ruby/*.rb runtime/spinel/*.rb`
 /// steps so the archive is self-contained — `tar -xzf spinel.tgz &&
 /// cd spinel && make spinel-test` works without a Roundhouse checkout.
@@ -204,7 +204,6 @@ fn spinel_files(app: &roundhouse::App) -> Result<Vec<(String, String)>, String> 
     // Framework Ruby modules + bridge .rb files under runtime/.
     for sub in [
         "active_record",
-        "active_support",
         "action_view",
         "action_controller",
         "action_dispatch",
