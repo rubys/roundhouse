@@ -528,17 +528,13 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/validations.rbs"),
-        rb_path: "runtime/ruby/active_record/validations.rb",
-        namespace: "ActiveRecord",
-        out_path: "src/validations.rs",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
+    // `validations.rb` intentionally NOT transpiled to rust2 — per
+    // docs/rust-migration-plan.md Phase 2.5(a), every `validates :x, …`
+    // declaration expands inline at lower time (see
+    // `src/lower/model_to_library/validations.rs`). No model on a typed
+    // target ever dispatches into `ActiveRecord::Validations` at runtime;
+    // the module exists in the Ruby runtime as a direct-call helper
+    // surface for CRuby/Spinel only.
 ];
 
 /// Parse + emit the Rust runtime files. Mirrors `crystal_units` /
