@@ -143,6 +143,36 @@ fn crystal_format_constant(name: &str, value: &str) -> String {
     format!("{name} = {value}")
 }
 
+const RUST_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::rust2::library::emit_module,
+    emit_library_class: crate::emit::rust2::library::emit_library_class,
+    emit_expr_for_runtime: crate::emit::rust2::library::emit_expr_for_runtime,
+    format_import: rust_format_import,
+    format_constant: rust_format_constant,
+    wrap_namespace: rust_wrap_namespace,
+};
+
+/// Rust uses the file-as-module convention — `src/inflector.rs` IS
+/// the `inflector` module. No `mod NAME { ... }` wrapping needed at
+/// emit time; consumers reference via `crate::inflector::...`.
+fn rust_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+/// Rust imports follow `use crate::module::Item;` form. The `name`
+/// parameter is the imported item, `source` is the module path.
+fn rust_format_import(name: &str, source: &str) -> String {
+    format!("use crate::{source}::{name};\n")
+}
+
+/// Rust: `pub const NAME: T = VALUE;`. Phase 2.1 stub — type
+/// inference at constant declarations isn't trivial, so for now
+/// we emit a TODO comment until Phase 2.9 (view_helpers'
+/// HTML_ESCAPES) forces a real implementation.
+fn rust_format_constant(name: &str, value: &str) -> String {
+    format!("// TODO rust2 const: pub const {name}: _ = {value};")
+}
+
 /// Strategy: each entry picks one of two pipelines.
 ///
 /// `Module` — flat list of `def self.*` helpers (e.g. inflector.rb).
@@ -470,18 +500,38 @@ where
     Ok(out)
 }
 
-/// Rust runtime transpile path — Phase 1 stub of the rust migration
-/// (see `docs/rust-migration-plan.md`). Returns an empty Vec until
-/// Phase 2 populates `RUST_RUNTIME` + wires `RUST_TARGET` to the
-/// rust2 emit functions. Sibling of `crystal_units` /
-/// `typescript_units`; same `transform` closure shape so callers
-/// can plug in identically when the time comes.
-pub fn rust_units<F>(transform: F) -> Result<Vec<RuntimeUnit>, String>
+/// Rust runtime entries — Phase 2 of the rust migration (see
+/// `docs/rust-migration-plan.md`). Populated file-by-file in
+/// dependency order matching Crystal's RUNTIME_ORDER. Phase 2.1:
+/// inflector only (smallest, no deps; validates the Module-mode
+/// emit pipeline).
+const RUST_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "src/inflector.rs",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+/// Parse + emit the Rust runtime files. Mirrors `crystal_units` /
+/// `typescript_units` — same driver, same `RuntimeEntry` shape,
+/// plus the rust-specific `TargetEmit` and `//` comment prefix.
+pub fn rust_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
 where
     F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
 {
-    let _ = transform;
-    Ok(Vec::new())
+    let mut out = Vec::with_capacity(RUST_RUNTIME.len());
+    for entry in RUST_RUNTIME {
+        let unit = transpile_entry(entry, &RUST_TARGET, "//", &mut transform)?;
+        out.push(unit);
+    }
+    Ok(out)
 }
 
 /// Parse + emit the TypeScript runtime files. Returns one `RuntimeUnit`
