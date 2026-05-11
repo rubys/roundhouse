@@ -528,6 +528,17 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/validations.rbs"),
+        rb_path: "runtime/ruby/active_record/validations.rb",
+        namespace: "ActiveRecord",
+        out_path: "src/validations.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Rust runtime files. Mirrors `crystal_units` /

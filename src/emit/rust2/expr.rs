@@ -207,27 +207,27 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::If { cond, then_branch, else_branch } => {
             // Ruby `cond ? a : b` and `if cond; a; else b; end` both
             // lower to `ExprNode::If`. The lowerer also produces this
-            // shape for the `STMT if COND` modifier form (`return X
-            // if cond`), with the else branch synthesized as `Nil`.
-            // For those one-sided cases — else is the implicit Nil
-            // AND the then branch diverges (Return/Raise) — emit the
-            // statement form `if cond { stmt; }` rather than the
-            // expression form `if cond { stmt } else { None }`. The
-            // expression form is type-correct in Ruby (nil) but in
-            // Rust would mismatch the surrounding return type
-            // (`Option<Value>` vs `Value` for HWIA's `get` body, etc.)
-            // and the `else { None }` is dead code anyway after the
-            // Return.
-            let then_diverges = matches!(
-                &*then_branch.node,
-                ExprNode::Return { .. } | ExprNode::Raise { .. }
-            );
+            // shape for the modifier forms `STMT if COND` / `STMT
+            // unless COND`, with the absent else branch synthesized
+            // as `Nil`. Two cases trigger statement-form `if cond {
+            // ... }` (no else clause):
+            //   1. then diverges (Return/Raise) AND else is Nil —
+            //      `return X if cond`. The else is dead code after
+            //      the diverging then.
+            //   2. else is Nil (period) — `errors << "msg" if cond`
+            //      style. The implicit else=nil in Ruby returns nil
+            //      from the conditional; in Rust the statement form
+            //      returns `()` from the conditional, which matches
+            //      `Option<...>::None` and statement-position uses
+            //      well enough that it's the right default.
+            // Both-branches-present cases (ternary, `if/else/end`
+            // with non-Nil else) keep the expression form.
             let else_is_nil = matches!(
                 &*else_branch.node,
                 ExprNode::Lit { value: Literal::Nil }
             );
-            if then_diverges && else_is_nil {
-                return format!("if {} {{ {}; }}", emit_expr(cond), emit_expr(then_branch));
+            if else_is_nil {
+                return format!("if {} {{ {} }}", emit_expr(cond), emit_expr(then_branch));
             }
             format!(
                 "if {} {{ {} }} else {{ {} }}",
@@ -312,6 +312,19 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Hash { entries, .. } => emit_hash(entries),
         ExprNode::Array { elements, .. } => emit_array(elements),
+        ExprNode::BoolOp { op, left, right, .. } => {
+            // Ruby `a && b` / `a || b` map directly to Rust `&&` /
+            // `||` — same short-circuit semantics, same precedence
+            // relative to comparison ops. `and`/`or` surface forms
+            // collapse to the symbol form on emit; Ruby's looser
+            // precedence for the keyword form doesn't matter once
+            // the IR has the tree shape locked in.
+            let op_s = match op {
+                crate::expr::BoolOpKind::And => "&&",
+                crate::expr::BoolOpKind::Or => "||",
+            };
+            format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+        }
         // Catch-all for IR shapes not yet implemented. Each new runtime
         // file in Phase 2 expands this until full coverage.
         other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
@@ -483,6 +496,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         && args.len() == 1
     {
         return format!("{} {} {}", emit_expr(recv.unwrap()), method, emit_expr(&args[0]));
+    }
+    // Unary `!` — `!cond` in Ruby lowers as `Send { recv: cond,
+    // method: "!", args: [] }`. Rust uses the same `!` operator
+    // syntactically but as a prefix unary, not a method call.
+    if method == "!" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("!{}", emit_expr(r));
+        }
+    }
+    // Array append: `arr << x` Ruby idiom → `arr.push(x)` in Rust.
+    // Recv-type-aware: only fires for Vec/Array-typed receivers so
+    // user-defined `<<` operators on other types stay intact.
+    if method == "<<" && args.len() == 1 {
+        if let Some(r) = recv {
+            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
+                return format!("{}.push({})", emit_expr(r), emit_expr(&args[0]));
+            }
+        }
     }
     // Index access: `recv[k]` / `recv[k] = v`. The lowerer shapes
     // both as `Send` with method `[]` / `[]=`; Rust uses the
