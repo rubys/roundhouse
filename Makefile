@@ -118,3 +118,50 @@ ruby-dev ruby-test ruby-run: ruby-transpile
 .PHONY: clean-ruby
 clean-ruby:
 	rm -rf $(RUBY_OUT)
+
+# ── Spinel target: same lowered emit as the Ruby target, but the
+# per-target Db shim is the FFI variant (`runtime/spinel/db.rb`)
+# instead of the gem variant. Output tree is intended for
+# `spinel main.rb -o build/blog` (AOT compile to a native binary).
+# Until spinel can compile the framework runtime end-to-end (residual
+# tracked in the issue cadence), this target produces a tree that's
+# useful for spinel-AOT error triage but not yet runnable end-to-end.
+
+SPINEL_OUT ?= build/transpiled-blog-spinel
+
+$(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
+	rm -rf $(SPINEL_OUT)
+	mkdir -p $(SPINEL_OUT)
+	cp -r runtime/spinel/scaffold/. $(SPINEL_OUT)/
+	mkdir -p $(SPINEL_OUT)/test
+	cp -r runtime/spinel/test/. $(SPINEL_OUT)/test/
+	mkdir -p $(SPINEL_OUT)/runtime
+	cp -r runtime/ruby/active_record runtime/ruby/active_support \
+	      runtime/ruby/action_view runtime/ruby/action_controller \
+	      runtime/ruby/action_dispatch \
+	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
+	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
+	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
+	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
+	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
+	ruby -rjson -rfileutils -e ' \
+	  m = JSON.parse(File.read(ARGV[0])); \
+	  m["files"].each do |f|; \
+	    p = File.join(ARGV[1], f["path"]); \
+	    FileUtils.mkdir_p(File.dirname(p)); \
+	    File.write(p, f["content"]); \
+	  end' \
+	  $(SPINEL_OUT)/.emit/browse/spinel.json $(SPINEL_OUT)
+	rm -rf $(SPINEL_OUT)/.emit
+	# Spinel target's tree keeps the FFI `db.rb` and drops `db_cruby.rb`
+	# (the gem variant is for the Ruby target). Symmetric to ruby-
+	# transpile's `mv db_cruby.rb db.rb`.
+	rm -f $(SPINEL_OUT)/runtime/db_cruby.rb
+	touch $(SPINEL_OUT)/.stamp
+
+.PHONY: spinel-transpile
+spinel-transpile: $(SPINEL_OUT)/.stamp
+
+.PHONY: clean-spinel
+clean-spinel:
+	rm -rf $(SPINEL_OUT)
