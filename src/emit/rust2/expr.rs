@@ -215,7 +215,35 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 emit_expr(else_branch),
             )
         }
-        ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let base = emit_send(recv.as_ref(), method.as_str(), args);
+            // A Send with attached block becomes a closure passed as
+            // the last arg. `other.each do |k, v| ... end` (Ruby) →
+            // `other.each(|k, v| { ... })` (Rust). Whether the
+            // receiver-type's method actually accepts a closure is
+            // a per-target concern; the emit shape is right and the
+            // type-checker surfaces mismatches when present.
+            match block.as_ref() {
+                None => base,
+                Some(b) => attach_block(&base, b),
+            }
+        }
+        ExprNode::Lambda { params, block_param: _, body, .. } => {
+            // Standalone lambda (e.g. `-> { ... }` or `lambda { |x| x }`)
+            // emits as a Rust closure literal. Block params are
+            // re-emitted as bare names; type inference at the call
+            // site fills in the rest. Multi-line bodies wrap in `{}`.
+            emit_closure(params, body)
+        }
+        ExprNode::Yield { args } => {
+            // `yield x, y` in Ruby calls the implicit block param.
+            // rust2 represents this as a call to a closure-typed
+            // parameter named `f` injected by the signature pass
+            // (next commit). Until that pass lands, the call site
+            // emits but won't compile — the body shape is right.
+            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            format!("f({})", args_s.join(", "))
+        }
         ExprNode::Seq { exprs } => {
             // Rust statements are `;`-terminated; the last expression
             // is the block's value (no trailing `;`). Multi-statement
@@ -298,6 +326,53 @@ fn emit_hash(entries: &[(Expr, Expr)]) -> String {
         .map(|(k, v)| format!("({}, {})", emit_expr(k), emit_expr(v)))
         .collect();
     format!("std::collections::HashMap::from([{}])", pairs.join(", "))
+}
+
+/// Build a Rust closure literal `|params| body` from a Lambda IR
+/// node. Single-line bodies inline; multi-line bodies wrap in
+/// `{ ... }`. No type annotations on params — call-site inference
+/// handles them in the cases we actually hit; explicit types come
+/// later when generic Lambda usage forces them.
+fn emit_closure(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+    let body_s = emit_expr(body);
+    if body_s.contains('\n') {
+        format!(
+            "|{}| {{\n{}\n}}",
+            ps.join(", "),
+            indent(&body_s, 1),
+        )
+    } else {
+        format!("|{}| {{ {body_s} }}", ps.join(", "))
+    }
+}
+
+/// Append a block-as-closure to a `recv.method(...)` call. The
+/// block's Lambda IR carries params + body; we emit a closure
+/// literal and splice it as the last arg. Empty arg lists become
+/// single-arg (`recv.method(|...| ...)`); non-empty lists insert
+/// the closure after the existing args. Detection of "method
+/// shouldn't take a closure" (e.g. mapping `each` to `iter()`
+/// stdlib chains) is per-target work for later.
+fn attach_block(base: &str, block: &Expr) -> String {
+    let closure = if let ExprNode::Lambda { params, body, .. } = &*block.node {
+        emit_closure(params, body)
+    } else {
+        // Non-Lambda block — shouldn't appear in lowered IR, but
+        // emit something recognizable rather than panic.
+        format!("/* TODO rust2: non-Lambda block: {:?} */", std::mem::discriminant(&*block.node))
+    };
+    // `base` is shaped as `recv.method(args)` or `name(args)`. The
+    // closing `)` is the last char; insert the closure before it
+    // (with a leading `, ` when args are already present).
+    if let Some(stripped) = base.strip_suffix("()") {
+        format!("{stripped}({closure})")
+    } else if let Some(stripped) = base.strip_suffix(')') {
+        format!("{stripped}, {closure})")
+    } else {
+        // Defensive — base didn't end as a call; just append.
+        format!("{base}({closure})")
+    }
 }
 
 fn emit_array(elements: &[Expr]) -> String {
