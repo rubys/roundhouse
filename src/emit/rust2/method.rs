@@ -139,7 +139,8 @@ pub(super) fn emit_instance_method(
     };
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     let body = if is_init {
-        super::expr::with_constructor_mode(|| emit_expr(&m.body))
+        let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
+        super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
     } else {
         emit_expr(&m.body)
     };

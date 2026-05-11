@@ -27,16 +27,38 @@ thread_local! {
     /// helpers regardless of call-site context.
     static STATIC_METHODS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Field names of the struct being constructed by the current
+    /// `pub fn new`. Empty outside constructor scope. Lets `Return {
+    /// Nil }` inside the constructor emit `return Self { f1, f2 }`
+    /// instead of bare `return` — Ruby's `return if cond` early
+    /// exit lowers to `Return { Nil }`, but the Rust constructor
+    /// must produce `Self`.
+    static CONSTRUCTOR_FIELDS: std::cell::RefCell<Vec<String>> =
+        std::cell::RefCell::new(Vec::new());
 }
 
-pub(super) fn with_constructor_mode<F, R>(f: F) -> R
+pub(super) fn with_constructor_mode<F, R>(fields: Vec<String>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = IN_CONSTRUCTOR.with(|c| c.replace(true));
+    let prev_mode = IN_CONSTRUCTOR.with(|c| c.replace(true));
+    let prev_fields = CONSTRUCTOR_FIELDS.with(|c| c.replace(fields));
     let r = f();
-    IN_CONSTRUCTOR.with(|c| c.set(prev));
+    IN_CONSTRUCTOR.with(|c| c.set(prev_mode));
+    CONSTRUCTOR_FIELDS.with(|c| *c.borrow_mut() = prev_fields);
     r
+}
+
+fn render_self_literal() -> String {
+    CONSTRUCTOR_FIELDS.with(|c| {
+        let fields = c.borrow();
+        if fields.is_empty() {
+            "Self {}".to_string()
+        } else {
+            format!("Self {{ {} }}", fields.join(", "))
+        }
+    })
 }
 
 /// Run `f` with `methods` registered as the current class's static-
@@ -116,12 +138,17 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::Return { value } => {
-            // Bare `return nil` (the implicit form from `return if …`)
-            // emits as plain `return` — Rust functions returning `()`
-            // accept that, and where the return type is something else
-            // the body should never hit this arm (the typer would
-            // have rejected the source).
-            if let ExprNode::Lit { value: Literal::Nil } = &*value.node {
+            let is_nil = matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
+            // Constructor early returns produce `Self { fields }` —
+            // Ruby's `return if cond` lowers to `Return { Nil }`, but
+            // a `pub fn new(...) -> Self` body returning bare `()`
+            // wouldn't typecheck. Explicit `return <expr>` keeps its
+            // value (callers wanting different early-return values
+            // can still write `return Self::new(...)` etc).
+            if in_constructor() && is_nil {
+                return format!("return {}", render_self_literal());
+            }
+            if is_nil {
                 "return".to_string()
             } else {
                 format!("return {}", emit_expr(value))
