@@ -206,8 +206,29 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::If { cond, then_branch, else_branch } => {
             // Ruby `cond ? a : b` and `if cond; a; else b; end` both
-            // lower to `ExprNode::If`. Rust uses `if/else` as an
-            // expression in both forms — same emit shape covers both.
+            // lower to `ExprNode::If`. The lowerer also produces this
+            // shape for the `STMT if COND` modifier form (`return X
+            // if cond`), with the else branch synthesized as `Nil`.
+            // For those one-sided cases — else is the implicit Nil
+            // AND the then branch diverges (Return/Raise) — emit the
+            // statement form `if cond { stmt; }` rather than the
+            // expression form `if cond { stmt } else { None }`. The
+            // expression form is type-correct in Ruby (nil) but in
+            // Rust would mismatch the surrounding return type
+            // (`Option<Value>` vs `Value` for HWIA's `get` body, etc.)
+            // and the `else { None }` is dead code anyway after the
+            // Return.
+            let then_diverges = matches!(
+                &*then_branch.node,
+                ExprNode::Return { .. } | ExprNode::Raise { .. }
+            );
+            let else_is_nil = matches!(
+                &*else_branch.node,
+                ExprNode::Lit { value: Literal::Nil }
+            );
+            if then_diverges && else_is_nil {
+                return format!("if {} {{ {}; }}", emit_expr(cond), emit_expr(then_branch));
+            }
             format!(
                 "if {} {{ {} }} else {{ {} }}",
                 emit_expr(cond),
