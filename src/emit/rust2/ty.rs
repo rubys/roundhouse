@@ -31,10 +31,24 @@ pub fn rust_ty(ty: &Ty) -> String {
         Ty::Union { variants } => option_shape(variants).unwrap_or_else(|| {
             "Box<dyn std::any::Any>".to_string()
         }),
-        Ty::Class { id, .. } => match id.0.as_str() {
-            "Time" => "String".to_string(),
-            other => other.to_string(),
-        },
+        Ty::Class { id, .. } => {
+            let name = id.0.as_str();
+            // Time → String for now; Rust's `chrono::DateTime<Utc>`
+            // is the real target but the framework Ruby surface
+            // serializes Times as ISO-8601 strings everywhere, so
+            // String matches behavior without forcing the chrono
+            // import on every consumer. Refine once the per-target
+            // primitive runtime lands.
+            if name == "Time" {
+                return "String".to_string();
+            }
+            // Strip the namespace prefix — Rust uses file-as-module,
+            // so `ActiveSupport::HashWithIndifferentAccess` ought to
+            // render as the bare type name (the namespace becomes
+            // the import path, not part of the identifier). Matches
+            // the Const-emit decision in `expr.rs`.
+            name.rsplit("::").next().unwrap_or(name).to_string()
+        }
         Ty::Fn { .. } => "Box<dyn Fn()>".to_string(),
         Ty::Var { .. } => "serde_json::Value".to_string(),
         // RBS `untyped` is pervasive in HWIA / Parameters / view_helpers

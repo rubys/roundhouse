@@ -143,6 +143,32 @@ fn walk_collect_ivars(e: &Expr, out: &mut Vec<(String, Ty)>) {
             }
             walk_collect_ivars(value, out);
         }
+        // `@ivar[k] = v` — Ruby parses as Send `[]=` on Ivar recv.
+        // The empty-literal `@data = {}` types as `Hash<Untyped,
+        // Untyped>` from analyzer inference; subsequent index-assigns
+        // tell us the real key/value types. Widen the registered
+        // entry from the args' types when it's Hash-typed; ignore
+        // when the ivar is a class instance (its own `[]=` happens
+        // to share the name). Matches Crystal's widening pass.
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                let key = name.as_str().to_string();
+                if let Some(entry) = out.iter_mut().find(|(n, _)| n == &key) {
+                    if let Ty::Hash { .. } = &entry.1 {
+                        let k_ty = args[0].ty.clone().unwrap_or(Ty::Untyped);
+                        let v_ty = args[1].ty.clone().unwrap_or(Ty::Untyped);
+                        entry.1 = Ty::Hash {
+                            key: Box::new(k_ty),
+                            value: Box::new(v_ty),
+                        };
+                    }
+                }
+            }
+            walk_collect_ivars(recv, out);
+            args.iter().for_each(|a| walk_collect_ivars(a, out));
+        }
         ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk_collect_ivars(e, out)),
         ExprNode::If { cond, then_branch, else_branch } => {
             walk_collect_ivars(cond, out);

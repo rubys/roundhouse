@@ -12,11 +12,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Var { name, .. } => name.as_str().to_string(),
         ExprNode::Ivar { name } => format!("self.{name}"),
         ExprNode::SelfRef => "self".to_string(),
-        ExprNode::Const { path } => path
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .join("::"),
+        ExprNode::Const { path } => {
+            // Rust uses file-as-module — `ActiveSupport::HashWithIndifferentAccess`
+            // in source becomes `crate::hash_with_indifferent_access::
+            // HashWithIndifferentAccess` at import time, while in-file
+            // self-references use the bare type name. Strip the
+            // namespace and emit the last segment; cross-file refs
+            // surface as missing imports in later phases (Phase 3+
+            // when the module-tree resolver lands).
+            path.last().map(|s| s.to_string()).unwrap_or_default()
+        }
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::If { cond, then_branch, else_branch } => {
             // Ruby `cond ? a : b` and `if cond; a; else b; end` both
@@ -174,11 +179,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if recv.is_none() {
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
-    let recv_s = emit_expr(recv.unwrap());
-    if args_s.is_empty() {
-        format!("{recv_s}.{rewritten_method}()")
+    let r = recv.unwrap();
+    let recv_s = emit_expr(r);
+    // Static method dispatch — `Type.method(args)` in Ruby becomes
+    // `Type::method(args)` in Rust when the receiver is a Const
+    // (class/module reference). The `.` form binds to a value
+    // receiver; `::` binds to a type. Detect via the recv's IR shape
+    // (ExprNode::Const) rather than name pattern so synthesized
+    // class refs without explicit Const wrapping fall back to the
+    // `.` form correctly.
+    let dispatch = if matches!(&*r.node, ExprNode::Const { .. }) {
+        "::"
     } else {
-        format!("{recv_s}.{rewritten_method}({})", args_s.join(", "))
+        "."
+    };
+    if args_s.is_empty() {
+        format!("{recv_s}{dispatch}{rewritten_method}()")
+    } else {
+        format!("{recv_s}{dispatch}{rewritten_method}({})", args_s.join(", "))
     }
 }
 
