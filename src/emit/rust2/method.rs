@@ -108,7 +108,7 @@ pub(super) fn emit_instance_method(
     m: &MethodDef,
     mutates_self: bool,
     _struct_name: &str,
-    _ivars: &[(String, Ty)],
+    ivars: &[(String, Ty)],
 ) -> Result<String, String> {
     if !matches!(m.receiver, MethodReceiver::Instance) {
         return Err(format!(
@@ -131,9 +131,22 @@ pub(super) fn emit_instance_method(
         render_return(m)
     };
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let body = emit_expr(&m.body);
+    let body = if is_init {
+        super::expr::with_constructor_mode(|| emit_expr(&m.body))
+    } else {
+        emit_expr(&m.body)
+    };
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
+    }
+    if is_init {
+        // Close the constructor with `Self { f1, f2, ... }` — Rust's
+        // struct-literal shorthand binds field names to local
+        // variables of the same name, which is precisely what the
+        // ivar→local rewrite above produces. Empty-ivar classes get
+        // `Self {}` (still valid).
+        let fields: Vec<&str> = ivars.iter().map(|(n, _)| n.as_str()).collect();
+        writeln!(out, "    Self {{ {} }}", fields.join(", ")).unwrap();
     }
     out.push_str("}\n");
     Ok(out)

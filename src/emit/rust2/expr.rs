@@ -6,11 +6,45 @@
 
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 
+thread_local! {
+    /// True while rendering the body of a `pub fn new(...) -> Self`
+    /// (Ruby `def initialize`). Rust constructors have no `self`
+    /// mid-body — the ivar emit shifts:
+    ///   `@x` (read) → bare `x` (local)
+    ///   `@x = value` → `let mut x = value` (binds a local)
+    /// The caller appends `Self { f1, f2, ... }` at the end, building
+    /// the instance from the locals. `self.method(args)` calls from
+    /// inside initialize stay as-is and surface as a separate gap:
+    /// static-method detection needs to lift such methods out of
+    /// `impl Foo` so they're callable without an instance.
+    static IN_CONSTRUCTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn with_constructor_mode<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IN_CONSTRUCTOR.with(|c| c.replace(true));
+    let r = f();
+    IN_CONSTRUCTOR.with(|c| c.set(prev));
+    r
+}
+
+fn in_constructor() -> bool {
+    IN_CONSTRUCTOR.with(|c| c.get())
+}
+
 pub(super) fn emit_expr(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
-        ExprNode::Ivar { name } => format!("self.{name}"),
+        ExprNode::Ivar { name } => {
+            if in_constructor() {
+                name.as_str().to_string()
+            } else {
+                format!("self.{name}")
+            }
+        }
         ExprNode::SelfRef => "self".to_string(),
         ExprNode::Const { path } => {
             // Rust uses file-as-module — `ActiveSupport::HashWithIndifferentAccess`
@@ -127,7 +161,19 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
     let rhs = emit_expr(value);
     match target {
         LValue::Var { name, .. } => format!("let {} = {rhs}", name.as_str()),
-        LValue::Ivar { name } => format!("self.{name} = {rhs}"),
+        LValue::Ivar { name } => {
+            if in_constructor() {
+                // Bind a local — the surrounding `pub fn new` body
+                // closes with `Self { f1, f2, ... }` and the locals
+                // become the field initializers. `mut` is uniformly
+                // applied so subsequent index-assigns / re-assigns
+                // inside initialize compile; the resulting `Self`
+                // literal moves the local in regardless of mutability.
+                format!("let mut {name} = {rhs}")
+            } else {
+                format!("self.{name} = {rhs}")
+            }
+        }
         LValue::Attr { recv, name } => format!("{}.{name} = {rhs}", emit_expr(recv)),
         LValue::Index { recv, index } => {
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
