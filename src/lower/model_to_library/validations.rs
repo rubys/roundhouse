@@ -14,7 +14,7 @@
 
 use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model, ValidationRule};
 use crate::effect::EffectSet;
-use crate::expr::{ArrayStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, Literal};
+use crate::expr::{ArrayStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -37,7 +37,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     // `<Target>.exists?(fk_value)` otherwise.
     for assoc in model.associations() {
         if let Association::BelongsTo { name, target, foreign_key, optional: false } = assoc {
-            stmts.push(belongs_to_validation_call(name, foreign_key, target));
+            stmts.push(inline_belongs_to_check(name, foreign_key, target));
         }
     }
 
@@ -65,10 +65,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
 fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(attr)],
-        ValidationRule::Absence => vec![helper_call(
-            "validates_absence_of",
-            vec![lit_sym(attr.clone()), ivar(attr)],
-        )],
+        ValidationRule::Absence => vec![inline_absence_check(attr)],
         ValidationRule::Length { min, max } => {
             let mut entries: Vec<(Expr, Expr)> = Vec::new();
             if let Some(n) = min {
@@ -84,31 +81,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
             ));
             vec![helper_call("validates_length_of", args)]
         }
-        ValidationRule::Format { pattern } => vec![helper_call(
-            "validates_format_of",
-            vec![
-                lit_sym(attr.clone()),
-                ivar(attr),
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Hash {
-                        entries: vec![(
-                            lit_sym(Symbol::from("with")),
-                            Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Lit {
-                                    value: Literal::Regex {
-                                        pattern: pattern.clone(),
-                                        flags: String::new(),
-                                    },
-                                },
-                            ),
-                        )],
-                        kwargs: true,
-                    },
-                ),
-            ],
-        )],
+        ValidationRule::Format { pattern } => vec![inline_format_check(attr, pattern)],
         ValidationRule::Numericality { only_integer, gt, lt } => {
             let mut entries: Vec<(Expr, Expr)> = Vec::new();
             if *only_integer {
@@ -135,32 +108,7 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
             }
             vec![helper_call("validates_numericality_of", args)]
         }
-        ValidationRule::Inclusion { values } => {
-            let array = Expr::new(
-                Span::synthetic(),
-                ExprNode::Array {
-                    elements: values
-                        .iter()
-                        .map(|lit| {
-                            Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() })
-                        })
-                        .collect(),
-                    style: ArrayStyle::Brackets,
-                },
-            );
-            let entries = vec![(lit_sym(Symbol::from("in")), array)];
-            vec![helper_call(
-                "validates_inclusion_of",
-                vec![
-                    lit_sym(attr.clone()),
-                    ivar(attr),
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Hash { entries, kwargs: true },
-                    ),
-                ],
-            )]
-        }
+        ValidationRule::Inclusion { values } => vec![inline_inclusion_check(attr, values)],
         ValidationRule::Uniqueness { .. } | ValidationRule::Custom { .. } => {
             // Not yet exercised by real-blog; lands when a fixture forces the issue.
             Vec::new()
@@ -181,23 +129,55 @@ fn helper_call(name: &str, args: Vec<Expr>) -> Expr {
     )
 }
 
-/// `validates_belongs_to(:<assoc_name>, @<fk>, <TargetClass>)` —
-/// emitted once per non-optional `belongs_to`. The third argument is
-/// a Const referencing the target model so the helper can dispatch
-/// `<Target>.exists?(fk_value)` to verify the FK is live.
-fn belongs_to_validation_call(
+/// Inline `belongs_to` presence check (Rails 5+ default — every
+/// non-optional `belongs_to` requires the associated record to
+/// exist). Generates the IR equivalent of:
+///   if @article_id.nil? || @article_id == 0 || !Article.exists?(@article_id)
+///     errors << "article must exist"
+///   end
+/// Mirrors `runtime/ruby/active_record/validations.rb::validates_belongs_to`
+/// but flattens the early-return + post-check sequence to a single
+/// composite condition.
+fn inline_belongs_to_check(
     assoc_name: &Symbol,
     foreign_key: &Symbol,
-    target: &crate::ident::ClassId,
+    target: &ClassId,
 ) -> Expr {
+    let fk_ivar = ivar(foreign_key);
+    // `@fk.nil?`
+    let nil_check = send(fk_ivar.clone(), "nil?", vec![]);
+    // `@fk == 0`
+    let zero_check = send(
+        fk_ivar.clone(),
+        "==",
+        vec![Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Int { value: 0 } },
+        )],
+    );
+    // `!Target.exists?(@fk)`
     let target_const = Expr::new(
         Span::synthetic(),
         ExprNode::Const { path: vec![target.0.clone()] },
     );
-    helper_call(
-        "validates_belongs_to",
-        vec![lit_sym(assoc_name.clone()), ivar(foreign_key), target_const],
-    )
+    let exists_call = send(target_const, "exists?", vec![fk_ivar]);
+    let not_exists = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(exists_call),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let cond = bool_op(
+        BoolOpKind::Or,
+        bool_op(BoolOpKind::Or, nil_check, zero_check),
+        not_exists,
+    );
+    let push_err = errors_push(format!("{} must exist", assoc_name.as_str()));
+    if_with_nil_else(cond, push_err)
 }
 
 /// `@<attr>` — direct ivar read passed as the `value` positional arg
@@ -245,6 +225,108 @@ fn inline_presence_check(attr: &Symbol) -> Expr {
     let push_err = errors_push(format!("{} can't be blank", attr.as_str()));
     // The wrapping `if cond then push_err end` (Nil else).
     if_with_nil_else(cond, push_err)
+}
+
+/// Inline `validates :attr, absence: true` — the negation of presence.
+///   if !(@attr.nil? || (@attr.is_a?(String) && @attr.empty?) || (@attr.is_a?(Array) && @attr.empty?))
+///     errors << "attr must be blank"
+///   end
+/// Reuses the presence condition tree and wraps with unary `!`.
+fn inline_absence_check(attr: &Symbol) -> Expr {
+    // Re-derive the blank-condition (matches inline_presence_check's tree).
+    let attr_ivar = ivar(attr);
+    let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
+    let string_blank = bool_op(
+        BoolOpKind::And,
+        is_a_check(&attr_ivar, "String"),
+        send(attr_ivar.clone(), "empty?", vec![]),
+    );
+    let array_blank = bool_op(
+        BoolOpKind::And,
+        is_a_check(&attr_ivar, "Array"),
+        send(attr_ivar, "empty?", vec![]),
+    );
+    let blank_cond = bool_op(
+        BoolOpKind::Or,
+        bool_op(BoolOpKind::Or, nil_check, string_blank),
+        array_blank,
+    );
+    let not_blank = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(blank_cond),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let push_err = errors_push(format!("{} must be blank", attr.as_str()));
+    if_with_nil_else(not_blank, push_err)
+}
+
+/// Inline `validates :attr, inclusion: { in: [v1, v2, …] }`.
+///   if ![v1, v2, …].include?(@attr)
+///     errors << "attr is not included in the list"
+///   end
+/// The `within.nil?` guard from the runtime helper is unnecessary —
+/// the list is a known literal at lower time.
+fn inline_inclusion_check(attr: &Symbol, values: &[Literal]) -> Expr {
+    let array_lit = Expr::new(
+        Span::synthetic(),
+        ExprNode::Array {
+            elements: values
+                .iter()
+                .map(|lit| Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() }))
+                .collect(),
+            style: ArrayStyle::Brackets,
+        },
+    );
+    let attr_ivar = ivar(attr);
+    let include_call = send(array_lit, "include?", vec![attr_ivar]);
+    let not_included = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(include_call),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let push_err = errors_push(format!("{} is not included in the list", attr.as_str()));
+    if_with_nil_else(not_included, push_err)
+}
+
+/// Inline `validates :attr, format: { with: /pattern/ }`.
+///   if !(@attr.is_a?(String) && /pattern/.match?(@attr))
+///     errors << "attr is invalid"
+///   end
+/// The runtime helper's `with.nil?` guard is unnecessary — the
+/// pattern is a known literal at lower time.
+fn inline_format_check(attr: &Symbol, pattern: &str) -> Expr {
+    let attr_ivar = ivar(attr);
+    let regex_lit = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit {
+            value: Literal::Regex { pattern: pattern.to_string(), flags: String::new() },
+        },
+    );
+    let is_string = is_a_check(&attr_ivar, "String");
+    let match_call = send(regex_lit, "match?", vec![attr_ivar]);
+    let valid = bool_op(BoolOpKind::And, is_string, match_call);
+    let invalid = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(valid),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let push_err = errors_push(format!("{} is invalid", attr.as_str()));
+    if_with_nil_else(invalid, push_err)
 }
 
 // ── IR helpers ────────────────────────────────────────────────

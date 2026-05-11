@@ -265,26 +265,16 @@ fn comment_lowers_validate_with_two_inline_presence_and_belongs_to() {
         roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
         other => panic!("validate body should be Seq; got {other:?}"),
     };
-    // Three stmts: inline presence-If for commenter + inline presence-If
-    // for body + `validates_belongs_to` Send for `belongs_to :article`
-    // (Rails 5+ presence-by-default, not yet inlined).
+    // Three stmts, all inline-If under Phase 2.5(a): presence-If for
+    // commenter + presence-If for body + belongs_to-If for the
+    // `belongs_to :article` synthesized check.
     assert_eq!(exprs.len(), 3, "got {}: {exprs:?}", exprs.len());
-    // First two are inline presence-If's; third is the belongs_to helper Send.
-    assert!(
-        matches!(&*exprs[0].node, roundhouse::ExprNode::If { .. }),
-        "stmt 0 should be inline presence-If; got {:?}",
-        &*exprs[0].node,
-    );
-    assert!(
-        matches!(&*exprs[1].node, roundhouse::ExprNode::If { .. }),
-        "stmt 1 should be inline presence-If; got {:?}",
-        &*exprs[1].node,
-    );
-    match &*exprs[2].node {
-        roundhouse::ExprNode::Send { method, .. } => {
-            assert_eq!(method.as_str(), "validates_belongs_to");
-        }
-        other => panic!("stmt 2 should be validates_belongs_to Send; got {other:?}"),
+    for (i, e) in exprs.iter().enumerate() {
+        assert!(
+            matches!(&*e.node, roundhouse::ExprNode::If { .. }),
+            "stmt {i} should be inline-If; got {:?}",
+            &*e.node,
+        );
     }
 }
 
