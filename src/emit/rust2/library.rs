@@ -93,6 +93,16 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
             // `pub fn` without a self receiver. Skip for now.
             continue;
         }
+        // `def []` / `def []=` aren't valid Rust fn names. The Ruby
+        // bracket forms emit via call-site index syntax (`recv[k]` /
+        // `recv[k] = v` in `expr.rs::emit_send`); the method bodies
+        // themselves drop here. When real-blog wants idiomatic
+        // `Index`/`IndexMut` trait impls on HWIA, swap this skip for
+        // a trait-emit branch — until then, the delegators `get`/`set`
+        // are the canonical accessors.
+        if matches!(m.name.as_str(), "[]" | "[]=") {
+            continue;
+        }
         if !first {
             writeln!(out).unwrap();
         }

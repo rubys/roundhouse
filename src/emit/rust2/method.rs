@@ -118,10 +118,11 @@ pub(super) fn emit_instance_method(
     }
     let mut out = String::new();
     let is_init = m.name.as_str() == "initialize";
-    let (fn_name, receiver) = if is_init {
+    let sanitized = super::expr::sanitize_ident(m.name.as_str());
+    let (fn_name, receiver): (&str, Option<&'static str>) = if is_init {
         ("new", None)
     } else {
-        (m.name.as_str(), Some(render_self_receiver(mutates_self)))
+        (sanitized.as_str(), Some(render_self_receiver(mutates_self)))
     };
     let params = render_instance_params(m, receiver);
     let ret_clause = if is_init {
