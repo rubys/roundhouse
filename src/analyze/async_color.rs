@@ -532,6 +532,8 @@ fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
                 "ErrorCollection"
                     | "Errors"
                     | "HashWithIndifferentAccess"
+                    | "Flash"
+                    | "Session"
                     | "Parameters"
                     | "Array"
                     | "Hash"

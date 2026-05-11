@@ -772,57 +772,123 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut params_cls);
     classes.insert(ClassId(Symbol::from("ActionController::Parameters")), params_cls);
 
-    // ActiveSupport::HashWithIndifferentAccess — what `controller.flash`
-    // is. Controllers read `flash[:notice]` / write
-    // `flash[:notice] = "..."`. The transpiled HWIA class wraps a
-    // String-keyed inner Hash with Symbol↔String coercion at the [] /
-    // []= boundary. Body-typer needs the methods registered so the
-    // dispatch resolves to a known signature instead of falling
-    // through to Untyped.
-    let mut hwia_cls = crate::analyze::ClassInfo::default();
-    hwia_cls.instance_methods.insert(
+    // ActionDispatch::Flash — what `controller.flash` is post-Phase-
+    // 2.5(b) (was HashWithIndifferentAccess). Typed `notice`/`alert`
+    // fields + HWIA-shape shim methods. Controllers read
+    // `@flash[:notice]` / write `@flash[:notice] = "..."`; the lowerer
+    // emits these as Send-`[]` / Send-`[]=` calls and the typer
+    // resolves them through this stub.
+    let mut flash_cls = crate::analyze::ClassInfo::default();
+    let nullable_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    flash_cls.instance_methods.insert(
+        Symbol::from("[]"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], nullable_str.clone()),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("[]="),
+        fn_sig(
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), nullable_str.clone())],
+            nullable_str.clone(),
+        ),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("fetch"),
+        fn_sig(
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), nullable_str.clone())],
+            nullable_str.clone(),
+        ),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("has_key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("delete"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], nullable_str.clone()),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("length"),
+        fn_sig(vec![], Ty::Int),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("size"),
+        fn_sig(vec![], Ty::Int),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("empty?"),
+        fn_sig(vec![], Ty::Bool),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("to_h"),
+        fn_sig(vec![], Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("notice"),
+        fn_sig(vec![], nullable_str.clone()),
+    );
+    flash_cls.instance_methods.insert(
+        Symbol::from("alert"),
+        fn_sig(vec![], nullable_str.clone()),
+    );
+    tag_all_method(&mut flash_cls);
+    classes.insert(ClassId(Symbol::from("ActionDispatch::Flash")), flash_cls);
+
+    // ActionDispatch::Session — empty for real-blog (no session keys
+    // exercised). Shim methods registered so `@session.length()` and
+    // friends resolve. Values typed Untyped (Hash-backed storage).
+    let mut session_cls = crate::analyze::ClassInfo::default();
+    session_cls.instance_methods.insert(
         Symbol::from("[]"),
         fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
     );
-    hwia_cls.instance_methods.insert(
+    session_cls.instance_methods.insert(
         Symbol::from("[]="),
         fn_sig(
             vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)],
             Ty::Untyped,
         ),
     );
-    hwia_cls.instance_methods.insert(
-        Symbol::from("key?"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
-    );
-    hwia_cls.instance_methods.insert(
-        Symbol::from("has_key?"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
-    );
-    hwia_cls.instance_methods.insert(
+    session_cls.instance_methods.insert(
         Symbol::from("fetch"),
         fn_sig(
             vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::Untyped)],
             Ty::Untyped,
         ),
     );
-    hwia_cls.instance_methods.insert(
+    session_cls.instance_methods.insert(
+        Symbol::from("key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    session_cls.instance_methods.insert(
+        Symbol::from("has_key?"),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
+    );
+    session_cls.instance_methods.insert(
         Symbol::from("delete"),
         fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
     );
-    hwia_cls.instance_methods.insert(
+    session_cls.instance_methods.insert(
+        Symbol::from("length"),
+        fn_sig(vec![], Ty::Int),
+    );
+    session_cls.instance_methods.insert(
+        Symbol::from("size"),
+        fn_sig(vec![], Ty::Int),
+    );
+    session_cls.instance_methods.insert(
         Symbol::from("empty?"),
         fn_sig(vec![], Ty::Bool),
     );
-    hwia_cls.instance_methods.insert(
+    session_cls.instance_methods.insert(
         Symbol::from("to_h"),
         fn_sig(vec![], untyped_hash.clone()),
     );
-    tag_all_method(&mut hwia_cls);
-    classes.insert(
-        ClassId(Symbol::from("ActiveSupport::HashWithIndifferentAccess")),
-        hwia_cls,
-    );
+    tag_all_method(&mut session_cls);
+    classes.insert(ClassId(Symbol::from("ActionDispatch::Session")), session_cls);
 }
 
 // ── view-name → module / arg / method helpers ────────────────────

@@ -1,0 +1,34 @@
+module ActionDispatch
+  # Per-app flash store with typed `notice`/`alert` fields plus HWIA-
+  # shape shim methods. Field-set is closed (mirrors the lowerer's
+  # `is_flash_name`); shim signatures take `untyped` keys to accept
+  # Symbol|String.
+  class Flash
+    @notice: String?
+    @alert: String?
+
+    # `attr_accessor :notice, :alert` — getter+setter pair per name.
+    def notice: () -> String?
+    def notice=: (String?) -> String?
+    def alert: () -> String?
+    def alert=: (String?) -> String?
+
+    def initialize: (?Hash[String, String]? other) -> void
+
+    def []: (untyped key) -> String?
+    def []=: (untyped key, String? value) -> String?
+    def fetch: (untyped key, ?String? default) -> String?
+    def key?: (untyped key) -> bool
+    def has_key?: (untyped key) -> bool
+    def include?: (untyped key) -> bool
+    def delete: (untyped key) -> String?
+    def length: () -> Integer
+    def size: () -> Integer
+    def empty?: () -> bool
+    def keys: () -> Array[String]
+    def values: () -> Array[String]
+    def each: () { (String, String?) -> void } -> Flash
+    def to_h: () -> Hash[String, String]
+    def merge: (untyped other) -> Flash
+  end
+end

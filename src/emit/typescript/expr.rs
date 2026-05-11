@@ -168,6 +168,8 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
                 "ErrorCollection"
                     | "Errors"
                     | "HashWithIndifferentAccess"
+                    | "Flash"
+                    | "Session"
                     | "Parameters"
                     | "Array"
                     | "Hash"

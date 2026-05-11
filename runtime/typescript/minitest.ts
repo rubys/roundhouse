@@ -21,7 +21,8 @@ import assert from "node:assert/strict";
 // `parameters.ts` are emitted to `src/`. Two levels up.
 import { Router } from "../../src/router.js";
 import { Parameters } from "../../src/parameters.js";
-import { HashWithIndifferentAccess } from "../../src/hash_with_indifferent_access.js";
+import { Flash } from "../../src/flash.js";
+import { Session } from "../../src/session.js";
 
 // ── Per-test dispatch table ────────────────────────────────────────
 //
@@ -307,9 +308,9 @@ export class Test {
   // the type checker.
   response: any;
   request: any;
-  session: HashWithIndifferentAccess = new HashWithIndifferentAccess();
+  session: Session = new Session();
   cookies: any;
-  flash: HashWithIndifferentAccess = new HashWithIndifferentAccess();
+  flash: Flash = new Flash();
 
   // Dispatch is synchronous — emitted controller actions are
   // currently all sync (process_action's switch arms call sync
@@ -367,7 +368,7 @@ export class Test {
     this.status = controller.status ?? 200;
     this.location = controller.location ?? "";
     this.response = { body: this.body, status: this.status };
-    this.flash = controller.flash ?? new HashWithIndifferentAccess();
+    this.flash = controller.flash ?? new Flash();
   }
 
   // ── HTTP response assertions ─────────────────────────────────

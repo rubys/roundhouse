@@ -36,7 +36,7 @@ import { createClient, type Client } from "@libsql/client";
 
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
-import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
+import { Flash } from "./flash.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
@@ -165,7 +165,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const controller = new ctrlClass();
     controller.params = new Parameters(merged);
     controller.session = sessionStore;
-    controller.flash = new HashWithIndifferentAccess(flashStore);
+    controller.flash = new Flash(flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
     await controller.process_action(match.action);

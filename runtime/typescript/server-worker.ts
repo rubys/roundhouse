@@ -32,7 +32,7 @@
 
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
-import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
+import { Flash } from "./flash.js";
 // Note: this file is emitted to `src/server.ts` and the
 // `juntos-worker.ts` source is emitted to `src/juntos.ts` — same
 // rename pattern as `juntos-libsql.ts` → `juntos.ts`. Imports
@@ -440,7 +440,7 @@ async function dispatchRequest(
     const controller = new ctrlClass();
     controller.params = new Parameters(merged);
     controller.session = _sessionStore;
-    controller.flash = new HashWithIndifferentAccess(_flashStore);
+    controller.flash = new Flash(_flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
     await controller.process_action(match.action);

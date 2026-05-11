@@ -32,8 +32,8 @@ module Roundhouse
     # vary — method/pattern are String, controller/action are Symbol.
     @@routes : Array(Hash(Symbol, String | Symbol)) = [] of Hash(Symbol, String | Symbol)
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
-    @@session : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new
-    @@flash : ActiveSupport::HashWithIndifferentAccess = ActiveSupport::HashWithIndifferentAccess.new
+    @@session : ActionDispatch::Session = ActionDispatch::Session.new
+    @@flash : ActionDispatch::Flash = ActionDispatch::Flash.new
 
     def self.start(
       schema_sql : String,
@@ -135,8 +135,8 @@ module Roundhouse
 
       # Carry flash forward exactly once: post-redirect, the next
       # request reads the flash, the request after that sees fresh.
-      flash_for_response = ctrl.flash || ActiveSupport::HashWithIndifferentAccess.new
-      @@flash = ActiveSupport::HashWithIndifferentAccess.new
+      flash_for_response = ctrl.flash || ActionDispatch::Flash.new
+      @@flash = ActionDispatch::Flash.new
 
       status = ctrl.status || 200i64
       body = ctrl.body || ""

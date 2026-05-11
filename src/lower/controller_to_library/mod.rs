@@ -166,13 +166,24 @@ pub fn lower_controllers_with_arel(
     // `@flash` is also framework-guaranteed: the render-rewrite emits
     // `@flash[:notice]` / `@flash[:alert]` as args to every Views
     // call, and `redirect_to`'s lowering writes `@flash[:notice] = …`
-    // when the source had `notice: …`. ActionController's runtime
-    // constructs a HashWithIndifferentAccess; expose it as a
-    // Sym→Untyped Hash so `@flash[:k]` typechecks at every read site.
+    // when the source had `notice: …`. Per Phase 2.5(b) the runtime
+    // class is `ActionDispatch::Flash` (typed `notice`/`alert` fields
+    // + HWIA-shape shims); type `@flash` as Flash so `@flash[:k]`
+    // routes through `Flash#[]` for typed targets.
     framework_ivars.insert(
         Symbol::from("flash"),
         Ty::Class {
-            id: ClassId(Symbol::from("ActiveSupport::HashWithIndifferentAccess")),
+            id: ClassId(Symbol::from("ActionDispatch::Flash")),
+            args: vec![],
+        },
+    );
+    // `@session` ditto — per Phase 2.5(b), typed as the per-app
+    // ActionDispatch::Session struct (empty for real-blog, HWIA-shape
+    // shims preserved on the class for cross-target tests).
+    framework_ivars.insert(
+        Symbol::from("session"),
+        Ty::Class {
+            id: ClassId(Symbol::from("ActionDispatch::Session")),
             args: vec![],
         },
     );

@@ -1,0 +1,28 @@
+module ActionDispatch
+  # Per-app session store. Empty struct for real-blog (no session
+  # keys exercised); `@data` Hash backs the shim methods so future
+  # app-specific keys can be wired without a runtime rewrite. Values
+  # typed `untyped` to keep API symmetry with HWIA's heterogeneous
+  # value channel.
+  class Session
+    @data: Hash[String, untyped]
+
+    def initialize: (?Hash[untyped, untyped]? other) -> void
+
+    def []: (untyped key) -> untyped
+    def []=: (untyped key, untyped value) -> untyped
+    def fetch: (untyped key, ?untyped default) -> untyped
+    def key?: (untyped key) -> bool
+    def has_key?: (untyped key) -> bool
+    def include?: (untyped key) -> bool
+    def delete: (untyped key) -> untyped
+    def length: () -> Integer
+    def size: () -> Integer
+    def empty?: () -> bool
+    def keys: () -> Array[String]
+    def values: () -> Array[untyped]
+    def each: () { (String, untyped) -> void } -> Session
+    def to_h: () -> Hash[String, untyped]
+    def merge: (untyped other) -> Session
+  end
+end

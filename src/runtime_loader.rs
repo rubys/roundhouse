@@ -253,12 +253,31 @@ pub struct RuntimeUnit {
 /// to one `runtime/ruby/<x>.rb` file we want to emit as a TS file
 /// in the output project.
 const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
+    // HashWithIndifferentAccess no longer transpiled to typed targets
+    // per Phase 2.5(b). @flash / @session moved to per-app
+    // ActionDispatch::Flash / ActionDispatch::Session structs with
+    // typed fields + HWIA-shape shims; HWIA stays in runtime/ruby/
+    // as a CRuby/Spinel helper for parity.
     RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
-        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
-        namespace: "ActiveSupport",
-        out_path: "src/hash_with_indifferent_access.ts",
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "ActionDispatch",
+        out_path: "src/flash.ts",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        // Hand-written server.ts constructs `new Flash(flashStore)`
+        // and reads `flash.to_h()` between requests — neither is
+        // visible to the app-side reachability walk.
+        extra_roots: &[("Flash", "to_h")],
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "ActionDispatch",
+        out_path: "src/session.ts",
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
@@ -320,7 +339,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: &[
             ("Parameters", "./parameters.js"),
-            ("HashWithIndifferentAccess", "./hash_with_indifferent_access.js"),
+            ("Flash", "./flash.js"),
+            ("Session", "./session.js"),
         ],
         // Module-scope `STATUS_CODES` is now picked up by
         // `parse_module_constant_exprs` and emitted as a
@@ -336,7 +356,10 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionController",
         out_path: "src/parameters.ts",
         mode: Mode::Library,
-        imports: &[("HashWithIndifferentAccess", "./hash_with_indifferent_access.js")],
+        // Parameters used to import HWIA for indifferent-access helpers;
+        // post-Phase-2.5(b) the class is self-contained (its own
+        // `normalize` + String-keyed storage), no HWIA dep.
+        imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -347,7 +370,10 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "",
         out_path: "src/router.ts",
         mode: Mode::Library,
-        imports: &[("HashWithIndifferentAccess", "./hash_with_indifferent_access.js")],
+        // Router historically imported HWIA for path-param storage; the
+        // class is now self-contained (plain String-keyed Hash) and
+        // doesn't need it.
+        imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         // Hand-written `server.ts` and `test_support.ts` call
         // `Router.match(method, path, table)` directly. Treeshake's
@@ -384,12 +410,25 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
 /// (Module mode, no dependencies); expanded as the Crystal target
 /// proves out additional surface area.
 const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
+    // HWIA dropped per Phase 2.5(b); flash/session moved to typed
+    // ActionDispatch structs.
     RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
-        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
-        namespace: "ActiveSupport",
-        out_path: "src/hash_with_indifferent_access.cr",
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "ActionDispatch",
+        out_path: "src/flash.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "ActionDispatch",
+        out_path: "src/session.cr",
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
@@ -517,24 +556,14 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
-        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
-        namespace: "ActiveSupport",
-        out_path: "src/hash_with_indifferent_access.rs",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    // `validations.rb` intentionally NOT transpiled to rust2 — per
-    // docs/rust-migration-plan.md Phase 2.5(a), every `validates :x, …`
-    // declaration expands inline at lower time (see
-    // `src/lower/model_to_library/validations.rs`). No model on a typed
-    // target ever dispatches into `ActiveRecord::Validations` at runtime;
-    // the module exists in the Ruby runtime as a direct-call helper
-    // surface for CRuby/Spinel only.
+    // HWIA intentionally NOT transpiled to rust2 — per Phase 2.5(b),
+    // `@flash` and `@session` move to per-app ActionDispatch::Flash /
+    // ActionDispatch::Session structs with typed fields. HWIA stays
+    // in runtime/ruby/ as a CRuby/Spinel helper for test parity.
+    //
+    // `validations.rb` similarly NOT transpiled (Phase 2.5(a)) —
+    // every `validates :x, …` declaration expands inline at lower
+    // time (see `src/lower/model_to_library/validations.rs`).
 ];
 
 /// Parse + emit the Rust runtime files. Mirrors `crystal_units` /

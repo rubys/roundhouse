@@ -25,7 +25,7 @@ import Database from "better-sqlite3";
 
 import { Router } from "./router.js";
 import { Parameters } from "./parameters.js";
-import { HashWithIndifferentAccess } from "./hash_with_indifferent_access.js";
+import { Flash } from "./flash.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
@@ -180,11 +180,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const controller = new ctrlClass();
     controller.params = new Parameters(merged);
     controller.session = sessionStore;
-    // Wrap the persisted flashStore in an HWIA so the controller's
-    // typed-as-HashWithIndifferentAccess `flash` property dispatches
-    // correctly (`flash.get("notice")` etc.). The plain-object store
-    // survives across requests; HWIA wraps per-request.
-    controller.flash = new HashWithIndifferentAccess(flashStore);
+    // Wrap the persisted flashStore in a Flash so the controller's
+    // typed-as-Flash `flash` property dispatches correctly
+    // (`flash.get("notice")` etc.). The plain-object store survives
+    // across requests; Flash wraps per-request. (Phase 2.5(b): was
+    // HashWithIndifferentAccess; Flash provides typed notice/alert
+    // fields + HWIA-shape shim methods.)
+    controller.flash = new Flash(flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
     await controller.process_action(match.action);

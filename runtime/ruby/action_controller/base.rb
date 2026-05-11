@@ -1,5 +1,6 @@
 require_relative "parameters"
-require_relative "../active_support/hash_with_indifferent_access"
+require_relative "../action_dispatch/flash"
+require_relative "../action_dispatch/session"
 require_relative "../action_view"
 
 module ActionController
@@ -34,8 +35,8 @@ module ActionController
 
     def initialize
       @params  = ActionController::Parameters.new({})
-      @session = ActiveSupport::HashWithIndifferentAccess.new
-      @flash   = ActiveSupport::HashWithIndifferentAccess.new
+      @session = ActionDispatch::Session.new
+      @flash   = ActionDispatch::Flash.new
       @status  = 200
       @body    = ""
       @location = nil
