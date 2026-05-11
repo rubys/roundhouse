@@ -370,6 +370,16 @@ pub(super) fn emit_send_base(
             return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
         }
     }
+    // Unary `!` Send (`Send { recv: cond, method: "!", args: [] }`)
+    // → prefix form `!cond`. Both forms (`!cond` and `cond.!`) are
+    // valid Ruby, but the prefix form is the idiomatic one and what
+    // the validation lowerer's negation patterns expect to emit
+    // (e.g. `unless cond` modifier from a wrapped `!cond` cond).
+    if m == "!" && args_s.is_empty() {
+        if let Some(r) = recv {
+            return format!("!{}", emit_expr(r));
+        }
+    }
     // SelfRef receivers come from the body-typer's self-dispatch
     // annotation. Ruby's idiomatic surface for self-dispatch is
     // implicit (`foo` not `self.foo`) for getters/methods — but

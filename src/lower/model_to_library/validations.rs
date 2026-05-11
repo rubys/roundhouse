@@ -67,46 +67,11 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
         ValidationRule::Presence => vec![inline_presence_check(attr)],
         ValidationRule::Absence => vec![inline_absence_check(attr)],
         ValidationRule::Length { min, max } => {
-            let mut entries: Vec<(Expr, Expr)> = Vec::new();
-            if let Some(n) = min {
-                entries.push((lit_sym(Symbol::from("minimum")), lit_int(*n as i64)));
-            }
-            if let Some(n) = max {
-                entries.push((lit_sym(Symbol::from("maximum")), lit_int(*n as i64)));
-            }
-            let mut args = vec![lit_sym(attr.clone()), ivar(attr)];
-            args.push(Expr::new(
-                Span::synthetic(),
-                ExprNode::Hash { entries, kwargs: true },
-            ));
-            vec![helper_call("validates_length_of", args)]
+            inline_length_check(attr, min.map(|n| n as usize), max.map(|n| n as usize))
         }
         ValidationRule::Format { pattern } => vec![inline_format_check(attr, pattern)],
         ValidationRule::Numericality { only_integer, gt, lt } => {
-            let mut entries: Vec<(Expr, Expr)> = Vec::new();
-            if *only_integer {
-                entries.push((
-                    lit_sym(Symbol::from("only_integer")),
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Lit { value: Literal::Bool { value: true } },
-                    ),
-                ));
-            }
-            if let Some(n) = gt {
-                entries.push((lit_sym(Symbol::from("greater_than")), lit_float(*n)));
-            }
-            if let Some(n) = lt {
-                entries.push((lit_sym(Symbol::from("less_than")), lit_float(*n)));
-            }
-            let mut args = vec![lit_sym(attr.clone()), ivar(attr)];
-            if !entries.is_empty() {
-                args.push(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Hash { entries, kwargs: true },
-                ));
-            }
-            vec![helper_call("validates_numericality_of", args)]
+            inline_numericality_check(attr, *only_integer, *gt, *lt)
         }
         ValidationRule::Inclusion { values } => vec![inline_inclusion_check(attr, values)],
         ValidationRule::Uniqueness { .. } | ValidationRule::Custom { .. } => {
@@ -327,6 +292,198 @@ fn inline_format_check(attr: &Symbol, pattern: &str) -> Expr {
     );
     let push_err = errors_push(format!("{} is invalid", attr.as_str()));
     if_with_nil_else(invalid, push_err)
+}
+
+/// Inline `validates :attr, length: { minimum: M, maximum: N, is: K }`.
+/// Produces a single outer `unless @attr.nil?` guard wrapping a Seq:
+///   unless @attr.nil?
+///     len = if @attr.is_a?(String) then @attr.length elsif @attr.is_a?(Array) then @attr.length else 0 end
+///     errors << "attr is too short (minimum is M)" if len < M     # if min set
+///     errors << "attr is too long (maximum is N)"  if len > N     # if max set
+///     errors << "attr is the wrong length (should be K)" if len != K  # if is set
+///   end
+/// The `is` (exact length) option isn't in the current ValidationRule
+/// shape; left for when the IR adds it.
+fn inline_length_check(attr: &Symbol, min: Option<usize>, max: Option<usize>) -> Vec<Expr> {
+    let attr_ivar = ivar(attr);
+    // Compute `len` — `if @attr.is_a?(String) then @attr.length
+    // elsif @attr.is_a?(Array) then @attr.length else 0 end`.
+    let length_send = send(attr_ivar.clone(), "length", vec![]);
+    let zero_lit = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Int { value: 0 } },
+    );
+    let inner_else = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: is_a_check(&attr_ivar, "Array"),
+            then_branch: length_send.clone(),
+            else_branch: zero_lit,
+        },
+    );
+    let len_expr = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: is_a_check(&attr_ivar, "String"),
+            then_branch: length_send,
+            else_branch: inner_else,
+        },
+    );
+    let len_var = Symbol::from("len");
+    let len_assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var {
+                id: crate::ident::VarId(0),
+                name: len_var.clone(),
+            },
+            value: len_expr,
+        },
+    );
+    let len_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: crate::ident::VarId(0), name: len_var },
+    );
+
+    let mut inner_stmts: Vec<Expr> = vec![len_assign];
+    if let Some(n) = min {
+        let lt = send(
+            len_read.clone(),
+            "<",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: n as i64 } },
+            )],
+        );
+        let msg = format!("{} is too short (minimum is {})", attr.as_str(), n);
+        inner_stmts.push(if_with_nil_else(lt, errors_push(msg)));
+    }
+    if let Some(n) = max {
+        let gt = send(
+            len_read.clone(),
+            ">",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: n as i64 } },
+            )],
+        );
+        let msg = format!("{} is too long (maximum is {})", attr.as_str(), n);
+        inner_stmts.push(if_with_nil_else(gt, errors_push(msg)));
+    }
+    let body_seq = seq(inner_stmts);
+
+    // `unless @attr.nil?` → `if !@attr.nil? then body end`.
+    let nil_check = send(attr_ivar, "nil?", vec![]);
+    let not_nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(nil_check),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    vec![if_with_nil_else(not_nil, body_seq)]
+}
+
+/// Inline `validates :attr, numericality: { ... }`.
+///   if @attr.nil? || !@attr.is_a?(Numeric)
+///     errors << "attr is not a number"
+///   else
+///     errors << "attr must be greater than G" if @attr <= G      # if gt set
+///     errors << "attr must be less than L"    if @attr >= L      # if lt set
+///     errors << "attr must be an integer"     if !@attr.is_a?(Integer)  # if only_integer
+///   end
+/// The if/else form keeps subsequent rules on other attrs running:
+/// no early `return` from within `def validate`.
+fn inline_numericality_check(
+    attr: &Symbol,
+    only_integer: bool,
+    gt: Option<f64>,
+    lt: Option<f64>,
+) -> Vec<Expr> {
+    let attr_ivar = ivar(attr);
+    // `@attr.nil? || !@attr.is_a?(Numeric)` — the "not a number" guard.
+    let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
+    let is_numeric = is_a_check(&attr_ivar, "Numeric");
+    let not_numeric = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(is_numeric),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let bad_cond = bool_op(BoolOpKind::Or, nil_check, not_numeric);
+    let nan_msg = errors_push(format!("{} is not a number", attr.as_str()));
+
+    // Build the else-branch Seq of per-option checks.
+    let mut else_stmts: Vec<Expr> = Vec::new();
+    if let Some(n) = gt {
+        let le = send(
+            attr_ivar.clone(),
+            "<=",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Float { value: n } },
+            )],
+        );
+        let msg = format!("{} must be greater than {}", attr.as_str(), format_float(n));
+        else_stmts.push(if_with_nil_else(le, errors_push(msg)));
+    }
+    if let Some(n) = lt {
+        let ge = send(
+            attr_ivar.clone(),
+            ">=",
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Float { value: n } },
+            )],
+        );
+        let msg = format!("{} must be less than {}", attr.as_str(), format_float(n));
+        else_stmts.push(if_with_nil_else(ge, errors_push(msg)));
+    }
+    if only_integer {
+        let is_int = is_a_check(&attr_ivar, "Integer");
+        let not_int = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(is_int),
+                method: Symbol::from("!"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let msg = format!("{} must be an integer", attr.as_str());
+        else_stmts.push(if_with_nil_else(not_int, errors_push(msg)));
+    }
+    // If the else has no stmts, just use the if-form (the rule has
+    // only the implicit "is a number" check). Otherwise wrap in
+    // if/else with both branches populated.
+    if else_stmts.is_empty() {
+        return vec![if_with_nil_else(bad_cond, nan_msg)];
+    }
+    let else_branch = seq(else_stmts);
+    vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond: bad_cond, then_branch: nan_msg, else_branch },
+    )]
+}
+
+/// Float literal formatter that matches Ruby's default `to_s` shape
+/// for whole numbers: `5.0` → "5", `0.5` → "0.5". Matches the runtime
+/// helper's `#{greater_than}` interpolation output so error messages
+/// agree across inline and helper-call paths.
+fn format_float(n: f64) -> String {
+    if n == n.trunc() {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
 }
 
 // ── IR helpers ────────────────────────────────────────────────
