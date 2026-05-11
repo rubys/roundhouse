@@ -36,6 +36,29 @@ thread_local! {
     /// must produce `Self`.
     static CONSTRUCTOR_FIELDS: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
+
+    /// Variable names that the current method body assigns more
+    /// than once. Pre-computed by `with_method_scope` and consulted
+    /// by `emit_assign`. First-assignment site emits `let mut name =
+    /// expr` (mutable binding); later sites emit plain `name = expr`
+    /// (rebind, no shadow). Single-assignment locals stay
+    /// immutable: `let name = expr`. Without this, Ruby `i = 0;
+    /// while ...; i += 1; end` translated naively shadows `i`
+    /// inside the loop and loops forever.
+    ///
+    /// Keyed on name (Symbol) rather than VarId — the body-typer's
+    /// `VarId` is not unique per local in the runtime IR (locals
+    /// within a method share `VarId(0)` until a true scope pass
+    /// lands). Name-based tracking works because `with_method_scope`
+    /// resets the set per method, so cross-method name collisions
+    /// don't matter.
+    static MUT_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+    /// Variable names the current method body has already emitted a
+    /// `let` binding for. Subsequent `Assign LValue::Var` sites for
+    /// the same name rebind without re-declaring.
+    static DECLARED_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 pub(super) fn with_constructor_mode<F, R>(fields: Vec<String>, f: F) -> R
@@ -48,6 +71,79 @@ where
     IN_CONSTRUCTOR.with(|c| c.set(prev_mode));
     CONSTRUCTOR_FIELDS.with(|c| *c.borrow_mut() = prev_fields);
     r
+}
+
+/// Per-method emit scope: pre-walks `body` to identify multi-assign
+/// VarIds (rendered with `let mut`), resets the declared-vars set,
+/// and runs `f`. Used by `method.rs` around the body emit so each
+/// method gets its own var-scope without leaking into the next.
+pub(super) fn with_method_scope<F, R>(body: &Expr, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let mut counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    collect_var_assign_counts(body, &mut counts);
+    let mut_vars: std::collections::HashSet<String> = counts
+        .into_iter()
+        .filter_map(|(name, n)| if n > 1 { Some(name) } else { None })
+        .collect();
+    let prev_mut = MUT_VARS.with(|c| c.replace(mut_vars));
+    let prev_declared =
+        DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
+    let r = f();
+    MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
+    DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
+    r
+}
+
+fn collect_var_assign_counts(
+    e: &Expr,
+    out: &mut std::collections::HashMap<String, usize>,
+) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            *out.entry(name.as_str().to_string()).or_insert(0) += 1;
+            collect_var_assign_counts(value, out);
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_var_assign_counts(recv, out);
+            }
+            collect_var_assign_counts(value, out);
+        }
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_assign_counts(e, out)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_var_assign_counts(cond, out);
+            collect_var_assign_counts(then_branch, out);
+            collect_var_assign_counts(else_branch, out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_var_assign_counts(cond, out);
+            collect_var_assign_counts(body, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv { collect_var_assign_counts(r, out); }
+            args.iter().for_each(|a| collect_var_assign_counts(a, out));
+            if let Some(b) = block { collect_var_assign_counts(b, out); }
+        }
+        ExprNode::Return { value } => collect_var_assign_counts(value, out),
+        ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .for_each(|(k, v)| {
+                collect_var_assign_counts(k, out);
+                collect_var_assign_counts(v, out);
+            }),
+        ExprNode::Array { elements, .. } => {
+            elements.iter().for_each(|e| collect_var_assign_counts(e, out))
+        }
+        ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
+            if let InterpPart::Expr { expr } = p {
+                collect_var_assign_counts(expr, out);
+            }
+        }),
+        _ => {}
+    }
 }
 
 fn render_self_literal() -> String {
@@ -216,7 +312,23 @@ fn emit_array(elements: &[Expr]) -> String {
 fn emit_assign(target: &LValue, value: &Expr) -> String {
     let rhs = emit_expr(value);
     match target {
-        LValue::Var { name, .. } => format!("let {} = {rhs}", name.as_str()),
+        LValue::Var { name, .. } => {
+            let name_str = name.as_str().to_string();
+            let already_declared =
+                DECLARED_VARS.with(|c| c.borrow().contains(&name_str));
+            if already_declared {
+                return format!("{name_str} = {rhs}");
+            }
+            let needs_mut = MUT_VARS.with(|c| c.borrow().contains(&name_str));
+            DECLARED_VARS.with(|c| {
+                c.borrow_mut().insert(name_str.clone());
+            });
+            if needs_mut {
+                format!("let mut {name_str} = {rhs}")
+            } else {
+                format!("let {name_str} = {rhs}")
+            }
+        }
         LValue::Ivar { name } => {
             if in_constructor() {
                 // Bind a local — the surrounding `pub fn new` body

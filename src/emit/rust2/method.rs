@@ -38,7 +38,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     let params = render_params(m);
     let ret_clause = render_return(m);
     writeln!(out, "pub fn {}{}{} {{", m.name.as_str(), params, ret_clause).unwrap();
-    let body = emit_expr(&m.body);
+    let body = super::expr::with_method_scope(&m.body, || emit_expr(&m.body));
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
@@ -138,12 +138,14 @@ pub(super) fn emit_instance_method(
         render_return(m)
     };
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let body = if is_init {
-        let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
-        super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
-    } else {
-        emit_expr(&m.body)
-    };
+    let body = super::expr::with_method_scope(&m.body, || {
+        if is_init {
+            let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
+            super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
+        } else {
+            emit_expr(&m.body)
+        }
+    });
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
