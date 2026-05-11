@@ -107,6 +107,7 @@ fn rust_param_ty(ty: &Ty) -> String {
 pub(super) fn emit_instance_method(
     m: &MethodDef,
     mutates_self: bool,
+    is_static: bool,
     _struct_name: &str,
     ivars: &[(String, Ty)],
 ) -> Result<String, String> {
@@ -119,8 +120,14 @@ pub(super) fn emit_instance_method(
     let mut out = String::new();
     let is_init = m.name.as_str() == "initialize";
     let sanitized = super::expr::sanitize_ident(m.name.as_str());
+    // `pub fn new(...)` constructors and static-safe methods both
+    // drop the `&self` receiver — the latter were identified by
+    // `library.rs::method_reads_self`. Call sites for static methods
+    // route through `Self::method(args)` (see expr.rs::emit_send).
     let (fn_name, receiver): (&str, Option<&'static str>) = if is_init {
         ("new", None)
+    } else if is_static {
+        (sanitized.as_str(), None)
     } else {
         (sanitized.as_str(), Some(render_self_receiver(mutates_self)))
     };

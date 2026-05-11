@@ -73,6 +73,24 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 
     let ivars = collect_ivar_types(&class.methods);
 
+    // Pre-pass: identify methods whose body never reads `self` or
+    // any `@ivar`. Those are static-safe — emit as `pub fn name(...)`
+    // (no `self` receiver) so they're callable from `new` before an
+    // instance exists. HWIA's `normalize_value` is the canonical
+    // case: pure value-transformation, no instance state. The
+    // companion call-site rewrite in `expr.rs::emit_send` routes
+    // `self.method(args)` for these methods to `Self::method(args)`.
+    let static_method_names: std::collections::HashSet<String> = class
+        .methods
+        .iter()
+        .filter(|m| {
+            matches!(m.receiver, MethodReceiver::Instance)
+                && m.name.as_str() != "initialize"
+                && !method_reads_self(&m.body)
+        })
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+
     let mut out = String::new();
 
     // Struct declaration.
@@ -86,39 +104,73 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // routes through the constructor variant of `emit_instance_method`.
     writeln!(out, "impl {name} {{").unwrap();
     let mut first = true;
-    for m in &class.methods {
-        if !matches!(m.receiver, MethodReceiver::Instance) {
-            // Class methods on Library-mode classes (e.g. AR::Base's
-            // `find_by_id`) will land in a later phase — they emit as
-            // `pub fn` without a self receiver. Skip for now.
-            continue;
-        }
-        // `def []` / `def []=` aren't valid Rust fn names. The Ruby
-        // bracket forms emit via call-site index syntax (`recv[k]` /
-        // `recv[k] = v` in `expr.rs::emit_send`); the method bodies
-        // themselves drop here. When real-blog wants idiomatic
-        // `Index`/`IndexMut` trait impls on HWIA, swap this skip for
-        // a trait-emit branch — until then, the delegators `get`/`set`
-        // are the canonical accessors.
-        if matches!(m.name.as_str(), "[]" | "[]=") {
-            continue;
-        }
-        if !first {
-            writeln!(out).unwrap();
-        }
-        first = false;
-        let mutates = method_mutates_self(&m.body);
-        let body = emit_instance_method(m, mutates, &name, &ivars)?;
-        for line in body.lines() {
-            if line.is_empty() {
+    let body_result = super::expr::with_static_methods(static_method_names.clone(), || {
+        for m in &class.methods {
+            if !matches!(m.receiver, MethodReceiver::Instance) {
+                continue;
+            }
+            if matches!(m.name.as_str(), "[]" | "[]=") {
+                continue;
+            }
+            if !first {
                 writeln!(out).unwrap();
-            } else {
-                writeln!(out, "    {line}").unwrap();
+            }
+            first = false;
+            let is_static = static_method_names.contains(m.name.as_str());
+            let mutates = method_mutates_self(&m.body);
+            let body = emit_instance_method(m, mutates, is_static, &name, &ivars)?;
+            for line in body.lines() {
+                if line.is_empty() {
+                    writeln!(out).unwrap();
+                } else {
+                    writeln!(out, "    {line}").unwrap();
+                }
             }
         }
-    }
+        Ok::<(), String>(())
+    });
+    body_result?;
     out.push_str("}\n");
     Ok(out)
+}
+
+/// Static-method probe: returns `true` when the method body
+/// references `self` (any `Ivar` read/write or `SelfRef` use). The
+/// pre-pass in `emit_library_class` filters this down to methods
+/// that can be lifted to `pub fn name(...)` (no `&self`).
+fn method_reads_self(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::SelfRef | ExprNode::Ivar { .. } => true,
+            ExprNode::Assign { target, value } => {
+                if matches!(target, LValue::Ivar { .. }) {
+                    return true;
+                }
+                if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                    if walk(recv) { return true; }
+                }
+                walk(value)
+            }
+            ExprNode::Seq { exprs } => exprs.iter().any(walk),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond) || walk(then_branch) || walk(else_branch)
+            }
+            ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
+            ExprNode::Send { recv, args, block, .. } => {
+                recv.as_ref().map(|r| walk(r)).unwrap_or(false)
+                    || args.iter().any(walk)
+                    || block.as_ref().map(|b| walk(b)).unwrap_or(false)
+            }
+            ExprNode::Return { value } => walk(value),
+            ExprNode::StringInterp { parts } => parts.iter().any(|p| {
+                if let crate::expr::InterpPart::Expr { expr } = p { walk(expr) } else { false }
+            }),
+            ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
+            ExprNode::Array { elements, .. } => elements.iter().any(walk),
+            _ => false,
+        }
+    }
+    walk(body)
 }
 
 /// Walk all methods collecting `@ivar = …` assignments. Returns the

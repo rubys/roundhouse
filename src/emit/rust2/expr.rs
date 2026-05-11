@@ -13,11 +13,20 @@ thread_local! {
     ///   `@x` (read) → bare `x` (local)
     ///   `@x = value` → `let mut x = value` (binds a local)
     /// The caller appends `Self { f1, f2, ... }` at the end, building
-    /// the instance from the locals. `self.method(args)` calls from
-    /// inside initialize stay as-is and surface as a separate gap:
-    /// static-method detection needs to lift such methods out of
-    /// `impl Foo` so they're callable without an instance.
+    /// the instance from the locals. `self.method(args)` calls now
+    /// route through STATIC_METHODS (below) — methods marked static
+    /// emit as `Self::method(args)` and compile pre-instance.
     static IN_CONSTRUCTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Methods in the current `impl` block that were classified as
+    /// static-safe by `library.rs::method_reads_self`. When a Send
+    /// targets one of these via implicit-`self` recv, emit as
+    /// `Self::method(args)` rather than `self.method(args)` — the
+    /// latter wouldn't compile inside `pub fn new` (no instance yet)
+    /// and is also the cleaner Rust form for inherently-static
+    /// helpers regardless of call-site context.
+    static STATIC_METHODS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 pub(super) fn with_constructor_mode<F, R>(f: F) -> R
@@ -30,8 +39,28 @@ where
     r
 }
 
+/// Run `f` with `methods` registered as the current class's static-
+/// method set. Used by `library.rs::emit_library_class` to scope the
+/// static-method dispatch decision to the impl block being rendered.
+pub(super) fn with_static_methods<F, R>(
+    methods: std::collections::HashSet<String>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = STATIC_METHODS.with(|c| c.replace(methods));
+    let r = f();
+    STATIC_METHODS.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
 fn in_constructor() -> bool {
     IN_CONSTRUCTOR.with(|c| c.get())
+}
+
+fn is_static_method(name: &str) -> bool {
+    STATIC_METHODS.with(|c| c.borrow().contains(name))
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
@@ -226,14 +255,23 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
+    // Static-method routing: `self.method(args)` where `method` was
+    // classified as not-reading-self emits as `Self::method(args)`.
+    // Required inside `pub fn new` (no instance yet), and also a
+    // valid choice elsewhere for inherently-static helpers — Rust
+    // accepts both `obj.foo()` and `T::foo(...)` when `foo` doesn't
+    // take a receiver, but the static form is unambiguous.
+    if matches!(&*r.node, ExprNode::SelfRef) && is_static_method(method) {
+        if args_s.is_empty() {
+            return format!("Self::{rewritten_method}()");
+        }
+        return format!("Self::{rewritten_method}({})", args_s.join(", "));
+    }
     let recv_s = emit_expr(r);
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const
     // (class/module reference). The `.` form binds to a value
-    // receiver; `::` binds to a type. Detect via the recv's IR shape
-    // (ExprNode::Const) rather than name pattern so synthesized
-    // class refs without explicit Const wrapping fall back to the
-    // `.` form correctly.
+    // receiver; `::` binds to a type.
     let dispatch = if matches!(&*r.node, ExprNode::Const { .. }) {
         "::"
     } else {
