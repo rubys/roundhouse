@@ -4,12 +4,19 @@
 //! (Lit, Var, Send `==`, StringInterp, If). Extended file-by-file
 //! through Phase 2 as each runtime file forces new IR shapes.
 
-use crate::expr::{Expr, ExprNode, InterpPart, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 
 pub(super) fn emit_expr(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
+        ExprNode::Ivar { name } => format!("self.{name}"),
+        ExprNode::SelfRef => "self".to_string(),
+        ExprNode::Const { path } => path
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::If { cond, then_branch, else_branch } => {
             // Ruby `cond ? a : b` and `if cond; a; else b; end` both
@@ -23,9 +30,38 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             )
         }
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
-        // Catch-all for IR shapes not yet implemented in Phase 2.1.
-        // Each subsequent runtime file in Phase 2 expands this.
+        ExprNode::Seq { exprs } => {
+            // Rust statements are `;`-terminated; the last expression
+            // is the block's value (no trailing `;`). Multi-statement
+            // method bodies render natural Rust shape this way.
+            let mut lines = Vec::with_capacity(exprs.len());
+            let last = exprs.len().saturating_sub(1);
+            for (i, e) in exprs.iter().enumerate() {
+                let s = emit_expr(e);
+                if i == last {
+                    lines.push(s);
+                } else {
+                    lines.push(format!("{s};"));
+                }
+            }
+            lines.join("\n")
+        }
+        ExprNode::Assign { target, value } => emit_assign(target, value),
+        // Catch-all for IR shapes not yet implemented. Each new runtime
+        // file in Phase 2 expands this until full coverage.
         other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
+    }
+}
+
+fn emit_assign(target: &LValue, value: &Expr) -> String {
+    let rhs = emit_expr(value);
+    match target {
+        LValue::Var { name, .. } => format!("let {} = {rhs}", name.as_str()),
+        LValue::Ivar { name } => format!("self.{name} = {rhs}"),
+        LValue::Attr { recv, name } => format!("{}.{name} = {rhs}", emit_expr(recv)),
+        LValue::Index { recv, index } => {
+            format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
+        }
     }
 }
 

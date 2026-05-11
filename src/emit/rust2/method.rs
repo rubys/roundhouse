@@ -11,6 +11,14 @@ use super::ty::rust_ty;
 use crate::dialect::{MethodDef, MethodReceiver};
 use crate::ty::Ty;
 
+/// Receiver-kind picker driven by the `mutates_self` heuristic
+/// computed in `library.rs`. Returned tokens already include the
+/// trailing comma when a method has additional params, so callers
+/// can splice without re-checking emptiness.
+fn render_self_receiver(mutates: bool) -> &'static str {
+    if mutates { "&mut self" } else { "&self" }
+}
+
 /// Emit a single `MethodDef` as a `pub fn` Rust function.
 ///
 /// Module-mode methods (every `def self.X` in `inflector.rb`,
@@ -83,4 +91,69 @@ fn rust_param_ty(ty: &Ty) -> String {
         Ty::Str | Ty::Sym => "&str".to_string(),
         other => rust_ty(other),
     }
+}
+
+/// Emit a single instance method. `mutates_self` decides the
+/// receiver token (`&self` vs `&mut self`). `def initialize` is
+/// special-cased to `pub fn new(...) -> Self` — Rust constructors
+/// don't take a self receiver and return the constructed value.
+///
+/// The `_struct_name` and `_ivars` params are passed for the
+/// `initialize → new` body synthesis (next commit's scope): the
+/// constructor needs to render the user's body then close with a
+/// `Self { f1, f2, .. }` literal initialized from the ivars. For
+/// now they're unused — `initialize` emits the body as-is and the
+/// resulting Rust will fail to compile until that synthesis lands.
+pub(super) fn emit_instance_method(
+    m: &MethodDef,
+    mutates_self: bool,
+    _struct_name: &str,
+    _ivars: &[(String, Ty)],
+) -> Result<String, String> {
+    if !matches!(m.receiver, MethodReceiver::Instance) {
+        return Err(format!(
+            "rust2::emit_instance_method: expected instance method, got class method `{}`",
+            m.name
+        ));
+    }
+    let mut out = String::new();
+    let is_init = m.name.as_str() == "initialize";
+    let (fn_name, receiver) = if is_init {
+        ("new", None)
+    } else {
+        (m.name.as_str(), Some(render_self_receiver(mutates_self)))
+    };
+    let params = render_instance_params(m, receiver);
+    let ret_clause = if is_init {
+        " -> Self".to_string()
+    } else {
+        render_return(m)
+    };
+    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
+    let body = emit_expr(&m.body);
+    for line in body.lines() {
+        writeln!(out, "    {line}").unwrap();
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn render_instance_params(m: &MethodDef, receiver: Option<&'static str>) -> String {
+    let sig_params = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
+        _ => None,
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(r) = receiver {
+        parts.push(r.to_string());
+    }
+    for (i, p) in m.params.iter().enumerate() {
+        let name = p.name.as_str();
+        let rendered = match sig_params.and_then(|sp| sp.get(i)) {
+            Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
+            None => format!("{name}: ()"),
+        };
+        parts.push(rendered);
+    }
+    format!("({})", parts.join(", "))
 }

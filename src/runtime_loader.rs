@@ -517,6 +517,17 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_support/hash_with_indifferent_access.rbs"),
+        rb_path: "runtime/ruby/active_support/hash_with_indifferent_access.rb",
+        namespace: "ActiveSupport",
+        out_path: "src/hash_with_indifferent_access.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Rust runtime files. Mirrors `crystal_units` /

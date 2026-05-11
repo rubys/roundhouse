@@ -7,9 +7,11 @@
 
 use std::fmt::Write;
 
-use super::method::emit_module_method;
-use crate::dialect::{LibraryClass, MethodDef};
-use crate::expr::Expr;
+use super::method::{emit_instance_method, emit_module_method};
+use super::ty::rust_ty;
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::expr::{Expr, ExprNode, LValue};
+use crate::ty::Ty;
 
 /// Module mode — flat list of `def self.*` helpers (e.g.
 /// `inflector.rb`'s `Inflector.pluralize`). Each method emits as a
@@ -38,10 +40,169 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     Ok(out)
 }
 
-/// Library mode — class declarations. Phase 2.2 stub; populated when
-/// HWIA lands.
-pub fn emit_library_class(_class: &LibraryClass) -> Result<String, String> {
-    Err("rust2::emit_library_class: not yet implemented (Phase 2.2)".to_string())
+/// Library mode — `class Foo ... end` → `pub struct Foo { ... }` +
+/// `impl Foo { ... }`. Phase 2.2 lands the scaffold:
+///
+/// * Ivars are collected from method bodies and emitted as private
+///   struct fields. Type comes from each ivar's first observed
+///   assignment in the analyzed IR (the body-typer fills `e.ty`);
+///   untyped ivars fall back to `serde_json::Value` via `rust_ty`.
+/// * Each instance method emits as `pub fn name(&self, ...)` or
+///   `pub fn name(&mut self, ...)`. The mutability heuristic walks
+///   the body for `@ivar = ...` (LValue::Ivar) or `self[k] = v`
+///   (LValue::Index recv=SelfRef) and picks `&mut self` if it sees
+///   either.
+/// * `def initialize` becomes `pub fn new(...) -> Self`; the
+///   construction body is the user's `initialize` body with a final
+///   `Self { fields }` return expression.
+///
+/// Subsequent commits drive the per-ExprNode body emit until the
+/// produced Rust is `cargo check`-clean.
+pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    // Strip the namespace prefix (`ActiveSupport::HashWithIndifferentAccess`
+    // → `HashWithIndifferentAccess`). Rust uses file-as-module, so the
+    // namespace is carried by the file path, not the struct name.
+    let name = class
+        .name
+        .0
+        .as_str()
+        .rsplit("::")
+        .next()
+        .unwrap_or(class.name.0.as_str())
+        .to_string();
+
+    let ivars = collect_ivar_types(&class.methods);
+
+    let mut out = String::new();
+
+    // Struct declaration.
+    writeln!(out, "pub struct {name} {{").unwrap();
+    for (fname, ty) in &ivars {
+        writeln!(out, "    {fname}: {},", rust_ty(ty)).unwrap();
+    }
+    out.push_str("}\n\n");
+
+    // Impl block. Each method renders independently; `initialize`
+    // routes through the constructor variant of `emit_instance_method`.
+    writeln!(out, "impl {name} {{").unwrap();
+    let mut first = true;
+    for m in &class.methods {
+        if !matches!(m.receiver, MethodReceiver::Instance) {
+            // Class methods on Library-mode classes (e.g. AR::Base's
+            // `find_by_id`) will land in a later phase — they emit as
+            // `pub fn` without a self receiver. Skip for now.
+            continue;
+        }
+        if !first {
+            writeln!(out).unwrap();
+        }
+        first = false;
+        let mutates = method_mutates_self(&m.body);
+        let body = emit_instance_method(m, mutates, &name, &ivars)?;
+        for line in body.lines() {
+            if line.is_empty() {
+                writeln!(out).unwrap();
+            } else {
+                writeln!(out, "    {line}").unwrap();
+            }
+        }
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+/// Walk all methods collecting `@ivar = …` assignments. Returns the
+/// observed ivar set with each entry's inferred type (the analyzer
+/// fills `Expr.ty` during typing; an unset `ty` falls back to
+/// `Ty::Untyped` and renders as `serde_json::Value`).
+fn collect_ivar_types(methods: &[MethodDef]) -> Vec<(String, Ty)> {
+    let mut seen: Vec<(String, Ty)> = Vec::new();
+    for m in methods {
+        walk_collect_ivars(&m.body, &mut seen);
+    }
+    seen
+}
+
+fn walk_collect_ivars(e: &Expr, out: &mut Vec<(String, Ty)>) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            let key = name.as_str().to_string();
+            if !out.iter().any(|(n, _)| n == &key) {
+                let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+                out.push((key, ty));
+            }
+            walk_collect_ivars(value, out);
+        }
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk_collect_ivars(e, out)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_collect_ivars(cond, out);
+            walk_collect_ivars(then_branch, out);
+            walk_collect_ivars(else_branch, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv { walk_collect_ivars(r, out); }
+            args.iter().for_each(|a| walk_collect_ivars(a, out));
+            if let Some(b) = block { walk_collect_ivars(b, out); }
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_collect_ivars(cond, out);
+            walk_collect_ivars(body, out);
+        }
+        ExprNode::Return { value } => walk_collect_ivars(value, out),
+        _ => {}
+    }
+}
+
+/// Receiver-kind heuristic: returns `true` when the method body
+/// contains any write to instance state (`@ivar = …`, `self[k] = v`,
+/// `self.attr = v`). Lands as Phase 2.2's first design choice; if the
+/// heuristic misclassifies in practice the lifting path is the
+/// [self-describing IR](feedback_self_describing_ir) pattern — add a
+/// `mutates_self` flag to `MethodDef` and let lowerers fill it.
+fn method_mutates_self(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::Assign { target, .. } => match target {
+                LValue::Ivar { .. } => true,
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
+                    matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
+                        || walk(recv)
+                }
+                LValue::Var { .. } => false,
+            },
+            // `self[k] = v` and `self.foo = v` lower as `Send`s to
+            // `[]=` / setter-suffixed methods, not Assign. Same for
+            // `@data[k] = v` — direct ivar mutation via index assign
+            // (HWIA `set` / `delete`). Treat all of these as mutation.
+            ExprNode::Send { recv: Some(recv), method, .. }
+                if matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
+                    && (method.as_str() == "[]=" || method.as_str().ends_with('='))
+                    && !is_comparison_method(method.as_str()) =>
+            {
+                true
+            }
+            ExprNode::Seq { exprs } => exprs.iter().any(walk),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond) || walk(then_branch) || walk(else_branch)
+            }
+            ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
+            ExprNode::Send { recv, args, block, .. } => {
+                recv.as_ref().map(|r| walk(r)).unwrap_or(false)
+                    || args.iter().any(walk)
+                    || block.as_ref().map(|b| walk(b)).unwrap_or(false)
+            }
+            ExprNode::Return { value } => walk(value),
+            _ => false,
+        }
+    }
+    walk(body)
+}
+
+/// Trailing-`=` filter: `==`, `!=`, `<=`, `>=` end with `=` but are
+/// comparison sends, not setters. The setter heuristic above needs
+/// to exclude them.
+fn is_comparison_method(m: &str) -> bool {
+    matches!(m, "==" | "!=" | "<=" | ">=" | "<=>" | "===" | "=~")
 }
 
 /// Top-level constant declaration. Crystal: `NAME = VALUE`. TS:
