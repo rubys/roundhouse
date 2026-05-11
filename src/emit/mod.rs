@@ -9,6 +9,7 @@ pub mod go;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod rust2;
 pub mod shared;
 pub mod typescript;
 

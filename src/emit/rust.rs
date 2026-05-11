@@ -441,6 +441,16 @@ fn rt_emit_string_interp(parts: &[InterpPart]) -> String {
 }
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
+    // Strangler-fig switch: route to the in-progress rust2 emitter
+    // when ROUNDHOUSE_RUST_V2=1 is set. Until Phase 7 (switchover),
+    // the legacy emitter below is the default for every caller; the
+    // env var lets the migration's per-phase A/B comparisons run
+    // against the same caller surface (CI gates, build-site, tests)
+    // without forking the public `pub fn emit` signature.
+    if std::env::var("ROUNDHOUSE_RUST_V2").is_ok() {
+        return super::rust2::emit(app);
+    }
+
     let mut files = Vec::new();
 
     // Project skeleton: Cargo.toml + src/lib.rs. These tag along

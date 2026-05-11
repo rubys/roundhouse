@@ -470,6 +470,20 @@ where
     Ok(out)
 }
 
+/// Rust runtime transpile path — Phase 1 stub of the rust migration
+/// (see `docs/rust-migration-plan.md`). Returns an empty Vec until
+/// Phase 2 populates `RUST_RUNTIME` + wires `RUST_TARGET` to the
+/// rust2 emit functions. Sibling of `crystal_units` /
+/// `typescript_units`; same `transform` closure shape so callers
+/// can plug in identically when the time comes.
+pub fn rust_units<F>(transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let _ = transform;
+    Ok(Vec::new())
+}
+
 /// Parse + emit the TypeScript runtime files. Returns one `RuntimeUnit`
 /// per entry, ready to be written to disk by the caller.
 ///
