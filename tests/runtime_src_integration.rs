@@ -707,13 +707,10 @@ fn every_runtime_method_body_concretely_typed() {
 
     // Ceiling — soft tracker. Tighten as Pattern A/B/C/D closures
     // land. Failing low is good (lower the ceiling and record).
-    // Bumped 200 → 210 on 2026-05-11 for Phase 2.5(b): flash.rb +
-    // session.rb introduce 31 untyped sites from the HWIA-shape
-    // shim methods (`fetch(key, default)`, `[](key)`, etc. with
-    // `untyped` key/value rbs to accept Symbol|String). HWIA stays
-    // in runtime/ruby/ for CRuby/Spinel parity (still counted here)
-    // until a follow-up retires the untyped channel on the shims.
-    const CEILING: usize = 210;
+    // 2026-05-11 Phase 2.5(b) follow-up: HWIA source deleted (no
+    // live require sites), dropping its 26 untyped contributions;
+    // ceiling lowered 210 → 180 to lock in the gain.
+    const CEILING: usize = 180;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

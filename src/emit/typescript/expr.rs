@@ -167,7 +167,6 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
                 last,
                 "ErrorCollection"
                     | "Errors"
-                    | "HashWithIndifferentAccess"
                     | "Flash"
                     | "Session"
                     | "Parameters"
@@ -1606,8 +1605,7 @@ fn emit_send_with_parens_inner(
                 let last = name.rsplit("::").next().unwrap_or(name);
                 matches!(
                     last,
-                    "HashWithIndifferentAccess"
-                        | "Parameters"
+                    "Parameters"
                         | "ParameterMissing"
                         | "Router"
                 )
@@ -2028,7 +2026,7 @@ fn emit_send_with_parens_inner(
                 "empty?" if args.is_empty() => {
                     return format!("{}.length === 0", emit_expr(r));
                 }
-                "size" if args.is_empty() => {
+                "size" | "length" if args.is_empty() => {
                     return format!("{}.length", emit_expr(r));
                 }
                 "upcase" if args.is_empty() => {
@@ -2442,8 +2440,7 @@ fn emit_send_with_parens_inner(
                     let last = name.rsplit("::").next().unwrap_or(name);
                     matches!(
                         last,
-                        "HashWithIndifferentAccess"
-                            | "Parameters"
+                        "Parameters"
                             | "ParameterMissing"
                             | "Router"
                     )

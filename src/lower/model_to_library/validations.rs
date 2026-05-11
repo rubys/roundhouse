@@ -25,8 +25,14 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     let mut stmts: Vec<Expr> = Vec::new();
 
     for v in model.validations() {
+        // Column type from the model's attributes row (when present).
+        // Lets the per-rule generator skip dead `is_a?(Array)` branches
+        // for fields the schema declares as `Str` — tsc narrows
+        // `Array.isArray(stringField)` to `never` and rejects the
+        // subsequent `.length` access.
+        let attr_ty = model.attributes.fields.get(&v.attribute);
         for rule in &v.rules {
-            stmts.extend(validation_rule_to_calls(&v.attribute, rule));
+            stmts.extend(validation_rule_to_calls(&v.attribute, rule, attr_ty));
         }
     }
 
@@ -62,12 +68,12 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
 /// `attr`. Each helper is `<helper>(:attr, @attr [, kwargs])` — the value
 /// is passed positionally so the runtime helper sees a concretely-typed
 /// `value` parameter (no block-yield, no `instance_variable_get`).
-fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule) -> Vec<Expr> {
+fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Option<&Ty>) -> Vec<Expr> {
     match rule {
-        ValidationRule::Presence => vec![inline_presence_check(attr)],
+        ValidationRule::Presence => vec![inline_presence_check(attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(attr)],
         ValidationRule::Length { min, max } => {
-            inline_length_check(attr, min.map(|n| n as usize), max.map(|n| n as usize))
+            inline_length_check(attr, min.map(|n| n as usize), max.map(|n| n as usize), attr_ty)
         }
         ValidationRule::Format { pattern } => vec![inline_format_check(attr, pattern)],
         ValidationRule::Numericality { only_integer, gt, lt } => {
@@ -161,31 +167,52 @@ fn ivar(attr: &Symbol) -> Expr {
 /// exactly; no behavior change vs. the helper-call form, but the
 /// expansion lives in the IR so every target emits inline checks
 /// instead of routing through the Validations module at runtime.
-/// Specialization on the column's static type (skip `is_a?` checks
-/// when @attr is known String) is a follow-up; the generic form
-/// works regardless of column type.
-fn inline_presence_check(attr: &Symbol) -> Expr {
+/// When `attr_ty` is `Some(Ty::Str)` the `is_a?(Array)` arm drops out
+/// (typed targets like TS narrow `Array.isArray(stringField)` to
+/// `never` and reject the subsequent property access). Same logic for
+/// `Some(Ty::Array { .. })` — the String arm drops. `None` keeps the
+/// generic three-way form so untyped/dynamic-shape attrs still work.
+fn inline_presence_check(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
-    // `@attr.is_a?(String) && @attr.empty?`
-    let string_blank = bool_op(
-        BoolOpKind::And,
-        is_a_check(&attr_ivar, "String"),
-        send(attr_ivar.clone(), "empty?", vec![]),
-    );
-    // `@attr.is_a?(Array) && @attr.empty?`
-    let array_blank = bool_op(
-        BoolOpKind::And,
-        is_a_check(&attr_ivar, "Array"),
-        send(attr_ivar, "empty?", vec![]),
-    );
-    // The full `cond` Or-chain
-    let cond = bool_op(
-        BoolOpKind::Or,
-        bool_op(BoolOpKind::Or, nil_check, string_blank),
-        array_blank,
-    );
+    let cond = match attr_ty {
+        Some(Ty::Str) => {
+            // Skip is_a?(Array) — `body : String` can never be an array.
+            bool_op(
+                BoolOpKind::Or,
+                nil_check,
+                send(attr_ivar, "empty?", vec![]),
+            )
+        }
+        Some(Ty::Array { .. }) => {
+            // Skip is_a?(String) — symmetric.
+            bool_op(
+                BoolOpKind::Or,
+                nil_check,
+                send(attr_ivar, "empty?", vec![]),
+            )
+        }
+        _ => {
+            // Generic: `@attr.nil? || (@attr.is_a?(String) && @attr.empty?) ||
+            //          (@attr.is_a?(Array) && @attr.empty?)`
+            let string_blank = bool_op(
+                BoolOpKind::And,
+                is_a_check(&attr_ivar, "String"),
+                send(attr_ivar.clone(), "empty?", vec![]),
+            );
+            let array_blank = bool_op(
+                BoolOpKind::And,
+                is_a_check(&attr_ivar, "Array"),
+                send(attr_ivar, "empty?", vec![]),
+            );
+            bool_op(
+                BoolOpKind::Or,
+                bool_op(BoolOpKind::Or, nil_check, string_blank),
+                array_blank,
+            )
+        }
+    };
     // `errors << "attr can't be blank"`
     let push_err = errors_push(format!("{} can't be blank", attr.as_str()));
     // The wrapping `if cond then push_err end` (Nil else).
@@ -304,31 +331,44 @@ fn inline_format_check(attr: &Symbol, pattern: &str) -> Expr {
 ///   end
 /// The `is` (exact length) option isn't in the current ValidationRule
 /// shape; left for when the IR adds it.
-fn inline_length_check(attr: &Symbol, min: Option<usize>, max: Option<usize>) -> Vec<Expr> {
+fn inline_length_check(
+    attr: &Symbol,
+    min: Option<usize>,
+    max: Option<usize>,
+    attr_ty: Option<&Ty>,
+) -> Vec<Expr> {
     let attr_ivar = ivar(attr);
-    // Compute `len` — `if @attr.is_a?(String) then @attr.length
-    // elsif @attr.is_a?(Array) then @attr.length else 0 end`.
+    // Compute `len`. When the attr's column type is statically known
+    // (Str / Array), drop the `is_a?` discrimination — `body : String`
+    // can never be an Array, and tsc narrows the dead branch to
+    // `never` and rejects the subsequent `.length`. Generic three-way
+    // form retained for unknown/dynamic attrs.
     let length_send = send(attr_ivar.clone(), "length", vec![]);
-    let zero_lit = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lit { value: Literal::Int { value: 0 } },
-    );
-    let inner_else = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: is_a_check(&attr_ivar, "Array"),
-            then_branch: length_send.clone(),
-            else_branch: zero_lit,
-        },
-    );
-    let len_expr = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: is_a_check(&attr_ivar, "String"),
-            then_branch: length_send,
-            else_branch: inner_else,
-        },
-    );
+    let len_expr = match attr_ty {
+        Some(Ty::Str) | Some(Ty::Array { .. }) => length_send,
+        _ => {
+            let zero_lit = Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: 0 } },
+            );
+            let inner_else = Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_a_check(&attr_ivar, "Array"),
+                    then_branch: length_send.clone(),
+                    else_branch: zero_lit,
+                },
+            );
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_a_check(&attr_ivar, "String"),
+                    then_branch: length_send,
+                    else_branch: inner_else,
+                },
+            )
+        }
+    };
     let len_var = Symbol::from("len");
     let len_assign = Expr::new(
         Span::synthetic(),

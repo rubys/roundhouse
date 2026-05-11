@@ -161,7 +161,7 @@ fn is_framework_hash_recv(recv: Option<&crate::expr::Expr>) -> bool {
         let last = name.rsplit("::").next().unwrap_or(name);
         return matches!(
             last,
-            "Parameters" | "HashWithIndifferentAccess" | "Flash" | "Session"
+            "Parameters" | "Flash" | "Session"
         );
     }
     false
@@ -550,7 +550,7 @@ fn force_hash_form_for_arg(recv: Option<&Expr>, method: &Symbol) -> bool {
     };
     matches!(
         path.last().map(|s| s.as_str()),
-        Some("Parameters") | Some("HashWithIndifferentAccess") | Some("Flash") | Some("Session")
+        Some("Parameters") | Some("Flash") | Some("Session")
     )
 }
 
