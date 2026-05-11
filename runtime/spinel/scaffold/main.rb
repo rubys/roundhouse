@@ -90,13 +90,13 @@ module Main
     merged = matched[:path_params].dup
     request[:params].each { |k, v| merged[k] = v }
     controller.params  = ActionController::Parameters.new(merged)
-    controller.session = {}
+    controller.session = ActionDispatch::Session.new
 
     # Decode inbound flash from cookies. Each flash key carries via
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
-    inbound_flash = {}
+    inbound_flash = ActionDispatch::Flash.new
     inbound_flash[:notice] = cookies[:flash_notice] if cookies.key?(:flash_notice)
     inbound_flash[:alert]  = cookies[:flash_alert]  if cookies.key?(:flash_alert)
     controller.flash = inbound_flash

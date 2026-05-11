@@ -227,8 +227,8 @@ module RequestDispatch
     merged = matched[:path_params].dup
     params.each { |k, v| merged[k] = v }
     controller.params  = ActionController::Parameters.new(merged)
-    controller.session = @__session ||= {}
-    controller.flash   = @__flash   ||= {}
+    controller.session = @__session ||= ActionDispatch::Session.new
+    controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     controller.request_method = method
     controller.request_path   = path
     controller.process_action(matched[:action])
