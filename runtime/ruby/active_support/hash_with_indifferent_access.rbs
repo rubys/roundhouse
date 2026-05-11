@@ -9,7 +9,7 @@ module ActiveSupport
   class HashWithIndifferentAccess
     @data: Hash[String, untyped]
 
-    def initialize: (?Hash[untyped, untyped]? other) -> void
+    def initialize: (?Hash[untyped, untyped] other) -> void
 
     def get: (untyped key) -> untyped
     def set: (untyped key, untyped value) -> untyped

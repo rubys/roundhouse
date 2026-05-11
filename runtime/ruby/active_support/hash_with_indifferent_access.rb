@@ -21,9 +21,13 @@ module ActiveSupport
     # Hash. Constraining the input to Hash here keeps target-language
     # dispatch on `.keys` / `[]` clean — TS lowers `hash.keys` to
     # `Object.keys(hash)` only when the analyzer sees Hash, not HWIA.
-    def initialize(other = nil)
+    #
+    # Default `{}` (not `nil`) so the param type stays a plain Hash
+    # across every target — eliminates Option<HashMap> in Rust and
+    # the nil-guard in CRuby/Crystal/TS. Iterating an empty hash
+    # is a no-op, so the no-arg case is behavior-identical.
+    def initialize(other = {})
       @data = {}
-      return if other.nil?
       other_keys = other.keys
       i = 0
       while i < other_keys.length
