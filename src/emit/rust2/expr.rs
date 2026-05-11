@@ -396,6 +396,35 @@ fn attach_block(base: &str, block: &Expr) -> String {
     }
 }
 
+/// `recv.is_a?(Class)` → serde_json predicate where the class
+/// name maps to a Value variant, else `false` with a marker
+/// comment. Detection: the arg's IR shape is `Const { path }`
+/// (the class reference); the last segment is the name we map.
+fn emit_is_a(recv: &Expr, class_arg: &Expr) -> String {
+    let class_name = match &*class_arg.node {
+        ExprNode::Const { path } => path.last().map(|s| s.to_string()).unwrap_or_default(),
+        _ => return format!("/* is_a? unknown class: {} */ false", emit_expr(class_arg)),
+    };
+    let recv_s = emit_expr(recv);
+    // serde_json::Value variants: Null, Bool, Number, String, Array,
+    // Object. Map the Ruby stdlib class names that the runtime files
+    // actually use.
+    let predicate = match class_name.as_str() {
+        "Hash" => Some("is_object"),
+        "Array" => Some("is_array"),
+        "String" => Some("is_string"),
+        "Integer" => Some("is_i64"),
+        "Float" => Some("is_f64"),
+        "TrueClass" | "FalseClass" => Some("is_boolean"),
+        "NilClass" => Some("is_null"),
+        _ => None,
+    };
+    match predicate {
+        Some(p) => format!("{recv_s}.{p}()"),
+        None => format!("/* is_a?({class_name}): no Value variant */ false"),
+    }
+}
+
 fn emit_array(elements: &[Expr]) -> String {
     // `vec![]` works for both empty and populated literals; lets the
     // surrounding type context infer the element type. The macro form
@@ -467,6 +496,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
         if method == "[]=" && args.len() == 2 {
             return format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1]));
+        }
+        // Ruby `value.is_a?(Class)` runtime type check. Rust has no
+        // generic analog — every type is statically known. For the
+        // `serde_json::Value`-typed gradual-escape recv (the common
+        // shape after Ty::Untyped commits to `serde_json::Value`),
+        // map the known Ruby class names to serde_json predicates;
+        // user-defined classes degrade to `false` with a comment
+        // (always-false branch in a chain like normalize_value, the
+        // next branch handles the real case).
+        if method == "is_a?" && args.len() == 1 {
+            return emit_is_a(r, &args[0]);
         }
     }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
