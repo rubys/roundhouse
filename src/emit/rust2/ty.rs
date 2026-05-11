@@ -36,8 +36,15 @@ pub fn rust_ty(ty: &Ty) -> String {
             other => other.to_string(),
         },
         Ty::Fn { .. } => "Box<dyn Fn()>".to_string(),
-        Ty::Var { .. } => "()".to_string(),
-        Ty::Untyped => "()".to_string(),
+        Ty::Var { .. } => "serde_json::Value".to_string(),
+        // RBS `untyped` is pervasive in HWIA / Parameters / view_helpers
+        // (the gradual-typing escape hatch). rust2 commits this to
+        // `serde_json::Value` — heterogeneous, serializable, already a
+        // dep, has nested object/array support that matches Ruby's
+        // recursive normalize_value semantics. Crystal commits to
+        // String fallback; TS to `any`. Rust gets the structured-but-
+        // dynamic option.
+        Ty::Untyped => "serde_json::Value".to_string(),
         Ty::Bottom => "!".to_string(),
     }
 }
