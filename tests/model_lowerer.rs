@@ -222,9 +222,10 @@ fn article_lowers_validate_method() {
     assert!(matches!(validate.receiver, MethodReceiver::Instance));
     assert!(validate.params.is_empty());
 
-    // Body is a Seq of one Send per (attr, rule) pair. Article has:
-    //   validates :title, presence: true              → 1 call
-    //   validates :body,  presence: true, length: {…} → 2 calls
+    // Body is a Seq of stmts. Article has:
+    //   validates :title, presence: true       → 1 inline If (Phase 2.5(a))
+    //   validates :body,  presence: true       → 1 inline If (Phase 2.5(a))
+    //   validates :body,  length: { min: 10 }  → 1 helper Send (not yet inlined)
     let body = &*validate.body.node;
     let exprs = match body {
         roundhouse::ExprNode::Seq { exprs } => exprs,
@@ -232,36 +233,27 @@ fn article_lowers_validate_method() {
     };
     assert!(
         exprs.len() >= 3,
-        "expected >=3 validates_* calls (presence on title, presence+length on body); got {}: {exprs:?}",
+        "expected >=3 stmts (presence-if on title, presence-if on body, length helper on body); got {}: {exprs:?}",
         exprs.len(),
     );
 
-    // Each call passes the value as a positional `@attr` Ivar arg
-    // (no block). Spot-check the first.
+    // First stmt: presence-if for title. Shape: `If { cond: BoolOp(Or, …),
+    // then: Send(errors << "title can't be blank"), else: Nil }`.
     let first = exprs.first().unwrap();
-    let (method_name, args, block) = match &*first.node {
-        roundhouse::ExprNode::Send { method, args, block, .. } => {
-            (method.as_str(), args, block)
+    match &*first.node {
+        roundhouse::ExprNode::If { cond, .. } => {
+            assert!(
+                matches!(&*cond.node, roundhouse::ExprNode::BoolOp { .. }),
+                "presence cond should be a BoolOp tree; got {:?}",
+                &*cond.node,
+            );
         }
-        other => panic!("first validate stmt is not Send: {other:?}"),
-    };
-    assert!(
-        method_name.starts_with("validates_"),
-        "first stmt should be a validates_* helper; got {method_name}",
-    );
-    assert!(block.is_none(), "validates_* helper should not carry a block");
-    assert!(args.len() >= 2, "expected >=2 args (attr + value); got {}", args.len());
-    // Second positional arg is the @attr Ivar.
-    match &*args[1].node {
-        roundhouse::ExprNode::Ivar { .. } => {}
-        other => panic!(
-            "validates_* second arg should be `@attr` (Ivar); got {other:?}",
-        ),
+        other => panic!("first validate stmt should be presence-If (Phase 2.5(a) inline); got {other:?}"),
     }
 }
 
 #[test]
-fn comment_lowers_validate_with_two_presence_calls() {
+fn comment_lowers_validate_with_two_inline_presence_and_belongs_to() {
     let lc = lower("Comment");
     let validate = lc
         .methods
@@ -273,34 +265,26 @@ fn comment_lowers_validate_with_two_presence_calls() {
         roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
         other => panic!("validate body should be Seq; got {other:?}"),
     };
-    // Two `validates_presence_of` calls (commenter + body) plus one
-    // `validates_belongs_to` call synthesized from `belongs_to :article`
-    // (Rails 5+ presence-by-default).
-    assert_eq!(
-        exprs.len(),
-        3,
-        "Comment validate emits commenter + body presence + article belongs_to (3 calls); got {}",
-        exprs.len(),
+    // Three stmts: inline presence-If for commenter + inline presence-If
+    // for body + `validates_belongs_to` Send for `belongs_to :article`
+    // (Rails 5+ presence-by-default, not yet inlined).
+    assert_eq!(exprs.len(), 3, "got {}: {exprs:?}", exprs.len());
+    // First two are inline presence-If's; third is the belongs_to helper Send.
+    assert!(
+        matches!(&*exprs[0].node, roundhouse::ExprNode::If { .. }),
+        "stmt 0 should be inline presence-If; got {:?}",
+        &*exprs[0].node,
     );
-    let methods: Vec<&str> = exprs
-        .iter()
-        .filter_map(|e| match &*e.node {
-            roundhouse::ExprNode::Send { method, .. } => Some(method.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        methods,
-        vec!["validates_presence_of", "validates_presence_of", "validates_belongs_to"],
-        "expected commenter + body presence then article belongs_to",
+    assert!(
+        matches!(&*exprs[1].node, roundhouse::ExprNode::If { .. }),
+        "stmt 1 should be inline presence-If; got {:?}",
+        &*exprs[1].node,
     );
-    for e in &exprs {
-        match &*e.node {
-            roundhouse::ExprNode::Send { .. } => {
-                // checked above
-            }
-            other => panic!("validate stmt should be Send; got {other:?}"),
+    match &*exprs[2].node {
+        roundhouse::ExprNode::Send { method, .. } => {
+            assert_eq!(method.as_str(), "validates_belongs_to");
         }
+        other => panic!("stmt 2 should be validates_belongs_to Send; got {other:?}"),
     }
 }
 

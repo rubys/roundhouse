@@ -102,17 +102,26 @@ fn article_renders_schema_scaffold_methods() {
 }
 
 #[test]
-fn article_renders_validate_with_positional_helpers() {
+fn article_renders_validate_with_inline_checks() {
     let files = lowered_real_blog();
     let src = find(&files, "article.rb");
     assert!(src.contains("def validate"), "{src}");
-    // Validates_*_of helpers carry the positional `(attr_name, value)`
-    // shape — value passed directly from the matching ivar; no block
-    // yield. Eliminates the generic-block-return type-inference cost.
+    // Presence rules expand to inline IR (Phase 2.5(a) lowerer per
+    // docs/rust-migration-plan.md) — no helper-call into the
+    // Validations runtime module. Error messages become string-literal
+    // constants; the type-erased `value: untyped` channel is gone.
+    // The Ruby emitter uses postfix-modifier form for single-line
+    // if's, so the assertion matches the natural output shape.
     assert!(
-        src.contains("validates_presence_of(:title, @title)"),
+        src.contains(r#"errors << "title can't be blank" if @title.nil?"#),
         "{src}",
     );
+    assert!(
+        src.contains(r#"errors << "body can't be blank" if @body.nil?"#),
+        "{src}",
+    );
+    // Length is still helper-call-shaped (not yet inlined in this
+    // first Phase 2.5(a) commit — Presence first, others follow).
     assert!(
         src.contains("validates_length_of(:body, @body, { minimum: 10 })"),
         "{src}",
