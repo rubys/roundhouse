@@ -28,9 +28,9 @@ for full strategic context.
 | # | Phase | Days | Status |
 |---|---|---|---|
 | 0 | Audit + tag | ½ | ✅ done |
-| 1 | Skeleton `rust2` parallel orchestrator | ½-1 | next |
-| 1.5 | Base/Validations inheritance spike | 1-2 | blocked on 1 |
-| 2 | Framework runtime transpile (9 files, dependency-ordered) | 3-7 | blocked on 1.5 |
+| 1 | Skeleton `rust2` parallel orchestrator | ½-1 | ✅ done |
+| 1.5 | Base/Validations inheritance spike | 1-2 | ✅ done — Option A (trait + composition) |
+| 2 | Framework runtime transpile (9 files, dependency-ordered) | 3-7 | next |
 | 3 | Hand-written primitive runtime + abstract adapter base | 2-3 | parallel-able with 2 |
 | 4 | `framework_tests_rust` gate (8/8 target) | 1-2 | blocked on 2+3 |
 | 5 | Per-file model/view/controller emit | 3-5 | blocked on 4 |
@@ -86,9 +86,57 @@ Total 4,852 LOC across 13 files. Categories:
 
 ## Mid-stream decision points
 
-- End of Phase 1.5: lock A/B/C choice in writing before Phase 2 starts.
+- End of Phase 1.5: lock A/B/C choice in writing before Phase 2 starts. ✅ See "Phase 1.5 result" below.
 - End of Phase 4: are cross-target source idioms holding, or do we
   need new ones for rust? Adding `.to_h`-style patches with no rust
   analog signals IR-needs-adjustment, not source.
 - End of Phase 6: if Phase 6 takes >1 week, root cause is probably
   IR/lowerer pressure. Strategic pause to assess.
+
+## Phase 1.5 result — Base/Validations inheritance: **Option A (trait + struct composition)**
+
+Three prototypes hand-written in `docs/rust-migration-spike/`. All
+three compile + tests pass. Comparison:
+
+| Axis | A: trait + composition | B: macro-driven | C: flat mega-struct |
+|---|---|---|---|
+| Per-model emit (LOC) | ~42 | ~10 (invocation) + ~80 macro infra | ~95 |
+| Framework runtime (LOC) | ~150 | ~80 + macro definition | 0 (everything inline) |
+| Spike total LOC | 335 | 167 | 205 |
+| Tests passing | 5/5 | 2/2 | 4/4 |
+| `Vec<Article>` (concrete) | ✅ | ✅ | ✅ |
+| `Vec<Box<dyn _>>` (heterogeneous) | ✅ via `ActiveRecordObject` subtrait | ✅ same pattern | ❌ no shared trait |
+| Maps cleanly from lowered IR? | ✅ `LibraryClass` → struct + impl trait | ⚠️ requires emitting macro invocations — diverges from crystal/ts IR consumption | ✅ but loses framework-runtime sharing |
+| Infrastructure cost | None — pure rust 2024 | Proc-macro crate (separate Cargo workspace member, ~500-1500 LOC of macro impl for full validates_*_of catalog) | None |
+| Compile time at scale (estimated) | Linear in model count; trait monomorphization is cheap | Proc-macro evaluation adds ~1-3s upfront; smaller post-expansion code | Largest codegen surface |
+
+**Estimated emit cost for a writebook-scale 30-model app:**
+
+- A: 30 × 42 + 150 = **~1,410 LOC**
+- B: 30 × 10 + 250 + 80 = **~630 LOC** (terse) but with the proc-macro crate + IR-shape divergence overhead
+- C: 30 × 95 = **~2,850 LOC**
+
+**Decision: Option A** — trait + default methods + struct composition.
+
+**Decisive factors (in priority order):**
+
+1. **IR contract preservation.** The migration plan's central premise (and the existing `project_strategic_bet.md` memory) is that the lowered IR is constitutive — every target consumes the same `LibraryClass` shape. Option B requires the lowerer to emit a macro *invocation* for rust specifically, while crystal/typescript consume the same `LibraryClass` directly. That's an IR fork, and the cost compounds across future targets that might prefer the macro shape. Option A maps `LibraryClass` 1:1 to `struct + impl ActiveRecord + impl Validations` — same shape rust as crystal does for `class X < Base end`.
+2. **Heterogeneous collections work cleanly.** The `ActiveRecordObject` subtrait pattern (~12 LOC: 4 method declarations + 4-line blanket impl) gives `Vec<Box<dyn ActiveRecordObject>>` without forcing the main `ActiveRecord` trait to be dyn-compatible. Option C makes this impossible by design.
+3. **No new infrastructure.** Pure rust 2024 + std. No proc-macro crate to set up, test, version, ship. (B requires a sibling crate in the emitted Cargo workspace; that's ~3-5 days of additional Phase 3 scope.)
+4. **Per-model verbosity acceptable.** 42 LOC per model is 4× B's terse form but ~½ C's flat form. For a 10-model real-blog: A ~420 + 150 = 570 vs B ~330. The ~240 LOC saving from B doesn't justify the proc-macro infrastructure + IR fork.
+
+**Trade-offs accepted:**
+
+- Two-trait split (`ActiveRecord` + `ActiveRecordObject`) for dyn-compat. Minor ergonomic cost at heterogeneous-collection sites: callers use `obj_id()` / `obj_persisted()` instead of `id()` / `persisted()`. Unambiguous and avoids method-resolution conflicts.
+- `attributes()` returns `HashMap<&'static str, CellValue>` with a tagged enum (`Str | Int | Bool | Nil`). Same pattern Crystal solved with the `TestCellValue` alias in `runtime/crystal/framework_test_adapter.cr`. Cross-target consistent.
+- Inherited fields embed via `pub base: BaseFields`. Field access is `self.base.id` instead of `self.id`. Lowerer hides this from emitted Ruby source — model fields look natural at the source level; only the rust struct shape differs.
+
+**IR/lowerer-side scope (small):**
+
+- Per-model rust2 lowerer needs to recognize "this class extends ActiveRecord::Base" and emit `pub base: BaseFields` as the first struct field. Mirrors crystal's existing `extends_active_record_base` flag in `src/emit/crystal/library.rs` (line 260+). ~30-50 LOC of lowerer adjustment.
+- No `Ty` changes needed for the inheritance pattern itself.
+- Future Phase 4 may surface `Ty::Ref(Box<Ty>)` pressure for closure lifetimes (independent of the inheritance choice).
+
+**Spike artifacts:** preserved in `docs/rust-migration-spike/{option_a_trait_composition, option_b_derive_macro, option_c_flat_struct}/` for re-validation and comparison if the decision needs revisiting.
+
+Phase 2 (framework runtime transpile) is now unblocked.
