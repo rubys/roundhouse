@@ -384,6 +384,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("src/framework_test_adapter.cr"),
             content: CR_FRAMEWORK_TEST_ADAPTER_SOURCE.to_string(),
         });
+        // `<Plural>Fixtures` classes — one per fixture file. Each
+        // exposes per-label class methods (`ArticlesFixtures.one`)
+        // that look the record up by id, plus `_fixtures_load_bang`
+        // that the test harness invokes between specs to insert
+        // every fixture row. Emitted alongside the app classes
+        // (under `src/fixtures/`) so app.cr's alphabetical sweep
+        // pulls them in — production builds without test_modules
+        // skip the directory entirely.
+        let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+        for lc in &fixture_lcs {
+            let class_name = lc.name.0.as_str();
+            let stem = crate::naming::snake_case(
+                class_name.strip_suffix("Fixtures").unwrap_or(class_name),
+            );
+            let out_path = PathBuf::from(format!("src/fixtures/{stem}.cr"));
+            files.push(library::emit_library_class_decl(lc, app, out_path));
+        }
         // Framework runtime RBS — translate each `(class, method →
         // Ty)` row into a ClassInfo extra so the test body-typer
         // dispatches precisely against framework methods. Same
@@ -400,6 +417,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             }
             test_extras.push((class_id.clone(), info));
         }
+        // Register fixture classes with the body-typer so test
+        // method bodies (`@article = ArticlesFixtures.one`) resolve
+        // the static-method dispatch to the synthesized return type
+        // (`Article` per fixture's `class_ty`).
+        test_extras.extend(crate::lower::extras_from_lcs(&fixture_lcs));
         let test_lowered = crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,
