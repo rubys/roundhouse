@@ -600,6 +600,17 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "ActionView",
+        out_path: "src/view_helpers.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb intentionally NOT transpiled yet — `RecordInvalid`
     // takes a `Base` parameter that AR::Base hasn't yet emitted, AND
     // the Rust-natural `class < StandardError` shape needs `impl

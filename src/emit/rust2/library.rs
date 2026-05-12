@@ -102,13 +102,14 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 
     // Impl block. Each method renders independently; `initialize`
     // routes through the constructor variant of `emit_instance_method`.
+    // `def self.X` class methods emit as `pub fn name(...)` (no
+    // receiver) — Rust's free-function-in-impl form. Callers reach
+    // them via `Type::name(...)`, same dispatch path static-safe
+    // instance methods use.
     writeln!(out, "impl {name} {{").unwrap();
     let mut first = true;
     let body_result = super::expr::with_static_methods(static_method_names.clone(), || {
         for m in &class.methods {
-            if !matches!(m.receiver, MethodReceiver::Instance) {
-                continue;
-            }
             if matches!(m.name.as_str(), "[]" | "[]=") {
                 continue;
             }
@@ -116,9 +117,18 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
                 writeln!(out).unwrap();
             }
             first = false;
-            let is_static = static_method_names.contains(m.name.as_str());
-            let mutates = method_mutates_self(&m.body);
-            let body = emit_instance_method(m, mutates, is_static, &name, &ivars)?;
+            let body = match m.receiver {
+                MethodReceiver::Class => {
+                    // `def self.X` → `pub fn X(...)` with no receiver.
+                    // Module-style call from within the impl block.
+                    super::method::emit_module_method(m)?
+                }
+                MethodReceiver::Instance => {
+                    let is_static = static_method_names.contains(m.name.as_str());
+                    let mutates = method_mutates_self(&m.body);
+                    emit_instance_method(m, mutates, is_static, &name, &ivars)?
+                }
+            };
             for line in body.lines() {
                 if line.is_empty() {
                     writeln!(out).unwrap();

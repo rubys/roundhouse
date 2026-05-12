@@ -158,8 +158,30 @@ pub(super) fn emit_instance_method(
             emit_expr(&m.body)
         }
     });
-    for line in body.lines() {
-        writeln!(out, "    {line}").unwrap();
+    let body_lines: Vec<&str> = body.lines().collect();
+    let last_idx = body_lines.len().saturating_sub(1);
+    for (i, line) in body_lines.iter().enumerate() {
+        if line.is_empty() {
+            writeln!(out).unwrap();
+            continue;
+        }
+        // In constructor mode the user body's tail is followed by
+        // a `Self { ... }` literal that must be a separate statement —
+        // the body's `Seq` emit leaves the tail un-terminated (Rust's
+        // block-value convention), which would concatenate the tail
+        // with the Self literal. Force-terminate the last user-body
+        // line for the constructor case so the appended Self literal
+        // is a distinct expression on its own line.
+        let needs_terminator = is_init
+            && i == last_idx
+            && !line.trim_end().ends_with(';')
+            && !line.trim_end().ends_with('{')
+            && !line.trim_end().ends_with('}');
+        if needs_terminator {
+            writeln!(out, "    {line};").unwrap();
+        } else {
+            writeln!(out, "    {line}").unwrap();
+        }
     }
     if is_init {
         // Close the constructor with `Self { f1, f2, ... }` — Rust's
