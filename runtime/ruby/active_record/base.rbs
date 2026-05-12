@@ -5,8 +5,8 @@ module ActiveRecord
   # `def self.adapter` / `def self.adapter=` at ingest time.
   #
   # Type as `untyped`: the adapter's interface is defined elsewhere
-  # (each backend has its own implementation — InMemoryAdapter,
-  # SqliteAdapter, etc.). Inside the spinel-blog active_record/
+  # (each backend has its own implementation — SqliteAdapter,
+  # FrameworkTestAdapter, etc.). Inside the spinel-blog active_record/
   # corpus we don't have a class declaration to point to. Calls like
   # `ActiveRecord.adapter.all(...)` will dispatch against `Ty::Var`
   # and return `Ty::Var` — documented residual.

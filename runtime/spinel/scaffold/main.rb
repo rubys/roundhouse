@@ -15,7 +15,6 @@
 #   AddHandler cgi-script .rb       (apache)
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
 
-require_relative "runtime/in_memory_adapter"
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced
 # from `Base#save` etc. via the adapter dispatcher. Under CRuby the
@@ -188,34 +187,25 @@ module Main
   # When `BLOG_DB` env var names a path, configure SqliteAdapter
   # against that file — required for the dev server, which forks a
   # fresh CGI process per request and would otherwise lose all data
-  # between requests if every fork got its own InMemoryAdapter. CRuby
-  # tests bypass this entirely (they configure SqliteAdapter via
-  # test_helper before main.rb loads).
-  #
-  # The eventual Spinel-target build uses InMemoryAdapter (no FFI
-  # required); leave that as the unset-env fallback so the
-  # Spinel-compiled binary still has a working default.
+  # between requests. Without BLOG_DB, fall back to `:memory:` — works
+  # for the spinel-compiled binary (FFI sqlite is universal) and the
+  # one-shot CGI invocation, and is per-process (no persistence across
+  # forks, which is fine for both).
   def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
+    path = (!db_path.nil? && !db_path.empty?) ? db_path : ":memory:"
     # Db (the primitive surface backing lowerer-emitted `_adapter_*`)
-    # is configured unconditionally — `:memory:` when no BLOG_DB is
-    # supplied, the named path otherwise. The higher-level adapter
-    # slot (SqliteAdapter / InMemoryAdapter) handles the legacy
-    # dispatcher path; Level-3 per-model primitives go through Db
-    # directly and need it open before any model method runs.
-    if !db_path.nil? && !db_path.empty?
-      Db.configure(db_path)
-      SqliteAdapter.configure(db_path)
-      ActiveRecord.adapter = SqliteAdapter
-      Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
-    else
-      Db.configure(":memory:")
-      InMemoryAdapter.configure
-      ActiveRecord.adapter = InMemoryAdapter
-      Schema.statements.each { |sql| InMemoryAdapter.execute_ddl(sql) }
-      Schema.statements.each { |sql| Db.exec(sql) }
-    end
+    # and SqliteAdapter (the legacy dispatcher path) each open their
+    # own sqlite handle. For file paths both handles see the same
+    # schema once SqliteAdapter applies the DDL. For `:memory:` each
+    # handle has its own private in-memory DB, so the schema must be
+    # applied to both.
+    Db.configure(path)
+    SqliteAdapter.configure(path)
+    ActiveRecord.adapter = SqliteAdapter
+    Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
+    Schema.statements.each { |sql| Db.exec(sql) } if path == ":memory:"
   end
 end
 

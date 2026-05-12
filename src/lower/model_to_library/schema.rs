@@ -424,8 +424,8 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
 /// touches the existing instance's slots.
 fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     let row = Symbol::from("row");
-    // String-keyed row to match SqliteAdapter / InMemoryAdapter row
-    // shape (mirrors `synth_row_from_raw`). Crystal/TS can't dynamically
+    // String-keyed row to match the SqliteAdapter row shape
+    // (mirrors `synth_row_from_raw`). Crystal/TS can't dynamically
     // create Symbol keys at runtime; Spinel adapters skip the
     // historical `to_sym` step, so all targets see String keys.
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };

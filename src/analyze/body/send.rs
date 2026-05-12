@@ -251,8 +251,8 @@ impl<'a> BodyTyper<'a> {
                 }
                 // Every class in Ruby responds to `.new`, returning an
                 // instance of itself. Serve this universally — covers
-                // unregistered classes (`InMemoryAdapter.new`,
-                // user-defined helpers) without requiring the class to
+                // unregistered classes (user-defined helpers) without
+                // requiring the class to
                 // appear in the catalog. Explicit catalog registrations
                 // still win because they're checked above.
                 //

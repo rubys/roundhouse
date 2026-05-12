@@ -3,8 +3,8 @@
 // Target-mechanism only — bridges node primitives (better-sqlite3,
 // Action Cable WebSocket) to the 12-method `ActiveRecordAdapter`
 // contract that transpiled framework Ruby calls into. Mirrors
-// spinel's `runtime/spinel/` (sqlite_adapter, in_memory_adapter,
-// broadcasts) — same role, target-specific mechanism.
+// spinel's `runtime/spinel/` (sqlite_adapter, broadcasts) — same
+// role, target-specific mechanism.
 //
 // Anything with a Ruby analog in `runtime/ruby/` lives there and
 // reaches TS via transpile, not here. Earlier revisions of this
@@ -112,11 +112,10 @@ export interface ActiveRecordAdapter {
   delete(table: string, id: number): boolean;
 }
 
-/** In-memory test adapter. Mirrors the semantics of
- *  `runtime/ruby/active_record/in_memory_adapter.rb`; transpiling that
- *  file to this shape is a milestone validation point for the
- *  strategic bet (currently hand-written here while the body-walker
- *  catches up to the patterns it uses). */
+/** In-memory test adapter. TS-only — used by framework_tests on the
+ *  TS target. Hand-written; no Ruby counterpart is shipped to other
+ *  targets (the spinel target uses SqliteAdapter against `:memory:`
+ *  instead). */
 export class InMemoryActiveRecordAdapter implements ActiveRecordAdapter {
   private tables: Map<string, Map<number, Row>> = new Map();
   private schemas: Map<string, AdapterSchema> = new Map();

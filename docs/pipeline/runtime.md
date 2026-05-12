@@ -71,7 +71,7 @@ Not every target has every file yet. The current inventory:
 | `runtime/crystal/` | Full — same layout in `.cr` |
 | `runtime/typescript/` | Full + framework-runtime files (transpiled from `runtime/ruby/`): `active_record_base.ts`, `action_controller_base.ts`, `parameters.ts`, `inflector.ts`, etc. `juntos.ts` is the legacy bundled stub being progressively replaced |
 | `runtime/go/`, `runtime/python/`, `runtime/elixir/` | Partial; HTTP + Cable layers in flight |
-| `runtime/spinel/` | Adapters + broadcast support (`broadcasts.rb`, `sqlite_adapter.rb`, `in_memory_adapter.rb`); reuses CRuby for the rest |
+| `runtime/spinel/` | Adapter + broadcast support (`broadcasts.rb`, `sqlite_adapter.rb`); reuses CRuby for the rest |
 
 ## Framework runtime — `runtime/ruby/`
 

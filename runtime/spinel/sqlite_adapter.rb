@@ -70,8 +70,7 @@ module SqliteAdapter
 
   # Adapter-agnostic table reset (test setup). Issues both the row
   # delete and the autoincrement-counter reset so subsequent inserts
-  # start from id=1 — InMemoryAdapter#truncate has the same effect
-  # by clearing its NEXT_ID hash.
+  # start from id=1.
   def self.truncate(table)
     db.execute("DELETE FROM #{table}")
     db.execute("DELETE FROM sqlite_sequence WHERE name = ?", [table])

@@ -73,8 +73,8 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     let scaffold = Path::new("runtime/spinel/scaffold");
     copy_tree(scaffold, scratch);
 
-    // Target-specific tests (broadcasts/cgi_io/in_memory_adapter at the
-    // top level + integration/views/models/tools subdirs).
+    // Target-specific tests (broadcasts/cgi_io at the top level +
+    // integration/views/models/tools subdirs).
     copy_tree(Path::new("runtime/spinel/test"), &scratch.join("test"));
 
     // Runtime: framework Ruby + spinel target primitives, both flat
@@ -110,7 +110,6 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     let runtime_spinel = Path::new("runtime/spinel");
     for entry in [
         "sqlite_adapter.rb",
-        "in_memory_adapter.rb",
         "cgi_io.rb",
         "broadcasts.rb",
     ] {

@@ -61,8 +61,8 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	mkdir -p $(RUBY_OUT)
 	# Verbatim scaffold for the output tree.
 	cp -r runtime/spinel/scaffold/. $(RUBY_OUT)/
-	# Target-specific tests (broadcasts/cgi_io/in_memory_adapter +
-	# integration/views/models/tools subdirs). emit_spinel layers
+	# Target-specific tests (broadcasts/cgi_io + integration/views/
+	# models/tools subdirs). emit_spinel layers
 	# test/{test_helper,models/{article,comment}_test,controllers/*,
 	# fixtures/*} on top via the JSON explode below.
 	mkdir -p $(RUBY_OUT)/test

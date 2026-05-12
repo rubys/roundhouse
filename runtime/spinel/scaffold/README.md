@@ -31,8 +31,7 @@ both FFI-shaped:
   `sqlite3` gem (a C extension that doesn't compile under spinel).
   The adapter is shaped for FFI lowering — the moment spinel can
   link SQLite directly, the existing adapter swaps in unchanged.
-  `runtime/in_memory_adapter.rb` is the stopgap for the spinel-compiled
-  path today.
+  Spinel-AOT compiles against the FFI shim in `runtime/db.rb`.
 - **HTTP/WebSocket server.** `server/dev_server.rb` is a pure-CRuby
   HTTP/WS terminator using Thread, Mutex, and sockets — things spinel
   doesn't compile. The intentional split — fixture proper does CGI;
@@ -132,7 +131,8 @@ refresh.
     action_controller/{base,parameters}.rb
     action_dispatch/router.rb
     sqlite_adapter.rb            sqlite3 gem-backed
-    in_memory_adapter.rb         pure-Ruby Hash-backed; spinel-target candidate
+    db.rb                        FFI shim (libsqlite3) — Spinel-AOT path
+    db_cruby.rb                  CRuby/gem variant of the same Db surface
     cgi_io.rb                    CGI/1.1 request parser + response writer
     broadcasts.rb                in-memory log + file IPC for the dev server
     inflector.rb                 pluralize (verbatim from runtime/ruby/)
@@ -172,7 +172,7 @@ watcher never sees a half-written file.
 | ActiveRecord-shape models | `attr_accessor` for columns, typed `initialize`/`attributes`/`[]`/`[]=`/`update`, `has_many` + `belongs_to` lowered to typed methods, `dependent: :destroy` cascade |
 | Validations | `validates_presence_of`, `validates_length_of`, `validates_numericality_of`, `validates_inclusion_of`, `validates_format_of`, `validates_absence_of` (block-based attr access — no `instance_variable_get`) |
 | Lifecycle callbacks | `before_*` / `after_*` for save/create/update/destroy + `*_commit` variants; auto-fill `created_at`/`updated_at` |
-| Adapters | `SqliteAdapter` (sqlite3 gem) + `InMemoryAdapter` (pure Ruby Hash); same interface, swappable |
+| Adapters | `SqliteAdapter` (sqlite3 gem); `:memory:` path for tests / one-shot CGI, file path for the dev server |
 | Routing | Pattern-matching path → controller dispatch with nested resources |
 | Controllers | `params.require.permit`, per-resource typed `*Params` factories (`ArticleParams.from_raw(...)`), `before_action`-equivalent, `render`/`redirect_to`/`head`, symbolic statuses (`:see_other`, `:unprocessable_entity`) |
 | Views | One `Views::<Controller>.<action>` method per template; HTML built via `String#<<` concatenation; no ERB at runtime |
@@ -239,7 +239,7 @@ The fixture has zero Rails dependency at runtime. The Gemfile pulls
 Makefile copies the file out of the gem's directory; nothing in the
 fixture's Ruby code requires the gem). At compile/run time the only
 gems involved are `sqlite3`, `minitest`, `rake`. Spinel-target
-runs would drop `sqlite3` for `InMemoryAdapter`.
+runs swap the gem for the FFI shim in `runtime/spinel/db.rb`.
 
 The shared assets are the Turbo JS file and Tailwind v4 (via npm),
 both of which are language-neutral artifacts.
@@ -264,10 +264,10 @@ from this fixture:
   schema (varchar/text/datetime affinities) reads + writes through
   spinel's `SqliteAdapter` transparently. `make clean-spinel` resets
   the demo to its seeded state.
-- **InMemoryAdapter loses everything on process exit.** Useful for
-  the spinel-compile path (no FFI required) but unsuitable for any
-  persistence scenario; `make run` (single-shot CGI) and the
-  eventual Spinel-compiled binary fall back to it.
+- **`:memory:` SQLite loses everything on process exit.** Used by
+  `make run` (single-shot CGI), tests, and the spinel-compiled binary
+  in the unset-`BLOG_DB` fallback path. Fine for ephemeral scenarios;
+  point `BLOG_DB` at a file for persistence.
 - **No transactions, no foreign-key enforcement at DB level**, no
   prepared-statement caching, no connection pooling. The application
   doesn't need them; production wouldn't be served by this stack.

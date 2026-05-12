@@ -28,9 +28,10 @@
 # last_insert_rowid, etc.) live inside each shim or in a separate dialect
 # helper consulted by the lowerer at SQL-composition time.
 #
-# This file replaces the role of InMemoryAdapter for spinel-target tests
-# once the per-model Level-3 adapter primitives are emitted by the lowerer
-# on top of this surface.
+# The Db primitive surface backs the lowerer-emitted Level-3 per-model
+# `_adapter_*` methods. This file is the CRuby (gem-backed) variant;
+# `db.rb` in the same directory is the FFI variant the Spinel-AOT
+# target compiles against.
 
 require "sqlite3"
 
