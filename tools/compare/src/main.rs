@@ -33,6 +33,7 @@ mod config;
 mod dom;
 mod diff;
 mod fetch;
+mod json_diff;
 mod report;
 
 use config::Config;
@@ -174,6 +175,22 @@ fn compare_one(
         }));
     }
 
+    // `.json` paths route to a structural JSON diff. Content-type
+    // would be more robust but the path suffix is the explicit
+    // signal Rails routes on and matches what scripts/compare lists
+    // in its default path set, so we stay symmetric.
+    if path_is_json(path) {
+        return Ok(match json_diff::compare_json(&ref_resp.body, &tgt_resp.body) {
+            json_diff::JsonOutcome::Equal => None,
+            json_diff::JsonOutcome::Different(div) => Some(report::Failure {
+                path: path.to_string(),
+                kind: report::FailureKind::Json(div),
+                reference_body: ref_resp.body,
+                target_body: tgt_resp.body,
+            }),
+        });
+    }
+
     let ref_dom = dom::parse_and_canonicalize(&ref_resp.body, config)
         .context("parse reference HTML")?;
     let tgt_dom = dom::parse_and_canonicalize(&tgt_resp.body, config)
@@ -188,6 +205,11 @@ fn compare_one(
             target_body: tgt_resp.body,
         })),
     }
+}
+
+fn path_is_json(path: &str) -> bool {
+    let head = path.split('?').next().unwrap_or(path);
+    head.ends_with(".json")
 }
 
 fn join_url(base: &str, path: &str) -> String {

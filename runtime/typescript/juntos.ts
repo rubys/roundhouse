@@ -405,10 +405,17 @@ export class SqliteActiveRecordAdapter implements ActiveRecordAdapter {
  *    - `status`: HTTP status code (default 200; 422 for
  *      unprocessable, 302 for redirects)
  *    - `location`: redirect target URL; test assertions on
- *      `assert_redirected_to` check this field. */
+ *      `assert_redirected_to` check this field.
+ *    - `content_type`: response Content-Type. JSON-rendering
+ *      actions set `application/json` via the controller's
+ *      `render(..., content_type: ...)` path; HTML actions leave
+ *      it as the controller's default (`text/html`). The HTTP
+ *      dispatcher reads this when deciding whether to skip the
+ *      layout wrap. */
 export type ActionResponse = {
   body?: string;
   status?: number;
   location?: string;
+  content_type?: string;
 };
 

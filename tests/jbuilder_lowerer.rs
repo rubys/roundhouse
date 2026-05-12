@@ -77,13 +77,15 @@ fn article_partial_emits_extract_plus_url_pair() {
         "missing updated_at datetime encode: {body}"
     );
     // The trailing `json.url article_url(...)` becomes the "url" pair
-    // and the bare `article_url(article, format: :json)` rewrites to
-    // `RouteHelpers.article_path(article.id)` (kwargs dropped — host-
-    // aware URL generation is a follow-on; see Phase 8 in the plan).
+    // and `article_url(article, format: :json)` rewrites to
+    // `RouteHelpers.article_path(article.id) + ".json"` — the format
+    // kwarg threads through as a literal suffix so the lowered output
+    // matches Rails' `/articles/1.json` self-link shape. Scheme+host
+    // is still dropped (per-deployment noise the comparator strips).
     assert!(body.contains("io << \"\\\"url\\\":\""), "missing url key: {body}");
     assert!(
-        body.contains("RouteHelpers.article_path(article.id)"),
-        "missing route-helper rewrite: {body}"
+        body.contains("RouteHelpers.article_path(article.id) + \".json\""),
+        "missing route-helper + format-suffix rewrite: {body}"
     );
     assert!(body.contains("io << \",\""), "missing pair separator: {body}");
     assert!(body.contains("io << \"}\""), "missing object close: {body}");

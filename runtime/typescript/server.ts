@@ -146,7 +146,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
   }
 
-  const match = Router.match(method, url.pathname, dispatchTable);
+  // Per-request format inference. Strip a `.json` suffix from the
+  // request path before route matching so `/articles/1.json` and
+  // `/articles/1` share one route entry, and remember the format
+  // so the controller's respond_to-flattened branch can pick the
+  // right view + Content-Type. Mirrors the Ruby scaffold's
+  // main.rb:82-93 — every target needs this glue at its server
+  // entry point since route patterns are format-agnostic.
+  let request_format: string = "html";
+  let route_path = url.pathname;
+  if (route_path.endsWith(".json")) {
+    request_format = "json";
+    route_path = route_path.slice(0, -5);
+  }
+
+  const match = Router.match(method, route_path, dispatchTable);
   if (!match) {
     res.statusCode = 404;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -188,6 +202,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     controller.flash = new Flash(flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
+    controller.request_format = request_format;
     await controller.process_action(match.action);
     // Rails carries flash forward exactly once: the action that
     // sets `flash[:notice] = ...` then `redirect_to`s, the next
@@ -200,6 +215,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       body: controller.body,
       status: controller.status,
       location: controller.location,
+      content_type: controller.content_type,
     };
   } catch (err) {
     console.error("handler error:", err);
@@ -217,6 +233,19 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   res.statusCode = response.status ?? 200;
+  // JSON responses skip the html layout wrap and ship the
+  // controller body verbatim with the controller-supplied
+  // Content-Type. Mirrors the Ruby scaffold's main.rb:157-167
+  // branch — the controller's `respond_to`-flattened body picks
+  // the JSON view + content_type; the server just honors it.
+  if (request_format === "json") {
+    res.setHeader(
+      "Content-Type",
+      response.content_type ?? "application/json; charset=utf-8",
+    );
+    res.end(response.body ?? "");
+    return;
+  }
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   if (layoutRenderer) {
     // Pass body explicitly to the layout — matches the lowered-IR

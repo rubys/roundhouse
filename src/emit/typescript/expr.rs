@@ -1523,6 +1523,17 @@ fn inject_await_inside_cast(s: &str) -> Option<String> {
     None
 }
 
+/// True if `e` is the integer literal `-1`. Ruby's `i..-1` inclusive
+/// range is the idiomatic "to end of sequence" form and lowers to an
+/// open-ended JS slice rather than the generic `end + 1` shift (see
+/// the inclusive-end branch in `emit_send_with_parens_inner` for the
+/// off-by-one rationale). The `-1` is stored directly as a signed
+/// `Literal::Int { value: -1 }` in the IR — there's no separate
+/// `UnaryOp::Neg` node — so a literal-only pattern is exhaustive.
+fn is_lit_neg_one(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Int { value: -1 } })
+}
+
 fn emit_send_with_parens_inner(
     recv: Option<&Expr>,
     method: &str,
@@ -1544,6 +1555,18 @@ fn emit_send_with_parens_inner(
             let recv_s = emit_expr(recv.unwrap());
             return match end {
                 None => format!("{recv_s}.slice({begin_s})"),
+                // `x[i..-1]` — inclusive range with literal `-1` end —
+                // is Ruby's "from i to last char/element". The generic
+                // `+1` shift below would produce `.slice(i, -1 + 1)`
+                // = `.slice(i, 0)` = empty (off-by-one straddling the
+                // zero boundary). Emit the open-ended form so the
+                // result is "from i to end" instead. The `[i..-n]`
+                // form for n ≥ 2 still falls through to `+1` — those
+                // produce valid negative slice indices (`-2+1=-1`,
+                // meaning "all but last char").
+                Some(e) if !*exclusive && is_lit_neg_one(e) => {
+                    format!("{recv_s}.slice({begin_s})")
+                }
                 Some(e) => {
                     let end_s = emit_expr(e);
                     if *exclusive {
@@ -2747,6 +2770,107 @@ mod async_hof_tests {
             !out.starts_with("(await (async () => {"),
             "sync profile must not rewrite, got: {out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod range_slice_tests {
+    //! Coverage for `x[Range]` slice-form emit. The interesting
+    //! case is the inclusive-end branch: `x[i..-1]` (Ruby idiom for
+    //! "from i to end") must lower to `x.slice(i)`, not the
+    //! generic `x.slice(i, -1 + 1)` = `x.slice(i, 0)` = empty.
+    //! Earlier emit hit the latter and silently zeroed any
+    //! microsecond timestamps that `runtime/ruby/json_builder.rb`
+    //! sliced out of a sqlite TEXT column.
+
+    use super::*;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    fn int_lit(value: i64) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Int { value } },
+        )
+    }
+
+    fn range(begin: Option<Expr>, end: Option<Expr>, exclusive: bool) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Range { begin, end, exclusive },
+        )
+    }
+
+    fn slice_call(recv: Expr, range_arg: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("[]"),
+                args: vec![range_arg],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn inclusive_range_to_neg_one_emits_open_ended_slice() {
+        // `s[20..-1]` → `s.slice(20)`, not `s.slice(20, -1 + 1)`.
+        let r = range(Some(int_lit(20)), Some(int_lit(-1)), false);
+        let send = slice_call(var("s"), r);
+        let out = emit_expr(&send);
+        assert_eq!(out, "s.slice(20)");
+    }
+
+    #[test]
+    fn inclusive_range_to_neg_two_keeps_plus_one_shift() {
+        // `s[0..-2]` → `s.slice(0, -2 + 1)` (= `s.slice(0, -1)`,
+        // JS semantics: "all but last char"). The +1 transform is
+        // correct for any end ≤ -2; only -1 needed the special
+        // case.
+        let r = range(Some(int_lit(0)), Some(int_lit(-2)), false);
+        let send = slice_call(var("s"), r);
+        let out = emit_expr(&send);
+        assert_eq!(out, "s.slice(0, -2 + 1)");
+    }
+
+    #[test]
+    fn exclusive_range_to_neg_one_unchanged() {
+        // `s[20...-1]` (exclusive) — emit drops the +1 shift
+        // regardless. Stays as `s.slice(20, -1)`.
+        let r = range(Some(int_lit(20)), Some(int_lit(-1)), true);
+        let send = slice_call(var("s"), r);
+        let out = emit_expr(&send);
+        assert_eq!(out, "s.slice(20, -1)");
+    }
+
+    #[test]
+    fn open_ended_range_emits_single_arg_slice() {
+        // `s[20..]` → `s.slice(20)`. (Pre-existing behavior; this
+        // test pins it so the new branch above doesn't perturb it.)
+        let r = range(Some(int_lit(20)), None, false);
+        let send = slice_call(var("s"), r);
+        let out = emit_expr(&send);
+        assert_eq!(out, "s.slice(20)");
+    }
+
+    #[test]
+    fn inclusive_range_to_positive_end_keeps_plus_one_shift() {
+        // `s[0..5]` → `s.slice(0, 5 + 1)`. Positive end stays on
+        // the generic path.
+        let r = range(Some(int_lit(0)), Some(int_lit(5)), false);
+        let send = slice_call(var("s"), r);
+        let out = emit_expr(&send);
+        assert_eq!(out, "s.slice(0, 5 + 1)");
     }
 }
 

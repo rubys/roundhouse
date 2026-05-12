@@ -12,6 +12,7 @@
 use similar::{ChangeTag, TextDiff};
 
 use crate::diff::{Divergence, DivergenceKind};
+use crate::json_diff::{JsonDivergence, JsonDivergenceKind};
 
 pub struct Failure {
     pub path: String,
@@ -23,6 +24,7 @@ pub struct Failure {
 pub enum FailureKind {
     Status { reference: u16, target: u16 },
     Dom(Divergence),
+    Json(JsonDivergence),
 }
 
 pub fn print_failure(f: &Failure, verbose: bool) {
@@ -37,6 +39,12 @@ pub fn print_failure(f: &Failure, verbose: bool) {
             println!("  ref {}", div.reference_snippet);
             println!("  tgt {}", div.target_snippet);
         }
+        FailureKind::Json(div) => {
+            println!("  at  {}", div.path);
+            println!("  why {}", describe_json_kind(&div.kind));
+            println!("  ref {}", div.reference_snippet);
+            println!("  tgt {}", div.target_snippet);
+        }
     }
     if verbose {
         println!();
@@ -44,6 +52,28 @@ pub fn print_failure(f: &Failure, verbose: bool) {
         print_body_diff(&f.reference_body, &f.target_body);
     }
     println!();
+}
+
+fn describe_json_kind(kind: &JsonDivergenceKind) -> String {
+    match kind {
+        JsonDivergenceKind::TypeMismatch { reference, target } => {
+            format!("type differs (ref={reference}, target={target})")
+        }
+        JsonDivergenceKind::ValueMismatch => "value differs".into(),
+        JsonDivergenceKind::ArrayLengthMismatch { reference, target } => {
+            format!("array length differs (ref={reference}, target={target})")
+        }
+        JsonDivergenceKind::ObjectKeysMismatch {
+            only_in_reference,
+            only_in_target,
+        } => format!(
+            "object keys differ (ref-only: {:?}, target-only: {:?})",
+            only_in_reference, only_in_target,
+        ),
+        JsonDivergenceKind::ParseError { side, message } => {
+            format!("{side} body failed to parse as JSON: {message}")
+        }
+    }
 }
 
 fn describe_kind(kind: &DivergenceKind) -> String {

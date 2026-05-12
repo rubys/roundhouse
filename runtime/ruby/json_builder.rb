@@ -75,7 +75,14 @@ module JsonBuilder
     time = str[11, 8]
     ms = "000"
     if str.length > 20 && str[19, 1] == "."
-      frac = str[20..-1]
+      # `str[20..]` (open-ended) rather than `str[20..-1]`. Both
+      # forms now lower correctly on every target — the TS emit's
+      # `Range { end: -1, inclusive }` path was fixed to produce
+      # `str.slice(20)` instead of the old `str.slice(20, -1 + 1)`
+      # = `str.slice(20, 0)` = empty (zeroed-out fractional
+      # seconds). Keep the open-ended idiom: it's the Ruby 2.6+
+      # convention and the lowering is unambiguous.
+      frac = str[20..]
       padded = "#{frac}000"
       ms = padded[0, 3]
     end

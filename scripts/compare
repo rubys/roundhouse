@@ -21,7 +21,10 @@
 # Options:
 #   --path PATH           URL path to compare (repeatable). Default:
 #                         / /articles /articles/1 /articles/new
-#                         /articles/1/edit
+#                         /articles/1/edit  (plus /articles.json
+#                         and /articles/1.json for targets that
+#                         strip the .json suffix before routing —
+#                         currently ruby + typescript)
 #   --rails-port N        Port for Rails (default 4000)
 #   --target-port N       Port for target (default 3000)
 #   --keep                Don't tear down servers or wipe the
@@ -115,6 +118,21 @@ esac
 
 if [[ ${#PATHS[@]} -eq 0 ]]; then
     PATHS=(/ /articles /articles/1 /articles/new /articles/1/edit)
+    # JSON paths exercise the jbuilder lowerer end-to-end. The
+    # comparator detects `.json` suffix and switches to structural
+    # JSON compare (parsed-value, datetime fractional seconds
+    # canonicalized) — see tools/compare/src/json_diff.rs. Gated
+    # per-target: only targets whose server entry point strips the
+    # `.json` suffix before routing and dispatches on
+    # `controller.request_format` are exercised. Other targets
+    # would 404/500 on the JSON paths until they grow the same
+    # glue (see runtime/typescript/server.ts:149-160 and
+    # runtime/spinel/scaffold/main.rb:82-93 for the pattern).
+    case "$TARGET" in
+        ruby|typescript)
+            PATHS+=(/articles.json /articles/1.json)
+            ;;
+    esac
 fi
 
 # -------- paths --------

@@ -627,9 +627,12 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
 /// so this rewrite is the bridge between Rails' `article_url(article,
 /// format: :json)` convention and the runtime's path-only surface.
 ///
-/// Trailing `format: :json` etc. kwargs drop on the floor for now.
-/// Full URL generation (scheme + host + format suffix) is a Phase 8
-/// concern; v1 focuses on getting the rest of the JSON shape right.
+/// A `format: :<sym>` kwarg appends `.<sym>` to the result so JSON
+/// templates emit the same `/articles/1.json` self-link shape Rails
+/// produces — without that the comparator flags every `json.url`
+/// pair as a value mismatch. Other kwargs still drop on the floor;
+/// scheme+host (the rest of the `_url` vs `_path` difference) is
+/// per-deployment noise the comparator canonicalizes away.
 fn rewrite_route_helpers(e: &Expr) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send {
@@ -640,12 +643,19 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
             parenthesized,
         } if method.as_str().ends_with("_url") => {
             let path_name = format!("{}_path", &method.as_str()[..method.as_str().len() - 4]);
+            let format_sym: Option<Symbol> = args.iter().find_map(|a| {
+                if let ExprNode::Hash { kwargs: true, entries } = &*a.node {
+                    hash_get_symbol(entries, "format")
+                } else {
+                    None
+                }
+            });
             let path_args: Vec<Expr> = args
                 .iter()
                 .filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. }))
                 .map(rewrite_path_arg_local)
                 .collect();
-            return send(
+            let path_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
                     ExprNode::Const {
@@ -657,6 +667,16 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
                 block.clone(),
                 *parenthesized,
             );
+            return match format_sym {
+                Some(fmt) => send(
+                    Some(path_call),
+                    "+",
+                    vec![lit_str(format!(".{}", fmt.as_str()))],
+                    None,
+                    false,
+                ),
+                None => path_call,
+            };
         }
         ExprNode::Send {
             recv,

@@ -137,7 +137,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
   }
 
-  const match = Router.match(method, url.pathname, dispatchTable);
+  let request_format: string = "html";
+  let route_path = url.pathname;
+  if (route_path.endsWith(".json")) {
+    request_format = "json";
+    route_path = route_path.slice(0, -5);
+  }
+
+  const match = Router.match(method, route_path, dispatchTable);
   if (!match) {
     res.statusCode = 404;
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -167,12 +174,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     controller.flash = new Flash(flashStore);
     controller.request_method = method;
     controller.request_path = url.pathname;
+    controller.request_format = request_format;
     await controller.process_action(match.action);
     flashStore = controller.flash ? controller.flash.to_h() : {};
     response = {
       body: controller.body,
       status: controller.status,
       location: controller.location,
+      content_type: controller.content_type,
     };
   } catch (err) {
     console.error("handler error:", err);
@@ -190,6 +199,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   res.statusCode = response.status ?? 200;
+  if (request_format === "json") {
+    res.setHeader(
+      "Content-Type",
+      response.content_type ?? "application/json; charset=utf-8",
+    );
+    res.end(response.body ?? "");
+    return;
+  }
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   if (layoutRenderer) {
     ViewHelpers.set_yield(response.body ?? "");
