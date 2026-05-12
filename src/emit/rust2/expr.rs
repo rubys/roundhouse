@@ -634,14 +634,37 @@ fn rewrite_method_name(m: &str) -> String {
     sanitize_ident(bridged)
 }
 
-/// Strip trailing `?` / `!` from a Ruby identifier and escape Rust
-/// reserved keywords with the `r#` raw-identifier prefix so Rust
-/// accepts the name. Public so `method.rs` can use the same rule
-/// at `pub fn` definition sites — defines and call sites share the
-/// transform so name agreement holds across both.
+/// Sanitize a Ruby identifier for Rust:
+/// * `foo!` (bang form, conventionally Ruby's "raises on failure")
+///   → `foo_bang`. Preserves the distinction vs the non-bang sibling
+///   (`def create` vs `def create!` both exist on AR::Base; stripping
+///   the `!` would collide them). Not idiomatic Rust (the canonical
+///   form would be `try_foo` Result vs `foo` panic), but mechanical
+///   and unambiguous.
+/// * `foo?` (predicate) → `foo`. Ruby's question-mark convention has
+///   no Rust analog; the body just returns `bool` either way.
+/// * `foo=` (setter, synthesized by `attr_writer` / `attr_accessor`)
+///   → `set_foo`. Rust has no setter syntax; explicit-named methods
+///   are the convention.
+/// * Reserved Rust keywords → `r#keyword` raw-identifier form.
+///
+/// Public so `method.rs` can use the same rule at `pub fn`
+/// definition sites — defines and call sites share the transform
+/// so name agreement holds across both.
 pub(super) fn sanitize_ident(name: &str) -> String {
-    let s = name.strip_suffix('?').unwrap_or(name);
-    let s = s.strip_suffix('!').unwrap_or(s);
+    let s = if let Some(base) = name.strip_suffix('!') {
+        // `bang!` collides with the non-bang sibling after `?`-strip,
+        // so suffix with `_bang` rather than dropping the marker.
+        return format!("{base}_bang");
+    } else if let Some(base) = name.strip_suffix('=') {
+        // `foo=` becomes `set_foo`. The `=` suffix is Ruby's setter
+        // convention; Rust uses explicit-method-named setters.
+        return format!("set_{base}");
+    } else if let Some(base) = name.strip_suffix('?') {
+        base
+    } else {
+        name
+    };
     if is_rust_keyword(s) {
         format!("r#{s}")
     } else {
