@@ -22,7 +22,6 @@ use roundhouse::ingest::ingest_library_classes;
 
 const ERRORS_RB_PATH: &str = "runtime/ruby/active_record/errors.rb";
 const INFLECTOR_RB_PATH: &str = "runtime/ruby/inflector.rb";
-const VALIDATIONS_RB_PATH: &str = "runtime/ruby/active_record/validations.rb";
 const BASE_RB_PATH: &str = "runtime/ruby/active_record/base.rb";
 
 #[test]
@@ -154,76 +153,6 @@ fn inflector_rb_ingests_module_as_namespace() {
     assert!(content.trim_end().ends_with("end"), "emitted: {content}");
 }
 
-/// `runtime/active_record/validations.rb`: a mixin module
-/// (`module Validations` inside `module ActiveRecord`) with seven
-/// instance-method validation helpers. Lowered to a `LibraryClass`
-/// with `is_module: true` and the methods carried verbatim. The
-/// outer `module ActiveRecord` is a pure namespace wrapper (no
-/// direct defs) and should NOT surface as a separate LibraryClass.
-#[test]
-fn validations_rb_ingests_mixin_module() {
-    let path = PathBuf::from(VALIDATIONS_RB_PATH);
-    let source = std::fs::read(&path).expect("read validations.rb");
-    let path_str = path.display().to_string();
-
-    let classes = ingest_library_classes(&source, &path_str)
-        .expect("ingest_library_classes returned Err");
-
-    assert_eq!(
-        classes.len(),
-        1,
-        "expected one LibraryClass (Validations); got {} ({:?})",
-        classes.len(),
-        classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
-    );
-
-    let v = &classes[0];
-    assert_eq!(v.name.0.as_str(), "ActiveRecord::Validations");
-    assert!(v.is_module, "Validations is a mixin module");
-    assert!(v.parent.is_none());
-
-    let method_names: Vec<&str> = v.methods.iter().map(|m| m.name.as_str()).collect();
-    for expected in [
-        "errors",
-        "validates_presence_of",
-        "validates_absence_of",
-        "validates_length_of",
-        "validates_numericality_of",
-        "validates_inclusion_of",
-        "validates_format_of",
-    ] {
-        assert!(
-            method_names.contains(&expected),
-            "missing method `{expected}` (got {method_names:?})",
-        );
-    }
-
-    // All methods are instance methods (no `def self.*`).
-    for m in &v.methods {
-        assert!(
-            matches!(m.receiver, roundhouse::dialect::MethodReceiver::Instance),
-            "{} should be instance method",
-            m.name.as_str(),
-        );
-    }
-
-    let mut app = App::new();
-    for lc in classes {
-        app.library_classes.push(lc);
-    }
-    let files = emit_library(&app);
-    assert_eq!(files.len(), 1);
-    let content = &files[0].content;
-
-    // Critical: `module Validations`, NOT `class Validations` —
-    // mixin semantics require the module form.
-    assert!(content.contains("module Validations"), "emitted: {content}");
-    assert!(!content.contains("class Validations"), "must not emit as class: {content}");
-    assert!(content.contains("def errors"), "emitted: {content}");
-    assert!(content.contains("def validates_presence_of(attr_name, value)"), "emitted: {content}");
-    assert!(content.trim_end().ends_with("end"), "emitted: {content}");
-}
-
 /// `runtime/active_record/base.rb`: the heaviest file. Three patterns
 /// to verify here:
 ///   - Top-level `require` directives are silently dropped (not
@@ -265,9 +194,12 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
     let base = classes.iter().find(|c| c.name.0.as_str() == "ActiveRecord::Base").unwrap();
     assert!(!base.is_module);
     assert!(base.parent.is_none(), "Base has no explicit superclass");
+    // Phase 2.5(a): `ActiveRecord::Validations` was retired; every
+    // `validates :x, …` now inlines at lower time. Base no longer
+    // mixes in anything.
     assert!(
-        base.includes.iter().any(|i| i.0.as_str() == "Validations"),
-        "Base should include Validations; got {:?}",
+        base.includes.is_empty(),
+        "Base should not include any modules after Validations retirement; got {:?}",
         base.includes,
     );
 
@@ -325,7 +257,7 @@ fn base_rb_ingests_module_with_singleton_class_and_class() {
         .expect("base.rb emitted");
     let bc = &base_file.content;
     assert!(bc.contains("class Base"), "base.rb: {bc}");
-    assert!(bc.contains("include Validations"), "base.rb: {bc}");
+    assert!(!bc.contains("include Validations"), "Base must not include Validations: {bc}");
     assert!(bc.contains("def self.find(id)"), "base.rb: {bc}");
     assert!(bc.contains("def save"), "base.rb: {bc}");
 

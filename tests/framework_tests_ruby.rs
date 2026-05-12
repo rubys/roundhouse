@@ -196,15 +196,6 @@ fn build_and_run(test_file: &Path, tag: &str) {
 
 #[test]
 #[ignore]
-fn validations_test_passes_under_cruby() {
-    build_and_run(
-        Path::new("runtime/ruby/test/active_record/validations_test.rb"),
-        "validations",
-    );
-}
-
-#[test]
-#[ignore]
 fn ar_base_test_passes_under_cruby() {
     build_and_run(
         Path::new("runtime/ruby/test/active_record/base_test.rb"),

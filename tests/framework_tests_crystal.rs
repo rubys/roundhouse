@@ -132,15 +132,6 @@ fn inflector_test_passes_under_crystal() {
 
 #[test]
 #[ignore]
-fn validations_test_passes_under_crystal() {
-    build_and_run(
-        Path::new("runtime/ruby/test/active_record/validations_test.rb"),
-        "validations",
-    );
-}
-
-#[test]
-#[ignore]
 fn ar_base_test_passes_under_crystal() {
     build_and_run(
         Path::new("runtime/ruby/test/active_record/base_test.rb"),

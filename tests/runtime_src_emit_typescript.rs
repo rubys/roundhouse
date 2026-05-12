@@ -117,7 +117,6 @@ const RUNTIME_PAIRS: &[(&str, &str)] = &[
     ("runtime/ruby/inflector.rb", "runtime/ruby/inflector.rbs"),
     ("runtime/ruby/json_builder.rb", "runtime/ruby/json_builder.rbs"),
     ("runtime/ruby/active_record/errors.rb", "runtime/ruby/active_record/errors.rbs"),
-    ("runtime/ruby/active_record/validations.rb", "runtime/ruby/active_record/validations.rbs"),
     ("runtime/ruby/active_record/base.rb", "runtime/ruby/active_record/base.rbs"),
     ("runtime/ruby/action_view/view_helpers.rb", "runtime/ruby/action_view/view_helpers.rbs"),
     // route_helpers retired 2026-05-01: superseded by per-app

@@ -18,12 +18,16 @@ module ActiveRecord
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
   class Base
-    include Validations
-
     # `attr_accessor :id` — instance-level, lowers at ingest to a
     # getter/setter pair that the RBS must declare.
     def id: () -> Integer
     def id=: (Integer) -> Integer
+
+    # Error message accumulator populated by the lowerer-emitted
+    # `validate` body. Phase 2.5(a) inlines every `validates :x, …`
+    # declaration so the runtime `ActiveRecord::Validations` mixin no
+    # longer ships; `errors` lives on Base directly.
+    def errors: () -> Array[String]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 
@@ -127,12 +131,6 @@ module ActiveRecord
     def fill_timestamps: (creating: bool) -> void
 
     def valid?: () -> bool
-
-    # `Base` inlines the `Validations` module via `include`. The
-    # registry-builder flattens included-module methods into the
-    # including class (see `tests/runtime_src_integration.rs` Phase
-    # 1.5), so `errors` and the `validates_*_of` family resolve
-    # through Base's dispatch without needing to be restated here.
 
     # Equality protocol intentionally not defined here — see comment
     # in base.rb for the cross-target rationale.

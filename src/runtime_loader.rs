@@ -316,17 +316,10 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/validations.rbs"),
-        rb_path: "runtime/ruby/active_record/validations.rb",
-        namespace: "ActiveRecord",
-        out_path: "src/validations.ts",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
+    // `validations.rb` intentionally NOT transpiled — Phase 2.5(a)
+    // inlines every `validates :x, …` declaration at lower time (see
+    // `src/lower/model_to_library/validations.rs`). No transpiled
+    // model dispatches into the Validations module any more.
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
@@ -334,10 +327,7 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.ts",
         mode: Mode::Library,
-        imports: &[
-            ("Validations", "./validations.js"),
-            ("RecordNotFound, RecordInvalid", "./errors.js"),
-        ],
+        imports: &[("RecordNotFound, RecordInvalid", "./errors.js")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -478,17 +468,10 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/validations.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/validations.rbs"),
-        rb_path: "runtime/ruby/active_record/validations.rb",
-        namespace: "ActiveRecord",
-        out_path: "src/validations.cr",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
+    // `validations.rb` intentionally NOT transpiled — Phase 2.5(a)
+    // inlines every `validates :x, …` declaration at lower time (see
+    // `src/lower/model_to_library/validations.rs`). No transpiled
+    // model dispatches into the Validations module any more.
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),

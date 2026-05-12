@@ -588,3 +588,206 @@ fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {
         ExprNode::If { cond, then_branch, else_branch: nil_lit },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests per ValidationRule arm. Replaces the deleted
+    //! `runtime/ruby/test/active_record/validations_test.rb` framework
+    //! test, which tested the runtime `validates_*_of` helper methods —
+    //! a surface no Group 1 target dispatches into any more (Phase 2.5(a)
+    //! inlines every validates declaration here).
+    //!
+    //! Each test calls the inline helper directly and asserts on the
+    //! error-message strings the lowered IR emits, since the error text
+    //! is the user-visible contract. Structural shape is covered
+    //! implicitly: the message-collection walker only reaches strings
+    //! that sit at `errors << "..."` positions.
+    use super::*;
+    use crate::ident::ClassId;
+
+    /// Walk an `Expr` tree and collect every string literal that's the
+    /// RHS of an `errors << "..."` send (the canonical error-push shape
+    /// emitted by `errors_push`). Used to assert which error messages
+    /// the lowerer arms produce.
+    fn collect_error_messages(expr: &Expr) -> Vec<String> {
+        let mut out = Vec::new();
+        walk(expr, &mut out);
+        out
+    }
+
+    fn walk(expr: &Expr, out: &mut Vec<String>) {
+        match expr.node.as_ref() {
+            ExprNode::Send { recv, method, args, .. } => {
+                if method.as_str() == "<<" {
+                    if let Some(r) = recv.as_ref() {
+                        if let ExprNode::Send { method: m, recv: None, .. } = r.node.as_ref() {
+                            if m.as_str() == "errors" {
+                                if let Some(arg) = args.first() {
+                                    if let ExprNode::Lit { value: Literal::Str { value } } =
+                                        arg.node.as_ref()
+                                    {
+                                        out.push(value.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(r) = recv {
+                    walk(r, out);
+                }
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            ExprNode::BoolOp { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond, out);
+                walk(then_branch, out);
+                walk(else_branch, out);
+            }
+            ExprNode::Seq { exprs } => {
+                for e in exprs {
+                    walk(e, out);
+                }
+            }
+            ExprNode::Assign { value, .. } => walk(value, out),
+            _ => {}
+        }
+    }
+
+    fn attr() -> Symbol {
+        Symbol::from("title")
+    }
+
+    #[test]
+    fn presence_emits_blank_error() {
+        let expr = inline_presence_check(&attr(), None);
+        assert_eq!(collect_error_messages(&expr), vec!["title can't be blank"]);
+    }
+
+    #[test]
+    fn presence_str_typed_attr_drops_is_a_array_branch() {
+        // Statically-typed string attr: the `is_a?(Array) && ...` arm
+        // must drop out, otherwise tsc narrows the dead branch to
+        // `never` and rejects the subsequent `.length` access.
+        let expr = inline_presence_check(&attr(), Some(&Ty::Str));
+        let dbg = format!("{:?}", expr);
+        assert!(
+            !dbg.contains("\"Array\""),
+            "Str-typed attr should drop is_a?(Array); tree: {dbg}",
+        );
+    }
+
+    #[test]
+    fn presence_array_typed_attr_drops_is_a_string_branch() {
+        let expr = inline_presence_check(&attr(), Some(&Ty::Array { elem: Box::new(Ty::Str) }));
+        let dbg = format!("{:?}", expr);
+        assert!(
+            !dbg.contains("\"String\""),
+            "Array-typed attr should drop is_a?(String); tree: {dbg}",
+        );
+    }
+
+    #[test]
+    fn absence_emits_must_be_blank_error() {
+        let expr = inline_absence_check(&attr());
+        assert_eq!(collect_error_messages(&expr), vec!["title must be blank"]);
+    }
+
+    #[test]
+    fn length_min_only_emits_too_short() {
+        let exprs = inline_length_check(&attr(), Some(5), None, None);
+        assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        assert_eq!(msgs, vec!["title is too short (minimum is 5)"]);
+    }
+
+    #[test]
+    fn length_max_only_emits_too_long() {
+        let exprs = inline_length_check(&attr(), None, Some(100), None);
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        assert_eq!(msgs, vec!["title is too long (maximum is 100)"]);
+    }
+
+    #[test]
+    fn length_min_and_max_emits_both_in_order() {
+        let exprs = inline_length_check(&attr(), Some(5), Some(100), None);
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        assert_eq!(
+            msgs,
+            vec![
+                "title is too short (minimum is 5)",
+                "title is too long (maximum is 100)",
+            ],
+        );
+    }
+
+    #[test]
+    fn format_emits_invalid_error() {
+        let expr = inline_format_check(&attr(), "[A-Z]+");
+        assert_eq!(collect_error_messages(&expr), vec!["title is invalid"]);
+    }
+
+    #[test]
+    fn inclusion_emits_not_included_error() {
+        let values = vec![
+            Literal::Str { value: "a".into() },
+            Literal::Str { value: "b".into() },
+        ];
+        let expr = inline_inclusion_check(&attr(), &values);
+        assert_eq!(
+            collect_error_messages(&expr),
+            vec!["title is not included in the list"],
+        );
+    }
+
+    #[test]
+    fn numericality_bare_emits_nan_only() {
+        let exprs = inline_numericality_check(&attr(), false, None, None);
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        assert_eq!(msgs, vec!["title is not a number"]);
+    }
+
+    #[test]
+    fn numericality_with_gt_lt_and_only_integer_emits_all_messages() {
+        let exprs = inline_numericality_check(&attr(), true, Some(0.0), Some(100.0));
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        // Order matches the source order in inline_numericality_check:
+        // nan-msg (then-branch), then gt → lt → only_integer in else.
+        assert_eq!(
+            msgs,
+            vec![
+                "title is not a number",
+                "title must be greater than 0",
+                "title must be less than 100",
+                "title must be an integer",
+            ],
+        );
+    }
+
+    #[test]
+    fn numericality_float_bounds_format_without_trailing_zero() {
+        // `format_float` matches Ruby's default `to_s` shape for whole
+        // numbers: 5.0 → "5", 0.5 → "0.5". Lock the contract so error
+        // messages stay byte-stable across cruby and transpiled targets.
+        let exprs = inline_numericality_check(&attr(), false, Some(0.5), None);
+        let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
+        assert!(
+            msgs.iter().any(|m| m == "title must be greater than 0.5"),
+            "expected decimal preserved; got {msgs:?}",
+        );
+    }
+
+    #[test]
+    fn belongs_to_inline_emits_must_exist_error() {
+        let assoc_name = Symbol::from("article");
+        let foreign_key = Symbol::from("article_id");
+        let target = ClassId(Symbol::from("Article"));
+        let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target);
+        assert_eq!(collect_error_messages(&expr), vec!["article must exist"]);
+    }
+}

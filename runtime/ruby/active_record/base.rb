@@ -1,5 +1,4 @@
 require_relative "errors"
-require_relative "validations"
 require "time"
 
 module ActiveRecord
@@ -14,9 +13,18 @@ module ActiveRecord
   # delegates to the adapter + validations + lifecycle hooks — without
   # any reflective access to ivars.
   class Base
-    include Validations
-
     attr_accessor :id
+
+    # Error message accumulator populated by the lowerer-emitted
+    # `validate` method (one `errors << "..."` per failed rule). Lives
+    # on Base directly — Phase 2.5(a) inlined every `validates :x, …`
+    # declaration, so the runtime `ActiveRecord::Validations` mixin no
+    # longer ships. `errors` is reached via implicit-self Send in the
+    # lowered IR; defining it here keeps that call resolvable.
+    def errors
+      @errors = [] if @errors.nil?
+      @errors
+    end
 
     # `attrs = {}` keeps Base's constructor signature compatible
     # with subclasses that take attrs (`def initialize(attrs = {})`).

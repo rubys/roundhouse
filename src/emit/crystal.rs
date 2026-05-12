@@ -599,23 +599,19 @@ fn emit_main_cr(app: &App) -> EmittedFile {
 /// Crystal processes `include` at parse time — a file with `class X
 /// include Y` needs `Y`'s module loaded BEFORE the include line is
 /// parsed. Whole-program analysis can't help here. The framework
-/// runtime has known dependencies (active_record_base includes
-/// Validations; action_controller_base may include other modules);
-/// hardcoding the order keeps things deterministic.
+/// runtime has known dependencies (action_controller_base may include
+/// modules); hardcoding the order keeps things deterministic.
 fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
     // Framework runtime files in dependency order. Each must be
     // loaded before any file that `include`s its module.
     const RUNTIME_ORDER: &[&str] = &[
         "hash_with_indifferent_access",
         "inflector",
-        // validations → active_record_base → errors keeps the
-        // forward-ref chain resolvable at parse time. Validations
-        // module is included by Base (parse-time `include`); Base is
-        // referenced by errors' RecordInvalid as a property type
-        // (parse-time class macro); errors is used by Base's body
-        // `raise RecordNotFound/RecordInvalid` (lazy method-body
-        // resolution).
-        "validations",
+        // active_record_base → errors keeps the forward-ref chain
+        // resolvable at parse time. Base is referenced by errors'
+        // RecordInvalid as a property type (parse-time class macro);
+        // errors is used by Base's body `raise RecordNotFound/
+        // RecordInvalid` (lazy method-body resolution).
         "active_record_base",
         "errors",
         "parameters",
