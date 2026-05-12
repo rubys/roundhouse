@@ -574,6 +574,22 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         if method == "[]" && args.len() == 1 {
             return format!("{}[{}]", emit_expr(r), emit_expr(&args[0]));
         }
+        // Ruby `String#[](start, length)` — byte-slice with start +
+        // length. Rust has no `Index<(usize, usize)>` for `&str`; lower
+        // to a range slice. Args land here as `i64` from the body-typer,
+        // hence the `as usize` casts. `&recv[..]` makes the result
+        // `&str` regardless of whether `recv` is `String` or `&str`.
+        // Caveat: `start_s` is duplicated in the emitted source; fine
+        // for the literal/local arg shapes seen in practice (`str[0,
+        // 10]`, `str[0, cutoff]`).
+        if method == "[]" && args.len() == 2 {
+            let recv_s = emit_expr(r);
+            let start_s = emit_expr(&args[0]);
+            let len_s = emit_expr(&args[1]);
+            return format!(
+                "&{recv_s}[({start_s}) as usize..(({start_s}) + ({len_s})) as usize]"
+            );
+        }
         if method == "[]=" && args.len() == 2 {
             return format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1]));
         }
