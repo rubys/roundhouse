@@ -28,7 +28,28 @@ module Roundhouse
   module Db
     @@db : DB::Database? = nil
 
+    # Per-prepared-statement state: the open ResultSet plus the most
+    # recently materialized row. step? advances the cursor and snapshots
+    # the row into `current`; column_int/column_text then index into
+    # the snapshot. crystal-db's ResultSet is sequential-read-only
+    # (`rs.read` consumes one column), so materializing to an array
+    # is the way to keep `column_*(stmt, i)` random-access.
+    class StmtEntry
+      getter result_set : DB::ResultSet
+      property current : Array(DB::Any)?
+
+      def initialize(@result_set : DB::ResultSet)
+        @current = nil
+      end
+    end
+
+    @@statements = {} of Int64 => StmtEntry
+    @@next_id : Int64 = 0_i64
+    @@last_insert_rowid : Int64 = 0_i64
+    @@changes : Int64 = 0_i64
+
     def self.setup_test_db(schema_sql : String) : Nil
+      reset_statements
       if old = @@db
         old.close
       end
@@ -46,6 +67,7 @@ module Roundhouse
     end
 
     def self.open_production_db(path : String, schema_sql : String) : Nil
+      reset_statements
       if old = @@db
         old.close
       end
@@ -64,6 +86,134 @@ module Roundhouse
         end
       end
       @@db = db
+    end
+
+    # ── Low-level prepare/step/column API ────────────────────────
+    #
+    # Mirrors `runtime/spinel/db.rb` and `runtime/typescript/db.ts`
+    # verbatim. Model adapter methods (`_adapter_find`, `_adapter_save`,
+    # etc.) emitted by `src/lower/model_to_library/adapter_emit.rs`
+    # compose inlined SQL via `escape_int`/`escape_string` and dispatch
+    # against this surface. Per-statement state lives in the
+    # `@@statements` table; opaque Int64 stmt ids index into it.
+
+    # Run any one-shot DDL/INSERT/UPDATE/DELETE. Captures the
+    # last_insert_rowid + changes so subsequent calls to those
+    # accessors return the most recent values (the same shape as the
+    # TS shim: `Db.exec(insert_sql)` followed by `Db.last_insert_rowid`).
+    def self.exec(sql : String) : Nil
+      result = conn.exec(sql)
+      @@last_insert_rowid = result.last_insert_id
+      @@changes = result.rows_affected
+    end
+
+    # Prepare a SELECT, returning an opaque integer handle. Subsequent
+    # `step?` / `column_int` / `column_text` / `finalize` calls take it
+    # by reference. Per-process stmt-id sequence; reset across
+    # `setup_test_db` / `open_production_db` so test runs start from 1.
+    def self.prepare(sql : String) : Int64
+      rs = conn.query(sql)
+      @@next_id += 1
+      @@statements[@@next_id] = StmtEntry.new(rs)
+      @@next_id
+    end
+
+    # Advance the cursor on a prepared statement. Returns true and
+    # snapshots the current row into the stmt entry on success; false
+    # (with the snapshot cleared) when the result set is exhausted.
+    def self.step?(stmt_id : Int64) : Bool
+      entry = @@statements[stmt_id]
+      if entry.result_set.move_next
+        col_count = entry.result_set.column_count
+        row = Array(DB::Any).new(col_count) do
+          entry.result_set.read.as(DB::Any)
+        end
+        entry.current = row
+        true
+      else
+        entry.current = nil
+        false
+      end
+    end
+
+    # Read an integer column at zero-based index from the row most
+    # recently snapshotted by `step?`. NULL coerces to 0 (matches the
+    # TS shim and `runtime/spinel/db.rb`); non-Int variants of `DB::Any`
+    # coerce via `to_i64`.
+    def self.column_int(stmt_id : Int64, i : Int64) : Int64
+      entry = @@statements[stmt_id]
+      row = entry.current.not_nil!
+      v = row[i]
+      case v
+      when Nil     then 0_i64
+      when Int64   then v
+      when Int32   then v.to_i64
+      when Float64 then v.to_i64
+      when Float32 then v.to_i64
+      when Bool    then v ? 1_i64 : 0_i64
+      when String  then v.to_i64? || 0_i64
+      else              0_i64
+      end
+    end
+
+    # Read a text column at zero-based index. NULL coerces to ""
+    # (matches the TS shim — lowered code compares strings, never
+    # against nil). Bytes/numeric variants stringify via `to_s`.
+    def self.column_text(stmt_id : Int64, i : Int64) : String
+      entry = @@statements[stmt_id]
+      row = entry.current.not_nil!
+      v = row[i]
+      case v
+      when Nil    then ""
+      when String then v
+      else             v.to_s
+      end
+    end
+
+    # Release the underlying ResultSet and drop the stmt-table entry.
+    # Idempotent — finalize on an unknown stmt id is a no-op (mirrors
+    # the TS shim).
+    def self.finalize(stmt_id : Int64) : Nil
+      entry = @@statements[stmt_id]?
+      return if entry.nil?
+      entry.result_set.close
+      @@statements.delete(stmt_id)
+    end
+
+    def self.last_insert_rowid : Int64
+      @@last_insert_rowid
+    end
+
+    def self.changes : Int64
+      @@changes
+    end
+
+    # SQL-quote a string value. Single-quotes are doubled per sqlite's
+    # string-literal escape rule; no other byte transforms (the lowered
+    # adapter emit never inlines binary blobs).
+    def self.escape_string(s : String) : String
+      "'" + s.gsub("'", "''") + "'"
+    end
+
+    # Render an Integer for SQL inlining. Matches the TS shim's
+    # truncate-to-int semantics; the Crystal type system already
+    # constrains the input to Int, so there's no parse-or-zero
+    # fallback.
+    def self.escape_int(n : Int) : String
+      n.to_s
+    end
+
+    # Drain in-flight ResultSets before swapping the underlying
+    # connection. Without this, `setup_test_db` between specs would
+    # leak ResultSets bound to a closed connection.
+    private def self.reset_statements : Nil
+      @@statements.each_value do |entry|
+        entry.result_set.close rescue nil
+      end
+      @@statements.clear
+      @@next_id = 0_i64
+      @@last_insert_rowid = 0_i64
+      @@changes = 0_i64
     end
   end
 
