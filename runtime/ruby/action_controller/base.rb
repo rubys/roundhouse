@@ -1,4 +1,3 @@
-require_relative "parameters"
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"
@@ -34,7 +33,7 @@ module ActionController
     attr_reader   :status, :body, :location, :content_type
 
     def initialize
-      @params  = ActionController::Parameters.new({})
+      @params  = {}
       @session = ActionDispatch::Session.new
       @flash   = ActionDispatch::Flash.new
       @status  = 200

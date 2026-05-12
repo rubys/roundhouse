@@ -237,10 +237,10 @@ pub fn lower_controllers_with_arel_and_views(
 
     // Ivar bindings: `@params` is framework-guaranteed (the lowerer
     // itself rewrites bare `params` → `@params` in action bodies, so
-    // every controller has it; ActionController's runtime constructs
-    // a Hash-shaped Parameters object). This isn't a naming
-    // heuristic — it's a fact about the framework that the lowerer
-    // KNOWS because it produced the @params reference.
+    // every controller has it; the dispatcher sets it to the raw
+    // request-parsed Hash). This isn't a naming heuristic — it's a
+    // fact about the framework that the lowerer KNOWS because it
+    // produced the @params reference.
     //
     // Other ivars (`@article`, `@articles`, `@comment`, ...) come
     // from inlined filter bodies: when `set_article` runs
@@ -251,9 +251,9 @@ pub fn lower_controllers_with_arel_and_views(
         std::collections::HashMap::new();
     framework_ivars.insert(
         Symbol::from("params"),
-        Ty::Class {
-            id: ClassId(Symbol::from("ActionController::Parameters")),
-            args: vec![],
+        Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Untyped),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits

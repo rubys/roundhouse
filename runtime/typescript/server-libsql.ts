@@ -35,7 +35,6 @@ import { URL } from "node:url";
 import { createClient, type Client } from "@libsql/client";
 
 import { Router } from "./router.js";
-import { Parameters } from "./parameters.js";
 import { Flash } from "./flash.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { Db } from "./db.js";
@@ -163,7 +162,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   let response: ActionResponse;
   try {
     const controller = new ctrlClass();
-    controller.params = new Parameters(merged);
+    controller.params = merged;
     controller.session = sessionStore;
     controller.flash = new Flash(flashStore);
     controller.request_method = method;

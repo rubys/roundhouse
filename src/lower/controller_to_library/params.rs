@@ -273,7 +273,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_attr_reader(&spec.class_id, field));
         methods.push(synth_attr_writer(&spec.class_id, field));
     }
-    methods.push(synth_from_raw(&spec.class_id, &spec.fields));
+    methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
 
     LibraryClass {
@@ -350,15 +350,50 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
     }
 }
 
-/// `def self.from_raw(params); instance = new; instance.f = params.fetch("f", ""); …; instance; end`
+/// `def self.from_raw(params)`
+/// `  sub = params.fetch("<resource>", {})`
+/// `  instance = new`
+/// `  instance.f = sub.fetch("f", "")`
+/// `  ...`
+/// `  instance`
+/// `end`
 ///
-/// The fetch-with-default-empty-string shape is what spinel's strong
-/// params handles cleanly: missing keys collapse to "" rather than nil,
-/// keeping the field type concrete (Str). Same convention as
-/// `app/views/articles/_form.html.erb` form-field defaults.
-fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+/// The fetch-with-default-empty-string shape collapses missing keys to
+/// "" rather than nil, keeping the field type concrete (Str). Same
+/// convention as `app/views/articles/_form.html.erb` form-field
+/// defaults. The leading `sub = params.fetch("<resource>", {})` dives
+/// into the nested resource hash that controller params arrive under
+/// (e.g. `{"article" => {"title" => …}}`); the empty-hash default keeps
+/// the field fetches non-divergent if the resource key is absent.
+fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> MethodDef {
     let params = Symbol::from("params");
+    let sub = Symbol::from("sub");
     let instance = Symbol::from("instance");
+
+    let resource_fetch = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: params.clone() },
+            )),
+            method: Symbol::from("fetch"),
+            args: vec![
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit {
+                        value: Literal::Str { value: resource.as_str().to_string() },
+                    },
+                ),
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Hash { entries: Vec::new(), kwargs: false },
+                ),
+            ],
+            block: None,
+            parenthesized: false,
+        },
+    );
 
     let new_call = Expr::new(
         Span::synthetic(),
@@ -378,22 +413,28 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: sub.clone() },
+            value: resource_fetch,
+        },
+    ));
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: instance.clone() },
             value: new_call,
         },
     ));
 
     for field in fields {
-        // params.fetch("field", "") — string key matches HWIA#to_h's
-        // String-keyed output (HWIA stores keys as strings internally;
-        // `to_h` exposes the inner storage). Symbol keys would fall
+        // sub.fetch("field", "") — string key matches the request-body
+        // parser's String-keyed Hash output. Symbol keys would fall
         // through to the default and silently produce empty fields.
         let fetch_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Var { id: VarId(0), name: params.clone() },
+                    ExprNode::Var { id: VarId(0), name: sub.clone() },
                 )),
                 method: Symbol::from("fetch"),
                 args: vec![
@@ -432,7 +473,18 @@ fn synth_from_raw(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         ExprNode::Var { id: VarId(0), name: instance },
     ));
 
-    let params_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    // Declare `params` as a nested Hash[String, Hash[String, untyped]]
+    // rather than Hash[String, untyped]: from_raw's body does
+    // `sub = params.fetch("<resource>", {})` then `sub.fetch("field", "")`,
+    // so the body typer needs `sub` to be Hash-typed for per-target
+    // emit (e.g. TS's `.fetch` → bracket-access rewrite) to fire on
+    // the inner accesses. The actual `@params` argument is
+    // Hash[String, untyped] at the call site (mixed path-captures +
+    // nested resource body); the wider declared type is a no-op
+    // under untyped's slidability and accurate for the only access
+    // pattern from_raw uses (resource-keyed read).
+    let inner_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let params_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(inner_ty) };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
         name: Symbol::from("from_raw"),
@@ -556,60 +608,25 @@ pub fn rewrite_to_from_raw(
     map_expr(expr, &|e| {
         let (resource, _fields) = match_permit_call(e)?;
         let spec = specs.get(&resource)?;
-        Some(build_from_raw_call(&spec.class_id, &resource, e.span))
+        Some(build_from_raw_call(&spec.class_id, e.span))
     })
 }
 
-fn build_from_raw_call(class_id: &ClassId, resource: &Symbol, span: Span) -> Expr {
+fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
     let class_const = Expr::new(
         span,
         ExprNode::Const { path: vec![class_id.0.clone()] },
     );
+    // `@params` directly — the synthesized `from_raw` dives into the
+    // nested resource key itself (`sub = params.fetch("<resource>", {})`),
+    // so the call site doesn't need a `.require(:r).to_h` chain.
     let params_ivar = Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") });
-    // `@params.require(:<resource>)` — extracts the inner Parameters
-    // wrapping the resource hash (controller params arrive nested under
-    // the resource name, e.g. `{article: {title: ..., body: ...}}`).
-    let require_call = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(params_ivar),
-            method: Symbol::from("require"),
-            args: vec![Expr::new(
-                span,
-                ExprNode::Lit { value: Literal::Sym { value: resource.clone() } },
-            )],
-            block: None,
-            parenthesized: true,
-        },
-    );
-    // `.to_h` — coerce Parameters → Hash[String, untyped] so from_raw's
-    // `params.fetch("k", "")` dispatches against Hash#fetch (typed by
-    // the default's String) rather than Parameters#fetch (which still
-    // returns sp_RbVal under spinel pending matz/spinel#207). HWIA
-    // stores keys as Strings; to_h exposes the inner storage, so
-    // from_raw uses String-keyed fetches to match.
-    // `to_h` is a Method-kind member on Parameters — synthesize the
-    // Send with `parenthesized: true` so per-target emit produces the
-    // call form (`params.require(...).to_h()`) instead of the
-    // property-access form (`params.require(...).to_h`), which would
-    // pass the function reference through to from_raw and surface
-    // every field as undefined.
-    let to_h_call = Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(require_call),
-            method: Symbol::from("to_h"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: true,
-        },
-    );
     Expr::new(
         span,
         ExprNode::Send {
             recv: Some(class_const),
             method: Symbol::from("from_raw"),
-            args: vec![to_h_call],
+            args: vec![params_ivar],
             block: None,
             parenthesized: true,
         },

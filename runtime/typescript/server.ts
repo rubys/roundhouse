@@ -24,7 +24,6 @@ import { URL } from "node:url";
 import Database from "better-sqlite3";
 
 import { Router } from "./router.js";
-import { Parameters } from "./parameters.js";
 import { Flash } from "./flash.js";
 import { setBroadcaster, installDb, type ActionResponse } from "./juntos.js";
 import { Db } from "./db.js";
@@ -178,7 +177,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   let response: ActionResponse;
   try {
     const controller = new ctrlClass();
-    controller.params = new Parameters(merged);
+    controller.params = merged;
     controller.session = sessionStore;
     // Wrap the persisted flashStore in a Flash so the controller's
     // typed-as-Flash `flash` property dispatches correctly

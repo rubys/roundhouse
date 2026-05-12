@@ -124,7 +124,6 @@ const RUNTIME_PAIRS: &[(&str, &str)] = &[
     // app/route_helpers.rb. The hand-written version was a stand-in
     // for what the lowerer now produces.
     ("runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"),
-    ("runtime/ruby/action_controller/parameters.rb", "runtime/ruby/action_controller/parameters.rbs"),
     ("runtime/ruby/action_dispatch/router.rb", "runtime/ruby/action_dispatch/router.rbs"),
 ];
 

@@ -10,11 +10,12 @@ module ActionController
   # their actions and override process_action.
   class Base
     # `attr_accessor` produces getter+setter pairs for each name.
-    # `params` is initialized to a fresh Parameters; the others to
-    # plain Hashes / String / nil. `request_method` and `request_path`
-    # are populated by the dispatcher before invoking the action.
-    def params: () -> Parameters
-    def params=: (Parameters) -> Parameters
+    # `params` is a plain String-keyed Hash from the request-body
+    # parser; nested resource bodies (`{article: {title: ...}}`) flow
+    # as nested Hashes. `request_method` and `request_path` are
+    # populated by the dispatcher before invoking the action.
+    def params: () -> Hash[String, untyped]
+    def params=: (Hash[String, untyped]) -> Hash[String, untyped]
     def session: () -> ActionDispatch::Session
     def session=: (ActionDispatch::Session) -> ActionDispatch::Session
     def flash: () -> ActionDispatch::Flash

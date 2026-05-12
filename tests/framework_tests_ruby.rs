@@ -214,15 +214,6 @@ fn errors_test_passes_under_cruby() {
 
 #[test]
 #[ignore]
-fn parameters_test_passes_under_cruby() {
-    build_and_run(
-        Path::new("runtime/ruby/test/action_controller/parameters_test.rb"),
-        "parameters",
-    );
-}
-
-#[test]
-#[ignore]
 fn ac_base_test_passes_under_cruby() {
     build_and_run(
         Path::new("runtime/ruby/test/action_controller/base_test.rb"),

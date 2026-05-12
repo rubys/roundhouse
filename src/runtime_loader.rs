@@ -339,7 +339,6 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         out_path: "src/action_controller_base.ts",
         mode: Mode::Library,
         imports: &[
-            ("Parameters", "./parameters.js"),
             ("Flash", "./flash.js"),
             ("Session", "./session.js"),
         ],
@@ -347,20 +346,6 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // `parse_module_constant_exprs` and emitted as a
         // top-level `const STATUS_CODES = ...;` automatically;
         // no hand-written prelude needed.
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/parameters.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/parameters.rbs"),
-        rb_path: "runtime/ruby/action_controller/parameters.rb",
-        namespace: "ActionController",
-        out_path: "src/parameters.ts",
-        mode: Mode::Library,
-        // Parameters used to import HWIA for indifferent-access helpers;
-        // post-Phase-2.5(b) the class is self-contained (its own
-        // `normalize` + String-keyed storage), no HWIA dep.
-        imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -478,17 +463,6 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         rb_path: "runtime/ruby/active_record/base.rb",
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.cr",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/parameters.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/parameters.rbs"),
-        rb_path: "runtime/ruby/action_controller/parameters.rb",
-        namespace: "ActionController",
-        out_path: "src/parameters.cr",
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,

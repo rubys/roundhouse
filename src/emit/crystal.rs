@@ -614,7 +614,6 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
         // RecordInvalid` (lazy method-body resolution).
         "active_record_base",
         "errors",
-        "parameters",
         "router",
         "action_controller_base",
         "view_helpers",

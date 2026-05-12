@@ -1019,11 +1019,12 @@ fn rewrite_expect(
     )
 }
 
-/// `@params.fetch(:sym, "0").to_i` — used for the single-symbol
+/// `@params.fetch("sym", "0").to_i` — used for the single-symbol
 /// expect shape. `fetch` with a default returns non-nil so the
 /// `.to_i` chain compiles under strict targets (Crystal). Default
 /// `"0"` parses to integer 0 — matches the spinel-blog convention
-/// for missing-id-as-unsaved-sentinel.
+/// for missing-id-as-unsaved-sentinel. String key matches the
+/// request-body parser's String-keyed Hash; a Symbol key would miss.
 fn params_index_to_i(sym: &Symbol, span: Span) -> Expr {
     let fetched = Expr::new(
         span,
@@ -1033,7 +1034,9 @@ fn params_index_to_i(sym: &Symbol, span: Span) -> Expr {
             args: vec![
                 Expr::new(
                     span,
-                    ExprNode::Lit { value: Literal::Sym { value: sym.clone() } },
+                    ExprNode::Lit {
+                        value: Literal::Str { value: sym.as_str().to_string() },
+                    },
                 ),
                 Expr::new(
                     span,

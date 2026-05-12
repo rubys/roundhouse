@@ -18,9 +18,8 @@ import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 
 // minitest.ts is emitted to `test/_runtime/`; `router.ts` and
-// `parameters.ts` are emitted to `src/`. Two levels up.
+// `flash.ts` are emitted to `src/`. Two levels up.
 import { Router } from "../../src/router.js";
-import { Parameters } from "../../src/parameters.js";
 import { Flash } from "../../src/flash.js";
 import { Session } from "../../src/session.js";
 
@@ -358,7 +357,7 @@ export class Test {
     // channel that strict-typed targets couldn't compile against.
     const merged: Record<string, any> = { ...match.path_params, ...body };
     const controller = new ctrlClass();
-    controller.params = new Parameters(merged);
+    controller.params = merged;
     controller.session = this.session;
     controller.flash = this.flash;
     controller.request_method = method;

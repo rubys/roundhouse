@@ -116,7 +116,7 @@ module Roundhouse
       body_params.each { |k, v| merged[k] = v }
 
       ctrl = ctrl_class.new
-      ctrl.params = ActionController::Parameters.new(merged)
+      ctrl.params = merged
       ctrl.session = @@session
       ctrl.flash = @@flash
       ctrl.request_method = method

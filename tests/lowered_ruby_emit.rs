@@ -685,16 +685,16 @@ fn controllers_articles_requires_referenced_models_from_models_dir() {
 #[test]
 fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
     // `params.expect(:id)` (Rails 8 single-symbol form) lowers to
-    // `@params.fetch(:id, "0").to_i`. Spinel doesn't have Rails' magic
-    // `params` method; request params arrive on `@params` (a Parameters
-    // wrapper) whose values are strings. `.fetch(:id, "0")` returns
-    // non-nil (Crystal's strict `String#to_i` rejects nil receivers);
-    // missing-id-as-unsaved-sentinel maps to integer 0.
+    // `@params.fetch("id", "0").to_i`. Spinel doesn't have Rails' magic
+    // `params` method; request params arrive on `@params` (a plain
+    // String-keyed Hash) whose values are strings. `.fetch("id", "0")`
+    // returns non-nil (Crystal's strict `String#to_i` rejects nil
+    // receivers); missing-id-as-unsaved-sentinel maps to integer 0.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.find(@params.fetch(:id, \"0\").to_i)"),
-        "expected `@params.fetch(:id, \"0\").to_i` lowering; got:\n{src}",
+        src.contains("Article.find(@params.fetch(\"id\", \"0\").to_i)"),
+        "expected `@params.fetch(\"id\", \"0\").to_i` lowering; got:\n{src}",
     );
     assert!(
         !src.contains("params.expect(:id)"),
@@ -707,15 +707,15 @@ fn controllers_article_params_lowers_to_typed_factory() {
     // `params.expect(article: [:title, :body])` and the older
     // `params.require(:article).permit(:title, :body)` both lower to a
     // typed-factory call:
-    //   `ArticleParams.from_raw(@params.require(:article).to_h)`
+    //   `ArticleParams.from_raw(@params)`
     // The synthesized `ArticleParams` LibraryClass holds the permitted
-    // fields as typed slots; the require step extracts the inner
-    // resource hash (controller params arrive nested under :resource);
-    // `.to_h` coerces to Hash for from_raw's signature.
+    // fields as typed slots; `from_raw` dives into the nested resource
+    // hash itself (`sub = params.fetch("article", {})`), so the call
+    // site passes `@params` raw — no `.require.to_h` chain.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("ArticleParams.from_raw(@params.require(:article).to_h)"),
+        src.contains("ArticleParams.from_raw(@params)"),
         "expected typed-factory lowering; got:\n{src}",
     );
     assert!(
@@ -1009,18 +1009,17 @@ fn controllers_params_helper_use_sites_call_typed_factory() {
 #[test]
 fn controllers_params_helper_body_is_from_raw_call() {
     // The `def article_params` body lowers to a single
-    // `ArticleParams.from_raw(@params.require(:article).to_h)` call —
-    // the boundary where `Hash[Symbol, untyped]` widens once into
-    // typed slots. The require step extracts the nested resource
-    // hash; .to_h coerces to Hash for from_raw's signature. No
-    // `permit` chain.
+    // `ArticleParams.from_raw(@params)` call — the boundary where
+    // `Hash[String, untyped]` widens once into typed slots. from_raw
+    // dives into the nested resource hash itself; no `.require.to_h`
+    // chain, no `permit` chain.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     let body = src
         .split("def article_params").nth(1).unwrap()
         .split("end").next().unwrap();
     assert!(
-        body.contains("ArticleParams.from_raw(@params.require(:article).to_h)"),
+        body.contains("ArticleParams.from_raw(@params)"),
         "expected typed-factory body; got:\n{body}",
     );
     assert!(
@@ -1082,7 +1081,7 @@ fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
 #[test]
 fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
     // `@comment = @article.comments.find(params.expect(:id))` lowers to
-    //   @comment = Comment.find(@params.fetch(:id, "0").to_i)
+    //   @comment = Comment.find(@params.fetch("id", "0").to_i)
     //   if @comment.article_id != @article.id
     //     head(:not_found)
     //     return
@@ -1092,7 +1091,7 @@ fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("@comment = Comment.find(@params.fetch(:id, \"0\").to_i)"),
+        src.contains("@comment = Comment.find(@params.fetch(\"id\", \"0\").to_i)"),
         "expected direct Comment.find lookup; got:\n{src}",
     );
     assert!(

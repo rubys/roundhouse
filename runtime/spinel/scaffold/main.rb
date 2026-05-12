@@ -105,7 +105,7 @@ module Main
     controller = Main.instantiate_controller(matched[:controller])
     merged = matched[:path_params].dup
     request[:params].each { |k, v| merged[k] = v }
-    controller.params  = ActionController::Parameters.new(merged)
+    controller.params  = merged
     controller.session = ActionDispatch::Session.new
 
     # Decode inbound flash from cookies. Each flash key carries via

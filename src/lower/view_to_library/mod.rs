@@ -726,75 +726,11 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut ec);
     classes.insert(ClassId(Symbol::from("ErrorCollection")), ec);
 
-    // ActionController::Parameters — what `controller.params` is.
-    // Controllers call `params.require(:k).to_h`, `params.permit(:a,
-    // :b)`, `params.fetch(:k, default)`, etc. The transpiled
-    // framework `Parameters` class provides these; the body-typer
-    // needs the kinds map populated so its force-parens check
-    // fires on call sites like `.to_h` (a method, not a property
-    // read). Without this, the controller's `article_params`
-    // emits `params.require("article").to_h` (no parens) and the
-    // resulting function reference flows through ArticleParams
-    // .from_raw, causing every field on the params object to be
-    // undefined.
-    let mut params_cls = crate::analyze::ClassInfo::default();
-    let untyped_hash = Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) };
-    let params_ty = Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![] };
-    params_cls.instance_methods.insert(
-        Symbol::from("[]"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("[]="),
-        fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)],
-            Ty::Untyped,
-        ),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("key?"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("has_key?"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Bool),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("fetch"),
-        fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::Untyped)],
-            Ty::Untyped,
-        ),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("require"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], params_ty.clone()),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("permit"),
-        fn_sig(
-            vec![(Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Sym) })],
-            params_ty.clone(),
-        ),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("expect"),
-        fn_sig(vec![(Symbol::from("shape"), untyped_hash.clone())], params_ty.clone()),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("merge"),
-        fn_sig(vec![(Symbol::from("other"), untyped_hash.clone())], params_ty.clone()),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("to_h"),
-        fn_sig(vec![], untyped_hash.clone()),
-    );
-    params_cls.instance_methods.insert(
-        Symbol::from("empty?"),
-        fn_sig(vec![], Ty::Bool),
-    );
-    tag_all_method(&mut params_cls);
-    classes.insert(ClassId(Symbol::from("ActionController::Parameters")), params_cls);
+    // ActionController::Parameters used to be seeded here so the
+    // body-typer could resolve `params.require(...).to_h` chains. As
+    // of the Parameters retirement, `@params` is a plain
+    // `Hash[String, untyped]` and Hash's primitive method surface is
+    // a builtin — no per-class seed needed.
 
     // ActionDispatch::Flash — what `controller.flash` is post-Phase-
     // 2.5(b) (was HashWithIndifferentAccess). Typed `notice`/`alert`
@@ -909,7 +845,10 @@ pub(crate) fn insert_framework_stubs(
     );
     session_cls.instance_methods.insert(
         Symbol::from("to_h"),
-        fn_sig(vec![], untyped_hash.clone()),
+        fn_sig(
+            vec![],
+            Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+        ),
     );
     tag_all_method(&mut session_cls);
     classes.insert(ClassId(Symbol::from("ActionDispatch::Session")), session_cls);

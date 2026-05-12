@@ -226,8 +226,12 @@ module RequestDispatch
                  when :comments then CommentsController.new
                  end
     merged = matched[:path_params].dup
-    params.each { |k, v| merged[k] = v }
-    controller.params  = ActionController::Parameters.new(merged)
+    # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
+    # ...}}`); the wire-level request body is String-keyed at runtime.
+    # Stringify recursively so the harness shape matches what the
+    # request-body parser would produce in production.
+    params.each { |k, v| merged[k.to_s] = stringify_keys(v) }
+    controller.params  = merged
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     controller.request_method = method
@@ -241,6 +245,17 @@ module RequestDispatch
       flash:    controller.flash,
     )
     @__response
+  end
+
+  # Recursively stringify Hash keys. Test fixtures pass Symbol-keyed
+  # nested hashes (Ruby's idiomatic shape); the wire-level request
+  # body parser would produce String keys. Used to normalize at the
+  # harness boundary so @params has the production shape.
+  def stringify_keys(value)
+    return value unless value.is_a?(Hash)
+    out = {}
+    value.each { |k, v| out[k.to_s] = stringify_keys(v) }
+    out
   end
 
   # Symbol-form HTTP-status assertion. Real-blog tests pass `:success`,

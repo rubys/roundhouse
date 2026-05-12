@@ -31,7 +31,6 @@
 // `juntos:lifecycle` BroadcastChannel.
 
 import { Router } from "./router.js";
-import { Parameters } from "./parameters.js";
 import { Flash } from "./flash.js";
 // Note: this file is emitted to `src/server.ts` and the
 // `juntos-worker.ts` source is emitted to `src/juntos.ts` — same
@@ -438,7 +437,7 @@ async function dispatchRequest(
   let response: ActionResponse;
   try {
     const controller = new ctrlClass();
-    controller.params = new Parameters(merged);
+    controller.params = merged;
     controller.session = _sessionStore;
     controller.flash = new Flash(_flashStore);
     controller.request_method = method;
