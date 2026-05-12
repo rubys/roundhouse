@@ -290,10 +290,16 @@ start_target() {
 
     case "$target" in
         rails)
+            # `RAILS_LOG_LEVEL=${BENCH_RAILS_LOG_LEVEL:-info}` lets the
+            # operator opt into a quieter Rails (warn) to isolate the
+            # per-request log-write cost from the rest of the stack.
+            # Default is `info` — the Rails 8 production-env default —
+            # so the headline comparison reflects a stock Rails install.
             (cd "$FIXTURE" && \
                 RAILS_ENV=production \
                 RAILS_MAX_THREADS="$THREADS" \
                 WEB_CONCURRENCY="$workers" \
+                RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
                 SECRET_KEY_BASE=bench-secret-key \
                 RUBYOPT=--yjit \
                 bin/rails server -p "$port" -e production \
