@@ -36,7 +36,9 @@ use crate::dialect::{
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
-use crate::lower::controller::body::{synthesize_implicit_render, unwrap_respond_to};
+use crate::lower::controller::body::{
+    synthesize_implicit_render, unwrap_respond_to_with_format_dispatch,
+};
 
 use self::params::ParamsSpec;
 use self::process_action::synthesize_process_action;
@@ -189,6 +191,47 @@ pub fn lower_controllers_with_arel_and_views(
     }
     for (id, info) in extras {
         classes.insert(id, info);
+    }
+
+    // Jbuilder LCs (`Views::Articles.<action>_json`). The
+    // respond_to-flattener inserts Sends to these into action bodies;
+    // without them in the typing registry the body-typer leaves the
+    // calls as TyVar and the typing-residual gate trips. Registered
+    // AFTER `extras` so the existing `Views::Articles` entry (from
+    // view_to_library, with `show`/`index`/`new`/`edit`) gets the
+    // `_json` siblings merged in rather than overwritten.
+    let app_stub = crate::App::new();
+    for lc in crate::lower::lower_jbuilder_to_library_classes(views, &app_stub, Vec::new()) {
+        let info = classes.entry(lc.name.clone()).or_default();
+        for m in &lc.methods {
+            if let Some(sig) = &m.signature {
+                if matches!(m.receiver, MethodReceiver::Class) {
+                    info.class_methods.insert(m.name.clone(), sig.clone());
+                    info.class_method_kinds.insert(m.name.clone(), m.kind);
+                } else {
+                    info.instance_methods.insert(m.name.clone(), sig.clone());
+                    info.instance_method_kinds.insert(m.name.clone(), m.kind);
+                }
+            }
+        }
+        // Last-segment alias for the typer's bare-Const resolver.
+        let raw = lc.name.0.as_str();
+        let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        if last != raw {
+            let alias_id = ClassId(Symbol::from(last));
+            let entry = classes.entry(alias_id).or_default();
+            for m in &lc.methods {
+                if let Some(sig) = &m.signature {
+                    if matches!(m.receiver, MethodReceiver::Class) {
+                        entry.class_methods.insert(m.name.clone(), sig.clone());
+                        entry.class_method_kinds.insert(m.name.clone(), m.kind);
+                    } else {
+                        entry.instance_methods.insert(m.name.clone(), sig.clone());
+                        entry.instance_method_kinds.insert(m.name.clone(), m.kind);
+                    }
+                }
+            }
+        }
     }
 
     // Ivar bindings: `@params` is framework-guaranteed (the lowerer
@@ -488,6 +531,19 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("params"))
         .or_insert_with(|| fn_sig(vec![], any_hash));
+
+    // `request_format` — accessor populated by main.rb from the path's
+    // `.json` suffix sniff. Action bodies branch on `request_format ==
+    // :json` after the Jbuilder-lowerer respond_to flatten; without a
+    // signature here the body-typer leaves the bare call as TyVar.
+    // Tagged AttributeReader so per-target emit (TS getter, Rust
+    // field) treats it as a property read, not a method call.
+    info.instance_methods
+        .entry(Symbol::from("request_format"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Sym));
+    info.instance_method_kinds
+        .entry(Symbol::from("request_format"))
+        .or_insert(AccessorKind::AttributeReader);
 }
 
 /// Walk the controller body in source order, partitioning actions at
@@ -637,7 +693,7 @@ fn lower_action_body(
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     has_json_variant: bool,
 ) -> Expr {
-    let unwrapped = unwrap_respond_to(body);
+    let unwrapped = unwrap_respond_to_with_format_dispatch(body);
     let with_render = if is_public {
         let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);

@@ -586,10 +586,11 @@ fn lowered_real_blog_typing_residual() {
     let mut controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     controller_extras.extend(build_class_info_extras(&view_lcs));
-    let controller_lcs = roundhouse::lower::lower_controllers_with_arel(
+    let controller_lcs = roundhouse::lower::lower_controllers_with_arel_and_views(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
+        &app.views,
     );
 
     // Fixtures lower to ArticlesFixtures / CommentsFixtures classes;

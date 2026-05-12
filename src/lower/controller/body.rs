@@ -22,7 +22,19 @@ use crate::span::Span;
 use super::actions::resolve_before_actions;
 use super::util::{is_format_binding, unwrap_lambda};
 
-/// Flatten every `respond_to do |format| ... end` block in `expr`.
+/// Flatten every `respond_to do |format| ... end` block in `expr`
+/// into just its HTML branch — the legacy behavior used by the
+/// per-target paths (`normalize_action_body`) that don't yet know
+/// how to emit the format dispatch. Group 1 emitters (Ruby /
+/// Crystal / TS, via `lower_controllers_with_arel_and_views`) call
+/// `unwrap_respond_to_with_format_dispatch` instead, which
+/// preserves the json branch as a `request_format == :json`
+/// conditional.
+pub fn unwrap_respond_to(expr: &Expr) -> Expr {
+    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ false)
+}
+
+/// Format-dispatching variant of `unwrap_respond_to`.
 ///
 /// When both the html and json branches use the simple `render :sym`
 /// shape, the respond_to becomes an `if request_format == :json` /
@@ -44,70 +56,75 @@ use super::util::{is_format_binding, unwrap_lambda};
 /// bottom-up, and non-respond_to sub-expressions pass through their
 /// structural variants so anything already at the top level is
 /// preserved.
-pub fn unwrap_respond_to(expr: &Expr) -> Expr {
+pub fn unwrap_respond_to_with_format_dispatch(expr: &Expr) -> Expr {
+    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ true)
+}
+
+fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool) -> Expr {
     // Top-level `respond_to` with a block — replace the whole Send
-    // with its flattened HTML-only body. This short-circuits the
-    // structural recursion so we don't re-enter the respond_to's
-    // Send/Lambda children via the generic path.
+    // with its flattened body. This short-circuits the structural
+    // recursion so we don't re-enter the respond_to's Send/Lambda
+    // children via the generic path.
     if let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*expr.node {
         if method.as_str() == "respond_to" {
             let lambda_body = unwrap_lambda(block);
-            return flatten_respond_to_body(lambda_body);
+            return flatten_respond_to_body(lambda_body, with_format_dispatch);
         }
     }
+    let recurse = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch);
     let new_node = match &*expr.node {
         ExprNode::Seq { exprs } => ExprNode::Seq {
-            exprs: exprs.iter().map(unwrap_respond_to).collect(),
+            exprs: exprs.iter().map(&recurse).collect(),
         },
         ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: unwrap_respond_to(cond),
-            then_branch: unwrap_respond_to(then_branch),
-            else_branch: unwrap_respond_to(else_branch),
+            cond: recurse(cond),
+            then_branch: recurse(then_branch),
+            else_branch: recurse(else_branch),
         },
         ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(unwrap_respond_to),
+            recv: recv.as_ref().map(&recurse),
             method: method.clone(),
-            args: args.iter().map(unwrap_respond_to).collect(),
-            block: block.as_ref().map(unwrap_respond_to),
+            args: args.iter().map(&recurse).collect(),
+            block: block.as_ref().map(&recurse),
             parenthesized: *parenthesized,
         },
         ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
             op: *op,
             surface: *surface,
-            left: unwrap_respond_to(left),
-            right: unwrap_respond_to(right),
+            left: recurse(left),
+            right: recurse(right),
         },
         ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
             params: params.clone(),
             block_param: block_param.clone(),
-            body: unwrap_respond_to(body),
+            body: recurse(body),
             block_style: *block_style,
         },
         ExprNode::Assign { target, value } => {
             let new_target = match target {
                 LValue::Attr { recv, name } => LValue::Attr {
-                    recv: unwrap_respond_to(recv),
+                    recv: recurse(recv),
                     name: name.clone(),
                 },
                 LValue::Index { recv, index } => LValue::Index {
-                    recv: unwrap_respond_to(recv),
-                    index: unwrap_respond_to(index),
+                    recv: recurse(recv),
+                    index: recurse(index),
                 },
                 other => other.clone(),
             };
             ExprNode::Assign {
                 target: new_target,
-                value: unwrap_respond_to(value),
+                value: recurse(value),
             }
         }
         ExprNode::Array { elements, style } => ExprNode::Array {
-            elements: elements.iter().map(unwrap_respond_to).collect(),
+            elements: elements.iter().map(&recurse).collect(),
             style: *style,
         },
         ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
-                .map(|(k, v)| (unwrap_respond_to(k), unwrap_respond_to(v)))
+                .map(|(k, v)| (recurse(k), recurse(v)))
                 .collect(),
             kwargs: *kwargs,
         },
@@ -132,7 +149,12 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 /// shapes at this level are `Seq` (the `format.html/.json` pair) and
 /// `If` (conditional branching to different format pairs); anything
 /// else is handled via `flatten_format_pair_or_drop` directly.
-fn flatten_respond_to_body(body: &Expr) -> Expr {
+///
+/// `with_format_dispatch=false` keeps just the html branch (legacy
+/// behavior, used by Group 2 emit paths). `true` emits the
+/// `if request_format == :json; …; else; …; end` shape.
+fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool) -> Expr {
+    let recurse_outer = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch);
     match &*body.node {
         ExprNode::Seq { exprs } => {
             let mut html: Option<Expr> = None;
@@ -141,19 +163,22 @@ fn flatten_respond_to_body(body: &Expr) -> Expr {
             for e in exprs {
                 match classify_format_stmt(e) {
                     Some((fmt, branch_body)) if fmt.as_str() == "html" => {
-                        html = Some(unwrap_respond_to(&branch_body));
+                        html = Some(recurse_outer(&branch_body));
                     }
                     Some((fmt, branch_body)) if fmt.as_str() == "json" => {
                         // Only preserve simple `render :sym [, kwargs]`
                         // shapes — others fall through and effectively
                         // drop (the html branch alone covers the
-                        // response).
-                        if is_simple_render_sym(&branch_body) {
-                            json = Some(unwrap_respond_to(&branch_body));
+                        // response). Group 2 emit doesn't carry the
+                        // dispatch (its emitters don't recognize
+                        // `request_format`), so we drop unconditionally
+                        // when `with_format_dispatch=false`.
+                        if with_format_dispatch && is_simple_render_sym(&branch_body) {
+                            json = Some(recurse_outer(&branch_body));
                         }
                     }
                     Some(_) => {} // unknown format (e.g. format.xml) — drop
-                    None => other.push(unwrap_respond_to(e)),
+                    None => other.push(recurse_outer(e)),
                 }
             }
             build_format_dispatch(html, json, other, body.span)
@@ -161,21 +186,25 @@ fn flatten_respond_to_body(body: &Expr) -> Expr {
         ExprNode::If { cond, then_branch, else_branch } => Expr::new(
             body.span,
             ExprNode::If {
-                cond: unwrap_respond_to(cond),
-                then_branch: flatten_respond_to_body(then_branch),
-                else_branch: flatten_respond_to_body(else_branch),
+                cond: recurse_outer(cond),
+                then_branch: flatten_respond_to_body(then_branch, with_format_dispatch),
+                else_branch: flatten_respond_to_body(else_branch, with_format_dispatch),
             },
         ),
         // A single expression at respond_to-body scope — either a
         // lone `format.html`/`format.json`, or some unrelated shape
         // the pass leaves to the generic walker.
         _ => match classify_format_stmt(body) {
-            Some((fmt, branch_body)) if fmt.as_str() == "html" => unwrap_respond_to(&branch_body),
-            Some((fmt, branch_body)) if fmt.as_str() == "json" && is_simple_render_sym(&branch_body) => {
-                build_format_dispatch(None, Some(unwrap_respond_to(&branch_body)), Vec::new(), body.span)
+            Some((fmt, branch_body)) if fmt.as_str() == "html" => recurse_outer(&branch_body),
+            Some((fmt, branch_body))
+                if fmt.as_str() == "json"
+                    && with_format_dispatch
+                    && is_simple_render_sym(&branch_body) =>
+            {
+                build_format_dispatch(None, Some(recurse_outer(&branch_body)), Vec::new(), body.span)
             }
             Some(_) => Expr::new(body.span, ExprNode::Seq { exprs: vec![] }),
-            None => unwrap_respond_to(body),
+            None => recurse_outer(body),
         },
     }
 }
@@ -252,12 +281,16 @@ fn build_format_dispatch(
 
 /// `request_format == :<fmt>` — the predicate every dispatched action
 /// branches on. `request_format` is a Base accessor populated by the
-/// CGI driver from a path-suffix sniff (`.json` → `:json`).
+/// CGI driver from a path-suffix sniff (`.json` → `:json`). Emitted
+/// with an explicit `self` receiver so Group 2 emitters (Elixir,
+/// Python, Go, Rust) that distinguish methods from locals at the
+/// emit layer route it to the accessor rather than to a bare
+/// variable lookup.
 fn request_format_eq(span: Span, fmt: &str) -> Expr {
     let recv = Expr::new(
         span,
         ExprNode::Send {
-            recv: None,
+            recv: Some(Expr::new(span, ExprNode::SelfRef)),
             method: Symbol::from("request_format"),
             args: vec![],
             block: None,
