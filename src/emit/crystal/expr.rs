@@ -1160,10 +1160,6 @@ pub(super) fn emit_send_base(
             } else {
                 recv_s
             };
-            // DEBUG
-            if method.as_str() == "id" || method.as_str() == "title" {
-                eprintln!("DEBUG send recv={:?} method={} recv.ty={:?}", recv_s, method.as_str(), r.ty);
-            }
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
             } else if parenthesized {
