@@ -91,7 +91,7 @@ All three sub-pieces landed:
 | 0 | Audit + tag | ½ | ✅ done |
 | 1 | Skeleton `rust2` parallel orchestrator | ½-1 | ✅ done |
 | 1.5 | Base/Validations inheritance spike | 1-2 | ✅ done — Option A (trait + composition) |
-| 2 | **Transpile 6 runtime files**, dependency-ordered: inflector → errors → view_helpers → router → active_record/base → action_controller/base | 2-4 | 2/6 done (inflector + json_builder); **next** |
+| 2 | **Transpile 6 runtime files**: inflector, json_builder, action_dispatch/router, action_view/view_helpers, active_record/base, action_controller/base. errors.rb deferred (blocked on Base type during Phase 2 — now unblockable). | 2-4 | ✅ done 2026-05-12 (commits 8eb3253, 4446a3a, b6a03f0, 3f475c4) |
 | 2.5 | Cross-target lowerer + HWIA elimination — (a) validations lowerer, (b) HWIA elimination, (c) Parameters specialization confirmation | 3-5 | ✅ done 2026-05-11 |
 | 3 | Hand-written primitive runtime + abstract adapter base | 2-3 | parallel-able with 2 |
 | 4 | `framework_tests_rust` gate (8/8 target) | 1-2 | blocked on 2+3 |
