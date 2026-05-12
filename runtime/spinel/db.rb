@@ -16,6 +16,8 @@
 #   Db.step?(stmt)             — advance, returns true if a row arrived
 #   Db.column_int(stmt, i)     — read int column at zero-based index
 #   Db.column_text(stmt, i)    — read text column at zero-based index
+#   Db.column_count(stmt)      — number of columns in the prepared row
+#   Db.column_name(stmt, i)    — name of column at zero-based index
 #   Db.finalize(stmt)          — release the prepared stmt
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
@@ -48,6 +50,8 @@ module SQL
   ffi_func :sqlite3_finalize,          [:ptr],                                :int
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
+  ffi_func :sqlite3_column_count,      [:ptr],                                :int
+  ffi_func :sqlite3_column_name,       [:ptr, :int],                          :str
   ffi_func :sqlite3_errmsg,            [:ptr],                                :str
   ffi_func :sqlite3_last_insert_rowid, [:ptr],                                :long
   ffi_func :sqlite3_changes,           [:ptr],                                :int
@@ -116,6 +120,22 @@ module Db
   # in spinel's reference blog.rb FFI example.
   def self.column_text(stmt, i)
     s = SQL.sqlite3_column_text(stmt, i)
+    if s.nil?
+      ""
+    else
+      s + ""
+    end
+  end
+
+  def self.column_count(stmt)
+    SQL.sqlite3_column_count(stmt)
+  end
+
+  # libsqlite3's `sqlite3_column_name` returns a pointer owned by the
+  # stmt; force a copy by appending an empty string so the value
+  # survives the next step / finalize, mirroring `column_text`.
+  def self.column_name(stmt, i)
+    s = SQL.sqlite3_column_name(stmt, i)
     if s.nil?
       ""
     else

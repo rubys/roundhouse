@@ -1,107 +1,109 @@
-require "sqlite3"
-
-# Gem-backed sqlite adapter. Implements the contract that AR base relies
-# on: take a table name + plain values, return plain row hashes (Symbol
-# keys → primitive values). Designed so a future shell-out-to-`sqlite3`
-# adapter (under Spinel, where there's no FFI) can drop in 1:1 — no FFI
-# handles surface in the API; no prepared-statement caching is exposed;
-# no connection-pool concept leaks through.
+# Generic ActiveRecord adapter facade routed through the `Db.*` primitive
+# surface. Implements the 10-method contract that AR Base's `_adapter_*`
+# defaults call into when a model hasn't received the lowerer's Level-3
+# emit (real-blog models all do; this code path is a documented fallback).
+#
+# Same source compiles under both Db variants:
+#   - `runtime/db.rb` = `db_cruby.rb` (gem-backed) under CRuby
+#   - `runtime/db.rb` = `db.rb`       (FFI-backed) under spinel-AOT
+# No SQLite3 / FFI references appear here directly; everything goes
+# through Db.exec / Db.prepare / Db.column_*.
+#
+# SQL composition uses Db.escape_string / Db.escape_int rather than
+# placeholder bind params — the FFI shim can't construct SQLITE_TRANSIENT
+# for bind_text, so the shared contract is "inline escaped values".
 module SqliteAdapter
-  @db = nil
-
   def self.configure(database_path)
-    @db = SQLite3::Database.new(database_path)
-    @db.results_as_hash = true
+    Db.configure(database_path)
   end
 
-  def self.db
-    raise "SqliteAdapter not configured; call SqliteAdapter.configure(path) first" if @db.nil?
-    @db
-  end
-
-  def self.execute(sql, params = [])
-    rows = db.execute(sql, params)
-    rows.map { |row| symbolize_row(row) }
+  def self.execute_ddl(sql)
+    Db.exec(sql)
   end
 
   def self.all(table)
-    execute("SELECT * FROM #{table}")
+    select_rows("SELECT * FROM #{table}")
   end
 
   def self.find(table, id)
-    rows = execute("SELECT * FROM #{table} WHERE id = ? LIMIT 1", [id])
-    rows.first
+    rows = select_rows("SELECT * FROM #{table} WHERE id = #{Db.escape_int(id)} LIMIT 1")
+    rows.empty? ? nil : rows[0]
   end
 
   def self.where(table, conditions)
-    where_clause, values = build_where(conditions)
     sql = "SELECT * FROM #{table}"
-    sql += " WHERE #{where_clause}" unless where_clause.empty?
-    execute(sql, values)
+    sql += " WHERE #{build_where(conditions)}" unless conditions.empty?
+    select_rows(sql)
   end
 
   def self.count(table)
-    rows = db.execute("SELECT COUNT(*) AS n FROM #{table}")
-    rows.first["n"].to_i
+    stmt = Db.prepare("SELECT COUNT(*) FROM #{table}")
+    n = Db.step?(stmt) ? Db.column_int(stmt, 0) : 0
+    Db.finalize(stmt)
+    n
   end
 
   def self.exists?(table, id)
-    rows = db.execute("SELECT 1 FROM #{table} WHERE id = ? LIMIT 1", [id])
-    !rows.empty?
+    stmt = Db.prepare("SELECT 1 FROM #{table} WHERE id = #{Db.escape_int(id)} LIMIT 1")
+    found = Db.step?(stmt)
+    Db.finalize(stmt)
+    found
   end
 
   def self.insert(table, attrs)
     cols = attrs.keys
-    placeholders = cols.map { "?" }.join(", ")
-    sql = "INSERT INTO #{table} (#{cols.join(", ")}) VALUES (#{placeholders})"
-    db.execute(sql, attrs.values)
-    db.last_insert_row_id
+    values = cols.map { |k| escape_value(attrs[k]) }
+    sql = "INSERT INTO #{table} (#{cols.join(", ")}) VALUES (#{values.join(", ")})"
+    Db.exec(sql)
+    Db.last_insert_rowid
   end
 
   def self.update(table, id, attrs)
-    assigns = attrs.keys.map { |k| "#{k} = ?" }.join(", ")
-    sql = "UPDATE #{table} SET #{assigns} WHERE id = ?"
-    db.execute(sql, attrs.values + [id])
+    assigns = attrs.keys.map { |k| "#{k} = #{escape_value(attrs[k])}" }
+    sql = "UPDATE #{table} SET #{assigns.join(", ")} WHERE id = #{Db.escape_int(id)}"
+    Db.exec(sql)
   end
 
   def self.delete(table, id)
-    db.execute("DELETE FROM #{table} WHERE id = ?", [id])
+    Db.exec("DELETE FROM #{table} WHERE id = #{Db.escape_int(id)}")
   end
 
   # Adapter-agnostic table reset (test setup). Issues both the row
   # delete and the autoincrement-counter reset so subsequent inserts
   # start from id=1.
   def self.truncate(table)
-    db.execute("DELETE FROM #{table}")
-    db.execute("DELETE FROM sqlite_sequence WHERE name = ?", [table])
+    Db.exec("DELETE FROM #{table}")
+    Db.exec("DELETE FROM sqlite_sequence WHERE name = #{Db.escape_string(table)}")
   end
 
-  def self.execute_ddl(sql)
-    db.execute_batch(sql)
-  end
-
-  # Internal: SQLite3::Database with results_as_hash=true returns rows
-  # carrying both string keys and integer indexes; strip to string-keyed
-  # hashes before handing back. (Was symbol-keyed; switched to String
-  # to match the Crystal/TS adapter shape — Crystal can't dynamically
-  # create Symbols at runtime, and the IR's `<Model>Row.from_raw`
-  # boundary now uses String keys uniformly.)
-  def self.symbolize_row(row)
-    out = {}
-    row.each do |key, val|
-      out[key] = val if key.is_a?(String)
+  # Internal helpers — walk a prepared statement and build a row hash
+  # keyed by column name. Values are read as text uniformly; numeric
+  # coercion is the caller's responsibility (the per-model
+  # assign_from_row chains a String-keyed Hash through typed slot
+  # writes, where the model layer owns the type). Each row is its own
+  # Hash so the caller gets a stable copy after `finalize`.
+  def self.select_rows(sql)
+    stmt = Db.prepare(sql)
+    rows = []
+    ncols = Db.column_count(stmt)
+    while Db.step?(stmt)
+      row = {}
+      i = 0
+      while i < ncols
+        row[Db.column_name(stmt, i)] = Db.column_text(stmt, i)
+        i += 1
+      end
+      rows << row
     end
-    out
+    Db.finalize(stmt)
+    rows
   end
 
   def self.build_where(conditions)
-    return ["", []] if conditions.empty?
-    clauses = []
-    values = []
-    conditions.each do |key, val|
-      clauses << "#{key} = ?"
-      values << val
-    end
-    [clauses.join(" AND "), values]
+    conditions.map { |k, v| "#{k} = #{escape_value(v)}" }.join(" AND ")
+  end
+
+  def self.escape_value(v)
+    v.is_a?(Integer) ? Db.escape_int(v) : Db.escape_string(v)
   end
 end

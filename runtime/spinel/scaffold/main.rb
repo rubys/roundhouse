@@ -195,17 +195,12 @@ module Main
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
     path = (!db_path.nil? && !db_path.empty?) ? db_path : ":memory:"
-    # Db (the primitive surface backing lowerer-emitted `_adapter_*`)
-    # and SqliteAdapter (the legacy dispatcher path) each open their
-    # own sqlite handle. For file paths both handles see the same
-    # schema once SqliteAdapter applies the DDL. For `:memory:` each
-    # handle has its own private in-memory DB, so the schema must be
-    # applied to both.
-    Db.configure(path)
+    # SqliteAdapter.configure delegates to Db.configure (single shared
+    # connection); both the legacy AR-adapter dispatch path and the
+    # Level-3 lowerer-emitted `_adapter_*` path read through one handle.
     SqliteAdapter.configure(path)
     ActiveRecord.adapter = SqliteAdapter
     Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
-    Schema.statements.each { |sql| Db.exec(sql) } if path == ":memory:"
   end
 end
 

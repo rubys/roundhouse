@@ -14,6 +14,8 @@
 #   Db.step?(stmt)             — advance, returns true if a row arrived
 #   Db.column_int(stmt, i)     — read int column at zero-based index
 #   Db.column_text(stmt, i)    — read text column at zero-based index
+#   Db.column_count(stmt)      — number of columns in the prepared row
+#   Db.column_name(stmt, i)    — name of column at zero-based index
 #   Db.finalize(stmt)          — release the prepared stmt
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
@@ -74,6 +76,14 @@ module Db
   def self.column_text(stmt_id, i)
     v = @rows[stmt_id][:row][i]
     v.nil? ? "" : v.to_s
+  end
+
+  def self.column_count(stmt_id)
+    @rows[stmt_id][:stmt].columns.length
+  end
+
+  def self.column_name(stmt_id, i)
+    @rows[stmt_id][:stmt].columns[i]
   end
 
   def self.finalize(stmt_id)
