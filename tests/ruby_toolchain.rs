@@ -99,6 +99,7 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "action_controller.rb",
         "action_dispatch.rb",
         "inflector.rb",
+        "json_builder.rb",
     ] {
         std::fs::copy(
             runtime_ruby.join(entry),

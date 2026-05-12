@@ -30,8 +30,8 @@ module ActionController
   # case (since spinel forbids `send` with non-literal symbols, the
   # action dispatch has to be explicit per-controller).
   class Base
-    attr_accessor :params, :session, :flash, :request_method, :request_path
-    attr_reader   :status, :body, :location
+    attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
+    attr_reader   :status, :body, :location, :content_type
 
     def initialize
       @params  = ActionController::Parameters.new({})
@@ -40,6 +40,8 @@ module ActionController
       @status  = 200
       @body    = ""
       @location = nil
+      @request_format = :html
+      @content_type = "text/html; charset=utf-8"
     end
 
     # Subclasses override. Error message omits `self.class.name` —
@@ -49,14 +51,15 @@ module ActionController
       raise NotImplementedError, "process_action must be overridden by subclass"
     end
 
-    # Render an HTML response. Two argument shapes accepted:
-    #   render(html_string, status: 200)
-    #   render(status: 422)   — re-renders the implicit action; not used
-    #                           in spinel-blog because actions render
-    #                           their views explicitly.
-    def render(html, status: 200)
-      @body   = html
+    # Render a response. The `content_type` kwarg defaults to the
+    # current `@content_type` (`text/html; charset=utf-8` on init).
+    # Jbuilder-lowered actions pass `content_type: "application/json"`
+    # on the JSON branch; the html branch omits it and rides the
+    # default.
+    def render(body, status: 200, content_type: nil)
+      @body   = body
       @status = resolve_status(status)
+      @content_type = content_type unless content_type.nil?
       nil
     end
 

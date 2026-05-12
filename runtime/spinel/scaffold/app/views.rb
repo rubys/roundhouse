@@ -11,3 +11,12 @@ require_relative "views/articles/show"
 require_relative "views/articles/new"
 require_relative "views/articles/edit"
 require_relative "views/layouts/application"
+
+# Jbuilder-lowered renderers (Phase-3 jbuilder_to_library output).
+# Each `_json.rb` reopens the same `Views::<Plural>` module its html
+# sibling defines, adding `<base>_json(arg)` methods that return a
+# JSON string. The controller side dispatches to these via Phase-8
+# `format.json { render :show }` plumbing (in flight).
+require_relative "views/articles/_article_json"
+require_relative "views/articles/index_json"
+require_relative "views/articles/show_json"

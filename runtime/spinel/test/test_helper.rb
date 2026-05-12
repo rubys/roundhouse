@@ -18,6 +18,7 @@ require_relative "../runtime/active_record"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"
 require_relative "../runtime/action_controller"
+require_relative "../runtime/json_builder"
 
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3

@@ -245,6 +245,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut view_lcs = crate::lower::lower_views_to_library_classes(
         &app.views,
         app,
+        view_lower_extras.clone(),
+    );
+    let jbuilder_lcs = crate::lower::lower_jbuilder_to_library_classes(
+        &app.views,
+        app,
         view_lower_extras,
     );
 
@@ -252,10 +257,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     controller_extras.extend(library::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
-    let mut controller_lcs = crate::lower::lower_controllers_with_arel(
+    let mut controller_lcs = crate::lower::lower_controllers_with_arel_and_views(
         &app.controllers,
         controller_extras.clone(),
         Some(&app.schema),
+        &app.views,
     );
 
     let mut fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
@@ -759,12 +765,39 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // parallel registry. The class-vs-function choice is purely an
     // emit-side surface decision.
     let view_funcs = crate::lower::flatten_lcs_to_functions(&view_lcs);
-    for (view, func) in app.views.iter().zip(view_funcs.iter()) {
+    let html_views: Vec<&crate::dialect::View> =
+        app.views.iter().filter(|v| v.format.as_str() == "html").collect();
+    for (view, func) in html_views.iter().zip(view_funcs.iter()) {
         let out_path = view_output_path(view.name.as_str());
         files.push(library::emit_function_file(func, app, out_path));
     }
-    if !view_funcs.is_empty() {
-        files.push(library::emit_views_aggregator(&app.views, &view_funcs));
+
+    // Jbuilder (json-format) views — emitted to `<base>_json.ts` so
+    // they sit alongside the html sibling without colliding. The
+    // `JsonBuilder.encode_value` helper transpiles automatically via
+    // the runtime_loader manifest.
+    let jbuilder_funcs = crate::lower::flatten_lcs_to_functions(&jbuilder_lcs);
+    let json_views: Vec<&crate::dialect::View> =
+        app.views.iter().filter(|v| v.format.as_str() == "json").collect();
+    for (view, func) in json_views.iter().zip(jbuilder_funcs.iter()) {
+        let out_path = jbuilder_view_output_path(view.name.as_str());
+        files.push(library::emit_function_file(func, app, out_path));
+    }
+
+    if !view_funcs.is_empty() || !jbuilder_funcs.is_empty() {
+        let mut all_funcs = view_funcs.clone();
+        all_funcs.extend(jbuilder_funcs.iter().cloned());
+        let mut all_views: Vec<crate::dialect::View> =
+            html_views.iter().map(|v| (*v).clone()).collect();
+        for v in &json_views {
+            let mut clone: crate::dialect::View = (*v).clone();
+            // The aggregator keys output paths off the view name —
+            // append `_json` here so the aggregator references the
+            // `<base>_json.ts` file we just emitted.
+            clone.name = crate::ident::Symbol::from(format!("{}_json", v.name.as_str()));
+            all_views.push(clone);
+        }
+        files.push(library::emit_views_aggregator(&all_views, &all_funcs));
     }
 
     // Synthesized `<Resource>Params` classes ride in `controller_lcs`
@@ -1155,6 +1188,13 @@ export default defineConfig({
 /// `layouts/application`) to the output path under `app/views/`.
 fn view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("app/views/{view_name}.ts"))
+}
+
+/// Jbuilder counterpart: `articles/_article` → `app/views/articles/
+/// _article_json.ts`. Matches the lowered method name (`article_json`)
+/// and keeps the html sibling's file slot free.
+fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
+    PathBuf::from(format!("app/views/{view_name}_json.ts"))
 }
 
 /// `ArticleTest` → `article` (strip Test suffix, snake_case). Used

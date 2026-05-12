@@ -23,12 +23,15 @@ module ActionController
     def request_method=: (String) -> String
     def request_path: () -> String
     def request_path=: (String) -> String
+    def request_format: () -> Symbol
+    def request_format=: (Symbol) -> Symbol
 
     # `attr_reader` — getter only. Setters are internal (assigned via
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
     def status: () -> Integer
     def body: () -> String
     def location: () -> String?
+    def content_type: () -> String
 
     def initialize: () -> void
 
@@ -39,9 +42,9 @@ module ActionController
     %a{abstract}
     def process_action: (Symbol _action_name) -> void
 
-    # `render(html_string, status: 200)` — sets @body, @status. Returns
-    # nil per Rails convention (callers ignore the result).
-    def render: (String html, ?status: untyped) -> void
+    # `render(body, status:, content_type:)` — sets @body, @status,
+    # and optionally @content_type. Returns nil per Rails convention.
+    def render: (String body, ?status: untyped, ?content_type: String?) -> void
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
     # @status, @flash entries. `status` accepts Symbol or Integer

@@ -131,7 +131,7 @@ fn has_toplevel_terminal_rejects_plain_assign() {
 fn synthesize_implicit_render_appends_when_missing() {
     // Body without a terminal gets `render :action_name` appended.
     let body = lit_int(42);
-    let out = synthesize_implicit_render(&body, "show");
+    let out = synthesize_implicit_render(&body, "show", false);
     assert!(last_send_is(&out, "render"), "expected render terminal; got shape: {:#?}", out.node);
     // Seq preserves the original expr as the first statement.
     let ExprNode::Seq { exprs } = &*out.node else {
@@ -144,7 +144,7 @@ fn synthesize_implicit_render_appends_when_missing() {
 fn synthesize_implicit_render_is_noop_when_terminal_present() {
     // Body already terminates — pass returns a clone, not a double-render.
     let body = send(None, "render", vec![lit_int(1)]);
-    let out = synthesize_implicit_render(&body, "show");
+    let out = synthesize_implicit_render(&body, "show", false);
     // No Seq wrapping — the original Send shape is preserved.
     assert!(
         matches!(&*out.node, ExprNode::Send { .. }),
@@ -464,7 +464,7 @@ fn synthesize_implicit_render_uses_action_name_as_view_symbol() {
     // Verifies the appended Send's first arg is a symbol literal
     // matching the action name.
     let body = lit_int(42);
-    let out = synthesize_implicit_render(&body, "headline");
+    let out = synthesize_implicit_render(&body, "headline", false);
     let ExprNode::Seq { exprs } = &*out.node else { panic!() };
     let tail = exprs.last().unwrap();
     let ExprNode::Send { args, .. } = &*tail.node else { panic!() };

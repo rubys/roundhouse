@@ -61,8 +61,13 @@ pub fn lower_views_to_library_classes(
     // Build LibraryClasses (with method signatures populated) but
     // *skip* the per-view internal body-typing pass — we'll do it
     // below with the merged registry.
+    //
+    // Only ERB (html-format) views go through this path. Jbuilder
+    // (json-format) views are lowered by `jbuilder_to_library`,
+    // which produces `<name>_json` methods on the same view module.
     let mut lcs: Vec<LibraryClass> = views
         .iter()
+        .filter(|v| v.format.as_str() == "html")
         .map(|v| build_library_class(v, app, /*type_body=*/ false))
         .collect();
 
@@ -484,6 +489,25 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut inf);
     classes.insert(ClassId(Symbol::from("Inflector")), inf);
 
+    // JsonBuilder — encode_value / encode_string. Used by lowered
+    // `*.json.jbuilder` templates (see `jbuilder_to_library`). Both
+    // return String; encode_value takes Untyped because it dispatches
+    // on the dynamic value type at runtime.
+    let mut jb = crate::analyze::ClassInfo::default();
+    jb.class_methods.insert(
+        Symbol::from("encode_value"),
+        fn_sig(vec![(Symbol::from("v"), Ty::Untyped)], Ty::Str),
+    );
+    jb.class_methods.insert(
+        Symbol::from("encode_string"),
+        fn_sig(
+            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
+    tag_all_method(&mut jb);
+    classes.insert(ClassId(Symbol::from("JsonBuilder")), jb);
+
     // Db — primitive surface the per-model `_adapter_*` Level-3
     // emit calls into. Backend-agnostic (sqlite via cruby gem here,
     // spinel-FFI sqlite planned, postgres/etc. siblings later); every
@@ -893,14 +917,14 @@ pub(crate) fn insert_framework_stubs(
 
 // ── view-name → module / arg / method helpers ────────────────────
 
-fn split_view_name(name: &str) -> (&str, &str) {
+pub(crate) fn split_view_name(name: &str) -> (&str, &str) {
     name.rsplit_once('/').unwrap_or(("", name))
 }
 
 /// Module the view's method lives under: `Views::Articles` for an
 /// `articles/...` view. Empty `dir` (uncommon — top-level view) maps
 /// to the bare `Views` module.
-fn view_module_id(dir: &str) -> ClassId {
+pub(crate) fn view_module_id(dir: &str) -> ClassId {
     if dir.is_empty() {
         return ClassId(Symbol::from("Views"));
     }
@@ -955,7 +979,7 @@ fn type_method_body(method: &mut MethodDef) {
 /// `articles.empty?` resolves to Array's `.empty?` dispatch and
 /// renders correctly per-target). Without this, params come through
 /// as `Ty::Untyped` and emit-side type-aware dispatch falls through.
-fn build_view_signature(
+pub(crate) fn build_view_signature(
     stem: &str,
     dir: &str,
     is_partial: bool,
@@ -1028,7 +1052,7 @@ fn build_view_signature(
     })
 }
 
-fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
+pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
     if dir.is_empty() {
         return String::new();
     }

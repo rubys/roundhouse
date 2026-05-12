@@ -115,6 +115,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
 /// — every framework Ruby file roundhouse has today.
 const RUNTIME_PAIRS: &[(&str, &str)] = &[
     ("runtime/ruby/inflector.rb", "runtime/ruby/inflector.rbs"),
+    ("runtime/ruby/json_builder.rb", "runtime/ruby/json_builder.rbs"),
     ("runtime/ruby/active_record/errors.rb", "runtime/ruby/active_record/errors.rbs"),
     ("runtime/ruby/active_record/validations.rb", "runtime/ruby/active_record/validations.rbs"),
     ("runtime/ruby/active_record/base.rb", "runtime/ruby/active_record/base.rbs"),

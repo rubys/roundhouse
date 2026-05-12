@@ -843,6 +843,7 @@ fn render_imports_with_companions(
     let mut views_import: bool = false;
     let mut view_helpers_import: bool = false;
     let mut inflector_import: bool = false;
+    let mut json_builder_import: bool = false;
     let mut broadcasts_import: bool = false;
     let mut importmap_import: bool = false;
 
@@ -901,6 +902,11 @@ fn render_imports_with_companions(
             // (`Inflector.pluralize(...)`); import as `* as Inflector`
             // from `src/inflector.ts`.
             inflector_import = true;
+        } else if r == "JsonBuilder" {
+            // Same shape as Inflector — Module-mode runtime helper at
+            // `src/json_builder.ts`. Jbuilder-lowered view bodies use
+            // `JsonBuilder.encode_value(...)` namespace access.
+            json_builder_import = true;
         } else if r == "Broadcasts" {
             // Broadcasts shim — model after_create/update/destroy
             // bodies call `Broadcasts.prepend({...})` etc. The runtime
@@ -1081,6 +1087,10 @@ fn render_imports_with_companions(
         // so call sites stay `Inflector.pluralize(...)` etc.
         let import_path = relative_to_root(out_path, "src/inflector.js");
         writeln!(s, "import * as Inflector from \"{import_path}\";").unwrap();
+    }
+    if json_builder_import {
+        let import_path = relative_to_root(out_path, "src/json_builder.js");
+        writeln!(s, "import * as JsonBuilder from \"{import_path}\";").unwrap();
     }
     if broadcasts_import {
         let import_path = relative_to_root(out_path, "src/broadcasts.js");

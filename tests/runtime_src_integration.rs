@@ -710,7 +710,11 @@ fn every_runtime_method_body_concretely_typed() {
     // 2026-05-11 Phase 2.5(b) follow-up: HWIA source deleted (no
     // live require sites), dropping its 26 untyped contributions;
     // ceiling lowered 210 → 180 to lock in the gain.
-    const CEILING: usize = 180;
+    // 2026-05-11 Jbuilder Phase 2: json_builder.rb's encode_value
+    // dispatches on `untyped` by design (JSON entry point); +7
+    // untyped sites at the chained `v.is_a?(...)` / `v.to_s` calls;
+    // ceiling raised 180 → 190.
+    const CEILING: usize = 190;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

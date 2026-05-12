@@ -64,27 +64,34 @@ rather than N hand-written per-target Jbuilder DSL implementations.
 Total: **~5-8 working days** for full five-target consumption, or
 **~3-4 working days** if trimmed to Ruby + Spinel only (Phases 0-4 + 8).
 
-## Reference fixtures (railsbench, lock at Phase 0)
+## Reference fixtures (lock at Phase 0)
 
-`~/git/ruby-bench/benchmarks/railsbench/app/views/posts/` ships:
+v1 validates against `fixtures/real-blog/app/views/articles/`, which
+already ships the same three-template surface (articles instead of
+posts; no `:published` column otherwise byte-equivalent to railsbench):
 
 ```ruby
-# _post.json.jbuilder
-json.extract! post, :id, :title, :body, :published, :created_at, :updated_at
-json.url post_url(post, format: :json)
+# _article.json.jbuilder
+json.extract! article, :id, :title, :body, :created_at, :updated_at
+json.url article_url(article, format: :json)
 ```
 
 ```ruby
 # index.json.jbuilder
-json.array! @posts, partial: "posts/post", as: :post
+json.array! @articles, partial: "articles/article", as: :article
 ```
 
 ```ruby
 # show.json.jbuilder
-json.partial! "posts/post", post: @post
+json.partial! "articles/article", article: @article
 ```
 
-These three templates exercise the four primitives the lowerer must
+The railsbench triple at
+`~/git/ruby-bench/benchmarks/railsbench/app/views/posts/*.json.jbuilder`
+exercises the identical four primitives and is a follow-on benchmark
+target (no additional lowerer work expected — same DSL).
+
+These templates exercise the four primitives the lowerer must
 handle:
 
 1. `json.extract! obj, :a, :b, :c` → emit a JSON object of the named
@@ -257,10 +264,9 @@ all four methods return `String`.
 
 ### Phase 4 — Ruby + Spinel verification (½-1 day)
 
-- Add railsbench's three Jbuilder templates as a roundhouse fixture
-  (smallest model + controller scaffold that renders both `index.json`
-  and `show.json`). Likely fits inside `tests/fixtures/json_blog/`
-  or extends `tests/fixtures/blog/` with `.json.jbuilder` siblings.
+- Use `fixtures/real-blog/`'s existing three Jbuilder templates
+  (already render `index.json` and `show.json` against the articles
+  controller — no new fixture dir needed).
 - Drive a roundhouse build through `make ruby-transpile`; verify
   byte output of `index.json` and `show.json` against a Rails
   reference rendering of the same data (Rails dev server one-shot).

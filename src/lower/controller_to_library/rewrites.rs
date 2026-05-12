@@ -47,6 +47,21 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
                 ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
                 _ => return None,
             };
+            // Peek at the trailing kwarg-Hash for a `format: :json`
+            // marker that the respond_to flattener planted. If
+            // present, route to `<sym>_json` view and tag the outer
+            // render with `content_type: "application/json"`. The
+            // marker drops out of the rewritten kwargs so it doesn't
+            // leak past the lowerer.
+            let json_format = render_kwargs_have_format(args, "json");
+            let (view_method, content_type) = if json_format {
+                (
+                    Symbol::from(format!("{}_json", view_method.as_str())),
+                    Some("application/json"),
+                )
+            } else {
+                (view_method, None)
+            };
             let mut view_args: Vec<Expr> = ivars
                 .iter()
                 .map(|n| ivar(n.as_str(), e.span))
@@ -58,8 +73,14 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
             // render flash messages receive them. Views that don't
             // reference flash get unused-local args — harmless under
             // any target's emit.
-            view_args.push(flash_lookup(e.span, "notice"));
-            view_args.push(flash_lookup(e.span, "alert"));
+            //
+            // The jbuilder lowerer does NOT plumb flash extras (json
+            // templates never reference notice/alert), so for the
+            // `_json` view variant we pass just the ivars.
+            if !json_format {
+                view_args.push(flash_lookup(e.span, "notice"));
+                view_args.push(flash_lookup(e.span, "alert"));
+            }
             let view_call = Expr::new(
                 e.span,
                 ExprNode::Send {
@@ -71,7 +92,16 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
                 },
             );
             let mut new_args = vec![view_call];
-            new_args.extend(args.iter().skip(1).cloned());
+            let rest: Vec<Expr> = args
+                .iter()
+                .skip(1)
+                .cloned()
+                .filter_map(|a| strip_format_kwarg(&a))
+                .collect();
+            new_args.extend(rest);
+            if let Some(ct) = content_type {
+                merge_or_append_kwarg(&mut new_args, "content_type", ct, e.span);
+            }
             Some(Expr::new(
                 e.span,
                 ExprNode::Send {
@@ -85,6 +115,100 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
         }
         _ => None,
     })
+}
+
+/// True when render's args have a trailing kwarg-Hash whose `format:`
+/// entry is `:<fmt>`. The marker is planted by the respond_to
+/// flattener for the json branch only — html renders never have it.
+fn render_kwargs_have_format(args: &[Expr], fmt: &str) -> bool {
+    let Some(last) = args.last() else { return false };
+    let ExprNode::Hash { entries, kwargs: true } = &*last.node else {
+        return false;
+    };
+    entries.iter().any(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "format")
+            && matches!(&*v.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == fmt)
+    })
+}
+
+/// Drop the `format:` (and `location:`) entries from a trailing
+/// kwarg-Hash on a render call. `format:` is the dispatch marker
+/// the respond_to flattener planted; it's consumed at lower time
+/// and shouldn't leak to the runtime. `location:` is Rails-specific
+/// (sets the Location header on a 201 JSON response) — our runtime's
+/// render signature doesn't carry it; dropping is the v1 compromise.
+/// Returns `Some(stripped)` if the Hash still has entries, `None` if
+/// the strip left it empty (caller drops the now-empty Hash).
+fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
+    if let ExprNode::Hash { entries, kwargs: true } = &*arg.node {
+        let kept: Vec<(Expr, Expr)> = entries
+            .iter()
+            .filter(|(k, _)| {
+                !matches!(
+                    &*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if value.as_str() == "format" || value.as_str() == "location"
+                )
+            })
+            .cloned()
+            .collect();
+        if kept.is_empty() {
+            return None;
+        }
+        return Some(Expr::new(
+            arg.span,
+            ExprNode::Hash {
+                entries: kept,
+                kwargs: true,
+            },
+        ));
+    }
+    Some(arg.clone())
+}
+
+/// Merge a single `key: <str-value>` entry into the trailing
+/// kwarg-Hash of `args`. If args already ends with a kwarg Hash,
+/// append the entry to it; otherwise push a fresh kwarg Hash with
+/// just this entry. The runtime's `render(body, status:, content_type:)`
+/// expects ONE kwargs hash, not multiple.
+fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Span) {
+    let key_node = Expr::new(
+        span,
+        ExprNode::Lit {
+            value: Literal::Sym {
+                value: Symbol::from(key),
+            },
+        },
+    );
+    let val_node = Expr::new(
+        span,
+        ExprNode::Lit {
+            value: Literal::Str {
+                value: value.to_string(),
+            },
+        },
+    );
+    if let Some(last) = args.last_mut() {
+        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+            let mut new_entries = entries.clone();
+            new_entries.push((key_node, val_node));
+            *last = Expr::new(
+                last.span,
+                ExprNode::Hash {
+                    entries: new_entries,
+                    kwargs: true,
+                },
+            );
+            return;
+        }
+    }
+    args.push(Expr::new(
+        span,
+        ExprNode::Hash {
+            entries: vec![(key_node, val_node)],
+            kwargs: true,
+        },
+    ));
 }
 
 // ---------------------------------------------------------------------------

@@ -258,12 +258,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // Re-lower views with the model registry so view bodies dispatch
     // models correctly (`@article.title` etc.). Used both to emit the
     // view classes (below) AND to feed the controller lowerer's
-    // class registry.
+    // class registry. Html-only — jbuilder (json-format) views go
+    // through `lower_jbuilder_to_library_classes` below.
     let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     view_lower_extras.extend(route_helper_extras.clone());
     let view_lcs =
-        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras);
+        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras.clone());
+    let jbuilder_lcs =
+        crate::lower::lower_jbuilder_to_library_classes(&app.views, app, view_lower_extras);
 
     // Controllers → src/controllers/<stem>.cr; synthesized
     // `<Resource>Params` siblings route to src/models/.
@@ -271,8 +274,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
-    let controller_lcs =
-        crate::lower::lower_controllers_with_arel(&app.controllers, controller_extras, Some(&app.schema));
+    let controller_lcs = crate::lower::lower_controllers_with_arel_and_views(
+        &app.controllers,
+        controller_extras,
+        Some(&app.schema),
+        &app.views,
+    );
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()
         .filter(|lc| lc.origin.is_some())
@@ -300,10 +307,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // Views → src/views/<dir>/<base>.cr (one per template; partials
     // keep their leading underscore). `view_lcs` was lowered above
     // with the model registry so each view body's model dispatches
-    // type. Pair them with the corresponding `View` so we get the
-    // right output path.
-    for (v, lc) in app.views.iter().zip(view_lcs.iter()) {
+    // type. Pair them with the corresponding html-format `View` so we
+    // get the right output path; jbuilder (json) views fan out in the
+    // companion loop below.
+    let html_views: Vec<&crate::dialect::View> =
+        app.views.iter().filter(|v| v.format.as_str() == "html").collect();
+    for (v, lc) in html_views.iter().zip(view_lcs.iter()) {
         let out_path = view_output_path(v.name.as_str());
+        files.push(library::emit_library_class_decl(lc, app, out_path));
+    }
+
+    // Jbuilder views → src/views/<dir>/<base>_json.cr. Reopens the
+    // same `Views::<Plural>` module its html sibling defines, adding
+    // `<base>_json(arg)` methods returning a JSON string. The `_json`
+    // suffix prevents path collision with the html sibling.
+    let json_views: Vec<&crate::dialect::View> =
+        app.views.iter().filter(|v| v.format.as_str() == "json").collect();
+    for (v, lc) in json_views.iter().zip(jbuilder_lcs.iter()) {
+        let out_path = jbuilder_view_output_path(v.name.as_str());
         files.push(library::emit_library_class_decl(lc, app, out_path));
     }
 
@@ -649,4 +670,11 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
 /// `layouts/application`) to the Crystal output path under `src/views/`.
 fn view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("src/views/{view_name}.cr"))
+}
+
+/// Jbuilder counterpart: `articles/_article` → `src/views/articles/
+/// _article_json.cr`. Matches the lowered method name (`article_json`)
+/// and keeps the html sibling's file slot free.
+fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
+    PathBuf::from(format!("src/views/{view_name}_json.cr"))
 }

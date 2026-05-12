@@ -38,6 +38,11 @@ require_relative "runtime/db"
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
 require_relative "runtime/json"
+# JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
+# emits calls to (`Views::Articles.article_json` etc.). Separate from
+# `runtime/json.rb`'s `JSON.generate` shim: this module exposes
+# `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
+require_relative "runtime/json_builder"
 require_relative "runtime/importmap"
 require_relative "runtime/active_record"
 require_relative "config/schema"
@@ -75,11 +80,23 @@ module Main
     Broadcasts.reset_log!
 
     request = CgiIo.parse_request(env, stdin)
+    # Per-request format inference. Strip a `.json` suffix from the
+    # request path before route matching (so `/articles/1.json` and
+    # `/articles/1` share one route entry) and remember the format
+    # so the controller's `respond_to`-flattened branch can pick the
+    # right view + Content-Type. Default html for any unrecognized
+    # extension.
+    request_format = :html
+    request_path = request[:path]
+    if request_path.end_with?(".json")
+      request_format = :json
+      request_path = request_path[0...-5]
+    end
     # Prepend ROOT so a GET / request matches before falling through
     # to TABLE. ROOT is kept as a separate constant in routes.rb for
     # legibility (it's the only literal-pattern entry); the dispatch
     # composes them here so Router.match stays a flat-table walk.
-    matched = ActionDispatch::Router.match(request[:method], request[:path],
+    matched = ActionDispatch::Router.match(request[:method], request_path,
                            [Routes.root] + Routes.table)
     if matched.nil?
       CgiIo.write_response(stdout, 404, "<h1>404 Not Found</h1>")
@@ -103,6 +120,7 @@ module Main
 
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
+    controller.request_format = request_format
 
     begin
       controller.process_action(matched[:action])
@@ -119,8 +137,17 @@ module Main
     if controller.location.nil?
       out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
       out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
-      page = Views::Layouts.application(controller.body)
-      CgiIo.write_response(stdout, controller.status, page, set_cookies: out_cookies)
+      # JSON responses skip the html layout wrap and ship the
+      # controller body verbatim with the JSON Content-Type. Other
+      # formats ride the application layout.
+      if controller.request_format == :json
+        CgiIo.write_response(stdout, controller.status, controller.body,
+          content_type: controller.content_type,
+          set_cookies: out_cookies)
+      else
+        page = Views::Layouts.application(controller.body)
+        CgiIo.write_response(stdout, controller.status, page, set_cookies: out_cookies)
+      end
     else
       out_cookies[:flash_notice] = controller.flash[:notice] unless controller.flash[:notice].nil?
       out_cookies[:flash_alert]  = controller.flash[:alert]  unless controller.flash[:alert].nil?

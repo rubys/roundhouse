@@ -19,6 +19,7 @@ use crate::vfs::{FsVfs, MapVfs, Vfs};
 use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
+use super::jbuilder::ingest_jbuilder;
 use super::library_class::{ClassKind, classify_class_file, ingest_library_class};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
@@ -99,6 +100,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     message: "view path outside views dir".into(),
                 })?;
             let view = ingest_view(&source, rel, &erb_path.display().to_string())?;
+            app.views.push(view);
+        }
+
+        let jbuilder_files = read_jbuilder_files(vfs, &views_dir)?;
+        for jb_path in jbuilder_files {
+            let source = vfs.read_to_string(&jb_path)?;
+            let rel = jb_path
+                .strip_prefix(&views_dir)
+                .map_err(|_| IngestError::Unsupported {
+                    file: jb_path.display().to_string(),
+                    message: "view path outside views dir".into(),
+                })?;
+            let view = ingest_jbuilder(&source, rel, &jb_path.display().to_string())?;
             app.views.push(view);
         }
     }
@@ -402,6 +416,28 @@ fn walk_erb<V: Vfs + ?Sized>(
             if path_str.ends_with(".html.erb") {
                 out.push(path);
             }
+        }
+    }
+    Ok(())
+}
+
+fn read_jbuilder_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    walk_jbuilder(vfs, dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn walk_jbuilder<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> IngestResult<()> {
+    for path in vfs.read_dir(dir)? {
+        if vfs.is_dir(&path) {
+            walk_jbuilder(vfs, &path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jbuilder") {
+            out.push(path);
         }
     }
     Ok(())

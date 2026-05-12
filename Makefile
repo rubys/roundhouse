@@ -77,7 +77,8 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
-	      runtime/ruby/inflector.rb $(RUBY_OUT)/runtime/
+	      runtime/ruby/inflector.rb runtime/ruby/json_builder.rb \
+	      $(RUBY_OUT)/runtime/
 	cp runtime/spinel/*.rb $(RUBY_OUT)/runtime/
 	cargo run --release --bin build-site -- fixtures/real-blog $(RUBY_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
@@ -141,7 +142,8 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	      runtime/ruby/action_dispatch \
 	      runtime/ruby/active_record.rb runtime/ruby/action_view.rb \
 	      runtime/ruby/action_controller.rb runtime/ruby/action_dispatch.rb \
-	      runtime/ruby/inflector.rb $(SPINEL_OUT)/runtime/
+	      runtime/ruby/inflector.rb runtime/ruby/json_builder.rb \
+	      $(SPINEL_OUT)/runtime/
 	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
 	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \

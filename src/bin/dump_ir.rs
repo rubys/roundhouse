@@ -40,6 +40,14 @@
 //!   has-method:NAME   — only nodes whose subtree calls a Send named
 //!                       NAME (any receiver).
 //!
+//! Raw-view mode (`--raw-views`):
+//!
+//!   Bypasses the lowering pipeline and dumps `app.views` bodies as
+//!   they come out of ingest. Useful when wiring up a new lowerer
+//!   (e.g. jbuilder) and you need to see the IR shape the walker
+//!   will consume. `--select` matches against the view name (e.g.
+//!   `articles/_article`); supports `*` as a wildcard.
+//!
 //! Examples:
 //!
 //!   cargo run --bin dump_ir -- fixtures/real-blog \
@@ -51,6 +59,9 @@
 //!   cargo run --bin dump_ir -- fixtures/real-blog \
 //!       --format json --select Article \
 //!     | jq '.methods[] | select(.name == "validate")'
+//!
+//!   cargo run --bin dump_ir -- fixtures/real-blog \
+//!       --raw-views --select 'articles/*'
 
 use std::path::PathBuf;
 
@@ -61,9 +72,9 @@ use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
 use roundhouse::lower::{
     class_info_from_library_class, lower_controllers_to_library_classes,
-    lower_fixtures_to_library_classes, lower_models_with_registry,
-    lower_test_modules_to_library_classes, lower_view_to_library_class,
-    lower_views_to_library_classes,
+    lower_fixtures_to_library_classes, lower_jbuilder_to_library_classes,
+    lower_models_with_registry, lower_test_modules_to_library_classes,
+    lower_view_to_library_class, lower_views_to_library_classes,
 };
 use roundhouse::ty::Ty;
 
@@ -83,6 +94,33 @@ fn main() {
         std::process::exit(1);
     });
     Analyzer::new(&app).analyze(&mut app);
+
+    if opts.raw_views {
+        let mut printed = 0usize;
+        let mut sep = "";
+        for v in &app.views {
+            if !view_name_matches(v.name.as_str(), &opts.selector) {
+                continue;
+            }
+            print!("{sep}");
+            println!("// === {} (format: {}) ===", v.name.as_str(), v.format.as_str());
+            match opts.format {
+                Format::Debug => println!("{:#?}", v.body),
+                Format::Ruby => println!("{}", roundhouse::emit::ruby::emit_expr(&v.body)),
+                Format::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v.body).unwrap_or_else(|e| format!("// json error: {e}"))
+                ),
+            }
+            sep = "\n";
+            printed += 1;
+        }
+        if printed == 0 {
+            eprintln!("no views matched selector");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let lcs = lower_all(&app);
 
@@ -129,6 +167,7 @@ struct Opts {
     selector: Selector,
     format: Format,
     filters: Vec<Filter>,
+    raw_views: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -180,9 +219,15 @@ fn parse_args() -> Result<Opts, String> {
     let mut selector_str = "*".to_string();
     let mut format = Format::Debug;
     let mut filters: Vec<Filter> = Vec::new();
+    let mut raw_views = false;
 
     while let Some(i) = args.iter().position(|a| a.starts_with("--")) {
         let flag = args.remove(i);
+        // Boolean flags don't consume a value.
+        if flag == "--raw-views" {
+            raw_views = true;
+            continue;
+        }
         let val = if i < args.len() { args.remove(i) } else {
             return Err(format!("missing value for {flag}"));
         };
@@ -209,7 +254,53 @@ fn parse_args() -> Result<Opts, String> {
 
     let selector = parse_selector(&selector_str)?;
 
-    Ok(Opts { fixture, selector, format, filters })
+    Ok(Opts { fixture, selector, format, filters, raw_views })
+}
+
+/// `--raw-views` selector match. Treats the selector as a glob over
+/// the view name; only `*` is wildcard (anywhere in the pattern, no
+/// regex). Class/method shapes are accepted but only the class half is
+/// consulted — a `--select 'articles/index'` selector matches the
+/// `articles/index` view; a `--select '*'` matches every view.
+fn view_name_matches(name: &str, sel: &Selector) -> bool {
+    let pat = match sel {
+        Selector::All => return true,
+        Selector::Class(c) => c.as_str(),
+        Selector::ClassAnyMethod(c) => c.as_str(),
+        Selector::Method { class, .. } => class.as_str(),
+        Selector::AnyClassMethod(_) => return true,
+    };
+    glob_match(pat, name)
+}
+
+/// Tiny `*`-only globber. `*` matches any (possibly empty) substring;
+/// other characters match literally. Sufficient for the dump_ir
+/// selector grammar — no character classes, no escaping.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat_bytes = pattern.as_bytes();
+    let txt_bytes = text.as_bytes();
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    let mut star: Option<(usize, usize)> = None;
+    while ti < txt_bytes.len() {
+        if pi < pat_bytes.len() && pat_bytes[pi] == b'*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if pi < pat_bytes.len() && pat_bytes[pi] == txt_bytes[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some((spi, sti)) = star {
+            pi = spi + 1;
+            ti = sti + 1;
+            star = Some((spi, ti));
+        } else {
+            return false;
+        }
+    }
+    while pi < pat_bytes.len() && pat_bytes[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat_bytes.len()
 }
 
 fn parse_selector(s: &str) -> Result<Selector, String> {
@@ -245,10 +336,11 @@ fn parse_filter(s: &str) -> Result<Filter, String> {
 }
 
 fn print_usage() {
-    eprintln!("usage: dump_ir <FIXTURE> [--select PATTERN] [--format debug|ruby|json] [--filter F]...");
+    eprintln!("usage: dump_ir <FIXTURE> [--select PATTERN] [--format debug|ruby|json] [--filter F]... [--raw-views]");
     eprintln!();
-    eprintln!("  PATTERN: 'Class', 'Class#method', 'Class#*', '*#method', or '*'");
-    eprintln!("  FILTER:  'untyped' | 'has-ivar:NAME' | 'has-method:NAME'");
+    eprintln!("  PATTERN:    'Class', 'Class#method', 'Class#*', '*#method', or '*'");
+    eprintln!("  FILTER:     'untyped' | 'has-ivar:NAME' | 'has-method:NAME'");
+    eprintln!("  --raw-views: dump pre-lowering `app.views` bodies; --select matches view name");
 }
 
 // ── Pipeline (mirrors tests/model_lowerer.rs::lowered_real_blog_typing_residual) ─
@@ -267,13 +359,19 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
         app,
         model_registry.clone().into_iter().collect(),
     );
+    let jbuilder_lcs = lower_jbuilder_to_library_classes(
+        &app.views,
+        app,
+        model_registry.clone().into_iter().collect(),
+    );
     let mut controller_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     controller_extras.extend(build_class_info_extras(&view_lcs));
-    let controller_lcs = roundhouse::lower::lower_controllers_with_arel(
+    let controller_lcs = roundhouse::lower::lower_controllers_with_arel_and_views(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
+        &app.views,
     );
 
     // Test modules — same shared-registry pattern. Test bodies dispatch
@@ -297,6 +395,7 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
     let mut all = Vec::new();
     all.extend(model_lcs);
     all.extend(view_lcs);
+    all.extend(jbuilder_lcs);
     all.extend(controller_lcs);
     all.extend(fixture_lcs);
     all.extend(test_lcs);

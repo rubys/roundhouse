@@ -295,6 +295,17 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "src/json_builder.ts",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
         rb_path: "runtime/ruby/active_record/errors.rb",
@@ -446,6 +457,17 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "src/json_builder.cr",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
         rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
         rb_path: "runtime/ruby/active_record/errors.rb",
@@ -556,6 +578,17 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "src/json_builder.rs",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // HWIA intentionally NOT transpiled to rust2 — per Phase 2.5(b),
     // `@flash` and `@session` move to per-app ActionDispatch::Flash /
     // ActionDispatch::Session structs with typed fields. HWIA stays
@@ -615,7 +648,25 @@ where
     let (emitted, classes, functions) = match entry.mode {
         Mode::Module => {
             let methods = parse_methods_with_rbs(entry.rb_src, entry.rbs_src)?;
-            let body = (target.emit_module)(&methods)?;
+            // Module-level constants (`ESCAPES = { ... }.freeze` in
+            // `json_builder.rb`) prepend the method emits, same as in
+            // Library mode below. Without this the methods reference
+            // undefined constants and trigger "Error: undefined
+            // constant" at the next compiler stage (Crystal
+            // semantic analysis, Rust borrow-check, etc.).
+            let constants = parse_module_constant_exprs(entry.rb_src)
+                .unwrap_or_default();
+            let mut body = String::new();
+            for (name, value) in &constants {
+                body.push_str(&format!(
+                    "{}\n",
+                    (target.format_constant)(name.as_str(), &(target.emit_expr_for_runtime)(value)),
+                ));
+            }
+            if !constants.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&(target.emit_module)(&methods)?);
             (body, Vec::new(), methods)
         }
         Mode::Library => {

@@ -19,6 +19,7 @@ pub mod app;
 pub mod controller;
 pub mod expr;
 pub mod fixture;
+pub mod jbuilder;
 pub mod library_class;
 pub mod model;
 pub mod routes;
@@ -31,6 +32,7 @@ pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use controller::ingest_controller;
 pub use expr::ingest_expr;
 pub use fixture::ingest_fixture_file;
+pub use jbuilder::ingest_jbuilder;
 pub use library_class::{
     classify_class_file, ingest_library_class, ingest_library_classes, ClassKind,
 };

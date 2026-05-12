@@ -47,6 +47,38 @@ use self::rewrites::{
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 
+/// Collect the set of action symbols on `controller` that have a
+/// `*.json.jbuilder` template under the controller's view directory.
+/// Empty when no jbuilder templates apply. Used to gate the implicit-
+/// render dispatch synthesis.
+fn json_actions_for(
+    controller: &Controller,
+    views: &[crate::dialect::View],
+) -> std::collections::HashSet<Symbol> {
+    let mut out: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    let module = match views_module_name(controller) {
+        Some(m) => m,
+        None => return out,
+    };
+    let dir = crate::naming::snake_case(&module);
+    let prefix = format!("{dir}/");
+    for v in views {
+        if v.format.as_str() != "json" {
+            continue;
+        }
+        let name = v.name.as_str();
+        if let Some(stem) = name.strip_prefix(&prefix) {
+            // Partials (`_article`) shouldn't count as implicit-
+            // render actions; they're rendered via `partial!` from
+            // other templates, not from controller dispatch.
+            if !stem.starts_with('_') {
+                out.insert(Symbol::from(stem));
+            }
+        }
+    }
+    out
+}
+
 use std::collections::BTreeMap;
 
 /// Bulk entry point: lower every controller against a shared class
@@ -62,7 +94,7 @@ pub fn lower_controllers_to_library_classes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
-    lower_controllers_with_arel(controllers, extras, None)
+    lower_controllers_with_arel_and_views(controllers, extras, None, &[])
 }
 
 /// Variant that also accepts the app `Schema`. When provided, the
@@ -80,6 +112,22 @@ pub fn lower_controllers_with_arel(
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
     schema: Option<&crate::schema::Schema>,
 ) -> Vec<LibraryClass> {
+    lower_controllers_with_arel_and_views(controllers, extras, schema, &[])
+}
+
+/// Variant of `lower_controllers_with_arel` that also accepts the
+/// app's `views` slice. The view list is scanned for
+/// `*.json.jbuilder` templates so each controller's implicit-render
+/// path can synthesize a format dispatch when the corresponding
+/// `<action>.json.jbuilder` exists. Without this, `GET
+/// /articles.json` would render html instead of the jbuilder
+/// template.
+pub fn lower_controllers_with_arel_and_views(
+    controllers: &[Controller],
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    schema: Option<&crate::schema::Schema>,
+    views: &[crate::dialect::View],
+) -> Vec<LibraryClass> {
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -89,7 +137,8 @@ pub fn lower_controllers_with_arel(
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
-        let methods = build_methods(controller, &params_specs);
+        let json_actions = json_actions_for(controller, views);
+        let methods = build_methods(controller, &params_specs, &json_actions);
         all_methods.push((methods, controller));
     }
 
@@ -251,7 +300,7 @@ pub fn lower_controllers_with_arel(
 /// `lower_controllers_to_library_classes`.
 pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClass {
     let specs = self::params::collect_specs(std::slice::from_ref(controller));
-    let methods = build_methods(controller, &specs);
+    let methods = build_methods(controller, &specs, &std::collections::HashSet::new());
     LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -265,6 +314,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
 fn build_methods(
     controller: &Controller,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    json_actions: &std::collections::HashSet<Symbol>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -311,10 +361,14 @@ fn build_methods(
     }
 
     for a in &publics_inlined {
-        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ true, params_specs));
+        methods.push(action_to_method(
+            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions,
+        ));
     }
     for a in &privs_kept {
-        methods.push(action_to_method(a, controller, &privs, /*is_public=*/ false, params_specs));
+        methods.push(action_to_method(
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+        ));
     }
 
     methods
@@ -472,6 +526,7 @@ fn action_to_method(
     privs: &[Action],
     is_public: bool,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    json_actions: &std::collections::HashSet<Symbol>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     let params: Vec<Param> = a
@@ -480,6 +535,7 @@ fn action_to_method(
         .iter()
         .map(|(n, _)| Param::positional(n.clone()))
         .collect();
+    let has_json_variant = json_actions.contains(&a.name);
     let body = lower_action_body(
         &a.body,
         controller,
@@ -487,6 +543,7 @@ fn action_to_method(
         privs,
         is_public,
         params_specs,
+        has_json_variant,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -578,10 +635,11 @@ fn lower_action_body(
     privs: &[Action],
     is_public: bool,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    has_json_variant: bool,
 ) -> Expr {
     let unwrapped = unwrap_respond_to(body);
     let with_render = if is_public {
-        let synth = synthesize_implicit_render(&unwrapped, action_name);
+        let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);
         let module_name = views_module_name(controller);
         rewrite_render_to_views(&synth, module_name.as_deref(), &ivars)

@@ -239,7 +239,12 @@ fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
     );
     let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
-    crate::lower::lower_controllers_with_arel(&app.controllers, model_extras, Some(&app.schema))
+    crate::lower::lower_controllers_with_arel_and_views(
+        &app.controllers,
+        model_extras,
+        Some(&app.schema),
+        &app.views,
+    )
 }
 
 /// Render pre-lowered controller `LibraryClass`es to one
@@ -277,18 +282,41 @@ fn emit_lowered_controllers_from_lcs(
         .collect()
 }
 
-/// Lower each `app.views` entry through `view_to_library` and emit
-/// the resulting `LibraryClass` as a Ruby source file under
+/// Lower each html-format `app.views` entry through `view_to_library`
+/// and emit the resulting `LibraryClass` as a Ruby source file under
 /// `app/views/<dir>/<base>.rb`. Output is the universal post-lowering
 /// shape: a `Views::<Plural>` module with one `def self.<action>(args)`
 /// per view, body in `io = String.new ; io << ViewHelpers.x(...) ; io`
 /// form. See `project_universal_post_lowering_ir.md`.
+///
+/// json-format views (`*.json.jbuilder`) go through
+/// `emit_lowered_jbuilder_views` — same shape, separate file per
+/// template named `<base>_json.rb` to avoid colliding with the html
+/// sibling. Both files reopen the same `Views::<Plural>` module.
 pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     app.views
         .iter()
+        .filter(|v| v.format.as_str() == "html")
         .map(|v| {
             let lc = crate::lower::lower_view_to_library_class(v, app);
             let out_path = view_output_path(v.name.as_str());
+            library::emit_library_class_decl(&lc, app, out_path)
+        })
+        .collect()
+}
+
+/// Lower each json-format `app.views` entry through `jbuilder_to_library`
+/// and emit the resulting `LibraryClass` as a Ruby source file under
+/// `app/views/<dir>/<base>_json.rb`. Method body uses the same
+/// io-accumulator shape as html views; values flow through
+/// `JsonBuilder.encode_value`.
+pub fn emit_lowered_jbuilder_views(app: &App) -> Vec<EmittedFile> {
+    app.views
+        .iter()
+        .filter(|v| v.format.as_str() == "json")
+        .map(|v| {
+            let lc = crate::lower::lower_jbuilder_to_library_class(v, app);
+            let out_path = jbuilder_view_output_path(v.name.as_str());
             library::emit_library_class_decl(&lc, app, out_path)
         })
         .collect()
@@ -300,6 +328,14 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
 /// require-relative graph keeps working without a separate alias step.
 fn view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("app/views/{view_name}.rb"))
+}
+
+/// Jbuilder counterpart of `view_output_path`. The `_json` suffix
+/// matches the lowered method name and prevents path collision with
+/// the html sibling: `articles/_article.json.jbuilder` →
+/// `app/views/articles/_article_json.rb`.
+fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
+    PathBuf::from(format!("app/views/{view_name}_json.rb"))
 }
 
 /// Spinel-shape emit: lowered IR rendered as runnable Ruby. Composes
@@ -323,6 +359,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     files.extend(emit_lowered_models(app));
     files.extend(emit_lowered_controllers(app));
     files.extend(emit_lowered_views(app));
+    files.extend(emit_lowered_jbuilder_views(app));
 
     // RouteHelpers — `app/route_helpers.rb` with `def self.<x>_path(args)`
     // per named route. Generated from `app.routes`; supersedes the
