@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+# scripts/bench — per-target HTTP throughput + memory benchmark.
+#
+# Measures req/sec, p50/p99 latency, and resident-set-size at sustained
+# load, then computes the cost-economics headline: req/sec per GB of
+# resident memory. That ratio captures what cloud bills actually charge
+# for — CRuby's GVL-fork tax means each worker carries ~200-400MB of
+# framework regardless of activity; compiled targets handle the same
+# concurrency in one shared image at ~30-50MB.
+#
+# Usage:  scripts/bench [options] [TARGET ...]
+#
+#   TARGET ∈ { rails | ruby | ruby-int | typescript | crystal | go |
+#              rust | python | elixir }  (default: rails ruby)
+#
+#   `rails` = Rails reference (Puma + YJIT, production env)
+#   `ruby`  = Roundhouse-emit Ruby (Puma + YJIT)
+#   `ruby-int` = Roundhouse-emit Ruby (Puma, YJIT disabled, baseline)
+#
+# Options:
+#   --workers N         Puma WEB_CONCURRENCY for Ruby targets (default 1)
+#                       Pass repeatedly to sweep: --workers 1 --workers 4
+#   --threads N         RAILS_MAX_THREADS per worker (default 5)
+#   --duration SEC      Measurement window (default 20)
+#   --warmup SEC        Warmup before each measurement (default 20)
+#   --connections N     wrk concurrency (default 64)
+#   --wrk-threads N     wrk client threads (default 2)
+#   --runs N            Repeated measurement runs per cell (default 3)
+#   --endpoint PATH     URL path to bench (repeatable)
+#                       Default: /articles /articles/1 /articles/new
+#   --port N            Base port; targets get N, N+1, ... (default 9000)
+#   --out DIR           Results dir (default bench/results)
+#   --keep              Don't tear down servers / build trees on exit
+#   --skip-emit         Reuse existing build trees
+#
+# Output:
+#   bench/results/<timestamp>/per-run.json        # raw per-run data
+#   bench/results/<timestamp>/summary.json        # median + computed metrics
+#   bench/results/<timestamp>/summary.md          # rendered table
+#
+# Environment:
+#   On Linux: assumes `cpupower frequency-set -g performance` was run
+#   beforehand and SMT is set to your preference (script doesn't change
+#   these). On macOS: no-op; numbers will be M-class baseline.
+
+set -euo pipefail
+
+# ── arg parsing ──────────────────────────────────────────────────────
+
+TARGETS=()
+WORKERS=()
+THREADS=5
+DURATION=20
+WARMUP=20
+CONNECTIONS=64
+WRK_THREADS=2
+RUNS=3
+ENDPOINTS=()
+BASE_PORT=9000
+OUT_DIR=""
+KEEP=0
+SKIP_EMIT=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --workers)        WORKERS+=("$2"); shift 2 ;;
+        --threads)        THREADS="$2"; shift 2 ;;
+        --duration)       DURATION="$2"; shift 2 ;;
+        --warmup)         WARMUP="$2"; shift 2 ;;
+        --connections)    CONNECTIONS="$2"; shift 2 ;;
+        --wrk-threads)    WRK_THREADS="$2"; shift 2 ;;
+        --runs)           RUNS="$2"; shift 2 ;;
+        --endpoint)       ENDPOINTS+=("$2"); shift 2 ;;
+        --port)           BASE_PORT="$2"; shift 2 ;;
+        --out)            OUT_DIR="$2"; shift 2 ;;
+        --keep)           KEEP=1; shift ;;
+        --skip-emit)      SKIP_EMIT=1; shift ;;
+        -h|--help)        sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)               echo "unknown flag: $1" >&2; exit 2 ;;
+        *)                TARGETS+=("$1"); shift ;;
+    esac
+done
+
+# Defaults
+[[ ${#TARGETS[@]} -eq 0 ]] && TARGETS=(rails ruby)
+[[ ${#WORKERS[@]} -eq 0 ]] && WORKERS=(1)
+[[ ${#ENDPOINTS[@]} -eq 0 ]] && ENDPOINTS=(/articles /articles/1 /articles/new)
+
+# Validate targets — only the ones implemented in this initial cut
+for t in "${TARGETS[@]}"; do
+    case "$t" in
+        rails|ruby|ruby-int) ;;
+        *) echo "target not yet supported in this initial cut: $t" >&2
+           echo "supported: rails ruby ruby-int" >&2; exit 2 ;;
+    esac
+done
+
+# ── paths ────────────────────────────────────────────────────────────
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FIXTURE="$REPO_ROOT/fixtures/real-blog"
+RUBY_OUT="$REPO_ROOT/build/transpiled-blog"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+[[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
+mkdir -p "$OUT_DIR"
+
+LOG_DIR="$(mktemp -d -t rh-bench-logs.XXXXXX)"
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+step() { printf '\033[36m→\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+wait_for_port() {
+    local url="$1"
+    local label="$2"
+    local deadline=$(( $(date +%s) + 30 ))
+    while (( $(date +%s) < deadline )); do
+        if curl --silent --fail --output /dev/null "$url" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.3
+    done
+    fail "$label did not come up within 30s ($url)"
+    return 1
+}
+
+# Recursive kill — kills children before parent so Puma workers get hit
+# before the master signals them.
+kill_tree() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 0
+    local children
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    for child in $children; do
+        kill_tree "$child"
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+    # Give a beat, then force-kill if it didn't die
+    sleep 0.2
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+# Sum RSS (in KB) across a PID and all its descendants. macOS and Linux
+# both have `ps -o rss=` that returns KB. Reads /proc on Linux too as
+# a cross-check but ps suffices for both.
+sum_rss_kb() {
+    local pid="$1"
+    [[ -z "$pid" ]] && { echo 0; return; }
+    # Gather PID + descendants
+    local pids="$pid"
+    local stack="$pid"
+    while [[ -n "$stack" ]]; do
+        local next=""
+        for p in $stack; do
+            local kids
+            kids="$(pgrep -P "$p" 2>/dev/null || true)"
+            for k in $kids; do
+                pids="$pids $k"
+                next="$next $k"
+            done
+        done
+        stack="$next"
+    done
+    local total=0
+    for p in $pids; do
+        local r
+        r="$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ' || echo 0)"
+        [[ -z "$r" ]] && r=0
+        total=$(( total + r ))
+    done
+    echo "$total"
+}
+
+# Parse wrk's stdout for Requests/sec and Latency percentiles.
+# wrk's --latency flag enables percentile output. Output is fixed-shape
+# enough that awk pulls it out reliably.
+parse_wrk() {
+    local out="$1"
+    local req_sec p50 p99
+    req_sec="$(grep -E '^Requests/sec:' "$out" | awk '{print $2}')"
+    # Latency Distribution block lines look like:
+    #     50%    1.23ms
+    #     99%   12.5ms
+    p50="$(awk '/Latency Distribution/{flag=1; next} flag && /^[[:space:]]*50%/{print $2; exit}' "$out")"
+    p99="$(awk '/Latency Distribution/{flag=1; next} flag && /^[[:space:]]*99%/{print $2; exit}' "$out")"
+    # Strip 'ms'/'us'/'s' suffix and normalize to ms. Use awk for the
+    # regex split — bash glob `[a-z]*` matches only one char per the
+    # shortest-match `%` operator, so "776.00us" yields num="776.00u".
+    # awk's gsub on /[a-z]+$/ handles the full suffix cleanly.
+    normalize_latency() {
+        local v="$1"
+        [[ -z "$v" ]] && { echo "null"; return; }
+        awk -v v="$v" 'BEGIN {
+            n = v; gsub(/[a-zA-Z]+$/, "", n)
+            u = v; sub(/^[0-9.]+/, "", u)
+            if (u == "us") printf "%.3f", n/1000
+            else if (u == "ms") printf "%.3f", n+0
+            else if (u == "s")  printf "%.3f", n*1000
+            else printf "null"
+        }'
+    }
+    p50="$(normalize_latency "$p50")"
+    p99="$(normalize_latency "$p99")"
+    [[ -z "$req_sec" ]] && req_sec="null"
+    echo "{\"req_sec\":$req_sec,\"p50_ms\":$p50,\"p99_ms\":$p99}"
+}
+
+# ── target lifecycle ─────────────────────────────────────────────────
+
+TARGET_PID=""
+TARGET_BUILD_DIR=""
+TARGET_GEMFILE=""
+
+cleanup() {
+    local code=$?
+    if (( KEEP == 0 )); then
+        kill_tree "$TARGET_PID"
+        sleep 0.3
+        wait 2>/dev/null || true
+    else
+        if [[ -n "$TARGET_PID" ]]; then
+            echo
+            step "--keep: server PID=$TARGET_PID still running"
+        fi
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+build_target() {
+    local target="$1"
+    case "$target" in
+        rails)
+            TARGET_BUILD_DIR="$FIXTURE"
+            TARGET_GEMFILE=""  # uses fixture's own Gemfile
+            if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
+                step "regenerating fixtures/real-blog"
+                (cd "$REPO_ROOT" && make real-blog >/dev/null)
+            fi
+            ;;
+        ruby|ruby-int)
+            TARGET_BUILD_DIR="$RUBY_OUT"
+            TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$RUBY_OUT/.stamp" ]]; then
+                step "regenerating ruby target (make ruby-transpile)"
+                (cd "$REPO_ROOT" && rm -rf "$RUBY_OUT" && make ruby-transpile >/dev/null)
+            fi
+            # Assets — Tailwind compile + JS deps. Needed for full
+            # response bytes; without it the index page is naked.
+            if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
+                step "building ruby assets"
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null)
+            fi
+            ;;
+    esac
+}
+
+# Stage the seeded DB. Each target gets its own copy so writes don't
+# bleed across runs. Note: bench is read-only by default, so the seed
+# isn't reapplied between measurement windows.
+stage_db() {
+    local target="$1"
+    case "$target" in
+        rails)
+            # Production Rails reads storage/production.sqlite3 — clone
+            # the seeded dev DB into place so the fixture serves real
+            # rows. SQLite3's `.backup` produces a clean copy without
+            # WAL/SHM artifacts.
+            local prod="$FIXTURE/storage/production.sqlite3"
+            local dev="$FIXTURE/storage/development.sqlite3"
+            rm -f "$prod" "$prod-wal" "$prod-shm"
+            sqlite3 "$dev" ".backup $prod"
+            ;;
+        ruby|ruby-int)
+            local db="$RUBY_OUT/tmp/blog.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+    esac
+}
+
+start_target() {
+    local target="$1"
+    local port="$2"
+    local workers="$3"
+    local log="$LOG_DIR/${target}-${workers}w.log"
+
+    case "$target" in
+        rails)
+            (cd "$FIXTURE" && \
+                RAILS_ENV=production \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY="$workers" \
+                SECRET_KEY_BASE=bench-secret-key \
+                RUBYOPT=--yjit \
+                bin/rails server -p "$port" -e production \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        ruby)
+            (cd "$RUBY_OUT" && \
+                BUNDLE_GEMFILE="$TARGET_GEMFILE" \
+                BLOG_DB=tmp/blog.sqlite3 \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY="$workers" \
+                RAILS_ENV=production \
+                PORT="$port" \
+                RUBYOPT=--yjit \
+                bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        ruby-int)
+            (cd "$RUBY_OUT" && \
+                BUNDLE_GEMFILE="$TARGET_GEMFILE" \
+                BLOG_DB=tmp/blog.sqlite3 \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY="$workers" \
+                RAILS_ENV=production \
+                PORT="$port" \
+                bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+    esac
+    wait_for_port "http://localhost:$port/articles" "$target" || {
+        echo "--- $target log ---" >&2
+        tail -40 "$log" >&2
+        kill_tree "$TARGET_PID"
+        TARGET_PID=""
+        return 1
+    }
+}
+
+# ── measurement ──────────────────────────────────────────────────────
+
+# RSS sampler: poll every 1s while wrk runs, write samples to a file.
+# Caller starts it in the background, kills when wrk exits.
+rss_sampler() {
+    local pid="$1"
+    local out="$2"
+    : > "$out"
+    while kill -0 "$pid" 2>/dev/null; do
+        sum_rss_kb "$pid" >> "$out"
+        sleep 1
+    done
+}
+
+# Median of a list of integers (one per line). Used for RSS samples
+# to get steady-state memory (peak is too noisy on macOS).
+median() {
+    sort -n | awk '
+        { a[NR] = $1 }
+        END {
+            n = NR
+            if (n == 0) { print 0; exit }
+            if (n % 2 == 1) print a[(n+1)/2]
+            else print int((a[n/2] + a[n/2+1]) / 2)
+        }
+    '
+}
+
+# Run one measurement (warmup + DURATION-second wrk). Captures req/sec,
+# p50, p99, and a steady-state RSS sample. Emits a single-line JSON
+# record on stdout.
+measure_one() {
+    local target="$1"
+    local workers="$2"
+    local port="$3"
+    local endpoint="$4"
+    local run_n="$5"
+
+    local url="http://localhost:$port$endpoint"
+
+    # Warmup wrk run — discarded
+    wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${WARMUP}s" "$url" \
+        >/dev/null 2>&1 || true
+
+    # Measurement window — RSS sampler in parallel
+    local wrk_out="$LOG_DIR/wrk-${target}-${workers}w-${run_n}.txt"
+    local rss_out="$LOG_DIR/rss-${target}-${workers}w-${run_n}.txt"
+    rss_sampler "$TARGET_PID" "$rss_out" &
+    local rss_pid=$!
+    wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
+        "$url" >"$wrk_out" 2>&1 || true
+    kill "$rss_pid" 2>/dev/null || true
+    wait "$rss_pid" 2>/dev/null || true
+
+    local wrk_json
+    wrk_json="$(parse_wrk "$wrk_out")"
+    local rss_median_kb
+    rss_median_kb="$(median < "$rss_out")"
+    [[ -z "$rss_median_kb" || "$rss_median_kb" == "0" ]] && rss_median_kb=0
+
+    # Emit one JSON record
+    cat <<EOF
+{"target":"$target","workers":$workers,"endpoint":"$endpoint","run":$run_n,"rss_kb":$rss_median_kb,$(echo "$wrk_json" | sed 's/^{//;s/}$//')}
+EOF
+}
+
+# ── main loop ────────────────────────────────────────────────────────
+
+PER_RUN_JSON="$OUT_DIR/per-run.json"
+: > "$PER_RUN_JSON"
+
+port="$BASE_PORT"
+for target in "${TARGETS[@]}"; do
+    step "build_target $target"
+    build_target "$target"
+    stage_db "$target"
+
+    for workers in "${WORKERS[@]}"; do
+        # Ruby targets honor WEB_CONCURRENCY; other targets ignore it
+        # (and we record the field as 1 for those).
+        case "$target" in
+            rails|ruby|ruby-int) effective_workers="$workers" ;;
+            *)                    effective_workers=1 ;;
+        esac
+
+        step "start $target (workers=$effective_workers, port=$port)"
+        start_target "$target" "$port" "$effective_workers" || {
+            fail "$target failed to start; skipping cell"
+            port=$(( port + 1 ))
+            continue
+        }
+        ok "$target up on :$port"
+
+        for endpoint in "${ENDPOINTS[@]}"; do
+            for run in $(seq 1 "$RUNS"); do
+                step "measure $target w=$effective_workers $endpoint run=$run/$RUNS"
+                rec="$(measure_one "$target" "$effective_workers" "$port" "$endpoint" "$run")"
+                echo "$rec" >> "$PER_RUN_JSON"
+                printf '  '
+                # Pretty-print the cell so the user sees progress
+                echo "$rec" | awk -F'[,:]' '{
+                    for(i=1;i<=NF;i++) {
+                        gsub(/["{}]/, "", $i)
+                        if($i=="req_sec") req=$(i+1)
+                        if($i=="p99_ms") p99=$(i+1)
+                        if($i=="rss_kb") rss=$(i+1)
+                    }
+                    gsub(/["{}]/, "", req); gsub(/["{}]/, "", p99); gsub(/["{}]/, "", rss)
+                    printf "req/sec=%s  p99=%sms  rss=%dMB\n", req, p99, int(rss/1024)
+                }'
+                # Cooldown between runs to let thermals settle
+                sleep 2
+            done
+        done
+
+        kill_tree "$TARGET_PID"
+        TARGET_PID=""
+        sleep 0.5
+        port=$(( port + 1 ))
+    done
+done
+
+# ── aggregation ──────────────────────────────────────────────────────
+
+step "aggregating $(wc -l < "$PER_RUN_JSON") runs → $OUT_DIR/summary.md"
+
+# Aggregate via Ruby (always present on dev machines, and we ship Ruby
+# targets so it's guaranteed available). Median across runs per
+# (target, workers, endpoint) cell. Compute req/sec/GB.
+ruby - "$PER_RUN_JSON" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" <<'RUBY'
+require "json"
+
+per_run_path, summary_json_path, summary_md_path = ARGV
+
+records = File.readlines(per_run_path, chomp: true).reject(&:empty?).map { |l| JSON.parse(l) }
+
+# Group by (target, workers, endpoint), median across runs
+def median(xs)
+  xs = xs.compact.sort
+  return nil if xs.empty?
+  n = xs.size
+  n.odd? ? xs[n / 2] : ((xs[n / 2 - 1] + xs[n / 2]) / 2.0)
+end
+
+cells = records.group_by { |r| [r["target"], r["workers"], r["endpoint"]] }.map do |(target, workers, endpoint), runs|
+  req_sec = median(runs.map { |r| r["req_sec"] })
+  p50     = median(runs.map { |r| r["p50_ms"] })
+  p99     = median(runs.map { |r| r["p99_ms"] })
+  rss_kb  = median(runs.map { |r| r["rss_kb"] })
+  rss_gb  = rss_kb ? rss_kb / 1024.0 / 1024.0 : nil
+  rps_per_gb = (req_sec && rss_gb && rss_gb > 0) ? req_sec / rss_gb : nil
+  {
+    target: target, workers: workers, endpoint: endpoint,
+    runs: runs.size,
+    req_sec: req_sec, p50_ms: p50, p99_ms: p99,
+    rss_kb: rss_kb, rss_mb: rss_kb ? rss_kb / 1024.0 : nil,
+    rps_per_gb: rps_per_gb,
+  }
+end
+
+File.write(summary_json_path, JSON.pretty_generate(cells))
+
+# Markdown table grouped by endpoint
+by_endpoint = cells.group_by { |c| c[:endpoint] }
+md = +""
+md << "# Benchmark results\n\n"
+md << "_#{records.size} measurements across #{cells.size} cells_\n\n"
+
+by_endpoint.each do |endpoint, eg_cells|
+  md << "## `#{endpoint}`\n\n"
+  md << "| target | workers | req/sec | p50 (ms) | p99 (ms) | RSS (MB) | req/sec/GB |\n"
+  md << "|--------|--------:|--------:|---------:|---------:|---------:|-----------:|\n"
+  eg_cells.sort_by { |c| [c[:target], c[:workers]] }.each do |c|
+    md << "| %s | %d | %.0f | %.2f | %.2f | %.0f | %.0f |\n" % [
+      c[:target], c[:workers],
+      c[:req_sec] || 0, c[:p50_ms] || 0, c[:p99_ms] || 0,
+      c[:rss_mb] || 0, c[:rps_per_gb] || 0,
+    ]
+  end
+  md << "\n"
+end
+
+File.write(summary_md_path, md)
+RUBY
+
+ok "summary written to $OUT_DIR/summary.md"
+echo
+cat "$OUT_DIR/summary.md"

@@ -21,6 +21,14 @@ workers ENV.fetch("WEB_CONCURRENCY", 0).to_i
 # memory sharing. Single-mode ignores it.
 preload_app! if ENV.fetch("WEB_CONCURRENCY", "0").to_i > 0
 
+# Re-open the SQLite connection per forked worker. `preload_app!`
+# opens the DB in the master; workers inherit a file descriptor that
+# SQLite cannot reuse safely post-fork. Re-running Db.configure here
+# gives each worker its own handle to the same file.
+on_worker_boot do
+  Db.configure(ENV.fetch("BLOG_DB", ":memory:")) if defined?(Db)
+end
+
 # `touch tmp/restart.txt` to restart workers without dropping
 # connections. Rails generator includes this by default.
 plugin :tmp_restart
