@@ -12,6 +12,13 @@ gem "rake"
 gem "puma"
 gem "rack"
 
+# WebSocket handshake + frame parsing for the CRuby target's
+# Action-Cable-shape /cable endpoint. Puma supplies the raw socket
+# via rack.hijack; websocket-driver owns the protocol. Spinel-target
+# builds get the equivalent surface via sphttp's upgrade path
+# (deferred). Pinned to 0.8.x — the API stabilized in that line.
+gem "websocket-driver", "~> 0.8.0"
+
 # Spinel-subset compliance gate (CI). Runs against the shipped tree
 # (scaffold + runtime + lowered emit) after toolchain-spinel emits
 # into the scratch dir; catches reflection/concurrency/singleton-class

@@ -1,13 +1,17 @@
 # Broadcasts — in-memory log of Turbo Stream fragments produced by
 # model after_*_commit hooks. The log is the test-visible contract;
-# transport (WebSocket fan-out) is layered separately and called
-# from `record` once a subscriber registry exists.
+# transport (WebSocket fan-out) is the live-server contract,
+# registered by the target overlay (CRuby's `config.ru` hands in a
+# Cable registry; spinel will pass an sphttp-side equivalent).
 #
-# State is held in a module-level constant Array. Spinel supports
+# State is held in module-level constant Arrays. Spinel supports
 # constants and array mutation; module-level instance variables are
-# more uncertain, so we deliberately use the constant form.
+# more uncertain, so we deliberately use the constant form. Same
+# pattern for the (at most one) transport hook — single-element
+# Array as a settable holder.
 module Broadcasts
   LOG = []
+  TRANSPORTS = []
 
   def self.reset_log!
     LOG.clear
@@ -15,6 +19,14 @@ module Broadcasts
 
   def self.log
     LOG.dup
+  end
+
+  # The transport responds to `broadcast(stream, fragment_html)` and
+  # owns its own thread-safety. Nil-transport (test environment, spinel
+  # tests, CGI one-shots) means `record` only appends to LOG.
+  def self.set_transport(transport)
+    TRANSPORTS.clear
+    TRANSPORTS << transport
   end
 
   def self.append(stream:, target:, html:)
@@ -36,6 +48,10 @@ module Broadcasts
   def self.record(action:, stream:, target:, html:)
     entry = { action: action, stream: stream, target: target, html: html }
     LOG << entry
+    if TRANSPORTS.length > 0
+      fragment = render_fragment(action: action, target: target, html: html)
+      TRANSPORTS[0].broadcast(stream, fragment)
+    end
     nil
   end
 

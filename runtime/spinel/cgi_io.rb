@@ -64,7 +64,7 @@ module CgiIo
     # rewrites the verb here. Only honored from POST → {PATCH,PUT,DELETE};
     # GETs ignore the override.
     if method == "POST"
-      override = params.delete(:_method)
+      override = params.delete("_method")
       if !override.nil?
         upcased = override.to_s.upcase
         method = upcased if upcased == "PATCH" || upcased == "PUT" || upcased == "DELETE"
@@ -134,18 +134,23 @@ module CgiIo
     nil
   end
 
-  # `article[title]` → into[:article][:title] = val
-  # `id` → into[:id] = val
+  # `article[title]` → into["article"]["title"] = val
+  # `id` → into["id"] = val
+  #
+  # String keys throughout: the router's path_params are already
+  # string-keyed (`params["id"]`), and merging the two via main.rb
+  # only works cleanly if both halves agree. Controllers (and the
+  # `*Params.from_raw` helpers) consequently fetch by string key.
   def self.assign_form_pair(into, raw_key, val)
     open_bracket = raw_key.index("[")
     if open_bracket.nil?
-      into[raw_key.to_sym] = val
+      into[raw_key] = val
       return
     end
     close_bracket = raw_key.index("]", open_bracket + 1)
     return if close_bracket.nil?
-    outer = raw_key[0, open_bracket].to_sym
-    inner = raw_key[(open_bracket + 1)...close_bracket].to_sym
+    outer = raw_key[0, open_bracket]
+    inner = raw_key[(open_bracket + 1)...close_bracket]
     into[outer] = {} unless into[outer].is_a?(Hash)
     into[outer][inner] = val
   end

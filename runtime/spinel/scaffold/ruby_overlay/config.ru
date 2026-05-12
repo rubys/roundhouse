@@ -14,8 +14,15 @@
 require "stringio"
 require "rack"
 require_relative "main"
+require_relative "cable"
 
 Main.configure_default_adapter!
+
+# Register the Cable registry as the broadcasts transport: every
+# `Broadcasts.record` call from model callbacks now also fans out
+# the rendered `<turbo-stream>` to every WS connection subscribed
+# to that stream name.
+Broadcasts.set_transport(Cable::Registry)
 
 # Static asset serving — `rake assets` lays files out under
 # `static/assets/*` (CSS + JS) plus root-level icons. Rack::Static
@@ -58,6 +65,18 @@ def parse_cgi_response(raw)
 end
 
 app = lambda do |env|
+  # WebSocket upgrade: `/cable`. Hijack the socket from Puma and
+  # spawn a per-connection thread that runs the read loop. The Rack
+  # tuple returned (-1, {}, []) is Rack's convention for "the
+  # response was handled out-of-band" — Puma stops touching the
+  # connection.
+  if env["PATH_INFO"] == "/cable"
+    socket = env["rack.hijack"].call
+    conn = Cable::Connection.new(env, socket)
+    Thread.new { conn.run }
+    return [-1, {}, []]
+  end
+
   cgi_env = {}
   RACK_TO_CGI.each { |rack_key, cgi_key| cgi_env[cgi_key] = env[rack_key].to_s }
   stdin = env["rack.input"] || StringIO.new("")
