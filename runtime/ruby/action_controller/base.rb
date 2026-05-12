@@ -55,11 +55,16 @@ module ActionController
     # current `@content_type` (`text/html; charset=utf-8` on init).
     # Jbuilder-lowered actions pass `content_type: "application/json"`
     # on the JSON branch; the html branch omits it and rides the
-    # default.
-    def render(body, status: 200, content_type: nil)
+    # default. The `location:` kwarg sets @location so the CGI driver
+    # ships a Location header alongside the rendered body — Rails'
+    # `render :show, status: :created, location: @article` idiom for
+    # POST 201 responses. Distinct from redirect_to (which uses a 3xx
+    # status); main.rb dispatches on status, not on @location nil-ness.
+    def render(body, status: 200, content_type: nil, location: nil)
       @body   = body
       @status = resolve_status(status)
       @content_type = content_type unless content_type.nil?
+      @location = location unless location.nil?
       nil
     end
 
@@ -75,10 +80,17 @@ module ActionController
       nil
     end
 
-    # `head(:no_content)` etc. — empty body, status only.
-    def head(status)
+    # `head(:no_content, content_type: "application/json")` — empty
+    # body, status only. The `content_type` kwarg is set by the
+    # respond_to-flattener's JSON branch when it preserves a
+    # `head :sym` terminal; html branches omit it and the default
+    # text/html stands. (Body-empty responses make Content-Type
+    # mostly irrelevant per RFC 7230, but some HTTP clients still
+    # parse it, so being explicit costs nothing.)
+    def head(status, content_type: nil)
       @status = resolve_status(status)
       @body   = ""
+      @content_type = content_type unless content_type.nil?
       nil
     end
 

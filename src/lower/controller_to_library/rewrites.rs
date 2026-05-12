@@ -131,12 +131,11 @@ fn render_kwargs_have_format(args: &[Expr], fmt: &str) -> bool {
     })
 }
 
-/// Drop the `format:` (and `location:`) entries from a trailing
-/// kwarg-Hash on a render call. `format:` is the dispatch marker
-/// the respond_to flattener planted; it's consumed at lower time
-/// and shouldn't leak to the runtime. `location:` is Rails-specific
-/// (sets the Location header on a 201 JSON response) — our runtime's
-/// render signature doesn't carry it; dropping is the v1 compromise.
+/// Drop the `format:` entry from a trailing kwarg-Hash on a render
+/// call. `format:` is the dispatch marker the respond_to flattener
+/// planted; it's consumed at lower time and shouldn't leak to the
+/// runtime. `location:` passes through (the runtime's render takes
+/// `location:` and main.rb ships it as the Location header).
 /// Returns `Some(stripped)` if the Hash still has entries, `None` if
 /// the strip left it empty (caller drops the now-empty Hash).
 fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
@@ -147,7 +146,7 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
                 !matches!(
                     &*k.node,
                     ExprNode::Lit { value: Literal::Sym { value } }
-                        if value.as_str() == "format" || value.as_str() == "location"
+                        if value.as_str() == "format"
                 )
             })
             .cloned()
@@ -758,6 +757,84 @@ pub(super) fn rewrite_redirect_to(expr: &Expr) -> Expr {
         }
         _ => None,
     })
+}
+
+/// `render(:show, …, location: @article)` — Rails' POST-201 idiom.
+/// The kwarg value is a polymorphic record reference; rewrite to
+/// `RouteHelpers.<singular>_path(@x.id)` so the runtime's
+/// `render(body, location: <string>)` sees a path string. Mirrors
+/// the `redirect_to @x` polymorphic rewrite below; runs over render
+/// Sends specifically (not redirect_to, which has its own pass).
+pub(super) fn rewrite_render_location_kwarg(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block, parenthesized }
+            if method.as_str() == "render" && !args.is_empty() =>
+        {
+            let new_args: Vec<Expr> = args
+                .iter()
+                .map(|a| rewrite_location_in_kwargs(a))
+                .collect();
+            if new_args
+                .iter()
+                .zip(args.iter())
+                .all(|(a, b)| std::ptr::eq(a.node.as_ref(), b.node.as_ref()))
+            {
+                // No change — let map_expr recurse normally.
+                return None;
+            }
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: None,
+                    method: method.clone(),
+                    args: new_args,
+                    block: block.clone(),
+                    parenthesized: *parenthesized,
+                },
+            ))
+        }
+        _ => None,
+    })
+}
+
+/// If `arg` is a kwarg-Hash with a `location:` entry whose value is
+/// a polymorphic record ref (Ivar), rewrite that entry's value to a
+/// path-helper call. Other shapes pass through untouched.
+fn rewrite_location_in_kwargs(arg: &Expr) -> Expr {
+    let ExprNode::Hash { entries, kwargs: true } = &*arg.node else {
+        return arg.clone();
+    };
+    let mut changed = false;
+    let new_entries: Vec<(Expr, Expr)> = entries
+        .iter()
+        .map(|(k, v)| {
+            let is_location = matches!(
+                &*k.node,
+                ExprNode::Lit { value: Literal::Sym { value } }
+                    if value.as_str() == "location"
+            );
+            if !is_location {
+                return (k.clone(), v.clone());
+            }
+            match &*v.node {
+                ExprNode::Ivar { name } => {
+                    changed = true;
+                    (k.clone(), polymorphic_path(name, v.span))
+                }
+                _ => (k.clone(), v.clone()),
+            }
+        })
+        .collect();
+    if !changed {
+        return arg.clone();
+    }
+    Expr::new(
+        arg.span,
+        ExprNode::Hash {
+            entries: new_entries,
+            kwargs: true,
+        },
+    )
 }
 
 /// `RouteHelpers.<ivar_name>_path(@<ivar_name>.id)` — the explicit form

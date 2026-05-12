@@ -226,17 +226,24 @@ fn classify_format_stmt(e: &Expr) -> Option<(Symbol, Expr)> {
     None
 }
 
-/// True when `body` is exactly `render :sym [, kwargs]` — the simple
-/// view-template shape the json dispatch supports today. Inline
-/// renders (`render json: <expr>`), `head :no_content`, and
-/// redirects in error branches don't qualify and the json branch
-/// gets dropped (html alone covers the response).
+/// True when `body` is a shape the json dispatch supports today:
+/// either `render :sym [, kwargs]` (simple view-template) or
+/// `head :sym` (status-only terminal). Inline renders (`render
+/// json: <expr>`) and redirects in error branches don't qualify
+/// and the json branch gets dropped (html alone covers the
+/// response).
 fn is_simple_render_sym(body: &Expr) -> bool {
     match &*body.node {
         ExprNode::Send { recv: None, method, args, .. }
             if method.as_str() == "render" && !args.is_empty() =>
         {
             matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
+        }
+        ExprNode::Send { recv: None, method, args, .. }
+            if method.as_str() == "head" && !args.is_empty() =>
+        {
+            matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
+                || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { .. } })
         }
         _ => false,
     }
@@ -317,11 +324,15 @@ fn request_format_eq(span: Span, fmt: &str) -> Expr {
     )
 }
 
-/// Walk `body` and add `format: :<fmt>` to every top-level Send
-/// `render(<sym>, …)`. The kwarg flows downstream into
-/// `rewrite_render_to_views`, which strips it and uses it to choose
-/// the `<sym>_json` view + tag the outer render with
-/// `content_type: "application/json"`.
+/// Walk `body` and tag terminals with format-aware kwargs:
+///   - `render(<sym>, …)` gets a `format: :<fmt>` marker; the kwarg
+///     flows into `rewrite_render_to_views`, which strips it and
+///     uses it to route to the `<sym>_<fmt>` view + tag the outer
+///     render with `content_type: "<mime>"`.
+///   - `head(<sym>, …)` gets a `content_type: "<mime>"` kwarg
+///     directly. head doesn't go through view rewriting (its body
+///     is empty regardless of format), so the lowerer plants the
+///     MIME marker here rather than via the render-rewrite path.
 fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
     let new_node = match &*body.node {
         ExprNode::Send {
@@ -344,6 +355,22 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
                 return body.clone();
             }
         }
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block,
+            parenthesized,
+        } if method.as_str() == "head" && !args.is_empty() => {
+            let new_args = add_content_type_kwarg(args, mime_for_format(fmt), body.span);
+            ExprNode::Send {
+                recv: None,
+                method: method.clone(),
+                args: new_args,
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            }
+        }
         ExprNode::Seq { exprs } => ExprNode::Seq {
             exprs: exprs.iter().map(|e| mark_render_format(e, fmt)).collect(),
         },
@@ -359,6 +386,62 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
         _ => return body.clone(),
     };
     Expr::new(body.span, new_node)
+}
+
+/// Map a Rails format symbol to its canonical MIME string.
+fn mime_for_format(fmt: &str) -> &'static str {
+    match fmt {
+        "json" => "application/json",
+        _ => "text/html; charset=utf-8",
+    }
+}
+
+/// Append (or merge into) a trailing kwarg-Hash carrying
+/// `content_type: "<mime>"`. Used to tag head call sites in the
+/// json branch — render call sites take the format-kwarg path so
+/// the view-rewrite layer can decide the MIME.
+fn add_content_type_kwarg(args: &[Expr], mime: &str, span: Span) -> Vec<Expr> {
+    let pair = (
+        Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Sym {
+                    value: Symbol::from("content_type"),
+                },
+            },
+        ),
+        Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: mime.to_string(),
+                },
+            },
+        ),
+    );
+    let mut out = args.to_vec();
+    if let Some(last) = out.last_mut() {
+        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+            let mut new_entries = entries.clone();
+            new_entries.push(pair);
+            *last = Expr::new(
+                last.span,
+                ExprNode::Hash {
+                    entries: new_entries,
+                    kwargs: true,
+                },
+            );
+            return out;
+        }
+    }
+    out.push(Expr::new(
+        span,
+        ExprNode::Hash {
+            entries: vec![pair],
+            kwargs: true,
+        },
+    ));
+    out
 }
 
 /// Append (or merge into) a trailing kwarg-Hash carrying `format:

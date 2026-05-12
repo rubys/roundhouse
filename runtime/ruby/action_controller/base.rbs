@@ -42,9 +42,15 @@ module ActionController
     %a{abstract}
     def process_action: (Symbol _action_name) -> void
 
-    # `render(body, status:, content_type:)` — sets @body, @status,
-    # and optionally @content_type. Returns nil per Rails convention.
-    def render: (String body, ?status: untyped, ?content_type: String?) -> void
+    # `render(body, status:, content_type:, location:)` — sets @body,
+    # @status, and optionally @content_type / @location. Returns nil
+    # per Rails convention.
+    def render: (
+      String body,
+      ?status: untyped,
+      ?content_type: String?,
+      ?location: untyped
+    ) -> void
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
     # @status, @flash entries. `status` accepts Symbol or Integer
@@ -56,8 +62,9 @@ module ActionController
       ?status: untyped
     ) -> void
 
-    # `head(:no_content)` — empty body, status only.
-    def head: (untyped status) -> void
+    # `head(:no_content, content_type: "application/json")` — empty
+    # body, status only; content_type optional.
+    def head: (untyped status, ?content_type: String?) -> void
 
     # `s` may be Integer or Symbol. Body narrows via `is_a?(Integer)`;
     # the Symbol branch reads STATUS_CODES.

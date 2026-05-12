@@ -129,35 +129,43 @@ module Main
       return
     end
 
-    # Encode outbound flash. On render: clear the inbound cookies
-    # (the action used flash for display; the next request shouldn't
-    # see the same notice again). On redirect: ship the controller's
-    # current flash as cookies for the next request to consume.
+    # Dispatch on status, not on @location nil-ness: redirect_to
+    # produces a 3xx status (302/303/etc.) and short-circuits to a
+    # "Redirecting…" body; render-with-`location:` (Rails' POST 201
+    # idiom) keeps a 2xx status and ships the rendered body alongside
+    # the Location header.
     out_cookies = {}
-    if controller.location.nil?
-      out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
-      out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
-      # JSON responses skip the html layout wrap and ship the
-      # controller body verbatim with the JSON Content-Type. Other
-      # formats ride the application layout.
-      if controller.request_format == :json
-        CgiIo.write_response(stdout, controller.status, controller.body,
-          content_type: controller.content_type,
-          set_cookies: out_cookies)
-      else
-        page = Views::Layouts.application(controller.body)
-        CgiIo.write_response(stdout, controller.status, page, set_cookies: out_cookies)
-      end
-    else
+    is_redirect = controller.status >= 300 && controller.status < 400
+    if is_redirect
+      # Redirect: ship the outbound flash as cookies for the next
+      # request to consume.
       out_cookies[:flash_notice] = controller.flash[:notice] unless controller.flash[:notice].nil?
       out_cookies[:flash_alert]  = controller.flash[:alert]  unless controller.flash[:alert].nil?
-      # Redirects: short-circuit body to a one-line "redirecting"
-      # message; real browsers follow the Location header without
-      # rendering the body anyway.
       CgiIo.write_response(stdout, controller.status,
         %(<a href="#{controller.location}">Redirecting</a>),
         location: controller.location,
         set_cookies: out_cookies)
+    else
+      # Render: clear inbound flash cookies (the action used them for
+      # display; the next request shouldn't see the same notice
+      # again). JSON responses skip the html layout wrap and ship the
+      # controller body verbatim with the JSON Content-Type. Other
+      # formats ride the application layout. `controller.location`
+      # (set by `render … location: @article`) flows through as the
+      # Location header when present.
+      out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
+      out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
+      if controller.request_format == :json
+        CgiIo.write_response(stdout, controller.status, controller.body,
+          content_type: controller.content_type,
+          location: controller.location,
+          set_cookies: out_cookies)
+      else
+        page = Views::Layouts.application(controller.body)
+        CgiIo.write_response(stdout, controller.status, page,
+          location: controller.location,
+          set_cookies: out_cookies)
+      end
     end
   end
 

@@ -45,7 +45,8 @@ use self::process_action::synthesize_process_action;
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_params,
-    rewrite_redirect_to, rewrite_render_to_views, rewrite_route_helpers,
+    rewrite_redirect_to, rewrite_render_location_kwarg, rewrite_render_to_views,
+    rewrite_route_helpers,
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 
@@ -702,6 +703,13 @@ fn lower_action_body(
     } else {
         unwrapped
     };
+    // Render `location: @ivar` kwarg → `RouteHelpers.<x>_path(@x.id)`
+    // — Rails' POST-201 idiom (`render :show, status: :created,
+    // location: @article`) passes a record where the runtime's render
+    // wants a path string. Same polymorphic transform as
+    // `rewrite_redirect_to`, just on the kwarg position rather than
+    // the first positional arg.
+    let with_render = rewrite_render_location_kwarg(&with_render);
     let with_params = rewrite_params(&with_render);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with

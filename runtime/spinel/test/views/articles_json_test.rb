@@ -95,4 +95,41 @@ class ViewsArticlesJsonTest < Minitest::Test
     assert_includes j, "},{", "missing comma between elements: #{j}"
     refute_includes j, ",]", "trailing comma: #{j}"
   end
+
+  # ── controller dispatch end-to-end (head + location kwargs) ─────
+
+  def test_delete_articles_json_returns_204_with_json_content_type
+    require_relative "../../main"
+    Main.configure_default_adapter!
+    @article.save
+    out = StringIO.new
+    Main.run(
+      { "REQUEST_METHOD" => "DELETE", "PATH_INFO" => "/articles/#{@article.id}.json" },
+      StringIO.new(""),
+      out,
+    )
+    assert_match(/^Status: 204\b/, out.string)
+    assert_includes out.string, "Content-Type: application/json"
+  end
+
+  def test_post_articles_json_returns_201_with_location_and_body
+    require_relative "../../main"
+    Main.configure_default_adapter!
+    body = "article%5Btitle%5D=Acceptance&article%5Bbody%5D=A+sufficiently+long+body."
+    out = StringIO.new
+    Main.run(
+      {
+        "REQUEST_METHOD"  => "POST",
+        "PATH_INFO"       => "/articles.json",
+        "CONTENT_TYPE"    => "application/x-www-form-urlencoded",
+        "CONTENT_LENGTH"  => body.bytesize.to_s,
+      },
+      StringIO.new(body),
+      out,
+    )
+    assert_match(/^Status: 201\b/, out.string)
+    assert_includes out.string, "Content-Type: application/json"
+    assert_match(%r{^Location: /articles/\d+}, out.string)
+    assert_includes out.string, %("title":"Acceptance")
+  end
 end
