@@ -90,10 +90,11 @@ done
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|ruby|ruby-int|typescript) NORMALIZED+=("$t") ;;
+        rails|ruby|ruby-int|typescript|crystal) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
+        cr) NORMALIZED+=(crystal) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails ruby ruby-int typescript" >&2; exit 2 ;;
+           echo "supported: rails ruby ruby-int typescript crystal" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -106,6 +107,8 @@ RUBY_OUT="$REPO_ROOT/build/transpiled-blog"
 # scripts/compare's typescript path — emit_preview always writes here,
 # so we reuse it to share the npm-install cache across compare runs.
 TS_OUT="/tmp/rh-ts-pass2"
+# Crystal target — same scratch-dir convention as scripts/compare.
+CR_OUT="/tmp/rh-cr-pass2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -272,6 +275,18 @@ build_target() {
                 (cd "$TS_OUT" && npm install --silent --no-audit --no-fund)
             fi
             ;;
+        crystal)
+            TARGET_BUILD_DIR="$CR_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$CR_OUT/src/main.cr" ]]; then
+                step "regenerating crystal target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target crystal "$FIXTURE" >/dev/null 2>&1)
+            fi
+            if [[ ! -x "$CR_OUT/.bin/server" ]]; then
+                step "building crystal target (release)"
+                (cd "$CR_OUT" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server)
+            fi
+            ;;
     esac
 }
 
@@ -299,6 +314,12 @@ stage_db() {
             ;;
         typescript)
             local db="$TS_OUT/db/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        crystal)
+            local db="$CR_OUT/db/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -364,6 +385,15 @@ start_target() {
             (cd "$TS_OUT" && \
                 PORT="$port" \
                 npm start \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        crystal)
+            # AOT-compiled binary — single-process, no workers concept.
+            (cd "$CR_OUT" && \
+                PORT="$port" \
+                ./.bin/server \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
