@@ -589,6 +589,23 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "src/router.rs",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    // errors.rb intentionally NOT transpiled yet — `RecordInvalid`
+    // takes a `Base` parameter that AR::Base hasn't yet emitted, AND
+    // the Rust-natural `class < StandardError` shape needs `impl
+    // Display + Error` synthesis that isn't yet there. Both unblock
+    // when AR::Base lands later in Phase 2.
+    //
     // HWIA intentionally NOT transpiled to rust2 — per Phase 2.5(b),
     // `@flash` and `@session` move to per-app ActionDispatch::Flash /
     // ActionDispatch::Session structs with typed fields. HWIA stays

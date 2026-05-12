@@ -312,6 +312,29 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Hash { entries, .. } => emit_hash(entries),
         ExprNode::Array { elements, .. } => emit_array(elements),
+        ExprNode::Range { begin, end, exclusive } => {
+            // Ruby `..` is inclusive end; Rust `..=` is inclusive end.
+            // Ruby `...` is exclusive end; Rust `..` is exclusive end.
+            // Mapping swaps the operator-shape: Ruby inclusive uses
+            // two dots, Rust inclusive uses two-dots-equals.
+            let op = if *exclusive { ".." } else { "..=" };
+            let b = begin.as_ref().map(emit_expr).unwrap_or_default();
+            let e = end.as_ref().map(emit_expr).unwrap_or_default();
+            // Endless ranges (`1..`, `..5`) — Ruby inclusive endless
+            // is `1..` (no end). Rust `1..` is also endless but
+            // exclusive-shaped; the `..=` form requires a right
+            // operand, so endless-inclusive collapses to plain `..`
+            // unconditionally. Slice indexing (`pp[1..]`) is the
+            // common case; semantics match either way for "from i
+            // to end."
+            if end.is_none() {
+                return format!("{b}..");
+            }
+            if begin.is_none() {
+                return format!("..{e}");
+            }
+            format!("{b}{op}{e}")
+        }
         ExprNode::BoolOp { op, left, right, .. } => {
             // Ruby `a && b` / `a || b` map directly to Rust `&&` /
             // `||` — same short-circuit semantics, same precedence
@@ -611,13 +634,40 @@ fn rewrite_method_name(m: &str) -> String {
     sanitize_ident(bridged)
 }
 
-/// Strip trailing `?` / `!` from a Ruby identifier so Rust accepts
-/// it as a function name. Public so `method.rs` can use the same
-/// rule at `pub fn` definition sites.
+/// Strip trailing `?` / `!` from a Ruby identifier and escape Rust
+/// reserved keywords with the `r#` raw-identifier prefix so Rust
+/// accepts the name. Public so `method.rs` can use the same rule
+/// at `pub fn` definition sites — defines and call sites share the
+/// transform so name agreement holds across both.
 pub(super) fn sanitize_ident(name: &str) -> String {
     let s = name.strip_suffix('?').unwrap_or(name);
     let s = s.strip_suffix('!').unwrap_or(s);
-    s.to_string()
+    if is_rust_keyword(s) {
+        format!("r#{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Rust 2024 reserved-word set. The `r#ident` raw-identifier form
+/// lifts the keyword restriction so user-defined names like `match`,
+/// `loop`, `type` can become function/struct names. Matches the
+/// `rustc_lexer` keyword list; `r#` doesn't apply to a small group
+/// of contextual keywords (`crate`, `self`, `Self`, `super`,
+/// `extern`) but those are unlikely in a Ruby source surface.
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
+            | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
+            | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub"
+            | "ref" | "return" | "self" | "Self" | "static" | "struct"
+            | "trait" | "true" | "type" | "unsafe" | "use" | "where"
+            | "while" | "async" | "await" | "dyn"
+            | "abstract" | "become" | "box" | "do" | "final" | "macro"
+            | "override" | "priv" | "typeof" | "unsized" | "virtual"
+            | "yield" | "try"
+    )
 }
 
 fn emit_string_interp(parts: &[InterpPart]) -> String {
