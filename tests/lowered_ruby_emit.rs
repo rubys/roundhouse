@@ -685,16 +685,18 @@ fn controllers_articles_requires_referenced_models_from_models_dir() {
 #[test]
 fn controllers_set_article_lowers_params_expect_id_to_indexed_to_i() {
     // `params.expect(:id)` (Rails 8 single-symbol form) lowers to
-    // `@params.fetch("id", "0").to_i`. Spinel doesn't have Rails' magic
-    // `params` method; request params arrive on `@params` (a plain
-    // String-keyed Hash) whose values are strings. `.fetch("id", "0")`
-    // returns non-nil (Crystal's strict `String#to_i` rejects nil
-    // receivers); missing-id-as-unsaved-sentinel maps to integer 0.
+    // `@params.fetch("id", "0").to_s.to_i`. @params is
+    // `Hash[String, Roundhouse::ParamValue]` (recursive `String |
+    // Hash | Array`); `.fetch` returns the union value type, so
+    // `.to_s` bridges it to a String leaf before `.to_i`. For the
+    // path-param shape this rewrite covers, the value is always a
+    // String at runtime — `.to_s` is a no-op (Ruby/Crystal) or
+    // `String(x)` coercion (TS). Missing-id sentinel `"0".to_i == 0`.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.find(@params.fetch(\"id\", \"0\").to_i)"),
-        "expected `@params.fetch(\"id\", \"0\").to_i` lowering; got:\n{src}",
+        src.contains("Article.find(@params.fetch(\"id\", \"0\").to_s.to_i)"),
+        "expected `@params.fetch(\"id\", \"0\").to_s.to_i` lowering; got:\n{src}",
     );
     assert!(
         !src.contains("params.expect(:id)"),
@@ -1081,17 +1083,20 @@ fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
 #[test]
 fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
     // `@comment = @article.comments.find(params.expect(:id))` lowers to
-    //   @comment = Comment.find(@params.fetch("id", "0").to_i)
+    //   @comment = Comment.find(@params.fetch("id", "0").to_s.to_i)
     //   if @comment.article_id != @article.id
     //     head(:not_found)
     //     return
     //   end
     // The guard preserves the belongs-to-article semantics that Rails
-    // would have enforced via the through-association lookup.
+    // would have enforced via the through-association lookup. The
+    // leading `.to_s` bridges the recursive `Roundhouse::ParamValue`
+    // union to a String leaf before `.to_i` — see
+    // `controllers_set_article_lowers_params_expect_id_to_indexed_to_i`.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("@comment = Comment.find(@params.fetch(\"id\", \"0\").to_i)"),
+        src.contains("@comment = Comment.find(@params.fetch(\"id\", \"0\").to_s.to_i)"),
         "expected direct Comment.find lookup; got:\n{src}",
     );
     assert!(

@@ -1026,6 +1026,14 @@ fn rewrite_expect(
 /// for missing-id-as-unsaved-sentinel. String key matches the
 /// request-body parser's String-keyed Hash; a Symbol key would miss.
 fn params_index_to_i(sym: &Symbol, span: Span) -> Expr {
+    // `@params.fetch("<sym>", "0").to_s.to_i` — the leading `.to_s`
+    // bridges the recursive `Roundhouse::ParamValue` union (String |
+    // Hash | Array) into a single String, so the subsequent `.to_i`
+    // type-checks on strict targets. For the only access pattern
+    // this rewrite covers (`params.expect(:id)` scalar lookup), the
+    // value is always a String leaf at runtime — the `.to_s` is a
+    // no-op on String (Ruby/Crystal) / `String(x)` coercion (TS),
+    // matching Rails' string-default param semantics.
     let fetched = Expr::new(
         span,
         ExprNode::Send {
@@ -1047,10 +1055,20 @@ fn params_index_to_i(sym: &Symbol, span: Span) -> Expr {
             parenthesized: true,
         },
     );
-    Expr::new(
+    let to_s = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(fetched),
+            method: Symbol::from("to_s"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(to_s),
             method: Symbol::from("to_i"),
             args: vec![],
             block: None,

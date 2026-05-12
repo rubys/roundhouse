@@ -111,11 +111,26 @@ fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
 
     let sql = compose_sql_select(sel, table);
     let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
+    // Empty Array literal carries an explicit `Array<Owner>` type
+    // annotation so strict-target emit (Crystal `[] of Owner`)
+    // matches the subsequent `results << instance` push semantics.
+    // The body-typer would otherwise type `[]` as `Array<Var>` and
+    // the Crystal emit's empty-array default (`[] of String`) would
+    // mismatch the appended instances.
+    let owner_array_ty = crate::ty::Ty::Array {
+        elem: Box::new(crate::ty::Ty::Class {
+            id: owner.clone(),
+            args: vec![],
+        }),
+    };
     let results_init = assign_var(
         &results,
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+        crate::lower::typing::with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+            ),
+            owner_array_ty,
         ),
     );
 

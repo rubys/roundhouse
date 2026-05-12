@@ -80,10 +80,16 @@ module Roundhouse
       end
 
       body_params = read_form_body(context.request)
-      if method == "POST" && body_params.has_key?("_method")
-        upper = body_params["_method"].upcase
-        if upper == "PATCH" || upper == "PUT" || upper == "DELETE"
-          method = upper
+      # `_method=delete|patch|put` from Rails' hidden form field is
+      # always a top-level (non-nested) key, so it survives bracket-
+      # parsing untouched.
+      if method == "POST"
+        raw_method = body_params["_method"]?
+        if raw_method.is_a?(String)
+          upper = raw_method.upcase
+          if upper == "PATCH" || upper == "PUT" || upper == "DELETE"
+            method = upper
+          end
         end
       end
 
@@ -112,8 +118,14 @@ module Roundhouse
         return
       end
 
-      # Build merged params (path + query + body), all String-keyed.
-      merged = {} of String => String
+      # Build merged params: path + query + body. Path captures and
+      # query-string entries are always String leaves; form-body keys
+      # may be bracket-nested (`comment[commenter]`) and surface as
+      # `Hash(String, ParamValue)` sub-trees. The slot's typed value
+      # union `Roundhouse::ParamValue = String | Hash(...) | Array(...)`
+      # accepts either shape; the lowered `<Resource>Params.from_raw`
+      # emit narrows via `is_a?(Hash)` / `is_a?(String)` at access.
+      merged = {} of String => Roundhouse::ParamValue
       path_params.each { |k, v| merged[k] = v }
       context.request.query_params.each { |k, v| merged[k] = v }
       body_params.each { |k, v| merged[k] = v }
@@ -166,8 +178,20 @@ module Roundhouse
       context.response.print response_body
     end
 
-    def self.read_form_body(request : HTTP::Request) : Hash(String, String)
-      result = {} of String => String
+    # Parse a `application/x-www-form-urlencoded` body into a nested
+    # `Hash(String, Roundhouse::ParamValue)`. Rails-shape bracket keys
+    # are unwrapped:
+    #
+    #   `comment[commenter]=Sam` → `{"comment" => {"commenter" => "Sam"}}`
+    #   `tags[]=a&tags[]=b`       → `{"tags" => ["a", "b"]}`
+    #   `_method=delete`          → `{"_method" => "delete"}`
+    #
+    # Bare (no-bracket) keys land as String leaves. Mirrors the
+    # TS server's `parseFormData` + `setNestedParam` (runtime/
+    # typescript/server.ts) and Spinel's `assign_form_pair`
+    # (runtime/spinel/cgi_io.rb).
+    def self.read_form_body(request : HTTP::Request) : Hash(String, Roundhouse::ParamValue)
+      result = {} of String => Roundhouse::ParamValue
       content_type = request.headers["Content-Type"]? || ""
       return result unless content_type.starts_with?("application/x-www-form-urlencoded")
       body_io = request.body
@@ -175,9 +199,56 @@ module Roundhouse
       raw = body_io.gets_to_end
       return result if raw.empty?
       URI::Params.parse(raw) do |k, v|
-        result[k] = v
+        set_nested_param(result, k, v)
       end
       result
+    end
+
+
+    # Insert `key=val` into the nested params map, handling Rails'
+    # bracket syntax. Recognized shapes:
+    #
+    #   `parent[child]=v` → `out[parent] = { child => v }`
+    #   `parent[]=v`      → `out[parent] = [..., v]`
+    #
+    # Deeper nesting (`a[b][c]`) is unsupported today — the real-blog
+    # fixture only exercises one level. Future work can extend the
+    # recursion if an app needs it; the ParamValue type admits it.
+    private def self.set_nested_param(
+      into : Hash(String, Roundhouse::ParamValue),
+      key : String,
+      val : String,
+    ) : Nil
+      open_bracket = key.index('[')
+      if open_bracket.nil?
+        into[key] = val
+        return
+      end
+      close_bracket = key.index(']', open_bracket + 1)
+      return if close_bracket.nil?
+      parent = key[0, open_bracket]
+      inner = key[(open_bracket + 1)...close_bracket]
+      if inner.empty?
+        # `tags[]=v` — array append.
+        existing = into[parent]?
+        bucket = if existing.is_a?(Array)
+                   existing
+                 else
+                   [] of Roundhouse::ParamValue
+                 end
+        bucket << val.as(Roundhouse::ParamValue)
+        into[parent] = bucket
+      else
+        # `parent[child]=v` — nested hash.
+        existing = into[parent]?
+        bucket = if existing.is_a?(Hash)
+                   existing
+                 else
+                   {} of String => Roundhouse::ParamValue
+                 end
+        bucket[inner] = val
+        into[parent] = bucket
+      end
     end
   end
 end

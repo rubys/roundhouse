@@ -422,6 +422,22 @@ pub fn parse_library_with_rbs(
         for m in &lc.methods {
             crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
         }
+        // Override flow-inferred ivar types with RBS-declared
+        // attr_accessor getter return types. `@params = {}` infers
+        // `Hash<Var, Var>` from the body; the RBS getter says
+        // `Hash[String, Roundhouse::ParamValue]`. The declared type
+        // is the contract; downstream strict-target emit (Crystal
+        // empty-hash `{} of K => V`) needs the RBS shape, not the
+        // initializer's inferred shape.
+        if let Some(info) = class_registry.get(&lc.name) {
+            for (m_name, sig) in &info.instance_methods {
+                if let Ty::Fn { params, ret, .. } = sig {
+                    if params.is_empty() {
+                        flow_ivars.insert(m_name.clone(), (**ret).clone());
+                    }
+                }
+            }
+        }
         if !flow_ivars.is_empty() {
             let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
                 .into_iter()

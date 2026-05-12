@@ -14,6 +14,7 @@
 
 use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 use super::shared::{escape_ident, indent_lines};
 
@@ -37,6 +38,31 @@ where
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    // Empty Hash/Array literal with a concrete type annotation —
+    // render with the `of K => V` / `of E` clause so Crystal infers
+    // the container type from the annotation rather than the default
+    // `{} of String => String` / `[] of String`. Driven by the
+    // body-typer's expected-type propagation in
+    // `propagate_expected_to_empty_container` (Assign branch).
+    if let Some(ty) = e.ty.as_ref() {
+        match (&*e.node, ty) {
+            (ExprNode::Hash { entries, kwargs: false }, Ty::Hash { key, value })
+                if entries.is_empty() =>
+            {
+                return format!(
+                    "{{}} of {} => {}",
+                    super::ty::crystal_ty(key),
+                    super::ty::crystal_ty(value),
+                );
+            }
+            (ExprNode::Array { elements, .. }, Ty::Array { elem })
+                if elements.is_empty() =>
+            {
+                return format!("[] of {}", super::ty::crystal_ty(elem));
+            }
+            _ => {}
+        }
+    }
     let raw = emit_node(&e.node);
     // Crystal's strict-typing flow analysis flushes ivar narrowing on
     // any intervening method call. Even after `@article = Article.find(...)`,
@@ -294,6 +320,29 @@ fn emit_node(n: &ExprNode) -> String {
                             let var = escape_ident(name.as_str());
                             let val = emit_expr(&args[0]);
                             return format!("{var} = {var} + {val}");
+                        }
+                    }
+                }
+            }
+            // `v.is_a?(TrueClass)` / `is_a?(FalseClass)` — Ruby
+            // distinguishes the singleton classes of `true` / `false`;
+            // Crystal has neither. Rewrite to `== true` / `== false`
+            // (works under any receiver type — value comparison).
+            // `is_a?(NilClass)` similarly rewrites to `== nil`. The
+            // jbuilder runtime's polymorphic value classifier
+            // (`runtime/ruby/json_builder.rb`) is the canonical
+            // producer.
+            if method.as_str() == "is_a?" && args.len() == 1 {
+                if let ExprNode::Const { path } = &*args[0].node {
+                    if let Some(last) = path.last() {
+                        let lit = match last.as_str() {
+                            "TrueClass" => Some("true"),
+                            "FalseClass" => Some("false"),
+                            "NilClass" => Some("nil"),
+                            _ => None,
+                        };
+                        if let (Some(r), Some(lit)) = (recv, lit) {
+                            return format!("{} == {lit}", emit_expr(r));
                         }
                     }
                 }

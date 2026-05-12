@@ -268,6 +268,17 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Hash { entries, .. } => {
+                // Empty literals can carry a pre-stamped expected type
+                // (set by `Assign`'s `propagate_expected_to_empty_container`
+                // when the LHS is an Ivar/Var with a declared Hash type).
+                // Honor it instead of falling back to `Hash<Var, Var>`
+                // — strict targets need the concrete shape, and the
+                // surrounding declaration already constrains the type.
+                if entries.is_empty() {
+                    if let Some(t @ Ty::Hash { .. }) = expr.ty.as_ref() {
+                        return t.clone();
+                    }
+                }
                 let mut key_ty: Option<Ty> = None;
                 let mut value_ty: Option<Ty> = None;
                 for (k, v) in entries.iter_mut() {
@@ -289,6 +300,15 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Array { elements, .. } => {
+                // Mirror the empty-Hash branch above: a pre-stamped
+                // `Ty::Array<T>` from `with_ty` (or from
+                // `propagate_expected_to_empty_container`) takes
+                // precedence over the `Var`-defaulted inference.
+                if elements.is_empty() {
+                    if let Some(t @ Ty::Array { .. }) = expr.ty.as_ref() {
+                        return t.clone();
+                    }
+                }
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
@@ -597,6 +617,20 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Assign { target, value } => {
+                // Pre-propagate expected type into empty-container
+                // literals: `@params = {}` where `@params : Hash[K, V]`
+                // should type the empty Hash as `Hash<K, V>` rather
+                // than `Hash<Var, Var>`. Without this, the strict
+                // Crystal emit's `{} of K => V` default falls back to
+                // `String => String` and trips against the declared
+                // property type. Only fires for empty literals — non-
+                // empty container literals already infer from their
+                // contents.
+                if let LValue::Ivar { name } = target {
+                    if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
+                        propagate_expected_to_empty_container(value, &expected);
+                    }
+                }
                 let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
                     self.analyze_expr(recv, ctx);
@@ -706,6 +740,47 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
 
 pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
+}
+
+/// Stamp the expected type onto an empty Hash/Array literal so the
+/// body-typer's normal inference (which would otherwise leave the
+/// inner type as `Var`) carries the surrounding context. Used by
+/// `Assign` to forward an ivar/var's declared type into a bare `{}`
+/// or `[]` RHS — strict targets need the concrete shape (Crystal's
+/// `{} of K => V`, TS's `Record<string, V>`) and `Var` doesn't
+/// render. Non-empty literals are left alone; their inferred element
+/// types already drive the result.
+///
+/// `expected` may arrive as `T | Nil` because pass-B reseeded ivars
+/// union the assignment type with Nil to model first-read-before-
+/// initialize; peel that wrapper before matching the container shape.
+fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
+    let peeled = peel_nilable(expected);
+    match &mut *value.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            if matches!(peeled, Ty::Hash { .. }) {
+                value.ty = Some(peeled.clone());
+            }
+        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            if matches!(peeled, Ty::Array { .. }) {
+                value.ty = Some(peeled.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn peel_nilable(ty: &Ty) -> &Ty {
+    if let Ty::Union { variants } = ty {
+        if variants.len() == 2 {
+            let nil_idx = variants.iter().position(|v| matches!(v, Ty::Nil));
+            if let Some(idx) = nil_idx {
+                return &variants[1 - idx];
+            }
+        }
+    }
+    ty
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
