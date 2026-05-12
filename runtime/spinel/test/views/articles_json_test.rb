@@ -36,10 +36,13 @@ class ViewsArticlesJsonTest < Minitest::Test
     assert_includes j, %("id":#{@article.id})
     assert_includes j, %("title":"Getting Started")
     assert_includes j, %("body":"Rails is a web application framework running on Ruby.")
-    # created_at / updated_at present (exact byte format pending
-    # iso8601 rewrite — Phase 8 byte-equivalence work).
-    assert_includes j, %("created_at":)
-    assert_includes j, %("updated_at":)
+    # datetime columns format as Rails-canonical ISO 8601 with
+    # millisecond precision + Z suffix — `JsonBuilder.encode_datetime`
+    # reformats the sqlite TEXT shape ("2026-05-10 02:22:28.114670")
+    # to the ActiveSupport::JSON::Encoding default
+    # ("2026-05-10T02:22:28.114Z").
+    assert_match(/"created_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/, j)
+    assert_match(/"updated_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/, j)
   end
 
   def test_article_json_partial_url_uses_path_helper
@@ -98,10 +101,16 @@ class ViewsArticlesJsonTest < Minitest::Test
 
   # ── controller dispatch end-to-end (head + location kwargs) ─────
 
+  # test_helper.rb sets `Db.configure(":memory:")` + schema + fixtures
+  # at load time, BEFORE main.rb is required. We deliberately skip
+  # `Main.configure_default_adapter!` here — it would call
+  # `Db.configure(":memory:")` again, opening a fresh empty DB
+  # connection and blowing away the setUp fixtures + saved @article.
+  # ActiveRecord.adapter stays nil per test_helper's policy (any path
+  # that falls through surfaces a NoMethodError; the lowered
+  # controllers use Level-3 Db.exec, not the adapter dispatcher).
   def test_delete_articles_json_returns_204_with_json_content_type
     require_relative "../../main"
-    Main.configure_default_adapter!
-    @article.save
     out = StringIO.new
     Main.run(
       { "REQUEST_METHOD" => "DELETE", "PATH_INFO" => "/articles/#{@article.id}.json" },
@@ -114,7 +123,6 @@ class ViewsArticlesJsonTest < Minitest::Test
 
   def test_post_articles_json_returns_201_with_location_and_body
     require_relative "../../main"
-    Main.configure_default_adapter!
     body = "article%5Btitle%5D=Acceptance&article%5Bbody%5D=A+sufficiently+long+body."
     out = StringIO.new
     Main.run(

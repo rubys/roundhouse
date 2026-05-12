@@ -159,9 +159,17 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         &known_models,
     );
 
+    let arg_columns = if arg_name.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        columns_for_arg(&arg_name, dir, is_partial, stem, app)
+    };
+
     let ctx = Ctx {
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
+        arg_name: arg_name.clone(),
+        arg_columns,
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -227,6 +235,17 @@ struct Ctx {
     /// Name of the accumulator local (`io`). Synthesized at body head;
     /// every appended fragment goes through `accumulator_append`.
     accumulator: String,
+    /// Name of the template's main positional arg (`article` for the
+    /// `_article` partial; `articles` for `index`). Used to recognize
+    /// `json.extract! article, :a, :b` calls so the lowerer can look
+    /// up column types on the implied model.
+    arg_name: String,
+    /// Column-type table for the model that backs `arg_name`. Keyed
+    /// by column-name symbol; empty when the arg has no resolvable
+    /// model (e.g. layouts, untyped fixtures). Used to route
+    /// datetime columns through `JsonBuilder.encode_datetime` rather
+    /// than the generic `encode_value`.
+    arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -288,6 +307,7 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
     for stmt in &classified {
         match stmt {
             JbStmt::Extract { obj, attrs } => {
+                let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
                 for attr in attrs {
                     if emitted > 0 {
                         out.push(io_append_lit(&ctx.accumulator, ","));
@@ -303,10 +323,23 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
                         None,
                         false,
                     );
-                    out.push(io_append_call(
-                        &ctx.accumulator,
-                        json_builder_encode(value),
-                    ));
+                    // Route datetime / date columns through
+                    // `JsonBuilder.encode_datetime` for Rails-canonical
+                    // ISO 8601 output. Other columns (Integer, String,
+                    // …) ride encode_value's type dispatch.
+                    let use_datetime = obj_is_arg
+                        && matches!(
+                            ctx.arg_columns.get(attr),
+                            Some(crate::schema::ColumnType::DateTime)
+                                | Some(crate::schema::ColumnType::Date)
+                                | Some(crate::schema::ColumnType::Time)
+                        );
+                    let encoded = if use_datetime {
+                        json_builder_call("encode_datetime", value)
+                    } else {
+                        json_builder_encode(value)
+                    };
+                    out.push(io_append_call(&ctx.accumulator, encoded));
                     emitted += 1;
                 }
             }
@@ -698,13 +731,75 @@ fn io_append_call(accumulator: &str, call: Expr) -> Expr {
 }
 
 fn json_builder_encode(value: Expr) -> Expr {
+    json_builder_call("encode_value", value)
+}
+
+fn json_builder_call(method: &str, value: Expr) -> Expr {
     let recv = Expr::new(
         Span::synthetic(),
         ExprNode::Const {
             path: vec![Symbol::from("JsonBuilder")],
         },
     );
-    send(Some(recv), "encode_value", vec![value], None, true)
+    send(Some(recv), method, vec![value], None, true)
+}
+
+/// True when `obj` reads as the named local — either a bare `Var`
+/// or a `Send` with no receiver, no args, no block (the bareword
+/// shape Prism produces for partial-scope locals).
+fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    match &*obj.node {
+        ExprNode::Var { name: n, .. } => n.as_str() == name,
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block: None,
+            ..
+        } => args.is_empty() && method.as_str() == name,
+        _ => false,
+    }
+}
+
+/// Build the `{column_name → ColumnType}` map for the template's
+/// main positional arg, when that arg resolves to a known model
+/// backed by a schema table. Returns an empty map for layouts,
+/// index views (arg is a collection, not a single record), and any
+/// arg we can't tie back to a schema row.
+fn columns_for_arg(
+    arg_name: &str,
+    dir: &str,
+    is_partial: bool,
+    stem: &str,
+    app: &App,
+) -> std::collections::HashMap<Symbol, crate::schema::ColumnType> {
+    let mut out: std::collections::HashMap<Symbol, crate::schema::ColumnType> =
+        std::collections::HashMap::new();
+    // Index views' arg is the plural collection (`articles`), not a
+    // single record. Per-row column lookups don't apply — the
+    // extract! inside the partial handles those instead.
+    if !is_partial && stem == "index" {
+        return out;
+    }
+    if dir == "layouts" {
+        return out;
+    }
+    let model_class = crate::naming::singularize_camelize(dir);
+    let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == model_class) else {
+        return out;
+    };
+    let Some(table) = app.schema.tables.get(&model.table.0) else {
+        return out;
+    };
+    for col in &table.columns {
+        out.insert(col.name.clone(), col.col_type.clone());
+    }
+    let _ = arg_name; // arg_name is informational; the dir → model
+                     // resolution above is the load-bearing path.
+    out
 }
 
 fn assign_var(name: &str, value: Expr) -> Expr {

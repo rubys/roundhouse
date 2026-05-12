@@ -54,4 +54,33 @@ class JsonBuilderTest < Minitest::Test
     assert_equal "\"a\\\"b\"", JsonBuilder.encode_value("a\"b")
   end
 
+  # ── encode_datetime ────────────────────────────────────────────
+
+  def test_encode_datetime_nil
+    assert_equal "null", JsonBuilder.encode_datetime(nil)
+  end
+
+  def test_encode_datetime_full_microseconds
+    # Sqlite TEXT timestamp with microsecond fraction.
+    assert_equal "\"2026-05-10T02:22:28.114Z\"",
+      JsonBuilder.encode_datetime("2026-05-10 02:22:28.114670")
+  end
+
+  def test_encode_datetime_no_fraction
+    # No fractional seconds → milliseconds default to "000".
+    assert_equal "\"2026-05-10T02:22:28.000Z\"",
+      JsonBuilder.encode_datetime("2026-05-10 02:22:28")
+  end
+
+  def test_encode_datetime_short_fraction
+    # One-digit fraction pads to milliseconds.
+    assert_equal "\"2026-05-10T02:22:28.100Z\"",
+      JsonBuilder.encode_datetime("2026-05-10 02:22:28.1")
+  end
+
+  def test_encode_datetime_unrecognized_passes_through_as_string
+    # Bogus input → fallback quoted-string encoding so call sites
+    # don't crash on malformed column data.
+    assert_equal "\"oops\"", JsonBuilder.encode_datetime("oops")
+  end
 end

@@ -4,17 +4,21 @@
 # the surface small enough that the same Ruby transpiles cleanly to
 # every Group 1 target.
 #
-# Scope: the two primitives the Jbuilder lowerer needs for real-blog
-# templates — encode_string (RFC 8259 escaping for the common cases)
-# and encode_value (type-dispatched scalar encoder). The lowerer
-# inlines `{`/`,`/`}` and `[`/`,`/`]` directly into method bodies,
-# so the runtime has no array_join / object_pairs primitive today;
-# those land when stretch DSL forms (json.merge!, dynamic-shape
+# Scope: three primitives the Jbuilder lowerer needs for real-blog
+# templates — encode_string (RFC 8259 escaping for the common cases),
+# encode_value (type-dispatched scalar encoder), and encode_datetime
+# (Rails-compatible ISO 8601 reformat for `datetime` columns). The
+# lowerer inlines `{`/`,`/`}` and `[`/`,`/`]` directly into method
+# bodies, so the runtime has no array_join / object_pairs primitive
+# today; those land when stretch DSL forms (json.merge!, dynamic-shape
 # objects) need them.
 #
-# Timestamp / decimal handling is the lowerer's job, not the runtime's:
-# call sites pass `.iso8601(3)` etc. so this module never sees Time or
-# BigDecimal. Keeps the runtime free of class-name-keyed dispatch.
+# Decimal handling is still the lowerer's job: call sites pass strings
+# or pre-formatted values. encode_datetime is bundled here because the
+# input is uniformly a sqlite-shape TEXT timestamp and the output
+# format is Rails-canonical; doing the reformat in the runtime keeps
+# the lowerer's column-aware routing simple (just "is this column a
+# datetime, yes or no").
 module JsonBuilder
   ESCAPES = {
     "\\" => "\\\\",
@@ -50,5 +54,31 @@ module JsonBuilder
     # Fallback: stringify and quote. Call sites convert Time /
     # BigDecimal / etc. before reaching here.
     "\"#{encode_string(v.to_s)}\""
+  end
+
+  # Reformat a sqlite-shape TEXT timestamp ("YYYY-MM-DD HH:MM:SS[.f]")
+  # to Rails-canonical ISO 8601 with millisecond precision and a `Z`
+  # suffix ("YYYY-MM-DDTHH:MM:SS.fffZ"). Returns a JSON-quoted string.
+  # Inputs that don't match the expected shape pass through as plain
+  # quoted strings, so the call site degrades gracefully if a column
+  # the lowerer routed here turns out to hold non-timestamp text.
+  #
+  # Assumes UTC — adapters that store local-time timestamps without
+  # an offset can't be reliably normalized without per-app config; the
+  # Rails default is UTC for ActiveRecord-managed datetime columns,
+  # which is what real-blog produces.
+  def self.encode_datetime(s)
+    return "null" if s.nil?
+    str = s.to_s
+    return "\"#{encode_string(str)}\"" if str.length < 19
+    date = str[0, 10]
+    time = str[11, 8]
+    ms = "000"
+    if str.length > 20 && str[19, 1] == "."
+      frac = str[20..-1]
+      padded = "#{frac}000"
+      ms = padded[0, 3]
+    end
+    "\"#{date}T#{time}.#{ms}Z\""
   end
 end
