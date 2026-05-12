@@ -332,6 +332,15 @@ fn emit_node(n: &ExprNode) -> String {
             // jbuilder runtime's polymorphic value classifier
             // (`runtime/ruby/json_builder.rb`) is the canonical
             // producer.
+            //
+            // `is_a?(Hash)` widens to `(... is_a?(Hash)) ||
+            // (... is_a?(NamedTuple))` — the framework's `data: {...}`
+            // attribute shape arrives as a Crystal NamedTuple (the
+            // `{key: val}` shorthand emits NamedTuple syntax), which
+            // `is_a?(Hash)` alone would reject. The unwrap path in
+            // `ViewHelpers.render_attrs` expects both shapes; the
+            // Ruby source can't say "either Hash or NamedTuple"
+            // because NamedTuple is Crystal-specific.
             if method.as_str() == "is_a?" && args.len() == 1 {
                 if let ExprNode::Const { path } = &*args[0].node {
                     if let Some(last) = path.last() {
@@ -343,6 +352,14 @@ fn emit_node(n: &ExprNode) -> String {
                         };
                         if let (Some(r), Some(lit)) = (recv, lit) {
                             return format!("{} == {lit}", emit_expr(r));
+                        }
+                        if last.as_str() == "Hash" {
+                            if let Some(r) = recv {
+                                let r_s = emit_expr(r);
+                                return format!(
+                                    "({r_s}.is_a?(Hash) || {r_s}.is_a?(NamedTuple))"
+                                );
+                            }
                         }
                     }
                 }

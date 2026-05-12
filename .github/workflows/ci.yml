@@ -329,31 +329,29 @@ jobs:
       - name: scripts/compare rust
         run: scripts/compare rust
 
-  # compare-crystal: temporarily disabled — see toolchain-crystal above.
-  #
-  # compare-crystal:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - uses: ruby/setup-ruby@v1
-  #       with:
-  #         ruby-version: '3.4'
-  #         bundler-cache: true
-  #         working-directory: ./fixtures/real-blog
-  #     - name: Install Crystal
-  #       uses: crystal-lang/install-crystal@v1
-  #       with:
-  #         crystal: latest
-  #     - name: scripts/compare crystal
-  #       run: scripts/compare crystal
+  compare-crystal:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - name: scripts/compare crystal
+        run: scripts/compare crystal
 
   compare-typescript:
     needs: generate-fixture
