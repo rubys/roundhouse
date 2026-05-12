@@ -58,6 +58,32 @@ in addition to Rust:
   sub-piece verifies the path is on track and drops
   `parameters.rb` from typed-target transpile when complete.
 
+## Phase 2.5 closure (2026-05-11)
+
+All three sub-pieces landed:
+
+- **(a) Validations lowerer ✅.** Every `ValidationRule` arm expands
+  to inline IR in `src/lower/model_to_library/validations.rs`. Error
+  messages are string-literal constants; column types stay typed.
+  `validations.rb` dropped from `RUST_RUNTIME` (kept in TS/Crystal
+  for direct-call test parity). Plus `attr_ty` threading drops dead
+  `is_a?(Array)` branches when the schema declares a String column.
+  Commits 7a6c27e, dd6057e, 1f02a1c, bac2073, 696a629.
+- **(b) HWIA elimination ✅.** Went beyond the rust2-only scope to
+  full cross-target elimination. Per-app `ActionDispatch::Flash` and
+  `ActionDispatch::Session` structs with typed fields + HWIA-shape
+  shim methods replace HWIA in TS, Crystal, and Rust. HWIA stays in
+  `runtime/ruby/` as a CRuby/Spinel helper for parity tests. ~540
+  LOC delta across 20 files. Commits e4c5207, 441655a, 696a629,
+  53e733a.
+- **(c) Parameters specialization confirmation ✅ for rust2.**
+  `parameters.rb` was dropped from `RUST_RUNTIME` as part of (b)'s
+  sweep. The broader Parameters specialization plan (TS/Crystal
+  Stages 3+4) is **deferred to a separate non-blocking session** —
+  orthogonal to the rust migration; no shared code path; can be
+  motivated by strict-TS-mode or four-way-benchmark Crystal row.
+  `parameters.rb` stays for CRuby/Spinel as canonical Ruby runtime.
+
 ## Phase status
 
 | # | Phase | Days | Status |
@@ -65,11 +91,11 @@ in addition to Rust:
 | 0 | Audit + tag | ½ | ✅ done |
 | 1 | Skeleton `rust2` parallel orchestrator | ½-1 | ✅ done |
 | 1.5 | Base/Validations inheritance spike | 1-2 | ✅ done — Option A (trait + composition) |
-| **2** | **Transpile 6 (was 9) runtime files**, dependency-ordered: inflector → errors → view_helpers → router → active_record/base → action_controller/base | 2-4 (was 3-7) | 1/6 done (inflector); HWIA work-in-progress paused after revision |
-| **2.5** | **Cross-target lowerer + HWIA elimination (NEW)** — (a) validations lowerer, (b) HWIA elimination, (c) Parameters specialization confirmation | 3-5 | not started — **recommended next** |
+| 2 | **Transpile 6 runtime files**, dependency-ordered: inflector → errors → view_helpers → router → active_record/base → action_controller/base | 2-4 | 2/6 done (inflector + json_builder); **next** |
+| 2.5 | Cross-target lowerer + HWIA elimination — (a) validations lowerer, (b) HWIA elimination, (c) Parameters specialization confirmation | 3-5 | ✅ done 2026-05-11 |
 | 3 | Hand-written primitive runtime + abstract adapter base | 2-3 | parallel-able with 2 |
 | 4 | `framework_tests_rust` gate (8/8 target) | 1-2 | blocked on 2+3 |
-| 5 | Per-file model/view/controller emit | 3-5 | blocked on 4 — validations/parameters/flash plumbing comes from 2.5 |
+| 5 | Per-file model/view/controller emit | 3-5 | blocked on 4 — validations/parameters/flash plumbing from 2.5 already done |
 | 6 | Real-blog parity via `rust2` | 2-4 | blocked on 5 |
 | 7 | Switchover commit + prune legacy | 1-2 | blocked on 6 |
 | 8 | Add `framework-tests-rust` CI; close out | ½ | blocked on 7 |
