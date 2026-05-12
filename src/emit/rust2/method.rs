@@ -39,7 +39,9 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let body = super::expr::with_method_scope(&m.body, || emit_expr(&m.body));
+    let body = super::expr::with_class_method_scope(|| {
+        super::expr::with_method_scope(&m.body, || emit_expr(&m.body))
+    });
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }

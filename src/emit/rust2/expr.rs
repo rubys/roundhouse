@@ -18,6 +18,16 @@ thread_local! {
     /// emit as `Self::method(args)` and compile pre-instance.
     static IN_CONSTRUCTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// True while rendering the body of a `def self.X` (class method),
+    /// emitted as `pub fn X(...)` with no `self` parameter. Ruby's
+    /// `self` inside a class method *is* the class, so `SelfRef` →
+    /// `Self` and `SelfRef.method(args)` → `Self::method(args)`. The
+    /// body-typer (see `analyze/body/mod.rs::resolves_through_self`)
+    /// rewrites implicit-receiver class-method calls to explicit
+    /// `recv = Some(SelfRef)`, so the emitter sees the explicit form
+    /// regardless of how the Ruby source was written.
+    static IN_CLASS_METHOD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Methods in the current `impl` block that were classified as
     /// static-safe by `library.rs::method_reads_self`. When a Send
     /// targets one of these via implicit-`self` recv, emit as
@@ -177,6 +187,20 @@ fn in_constructor() -> bool {
     IN_CONSTRUCTOR.with(|c| c.get())
 }
 
+fn in_class_method() -> bool {
+    IN_CLASS_METHOD.with(|c| c.get())
+}
+
+pub(super) fn with_class_method_scope<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IN_CLASS_METHOD.with(|c| c.replace(true));
+    let r = f();
+    IN_CLASS_METHOD.with(|c| c.set(prev));
+    r
+}
+
 fn is_static_method(name: &str) -> bool {
     STATIC_METHODS.with(|c| c.borrow().contains(name))
 }
@@ -192,7 +216,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 format!("self.{name}")
             }
         }
-        ExprNode::SelfRef => "self".to_string(),
+        ExprNode::SelfRef => {
+            if in_class_method() { "Self".to_string() } else { "self".to_string() }
+        }
         ExprNode::Const { path } => {
             // Rust uses file-as-module — `ActiveSupport::HashWithIndifferentAccess`
             // in source becomes `crate::hash_with_indifferent_access::
@@ -590,7 +616,11 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // valid choice elsewhere for inherently-static helpers — Rust
     // accepts both `obj.foo()` and `T::foo(...)` when `foo` doesn't
     // take a receiver, but the static form is unambiguous.
-    if matches!(&*r.node, ExprNode::SelfRef) && is_static_method(method) {
+    //
+    // The same routing applies unconditionally inside class methods
+    // (`def self.X` bodies): Ruby's `self` *is* the class there, so
+    // every `self.method(args)` is class-level dispatch.
+    if matches!(&*r.node, ExprNode::SelfRef) && (is_static_method(method) || in_class_method()) {
         if args_s.is_empty() {
             return format!("Self::{rewritten_method}()");
         }
