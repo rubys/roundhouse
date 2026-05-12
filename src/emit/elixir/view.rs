@@ -40,7 +40,7 @@ pub(super) fn emit_ex_views(app: &App) -> EmittedFile {
     let mut emitted_names: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
 
-    for v in &app.views {
+    for v in app.views.iter().filter(|v| v.format.as_str() == "html") {
         let fn_name = ex_view_function_name(v.name.as_str());
         if !emitted_names.insert(fn_name.clone()) {
             continue;

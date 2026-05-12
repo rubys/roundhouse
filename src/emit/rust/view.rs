@@ -45,7 +45,12 @@ pub(super) fn emit_views(app: &App) -> EmittedFile {
         .collect();
     let attrs_by_class = &attrs_by_class;
 
-    for view in &app.views {
+    // html-only — jbuilder (`*.json.jbuilder`) views go through the
+    // dedicated lowerer and Group 1 emitters (Ruby / Crystal / TS).
+    // Rust doesn't yet wire the jbuilder lowering, so skip json views
+    // here to avoid emitting two `articles_show` functions (one per
+    // format) that collide on the value-namespace.
+    for view in app.views.iter().filter(|v| v.format.as_str() == "html") {
         emit_view_fn(&mut s, view, &view_ctx, attrs_by_class);
         writeln!(s).unwrap();
     }
@@ -152,7 +157,11 @@ fn emit_view_fn(
 fn emit_missing_view_stubs(out: &mut String, app: &App, ctx: &ViewEmitCtx) {
     use std::collections::BTreeSet;
     let present: BTreeSet<String> =
-        app.views.iter().map(|v| v.name.as_str().to_string()).collect();
+        app.views
+            .iter()
+            .filter(|v| v.format.as_str() == "html")
+            .map(|v| v.name.as_str().to_string())
+            .collect();
     for model in &app.models {
         if model.attributes.fields.is_empty() {
             continue;

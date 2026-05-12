@@ -41,7 +41,7 @@ pub(super) fn emit_go_main(app: &App) -> EmittedFile {
         .map(|m| m.name.0.as_str().to_string())
         .collect();
     let mut registered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for v in &app.views {
+    for v in app.views.iter().filter(|v| v.format.as_str() == "html") {
         let name = v.name.as_str();
         if let Some((dir, base)) = name.rsplit_once('/') {
             if let Some(singular) = base.strip_prefix('_') {

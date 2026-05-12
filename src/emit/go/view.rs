@@ -46,7 +46,7 @@ pub(super) fn emit_go_views(app: &App, known_models: &[Symbol]) -> EmittedFile {
 
     let mut emitted: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
-    for v in &app.views {
+    for v in app.views.iter().filter(|v| v.format.as_str() == "html") {
         let fn_name = go_view_function_name(v.name.as_str());
         if !emitted.insert(fn_name.clone()) {
             continue;
