@@ -622,6 +622,17 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
+        rb_path: "runtime/ruby/action_controller/base.rb",
+        namespace: "ActionController",
+        out_path: "src/action_controller_base.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb intentionally NOT transpiled yet — `RecordInvalid`
     // takes a `Base` parameter that AR::Base hasn't yet emitted, AND
     // the Rust-natural `class < StandardError` shape needs `impl
