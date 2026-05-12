@@ -23,7 +23,7 @@ use crate::expr::{ArrayStyle, Expr, ExprNode};
 use crate::ident::Symbol;
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{Row, Ty};
 
 /// Build the `Importmap` module as two LibraryFunctions:
 /// `pins() -> Array<Hash>` returning the structured pin list, and
@@ -38,18 +38,25 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("Importmap")];
-    // Symbol-keyed hash so Ruby callers can access via `p[:name]`
-    // (the spinel ViewHelpers.javascript_importmap_tags shape) AND
-    // TS callers via `p["name"]` / `p.name` (Sym renders as a quoted
-    // string in TS object literals). String keys would break the
-    // Ruby callers — `p[:name]` on a string-keyed hash returns nil
-    // and the importmap script renders empty entries.
-    let pin_hash_ty = Ty::Hash {
-        key: Box::new(Ty::Sym),
-        value: Box::new(Ty::Str),
+    // Each pin is a record with two fixed fields (`name`, `path`).
+    // Symbol-keyed record / NamedTuple so Ruby callers can access via
+    // `p[:name]` (the spinel `ViewHelpers.javascript_importmap_tags`
+    // shape) AND TS callers via `p["name"]` / `p.name` (Sym renders
+    // as a quoted string in TS object literals). `Ty::Record` (rather
+    // than `Ty::Hash<Sym, Str>`) so Crystal's strict typing accepts
+    // the lowerer's `{name: "...", path: "..."}` shorthand — Crystal
+    // parses that as `NamedTuple(name: String, path: String)`, which
+    // matches the `Ty::Record` signature but conflicts with
+    // `Hash(Symbol, String)`.
+    let pin_row = {
+        let mut fields = indexmap::IndexMap::new();
+        fields.insert(Symbol::from("name"), Ty::Str);
+        fields.insert(Symbol::from("path"), Ty::Str);
+        Row { fields, rest: None }
     };
-    let pins_ty = Ty::Array { elem: Box::new(pin_hash_ty.clone()) };
-    let pins_body = build_pins_array(&importmap.pins, &pin_hash_ty);
+    let pin_record_ty = Ty::Record { row: pin_row };
+    let pins_ty = Ty::Array { elem: Box::new(pin_record_ty.clone()) };
+    let pins_body = build_pins_array(&importmap.pins, &pin_record_ty);
 
     vec![
         LibraryFunction {
@@ -73,7 +80,7 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     ]
 }
 
-fn build_pins_array(pins: &[crate::app::ImportmapPin], hash_ty: &Ty) -> Expr {
+fn build_pins_array(pins: &[crate::app::ImportmapPin], pin_ty: &Ty) -> Expr {
     let elements: Vec<Expr> = pins
         .iter()
         .map(|pin| {
@@ -92,7 +99,7 @@ fn build_pins_array(pins: &[crate::app::ImportmapPin], hash_ty: &Ty) -> Expr {
                     Span::synthetic(),
                     ExprNode::Hash { entries, kwargs: false },
                 ),
-                hash_ty.clone(),
+                pin_ty.clone(),
             )
         })
         .collect();
@@ -101,6 +108,6 @@ fn build_pins_array(pins: &[crate::app::ImportmapPin], hash_ty: &Ty) -> Expr {
             Span::synthetic(),
             ExprNode::Array { elements, style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(hash_ty.clone()) },
+        Ty::Array { elem: Box::new(pin_ty.clone()) },
     )
 }

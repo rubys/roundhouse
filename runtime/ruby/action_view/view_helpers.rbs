@@ -60,11 +60,15 @@ module ActionView
     # `name` is the asset stem (e.g., "application" → /assets/application.css).
     def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
   
-    # `pins` is the importmap pin array (each entry a Hash[Symbol, String]
-    # with `:name` and `:path`). When nil/empty, falls back to a Turbo-only
-    # shape. `entry` is the JS module entrypoint name.
+    # `pins` is the importmap pin array — each entry a record with
+    # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,
+    # String]`) so strict-typed targets see the literal shape: the
+    # lowerer emits `{name: ..., path: ...}` which Crystal parses
+    # as `NamedTuple(name: String, path: String)`. When nil/empty,
+    # falls back to a Turbo-only shape. `entry` is the JS module
+    # entrypoint name.
     def self.javascript_importmap_tags: (
-      ?Array[Hash[Symbol, String]]? pins,
+      ?Array[{ name: String, path: String }]? pins,
       ?String entry
     ) -> String
   

@@ -612,20 +612,27 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut bc);
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 
-    // Importmap — `Importmap.pins -> Array<Hash<Sym,Str>>`,
+    // Importmap — `Importmap.pins -> Array<Record{name: Str, path: Str}>`,
     // `Importmap.entry -> Str`. The view lowerer's
     // `JavascriptImportmapTags` rewrite emits Send calls on
     // `Importmap` (used to be `Importmap::PINS` const access);
     // the typer needs to resolve them or the body has untyped
-    // sub-expressions and the residual ratchet trips. Sym keys
-    // mirror the lowerer's emit so `p[:name]` access types
-    // correctly in the spinel ViewHelpers.javascript_importmap_tags
-    // helper that walks the array.
+    // sub-expressions and the residual ratchet trips. Each pin is a
+    // record with two fixed fields, mirroring the importmap lowerer
+    // (`importmap_to_library`). Record (rather than `Hash<Sym, Str>`)
+    // keeps `p[:name]` access typed across strict targets — Crystal
+    // parses `{name: ..., path: ...}` as `NamedTuple`, which matches
+    // `Ty::Record` but conflicts with `Hash`.
     let mut im = crate::analyze::ClassInfo::default();
-    let pin_hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+    let pin_record_ty = {
+        let mut fields = indexmap::IndexMap::new();
+        fields.insert(Symbol::from("name"), Ty::Str);
+        fields.insert(Symbol::from("path"), Ty::Str);
+        Ty::Record { row: crate::ty::Row { fields, rest: None } }
+    };
     im.class_methods.insert(
         Symbol::from("pins"),
-        fn_sig(vec![], Ty::Array { elem: Box::new(pin_hash_ty) }),
+        fn_sig(vec![], Ty::Array { elem: Box::new(pin_record_ty) }),
     );
     im.class_methods.insert(
         Symbol::from("entry"),

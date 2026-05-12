@@ -181,6 +181,15 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
         // this, `assert_operator(X, :<, StandardError)` and similar
         // bare-Const refs leave an undefined name in the output.
         "StandardError" | "RuntimeError" => Some("Exception"),
+        // The DB-bridge runtime module lives at `Roundhouse::Db`
+        // (see `runtime/crystal/db.cr`). Model code emits at top
+        // level (`class Article < ApplicationRecord`), so a bare
+        // `Db.prepare(...)` reference resolves in Crystal's
+        // namespace lookup to nothing (and the diagnostic
+        // confusingly suggests `DB`, the stdlib database module).
+        // Re-qualify here so `Db.prepare`/`Db.escape_int`/`Db.step?`
+        // all reach the runtime helpers.
+        "Db" => Some("Roundhouse::Db"),
         _ => None,
     }
 }

@@ -25,12 +25,15 @@ require "./cable"
 module Roundhouse
   module Server
     @@layout : Proc(String, String)? = nil
-    # Routes are emitted by the lowerer as Symbol-keyed Hash literals
-    # (`{ :method => "GET", :pattern => "/", :controller => :app,
-    # :action => :index }`). Symbol keys preserve Ruby's idiom and let
-    # the transpiled router access via `route[:method]` directly. Values
-    # vary — method/pattern are String, controller/action are Symbol.
-    @@routes : Array(Hash(Symbol, String | Symbol)) = [] of Hash(Symbol, String | Symbol)
+    # Per-route record shape: `{method:, pattern:, controller:, action:}`.
+    # Matches the RBS record-row type that `ActionDispatch::Router.match`
+    # declares for its `table` parameter
+    # (`Array[{ method: String, pattern: String, controller: Symbol,
+    # action: Symbol }]`). Crystal renders that record as a NamedTuple,
+    # and the lowerer emits route rows via the matching shorthand
+    # literal (`{method: "GET", ...}`).
+    alias RouteRow = NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
+    @@routes : Array(RouteRow) = [] of RouteRow
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
     @@session : ActionDispatch::Session = ActionDispatch::Session.new
     @@flash : ActionDispatch::Flash = ActionDispatch::Flash.new
