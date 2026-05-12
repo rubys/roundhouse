@@ -386,10 +386,7 @@ fn escape_value(db: &ClassId, val: &Value) -> Expr {
             let method = match ty {
                 ValueType::Int => "escape_int",
                 ValueType::Str => "escape_string",
-                // No primitive yet — bool runtime values aren't built
-                // by Phase 1 patterns. Keep the panic path explicit
-                // so a future regression surfaces loudly.
-                ValueType::Bool => unimplemented!("Db.escape_bool not yet supported"),
+                ValueType::Bool => "escape_bool",
             };
             db_call(db, method, vec![expr.clone()])
         }
@@ -425,11 +422,12 @@ fn push_hydrate_columns(
     }
 }
 
-/// Pick `column_int` vs `column_text` based on the schema column's
-/// type. Mirrors today's `adapter_emit` branch.
+/// Pick `column_int` / `column_bool` / `column_text` based on the
+/// schema column's type. Mirrors today's `adapter_emit` branch.
 fn read_method_for(t: &ColumnType) -> &'static str {
     match ty_of_column(t) {
         Ty::Int => "column_int",
+        Ty::Bool => "column_bool",
         _ => "column_text",
     }
 }

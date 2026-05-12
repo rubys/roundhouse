@@ -165,4 +165,15 @@ module Db
   def self.escape_int(n)
     n.to_i.to_s
   end
+
+  # SQLite stores booleans as 0/1 integers (no native bool type) —
+  # mirrors the cruby sibling shim.
+  def self.escape_bool(b)
+    b ? "1" : "0"
+  end
+
+  # Read a boolean column. SQLite returns 0/1 (integer), widen to bool.
+  def self.column_bool(stmt, idx)
+    column_int(stmt, idx) != 0
+  end
 end

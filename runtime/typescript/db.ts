@@ -162,6 +162,16 @@ function escapeInt(n: unknown): string {
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 
+function escapeBool(b: unknown): string {
+  // SQLite stores booleans as 0/1 integers — mirror the Ruby/Crystal
+  // sibling shims. Truthiness check accepts Ruby's `truthy` interp.
+  return b ? "1" : "0";
+}
+
+function columnBool(stmtId: number, idx: number): boolean {
+  return columnInt(stmtId, idx) !== 0;
+}
+
 // Method names match the TypeScript emitter's Ruby→TS rename rule
 // (see `src/emit/typescript/naming.rs::ts_method_name`): Ruby's `?`
 // suffix becomes an `is_` prefix at the call site, so `Db.step?(stmt)`
@@ -176,11 +186,13 @@ export const Db = {
   is_step: stepQ,
   column_int: columnInt,
   column_text: columnText,
+  column_bool: columnBool,
   finalize,
   last_insert_rowid: lastInsertRowid,
   changes,
   escape_string: escapeString,
   escape_int: escapeInt,
+  escape_bool: escapeBool,
 };
 
 export type DbModule = typeof Db;

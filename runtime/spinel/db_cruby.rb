@@ -112,4 +112,17 @@ module Db
   def self.escape_int(n)
     n.to_i.to_s
   end
+
+  # SQLite stores booleans as 0/1 integers (no native bool type) —
+  # AR `t.boolean :col` maps to INTEGER affinity. Emit the inline
+  # literal directly; saves a CAST round-trip vs `'true'`/`'false'`.
+  def self.escape_bool(b)
+    b ? "1" : "0"
+  end
+
+  # Read a boolean column. SQLite returns 0/1 (integer), we widen to
+  # Ruby's bool. Nulls coerce to false.
+  def self.column_bool(stmt_id, idx)
+    column_int(stmt_id, idx) != 0
+  end
 end

@@ -203,6 +203,18 @@ module Roundhouse
       n.to_s
     end
 
+    # SQLite stores booleans as 0/1 integers (no native bool type) —
+    # mirrors the Ruby/spinel sibling shims.
+    def self.escape_bool(b : Bool) : String
+      b ? "1" : "0"
+    end
+
+    # Read a boolean column. SQLite returns 0/1 (integer), widen to Bool.
+    # Nulls coerce to false.
+    def self.column_bool(stmt : Int64, idx : Int) : Bool
+      column_int(stmt, idx) != 0
+    end
+
     # Drain in-flight ResultSets before swapping the underlying
     # connection. Without this, `setup_test_db` between specs would
     # leak ResultSets bound to a closed connection.

@@ -133,6 +133,14 @@ function escape_int(n: unknown): string {
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 
+function escape_bool(b: unknown): string {
+  return b ? "1" : "0";
+}
+
+function column_bool(stmtId: number, i: number): boolean {
+  return column_int(stmtId, i) !== 0;
+}
+
 // Suppress an unused-import warning when InValue isn't referenced
 // directly anywhere in this file (libsql types it via `args: InValue[]`
 // inside execute; we don't bind params, only inline-compose SQL).
@@ -152,11 +160,13 @@ export const Db = {
   is_step,
   column_int,
   column_text,
+  column_bool,
   finalize,
   last_insert_rowid,
   changes,
   escape_string,
   escape_int,
+  escape_bool,
 };
 
 export type DbModule = typeof Db;
