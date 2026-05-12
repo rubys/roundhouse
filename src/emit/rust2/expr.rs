@@ -28,6 +28,17 @@ thread_local! {
     /// regardless of how the Ruby source was written.
     static IN_CLASS_METHOD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// True at expression positions whose value flows out of the
+    /// enclosing function as the return value: top-level body emit,
+    /// tail of a `Seq`, value of a `Return`. Reset when entering
+    /// non-tail child positions (Send args, If conds, etc.). Lets
+    /// the `Ivar` arm append `.clone()` for non-Copy fields read in
+    /// tail position — `pub fn body(&self) -> String { self.body }`
+    /// otherwise moves out of `&self` (E0507). Off in constructor
+    /// mode (the closing `Self { fields }` literal handles the
+    /// return; ivars in the body are locals).
+    static IN_RETURN_TAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Methods in the current `impl` block that were classified as
     /// static-safe by `library.rs::method_reads_self`. When a Send
     /// targets one of these via implicit-`self` recv, emit as
@@ -201,17 +212,71 @@ where
     r
 }
 
+fn in_return_tail() -> bool {
+    IN_RETURN_TAIL.with(|c| c.get())
+}
+
+/// Set the return-tail flag and run `f`. Used by `method.rs` around
+/// the body emit of non-constructor instance methods, so the body's
+/// top-level expression (or `Seq` tail / `Return` value) is recognized
+/// as the function's return value.
+pub(super) fn with_return_tail<F, R>(value: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IN_RETURN_TAIL.with(|c| c.replace(value));
+    let r = f();
+    IN_RETURN_TAIL.with(|c| c.set(prev));
+    r
+}
+
+/// Conservative `Copy`-trait check for Rust target types. Numeric +
+/// bool + nil are Copy; String/Vec/HashMap/Option/Class are not.
+/// Used by the `Ivar` arm to decide whether a tail-position read
+/// needs `.clone()` to avoid moving out of `&self`. `Ty::Untyped`
+/// commits to `serde_json::Value` which is non-Copy.
+fn is_copy_ty(t: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    // Sym maps to `String` in rust2 (see `ty.rs::rust_ty`), so it's
+    // non-Copy despite being a primitive-shaped Ruby type.
+    matches!(t, Ty::Int | Ty::Bool | Ty::Nil | Ty::Float)
+}
+
 fn is_static_method(name: &str) -> bool {
     STATIC_METHODS.with(|c| c.borrow().contains(name))
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
+    // Public entry clears IN_RETURN_TAIL: any caller recursing into a
+    // child expression is, by default, not in return tail. The Seq /
+    // Return / If arms re-enable the flag for their tail children via
+    // `emit_expr_tail`.
+    with_return_tail(false, || emit_expr_inner(e))
+}
+
+/// Tail-preserving emit. Caller is responsible for ensuring this is
+/// invoked only at tail positions of the enclosing function (e.g.,
+/// `Seq`'s last expression, `Return`'s value, `If`'s branches when
+/// the `If` itself is in tail position).
+pub(super) fn emit_expr_tail(e: &Expr) -> String {
+    emit_expr_inner(e)
+}
+
+fn emit_expr_inner(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
         ExprNode::Ivar { name } => {
             if in_constructor() {
                 name.as_str().to_string()
+            } else if in_return_tail()
+                && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
+            {
+                // Tail-position read of a non-Copy field would move
+                // out of `&self`. `attr_reader`-shaped getters are the
+                // canonical case (`def body; @body; end`); also kicks
+                // in for any tail-`@x` body.
+                format!("self.{name}.clone()")
             } else {
                 format!("self.{name}")
             }
@@ -252,14 +317,17 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 &*else_branch.node,
                 ExprNode::Lit { value: Literal::Nil }
             );
+            // Branches inherit the enclosing function's return-tail
+            // flag: an `if/else` in tail position has both branches in
+            // tail position; the cond is not.
             if else_is_nil {
-                return format!("if {} {{ {} }}", emit_expr(cond), emit_expr(then_branch));
+                return format!("if {} {{ {} }}", emit_expr(cond), emit_expr_tail(then_branch));
             }
             format!(
                 "if {} {{ {} }} else {{ {} }}",
                 emit_expr(cond),
-                emit_expr(then_branch),
-                emit_expr(else_branch),
+                emit_expr_tail(then_branch),
+                emit_expr_tail(else_branch),
             )
         }
         ExprNode::Send { recv, method, args, block, .. } => {
@@ -294,11 +362,19 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Seq { exprs } => {
             // Rust statements are `;`-terminated; the last expression
             // is the block's value (no trailing `;`). Multi-statement
-            // method bodies render natural Rust shape this way.
+            // method bodies render natural Rust shape this way. The
+            // tail expression inherits the enclosing function's
+            // return-tail flag (`emit_expr_tail`) so e.g. a bare
+            // `@field` at the end of a getter body becomes
+            // `self.field.clone()`.
             let mut lines = Vec::with_capacity(exprs.len());
             let last = exprs.len().saturating_sub(1);
             for (i, e) in exprs.iter().enumerate() {
-                let s = emit_expr(e);
+                let s = if i == last {
+                    emit_expr_tail(e)
+                } else {
+                    emit_expr(e)
+                };
                 if i == last {
                     lines.push(s);
                 } else {
@@ -322,7 +398,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             if is_nil {
                 "return".to_string()
             } else {
-                format!("return {}", emit_expr(value))
+                format!("return {}", emit_expr_tail(value))
             }
         }
         ExprNode::While { cond, body, until_form } => {

@@ -157,7 +157,15 @@ pub(super) fn emit_instance_method(
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
             super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
         } else {
-            emit_expr(&m.body)
+            // Body root is a function return position — let the
+            // `Ivar` arm see `IN_RETURN_TAIL=true` so a getter shaped
+            // `def field; @field; end` emits as `self.field.clone()`
+            // for non-Copy field types. `emit_expr_tail` is the
+            // flag-preserving variant; the plain `emit_expr` would
+            // clear the flag at entry.
+            super::expr::with_return_tail(true, || {
+                super::expr::emit_expr_tail(&m.body)
+            })
         }
     });
     let body_lines: Vec<&str> = body.lines().collect();
