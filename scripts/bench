@@ -86,20 +86,26 @@ done
 [[ ${#WORKERS[@]} -eq 0 ]] && WORKERS=(1)
 [[ ${#ENDPOINTS[@]} -eq 0 ]] && ENDPOINTS=(/articles /articles/1 /articles/new)
 
-# Validate targets — only the ones implemented in this initial cut
+# Validate + normalize targets
+NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|ruby|ruby-int) ;;
+        rails|ruby|ruby-int|typescript) NORMALIZED+=("$t") ;;
+        ts) NORMALIZED+=(typescript) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails ruby ruby-int" >&2; exit 2 ;;
+           echo "supported: rails ruby ruby-int typescript" >&2; exit 2 ;;
     esac
 done
+TARGETS=("${NORMALIZED[@]}")
 
 # ── paths ────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
 RUBY_OUT="$REPO_ROOT/build/transpiled-blog"
+# scripts/compare's typescript path — emit_preview always writes here,
+# so we reuse it to share the npm-install cache across compare runs.
+TS_OUT="/tmp/rh-ts-pass2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -254,6 +260,18 @@ build_target() {
                 (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null)
             fi
             ;;
+        typescript)
+            TARGET_BUILD_DIR="$TS_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$TS_OUT/main.ts" ]]; then
+                step "regenerating typescript target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target typescript "$FIXTURE" >/dev/null 2>&1)
+            fi
+            if [[ ! -d "$TS_OUT/node_modules" ]]; then
+                step "installing npm deps"
+                (cd "$TS_OUT" && npm install --silent --no-audit --no-fund)
+            fi
+            ;;
     esac
 }
 
@@ -275,6 +293,12 @@ stage_db() {
             ;;
         ruby|ruby-int)
             local db="$RUBY_OUT/tmp/blog.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        typescript)
+            local db="$TS_OUT/db/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -330,6 +354,16 @@ start_target() {
                 RAILS_ENV=production \
                 PORT="$port" \
                 bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        typescript)
+            # Single-process node (no worker / preload concept) —
+            # `workers` is ignored and the per-cell row records workers=1.
+            (cd "$TS_OUT" && \
+                PORT="$port" \
+                npm start \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
@@ -421,6 +455,7 @@ for target in "${TARGETS[@]}"; do
     build_target "$target"
     stage_db "$target"
 
+    seen_cells=""
     for workers in "${WORKERS[@]}"; do
         # Ruby targets honor WEB_CONCURRENCY; other targets ignore it
         # (and we record the field as 1 for those).
@@ -428,6 +463,13 @@ for target in "${TARGETS[@]}"; do
             rails|ruby|ruby-int) effective_workers="$workers" ;;
             *)                    effective_workers=1 ;;
         esac
+
+        # Skip dupes — non-worker-honoring targets collapse all
+        # `--workers N` iterations onto a single workers=1 cell.
+        if [[ " $seen_cells " == *" $effective_workers "* ]]; then
+            continue
+        fi
+        seen_cells="$seen_cells $effective_workers"
 
         step "start $target (workers=$effective_workers, port=$port)"
         start_target "$target" "$port" "$effective_workers" || {
