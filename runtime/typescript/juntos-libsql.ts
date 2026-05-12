@@ -313,4 +313,5 @@ export type ActionResponse = {
   body?: string;
   status?: number;
   location?: string;
+  content_type?: string;
 };
