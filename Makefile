@@ -61,6 +61,10 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	mkdir -p $(RUBY_OUT)
 	# Verbatim scaffold for the output tree.
 	cp -r runtime/spinel/scaffold/. $(RUBY_OUT)/
+	# Strip the overlay subdir; its contents land at the top of the
+	# emit tree below, AFTER the manifest explode (otherwise the
+	# explode rewrites Rakefile from the scaffold's base copy).
+	rm -rf $(RUBY_OUT)/ruby_overlay
 	# Target-specific tests (broadcasts/cgi_io + integration/views/
 	# models/tools subdirs). emit_spinel layers
 	# test/{test_helper,models/{article,comment}_test,controllers/*,
@@ -98,6 +102,25 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	# CRuby-runnable shim. Applied after the manifest explode so
 	# it's the final state regardless of what the archive emitted.
 	mv $(RUBY_OUT)/runtime/db_cruby.rb $(RUBY_OUT)/runtime/db.rb
+	# Ruby-target overlay: Rakefile (replaces base), config.ru,
+	# config/puma.rb. Applied AFTER the manifest explode so the
+	# overlay's Rakefile isn't reverted by the scaffold-walk that
+	# build-site does. Spinel target doesn't get these (it uses
+	# the base Makefile + eventually sphttp + fibers).
+	cp -r runtime/spinel/scaffold/ruby_overlay/. $(RUBY_OUT)/
+	# Source-app static files: app/javascript/* (importmap-served
+	# JS modules) and public/* (icons, robots.txt). Build-site
+	# doesn't include these — they're verbatim assets, not
+	# transpilable Ruby. `rake assets` reads from app/javascript/
+	# to populate static/assets/.
+	if [ -d fixtures/real-blog/app/javascript ]; then \
+	  mkdir -p $(RUBY_OUT)/app/javascript && \
+	  cp -r fixtures/real-blog/app/javascript/. $(RUBY_OUT)/app/javascript/; \
+	fi
+	if [ -d fixtures/real-blog/public ]; then \
+	  mkdir -p $(RUBY_OUT)/public && \
+	  cp -r fixtures/real-blog/public/. $(RUBY_OUT)/public/; \
+	fi
 	# Seed the demo DB from real-blog's Rails-populated SQLite. The
 	# Rails-generated schema (varchar/text/datetime affinities) reads
 	# fine through SqliteAdapter; main.rb's Schema.load! is idempotent
@@ -134,6 +157,9 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	rm -rf $(SPINEL_OUT)
 	mkdir -p $(SPINEL_OUT)
 	cp -r runtime/spinel/scaffold/. $(SPINEL_OUT)/
+	# Strip the CRuby-only overlay dir; spinel target keeps the base
+	# Makefile and doesn't get config.ru / config/puma.rb.
+	rm -rf $(SPINEL_OUT)/ruby_overlay
 	mkdir -p $(SPINEL_OUT)/test
 	cp -r runtime/spinel/test/. $(SPINEL_OUT)/test/
 	mkdir -p $(SPINEL_OUT)/runtime

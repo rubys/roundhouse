@@ -1,0 +1,167 @@
+# Rake tasks for the CRuby target — Rails-idiomatic build tool.
+# The spinel target uses Makefile (see scaffold/Makefile, which
+# stays in place for that side).
+#
+# Common tasks:
+#
+#   rake test    — run all minitest files under test/
+#   rake assets  — compile static/tailwind.css + copy turbo.min.js
+#   rake dev     — start puma on :3000 (Rack adapter to Main.run)
+#   rake bench   — wrk against /articles, comparing this app to a
+#                  Rails baseline (if fixtures/real-blog is set up
+#                  for serving)
+#   rake lint    — spinel-subset linter (CI gate; spinel target uses
+#                  this to confirm the emitted Ruby compiles)
+
+require "rake/testtask"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "runtime"
+  t.libs << "app"
+  t.test_files = FileList["test/**/*_test.rb"]
+  t.warning = false
+end
+
+task :lint do
+  ruby "tools/check_spinel_subset.rb"
+end
+
+# Static asset pipeline — produces `static/assets/*` for the Rack
+# adapter to serve, plus `static/icon.{png,svg}` etc. at the root.
+# Mirrors Rails's Propshaft URL shape (`/assets/<name>.css`,
+# `/assets/<name>.js`) so importmap-generated module URLs resolve.
+STATIC = "static"
+ASSETS = "#{STATIC}/assets"
+
+directory STATIC
+directory ASSETS
+directory "#{ASSETS}/controllers"
+
+file "#{ASSETS}/application.css" => ASSETS do |t|
+  sh "touch #{t.name}"
+end
+
+file "#{ASSETS}/tailwind.css" => [ASSETS, "app/assets/tailwind.css", "node_modules/.installed"] do |t|
+  sh "npx @tailwindcss/cli --input app/assets/tailwind.css --output #{t.name} --minify " \
+     "--content 'app/**/*.rb' --content 'runtime/**/*.rb'"
+end
+
+file "node_modules/.installed" do |t|
+  sh "npm install --silent --no-save tailwindcss @tailwindcss/cli"
+  sh "touch #{t.name}"
+end
+
+# JS bundles copied out of gems (turbo-rails, stimulus-rails) and
+# from app/javascript/ — laid out at `static/assets/<name>.js` to
+# match the importmap pin URLs in config/importmap.rb.
+def gem_dir(name)
+  `bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(#{name})).gem_dir'`.strip
+end
+
+file "#{ASSETS}/turbo.min.js" => ASSETS do |t|
+  sh "cp #{gem_dir("turbo-rails")}/app/assets/javascripts/turbo.min.js #{t.name}"
+end
+
+file "#{ASSETS}/stimulus.min.js" => ASSETS do |t|
+  sh "cp #{gem_dir("stimulus-rails")}/app/assets/javascripts/stimulus.min.js #{t.name}"
+end
+
+file "#{ASSETS}/stimulus-loading.js" => ASSETS do |t|
+  sh "cp #{gem_dir("stimulus-rails")}/app/assets/javascripts/stimulus-loading.js #{t.name}"
+end
+
+# App-side JS — copied verbatim from app/javascript/ if present.
+APP_JS = ["application.js", "controllers/application.js",
+          "controllers/index.js", "controllers/hello_controller.js"]
+APP_JS.each do |rel|
+  file "#{ASSETS}/#{rel}" => ["#{ASSETS}/controllers", "app/javascript/#{rel}"] do |t|
+    sh "cp app/javascript/#{rel} #{t.name}"
+  end
+end
+
+# Root-level static files: icons, robots.txt, error pages — emitted
+# from real-blog/public/ (when present) so /icon.png etc. resolve.
+file "#{STATIC}/icon.png" => STATIC do |t|
+  src = "public/icon.png"
+  sh "cp #{src} #{t.name}" if File.exist?(src)
+end
+
+file "#{STATIC}/icon.svg" => STATIC do |t|
+  src = "public/icon.svg"
+  sh "cp #{src} #{t.name}" if File.exist?(src)
+end
+
+task :assets => [
+  "#{ASSETS}/application.css",
+  "#{ASSETS}/tailwind.css",
+  "#{ASSETS}/turbo.min.js",
+  "#{ASSETS}/stimulus.min.js",
+  "#{ASSETS}/stimulus-loading.js",
+  *APP_JS.map { |rel| "#{ASSETS}/#{rel}" },
+  "#{STATIC}/icon.png",
+  "#{STATIC}/icon.svg",
+]
+
+# Dev server — Puma against config.ru. Defaults match Rails 7.1+
+# generator output (3 threads, single process, dev environment).
+# Override with env vars: RAILS_MAX_THREADS=5 WEB_CONCURRENCY=2 PORT=4000.
+desc "Start Puma on :3000 (override PORT, WEB_CONCURRENCY, RAILS_MAX_THREADS)"
+task :dev => :assets do
+  # Default to the seeded SQLite file produced by `make ruby-transpile`
+  # so the demo opens with three articles + seven comments. Override
+  # with BLOG_DB=:memory: for an empty start, or any file path.
+  env = {
+    "RUBYOPT" => "--yjit",
+    "BLOG_DB" => ENV.fetch("BLOG_DB", "tmp/blog.sqlite3"),
+  }
+  sh(env, "bundle exec puma -C config/puma.rb config.ru")
+end
+
+# Single-shot CGI smoke (rendering one page to stdout). Useful for
+# eyeballing layout/asset wiring without starting a server.
+desc "Single-shot CGI smoke (REQUEST_METHOD=GET PATH_INFO=/articles)"
+task :run do
+  sh "REQUEST_METHOD=GET PATH_INFO=/articles bundle exec ruby main.rb"
+end
+
+# Benchmark vs Rails. Starts puma against this app, then runs wrk
+# against three scenarios. Optionally compares against a Rails app
+# at fixtures/real-blog (configured separately). Requires `wrk`
+# installed (brew install wrk, apt install wrk).
+desc "wrk benchmark — three scenarios against the running app"
+task :bench => :assets do
+  port = ENV.fetch("BENCH_PORT", "3000").to_i
+  duration = ENV.fetch("BENCH_DURATION", "30s")
+  connections = ENV.fetch("BENCH_CONCURRENCY", "64").to_i
+  threads = ENV.fetch("BENCH_THREADS", "4").to_i
+
+  # Boot puma in the background. Caller must `rake bench:setup` (or
+  # equivalent) to ensure a clean DB / fresh seed. For now, just
+  # assume tmp/blog.sqlite3 exists with seed data.
+  pid = spawn({
+    "PORT" => port.to_s,
+    "RAILS_ENV" => "production",
+    "RAILS_MAX_THREADS" => ENV.fetch("RAILS_MAX_THREADS", "5"),
+    "WEB_CONCURRENCY" => ENV.fetch("WEB_CONCURRENCY", "1"),
+    "RUBYOPT" => "--yjit",
+  }, "bundle exec puma -C config/puma.rb config.ru",
+     out: "/tmp/bench-puma.log", err: "/tmp/bench-puma.log")
+  begin
+    # Wait for puma to start accepting connections.
+    sleep 2
+    [
+      ["GET /articles      (index)", "GET", "/articles"],
+      ["GET /articles/1    (show)",  "GET", "/articles/1"],
+    ].each do |label, _method, path|
+      puts
+      puts "=== #{label} ==="
+      sh "wrk -t#{threads} -c#{connections} -d#{duration} --latency http://127.0.0.1:#{port}#{path}"
+    end
+  ensure
+    Process.kill("TERM", pid) rescue nil
+    Process.wait(pid) rescue nil
+  end
+end
+
+task default: [:test, :lint]

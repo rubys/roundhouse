@@ -4,6 +4,14 @@ gem "sqlite3"
 gem "minitest"
 gem "rake"
 
+# CRuby HTTP serving — `rake dev` runs Puma against `config.ru`'s
+# Rack adapter to `Main.run`. Spinel-target builds don't reference
+# these at runtime (the compiled binary uses sphttp via FFI); the
+# gems are still bundle-installed for the toolchain (rake test +
+# rubocop run under CRuby in both target trees).
+gem "puma"
+gem "rack"
+
 # Spinel-subset compliance gate (CI). Runs against the shipped tree
 # (scaffold + runtime + lowered emit) after toolchain-spinel emits
 # into the scratch dir; catches reflection/concurrency/singleton-class
@@ -14,11 +22,14 @@ group :development do
   gem "rubocop_spinel", "~> 0.1"
 end
 
-# Build-only: turbo-rails is installed for its bundled `turbo.min.js`
-# asset (read by the Makefile from the gem's directory). Nothing in
-# this fixture's runtime ever `require`s it, and the spinel-compiled
-# binary doesn't see it. Pulled into Bundler so the gem dir is
-# consistently locatable across machines.
+# Build-only: turbo-rails + stimulus-rails are installed for their
+# bundled JS assets (`turbo.min.js`, `stimulus.min.js`,
+# `stimulus-loading.js`), which `rake assets` copies out of the gem
+# dirs into static/assets/. Nothing in this fixture's Ruby runtime
+# requires either gem, and the spinel-compiled binary doesn't see
+# them. Pulled into Bundler so the gem dirs are consistently
+# locatable across machines.
 group :assets do
   gem "turbo-rails"
+  gem "stimulus-rails"
 end

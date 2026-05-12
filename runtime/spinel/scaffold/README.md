@@ -134,7 +134,7 @@ refresh.
     db.rb                        FFI shim (libsqlite3) — Spinel-AOT path
     db_cruby.rb                  CRuby/gem variant of the same Db surface
     cgi_io.rb                    CGI/1.1 request parser + response writer
-    broadcasts.rb                in-memory log + file IPC for the dev server
+    broadcasts.rb                in-memory log of Turbo Stream fragments
     inflector.rb                 pluralize (verbatim from runtime/ruby/)
   server/
     dev_server.rb                HTTP + WebSocket front-end (CRuby only)
@@ -159,11 +159,12 @@ refresh.
    fragments. This layer uses Threads, Mutex, Sockets — things spinel
    doesn't support and never needs to compile.
 
-The contract between them: **the fixture writes broadcast fragments
-to `$BROADCAST_DIR/<stream>__<ts>.frag`; the dev server watches that
-directory and forwards new fragments over WebSocket to subscribed
-Turbo clients.** Atomic publish (`.tmp` write + rename) means the
-watcher never sees a half-written file.
+Broadcasts are in-process: model after-commit hooks call
+`Broadcasts.append`/`prepend`/`replace`/`remove`, which records to
+an in-memory log. The transport (WebSocket fan-out to subscribed
+Turbo clients) is layered on top of that log by the per-target
+server — Puma + Rack hijack under CRuby, sphttp + fibers under
+the spinel-compiled binary.
 
 ## What's implemented
 
@@ -323,26 +324,19 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   `check_box`, no `fields_for`. Real-blog forms only need the
   small set; richer forms would need extension.
 
-### Server-side limitations
+### Server-side status (WIP)
 
-The dev server (`server/dev_server.rb`) is deliberately small:
+The HTTP serving layer is being rebuilt:
 
-- **Single-process Ruby** with one thread per connection. Fine for
-  one developer in a browser; will not scale.
-- **CGI per-request fork.** Each request execs `ruby main.rb`,
-  paying ~50ms of Ruby boot per request. The spinel-compiled
-  binary would be much faster, but we haven't measured.
-- **No graceful shutdown.** Ctrl-C kills threads abruptly.
-- **No request logging.** Errors are warned; happy paths are silent.
-- **Watcher is polling-based.** 100ms tick over `BROADCAST_DIR`,
-  not real filesystem events. Would need `inotify`/`FSEvents`/etc.
-  for production.
-- **WebSocket sends are blocking.** A slow client briefly stalls
-  the watcher's broadcast dispatch loop. No backpressure handling.
-- **No frame fragmentation, no WS extensions, no compression.**
-  All sends are single-frame text; client masking is required and
-  enforced; non-text/control frames from the client are silently
-  dropped.
+- **CRuby target:** Rack adapter to `Main.run` served by Puma (in
+  progress). Standard Rails-shaped `config/puma.rb` so benchmarks
+  against a baseline Rails app run under identical configuration.
+- **Spinel target:** sphttp + fibers (vendored from
+  [tep](https://github.com/OriPekelman/tep)) for the compiled
+  binary. Single self-contained executable, no .so dependencies.
+- **WebSocket:** in-process for both targets; Puma `hijack` API
+  under CRuby, fiber-multiplexed `poll()` under spinel. Replaces
+  the previous file-IPC + dev-server pattern.
 
 ### Testing posture
 

@@ -7,6 +7,5 @@
 /package.json
 /package-lock.json
 
-# Broadcast IPC — populated by `main.rb` when BROADCAST_DIR is set;
-# the dev server consumes + deletes these.
+# Per-process working files (PID file, scratch DBs, etc.)
 /tmp/

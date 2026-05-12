@@ -252,8 +252,15 @@ fn dedupe_last_wins(files: Vec<(String, String)>) -> Vec<(String, String)> {
 /// `coverage/`, which the scaffold doesn't gitignore (since git
 /// ignores them via global rules) but CI's `bundler-cache: true`
 /// populates with read-only gem trees that EACCES the explode step.
+///
+/// `ruby_overlay` is the CRuby-target-specific scaffold overlay
+/// (Rakefile, config.ru, config/puma.rb) — the outer Makefile
+/// copies its contents to the top of the Ruby emit tree; the
+/// build-site walker must NOT include the subdir verbatim or the
+/// manifest re-creates it inside the emit on every transpile.
 const SKIP_DIRS: &[&str] = &[
     "vendor", "node_modules", "build", "static", "tmp", "coverage", "log", ".bundle",
+    "ruby_overlay",
 ];
 
 /// Walk `src` recursively, collecting every readable text file as
