@@ -4,7 +4,10 @@
 # will land an sphttp-side equivalent that satisfies the same surface
 # (`Broadcasts.set_transport(Cable::Registry)`).
 #
-# Protocol implemented:
+# Protocol implemented (Action Cable v1 JSON):
+#   - Subprotocol negotiation: server echoes "actioncable-v1-json" in
+#     the Sec-WebSocket-Protocol response header. Turbo's JS client
+#     drops the connection without this.
 #   - Server → client `{type: "welcome"}` on connect
 #   - Client → server `{command: "subscribe", identifier: '<json>'}`
 #     where the identifier JSON carries
@@ -12,7 +15,9 @@
 #   - Server → client `{type: "confirm_subscription", identifier: ...}`
 #   - Server → client `{identifier: ..., message: "<turbo-stream>..."}`
 #     when `Broadcasts.record` fires on a subscribed stream
-#   - Server → client `{type: "ping", message: <ts>}` every 3s
+#   - Server → client `{type: "ping", message: <unix-ts>}` every 3s
+#     (per-connection thread). Required — the JS client times out and
+#     reconnects without periodic pings.
 #
 # Single-worker only. Clustered Puma (workers > 1) would need an
 # inter-worker pubsub (Redis equivalent); deferred until measurement
@@ -52,14 +57,26 @@ module Cable
   # `env["rack.hijack"].call`. websocket-driver handles the HTTP
   # upgrade handshake (it reads the request line + headers off the
   # socket via the env adapter below) and frame parsing thereafter.
+  # Action Cable's browser client requires:
+  # 1. Server echoes one of the offered subprotocols ("actioncable-
+  #    v1-json") in the Sec-WebSocket-Protocol response header; without
+  #    it the JS client refuses the connection.
+  # 2. Periodic server-sent `{type: "ping", message: <unix-ts>}` frames.
+  #    The client treats absence of pings (default ~6s) as a dead
+  #    connection and reconnects in a loop.
+  PROTOCOLS = ["actioncable-v1-json"].freeze
+  PING_INTERVAL = 3 # seconds — matches Rails' Action Cable default
+
   class Connection
     def initialize(env, socket)
       @socket = socket
       @write_mutex = Mutex.new
       @subscriptions = {}  # stream_name → identifier_json (for echoing in messages)
+      @ping_thread = nil
+      @closed = false
 
-      @driver = WebSocket::Driver.rack(EnvAdapter.new(env, socket))
-      @driver.on(:open)    { send_welcome }
+      @driver = WebSocket::Driver.rack(EnvAdapter.new(env, socket), protocols: PROTOCOLS)
+      @driver.on(:open)    { on_open }
       @driver.on(:message) { |evt| handle_message(evt.data) }
       @driver.on(:close)   { teardown }
       @driver.start
@@ -93,8 +110,32 @@ module Cable
 
     private
 
+    def on_open
+      send_welcome
+      start_ping_thread
+    end
+
     def send_welcome
       @write_mutex.synchronize { @driver.text(JSON.generate(type: "welcome")) }
+    end
+
+    # Spawn a background thread that emits ping frames every 3 seconds
+    # until the connection closes. Ping payload is `{type: "ping",
+    # message: <unix-ts>}` matching Action Cable's wire format —
+    # Turbo's JS client checks the timestamp to detect liveness.
+    def start_ping_thread
+      @ping_thread = Thread.new do
+        until @closed
+          sleep PING_INTERVAL
+          break if @closed
+          begin
+            payload = JSON.generate(type: "ping", message: Time.now.to_i)
+            @write_mutex.synchronize { @driver.text(payload) }
+          rescue
+            break
+          end
+        end
+      end
     end
 
     def handle_message(raw)
@@ -135,6 +176,7 @@ module Cable
     end
 
     def teardown
+      @closed = true
       Registry.unsubscribe_all(self)
       begin
         @socket.close
