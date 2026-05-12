@@ -721,10 +721,33 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
         return a;
     }
     if a == b {
-        a
-    } else {
-        Ty::Union { variants: vec![a, b] }
+        return a;
     }
+    // Structural join for same-shape generic containers — `Hash<A,B>
+    // | Hash<C,D>` is more usefully expressed as `Hash<A|C, B|D>`
+    // than as a flat Union, because dispatch on `.fetch` / `.[]` /
+    // etc. operates on the Hash spine regardless of inner types.
+    // The flat Union form would push every consumer to fan out per
+    // variant. The if-narrowing case (`raw.is_a?(Hash) ? raw : {}`)
+    // is the canonical producer — narrowed branch types `Hash<K,V>`,
+    // empty-literal else branch types `Hash<Var,Var>`; the join
+    // should be `Hash<K|Var, V|Var>`, which collapses to `Hash<K,V>`
+    // once inference resolves the Vars.
+    match (&a, &b) {
+        (Ty::Hash { key: k1, value: v1 }, Ty::Hash { key: k2, value: v2 }) => {
+            return Ty::Hash {
+                key: Box::new(union_of((**k1).clone(), (**k2).clone())),
+                value: Box::new(union_of((**v1).clone(), (**v2).clone())),
+            };
+        }
+        (Ty::Array { elem: e1 }, Ty::Array { elem: e2 }) => {
+            return Ty::Array {
+                elem: Box::new(union_of((**e1).clone(), (**e2).clone())),
+            };
+        }
+        _ => {}
+    }
+    Ty::Union { variants: vec![a, b] }
 }
 
 pub(super) fn union_many(mut tys: Vec<Ty>) -> Ty {

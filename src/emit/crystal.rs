@@ -63,6 +63,7 @@ dependencies:
 // and transpiles via `runtime_loader::crystal_units`.
 const CR_DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");
 const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
+const CR_PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/crystal/param_value.cr");
 const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
 const CR_CABLE_SOURCE: &str = include_str!("../../runtime/crystal/cable.cr");
 const CR_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/crystal/test_support.cr");
@@ -104,6 +105,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     // Primitive runtime — hand-written platform glue.
+    //
+    // param_value.cr declares the recursive `Roundhouse::ParamValue`
+    // alias the RBS references for `@params`; it must load before
+    // the transpiled `action_controller_base.cr` that uses it.
+    // Crystal's `require` lookup is order-insensitive (each require
+    // pulls in declarations transitively), but we keep it ahead of
+    // db.cr to mirror the conceptual layering: pure types first,
+    // primitive-with-state second.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/param_value.cr"),
+        content: CR_PARAM_VALUE_SOURCE.to_string(),
+    });
     files.push(EmittedFile {
         path: PathBuf::from("src/db.cr"),
         content: CR_DB_SOURCE.to_string(),
@@ -605,6 +618,11 @@ fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
     // Framework runtime files in dependency order. Each must be
     // loaded before any file that `include`s its module.
     const RUNTIME_ORDER: &[&str] = &[
+        // ParamValue alias is a pure-type declaration — load first so
+        // every downstream signature that names `Roundhouse::ParamValue`
+        // (action_controller_base's @params slot, etc.) sees the
+        // declaration at parse time.
+        "param_value",
         "hash_with_indifferent_access",
         "inflector",
         // active_record_base → errors keeps the forward-ref chain

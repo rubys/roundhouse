@@ -706,6 +706,11 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     // inline SELECT expansions. Sourced from `src/db.ts` (the
     // sync better-sqlite3 wrap inlined in `emit::typescript::emit`).
     ("Db", "db"),
+    // Recursive `ParamValue` type the RBS references for the
+    // `@params` slot. Sourced from `src/param_value.ts`; appears in
+    // every file whose signatures mention `Hash[String,
+    // Roundhouse::ParamValue]`.
+    ("ParamValue", "param_value"),
 ];
 
 /// Compute the import block for a class: scan method bodies for Const
@@ -1115,6 +1120,12 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
                 "ActionView",
                 "ActionDispatch",
                 "ActiveSupport",
+                // Roundhouse runtime namespace — currently carries
+                // `ParamValue` (the recursive params type). Treated
+                // identically to the Rails namespaces so
+                // `Roundhouse::ParamValue` collapses to `ParamValue`
+                // for import-name lookup (matches `ts_class_ty`).
+                "Roundhouse",
             ];
             let raw = id.0.as_str();
             let segs: Vec<&str> = raw.split("::").collect();
@@ -1248,6 +1259,12 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 "ActionView",
                 "ActionDispatch",
                 "ActiveSupport",
+                // Roundhouse runtime namespace — currently carries
+                // `ParamValue` (the recursive params type). Treated
+                // identically to the Rails namespaces so
+                // `Roundhouse::ParamValue` collapses to `ParamValue`
+                // for import-name lookup (matches `ts_class_ty`).
+                "Roundhouse",
             ];
             let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
             if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {

@@ -10,12 +10,16 @@ module ActionController
   # their actions and override process_action.
   class Base
     # `attr_accessor` produces getter+setter pairs for each name.
-    # `params` is a plain String-keyed Hash from the request-body
-    # parser; nested resource bodies (`{article: {title: ...}}`) flow
-    # as nested Hashes. `request_method` and `request_path` are
-    # populated by the dispatcher before invoking the action.
-    def params: () -> Hash[String, untyped]
-    def params=: (Hash[String, untyped]) -> Hash[String, untyped]
+    # `params` is a String-keyed Hash whose values are recursive
+    # `Roundhouse::ParamValue` — String leaves, nested Hashes, and
+    # Arrays (Rails-shape `comment[author][name]=x`, `tags[]=a`).
+    # Each target's runtime declares its own recursive realization
+    # (`runtime/crystal/param_value.cr`, `runtime/typescript/
+    # param_value.ts`, etc.); the body-typer carries the class id
+    # uniformly. `request_method` and `request_path` are populated
+    # by the dispatcher before invoking the action.
+    def params: () -> Hash[String, Roundhouse::ParamValue]
+    def params=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
     def session: () -> ActionDispatch::Session
     def session=: (ActionDispatch::Session) -> ActionDispatch::Session
     def flash: () -> ActionDispatch::Flash

@@ -33,6 +33,7 @@ const SQLITE_WASM_ENGINE_SOURCE: &str =
     include_str!("../../runtime/typescript/sqlite_wasm_engine.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
+const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
 const DB_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/db-libsql.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
@@ -158,6 +159,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // internal cross-imports use `./<name>.js`. server.ts swaps
     // between the better-sqlite3 + libsql variants based on the
     // active profile (same selection rule as juntos.ts).
+    // ParamValue — recursive `string | { [k]: ParamValue } |
+    // ParamValue[]` type the RBS references for `@params`. The
+    // emitter renders `Roundhouse::ParamValue` Class refs as bare
+    // `ParamValue` (per ts_class_ty's last-segment rule); imports
+    // pull it into the controller-base file. See
+    // `runtime/typescript/param_value.ts` and the cross-target
+    // declaration in `runtime/crystal/param_value.cr`.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/param_value.ts"),
+        content: PARAM_VALUE_SOURCE.to_string(),
+    });
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),

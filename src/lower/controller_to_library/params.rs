@@ -366,55 +366,134 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
 /// (e.g. `{"article" => {"title" => …}}`); the empty-hash default keeps
 /// the field fetches non-divergent if the resource key is absent.
 fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> MethodDef {
+    use crate::lower::typing::with_ty;
     let params = Symbol::from("params");
+    let raw_sub = Symbol::from("raw_sub");
     let sub = Symbol::from("sub");
     let instance = Symbol::from("instance");
 
-    let resource_fetch = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: VarId(0), name: params.clone() },
-            )),
-            method: Symbol::from("fetch"),
-            args: vec![
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit {
-                        value: Literal::Str { value: resource.as_str().to_string() },
-                    },
-                ),
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Hash { entries: Vec::new(), kwargs: false },
-                ),
-            ],
-            block: None,
-            parenthesized: false,
-        },
+    // Type-shorthand helpers so the body's IR carries explicit annotations
+    // — the body-typer in mod.rs runs over the synthesized class, but
+    // attaching the types we know-by-construction keeps the emit
+    // dispatch (TS `.fetch` → bracket access, Crystal Hash#fetch
+    // narrowing) deterministic.
+    let param_value_ty = Ty::Class {
+        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+        args: vec![],
+    };
+    let inner_hash_ty = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(param_value_ty.clone()),
+    };
+    let outer_hash_ty = inner_hash_ty.clone();
+
+    let str_lit = |s: &str| with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+        ),
+        Ty::Str,
+    );
+    let empty_hash = |ty: Ty| with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries: Vec::new(), kwargs: false },
+        ),
+        ty,
+    );
+    let var = |name: &Symbol, ty: Ty| with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: name.clone() },
+        ),
+        ty,
     );
 
-    let new_call = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(Expr::new(
-                Span::synthetic(),
-                ExprNode::Const { path: vec![owner.0.clone()] },
-            )),
-            method: Symbol::from("new"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: true,
-        },
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+
+    // raw_sub = params.fetch("<resource>", {})
+    //   — value type is `ParamValue` per the body-typer.
+    let resource_fetch = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var(&params, Ty::Hash {
+                    key: Box::new(Ty::Str),
+                    value: Box::new(param_value_ty.clone()),
+                })),
+                method: Symbol::from("fetch"),
+                args: vec![
+                    str_lit(resource.as_str()),
+                    empty_hash(inner_hash_ty.clone()),
+                ],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        param_value_ty.clone(),
+    );
+
+    // sub = raw_sub.is_a?(Hash) ? raw_sub : {}
+    //   — narrows the ParamValue variant to Hash[String, ParamValue]
+    //   on strict targets; degrades cleanly under duck typing.
+    let is_a_hash = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var(&raw_sub, param_value_ty.clone())),
+                method: Symbol::from("is_a?"),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Hash")] },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Bool,
+    );
+    let sub_narrowed = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: is_a_hash,
+                then_branch: var(&raw_sub, inner_hash_ty.clone()),
+                else_branch: empty_hash(inner_hash_ty.clone()),
+            },
+        ),
+        inner_hash_ty.clone(),
+    );
+
+    let new_call = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![owner.0.clone()] },
+                )),
+                method: Symbol::from("new"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        owner_ty.clone(),
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: sub.clone() },
+            target: LValue::Var { id: VarId(0), name: raw_sub.clone() },
             value: resource_fetch,
+        },
+    ));
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: sub.clone() },
+            value: sub_narrowed,
         },
     ));
     stmts.push(Expr::new(
@@ -426,65 +505,89 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
     ));
 
     for field in fields {
-        // sub.fetch("field", "") — string key matches the request-body
-        // parser's String-keyed Hash output. Symbol keys would fall
-        // through to the default and silently produce empty fields.
-        let fetch_call = Expr::new(
+        // raw_<field> = sub.fetch("<field>", "")
+        //   — value type at the body-typer level is `ParamValue`;
+        //   `is_a?(String)` narrows it for the String-typed attr.
+        let raw_field = Symbol::from(format!("raw_{}", field.as_str()));
+        let fetch_call = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var(&sub, inner_hash_ty.clone())),
+                    method: Symbol::from("fetch"),
+                    args: vec![str_lit(field.as_str()), str_lit("")],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            param_value_ty.clone(),
+        );
+        stmts.push(Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Var { id: VarId(0), name: sub.clone() },
-                )),
-                method: Symbol::from("fetch"),
-                args: vec![
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Lit {
-                            value: Literal::Str { value: field.as_str().to_string() },
-                        },
-                    ),
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Lit { value: Literal::Str { value: String::new() } },
-                    ),
-                ],
-                block: None,
-                parenthesized: false,
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: raw_field.clone() },
+                value: fetch_call,
             },
+        ));
+        let is_a_string = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var(&raw_field, param_value_ty.clone())),
+                    method: Symbol::from("is_a?"),
+                    args: vec![Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Const { path: vec![Symbol::from("String")] },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            Ty::Bool,
+        );
+        let narrowed = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_a_string,
+                    then_branch: var(&raw_field, Ty::Str),
+                    else_branch: str_lit(""),
+                },
+            ),
+            Ty::Str,
         );
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Var { id: VarId(0), name: instance.clone() },
-                )),
+                recv: Some(var(&instance, owner_ty.clone())),
                 method: Symbol::from(format!("{}=", field.as_str())),
-                args: vec![fetch_call],
+                args: vec![narrowed],
                 block: None,
                 parenthesized: false,
             },
         ));
     }
 
-    stmts.push(Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: instance },
-    ));
+    stmts.push(var(&instance, owner_ty.clone()));
 
-    // Declare `params` as a nested Hash[String, Hash[String, untyped]]
-    // rather than Hash[String, untyped]: from_raw's body does
-    // `sub = params.fetch("<resource>", {})` then `sub.fetch("field", "")`,
-    // so the body typer needs `sub` to be Hash-typed for per-target
-    // emit (e.g. TS's `.fetch` → bracket-access rewrite) to fire on
-    // the inner accesses. The actual `@params` argument is
-    // Hash[String, untyped] at the call site (mixed path-captures +
-    // nested resource body); the wider declared type is a no-op
-    // under untyped's slidability and accurate for the only access
-    // pattern from_raw uses (resource-keyed read).
-    let inner_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
-    let params_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(inner_ty) };
+    let _ = outer_hash_ty;
+
+    // Declare `params` as `Hash[String, Roundhouse::ParamValue]` —
+    // the same shape carried at the controller's `@params` slot
+    // (see `runtime/ruby/action_controller/base.rbs`). ParamValue
+    // is the recursive `String | Hash[String, PV] | Array[PV]`
+    // union each target's runtime realizes natively (Crystal alias,
+    // TS type, Ruby dynamic). Using it here keeps from_raw's
+    // call-site type-check honest — passing `@params` directly
+    // works without a cast on strict targets.
+    let param_value_ty = Ty::Class {
+        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+        args: vec![],
+    };
+    let params_ty = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(param_value_ty),
+    };
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
         name: Symbol::from("from_raw"),

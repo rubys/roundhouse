@@ -341,6 +341,13 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         imports: &[
             ("Flash", "./flash.js"),
             ("Session", "./session.js"),
+            // `ParamValue` is the recursive params type referenced
+            // by `@params`'s RBS signature. The TS runtime declares
+            // it in `runtime/typescript/param_value.ts`; the type-
+            // only import keeps it in scope for the `Record<string,
+            // ParamValue>` annotation. See cross-target rationale
+            // in `runtime/crystal/param_value.cr`.
+            ("type ParamValue", "./param_value.js"),
         ],
         // Module-scope `STATUS_CODES` is now picked up by
         // `parse_module_constant_exprs` and emitted as a
