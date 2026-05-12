@@ -97,6 +97,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // can drop unreachable methods in a follow-up pass.
     let runtime_units = crate::runtime_loader::crystal_units(|_path, classes| classes)
         .expect("crystal runtime transpile failed (Ruby source error)");
+    // Harvest runtime classes (ActiveRecord::Base, ActionController::
+    // Base, etc.) before consuming the units for emit. The test body-
+    // typer uses these to walk Article → ApplicationRecord → AR::Base
+    // for `last`/`find`/etc. dispatch; without them, `Article.last`
+    // types as `Ty::Var` and the Crystal emit can't surface the
+    // auto-`.not_nil!` recv rewrite (auto-narrowing only fires on
+    // concrete nilable-class unions).
+    let mut runtime_classes_for_typing: Vec<crate::dialect::LibraryClass> = Vec::new();
+    for unit in &runtime_units {
+        runtime_classes_for_typing.extend(unit.classes.iter().cloned());
+    }
     for unit in runtime_units {
         files.push(EmittedFile {
             path: unit.out_path,
@@ -401,6 +412,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let out_path = PathBuf::from(format!("src/fixtures/{stem}.cr"));
             files.push(library::emit_library_class_decl(lc, app, out_path));
         }
+        // `src/test_setup.cr` — top-level code that wires the schema,
+        // routes, controllers, and fixture loaders into the
+        // `RoundhouseTest` class state at program load time. Specs
+        // pull this in via `app.cr`'s alphabetical sweep (`test_setup`
+        // sorts after `test_helper` so RoundhouseTest is defined when
+        // the assignments execute). Production builds without
+        // test_modules skip the file entirely — `main.cr`'s
+        // `Roundhouse::Server.start` is the production entrypoint and
+        // doesn't reference any of this state.
+        files.push(emit_test_setup_cr(app, &fixture_lcs));
         // Framework runtime RBS — translate each `(class, method →
         // Ty)` row into a ClassInfo extra so the test body-typer
         // dispatches precisely against framework methods. Same
@@ -417,6 +438,47 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             }
             test_extras.push((class_id.clone(), info));
         }
+        // Register model + controller classes with the body-typer so
+        // test method bodies dispatch correctly on
+        // `Article.last`/`Article.find`/etc. Without these, the typer
+        // leaves the recv at `Untyped` and the Crystal emit can't
+        // distinguish a nilable-class return (needs `.not_nil!` on
+        // chained dispatch) from a concrete-class return. Same
+        // pattern as `src/emit/typescript.rs:284-302`.
+        test_extras.extend(crate::lower::extras_from_lcs(&model_lcs));
+        test_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
+        // Runtime classes harvested earlier (ActiveRecord::Base,
+        // ActionController::Base, etc.). Required for the body-typer
+        // to walk Article → ApplicationRecord → AR::Base when
+        // resolving inherited class methods like `last`. Each is
+        // registered under both the full path AND the last-segment
+        // alias (`Base`) so the typer's Const arm resolves bare
+        // refs in test bodies.
+        for lc in &runtime_classes_for_typing {
+            let info = crate::lower::class_info_from_library_class(lc);
+            test_extras.push((lc.name.clone(), info.clone()));
+            let raw = lc.name.0.as_str();
+            let last = raw.rsplit("::").next().unwrap_or(raw);
+            if last != raw {
+                test_extras.push((
+                    crate::ident::ClassId(crate::ident::Symbol::from(last)),
+                    info,
+                ));
+            }
+        }
+        // Synthesized ApplicationRecord shim — Article inherits from
+        // ApplicationRecord which inherits from ActiveRecord::Base.
+        // The body-typer's parent walk needs `ApplicationRecord` in
+        // the registry to traverse the chain. Without it, `Article
+        // .last` resolves to `Ty::Var` even when AR::Base is loaded.
+        let mut app_record_info = crate::analyze::ClassInfo::default();
+        app_record_info.parent = Some(crate::ident::ClassId(
+            crate::ident::Symbol::from("ActiveRecord::Base"),
+        ));
+        test_extras.push((
+            crate::ident::ClassId(crate::ident::Symbol::from("ApplicationRecord")),
+            app_record_info,
+        ));
         // Register fixture classes with the body-typer so test
         // method bodies (`@article = ArticlesFixtures.one`) resolve
         // the static-method dispatch to the synthesized return type
@@ -636,6 +698,70 @@ fn emit_main_cr(app: &App) -> EmittedFile {
 /// parsed. Whole-program analysis can't help here. The framework
 /// runtime has known dependencies (action_controller_base may include
 /// modules); hardcoding the order keeps things deterministic.
+/// Emit `src/test_setup.cr` — top-level code that registers the
+/// schema, routes, controllers, and fixture loaders into
+/// `RoundhouseTest` class state at program load. Mirrors the role
+/// of `test/_runtime/setup.ts` in the TypeScript emit and the
+/// `SchemaSetup` / `FixtureLoader` glue in `runtime/spinel/test/
+/// test_helper.rb`. Only emitted when `app.test_modules` is non-
+/// empty; production builds skip the file.
+///
+/// File layout:
+///   - schema SQL string (one-shot Db.setup_test_db driver)
+///   - `RoundhouseTest.routes = Routes.table.as(...)`
+///   - `RoundhouseTest.controllers = { :articles => …, … }`
+///   - `RoundhouseTest.fixture_loaders = [ ->{ …Fixtures._fixtures_load! }, … ]`
+///
+/// Routes is the standard `Routes` module emitted by
+/// `lower_routes_to_library_functions`; controllers are looked up
+/// from `app.controllers`. Fixture loaders reference each
+/// `<Plural>Fixtures._fixtures_load!` synthesized by
+/// `fixture_to_library`.
+fn emit_test_setup_cr(
+    app: &App,
+    fixture_lcs: &[crate::dialect::LibraryClass],
+) -> EmittedFile {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str("# Generated by Roundhouse — Crystal test setup.\n");
+    s.push_str("#\n");
+    s.push_str("# Registers schema, routes, controllers, and fixture loaders\n");
+    s.push_str("# with `RoundhouseTest` class state at program load. Specs\n");
+    s.push_str("# pull this in via `app.cr`'s alphabetical sweep; main.cr's\n");
+    s.push_str("# production entrypoint doesn't reference this state.\n\n");
+    s.push_str("RoundhouseTest.schema_sql = Schema.statements.join(\";\\n\")\n");
+    s.push_str("RoundhouseTest.routes = Routes.table\n");
+    s.push_str("RoundhouseTest.controllers = {\n");
+    for controller in &app.controllers {
+        let class_name = controller.name.0.as_str();
+        let sym = controller_symbol(class_name);
+        let _ = writeln!(s, "  :{} => {},", sym, class_name);
+    }
+    s.push_str("} of Symbol => ::ActionController::Base.class\n");
+    s.push_str("RoundhouseTest.fixture_loaders = [\n");
+    for lc in fixture_lcs {
+        let class_name = lc.name.0.as_str();
+        let _ = writeln!(
+            s,
+            "  -> {{ {}._fixtures_load!; nil }},",
+            class_name,
+        );
+    }
+    s.push_str("] of -> Nil\n");
+    EmittedFile {
+        path: PathBuf::from("src/test_setup.cr"),
+        content: s,
+    }
+}
+
+/// `ArticlesController` → `articles` (the controller-symbol form the
+/// router uses). Mirrors the same convention in
+/// `src/lower/routes_to_library/mod.rs::controller_symbol`.
+fn controller_symbol(class_name: &str) -> String {
+    let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
+    crate::naming::snake_case(base)
+}
+
 fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {
     // Framework runtime files in dependency order. Each must be
     // loaded before any file that `include`s its module.

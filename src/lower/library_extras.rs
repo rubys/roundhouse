@@ -25,6 +25,17 @@ pub fn extras_from_lcs(lcs: &[LibraryClass]) -> Vec<(ClassId, ClassInfo)> {
     for lc in lcs {
         let info = grouped.entry(lc.name.clone()).or_default();
         let from = crate::lower::class_info_from_library_class(lc);
+        // Preserve the parent slot — `Article` carries `parent =
+        // ApplicationRecord` so the body-typer's class-dispatch
+        // parent walk can climb to the framework runtime's
+        // `ActiveRecord::Base`. Without this, `Article.last` and
+        // every other inherited class method resolves to `Ty::Var`
+        // and downstream strict-target emit can't reason about the
+        // RBS-declared return type. First-occurrence wins so a later
+        // group entry doesn't clobber a parent already set.
+        if info.parent.is_none() {
+            info.parent = from.parent;
+        }
         for (k, v) in from.class_methods {
             info.class_methods.insert(k, v);
         }

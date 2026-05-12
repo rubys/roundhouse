@@ -119,89 +119,146 @@ fn build_find_call(cls: &ClassId, id: i64) -> Expr {
     )
 }
 
-/// Body of `_fixtures_load!`: a Seq of `<Class>.new({...}).save` Sends,
-/// one per fixture record in 1-indexed source order.
+/// Body of `_fixtures_load!`: a Seq of per-record blocks. Each
+/// record lowers to
+///   instance = <Class>.new
+///   instance.id = <id>
+///   instance.<field> = <value>
+///   ...
+///   instance.save
+/// mirroring the shape `synth_from_params` uses. The per-field
+/// assignment path avoids the `<Class>.new({attrs_hash})`
+/// constructor pattern — strict targets (Crystal) can't reconcile
+/// a `Hash[Symbol, Untyped]` arg's lookups (`attrs[:id]? || 0` is
+/// `String | Int64`) against typed setters. Each typed setter
+/// accepts its column type directly, so the value-type union never
+/// surfaces.
 fn build_load_method_body(
     cls: &ClassId,
     records: &[LoweredFixtureRecord],
     all: &LoweredFixtureSet,
 ) -> Expr {
-    let exprs: Vec<Expr> = records
-        .iter()
-        .enumerate()
-        .map(|(idx, r)| {
-            let id = (idx + 1) as i64;
-            let new_call = build_constructor_call(cls, id, r, all);
-            with_ty(
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(new_call),
-                        method: Symbol::from("save"),
-                        args: vec![],
-                        block: None,
-                        // `save` is a real method (`AccessorKind::Method`)
-                        // on `ActiveRecord::Base`. The fixture lowerer
-                        // synthesizes this Send directly without running
-                        // the body-typer, so the parens-on-Method-kind
-                        // annotation doesn't fire — set it explicitly.
-                        parenthesized: true,
-                    },
-                ),
-                Ty::Bool,
-            )
-        })
-        .collect();
-    Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
-}
+    let class_ty = Ty::Class { id: cls.clone(), args: vec![] };
+    let instance_sym = Symbol::from("instance");
 
-/// Build `<Class>.new({id: <id>, <field>: <value>, ...})`. Fields
-/// resolve through the lowered record + cross-fixture FK lookups.
-fn build_constructor_call(
-    cls: &ClassId,
-    id: i64,
-    record: &LoweredFixtureRecord,
-    all: &LoweredFixtureSet,
-) -> Expr {
-    let mut entries: Vec<(Expr, Expr)> = Vec::new();
-    entries.push((lit_sym(Symbol::from("id")), lit_int(id)));
-    for field in &record.fields {
-        let value_expr = match &field.value {
-            LoweredFixtureValue::Literal { ty, raw } => literal_value_to_expr(ty, raw),
-            LoweredFixtureValue::FkLookup { target_fixture, target_label } => {
-                resolve_fk_id(target_fixture, target_label, all)
-            }
-        };
-        entries.push((lit_sym(field.column.clone()), value_expr));
-    }
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let hash_expr = with_ty(
-        Expr::new(
+    let mut exprs: Vec<Expr> = Vec::new();
+    for (idx, r) in records.iter().enumerate() {
+        let id = (idx + 1) as i64;
+        // instance = <Class>.new
+        let class_const = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![cls.0.clone()] },
+            ),
+            class_ty.clone(),
+        );
+        let new_call = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(class_const),
+                    method: Symbol::from("new"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            class_ty.clone(),
+        );
+        exprs.push(Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries, kwargs: false },
-        ),
-        hash_ty,
-    );
-    let class_const = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Const { path: vec![cls.0.clone()] },
-        ),
-        Ty::Class { id: cls.clone(), args: vec![] },
-    );
-    with_ty(
-        Expr::new(
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var {
+                    id: crate::ident::VarId(0),
+                    name: instance_sym.clone(),
+                },
+                value: new_call,
+            },
+        ));
+
+        // instance.id = <id>
+        let instance_var = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Var {
+                    id: crate::ident::VarId(0),
+                    name: instance_sym.clone(),
+                },
+            ),
+            class_ty.clone(),
+        );
+        exprs.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(class_const),
-                method: Symbol::from("new"),
-                args: vec![hash_expr],
+                recv: Some(instance_var.clone()),
+                method: Symbol::from("id="),
+                args: vec![lit_int(id)],
                 block: None,
-                parenthesized: true,
+                parenthesized: false,
             },
-        ),
-        Ty::Class { id: cls.clone(), args: vec![] },
-    )
+        ));
+
+        // instance.<field> = <value>
+        for field in &r.fields {
+            let value_expr = match &field.value {
+                LoweredFixtureValue::Literal { ty, raw } => literal_value_to_expr(ty, raw),
+                LoweredFixtureValue::FkLookup { target_fixture, target_label } => {
+                    resolve_fk_id(target_fixture, target_label, all)
+                }
+            };
+            let recv = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: instance_sym.clone(),
+                    },
+                ),
+                class_ty.clone(),
+            );
+            exprs.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(recv),
+                    method: Symbol::from(format!("{}=", field.column.as_str())),
+                    args: vec![value_expr],
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+        }
+
+        // instance.save
+        let save_recv = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Var {
+                    id: crate::ident::VarId(0),
+                    name: instance_sym.clone(),
+                },
+            ),
+            class_ty.clone(),
+        );
+        exprs.push(with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(save_recv),
+                    method: Symbol::from("save"),
+                    args: vec![],
+                    block: None,
+                    // `save` is a real method on `ActiveRecord::Base`;
+                    // explicit parens so per-target emit doesn't drop
+                    // them (the lowerer doesn't re-run the body-typer
+                    // on this synth, so the auto-parens rule for Method
+                    // accessors doesn't fire).
+                    parenthesized: true,
+                },
+            ),
+            Ty::Bool,
+        ));
+    }
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
 }
 
 /// YAML-string values come through as raw strings; cast to the

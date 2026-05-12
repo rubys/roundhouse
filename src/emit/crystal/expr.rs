@@ -623,10 +623,54 @@ fn force_hash_form_for_arg(recv: Option<&Expr>, method: &Symbol) -> bool {
     let ExprNode::Const { path } = &*r.node else {
         return false;
     };
-    matches!(
-        path.last().map(|s| s.as_str()),
+    // Per-class constructor shapes that take a `Hash[untyped,
+    // untyped]` per RBS. ActiveRecord::Base.initialize is the
+    // primary case — model `<Plural>Fixtures._fixtures_load!` builds
+    // `Article.new({id: 1, title: …})` and the auto-NamedTuple emit
+    // would mismatch the Hash-typed `_attrs` parameter. We can't
+    // enumerate every app-defined model here (Crystal emit doesn't
+    // carry the App context), so the catch-all condition is "the
+    // recv looks like a user-named class (capitalized Const, not in
+    // the stdlib/framework drop list) and the only arg is a Hash
+    // literal with simple-Symbol keys" — checked at the arg-emit
+    // site via `force_hash_form_for_arg_with_hash_arg`. The named
+    // entries below stay for the framework-only types that emit
+    // before the model-emit pipeline runs.
+    let last = path.last().map(|s| s.as_str());
+    if matches!(
+        last,
         Some("Parameters") | Some("Flash") | Some("Session")
-    )
+    ) {
+        return true;
+    }
+    // User-defined class names — capitalized first char, no `::`
+    // beyond a single segment, NOT a stdlib container. The fixture
+    // loader and any other `Model.new(attrs_hash)` call site fits
+    // this shape. NamedTuple-shaped Crystal stdlib targets (`Tuple`,
+    // `Set`, `Range`, …) are excluded so a hand-written
+    // `Tuple.new({a: 1})` doesn't get flipped.
+    if let Some(name) = last {
+        let is_stdlib_container = matches!(
+            name,
+            "Hash"
+                | "Array"
+                | "Tuple"
+                | "NamedTuple"
+                | "Set"
+                | "Range"
+                | "Slice"
+                | "Bytes"
+                | "String"
+        );
+        let starts_upper = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
+        if starts_upper && !is_stdlib_container {
+            return true;
+        }
+    }
+    false
 }
 
 /// `emit_expr` variant that passes a "force Hash form" hint into the
@@ -1091,6 +1135,35 @@ pub(super) fn emit_send_base(
             } else {
                 recv_s
             };
+            // Auto-`.not_nil!` for chained dispatch through a nilable
+            // class-or-nil receiver: `Article.last.title` arrives as
+            // `Send{recv: Send{...last}, method: title}` where the
+            // inner send's `Ty::Union<Article, Nil>` would compile-
+            // fail under Crystal's strict null-check. The Rails idiom
+            // assumes presence; surfacing `.not_nil!` matches that
+            // intent (raises at runtime if the underlying record is
+            // absent — same as Ruby's `NoMethodError on nil`).
+            //
+            // Excluded methods are the ones designed to operate on
+            // nilable receivers — narrowing predicates (`nil?`,
+            // `is_a?`, `kind_of?`, `instance_of?`, `respond_to?`) and
+            // the Crystal-side null-safety helpers (`not_nil!`,
+            // `try`, `inspect`, `to_s`). Without the exclusion, a
+            // `parent.nil?` check turns into `parent.not_nil!.nil?`
+            // — always false — and the surrounding `return if` is
+            // dead code.
+            let recv_s = if is_nilable_class_union(r.ty.as_ref())
+                && is_simple_method_name(method.as_str())
+                && !is_nil_safe_dispatch(method.as_str())
+            {
+                format!("{recv_s}.not_nil!")
+            } else {
+                recv_s
+            };
+            // DEBUG
+            if method.as_str() == "id" || method.as_str() == "title" {
+                eprintln!("DEBUG send recv={:?} method={} recv.ty={:?}", recv_s, method.as_str(), r.ty);
+            }
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
             } else if parenthesized {
@@ -1111,6 +1184,70 @@ fn needs_recv_parens(e: &Expr) -> bool {
         &*e.node,
         ExprNode::BoolOp { .. } | ExprNode::If { .. } | ExprNode::Assign { .. }
     )
+}
+
+/// True when `ty` is exactly a two-variant union of a `Ty::Class` and
+/// `Ty::Nil` — the body-typer's canonical shape for a nilable-class
+/// result (`ActiveRecord::Base#last` returns `Base?`, surfaces here
+/// as `Union<Class, Nil>`). Drives the auto-`.not_nil!` recv rewrite
+/// for chained Rails idioms (`Article.last.title`) that would
+/// otherwise compile-fail under Crystal's strict null check.
+fn is_nilable_class_union(ty: Option<&Ty>) -> bool {
+    let Some(Ty::Union { variants }) = ty else { return false; };
+    if variants.len() != 2 {
+        return false;
+    }
+    let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+    let has_class = variants.iter().any(|v| matches!(v, Ty::Class { .. }));
+    has_nil && has_class
+}
+
+/// Method names that are part of Crystal's / Ruby's null-safety
+/// surface and SHOULD NOT trigger an auto-`.not_nil!` recv rewrite.
+/// Narrowing predicates (`nil?`, `is_a?`, …) and pass-through
+/// helpers (`not_nil!`, `try`, `inspect`, `to_s`, `hash`) all
+/// accept nilable receivers natively; pre-narrowing the recv would
+/// either change semantics (`parent.not_nil!.nil?` is always false)
+/// or be redundant.
+fn is_nil_safe_dispatch(name: &str) -> bool {
+    matches!(
+        name,
+        "nil?"
+            | "is_a?"
+            | "kind_of?"
+            | "instance_of?"
+            | "respond_to?"
+            | "not_nil!"
+            | "try"
+            | "inspect"
+            | "to_s"
+            | "hash"
+            | "object_id"
+            | "==",
+    )
+}
+
+/// True when a method name is a "simple" Ruby identifier — letters,
+/// digits, underscores, optional trailing `?`/`!`. Excludes operator
+/// methods (`[]`, `+`, `<<`, …) so the auto-`.not_nil!` rewrite stays
+/// inside the bare-dispatch shape where the Rails idiom applies.
+fn is_simple_method_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    let len = name.len();
+    let body_end = if name.ends_with('?') || name.ends_with('!') || name.ends_with('=') {
+        len - 1
+    } else {
+        len
+    };
+    name[..body_end]
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_binary_operator(m: &str) -> bool {

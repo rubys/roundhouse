@@ -573,15 +573,16 @@ fn is_skipped_method(
     if accessor_names.contains(m.name.as_str()) {
         return true;
     }
+    // The lowered `def initialize(attrs = {})` is skipped — Crystal's
+    // strict typing can't reconcile a `Hash[Symbol, Untyped]` attrs
+    // param's lookups (`attrs[:id]? || 0_i64` yields `String | Int64`,
+    // which the typed setter rejects). Call sites that need to
+    // construct from a typed attribute set use the lowerer-synthesized
+    // factories (`from_row`, `from_params`) which do per-field
+    // assignment with typed `.<col> =` writes — those paths sidestep
+    // the union problem entirely. Fixture loads emit per-field assigns
+    // too (see `fixture_to_library`).
     if m.name.as_str() == "initialize" && m.params.len() == 1 {
-        // Heuristic: the lowerer-emitted shape takes a single `attrs`
-        // hash AND carries a typed signature (the synthesizer attaches
-        // `Ty::Fn` with `Hash[Symbol, Untyped]`). User-written
-        // `initialize(attrs = {})` in test fixtures has no RBS sig
-        // attached → `signature` is None — those still emit through
-        // the normal path. Without the signature check, hand-written
-        // model fixtures defining `initialize` for `create(attrs)`
-        // would be silently dropped.
         let only_param = &m.params[0];
         if only_param.as_str() == "attrs" && m.signature.is_some() {
             return true;

@@ -171,6 +171,16 @@ impl<'a> BodyTyper<'a> {
         let Some(Ty::Class { id, .. }) = recv_ty else { return };
         let mut current_id: Option<&ClassId> = Some(id);
         let mut seen = 0usize;
+        // For `Class.new(…)` calls, the actual signature lives on
+        // `initialize` (Ruby/Crystal auto-generate `new` to forward
+        // to `initialize`). Look up under `initialize` instead so
+        // the kwargs-flip fires for typed `def initialize(opts =
+        // {})` model constructors.
+        let lookup_name = if method.as_str() == "new" {
+            Symbol::from("initialize")
+        } else {
+            method.clone()
+        };
         let sig: Option<&Ty> = loop {
             let Some(cid) = current_id else { break None };
             seen += 1;
@@ -180,8 +190,8 @@ impl<'a> BodyTyper<'a> {
             let Some(cls) = self.classes().get(cid) else { break None };
             if let Some(s) = cls
                 .instance_methods
-                .get(method)
-                .or_else(|| cls.class_methods.get(method))
+                .get(&lookup_name)
+                .or_else(|| cls.class_methods.get(&lookup_name))
             {
                 break Some(s);
             }
@@ -241,14 +251,34 @@ impl<'a> BodyTyper<'a> {
             // `unknown()`).
             Some(Ty::Untyped) => Ty::Untyped,
             Some(Ty::Class { id, args }) => {
-                if let Some(cls) = self.classes().get(id) {
+                // Walk the parent chain so inherited methods resolve:
+                // `Article.last` looks up `last` on Article → Application
+                // Record → ActiveRecord::Base (where the RBS-declared
+                // signature lives). Without the walk, lookups on the
+                // immediate class miss inherited surface and return
+                // `Ty::Var`, which downstream strict-target emit can't
+                // reason about (no auto-`.not_nil!` on nilable-class
+                // returns, etc.). Loop guard caps depth at 32 to match
+                // `normalize_trailing_kwargs` (same shape, same cap).
+                let mut current_id: Option<&ClassId> = Some(id);
+                let mut depth = 0usize;
+                while let Some(cid) = current_id {
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    let Some(cls) = self.classes().get(cid) else {
+                        break;
+                    };
                     if let Some(ty) = cls.class_methods.get(method) {
                         return unwrap_fn_ret(ty);
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
                         return unwrap_fn_ret(ty);
                     }
+                    current_id = cls.parent.as_ref();
                 }
+                let _ = args; // already shadowed below for new-call shortcut
                 // Every class in Ruby responds to `.new`, returning an
                 // instance of itself. Serve this universally — covers
                 // unregistered classes (user-defined helpers) without
