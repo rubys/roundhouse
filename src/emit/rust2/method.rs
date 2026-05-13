@@ -43,9 +43,10 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,
     };
-    let body = super::expr::with_current_return_ty(return_ty, || super::expr::with_class_method_scope(|| {
+    let param_types = collect_param_types(m);
+    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty, || super::expr::with_class_method_scope(|| {
         super::expr::with_method_scope(&m.body, || emit_expr(&m.body))
-    }));
+    })));
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
@@ -176,7 +177,12 @@ pub(super) fn emit_instance_method(
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,
     };
-    let body = super::expr::with_current_return_ty(return_ty, || super::expr::with_method_scope(&m.body, || {
+    // Build the param-name → declared-Ty map for the String coercion
+    // logic in `emit_assign`. The body-typer doesn't always propagate
+    // Option-ness from RBS to Var reads inside the body, so this is
+    // the authoritative source for "is this param Option-typed".
+    let param_types = collect_param_types(m);
+    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty, || super::expr::with_method_scope(&m.body, || {
         if is_init {
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
             super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
@@ -191,7 +197,7 @@ pub(super) fn emit_instance_method(
                 super::expr::emit_expr_tail(&m.body)
             })
         }
-    }));
+    })));
     let body_lines: Vec<&str> = body.lines().collect();
     let last_idx = body_lines.len().saturating_sub(1);
     for (i, line) in body_lines.iter().enumerate() {
@@ -228,6 +234,26 @@ pub(super) fn emit_instance_method(
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+/// Build a map from each declared parameter name to its RBS-declared
+/// Ty for the supplied method. Empty when the method has no
+/// signature or no params. Used to thread param-shape information
+/// into `emit_assign`'s coercion logic — the body-typer doesn't
+/// always set the Option-ness on Var reads, so the param table is
+/// the authoritative source.
+fn collect_param_types(m: &MethodDef) -> std::collections::HashMap<String, Ty> {
+    let mut out = std::collections::HashMap::new();
+    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+        return out;
+    };
+    if params.len() != m.params.len() {
+        return out;
+    }
+    for (p, sig_p) in m.params.iter().zip(params.iter()) {
+        out.insert(p.name.as_str().to_string(), sig_p.ty.clone());
+    }
+    out
 }
 
 fn render_instance_params(

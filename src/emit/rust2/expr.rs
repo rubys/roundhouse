@@ -109,6 +109,29 @@ thread_local! {
     /// E0069 in non-Unit-returning functions).
     static CURRENT_RETURN_TY: std::cell::RefCell<Option<crate::ty::Ty>> =
         std::cell::RefCell::new(None);
+
+    /// Parameter name → declared RBS type for the enclosing method,
+    /// set by `method.rs` around each method-body emit. The body-typer
+    /// doesn't always propagate the param's Option-ness to Var reads,
+    /// so `emit_assign`'s String coercion needs this side channel to
+    /// avoid adding `.to_string()` to an `Option<String>`-typed param
+    /// reference (which fails Display). Empty outside method body.
+    static PARAM_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub(super) fn with_param_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = PARAM_TYPES.with(|c| c.replace(types));
+    let r = f();
+    PARAM_TYPES.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+pub(super) fn param_ty(name: &str) -> Option<crate::ty::Ty> {
+    PARAM_TYPES.with(|c| c.borrow().get(name).cloned())
 }
 
 pub(super) fn with_current_return_ty<F, R>(ty: Option<crate::ty::Ty>, f: F) -> R
@@ -424,11 +447,27 @@ fn emit_expr_inner(e: &Expr) -> String {
                 &*else_branch.node,
                 ExprNode::Lit { value: Literal::Nil }
             );
+            let then_is_nil = matches!(
+                &*then_branch.node,
+                ExprNode::Lit { value: Literal::Nil }
+            );
             // Branches inherit the enclosing function's return-tail
             // flag: an `if/else` in tail position has both branches in
             // tail position; the cond is not.
             if else_is_nil {
                 return format!("if {} {{ {} }}", emit_expr(cond), emit_expr_tail(then_branch));
+            }
+            // `STMT unless COND` lowers to `If { cond, then: Nil, else:
+            // STMT }` — emit as the negated single-branch form so the
+            // Nil-vs-Assign branch mismatch (E0308 "if and else have
+            // incompatible types") doesn't surface. Symmetric with
+            // the else_is_nil case above.
+            if then_is_nil {
+                return format!(
+                    "if !({}) {{ {} }}",
+                    emit_expr(cond),
+                    emit_expr_tail(else_branch),
+                );
             }
             format!(
                 "if {} {{ {} }} else {{ {} }}",
@@ -795,20 +834,42 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
         }
         _ => (field_ty.clone(), false),
     };
+    // Authoritative RHS Ty: if `value` is a bare Var read of a
+    // declared param, look up the param's RBS type — the body-typer
+    // sometimes erases the Option-ness on Var reads and the param
+    // table is the source of truth. Otherwise fall back to the
+    // body-typer's `value.ty`.
+    let effective_value_ty = match &*value.node {
+        ExprNode::Var { name, .. } => param_ty(name.as_str()).or_else(|| value.ty.clone()),
+        _ => value.ty.clone(),
+    };
     // If the RHS is itself an Option (Union{Nil, _}), it already
     // matches the Option-typed field — don't re-wrap.
     let rhs_is_option = matches!(
-        value.ty.as_ref(),
+        effective_value_ty.as_ref(),
         Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
     );
+    // Three coercion paths:
+    //   1. `T → T`               — emit unchanged
+    //   2. `Ty::Str → String`    — append `.to_string()` (cover &str-to-String)
+    //   3. `Option<T> → T`       — append `.unwrap()` (Ruby idiom
+    //                              `@x = y unless y.nil?` lowers the
+    //                              body to plain `@x = y`; the guard
+    //                              proves Some at the assignment site)
     let coerced = if matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
-        && matches!(value.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
+        && matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
     {
         format!("{rhs}.to_string()")
+    } else if !needs_some && rhs_is_option {
+        // Field is non-Option but RHS is Option-typed — unwrap.
+        // Generated code paths into this branch run only after an
+        // `if x.is_none() return / skip` guard (the Ruby `unless
+        // x.nil?` idiom); unwrap is safe in that flow.
+        format!("{rhs}.unwrap()")
     } else {
         rhs.to_string()
     };
-    if needs_some && !rhs_is_option && !matches!(value.ty.as_ref(), Some(crate::ty::Ty::Nil)) {
+    if needs_some && !rhs_is_option && !matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Nil)) {
         format!("Some({coerced})")
     } else {
         coerced
