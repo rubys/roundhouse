@@ -324,6 +324,53 @@ fn emit_node(n: &ExprNode) -> String {
                     }
                 }
             }
+            // `@ivar.nil?` — suppress the auto-`.not_nil!` that the
+            // Ivar narrowing rule (above) inserts on non-nilable
+            // concrete-typed ivar reads. Schema-derived column
+            // accessors type their ivar as `T` (the setter's value
+            // type after the `.as?(T).not_nil!` chain in
+            // `synth_attr_writer`), but the property declaration is
+            // `T?` and the runtime ivar legitimately holds nil for
+            // freshly-allocated records. `@x.not_nil!.nil?` would
+            // raise instead of returning true — the `.nil?` check is
+            // the canonical pre-validation guard in `validate`
+            // bodies. Same suppression for `.is_a?(NilClass)` (an
+            // equivalent nil-introspection shape).
+            if args.is_empty() && method.as_str() == "nil?" {
+                if let Some(r) = recv {
+                    if let ExprNode::Ivar { name } = &*r.node {
+                        return format!("@{name}.nil?");
+                    }
+                }
+            }
+            // `<Class>.new({k: v, ...})` / `<Class>.create({k: v, ...})`
+            // — user-test idiom (`Comment.new({article_id: x, ...})`)
+            // and ActiveRecord factory (`Comment.create({...})`). The
+            // synthesized `def initialize(attrs)` is dropped on the
+            // Crystal side (its `Hash[Sym, Untyped]` lookups don't
+            // reconcile with typed setters); rewrite the call site
+            // into a `begin … end` expression that builds the
+            // instance with per-field setters, mirroring the shape
+            // the fixture lowerer uses. Each setter has its declared
+            // type, so the hash-value union never surfaces.
+            //
+            // Only fires for user-defined class names (capitalized
+            // first char, not a stdlib container) with a single
+            // non-empty Hash literal argument whose keys are all
+            // simple-Symbol literals. Hand-written calls that
+            // already pass a typed Hash variable, or non-Hash args,
+            // fall through to the standard emit.
+            if (method.as_str() == "new" || method.as_str() == "create")
+                && args.len() == 1
+            {
+                if let Some(r) = recv {
+                    if let Some(rewrite) =
+                        try_emit_new_or_create_per_field(r, method.as_str(), &args[0])
+                    {
+                        return rewrite;
+                    }
+                }
+            }
             // `v.is_a?(TrueClass)` / `is_a?(FalseClass)` — Ruby
             // distinguishes the singleton classes of `true` / `false`;
             // Crystal has neither. Rewrite to `== true` / `== false`
@@ -615,6 +662,92 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
 /// emit's all-symbol-keys → NamedTuple default for arg positions
 /// where Crystal expects a runtime Hash. Targets specific framework
 /// constructors that take a `Hash[untyped, untyped]` per RBS.
+/// Rewrite `<Class>.new(<hash literal>)` / `<Class>.create(<hash
+/// literal>)` to a `begin … end` block that instantiates and
+/// assigns each field via its typed setter. The Crystal-side
+/// synth_initialize is intentionally skipped (its
+/// `Hash[Sym, Untyped]` lookups don't reconcile with typed
+/// setters); this rewrite re-routes the call sites that needed
+/// the hash form. Returns `None` for shapes that don't match —
+/// caller falls back to the standard emit.
+///
+/// Only fires for:
+///   - User-defined class names (capitalized first char, not a
+///     stdlib container).
+///   - A single argument that's a non-empty Hash literal with all
+///     simple-Symbol keys.
+///
+/// `.new` produces: `(__inst = Cls.new; __inst.k1 = v1; …; __inst)`
+/// `.create` adds an explicit `.save` after the assigns and still
+/// returns the instance.
+fn try_emit_new_or_create_per_field(
+    recv: &Expr,
+    method: &str,
+    arg: &Expr,
+) -> Option<String> {
+    let ExprNode::Const { path } = &*recv.node else {
+        return None;
+    };
+    let class_name = path
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    let last = path.last()?.as_str();
+    let is_stdlib_container = matches!(
+        last,
+        "Hash"
+            | "Array"
+            | "Tuple"
+            | "NamedTuple"
+            | "Set"
+            | "Range"
+            | "Slice"
+            | "Bytes"
+            | "String"
+            | "Object"
+            | "Class"
+            | "Exception"
+    );
+    let starts_upper = last
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase());
+    if !starts_upper || is_stdlib_container {
+        return None;
+    }
+    // The Hash literal arg must be present, non-empty, and have
+    // simple-Symbol keys throughout — that's the user-test /
+    // fixture / seed shape this rewrite targets.
+    let ExprNode::Hash { entries, kwargs: false } = &*arg.node else {
+        return None;
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let mut field_assigns: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*k.node else {
+            return None;
+        };
+        let name = sym.as_str();
+        if !is_simple_method_name(name) {
+            return None;
+        }
+        field_assigns.push((name.to_string(), emit_expr(v)));
+    }
+    let mut body = String::new();
+    body.push_str(&format!("__inst = {}.new\n", class_name));
+    for (field, value_s) in &field_assigns {
+        body.push_str(&format!("__inst.{} = {}\n", field, value_s));
+    }
+    if method == "create" {
+        body.push_str("__inst.save\n");
+    }
+    body.push_str("__inst");
+    Some(format!("begin\n{}\nend", indent_lines(&body, 1)))
+}
+
 fn force_hash_form_for_arg(recv: Option<&Expr>, method: &Symbol) -> bool {
     if method.as_str() != "new" {
         return false;

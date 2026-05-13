@@ -87,32 +87,24 @@ jobs:
       - name: cargo test --test rust_toolchain -- --ignored
         run: cargo test --test rust_toolchain -- --ignored --nocapture
 
-  # toolchain-crystal: temporarily disabled while the Crystal target is
-  # rebuilt from scratch using Spinel's emit-shape template + the
-  # target-pluggable runtime_loader. The existing 6,604-LOC walker-style
-  # emitter is being replaced with a ~2,800-LOC LibraryClass consumer
-  # mirroring src/emit/ruby/. See memory:
-  # project_crystal_rip_and_replace.md. Re-enable once the new emitter
-  # passes locally.
-  #
-  # toolchain-crystal:
-  #   needs: generate-fixture
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: real-blog-fixture
-  #     - name: Extract fixture
-  #       run: tar -xzf real-blog.tar.gz
-  #     - name: Install Crystal
-  #       uses: crystal-lang/install-crystal@v1
-  #       with:
-  #         crystal: latest
-  #     - name: cargo test --test crystal_toolchain -- --ignored
-  #       run: cargo test --test crystal_toolchain -- --ignored --nocapture
+  toolchain-crystal:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - name: cargo test --test crystal_toolchain -- --ignored
+        run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
   # toolchain-typescript: tsc parity + node:test on real-blog,
   # under both the default (`node-sync`, better-sqlite3) profile
