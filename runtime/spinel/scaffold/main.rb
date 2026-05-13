@@ -127,7 +127,16 @@ module Main
     merged = matched[:path_params].dup
     req.params.each { |k, v| merged[k] = v }
     controller.params  = merged
-    controller.session = ActionDispatch::Session.new
+    # Session: ActionDispatch::Session owns the storage + cookie
+    # envelope; sphttp owns the HMAC primitive it calls into. Loads
+    # only when a secret is configured (SESSION_SECRET env var) AND
+    # the inbound request carries the session cookie.
+    session = ActionDispatch::Session.new
+    session_secret = ENV["SESSION_SECRET"] || ""
+    if session_secret.length > 0 && req.cookies.key?("session")
+      session.load_from(req.cookies["session"], session_secret)
+    end
+    controller.session = session
 
     inbound_flash = ActionDispatch::Flash.new
     inbound_flash[:notice] = req.cookies["flash_notice"] if req.cookies.key?("flash_notice")
@@ -170,6 +179,18 @@ module Main
       clear_opts["Max-Age"] = "0"
       res.set_cookie("flash_notice", "", clear_opts) if req.cookies.key?("flash_notice")
       res.set_cookie("flash_alert",  "", clear_opts) if req.cookies.key?("flash_alert")
+    end
+
+    # Sign + emit the session cookie when the handler mutated the
+    # session AND a secret is configured. Same lifecycle Tep::App
+    # runs for Sinatra-flavored apps; we run it ourselves because we
+    # bypass Tep::App with MainApp.
+    if session_secret.length > 0 && controller.session.dirty
+      session_opts = Tep.str_hash
+      session_opts["Path"]     = "/"
+      session_opts["HttpOnly"] = ""
+      session_opts["SameSite"] = "Lax"
+      res.set_cookie("session", controller.session.to_cookie_value(session_secret), session_opts)
     end
   end
 end
