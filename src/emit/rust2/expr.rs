@@ -650,20 +650,59 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
     }
 }
 
-/// Coerce `&str` → `String` when the named ivar's declared field
-/// type is `Ty::Str` (or `Ty::Sym`, which also renders as `String`).
+/// Coerce RHS expressions to the declared field type when emit
+/// produces a known-incompatible shape. Two cases land here:
+///
+///   1. `&str` → `String`: when the named ivar's declared field
+///      type is `Ty::Str` (or `Ty::Sym`, both render as `String`)
+///      and the RHS is `Ty::Str`/`Ty::Sym`, append `.to_string()`.
+///      Without this, `self.body = ""` (literal `""` is `&str`,
+///      field is `String`) fails E0308.
+///
+///   2. `T` → `Option<T>`: when the field type is `Ty::Union {Nil, T}`
+///      (renders as `Option<T>`) and the RHS isn't itself an Option
+///      (its Ty isn't a Nil-containing Union), wrap with `Some(...)`.
+///      Most commonly `self.location = path` where path is `&str`
+///      and the field is `Option<String>`. Combines with the
+///      String coercion when T is Str (Some(rhs.to_string())).
+///
 /// Other RHS / field combinations pass through unchanged.
 fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String {
     let Some(field_ty) = ivar_field_ty(ivar_name) else {
         return rhs.to_string();
     };
-    if !matches!(field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym) {
-        return rhs.to_string();
+    // Unwrap Option-typed field — track whether we need to add the
+    // Some() wrap at the end. Pulls in any combination of
+    // `T → Option<T>` and the underlying String coercion below.
+    let (inner_field_ty, needs_some) = match &field_ty {
+        crate::ty::Ty::Union { variants } if variants.len() == 2 => {
+            let nil_idx = variants.iter().position(|v| matches!(v, crate::ty::Ty::Nil));
+            match nil_idx {
+                Some(0) => (variants[1].clone(), true),
+                Some(1) => (variants[0].clone(), true),
+                _ => (field_ty.clone(), false),
+            }
+        }
+        _ => (field_ty.clone(), false),
+    };
+    // If the RHS is itself an Option (Union{Nil, _}), it already
+    // matches the Option-typed field — don't re-wrap.
+    let rhs_is_option = matches!(
+        value.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    let coerced = if matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+        && matches!(value.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
+    {
+        format!("{rhs}.to_string()")
+    } else {
+        rhs.to_string()
+    };
+    if needs_some && !rhs_is_option && !matches!(value.ty.as_ref(), Some(crate::ty::Ty::Nil)) {
+        format!("Some({coerced})")
+    } else {
+        coerced
     }
-    if !matches!(value.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)) {
-        return rhs.to_string();
-    }
-    format!("{rhs}.to_string()")
 }
 
 /// In constructor mode, render the type annotation for the let

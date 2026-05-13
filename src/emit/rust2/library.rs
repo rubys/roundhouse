@@ -196,65 +196,163 @@ fn method_reads_self(body: &Expr) -> bool {
 /// fills `Expr.ty` during typing; an unset `ty` falls back to
 /// `Ty::Untyped` and renders as `serde_json::Value`).
 fn collect_ivar_types(methods: &[MethodDef]) -> Vec<(String, Ty)> {
-    let mut seen: Vec<(String, Ty)> = Vec::new();
+    // Phase 1: walk every method body and record every Ty observed
+    // assigning to each ivar — both direct `@x =` (Ivar lvalue) and
+    // `self.x = ...` (Attr lvalue with SelfRef recv, which writes the
+    // same backing field on the emitted struct). Preserve first-seen
+    // order so the struct's field declaration order matches the
+    // source's `def initialize` order.
+    let mut order: Vec<String> = Vec::new();
+    let mut observed: std::collections::HashMap<String, Vec<Ty>> =
+        std::collections::HashMap::new();
     for m in methods {
-        walk_collect_ivars(&m.body, &mut seen);
+        walk_collect_ivars(&m.body, &mut order, &mut observed);
     }
-    seen
+    // Phase 2: unify each ivar's observed-type list into one Ty.
+    // Rules:
+    //   - {Nil, T, ...}            → Option<T> (T = first non-Nil)
+    //   - {Nil}                    → Option<Untyped> (nil-only ivar,
+    //                                widen to Option for setter shape)
+    //   - {Hash<_,_>, Hash<K, V>}  → keep the widest (matches the
+    //                                previous one-shot widening for
+    //                                empty-literal seeded hashes)
+    //   - {T}                      → T (single-type ivar)
+    //   - {T1, T2, ...} mixed      → first observed (fallback)
+    order
+        .into_iter()
+        .map(|name| {
+            let tys = observed.remove(&name).unwrap_or_default();
+            let unified = unify_ivar_tys(&tys);
+            (name, unified)
+        })
+        .collect()
 }
 
-fn walk_collect_ivars(e: &Expr, out: &mut Vec<(String, Ty)>) {
+fn unify_ivar_tys(tys: &[Ty]) -> Ty {
+    let has_nil = tys.iter().any(|t| matches!(t, Ty::Nil));
+    let first_non_nil = tys.iter().find(|t| !matches!(t, Ty::Nil)).cloned();
+    if has_nil {
+        match first_non_nil {
+            Some(t) => Ty::Union {
+                variants: vec![Ty::Nil, t],
+            },
+            // Nil-only ivar (e.g. `@location = nil` with no other
+            // assignments visible in the class body) — widen to
+            // Option<Untyped> so the setter side can assign any
+            // value-typed payload without an E0308. Without widening
+            // the field types as `()` and every other path fails.
+            None => Ty::Union {
+                variants: vec![Ty::Nil, Ty::Untyped],
+            },
+        }
+    } else {
+        // No Nil observed — pick the most informative concrete type.
+        // For Hash, prefer the most-specified variant (Hash{K, V} with
+        // concrete K/V over Hash{Untyped, Untyped}) — matches the
+        // previous single-shot widening.
+        tys.iter()
+            .max_by_key(|t| match t {
+                Ty::Hash { key, value } => {
+                    let k = !matches!(**key, Ty::Untyped);
+                    let v = !matches!(**value, Ty::Untyped);
+                    (k as u8) + (v as u8)
+                }
+                _ => 0,
+            })
+            .cloned()
+            .unwrap_or(Ty::Untyped)
+    }
+}
+
+fn walk_collect_ivars(
+    e: &Expr,
+    order: &mut Vec<String>,
+    observed: &mut std::collections::HashMap<String, Vec<Ty>>,
+) {
+    fn record(
+        name: &str,
+        ty: Ty,
+        order: &mut Vec<String>,
+        observed: &mut std::collections::HashMap<String, Vec<Ty>>,
+    ) {
+        let k = name.to_string();
+        if !order.iter().any(|n| n == &k) {
+            order.push(k.clone());
+        }
+        observed.entry(k).or_default().push(ty);
+    }
     match &*e.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let key = name.as_str().to_string();
-            if !out.iter().any(|(n, _)| n == &key) {
-                let ty = value.ty.clone().unwrap_or(Ty::Untyped);
-                out.push((key, ty));
-            }
-            walk_collect_ivars(value, out);
+            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            record(name.as_str(), ty, order, observed);
+            walk_collect_ivars(value, order, observed);
+        }
+        // `self.x = value` — Attr lvalue with SelfRef recv. Writes
+        // the same backing field as `@x = value`. Without this, an
+        // ivar assigned only as `@x = nil` in `initialize` and then
+        // `self.x = path` in `redirect_to` would type as `()`,
+        // mismatching every `self.x = path` site.
+        ExprNode::Assign {
+            target: LValue::Attr { recv, name },
+            value,
+        } if matches!(&*recv.node, ExprNode::SelfRef) => {
+            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            record(name.as_str(), ty, order, observed);
+            walk_collect_ivars(value, order, observed);
         }
         // `@ivar[k] = v` — Ruby parses as Send `[]=` on Ivar recv.
         // The empty-literal `@data = {}` types as `Hash<Untyped,
         // Untyped>` from analyzer inference; subsequent index-assigns
-        // tell us the real key/value types. Widen the registered
-        // entry from the args' types when it's Hash-typed; ignore
-        // when the ivar is a class instance (its own `[]=` happens
-        // to share the name). Matches Crystal's widening pass.
+        // tell us the real key/value types. Only record a Hash
+        // observation when the ivar's prior observations already
+        // contain a Hash — otherwise `@flash[:notice] = "..."` (where
+        // `@flash` is the typed `Flash` struct, not a HashMap) would
+        // be misread as a Hash assignment and widen the ivar type
+        // away from the concrete struct.
         ExprNode::Send { recv: Some(recv), method, args, .. }
             if method.as_str() == "[]=" && args.len() == 2 =>
         {
             if let ExprNode::Ivar { name } = &*recv.node {
-                let key = name.as_str().to_string();
-                if let Some(entry) = out.iter_mut().find(|(n, _)| n == &key) {
-                    if let Ty::Hash { .. } = &entry.1 {
-                        let k_ty = args[0].ty.clone().unwrap_or(Ty::Untyped);
-                        let v_ty = args[1].ty.clone().unwrap_or(Ty::Untyped);
-                        entry.1 = Ty::Hash {
+                let key = name.as_str();
+                let already_hash = observed
+                    .get(key)
+                    .map(|tys| tys.iter().any(|t| matches!(t, Ty::Hash { .. })))
+                    .unwrap_or(false);
+                if already_hash {
+                    let k_ty = args[0].ty.clone().unwrap_or(Ty::Untyped);
+                    let v_ty = args[1].ty.clone().unwrap_or(Ty::Untyped);
+                    record(
+                        key,
+                        Ty::Hash {
                             key: Box::new(k_ty),
                             value: Box::new(v_ty),
-                        };
-                    }
+                        },
+                        order,
+                        observed,
+                    );
                 }
             }
-            walk_collect_ivars(recv, out);
-            args.iter().for_each(|a| walk_collect_ivars(a, out));
+            walk_collect_ivars(recv, order, observed);
+            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
         }
-        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk_collect_ivars(e, out)),
+        ExprNode::Seq { exprs } => {
+            exprs.iter().for_each(|e| walk_collect_ivars(e, order, observed))
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
-            walk_collect_ivars(cond, out);
-            walk_collect_ivars(then_branch, out);
-            walk_collect_ivars(else_branch, out);
+            walk_collect_ivars(cond, order, observed);
+            walk_collect_ivars(then_branch, order, observed);
+            walk_collect_ivars(else_branch, order, observed);
         }
         ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { walk_collect_ivars(r, out); }
-            args.iter().for_each(|a| walk_collect_ivars(a, out));
-            if let Some(b) = block { walk_collect_ivars(b, out); }
+            if let Some(r) = recv { walk_collect_ivars(r, order, observed); }
+            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
+            if let Some(b) = block { walk_collect_ivars(b, order, observed); }
         }
         ExprNode::While { cond, body, .. } => {
-            walk_collect_ivars(cond, out);
-            walk_collect_ivars(body, out);
+            walk_collect_ivars(cond, order, observed);
+            walk_collect_ivars(body, order, observed);
         }
-        ExprNode::Return { value } => walk_collect_ivars(value, out),
+        ExprNode::Return { value } => walk_collect_ivars(value, order, observed),
         _ => {}
     }
 }
