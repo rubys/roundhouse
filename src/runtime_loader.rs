@@ -527,9 +527,8 @@ where
 
 /// Rust runtime entries — Phase 2 of the rust migration (see
 /// `docs/rust-migration-plan.md`). Populated file-by-file in
-/// dependency order matching Crystal's RUNTIME_ORDER. Phase 2.1:
-/// inflector only (smallest, no deps; validates the Module-mode
-/// emit pipeline).
+/// dependency order matching Crystal's RUNTIME_ORDER. Phase 3 layers
+/// hand-written primitive runtime (`runtime/rust/`) on top.
 const RUST_RUNTIME: &[RuntimeEntry] = &[
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
@@ -571,7 +570,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionView",
         out_path: "src/view_helpers.rs",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        imports: &[("Base", "active_record_base")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -582,7 +581,21 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.rs",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        // Phase 3 hand-written runtime ships these — make the
+        // transpiled file's bare references resolve via use-imports.
+        // Bare-token names mirror the Ruby source's call sites
+        // (`raise NotImplementedError, ...`); the emit pipeline
+        // lowers them to `raise(NotImplementedError, ...)` Rust
+        // call syntax. Each entry becomes a separate `use crate::X::Y;`
+        // line.
+        imports: &[
+            ("ActiveRecordAdapter", "active_record_adapter"),
+            ("raise", "errors_ext"),
+            ("name", "errors_ext"),
+            ("NotImplementedError", "errors_ext"),
+            ("RecordNotFound", "errors_ext"),
+            ("RecordInvalid", "errors_ext"),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -593,20 +606,31 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionController",
         out_path: "src/action_controller_base.rs",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        imports: &[
+            ("Flash", "flash"),
+            ("Session", "session"),
+            ("ParamValue", "param_value"),
+            ("raise", "errors_ext"),
+            ("NotImplementedError", "errors_ext"),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // errors.rb intentionally NOT transpiled yet — `RecordInvalid`
-    // takes a `Base` parameter that AR::Base hasn't yet emitted, AND
-    // the Rust-natural `class < StandardError` shape needs `impl
-    // Display + Error` synthesis that isn't yet there. Both unblock
-    // when AR::Base lands later in Phase 2.
+    // errors.rb intentionally NOT transpiled — the Rust-natural
+    // `class < StandardError` shape needs Display + Error synthesis
+    // that the transpile pipeline doesn't yet support. Phase 3
+    // hand-writes `runtime/rust/errors_ext.rs` providing a single
+    // `FrameworkError` enum + `raise_error` macro; the transpiled
+    // bare tokens `NotImplementedError`/`RecordNotFound`/
+    // `RecordInvalid` reach those via emit-side mapping (deferred
+    // emit fix).
     //
     // HWIA intentionally NOT transpiled to rust2 — per Phase 2.5(b),
     // `@flash` and `@session` move to per-app ActionDispatch::Flash /
-    // ActionDispatch::Session structs with typed fields. HWIA stays
-    // in runtime/ruby/ as a CRuby/Spinel helper for test parity.
+    // ActionDispatch::Session structs. Phase 3 hand-writes those in
+    // `runtime/rust/{flash,session}.rs` with the same HWIA-shape API.
+    // HWIA stays in runtime/ruby/ as a CRuby/Spinel helper for test
+    // parity.
     //
     // `validations.rb` similarly NOT transpiled (Phase 2.5(a)) —
     // every `validates :x, …` declaration expands inline at lower
