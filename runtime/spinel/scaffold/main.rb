@@ -100,10 +100,15 @@ module Main
     Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
   end
 
-  # Tep::Server callback. Translates Tep::Request → existing controller
-  # flow → Tep::Response. Mirrors `Main.run` but speaks the Tep IO
-  # shapes instead of CGI env+stdio, sidestepping spinel's `io.write
-  # on int` codegen gap.
+  # Tep::Server callback — MINIMAL form. Routes, runs the controller,
+  # copies status/body back. Skips flash + session lifecycle for now
+  # so the transport-only validation (sphttp eliminates io.write/read
+  # on int) can be measured without poly-dispatch collisions from
+  # cookie/session data flow narrowing field types.
+  #
+  # Discovery loop: add features back one at a time, each time noting
+  # what shape pressure the integration produces. See WHY.md /
+  # tep-transport-experiment branch notes for the inventory.
   def self.dispatch(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
@@ -127,27 +132,8 @@ module Main
     merged = matched[:path_params].dup
     req.params.each { |k, v| merged[k] = v }
     controller.params  = merged
-    # Session: ActionDispatch::Session owns the storage + cookie
-    # envelope; sphttp owns the HMAC primitive it calls into. Loads
-    # only when a secret is configured (SESSION_SECRET env var) AND
-    # the inbound request carries the session cookie.
-    session = ActionDispatch::Session.new
-    session_secret = ENV["SESSION_SECRET"] || ""
-    if session_secret.length > 0 && req.cookies.key?("session")
-      session.load_from(req.cookies["session"], session_secret)
-    end
-    controller.session = session
-
-    inbound_flash = ActionDispatch::Flash.new
-    inbound_flash[:notice] = req.cookies["flash_notice"] if req.cookies.key?("flash_notice")
-    inbound_flash[:alert]  = req.cookies["flash_alert"]  if req.cookies.key?("flash_alert")
-    controller.flash = inbound_flash
-
-    # request_method / request_path are attr_accessors but unread by
-    # the app + runtime in this build; the old CGI path unboxed them
-    # to int (Sym) via SymPolyHash get, while Tep::Request gives us
-    # const char *. Dropping the writes avoids the type-mismatch and
-    # is harmless until something starts reading them.
+    controller.session = ActionDispatch::Session.new
+    controller.flash   = ActionDispatch::Flash.new
     controller.request_format = request_format
 
     begin
@@ -158,40 +144,13 @@ module Main
       return
     end
 
-    is_redirect = controller.status >= 300 && controller.status < 400
-    if is_redirect
-      res.status = controller.status
-      res.body = %(<a href="#{controller.location}">Redirecting</a>)
-      res.headers["Location"] = controller.location unless controller.location.nil?
-      res.set_cookie("flash_notice", controller.flash[:notice], Tep.str_hash) unless controller.flash[:notice].nil?
-      res.set_cookie("flash_alert",  controller.flash[:alert],  Tep.str_hash) unless controller.flash[:alert].nil?
+    res.status = controller.status
+    if controller.request_format == :json
+      res.body = controller.body
     else
-      res.status = controller.status
-      if controller.request_format == :json
-        res.body = controller.body
-        res.headers["Content-Type"] = controller.content_type
-      else
-        res.body = Views::Layouts.application(controller.body)
-      end
-      res.headers["Location"] = controller.location unless controller.location.nil?
-      # Clear inbound flash cookies once consumed.
-      clear_opts = Tep.str_hash
-      clear_opts["Max-Age"] = "0"
-      res.set_cookie("flash_notice", "", clear_opts) if req.cookies.key?("flash_notice")
-      res.set_cookie("flash_alert",  "", clear_opts) if req.cookies.key?("flash_alert")
+      res.body = Views::Layouts.application(controller.body)
     end
-
-    # Sign + emit the session cookie when the handler mutated the
-    # session AND a secret is configured. Same lifecycle Tep::App
-    # runs for Sinatra-flavored apps; we run it ourselves because we
-    # bypass Tep::App with MainApp.
-    if session_secret.length > 0 && controller.session.dirty
-      session_opts = Tep.str_hash
-      session_opts["Path"]     = "/"
-      session_opts["HttpOnly"] = ""
-      session_opts["SameSite"] = "Lax"
-      res.set_cookie("session", controller.session.to_cookie_value(session_secret), session_opts)
-    end
+    res.headers["Location"] = controller.location unless controller.location.nil?
   end
 end
 
