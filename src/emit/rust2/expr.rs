@@ -1020,6 +1020,21 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             let default_s = emit_expr(&args[1]);
             return format!("{recv_s}.get({key_s}).cloned().unwrap_or({default_s})");
         }
+        // `str.split(sep)` — Ruby returns an Array; Rust returns a
+        // lazy `Split` iterator that doesn't support `.len()` or
+        // indexing. Eagerly collect to Vec<&str> so downstream
+        // `parts.length` / `parts[i]` (the typical router-table
+        // walking pattern) compiles. Recv-type-aware: only fires on
+        // Ty::Str receivers; user-defined `split` on other types
+        // stays intact.
+        if method == "split"
+            && args.len() == 1
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str))
+        {
+            let recv_s = emit_expr(r);
+            let sep_s = emit_expr(&args[0]);
+            return format!("{recv_s}.split({sep_s}).collect::<Vec<&str>>()");
+        }
         // `value.nil?` on a `Ty::Untyped` receiver — `serde_json::Value`
         // exposes `.is_null()` (not `.is_none`, which is the Option
         // method the generic `nil?` bridge below produces). Recv-type
