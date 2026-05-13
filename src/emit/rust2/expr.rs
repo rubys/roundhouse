@@ -477,6 +477,53 @@ fn emit_expr_inner(e: &Expr) -> String {
             )
         }
         ExprNode::Send { recv, method, args, block, .. } => {
+            // `recv.each { ... }` on Hash / Vec — Ruby returns the
+            // receiver after iterating; Rust has no `each` method on
+            // these types. Emit as `.iter().for_each(...)` (Hash) /
+            // `.iter_mut().for_each(...)` (Vec) so the closure
+            // attaches against a stdlib method that accepts an
+            // FnMut. For Hash, the closure params reshape into a
+            // tuple destructure `|(k, v)|` to match `iter()`'s pair
+            // yield. Recv-type-aware: only fires on the explicit
+            // Vec/Hash receivers; untyped (serde_json::Value)
+            // receivers fall through to the generic path (their
+            // `.each` shape needs a per-value-shape bridge that's
+            // separate work).
+            if method.as_str() == "each" && args.is_empty() && recv.is_some() {
+                let r = recv.as_ref().unwrap();
+                let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
+                    block.as_ref().and_then(|b| match &*b.node {
+                        ExprNode::Lambda { params, body, .. } => {
+                            Some((params.as_slice(), body))
+                        }
+                        _ => None,
+                    });
+                if let Some((params, body)) = block_lambda {
+                    if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) && params.len() == 2 {
+                        let recv_s = emit_expr(r);
+                        let k = params[0].as_str();
+                        let v = params[1].as_str();
+                        let body_s = emit_expr(body);
+                        let closure = if body_s.contains('\n') {
+                            format!("|({k}, {v})| {{\n{}\n}}", indent(&body_s, 1))
+                        } else {
+                            format!("|({k}, {v})| {{ {body_s} }}")
+                        };
+                        return format!("{recv_s}.iter().for_each({closure})");
+                    }
+                    if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) && params.len() == 1 {
+                        let recv_s = emit_expr(r);
+                        let p = params[0].as_str();
+                        let body_s = emit_expr(body);
+                        let closure = if body_s.contains('\n') {
+                            format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))
+                        } else {
+                            format!("|{p}| {{ {body_s} }}")
+                        };
+                        return format!("{recv_s}.iter_mut().for_each({closure})");
+                    }
+                }
+            }
             let base = emit_send(recv.as_ref(), method.as_str(), args);
             // A Send with attached block becomes a closure passed as
             // the last arg. `other.each do |k, v| ... end` (Ruby) →
