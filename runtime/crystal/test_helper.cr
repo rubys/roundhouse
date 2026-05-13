@@ -467,7 +467,14 @@ abstract class RoundhouseTest
   # Reset in-memory DB to a fresh schema and reload every registered
   # fixture set. Called from the `before_each` block in the discover
   # macro so each spec sees the canonical starting state.
+  #
+  # No-ops cleanly when the app carries no schema / no fixtures —
+  # framework-test harnesses (router_test, view_helpers_test, etc.)
+  # exercise the runtime layer directly without a Rails-shape app
+  # underneath, so their `src/test_setup.cr` skips the schema and
+  # fixture registrations.
   def self.reset_and_load_fixtures : Nil
+    return if @@schema_sql.empty?
     Roundhouse::Db.setup_test_db(@@schema_sql)
     ::ActiveRecord.adapter = Roundhouse::SqliteAdapter.new
     @@fixture_loaders.each(&.call)

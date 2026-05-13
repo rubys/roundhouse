@@ -677,9 +677,18 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
 ///   - A single argument that's a non-empty Hash literal with all
 ///     simple-Symbol keys.
 ///
-/// `.new` produces: `(__inst = Cls.new; __inst.k1 = v1; …; __inst)`
+/// `.new` produces: `(__inst = Cls.new(hash); __inst.k1 = v1; …; __inst)`
 /// `.create` adds an explicit `.save` after the assigns and still
 /// returns the instance.
+///
+/// The hash is passed through to `.new` (in addition to the per-
+/// field assigns) so classes with a user-defined `initialize(attrs)`
+/// — framework_tests' `HashItem` shape — still see the hash and
+/// set fields from it. The trailing per-field setters are
+/// redundant for those classes but harmless (same value re-assigned
+/// via the typed setter); for AR-inherited models whose
+/// `initialize` ignores attrs, the setters are what actually
+/// populate the record. Both shapes converge.
 fn try_emit_new_or_create_per_field(
     recv: &Expr,
     method: &str,
@@ -736,8 +745,15 @@ fn try_emit_new_or_create_per_field(
         }
         field_assigns.push((name.to_string(), emit_expr(v)));
     }
+    // Emit the original hash literal (in hashrocket form so it
+    // satisfies AR-inherited `Hash[Symbol, _]` signatures rather
+    // than Crystal's NamedTuple shorthand) so user-defined
+    // `initialize(attrs)` still sees the data. Use the existing
+    // forced-hash emitter via `emit_expr_with_form_hint` so nested
+    // hash values flip too.
+    let hash_arg_s = emit_expr_with_form_hint(arg, true);
     let mut body = String::new();
-    body.push_str(&format!("__inst = {}.new\n", class_name));
+    body.push_str(&format!("__inst = {}.new({})\n", class_name, hash_arg_s));
     for (field, value_s) in &field_assigns {
         body.push_str(&format!("__inst.{} = {}\n", field, value_s));
     }
