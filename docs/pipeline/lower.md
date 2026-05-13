@@ -184,15 +184,26 @@ two emitters could disagree.
 ## Status of legacy per-target derivation
 
 The older shape — `CtrlWalker` trait, `WalkCtx` / `WalkState`,
-`SendKind` classifier in `src/lower/controller.rs` — is still in
-place for emitters that haven't migrated to the universal IR. It
-walks controller bodies through a target-implemented dispatch trait,
-with each target overriding leaf `write_*` / `render_*` methods.
+`SendKind` classifier in `src/lower/controller.rs` — walks controller
+bodies through a target-implemented dispatch trait, with each target
+overriding leaf `write_*` / `render_*` methods.
 
-This shape is being torn down as `controller_to_library` lands per
-target. New work shouldn't extend it; existing per-target emitters
-either migrate to the universal IR or get rip-and-replaced (see
-`emit.md`'s working policy section).
+Migration status as of 2026-05-13:
+
+- **Migrated to universal IR** (no longer use `CtrlWalker`):
+  Spinel/Ruby, TypeScript, Crystal. All three were rip-and-replaced
+  end-to-end against the `LibraryClass | LibraryFunction` shape.
+- **In flight:** `src/emit/rust2/` — Phases 0–2.5 closed (HWIA
+  elimination, Parameters retirement, primitive-runtime bridge);
+  Phase 3 primitive-runtime gaps in progress.
+- **Still on the legacy path:** `src/emit/rust/` (kept alive while
+  rust2 lands), Go, Python, Elixir. Each will rip-and-replace
+  against the same shape once the rust2 pattern stabilizes; the
+  CtrlWalker code stays in tree until the last consumer is gone.
+
+New work shouldn't extend the legacy form; existing per-target
+emitters either migrate to the universal IR or get rip-and-replaced
+(see `emit.md`'s working policy section).
 
 ## Key files
 

@@ -15,17 +15,18 @@ in `src/emit/shared/`.
 
 Roundhouse is mid-migration from per-target derivation to thin
 emitters that consume the universal post-lowering IR
-(`LibraryClass | LibraryFunction`). TypeScript was rebuilt from
-scratch and now consumes both shapes for every artifact category;
-the remaining six targets follow on a strangler-fig schedule.
+(`LibraryClass | LibraryFunction`). The first three rip-and-replaces
+(Spinel/Ruby, TypeScript, Crystal) are landed; rust2 is the active
+front of work; the remaining three targets (Go, Python, Elixir) still
+run on the legacy per-target derivation.
 
 | Target | Models | Views | Controllers | Tests | Schema/Routes/Seeds | Notes |
 |--------|--------|-------|-------------|-------|---------------------|-------|
-| Ruby | n/a | n/a | n/a | n/a | n/a | Round-trip identity partner — see `data/ruby-and-erb.md` |
-| Spinel | thin | thin | thin | thin | thin | Reference shape — drove the universal IR contract |
-| TypeScript | thin | thin (function) | thin | thin | thin (function) | Code-complete from a fresh rebuild; `tsc` not yet exercised |
-| Crystal | per-target | thin (flag) | per-target | per-target | per-target | View thin scaffold landed; not yet default |
-| Rust, Go, Python, Elixir | per-target | per-target | per-target | per-target | per-target | Migration deferred; rip-and-replace once shape stabilizes |
+| Spinel / Ruby | thin | thin | thin | thin | thin | Reference shape — drove the universal IR contract; Ruby emit collapsed to lowered-IR-only (2026-05-05) |
+| TypeScript | thin | thin (function) | thin | thin | thin (function) | Rip-and-replace complete; `tsc` green sync + libsql under `tests/typescript_toolchain.rs` (2026-05-07) |
+| Crystal | thin | thin (function) | thin | thin | thin | Rip-and-replace complete; compare-crystal 5/5 + framework_tests 8/8 (2026-05-06 → 2026-05-10) |
+| Rust (`src/emit/rust2/`) | in flight | in flight | in flight | in flight | in flight | Phases 0–2.5 ✅; Phase 3 primitive-runtime gaps in progress |
+| Rust (`src/emit/rust/`), Go, Python, Elixir | per-target | per-target | per-target | per-target | per-target | Legacy path; rip-and-replace once shape stabilizes |
 
 "thin" = consumes the universal IR (`LibraryClass` or
 `LibraryFunction`) from a `*_to_library` lowerer. "per-target" =
@@ -168,32 +169,37 @@ This split is the architectural commitment behind the unified-IR Phase
 support. If your emitter can transpile `runtime/ruby/`, it can
 transpile a real Rails app.
 
-For TS, the runtime files ship inlined into the emit output under
-`src/` (twelve files: `action_controller_base`, `active_record_base`,
-`errors`, `http`, `inflector`, `parameters`, `router`, `server`,
-`test_support`, `validations`, `view_helpers`, `view_helpers_generated`)
-plus `src/juntos.ts` as the central runtime hub. See `runtime.md` for
-the per-target file inventory.
+For TS, the runtime files ship under the emit output's `src/`
+directory — currently fifteen files: `action_controller_base.ts`,
+`active_record_base.ts`, `broadcasts.ts`, `db.ts`, `errors.ts`,
+`flash.ts`, `inflector.ts`, `json_builder.ts`, `juntos.ts`,
+`param_value.ts`, `router.ts`, `schema.ts`, `server.ts`,
+`session.ts`, `view_helpers.ts`. The `_base` / helper files are
+emitter-generated from `runtime/ruby/`; the rest are hand-written
+primitives copied from `runtime/typescript/`. `juntos.ts` is the
+worker bridge entry point. See `runtime.md` for the per-target file
+inventory.
 
 ## Generated TS project layout
 
-A complete TS emit produces ~43 files for the real-blog fixture:
+A complete TS emit produces ~51 files for the real-blog fixture:
 
 ```
 package.json, tsconfig.json
 main.ts                            — boot shell (Schema + Seeds + startServer)
-src/                               — framework runtime (12 files + juntos.ts + schema.ts)
+src/                               — framework runtime (15 files; see list above)
 app/
   models/<model>.ts                — one LibraryClass per file
   controllers/<controller>.ts      — one LibraryClass per file
   views.ts                         — aggregator namespace const
   views/<dir>/<template>.ts        — one LibraryFunction per file
   route_helpers.ts                 — RouteHelpers module file
+  routes.ts                        — flat route table
   importmap.ts                     — Importmap module file
 db/
   seeds.ts                         — Seeds.run module file
 test/
-  _runtime/minitest.ts             — test runtime adapter
+  _runtime/{minitest,setup}.ts     — test runtime adapter
   fixtures/<plural>.ts             — one LibraryClass per fixture file
   <model>.test.ts                  — one LibraryClass per test class
   <controller>.test.ts             — controller tests (LibraryClass)

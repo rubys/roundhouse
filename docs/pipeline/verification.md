@@ -7,41 +7,53 @@ different failure mode to catch.
 
 | Layer | What it catches | Where |
 |-------|-----------------|-------|
-| **Source equivalence** | Ingest silently dropped a construct | `tests/source_equivalence.rs` |
-| **Round-trip identity** | IR is lossy — emit dropped information the ingester produced | `tests/round_trip_identity.rs`, `tests/real_blog.rs`, `--round-trip` CLI |
+| **Ingest coverage** | Ingest silently dropped or mis-typed a construct | `tests/real_blog.rs`, `tests/ingest.rs` |
+| **Round-trip identity** | IR is lossy — emit dropped information the ingester produced | `tests/roundtrip.rs`, `tests/runtime_src_roundtrip.rs`, `--round-trip` CLI |
 | **Toolchain compile** | Emitted project doesn't build / type-check in its target language | `tests/<target>_toolchain.rs` (`--ignored`) |
 | **Cross-runtime DOM** | Emitted runtime renders HTML that diverges from Rails | `tools/compare/` |
 
 Each layer has a different blind spot the next layer catches.
 
-## Source equivalence
+## Ingest coverage
 
-**Claim:** emitted Ruby equals the fixture source byte-for-byte.
+**Claim:** the ingester loads `fixtures/real-blog/` cleanly, the
+analyzer types every expression, and zero error diagnostics fire.
 
-**File:** `tests/source_equivalence.rs` (gates against
-`fixtures/tiny-blog/`).
+**Files:**
+- `tests/real_blog.rs::ingests_without_errors` — loud-by-design
+  regression guard against any unsupported construct.
+- `tests/real_blog.rs::model_tests_ingest_into_test_modules`,
+  `fixtures_ingest_into_app` — domain-specific coverage.
+- `tests/real_blog.rs::type_analysis_coverage` — the zero-error-
+  diagnostics gate; the subset of programs roundhouse can transpile.
+- `tests/ingest.rs` — finer-grained construct-level coverage.
 
 **Why it exists:** if the ingester silently drops a construct, the
-emitter has nothing to emit, a round-trip test ingests nothing both
-times and trivially passes. Source equivalence closes that hole — the
-diff shows exactly which file drifted.
+emitter has nothing to emit, and downstream tests trivially pass. The
+ingest-coverage gate closes that hole — `Unsupported` errors are
+loud, and the analyzer's diagnostic pipeline catches anything that
+ingested but didn't type.
 
-**Failure recipe:** almost always an ingest gap (a Rails construct the
-recognizer doesn't handle yet). Add the recognizer, don't relax the
-test.
+**Failure recipe:** almost always an ingest gap (a Rails construct
+the recognizer doesn't handle yet) or an analyzer gap. Add the
+recognizer, don't relax the test.
 
 ## Round-trip identity
 
 **Claim:** `ingest(source) → emit_ruby → ingest → App` ≡ the original
-ingest's `App`.
+ingest's `App`. Also: `App → JSON → App` is identity.
 
 **Files:**
-- `tests/round_trip_identity.rs` — tiny-blog.
-- `tests/real_blog.rs::ir_is_fixed_under_emit_ingest` — whole real-blog.
-- `tests/real_blog.rs::expected_files_round_trip_byte_for_byte` — the
-  inclusion list; real-blog files promoted as gaps close.
-- `cargo run --bin roundhouse-ast -- --round-trip PATH.erb` — interactive,
-  one file at a time.
+- `tests/roundtrip.rs::tiny_blog_round_trips` — hand-constructed `App`
+  through `serde_json::{to_string, from_str}`. The forcing function for
+  IR completeness.
+- `tests/roundtrip.rs::literals_round_trip` — every literal kind.
+- `tests/runtime_src_roundtrip.rs` — framework-Ruby `MethodDef` →
+  emit → re-ingest stability.
+- `cargo run --bin roundhouse-ast -- --round-trip -e '<ruby>'` or
+  `--round-trip PATH.rb` — interactive, one snippet at a time.
+  (ERB round-trip was removed when the spinel emit pipeline dropped
+  the parsed-AST emitter — the tool errors on `.erb` inputs.)
 
 **What it catches:** IR holes. If the emitter produces a form the
 ingester doesn't accept, or the IR dropped information the emitter
@@ -51,11 +63,9 @@ panics.
 **Debugging failures:** the panic prints both `App` structs on one
 line each (not useful at scale). Instead:
 
-1. Narrow to one file: `roundhouse-ast --round-trip PATH.erb`.
-2. If divergence is in the full-app path, use the scratch dir
-   (`CARGO_TARGET_TMPDIR/roundhouse/real_blog_round_trip/`) and diff
-   that tree against `fixtures/real-blog/`.
-3. For structural divergence, dump both `App` JSONs via
+1. Narrow to one snippet: `roundhouse-ast --round-trip -e '<expr>'`
+   or `--round-trip PATH.rb`.
+2. For structural divergence, dump both `App` JSONs via
    `roundhouse-ast --stage ingest` and diff.
 
 The JSON's deterministic key ordering makes diffs trivially
@@ -68,9 +78,10 @@ change in the IR.
 
 **Files:** `tests/rust_toolchain.rs`, `tests/typescript_toolchain.rs`,
 `tests/go_toolchain.rs`, `tests/crystal_toolchain.rs`,
-`tests/elixir_toolchain.rs`, `tests/python_toolchain.rs`. All marked
-`#[ignore]` so `cargo test` doesn't require six language toolchains
-installed — CI runs each in its own job. Invoke locally:
+`tests/elixir_toolchain.rs`, `tests/python_toolchain.rs`,
+`tests/ruby_toolchain.rs`. All marked `#[ignore]` so `cargo test`
+doesn't require every language toolchain installed — CI runs each in
+its own job. Invoke locally:
 
 ```bash
 cargo test --test rust_toolchain -- --ignored --nocapture
@@ -177,34 +188,41 @@ layers:
 1. **`generate-fixture`** — runs `make real-blog` once and packs the
    result as an artifact.
 2. **`unit`** — downloads the artifact and runs `cargo test
-   --all-targets` (source equivalence + round-trip identity +
-   analyzer + ingest + emit snapshots).
+   --all-targets` (round-trip identity + analyzer + ingest + emit
+   snapshots).
 3. **`toolchain-<target>`** — one job per target. Each installs the
    target toolchain, downloads the fixture, and runs
    `cargo test --test <target>_toolchain -- --ignored`.
-4. **`build-site`** — gated on every toolchain job succeeding. Builds
-   the Pages manifest only when every target compiles its emitted
-   project cleanly.
-5. **`deploy`** — pushes the Pages artifact on `main` only.
+4. **`compare-<target>`** — one job per target (rust, crystal,
+   typescript, go, elixir, python, ruby). Each runs
+   `scripts/compare <target>`, which boots Rails on the fixture and
+   the emitted runtime, then DOM-diffs the responses for a fixed URL
+   set. The Pages deploy is gated on every compare job passing — any
+   DOM drift fails the build.
+5. **`build-site`** — gated on every toolchain + compare job
+   succeeding. Builds the Pages manifest.
+6. **`deploy`** — pushes the Pages artifact on `main` only.
 
 Fixture generation happens once per CI run; every subsequent job
 reuses it. `ruby/setup-ruby` + `rails` install costs are paid once,
-not six times.
+not seven times.
 
-The cross-runtime DOM check isn't in CI yet — it needs two running
-servers per target, which is more orchestration than the current
-setup provides. Running it locally before a merge that touches the
-emit/runtime boundary is the current convention.
+`compare-spinel` is the open future job — `scripts/compare ruby`
+covers DOM parity for the lowered Ruby today via shell-out to
+`main.rb`; the spinel-compiled binary plugs into the same compare
+harness once end-to-end runnable.
 
 ## Key files
 
 | File | Role |
 |------|------|
-| `tests/source_equivalence.rs` | tiny-blog byte-for-byte |
-| `tests/round_trip_identity.rs` | tiny-blog IR stability |
-| `tests/real_blog.rs` | real-blog forcing functions |
-| `tests/<target>_toolchain.rs` | `--ignored` real-toolchain builds |
+| `tests/real_blog.rs` | Ingest + analyzer coverage on the real-blog fixture |
+| `tests/roundtrip.rs` | IR → JSON → IR identity (hand-constructed `App` + literal coverage) |
+| `tests/runtime_src_roundtrip.rs` | Framework-Ruby round-trip identity |
+| `tests/ingest.rs` | Construct-level ingest coverage |
+| `tests/<target>_toolchain.rs` | `--ignored` real-toolchain builds (rust, ts, go, crystal, elixir, python, ruby) |
 | `tools/compare/` | Cross-runtime DOM comparator |
+| `scripts/compare` | CI driver for `compare-<target>` jobs |
 | `src/bin/roundhouse-ast.rs` | Interactive pipeline inspector |
 | `.github/workflows/ci.yml` | CI layout |
 

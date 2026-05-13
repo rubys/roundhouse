@@ -28,7 +28,7 @@ and foreign-key declarations. Iteration order is source order, so
 downstream consumers (schema DDL lowering, persistence lowering, model
 attribute seeding) produce deterministic output.
 
-**Ingest:** `src/ingest.rs::ingest_schema`. Recognizes the
+**Ingest:** `src/ingest/schema.rs::ingest_schema`. Recognizes the
 `ActiveRecord::Schema[…].define do` DSL: `create_table`, `t.string`,
 `t.integer`, `t.references`, `t.timestamps`, `add_index`,
 `add_foreign_key`, etc.
@@ -199,7 +199,7 @@ methods.
 | File | Role |
 |------|------|
 | `src/schema.rs` | `Schema` / `Table` / `Column` source IR |
-| `src/ingest.rs` + `src/ingest/`| `ingest_schema`, `ingest_routes`, `ingest_importmap` (seeds go through `ingest_ruby_program`) |
+| `src/ingest/` | `ingest_schema` (`schema.rs`), `ingest_routes` (`routes.rs`), `ingest_importmap` (`app.rs`); seeds go through `ingest_ruby_program` (`expr.rs`) |
 | `src/dialect.rs` | `RouteTable`, `RouteSpec`, `Fixture`, `LibraryClass`, `LibraryFunction` |
 | `src/app.rs` | `App::seeds`, `App::fixtures`, `App::importmap` |
 | `src/emit/shared/schema_sql.rs` | Schema → CREATE TABLE DDL |

@@ -154,7 +154,7 @@ added):
 |------|------|
 | `src/catalog/mod.rs` | `CatalogedMethod`, `AR_CATALOG`, `ReceiverContext`, `EffectClass`, `ChainKind`, `ReturnKind` |
 | `src/adapter.rs` | `SqliteAdapter` / `SqliteAsyncAdapter` — consume the catalog for effect classification |
-| `src/analyze.rs` | `Analyzer::with_adapter` seeds method registries from the catalog |
+| `src/analyze/mod.rs` | `Analyzer::with_adapter` seeds method registries from the catalog |
 | `src/lower/controller.rs` | `is_query_builder_method` — chain classification consumer |
 
 ## Related docs

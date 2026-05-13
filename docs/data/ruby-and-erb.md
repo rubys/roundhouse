@@ -21,19 +21,20 @@ supported `ExprNode`.
 
 ## Ruby → IR
 
-### Entry points (`src/ingest.rs`)
+### Entry points (`src/ingest/`)
 
-- `ingest_app(dir)` — walks a full Rails directory. Calls the
-  per-concern helpers below in a fixed order:
+- `ingest_app(dir)` — walks a full Rails directory (`src/ingest/app.rs`).
+  Calls the per-concern helpers below in a fixed order:
   `db/schema.rb` → `app/models/*` → `app/controllers/*` →
   `config/routes.rb` → `app/views/**` → `test/models/*`,
   `test/controllers/*` → `test/fixtures/*.yml` → `db/seeds.rb`.
 - `ingest_model`, `ingest_controller`, `ingest_view`,
   `ingest_routes`, `ingest_schema`, `ingest_test_file`,
   `ingest_fixture_file`, `ingest_ruby_program` — per-concern
-  front doors. Each returns an `IngestResult<T>`.
-- `ingest_expr` — the core recursive descent. One arm per supported
-  `ExprNode` kind.
+  front doors, one file each under `src/ingest/`. Each returns an
+  `IngestResult<T>`.
+- `ingest_expr` (`src/ingest/expr.rs`) — the core recursive descent.
+  One arm per supported `ExprNode` kind.
 
 ### Error discipline
 
@@ -132,7 +133,7 @@ where the divergence lands in the IR.
 
 | File | What it does |
 |------|--------------|
-| `src/ingest.rs` | Prism → IR for every supported construct |
+| `src/ingest/` | Prism → IR; `mod.rs` re-exports, one file per concern (`app`, `model`, `controller`, `view`, `routes`, `schema`, `test`, `fixture`, `jbuilder`, `library_class`, `expr`, `util`) |
 | `src/erb.rs` | ERB → Ruby source |
 | `src/expr.rs` | `Expr`, `ExprNode`, surface-preservation fields |
 | `src/dialect.rs` | Rails-level structures (`Model`, `Controller`, …) |

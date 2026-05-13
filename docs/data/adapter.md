@@ -77,7 +77,7 @@ async backend becomes "new adapter impl, same emit path."
 2. `Analyzer::with_adapter(app, Box::new(...))` swaps in a different
    adapter when the caller knows which backend the generated project
    will ship against.
-3. During the effect walk (`visit_effects` in `src/analyze.rs`), each
+3. During the effect walk (`visit_effects` in `src/analyze/mod.rs`), each
    `Send` on an AR receiver hands its method name to
    `adapter.classify_ar_method(name)`. The result attaches
    `Effect::DbRead { table }` or `Effect::DbWrite { table }` — or
@@ -151,7 +151,7 @@ demands it):
 |------|------|
 | `src/adapter.rs` | Trait + the two SQLite impls |
 | `src/catalog/mod.rs` | The method table the adapters consult |
-| `src/analyze.rs` | Consumer: effect inference |
+| `src/analyze/mod.rs` | Consumer: effect inference |
 | `src/lower/controller_walk.rs` | Consumer: `await` emission decision |
 | `src/effect.rs` | `Effect` enum (`DbRead`, `DbWrite`, `Io`, …) |
 

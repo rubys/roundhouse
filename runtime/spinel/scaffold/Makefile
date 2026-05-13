@@ -129,12 +129,17 @@ cruby-test:
 
 # ── Dev workflow ─────────────────────────────────────────────────
 
-# `make dev` (CRuby HTTP+WebSocket dev server) was retired alongside
-# server/dev_server.rb in the lint-spinel cleanup; the dev server's
-# Thread/Mutex/module_function usage is fundamentally outside the
-# spinel subset. Native HTTP is staged for civetweb in collaboration
-# with the spinel team once the backend lands. See memory:
-# project_ruby_dev_server_retirement.
+# `make dev` delegates to `rake dev` — the Rakefile task lives in
+# the CRuby overlay (runtime/spinel/scaffold/ruby_overlay/Rakefile)
+# and serves on :3000 via Puma + Rack adapter to Main.run. The
+# previous in-tree dev_server.rb was retired alongside its
+# Thread/Mutex/module_function usage (fundamentally outside the
+# spinel subset). Spinel-target builds don't ship the overlay; for
+# those, `make dev` errors because no rake task exists, which is the
+# correct behavior — the spinel binary's HTTP layer is civetweb +
+# FFI, not a Ruby dev server. See memory: project_ruby_dev_server_retirement.
+dev:
+	bundle exec rake dev
 
 # Single-shot CGI smoke (renders a full page to stdout). Useful for
 # eyeballing layout/asset wiring.

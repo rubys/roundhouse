@@ -91,11 +91,11 @@ Tailwind styling, create + destroy flows — in two `make` commands:
 git clone https://github.com/rubys/roundhouse
 cd roundhouse
 make real-blog            # generate the Rails fixture (~60s)
-make spinel-dev           # transpile + assets + serve on :3000 (~3-5min cold)
+make ruby-dev             # transpile + assets + serve on :3000 (~3-5min cold)
 ```
 
 Prerequisites and the architecture of what gets generated:
-[`fixtures/spinel-blog/README.md`](fixtures/spinel-blog/README.md).
+[`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
 
 ## Supporting pieces worth knowing
 

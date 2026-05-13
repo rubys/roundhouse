@@ -12,19 +12,19 @@ roundhouse pipeline that compiles user apps).
 
 ```
 runtime/ruby/                    ← single source of framework Ruby
-  active_record/                    transpiled per target
+  active_record/                    transpiled into the emit pipeline
   action_controller/                  ↓
-  action_view/                      runtime/typescript/active_record_base.ts
-  action_dispatch/                  runtime/rust/...                          (planned)
-  inflector.rb                      runtime/crystal/...                       (planned)
-  ...                               etc.
+  action_view/                      framework-runtime files appear in
+  action_dispatch/                  the emitted project (e.g. TS emit
+  inflector.rb                      writes src/active_record_base.ts,
+  json_builder.rb                   src/action_controller_base.ts, …)
+  ...
 
 runtime/<target>/                ← per-target primitives, hand-written
-  http.<ext>                        DB connections, HTTP server,
-  db.<ext>                          WebSocket plumbing, test harness —
-  server.<ext>                      genuinely target-idiomatic glue
+  db.<ext>                          DB connections, HTTP server,
+  server.<ext>                      WebSocket plumbing, test harness —
+  cable.<ext>                       genuinely target-idiomatic glue
   test_support.<ext>                that no IR-level lowering captures
-  cable.<ext>
   ...
 ```
 
@@ -51,27 +51,28 @@ app emission depended on the result.
 
 ## Target primitives — what's in each `runtime/<target>/`
 
-Conventional file layout (modulo language extensions):
+Conventional file roles (file names vary by target — see inventory below):
 
-| File | Role |
-|------|------|
-| `runtime.<ext>` | Validation error type, model base trait/class shim |
-| `db.<ext>` | DB connection lifecycle (open, with_conn borrow, test-mode in-memory) |
-| `http.<ext>` | Controller-facing types: `Params`, `ActionContext`, `ActionResponse` |
-| `server.<ext>` | Production HTTP server entry — listens on a port, dispatches through Router |
-| `cable.<ext>` | Action Cable / WebSocket endpoint |
-| `view_helpers.<ext>` | View helper shims that delegate into transpiled framework Ruby (where present) or implement helpers directly (legacy) |
-| `test_support.<ext>` | TestClient + TestResponse + Rails-shaped assertions |
+| Role | Description |
+|------|-------------|
+| Model base / shims | `ActiveRecordAdapter` trait, validation error type, framework-test adapter |
+| DB connection | Lifecycle (open, with_conn borrow, test-mode in-memory) |
+| HTTP server | Production HTTP entry — listens on a port, dispatches through Router |
+| Action Cable | WebSocket endpoint |
+| View helpers | Delegates into transpiled framework Ruby (where present) or implements helpers directly (legacy) |
+| Test support | TestClient + TestResponse + Rails-shaped assertions |
 
-Not every target has every file yet. The current inventory:
+The shape varies per target — newer targets (Rust, Crystal) carry
+adapter + framework-test scaffolding the older ones don't yet. The
+current inventory:
 
-| Target | Status |
-|--------|--------|
-| `runtime/rust/` | Full — `cable.rs`, `db.rs`, `http.rs`, `runtime.rs`, `server.rs`, `test_support.rs`, `view_helpers.rs` |
-| `runtime/crystal/` | Full — same layout in `.cr` |
-| `runtime/typescript/` | Full + framework-runtime files (transpiled from `runtime/ruby/`): `active_record_base.ts`, `action_controller_base.ts`, `parameters.ts`, `inflector.ts`, etc. `juntos.ts` is the legacy bundled stub being progressively replaced |
-| `runtime/go/`, `runtime/python/`, `runtime/elixir/` | Partial; HTTP + Cable layers in flight |
-| `runtime/spinel/` | Adapter + broadcast support (`broadcasts.rb`, `sqlite_adapter.rb`); reuses CRuby for the rest |
+| Target | Files |
+|--------|-------|
+| `runtime/rust/` | `active_record_adapter.rs`, `cable.rs`, `db.rs`, `errors_ext.rs`, `flash.rs`, `framework_test_adapter.rs`, `hash_ext.rs`, `http.rs`, `param_value.rs`, `runtime.rs`, `server.rs`, `session.rs`, `test_support.rs`, `view_helpers.rs` |
+| `runtime/crystal/` | `broadcasts.cr`, `cable.cr`, `db.cr`, `framework_test_adapter.cr`, `http.cr`, `param_value.cr`, `server.cr`, `test_helper.cr`, `test_support.cr` |
+| `runtime/typescript/` | DB / server / Cable primitives (`db.ts`, `db-libsql.ts`, `db_worker.ts`, `server.ts`, `server-libsql.ts`, `server-worker.ts`, `broadcasts.ts`, `client.ts`, `param_value.ts`, `sqlite_wasm_engine.ts`), the worker bridge (`juntos*.ts`), and async/sync minitest adapters (`minitest.ts`, `minitest-async.ts`). Framework-runtime files (`active_record_base.ts`, `action_controller_base.ts`, `inflector.ts`, `json_builder.ts`, …) are emitter-generated from `runtime/ruby/` and appear under `src/` in emitted projects, not in this directory. |
+| `runtime/go/`, `runtime/python/`, `runtime/elixir/` | Conventional 7-file primitive set (`cable`, `db`, `http`, `runtime`, `server`, `test_support`, `view_helpers`) |
+| `runtime/spinel/` | Per-target primitives for the Ruby/Spinel target (`base64.rb`, `broadcasts.rb`, `cgi_io.rb`, `db.rb`, `db_cruby.rb`, `importmap.rb`, `json.rb`, `sqlite_adapter.rb`) plus a `scaffold/` tree (Gemfile, inner Makefile, main.rb, Tailwind config) overlaid into every emitted Ruby/Spinel project, and a `test/` tree of target-specific test files |
 
 ## Framework runtime — `runtime/ruby/`
 
@@ -108,9 +109,11 @@ These strings are written verbatim into the generated project as
 
 Framework runtime files (TS, eventually all targets) ship via the
 same emit pipeline that compiles user apps — `runtime/ruby/active_record/`
-becomes `runtime/typescript/active_record_base.ts` via
-`bin/build-runtime` (or equivalent), and the emitted project imports
-the result.
+is ingested with its RBS sidecar (`src/runtime_src.rs`), lowered, and
+emitted into the generated project as `src/active_record_base.ts`
+(etc.) by the same code path that compiles user controllers and
+models. There is no separate `bin/build-runtime` binary; emission
+runs inline as part of `cargo run --bin build-site`.
 
 ## Why hand-write the primitives?
 
@@ -150,7 +153,7 @@ function is a compile failure in the generated project.
 |-----------|------|
 | `runtime/ruby/` | Framework runtime — Ruby source + RBS sidecars |
 | `runtime/rust/` | Rust primitives |
-| `runtime/typescript/` | TS primitives + transpiled framework runtime |
+| `runtime/typescript/` | TS primitives (framework runtime is emitter-generated from `runtime/ruby/`) |
 | `runtime/crystal/` | Crystal primitives |
 | `runtime/{go,python,elixir,spinel}/` | Sibling targets, partial |
 | `src/emit/<target>.rs` | Emitter side that reads + embeds the runtime |

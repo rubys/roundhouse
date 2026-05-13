@@ -108,7 +108,7 @@ Predecessors didn't have analogous fallbacks. The downside of this project isn't
 
 ## How to evaluate
 
-- Try `make spinel-dev` for the working demo.
+- Try `make real-blog && make ruby-dev` for the working demo.
 - Read [WHY.md](WHY.md) for the constraints argument.
 - Read the [blog post](https://intertwingly.net/blog/2026/05/04/Weve-Seen-This-Movie-Before.html) for the long-form differentiation argument.
 - Try the analyzer against your own Rails app — zero annotations required. If it types cleanly, you're inside the subset.
