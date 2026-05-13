@@ -90,6 +90,42 @@ thread_local! {
     /// entries don't bleed across emit units.
     static IVAR_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// True while emitting a module-singleton class (Ruby pattern
+    /// `module X; class << self; attr_accessor :slot; end; end`):
+    /// all methods are class methods, "ivars" are module-level
+    /// state. In this mode `@x` reads emit as
+    /// `X_SLOT.lock().unwrap().clone()...` and `@x = v` emits as
+    /// `*X_SLOT.lock().unwrap() = Some(v)`, against per-ivar
+    /// `static` Mutex slots emitted alongside the impl block.
+    static IN_MODULE_SINGLETON: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the module-singleton emit mode active. Used by
+/// `library.rs` when the class shape signals a Ruby
+/// `class << self; ... end` (every method is a class method).
+pub(super) fn with_module_singleton<F, R>(active: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IN_MODULE_SINGLETON.with(|c| c.replace(active));
+    let r = f();
+    IN_MODULE_SINGLETON.with(|c| c.set(prev));
+    r
+}
+
+pub(super) fn in_module_singleton() -> bool {
+    IN_MODULE_SINGLETON.with(|c| c.get())
+}
+
+/// Slot identifier for an ivar in module-singleton emit. `@adapter`
+/// → `ADAPTER`. Mirrors the SCREAMING_SNAKE Rust convention for
+/// statics; the `_` stripping handles Ruby's leading-underscore
+/// ivars (`@_foo` → `FOO`) and tail-underscore predicates aren't a
+/// shape `attr_accessor` produces.
+pub(super) fn module_singleton_slot_name(ivar: &str) -> String {
+    ivar.trim_start_matches('_').to_uppercase()
 }
 
 /// Look up the declared field type for `name` within the struct
@@ -296,6 +332,20 @@ fn emit_expr_inner(e: &Expr) -> String {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => name.as_str().to_string(),
         ExprNode::Ivar { name } => {
+            if in_module_singleton() {
+                // Module-singleton ivar read — pull through the
+                // Mutex<Option<T>> slot emitted alongside the impl.
+                // `clone().unwrap_or_default()` matches Ruby's "nil
+                // until set" semantics: every read after a `set_X`
+                // sees the latest value, reads before init return a
+                // default (the field type's `Default::default()`).
+                // Callers expect a non-Option return type per RBS;
+                // `Option<T>` ivars stay None-able via the inner T.
+                let slot = module_singleton_slot_name(name.as_str());
+                return format!(
+                    "{slot}.lock().unwrap().clone().unwrap_or_default()"
+                );
+            }
             if in_constructor() {
                 name.as_str().to_string()
             } else if in_return_tail()
@@ -632,6 +682,17 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             // let-binding type so the closing `Self { ... }` literal
             // gets a `String` slot rather than `&str`.
             let rhs_coerced = maybe_to_string_coercion(name.as_str(), value, &rhs);
+            if in_module_singleton() {
+                // Module-singleton ivar write — route through the
+                // static Mutex slot (`*ADAPTER.lock().unwrap() =
+                // Some(value)`). Always Some-wraps so the slot stays
+                // `Option<T>` regardless of T's nullability — read-
+                // side defaults handle the "not yet set" case.
+                let slot = module_singleton_slot_name(name.as_str());
+                return format!(
+                    "*{slot}.lock().unwrap() = Some({rhs_coerced})"
+                );
+            }
             if in_constructor() {
                 // Annotate the let with the field's declared type so
                 // the closing `Self { f1, f2, ... }` literal sees
@@ -643,7 +704,19 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
             format!("self.{name} = {rhs_coerced}")
         }
-        LValue::Attr { recv, name } => format!("{}.{name} = {rhs}", emit_expr(recv)),
+        LValue::Attr { recv, name } => {
+            // `self.x = ...` inside a module-singleton class method
+            // refers to the class itself, not an instance — route
+            // through the static slot (same path as the Ivar branch
+            // above). Other Attr LHS forms (`obj.field = ...` on a
+            // non-self receiver) keep the simple field-assignment
+            // emit.
+            if in_module_singleton() && matches!(&*recv.node, ExprNode::SelfRef) {
+                let slot = module_singleton_slot_name(name.as_str());
+                return format!("*{slot}.lock().unwrap() = Some({rhs})");
+            }
+            format!("{}.{name} = {rhs}", emit_expr(recv))
+        }
         LValue::Index { recv, index } => {
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }
