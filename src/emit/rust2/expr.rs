@@ -1032,6 +1032,36 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         {
             return format!("{}.is_null()", emit_expr(r));
         }
+        // `self.class.X(args)` — Ruby idiom for "dispatch X on the
+        // class of self" (`@id` getter is an instance dispatch;
+        // `table_name`, `schema_columns` are per-subclass class
+        // methods). The chained Send `recv.class.X` lowers to
+        // `Send { recv: Send { recv: SelfRef, method: "class" },
+        // method: X }`. In Rust, the equivalent is `Self::X(args)`
+        // — the surrounding `impl Base` resolves the per-class
+        // override at the call site. Only fires when the recv is
+        // SelfRef (subclass overrides reach the correct method
+        // through Self resolution); other receivers' .class chains
+        // surface as proper E0599 noise upstream.
+        if let ExprNode::Send {
+            recv: Some(inner_recv),
+            method: inner_method,
+            args: inner_args,
+            ..
+        } = &*r.node
+        {
+            if inner_method.as_str() == "class"
+                && inner_args.is_empty()
+                && matches!(&*inner_recv.node, ExprNode::SelfRef)
+            {
+                let rewritten = rewrite_method_name(method);
+                let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+                if args_s.is_empty() {
+                    return format!("Self::{rewritten}()");
+                }
+                return format!("Self::{rewritten}({})", args_s.join(", "));
+            }
+        }
     }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
