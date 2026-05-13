@@ -80,6 +80,35 @@ thread_local! {
     /// the same name rebind without re-declaring.
     static DECLARED_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Ivar name → declared field type for the struct currently being
+    /// emitted. Set by `library.rs` around each `impl` block so
+    /// `emit_assign` can coerce mismatched RHS types (the canonical
+    /// case is `self.body = ""`: literal `""` is `&str`, field is
+    /// `String`; without coercion the Rust compiler rejects). Empty
+    /// outside class-body scope; cleared between classes so stale
+    /// entries don't bleed across emit units.
+    static IVAR_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Look up the declared field type for `name` within the struct
+/// currently being emitted. `None` outside class-body scope or for
+/// names not in the ivar table.
+pub(super) fn ivar_field_ty(name: &str) -> Option<crate::ty::Ty> {
+    IVAR_TYPES.with(|c| c.borrow().get(name).cloned())
+}
+
+/// Run `f` with the supplied ivar→type table active. Used by
+/// `library.rs` to scope each `impl` block's emit.
+pub(super) fn with_ivar_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = IVAR_TYPES.with(|c| c.replace(types));
+    let r = f();
+    IVAR_TYPES.with(|c| *c.borrow_mut() = prev);
+    r
 }
 
 pub(super) fn with_constructor_mode<F, R>(fields: Vec<String>, f: F) -> R
@@ -593,22 +622,58 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
         }
         LValue::Ivar { name } => {
+            // Field-type coercion: when RHS is a `Ty::Str` value (a
+            // string literal, an `&str`-typed param/var, an expression
+            // returning &str) and the declared field is `Ty::Str` /
+            // `Ty::Sym` (both render as `String`), wrap RHS with
+            // `.to_string()`. Without this, `self.body = ""` (literal
+            // `""` is `&str`, field is `String`) fails E0308. Inside
+            // the constructor the same lookup also annotates the
+            // let-binding type so the closing `Self { ... }` literal
+            // gets a `String` slot rather than `&str`.
+            let rhs_coerced = maybe_to_string_coercion(name.as_str(), value, &rhs);
             if in_constructor() {
-                // Bind a local — the surrounding `pub fn new` body
-                // closes with `Self { f1, f2, ... }` and the locals
-                // become the field initializers. `mut` is uniformly
-                // applied so subsequent index-assigns / re-assigns
-                // inside initialize compile; the resulting `Self`
-                // literal moves the local in regardless of mutability.
-                format!("let mut {name} = {rhs}")
-            } else {
-                format!("self.{name} = {rhs}")
+                // Annotate the let with the field's declared type so
+                // the closing `Self { f1, f2, ... }` literal sees
+                // matching types. Without the annotation, a `let mut
+                // body = ""` declared as `&str` collides with the
+                // `String`-typed field at the Self literal site.
+                let annot = field_let_annotation(name.as_str());
+                return format!("let mut {name}{annot} = {rhs_coerced}");
             }
+            format!("self.{name} = {rhs_coerced}")
         }
         LValue::Attr { recv, name } => format!("{}.{name} = {rhs}", emit_expr(recv)),
         LValue::Index { recv, index } => {
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }
+    }
+}
+
+/// Coerce `&str` → `String` when the named ivar's declared field
+/// type is `Ty::Str` (or `Ty::Sym`, which also renders as `String`).
+/// Other RHS / field combinations pass through unchanged.
+fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String {
+    let Some(field_ty) = ivar_field_ty(ivar_name) else {
+        return rhs.to_string();
+    };
+    if !matches!(field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym) {
+        return rhs.to_string();
+    }
+    if !matches!(value.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)) {
+        return rhs.to_string();
+    }
+    format!("{rhs}.to_string()")
+}
+
+/// In constructor mode, render the type annotation for the let
+/// binding that backs the named ivar. Returns `: <Ty>` when the
+/// field type is known, empty string otherwise (let inference
+/// covers the unknown-type case).
+fn field_let_annotation(ivar_name: &str) -> String {
+    match ivar_field_ty(ivar_name) {
+        Some(ty) => format!(": {}", super::ty::rust_ty(&ty)),
+        None => String::new(),
     }
 }
 

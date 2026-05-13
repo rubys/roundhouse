@@ -108,7 +108,15 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // instance methods use.
     writeln!(out, "impl {name} {{").unwrap();
     let mut first = true;
-    let body_result = super::expr::with_static_methods(static_method_names.clone(), || {
+    // Make this class's ivar → field-type table available to
+    // `emit_assign` (via thread-local) so RHS values can be coerced
+    // when their Ty doesn't match the declared field type — most
+    // commonly `self.body = ""` where field is `String` and `""` is
+    // `&str`. Empty outside class-body scope; scoped per-class to
+    // prevent bleeding between siblings.
+    let ivar_type_map: std::collections::HashMap<String, Ty> =
+        ivars.iter().cloned().collect();
+    let body_result = super::expr::with_ivar_types(ivar_type_map, || super::expr::with_static_methods(static_method_names.clone(), || {
         for m in &class.methods {
             if matches!(m.name.as_str(), "[]" | "[]=") {
                 continue;
@@ -138,7 +146,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
             }
         }
         Ok::<(), String>(())
-    });
+    }));
     body_result?;
     out.push_str("}\n");
     Ok(out)

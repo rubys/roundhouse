@@ -73,6 +73,18 @@ fn render_params(m: &MethodDef) -> String {
 }
 
 fn render_return(m: &MethodDef) -> String {
+    // Setter methods (`def x=`, `attr_writer :x`, `attr_accessor :x`)
+    // have a Ruby-shape return type of the assigned value, but the
+    // synthesized body is a bare `@x = value` assignment that returns
+    // `()` in Rust. No framework call site uses the setter return
+    // value (the convention is statement-position assignment), so
+    // dropping the return type to `()` aligns body and signature
+    // without losing reachable behavior. Detected on the original
+    // Ruby method name (`m.name`) before sanitize_ident rewrites the
+    // trailing `=` to a `set_` prefix.
+    if m.name.as_str().ends_with('=') {
+        return String::new();
+    }
     match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => {
             if matches!(&**ret, Ty::Nil) {
