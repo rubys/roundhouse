@@ -993,6 +993,45 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 emit_expr(&args[0]),
             );
         }
+        // `hash.fetch(key, default)` — Ruby Hash#fetch returns the
+        // value at key or `default` when missing. Rust HashMap has
+        // `.get(K) -> Option<&V>`; bridge via `.cloned()` (nil
+        // default; `Option::None` unifies trivially) or
+        // `.cloned().unwrap_or(default)` otherwise. Recv must be a
+        // Ty::Hash that's a real value at the call site — skip
+        // Const-typed receivers (e.g. `STATUS_CODES.fetch(...)` where
+        // STATUS_CODES is an emit-time top-level Hash constant whose
+        // `pub const` declaration is still a TODO; the legacy `::`
+        // form was already broken there).
+        if method == "fetch"
+            && args.len() == 2
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+            && !matches!(&*r.node, ExprNode::Const { .. })
+        {
+            let recv_s = emit_expr(r);
+            let key_s = emit_expr(&args[0]);
+            let default_is_nil = matches!(
+                &*args[1].node,
+                ExprNode::Lit { value: Literal::Nil }
+            );
+            if default_is_nil {
+                return format!("{recv_s}.get({key_s}).cloned()");
+            }
+            let default_s = emit_expr(&args[1]);
+            return format!("{recv_s}.get({key_s}).cloned().unwrap_or({default_s})");
+        }
+        // `value.nil?` on a `Ty::Untyped` receiver — `serde_json::Value`
+        // exposes `.is_null()` (not `.is_none`, which is the Option
+        // method the generic `nil?` bridge below produces). Recv-type
+        // aware: the generic bridge stays in place for Option-typed
+        // receivers (the typical case for Ruby `attr_reader` getters
+        // typed `T?`).
+        if method == "nil?"
+            && args.is_empty()
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+        {
+            return format!("{}.is_null()", emit_expr(r));
+        }
     }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
