@@ -171,6 +171,13 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	      runtime/ruby/inflector.rb runtime/ruby/json_builder.rb \
 	      $(SPINEL_OUT)/runtime/
 	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
+	# Vendored Tep transport (FFI HTTP server) — replaces CGI dispatch.
+	# sphttp.o is precompiled here so spinel's ffi_cflags substitution
+	# lands a path that exists at the moment spinel reads net.rb.
+	mkdir -p $(SPINEL_OUT)/runtime/tep
+	cp runtime/spinel/tep/*.rb runtime/spinel/tep/sphttp.c $(SPINEL_OUT)/runtime/tep/
+	cc -O2 -c $(SPINEL_OUT)/runtime/tep/sphttp.c -o $(SPINEL_OUT)/runtime/tep/sphttp.o
+	sed -i.bak 's|@TEP_SPHTTP_O@|runtime/tep/sphttp.o|' $(SPINEL_OUT)/runtime/tep/net.rb && rm $(SPINEL_OUT)/runtime/tep/net.rb.bak
 	cargo run --release --bin build-site -- fixtures/real-blog $(SPINEL_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
