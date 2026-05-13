@@ -1082,6 +1082,26 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             let sep_s = emit_expr(&args[0]);
             return format!("{recv_s}.split({sep_s}).collect::<Vec<&str>>()");
         }
+        // `str.capitalize` — Ruby's "first letter uppercase, rest
+        // lowercase". Rust's String has no direct analog; inline a
+        // small block that chains uppercase-first + lowercase-rest.
+        // Fires whenever `.capitalize()` is called with no args; the
+        // body-typer doesn't always propagate Ty::Str through getter
+        // Sends (e.g. `self.model_name.capitalize` where model_name
+        // is an attr_reader returning String), so checking recv.ty
+        // misses those cases. Non-String receivers would already
+        // fail E0599 today and surface as a clearer error after the
+        // bridge fires (`&recv_s` deref against a non-String type).
+        if method == "capitalize" && args.is_empty() {
+            let recv_s = emit_expr(r);
+            return format!(
+                "{{ let __s: &str = &{recv_s}; let mut __c = __s.chars(); \
+                    match __c.next() {{ \
+                        Some(__f) => __f.to_uppercase().collect::<String>() + &__c.as_str().to_lowercase(), \
+                        None => String::new(), \
+                    }} }}"
+            );
+        }
         // `value.nil?` on a `Ty::Untyped` receiver — `serde_json::Value`
         // exposes `.is_null()` (not `.is_none`, which is the Option
         // method the generic `nil?` bridge below produces). Recv-type

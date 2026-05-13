@@ -274,6 +274,19 @@ fn method_reads_self(body: &Expr) -> bool {
             }),
             ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
             ExprNode::Array { elements, .. } => elements.iter().any(walk),
+            // `||` / `&&` short-circuit expressions. Without this arm
+            // a body like `label || @model_name` short-circuits the
+            // self-detection: walk falls into the catch-all `_` arm
+            // and returns false, so the method gets misclassified as
+            // static-safe (FormBuilder.submit was the visible case —
+            // 3 E0424 errors from the missing &self receiver).
+            ExprNode::BoolOp { left, right, .. } => walk(left) || walk(right),
+            ExprNode::Lambda { body, .. } => walk(body),
+            ExprNode::Range { begin, end, .. } => {
+                begin.as_ref().map(|b| walk(b)).unwrap_or(false)
+                    || end.as_ref().map(|e| walk(e)).unwrap_or(false)
+            }
+            ExprNode::Yield { args } => args.iter().any(walk),
             _ => false,
         }
     }
