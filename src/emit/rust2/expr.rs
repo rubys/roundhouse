@@ -100,6 +100,34 @@ thread_local! {
     /// `static` Mutex slots emitted alongside the impl block.
     static IN_MODULE_SINGLETON: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+
+    /// Declared return type of the enclosing method, set by
+    /// `method.rs` around each method-body emit. `None` outside a
+    /// method body. `emit_expr` consults it for `return nil` lowering:
+    /// when the method returns `Option<T>`, a bare Ruby `return nil`
+    /// must emit `return None` rather than just `return` (which is
+    /// E0069 in non-Unit-returning functions).
+    static CURRENT_RETURN_TY: std::cell::RefCell<Option<crate::ty::Ty>> =
+        std::cell::RefCell::new(None);
+}
+
+pub(super) fn with_current_return_ty<F, R>(ty: Option<crate::ty::Ty>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = CURRENT_RETURN_TY.with(|c| c.replace(ty));
+    let r = f();
+    CURRENT_RETURN_TY.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+pub(super) fn current_return_is_option() -> bool {
+    CURRENT_RETURN_TY.with(|c| {
+        matches!(
+            c.borrow().as_ref(),
+            Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+        )
+    })
 }
 
 /// Run `f` with the module-singleton emit mode active. Used by
@@ -475,7 +503,16 @@ fn emit_expr_inner(e: &Expr) -> String {
                 return format!("return {}", render_self_literal());
             }
             if is_nil {
-                "return".to_string()
+                // `return nil` in a method declared `-> T?` (lowered
+                // as `Option<T>`) must emit `return None`; bare
+                // `return` is E0069 outside `() / Unit` returns. Plain
+                // `return` is still correct for `void` Ruby methods
+                // (RBS `-> void` lowers to `Ty::Nil` → Rust `()`).
+                if current_return_is_option() {
+                    "return None".to_string()
+                } else {
+                    "return".to_string()
+                }
             } else {
                 format!("return {}", emit_expr_tail(value))
             }

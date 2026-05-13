@@ -39,9 +39,13 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let body = super::expr::with_class_method_scope(|| {
+    let return_ty = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
+    let body = super::expr::with_current_return_ty(return_ty, || super::expr::with_class_method_scope(|| {
         super::expr::with_method_scope(&m.body, || emit_expr(&m.body))
-    });
+    }));
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
@@ -164,7 +168,15 @@ pub(super) fn emit_instance_method(
         render_return(m)
     };
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let body = super::expr::with_method_scope(&m.body, || {
+    // Thread the method's RBS-declared return type through to the
+    // Return arm in `emit_expr` so `return nil` in a method typed
+    // `-> T?` emits as `return None` instead of bare `return` (the
+    // latter is E0069 in non-Unit-returning functions).
+    let return_ty = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
+    let body = super::expr::with_current_return_ty(return_ty, || super::expr::with_method_scope(&m.body, || {
         if is_init {
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
             super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
@@ -179,7 +191,7 @@ pub(super) fn emit_instance_method(
                 super::expr::emit_expr_tail(&m.body)
             })
         }
-    });
+    }));
     let body_lines: Vec<&str> = body.lines().collect();
     let last_idx = body_lines.len().saturating_sub(1);
     for (i, line) in body_lines.iter().enumerate() {
