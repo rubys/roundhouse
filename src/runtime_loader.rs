@@ -570,7 +570,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionView",
         out_path: "src/view_helpers.rs",
         mode: Mode::Library,
-        imports: &[("Base", "active_record_base")],
+        imports: &[
+            ("Base", "active_record_base"),
+            ("merge_attrs", "hash_ext"),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },

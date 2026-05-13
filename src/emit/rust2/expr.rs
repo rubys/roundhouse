@@ -680,6 +680,44 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         if method == "is_a?" && args.len() == 1 {
             return emit_is_a(r, &args[0]);
         }
+        // `hash.to_h` — Ruby identity on Hash (returns self). Crystal
+        // uses it to bridge NamedTuple → Hash; Rust has no NamedTuple,
+        // so on a HashMap-typed recv the method has no analog and
+        // `.clone()` preserves the "fresh owned hash" semantics. The
+        // Flash/Session typed structs have their own `to_h()` method
+        // returning HashMap<String, String>; those go through the
+        // generic dispatch path below (recv ty is not Ty::Hash there).
+        // Recv typed Untyped/None falls through too — call sites that
+        // need the .to_h() on a serde_json::Value will rely on
+        // separate emit work for the Value method-call fix.
+        if method == "to_h"
+            && args.is_empty()
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+        {
+            return format!("{}.clone()", emit_expr(r));
+        }
+        // `hash.merge(other)` — Ruby Hash#merge returns a new Hash
+        // with `other`'s entries layered on top. Rust HashMap has no
+        // built-in merge AND the typical call site has mixed K/V
+        // types (literal `(&str, &str)` merged with parameter
+        // `HashMap<String, Value>`), which a generic trait can't
+        // bridge. `merge_attrs` from runtime/rust/hash_ext.rs takes
+        // both sides as IntoIterator over (K: Into<String>, V:
+        // Into<Value>) and produces a unified
+        // `HashMap<String, Value>` — matches what `render_attrs`,
+        // `r#where`, and similar consumers expect. Recv-types
+        // outside Ty::Hash (Flash, Session) keep their own `merge`
+        // method via the generic dispatch path below.
+        if method == "merge"
+            && args.len() == 1
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+        {
+            return format!(
+                "merge_attrs({}, {})",
+                emit_expr(r),
+                emit_expr(&args[0]),
+            );
+        }
     }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those

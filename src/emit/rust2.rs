@@ -82,6 +82,7 @@ const RT_ACTIVE_RECORD_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/active_record_adapter.rs");
 const RT_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/framework_test_adapter.rs");
+const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
 
 /// Emit a `rust2`-shaped project for `app`. Phase 2.1+: minimal
 /// scaffold + transpiled framework runtime files (currently just
@@ -113,6 +114,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/errors_ext.rs", RT_ERRORS_EXT_SOURCE),
         ("src/active_record_adapter.rs", RT_ACTIVE_RECORD_ADAPTER_SOURCE),
         ("src/framework_test_adapter.rs", RT_FRAMEWORK_TEST_ADAPTER_SOURCE),
+        ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
     ] {
         files.push(EmittedFile {
             path: PathBuf::from(path),
