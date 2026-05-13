@@ -95,7 +95,12 @@ module ActionView
     # ── attribute rendering (public for FormBuilder) ────────────────
     # `attrs` is a Hash whose keys are Symbol or String and whose
     # values are String/Integer/nil/Hash (nested for data:/aria:).
-    def self.render_attrs: (Hash[untyped, untyped] attrs) -> String
+    # In transpile, callers funnel through a merge helper (rust2's
+    # `merge_attrs`, TS spread, Crystal NamedTuple→Hash) that lifts
+    # Symbol keys to String, so the param key narrows to String at
+    # this boundary; values stay `untyped` because the body branches
+    # on `is_a?(Hash)` to handle nested data/aria maps.
+    def self.render_attrs: (Hash[String, untyped] attrs) -> String
   
     # ── form builder (yielded by form_with) ─────────────────────────
     class FormBuilder
