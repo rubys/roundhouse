@@ -79,6 +79,21 @@ module Roundhouse
         return
       end
 
+      # Per-request format inference. Strip a `.json` suffix from the
+      # request path before route matching so `/articles/1.json` and
+      # `/articles/1` share one route entry, and remember the format
+      # so the controller's respond_to-flattened branch can pick the
+      # right view + Content-Type. Mirrors `runtime/typescript/server.
+      # ts:149-161` and the Ruby scaffold's `main.rb:82-93` — every
+      # target needs this glue at its server entry point since route
+      # patterns are format-agnostic.
+      request_format = :html
+      route_path = path
+      if route_path.ends_with?(".json")
+        request_format = :json
+        route_path = route_path[0, route_path.size - 5]
+      end
+
       body_params = read_form_body(context.request)
       # `_method=delete|patch|put` from Rails' hidden form field is
       # always a top-level (non-nested) key, so it survives bracket-
@@ -93,7 +108,7 @@ module Roundhouse
         end
       end
 
-      matched = ActionDispatch::Router.match(method, path, @@routes)
+      matched = ActionDispatch::Router.match(method, route_path, @@routes)
       if matched.nil?
         context.response.status_code = 404
         context.response.content_type = "text/plain"
@@ -136,6 +151,7 @@ module Roundhouse
       ctrl.flash = @@flash
       ctrl.request_method = method
       ctrl.request_path = path
+      ctrl.request_format = request_format
 
       begin
         ctrl.process_action(action)
@@ -161,6 +177,20 @@ module Roundhouse
         context.response.status_code = status.to_i
         context.response.headers["Location"] = location
         @@flash = flash_for_response
+        return
+      end
+
+      # JSON responses skip the html layout wrap and ship the
+      # controller body verbatim with the controller-supplied
+      # Content-Type. Mirrors `runtime/typescript/server.ts:236-248`
+      # and the Ruby scaffold's `main.rb:157-167` branch — the
+      # controller's `respond_to`-flattened body picks the JSON view
+      # + content_type; the server just honors it.
+      if request_format == :json
+        context.response.status_code = status.to_i
+        context.response.content_type =
+          (ctrl.content_type.empty? ? "application/json; charset=utf-8" : ctrl.content_type)
+        context.response.print body
         return
       end
 
