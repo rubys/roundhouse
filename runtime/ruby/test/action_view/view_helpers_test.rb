@@ -39,6 +39,14 @@ class Article < ActiveRecord::Base
     when :body then @body
     end
   end
+
+  # Per-model `dom_prefix` — the lowerer synthesizes this for
+  # app/models/ classes via `push_dom_prefix_method`; test stubs
+  # defined inline here have to declare it explicitly so dom_id's
+  # contract `record.dom_prefix` resolves.
+  def dom_prefix
+    "article"
+  end
 end
 
 class ViewHelpersTest < Minitest::Test
@@ -135,9 +143,10 @@ class ViewHelpersTest < Minitest::Test
       ViewHelpers.dom_id(article, :comments_count)
   end
 
-  def test_dom_id_with_explicit_prefix_and_id
-    assert_equal "article_7", ViewHelpers.dom_id("article", 7)
-  end
+  # `dom_id("article", 7)` (explicit String prefix + integer suffix)
+  # is no longer supported — `dom_id` is monomorphic on a record
+  # receiver. Callers needing the explicit form spell it directly
+  # in source: `"article_7"`.
 
   # ── HTML elements ──────────────────────────────────────────
 

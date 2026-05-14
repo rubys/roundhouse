@@ -25,11 +25,14 @@ use super::{fn_sig, seq, with_ty};
 /// model name as a String literal. Used by
 /// `ActionView::ViewHelpers.dom_id(record)` to build CSS-id strings
 /// at transpile time rather than via runtime introspection
-/// (`record.class.name.downcase` previously). The synthesizer runs for
-/// every concrete model — abstract bases (ApplicationRecord) get their
-/// dom_prefix from `runtime/ruby/active_record/base.rb`'s raise-stub
-/// since they're never instantiated directly.
+/// (`record.class.name.downcase` previously). Skipped for abstract
+/// models (`primary_abstract_class` marker present) — those are never
+/// instantiated, and ApplicationRecord's lowered shape is tested
+/// against the abstract-marker-only baseline.
 pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model) {
+    if is_abstract_class(model) {
+        return;
+    }
     let prefix = crate::naming::snake_case(model.name.0.as_str());
     methods.push(MethodDef {
         name: Symbol::from("dom_prefix"),
@@ -48,6 +51,21 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
         kind: AccessorKind::Method,
         is_async: false,
     });
+}
+
+/// True when the model body declares `primary_abstract_class` (Rails'
+/// way of marking ApplicationRecord-shaped abstract bases). Per-model
+/// synthesizers that emit instance-shaped methods skip these classes
+/// since they're never instantiated.
+fn is_abstract_class(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        if let ModelBodyItem::Unknown { expr, .. } = item {
+            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+                return args.is_empty() && method.as_str() == "primary_abstract_class";
+            }
+        }
+        false
+    })
 }
 
 /// `primary_abstract_class` marks a model as the abstract base of a Rails
