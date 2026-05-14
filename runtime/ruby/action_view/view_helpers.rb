@@ -97,13 +97,18 @@ module ActionView
     # runtime introspection; the synthesizer knows the model name at
     # transpile time so no compiler has to chase the reflection chain.
     def self.dom_id(record, suffix = nil)
+      # Explicit parens on `record.dom_prefix()` — TS emit collapses
+      # parens-less zero-arg sends to attr-reader-shaped property access
+      # (`record.dom_prefix` returns the function reference, not the
+      # string). The synthesized method's AccessorKind doesn't yet
+      # thread to the Send-emit; parens are the cheap forcing function.
       if suffix.nil?
         # `dom_id(article)` -> "article_3"
-        "#{record.dom_prefix}_#{record.id}"
+        "#{record.dom_prefix()}_#{record.id}"
       else
         # `dom_id(article, :comments_count)` -> "comments_count_article_3"
         # (Rails order: suffix BEFORE model name in the resulting id.)
-        "#{suffix}_#{record.dom_prefix}_#{record.id}"
+        "#{suffix}_#{record.dom_prefix()}_#{record.id}"
       end
     end
   
@@ -295,7 +300,12 @@ module ActionView
         )
         # `@model[field]` is untyped per Base#[]; coerce to String at
         # the boundary so html_escape sees its String-typed contract.
-        "<textarea#{attrs}>#{ViewHelpers.html_escape(value.to_s)}</textarea>"
+        # Explicit nil-check rather than `value.to_s` — JS `String(null)`
+        # returns the literal `"null"` (4 chars) whereas Ruby's
+        # `nil.to_s` returns `""`. The Ruby-shape-on-every-target
+        # invariant demands the explicit guard at the source.
+        body_str = value.nil? ? "" : ViewHelpers.html_escape(value.to_s)
+        "<textarea#{attrs}>#{body_str}</textarea>"
       end
   
       def submit(label = nil, opts = {})
