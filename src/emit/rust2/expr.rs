@@ -1406,6 +1406,20 @@ fn rewrite_method_name(m: &str) -> String {
         "has_key?" => "contains_key",
         "include?" => "contains",
         "delete" => "remove",
+        // Ruby String predicates spelled without the final `s`.
+        // The body-typer strips trailing `?` before this match runs,
+        // so the names land here without their predicate marker.
+        "start_with" => "starts_with",
+        "end_with" => "ends_with",
+        // Ruby casing methods. Rust's `to_uppercase` / `to_lowercase`
+        // on &str / String return String, matching Ruby's
+        // `.upcase` / `.downcase` semantics.
+        "upcase" => "to_uppercase",
+        "downcase" => "to_lowercase",
+        // Ruby Hash#dup makes a shallow copy. HashMap doesn't have
+        // `.dup` but `.clone()` is the same shape and produces a
+        // new owned HashMap with the same entries.
+        "dup" => "clone",
         other => other,
     };
     sanitize_ident(bridged)
