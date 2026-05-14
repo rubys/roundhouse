@@ -586,6 +586,46 @@ fn emit_expr_inner(e: &Expr) -> String {
                     }
                 }
             }
+            // `vec.map { |x| ... }` — Ruby returns a new Array of the
+            // block's return value. Rust Vec has no `.map`; emit as
+            // `.into_iter().map(...).collect::<Vec<_>>()`. The block's
+            // body becomes a closure passed to Iterator::map.
+            //
+            // `into_iter` (not `iter`) so the closure receives the
+            // element by value — matches Ruby's pass-by-value yield
+            // and avoids forcing the block to `.clone()` everything
+            // it reads from `x`. The receiver's owned-vs-borrowed
+            // nature determines whether `into_iter` consumes; for
+            // function-return Vec receivers (the common case here,
+            // `adapter.all(...).map { ... }`) the temporary is moved
+            // anyway.
+            if method.as_str() == "map" && args.is_empty() && recv.is_some() {
+                let r = recv.as_ref().unwrap();
+                if matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. })) {
+                    let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
+                        block.as_ref().and_then(|b| match &*b.node {
+                            ExprNode::Lambda { params, body, .. } => {
+                                Some((params.as_slice(), body))
+                            }
+                            _ => None,
+                        });
+                    if let Some((params, body)) = block_lambda {
+                        if params.len() == 1 {
+                            let recv_s = emit_expr(r);
+                            let p = params[0].as_str();
+                            let body_s = emit_expr(body);
+                            let closure = if body_s.contains('\n') {
+                                format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))
+                            } else {
+                                format!("|{p}| {{ {body_s} }}")
+                            };
+                            return format!(
+                                "{recv_s}.into_iter().map({closure}).collect::<Vec<_>>()"
+                            );
+                        }
+                    }
+                }
+            }
             let base = emit_send(recv.as_ref(), method.as_str(), args);
             // A Send with attached block becomes a closure passed as
             // the last arg. `other.each do |k, v| ... end` (Ruby) →

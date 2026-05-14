@@ -372,6 +372,16 @@ pub fn parse_library_with_rbs(
         let info = crate::lower::class_info_from_library_class(lc);
         class_registry.insert(lc.name.clone(), info);
     }
+    // Well-known cross-file runtime classes that the per-file
+    // body-typer needs to resolve dispatches against. Each base.rb
+    // gets its own isolated class_registry; without this seed,
+    // references like `ActiveRecord.adapter.find(...)` in
+    // active_record/base.rb would see `adapter` typed as
+    // Ty::Class { AdapterInterface } (from the RBS) but then
+    // miss every method lookup on that class — the runtime body-typer
+    // has no analog of the analyzer's hand-registered known-classes
+    // map (`analyze/mod.rs`).
+    seed_well_known_classes(&mut class_registry);
 
     // Step 3: body-type each method. Two-pass ivar typing mirroring the
     // module-flat path: pass A seeds nothing, pass B seeds ivar
@@ -451,6 +461,62 @@ pub fn parse_library_with_rbs(
     }
 
     Ok(library_classes)
+}
+
+/// Pre-seed the per-file body-typer's class registry with phantom
+/// classes that the analyzer registers globally (see
+/// `analyze/mod.rs`'s hand-coded ClassInfo blocks). The runtime
+/// transpile pipeline runs *before* the analyzer over the user's app,
+/// so we duplicate the relevant entries here. Today this is just
+/// `ActiveRecord::AdapterInterface` — the trait-shaped phantom whose
+/// 9 methods (`all/find/where/count/exists?/insert/update/delete/
+/// truncate`) `runtime/ruby/active_record/base.rb` dispatches through
+/// `ActiveRecord.adapter`.
+fn seed_well_known_classes(
+    classes: &mut std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+) {
+    use crate::analyze::ClassInfo;
+    use crate::ident::{ClassId, Symbol};
+
+    let row_ty = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Untyped),
+    };
+    let nilable_row = Ty::Union {
+        variants: vec![row_ty.clone(), Ty::Nil],
+    };
+    let array_of_rows = Ty::Array { elem: Box::new(row_ty.clone()) };
+    let mut adapter_iface = ClassInfo::default();
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("all"), array_of_rows.clone());
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("find"), nilable_row.clone());
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("where"), array_of_rows.clone());
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("count"), Ty::Int);
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("exists?"), Ty::Bool);
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("insert"), Ty::Int);
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("update"), Ty::Nil);
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("delete"), Ty::Nil);
+    adapter_iface
+        .instance_methods
+        .insert(Symbol::from("truncate"), Ty::Nil);
+    classes
+        .entry(ClassId(Symbol::from("ActiveRecord::AdapterInterface")))
+        .or_insert(adapter_iface);
 }
 
 /// Same as `parse_methods_with_rbs` but takes a pre-built class
