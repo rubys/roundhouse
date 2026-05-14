@@ -841,6 +841,25 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             format!("{}.{name} = {rhs}", emit_expr(recv))
         }
         LValue::Index { recv, index } => {
+            // `recv[k] = v` on a Flash / Session struct dispatches to
+            // the hand-written `.set(key, value)` method (no
+            // IndexMut impl; the runtime/rust/flash.rs etc. surface
+            // explicit setters). Other Ty::Class indexers and
+            // HashMap-typed receivers keep the bracket-assignment
+            // emit — HashMap implements IndexMut, model classes
+            // override `[]=` per-column (a separate IR path).
+            if let Some(crate::ty::Ty::Class { id, .. }) = recv.ty.as_ref() {
+                let cls = id.0.as_str();
+                if matches!(cls, "Flash" | "Session"
+                    | "ActionDispatch::Flash" | "ActionDispatch::Session")
+                {
+                    return format!(
+                        "{}.set({}, {rhs})",
+                        emit_expr(recv),
+                        emit_expr(index),
+                    );
+                }
+            }
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }
     }
@@ -1028,6 +1047,40 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             );
         }
         if method == "[]=" && args.len() == 2 {
+            // Mirror the LValue::Index Flash/Session bridge — when
+            // the Send-shape `recv.[]=(k, v)` lands on a Flash or
+            // Session typed receiver, route through the hand-written
+            // `.set(key, value)` method (no IndexMut impl). Per-app
+            // model classes implement column-specific `[]=` overrides
+            // via the IR's regular method path, not this branch.
+            //
+            // Type detection covers two channels: `recv.ty` (when the
+            // body-typer set it) and an `Ivar { name }` recv whose
+            // declared field type sits in IVAR_TYPES.
+            let recv_class = match r.ty.as_ref() {
+                Some(crate::ty::Ty::Class { id, .. }) => Some(id.0.as_str().to_string()),
+                _ => match &*r.node {
+                    ExprNode::Ivar { name } => match ivar_field_ty(name.as_str()) {
+                        Some(crate::ty::Ty::Class { id, .. }) => {
+                            Some(id.0.as_str().to_string())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                },
+            };
+            if let Some(cls) = recv_class.as_deref() {
+                if matches!(cls, "Flash" | "Session"
+                    | "ActionDispatch::Flash" | "ActionDispatch::Session")
+                {
+                    return format!(
+                        "{}.set({}, {})",
+                        emit_expr(r),
+                        emit_expr(&args[0]),
+                        emit_expr(&args[1]),
+                    );
+                }
+            }
             return format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1]));
         }
         // Ruby `value.is_a?(Class)` runtime type check. Rust has no
