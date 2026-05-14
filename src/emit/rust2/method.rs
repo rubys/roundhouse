@@ -229,11 +229,106 @@ pub(super) fn emit_instance_method(
         // variables of the same name, which is precisely what the
         // ivar→local rewrite above produces. Empty-ivar classes get
         // `Self {}` (still valid).
+        //
+        // Ivars not assigned in the `def initialize` body — fields
+        // the struct declares but the constructor body didn't touch
+        // (e.g. `@request_method`, `@request_path` on
+        // ActionController::Base, where they get populated later by
+        // the request dispatcher) — would otherwise reference
+        // undeclared locals at the Self literal site. Emit a default-
+        // initialized let binding for each so the literal compiles.
+        let assigned: std::collections::HashSet<String> =
+            collect_ivars_assigned_in_body(&m.body);
+        for (fname, fty) in ivars {
+            if !assigned.contains(fname) {
+                writeln!(
+                    out,
+                    "    let {fname}: {} = {};",
+                    super::ty::rust_ty(fty),
+                    default_value_for_ty(fty),
+                )
+                .unwrap();
+            }
+        }
         let fields: Vec<&str> = ivars.iter().map(|(n, _)| n.as_str()).collect();
         writeln!(out, "    Self {{ {} }}", fields.join(", ")).unwrap();
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+/// Walk the constructor body collecting names of ivars assigned
+/// anywhere in it (via `@x = ...` or `self.x = ...` writes). Used
+/// to find ivars the body didn't touch so the closing `Self { ... }`
+/// literal can default-init them rather than referencing undeclared
+/// locals.
+fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections::HashSet<String> {
+    use crate::expr::{ExprNode, LValue};
+    fn walk(e: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                out.insert(name.as_str().to_string());
+                walk(value, out);
+            }
+            ExprNode::Assign {
+                target: LValue::Attr { recv, name },
+                value,
+            } if matches!(&*recv.node, ExprNode::SelfRef) => {
+                out.insert(name.as_str().to_string());
+                walk(value, out);
+            }
+            ExprNode::Assign { target, value } => {
+                if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                    walk(recv, out);
+                }
+                walk(value, out);
+            }
+            ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk(e, out)),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond, out);
+                walk(then_branch, out);
+                walk(else_branch, out);
+            }
+            ExprNode::While { cond, body, .. } => {
+                walk(cond, out);
+                walk(body, out);
+            }
+            ExprNode::Send { recv, args, block, .. } => {
+                if let Some(r) = recv { walk(r, out); }
+                args.iter().for_each(|a| walk(a, out));
+                if let Some(b) = block { walk(b, out); }
+            }
+            ExprNode::Return { value } => walk(value, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(body, &mut out);
+    out
+}
+
+/// Default-value Rust expression for a field Ty — used to fill in
+/// constructor-unassigned ivars at the Self literal. Mirrors the
+/// `Default` impl shape for each `Ty` variant; types without a
+/// natural Default fall back to `Default::default()` which the
+/// compiler will reject (E0277) if the concrete type doesn't
+/// derive Default — that's a clearer error than the
+/// "cannot find value" the alternative produces.
+fn default_value_for_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Int => "0_i64".to_string(),
+        Ty::Float => "0.0_f64".to_string(),
+        Ty::Bool => "false".to_string(),
+        Ty::Str | Ty::Sym => "String::new()".to_string(),
+        Ty::Nil => "()".to_string(),
+        Ty::Array { .. } => "Vec::new()".to_string(),
+        Ty::Hash { .. } => "std::collections::HashMap::new()".to_string(),
+        Ty::Untyped => "serde_json::Value::Null".to_string(),
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
+            "None".to_string()
+        }
+        _ => "Default::default()".to_string(),
+    }
 }
 
 /// Build a map from each declared parameter name to its RBS-declared
