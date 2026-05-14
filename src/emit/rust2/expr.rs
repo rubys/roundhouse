@@ -1178,6 +1178,65 @@ fn field_let_annotation(ivar_name: &str) -> String {
 }
 
 fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // Stdlib class-method bridges. The Ruby source's `Time.now.utc.iso8601`,
+    // `Base64.strict_encode64(...)`, `JSON.generate(...)` patterns
+    // refer to Ruby stdlib that doesn't exist in Rust. Recognize the
+    // Const-typed receiver and emit the equivalent crate call. The
+    // `regex`, `base64`, and `chrono` crates are already rust2 deps.
+    if let Some(r) = recv {
+        if let ExprNode::Const { path } = &*r.node {
+            let last = path.last().map(|s| s.as_str()).unwrap_or("");
+            match (last, method, args.len()) {
+                ("Time", "now", 0) => {
+                    return "chrono::Utc::now()".to_string();
+                }
+                ("JSON", "generate" | "dump" | "fast_generate", 1) => {
+                    return format!("serde_json::to_string(&{}).unwrap()", emit_expr(&args[0]));
+                }
+                ("JSON", "pretty_generate", 1) => {
+                    return format!(
+                        "serde_json::to_string_pretty(&{}).unwrap()",
+                        emit_expr(&args[0])
+                    );
+                }
+                ("Base64", "encode64" | "strict_encode64", 1) => {
+                    return format!(
+                        "{{ use base64::Engine; base64::engine::general_purpose::STANDARD.encode({}) }}",
+                        emit_expr(&args[0])
+                    );
+                }
+                ("Base64", "urlsafe_encode64", 1) => {
+                    return format!(
+                        "{{ use base64::Engine; base64::engine::general_purpose::URL_SAFE.encode({}) }}",
+                        emit_expr(&args[0])
+                    );
+                }
+                _ => {}
+            }
+        }
+        // `.utc()` on a `Ty::Class { Time }` recv (already a chrono
+        // DateTime<Utc> after `Time.now`) is a no-op — chrono's
+        // `Utc::now()` is already UTC. `.iso8601()` becomes
+        // `.to_rfc3339()`; `.strftime(fmt)` becomes `.format(fmt).to_string()`.
+        if matches!(
+            r.ty.as_ref().map(peel_nil),
+            Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Time"
+        ) {
+            match (method, args.len()) {
+                ("utc" | "to_time", 0) => return emit_expr(r),
+                ("iso8601" | "rfc3339", 0) => return format!("{}.to_rfc3339()", emit_expr(r)),
+                ("rfc2822", 0) => return format!("{}.to_rfc2822()", emit_expr(r)),
+                ("strftime", 1) => {
+                    return format!(
+                        "{}.format({}).to_string()",
+                        emit_expr(r),
+                        emit_expr(&args[0])
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
     // Binary operators (==, !=, <, >, +, -, *, /) ingest as Send
     // with `method` as the operator name. Ruby `a == b` lowers to
     // `Send { recv: a, method: ==, args: [b] }`.
