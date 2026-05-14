@@ -1104,6 +1104,45 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // because the lowerer hasn't synthesized an LValue::Index for it).
     if let Some(r) = recv {
         if method == "[]" && args.len() == 1 {
+            // Peel `Union<T, Nil>` from the recv Ty so receivers bound
+            // via `let x = arr[i]` (typed `T | Nil` by the body-typer's
+            // Ruby-semantics view) match the same branches as the
+            // plain receiver case. Emit chose panic-on-miss for `[]`,
+            // so the runtime value really is T.
+            let recv_ty = r.ty.as_ref().map(peel_nil);
+            let arg_ty = args[0].ty.as_ref().map(peel_nil);
+            // Range index on Str/Vec receiver — `pp[1..]`. The Range
+            // node emits its endpoints unmodified (`1_i64..`), but
+            // slice indexing needs `usize`. Wrap the rendered range
+            // in a re-cast so `&pp[(1) as usize..]` compiles.
+            if matches!(
+                recv_ty,
+                Some(crate::ty::Ty::Str)
+                    | Some(crate::ty::Ty::Sym)
+                    | Some(crate::ty::Ty::Array { .. })
+            ) {
+                if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                    let b = begin
+                        .as_ref()
+                        .map(|e| format!("({}) as usize", emit_expr(e)))
+                        .unwrap_or_default();
+                    let e = end
+                        .as_ref()
+                        .map(|e| format!("({}) as usize", emit_expr(e)))
+                        .unwrap_or_default();
+                    let op = if *exclusive { ".." } else { "..=" };
+                    let range_s = match (begin.is_some(), end.is_some()) {
+                        (true, true) => format!("{b}{op}{e}"),
+                        (true, false) => format!("{b}.."),
+                        (false, true) => format!("..{e}"),
+                        (false, false) => "..".to_string(),
+                    };
+                    // Str slices need a `&` prefix to yield `&str`; Vec
+                    // slices likewise yield `&[T]`. Either way the
+                    // caller treats it as borrowed.
+                    return format!("&{}[{range_s}]", emit_expr(r));
+                }
+            }
             // Slice/Vec indexing needs `usize`. Ruby integers (including
             // numeric loop counters like `let mut i = 0_i64`) lower to
             // `i64`; without a cast the `Index<i64>` impl is missing
@@ -1112,8 +1151,8 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // Ty is Ty::Int. HashMap indexing keeps the bare form
             // (HashMap<K, V> indexes by &K, the user-supplied key
             // is already the right type).
-            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
-                && matches!(args[0].ty.as_ref(), Some(crate::ty::Ty::Int))
+            if matches!(recv_ty, Some(crate::ty::Ty::Array { .. }))
+                && matches!(arg_ty, Some(crate::ty::Ty::Int))
             {
                 return format!(
                     "{}[({}) as usize]",
@@ -1454,7 +1493,14 @@ fn dispatch_method_by_recv_ty(
     use crate::ty::Ty;
     let recv_s = emit_expr(recv);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-    match recv.ty.as_ref() {
+    // Peel `Union<T, Nil>` to `T` for dispatch. The body-typer reports
+    // Ruby's nil-on-miss shape for `arr[i]` / `hash[k]` / `first`/`last`
+    // (returns `T | Nil`), but rust2 emits these as panic-on-miss
+    // (`arr[i]`, `hash[&k]`), so the runtime value really is `T`.
+    // Matching `Some(Ty::Str)` directly would miss every `let x = arr[i]`
+    // binding, since `x`'s recorded Ty is `Union<Str, Nil>`.
+    let recv_ty = recv.ty.as_ref().map(peel_nil);
+    match recv_ty {
         Some(Ty::Array { .. }) => match method {
             "size" | "length" | "count" if args.is_empty() => {
                 Some(format!("({recv_s}.len() as i64)"))
@@ -1543,6 +1589,22 @@ fn dispatch_method_by_recv_ty(
         },
         _ => None,
     }
+}
+
+/// Peel `Union<T, Nil>` to `T` for dispatch-time matching. Returns the
+/// original Ty unchanged if it isn't a 2-variant `T | Nil` union.
+/// Mirrors `analyze::body::peel_nilable` — kept locally so emit doesn't
+/// reach across into a private analyzer helper.
+fn peel_nil(ty: &crate::ty::Ty) -> &crate::ty::Ty {
+    use crate::ty::Ty;
+    if let Ty::Union { variants } = ty {
+        if variants.len() == 2 {
+            if let Some(idx) = variants.iter().position(|v| matches!(v, Ty::Nil)) {
+                return &variants[1 - idx];
+            }
+        }
+    }
+    ty
 }
 
 /// Ruby method names → Rust analog. Generic (recv-type-agnostic)
