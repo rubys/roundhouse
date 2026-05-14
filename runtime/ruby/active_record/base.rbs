@@ -4,14 +4,17 @@ module ActiveRecord
   # `class << self; attr_accessor :adapter; end` lowers to
   # `def self.adapter` / `def self.adapter=` at ingest time.
   #
-  # Type as `untyped`: the adapter's interface is defined elsewhere
-  # (each backend has its own implementation — SqliteAdapter,
-  # FrameworkTestAdapter, etc.). Inside the spinel-blog active_record/
-  # corpus we don't have a class declaration to point to. Calls like
-  # `ActiveRecord.adapter.all(...)` will dispatch against `Ty::Var`
-  # and return `Ty::Var` — documented residual.
-  def self.adapter: () -> untyped
-  def self.adapter=: (untyped) -> untyped
+  # Type as `AdapterInterface` — a phantom class registered in the
+  # analyzer's class registry (no Ruby source counterpart; each
+  # target ships its own concrete implementation: Rust trait + impls,
+  # Crystal abstract class + SqliteAdapter, TS interface +
+  # SqliteActiveRecordAdapter). The body-typer dispatches the 9
+  # contract methods (`all`/`find`/`where`/`count`/`exists?`/`insert`/
+  # `update`/`delete`/`truncate`) against this interface so call
+  # sites like `ActiveRecord.adapter.find(...)` carry concrete return
+  # types in the IR.
+  def self.adapter: () -> ActiveRecord::AdapterInterface
+  def self.adapter=: (ActiveRecord::AdapterInterface) -> ActiveRecord::AdapterInterface
 
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column

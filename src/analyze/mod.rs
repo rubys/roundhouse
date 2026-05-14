@@ -300,6 +300,62 @@ impl Analyzer {
             error_cls,
         );
 
+        // `ActiveRecord::AdapterInterface` — the 9-method contract that
+        // `runtime/ruby/active_record/base.rb` calls into via
+        // `ActiveRecord.adapter.X`. Each per-target runtime ships its
+        // own concrete impl (Rust trait + impls in `runtime/rust/`,
+        // Crystal abstract class + SqliteAdapter, TS interface +
+        // SqliteActiveRecordAdapter / FrameworkTestAdapter). On the
+        // Ruby side there's no class declaration — the RBS for
+        // `ActiveRecord.adapter` previously returned `untyped`, which
+        // let TS get away with `any` but left rust2 emit producing
+        // method calls on `serde_json::Value` (E0599 on
+        // `.find/.where/.all/.insert/.update/.delete/.count/.exists/.truncate`).
+        // Registering it here gives the body-typer a concrete class to
+        // dispatch against; the RBS sidecar then references it as
+        // `() -> AdapterInterface`.
+        let hash_str_untyped = Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Untyped),
+        };
+        let row_ty = hash_str_untyped.clone();
+        let nilable_row = Ty::Union {
+            variants: vec![row_ty.clone(), Ty::Nil],
+        };
+        let array_of_rows = Ty::Array { elem: Box::new(row_ty.clone()) };
+        let mut adapter_iface = ClassInfo::default();
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("all"), array_of_rows.clone());
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("find"), nilable_row.clone());
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("where"), array_of_rows.clone());
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("count"), Ty::Int);
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("exists?"), Ty::Bool);
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("insert"), Ty::Int);
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("update"), Ty::Nil);
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("delete"), Ty::Nil);
+        adapter_iface
+            .instance_methods
+            .insert(Symbol::from("truncate"), Ty::Nil);
+        classes.insert(
+            ClassId(Symbol::from("ActiveRecord::AdapterInterface")),
+            adapter_iface,
+        );
+
         // Hardcoded ApplicationController-ish surface. Real inheritance chains
         // and per-controller overrides land when a fixture forces them.
         let mut app_ctrl = ClassInfo::default();

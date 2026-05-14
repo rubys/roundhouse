@@ -1276,7 +1276,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         // form was already broken there).
         if method == "fetch"
             && args.len() == 2
-            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+            && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Hash { .. }))
             && !matches!(&*r.node, ExprNode::Const { .. })
         {
             let recv_s = emit_expr(r);
@@ -1585,6 +1585,15 @@ fn dispatch_method_by_recv_ty(
             // `dup` / `clone` make a shallow copy. HashMap::clone()
             // matches both.
             "dup" | "clone" if args.is_empty() => Some(format!("{recv_s}.clone()")),
+            // `hash.delete(k)` — Ruby removes by key, returns the
+            // removed value (or nil). HashMap::remove takes `&K` and
+            // returns `Option<V>`. Emit-side only; user-defined
+            // classes with their own `delete(...)` method (e.g.
+            // `ActiveRecordAdapter::delete(table, id)`) bypass this
+            // arm because the recv-Ty match fails.
+            "delete" if args.len() == 1 => {
+                Some(format!("{recv_s}.remove(&{})", args_s[0]))
+            }
             _ => None,
         },
         _ => None,
@@ -1622,7 +1631,12 @@ fn rewrite_method_name(m: &str) -> String {
         "key?" => "contains_key",
         "has_key?" => "contains_key",
         "include?" => "contains",
-        "delete" => "remove",
+        // `delete` is NOT blanket-rewritten: Ruby has it on Hash (remove
+        // by key) AND on user-defined classes (the `ActiveRecordAdapter`
+        // trait's `delete(table, id)` is the visible case). The Hash
+        // case is handled in `dispatch_method_by_recv_ty`; other
+        // receivers keep the Ruby name and resolve through their own
+        // method definitions.
         other => other,
     };
     sanitize_ident(bridged)

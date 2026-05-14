@@ -327,7 +327,13 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.ts",
         mode: Mode::Library,
-        imports: &[("RecordNotFound, RecordInvalid", "./errors.js")],
+        // `AdapterInterface` is the phantom class the analyzer registers
+        // for the adapter slot type. TS aliases it to ActiveRecordAdapter
+        // in juntos.ts; this import wires that alias into every call site.
+        imports: &[
+            ("RecordNotFound, RecordInvalid", "./errors.js"),
+            ("type AdapterInterface", "./juntos.js"),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -593,6 +599,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         // line.
         imports: &[
             ("ActiveRecordAdapter", "active_record_adapter"),
+            ("AdapterInterface", "adapter_interface"),
             ("raise", "errors_ext"),
             ("name", "errors_ext"),
             ("NotImplementedError", "errors_ext"),

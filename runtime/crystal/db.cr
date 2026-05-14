@@ -356,6 +356,14 @@ end
 # (production sqlite, framework-test in-memory, future libsql/D1)
 # can plug in via `ActiveRecord.adapter = <impl>`.
 module ActiveRecord
+  # Phantom class the analyzer registers for the adapter slot type;
+  # `runtime/ruby/active_record/base.rbs` declares the slot as
+  # `() -> ActiveRecord::AdapterInterface`. Each target maps the name
+  # onto its concrete adapter type — Crystal points it at the abstract
+  # base in `Roundhouse::ActiveRecordAdapter` so the transpiled
+  # `property adapter : ActiveRecord::AdapterInterface?` resolves.
+  alias AdapterInterface = Roundhouse::ActiveRecordAdapter
+
   @@adapter : Roundhouse::ActiveRecordAdapter? = nil
 
   def self.adapter : Roundhouse::ActiveRecordAdapter

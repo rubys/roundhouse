@@ -80,6 +80,8 @@ const RT_SESSION_SOURCE: &str = include_str!("../../runtime/rust/session.rs");
 const RT_ERRORS_EXT_SOURCE: &str = include_str!("../../runtime/rust/errors_ext.rs");
 const RT_ACTIVE_RECORD_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/active_record_adapter.rs");
+const RT_ADAPTER_INTERFACE_SOURCE: &str =
+    include_str!("../../runtime/rust/adapter_interface.rs");
 const RT_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/framework_test_adapter.rs");
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
@@ -113,6 +115,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/session.rs", RT_SESSION_SOURCE),
         ("src/errors_ext.rs", RT_ERRORS_EXT_SOURCE),
         ("src/active_record_adapter.rs", RT_ACTIVE_RECORD_ADAPTER_SOURCE),
+        ("src/adapter_interface.rs", RT_ADAPTER_INTERFACE_SOURCE),
         ("src/framework_test_adapter.rs", RT_FRAMEWORK_TEST_ADAPTER_SOURCE),
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
     ] {

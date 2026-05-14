@@ -93,6 +93,13 @@ export interface AdapterSchema {
   foreign_keys: ForeignKey[];
 }
 
+/** Alias for the transpiled-framework type name. `runtime/ruby/active_record/
+ *  base.rbs` types `ActiveRecord.adapter` as `AdapterInterface` (a phantom
+ *  class registered in the analyzer); each target maps that name onto its
+ *  own concrete adapter type. TS points it at the ActiveRecordAdapter
+ *  interface declared just below. */
+export type AdapterInterface = ActiveRecordAdapter;
+
 /** The full adapter surface — twelve methods. Framework Ruby calls
  *  exclusively through this interface; targets implement it. */
 export interface ActiveRecordAdapter {
