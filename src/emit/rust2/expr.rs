@@ -702,12 +702,43 @@ fn emit_expr_inner(e: &Expr) -> String {
             format!("{b}{op}{e}")
         }
         ExprNode::BoolOp { op, left, right, .. } => {
-            // Ruby `a && b` / `a || b` map directly to Rust `&&` /
-            // `||` — same short-circuit semantics, same precedence
-            // relative to comparison ops. `and`/`or` surface forms
-            // collapse to the symbol form on emit; Ruby's looser
-            // precedence for the keyword form doesn't matter once
-            // the IR has the tree shape locked in.
+            // Ruby `a && b` / `a || b` are truthy-on-non-nil-non-false,
+            // not bool-typed. Rust's `||` / `&&` are bool-only — direct
+            // emit only works when both operands are already Ty::Bool.
+            //
+            // For `Or` with a non-bool LHS, the idiomatic Ruby use is
+            // "default value if LHS is nil/missing": `a || b` →
+            //   - LHS Option<T>: `a.unwrap_or(b)`
+            //   - LHS non-Option (String/Int/Class instance): `a`
+            //     alone (Ruby's non-nil values are all truthy, so the
+            //     RHS branch is unreachable when LHS is statically
+            //     non-null)
+            //
+            // For `And`, the result-of-a-truthy-chain idiom is less
+            // common; keep the literal `&&` for bool LHS and otherwise
+            // fall back to evaluating LHS-then-RHS via Rust's `if let`
+            // shape would be involved — for now keep the literal form
+            // and let bool cases work; non-bool `And` is exotic enough
+            // to surface separately.
+            if matches!(op, crate::expr::BoolOpKind::Or) {
+                let lhs_is_option = matches!(
+                    left.ty.as_ref(),
+                    Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                );
+                let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
+                if lhs_is_option {
+                    return format!(
+                        "{}.unwrap_or({})",
+                        emit_expr(left),
+                        emit_expr(right),
+                    );
+                }
+                if !lhs_is_bool && left.ty.is_some() {
+                    // Statically non-nil — RHS is unreachable in Ruby
+                    // semantics. Drop it.
+                    return emit_expr(left);
+                }
+            }
             let op_s = match op {
                 crate::expr::BoolOpKind::And => "&&",
                 crate::expr::BoolOpKind::Or => "||",
