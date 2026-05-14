@@ -35,6 +35,11 @@ export interface AdapterSchema {
   foreign_keys: ForeignKey[];
 }
 
+/** Alias for the transpiled-framework type name. See juntos.ts for
+ *  the cross-target convention; worker variant points it at the
+ *  ActiveRecordAdapter interface declared just below. */
+export type AdapterInterface = ActiveRecordAdapter;
+
 export interface ActiveRecordAdapter {
   // DDL
   create_table(name: string, columns: string[], foreign_keys?: ForeignKey[]): void | Promise<void>;

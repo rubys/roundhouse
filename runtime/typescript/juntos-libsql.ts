@@ -103,6 +103,13 @@ export interface AdapterSchema {
   foreign_keys: ForeignKey[];
 }
 
+/** Alias for the transpiled-framework type name. `runtime/ruby/
+ *  active_record/base.rbs` types `ActiveRecord.adapter` as
+ *  `AdapterInterface`; each target maps that name onto its own
+ *  concrete adapter type. libsql variant points it at the
+ *  ActiveRecordAdapter interface declared just below. */
+export type AdapterInterface = ActiveRecordAdapter;
+
 /** The full adapter surface. Return types are `T | Promise<T>` so
  *  both the libsql (async) and better-sqlite3 (sync) adapters
  *  satisfy the same interface. Callers always `await` so the

@@ -1,18 +1,38 @@
 module ActiveRecord
+  # The 9-method adapter contract `Base.find` / `Base.create!` / etc.
+  # dispatch through. Phantom RBS-only class — no Ruby source body,
+  # each target ships its own concrete implementation (Rust trait +
+  # impls, Crystal abstract class + SqliteAdapter, TS interface +
+  # SqliteActiveRecordAdapter). Methods are marked `%a{abstract}`
+  # so the orphan check skips them; the analyzer's runtime body-typer
+  # gets the same info via `seed_well_known_classes` so per-file
+  # dispatch (which doesn't see this class declaration) still
+  # resolves.
+  class AdapterInterface
+    %a{abstract}
+    def all: (String table_name) -> Array[Hash[String, untyped]]
+    %a{abstract}
+    def find: (String table_name, Integer id) -> Hash[String, untyped]?
+    %a{abstract}
+    def where: (String table_name, Hash[String, untyped] conditions) -> Array[Hash[String, untyped]]
+    %a{abstract}
+    def count: (String table_name) -> Integer
+    %a{abstract}
+    def exists?: (String table_name, Integer id) -> bool
+    %a{abstract}
+    def insert: (String table_name, Hash[String, untyped] attributes) -> Integer
+    %a{abstract}
+    def update: (String table_name, Integer id, Hash[String, untyped] attributes) -> void
+    %a{abstract}
+    def delete: (String table_name, Integer id) -> void
+    %a{abstract}
+    def truncate: (String table_name) -> void
+  end
+
   # The global adapter slot. Set once during boot; read everywhere
   # `Base.find` / `Base.create!` / etc. needs to dispatch a query.
   # `class << self; attr_accessor :adapter; end` lowers to
   # `def self.adapter` / `def self.adapter=` at ingest time.
-  #
-  # Type as `AdapterInterface` — a phantom class registered in the
-  # analyzer's class registry (no Ruby source counterpart; each
-  # target ships its own concrete implementation: Rust trait + impls,
-  # Crystal abstract class + SqliteAdapter, TS interface +
-  # SqliteActiveRecordAdapter). The body-typer dispatches the 9
-  # contract methods (`all`/`find`/`where`/`count`/`exists?`/`insert`/
-  # `update`/`delete`/`truncate`) against this interface so call
-  # sites like `ActiveRecord.adapter.find(...)` carry concrete return
-  # types in the IR.
   def self.adapter: () -> ActiveRecord::AdapterInterface
   def self.adapter=: (ActiveRecord::AdapterInterface) -> ActiveRecord::AdapterInterface
 
