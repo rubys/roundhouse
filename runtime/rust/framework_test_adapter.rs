@@ -15,7 +15,7 @@
 //!      pre-assign ids: `insert("stubs", id: 7)`); the production
 //!      sqlite adapter always autogenerates via `last_insert_rowid()`.
 
-use crate::active_record_adapter::ActiveRecordAdapter;
+use crate::active_record_adapter::{ActiveRecordAdapter, Row};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -81,33 +81,27 @@ impl Default for FrameworkTestAdapter {
 }
 
 impl ActiveRecordAdapter for FrameworkTestAdapter {
-    fn all(&self, table_name: String) -> Vec<Value> {
+    fn all(&self, table_name: String) -> Vec<Row> {
         let s = self.inner.lock().expect("framework test adapter lock");
         match s.tables.get(&table_name) {
-            Some(t) => t
-                .values()
-                .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
-                .collect(),
+            Some(t) => t.values().cloned().collect(),
             None => Vec::new(),
         }
     }
 
-    fn find(&self, table_name: String, id: i64) -> Option<Value> {
+    fn find(&self, table_name: String, id: i64) -> Option<Row> {
         let s = self.inner.lock().expect("framework test adapter lock");
-        s.tables
-            .get(&table_name)
-            .and_then(|t| t.get(&id))
-            .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
+        s.tables.get(&table_name).and_then(|t| t.get(&id)).cloned()
     }
 
-    fn r#where(&self, table_name: String, conditions: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, table_name: String, conditions: HashMap<String, Value>) -> Vec<Row> {
         let s = self.inner.lock().expect("framework test adapter lock");
         let Some(t) = s.tables.get(&table_name) else {
             return Vec::new();
         };
         t.values()
             .filter(|row| conditions.iter().all(|(k, v)| row.get(k) == Some(v)))
-            .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
+            .cloned()
             .collect()
     }
 

@@ -664,7 +664,29 @@ fn emit_expr_inner(e: &Expr) -> String {
             // `self.field.clone()`.
             let mut lines = Vec::with_capacity(exprs.len());
             let last = exprs.len().saturating_sub(1);
-            for (i, e) in exprs.iter().enumerate() {
+            let mut i = 0;
+            while i < exprs.len() {
+                // Guard-clause let-else fusion: detect
+                //   let x = OPT;
+                //   if x.nil? { return nil };  (or raise, etc.)
+                //   ... uses of x narrowed to non-nil ...
+                // and emit as
+                //   let Some(x) = OPT else { return None };
+                // The body-typer narrows `x` to non-nil for the
+                // subsequent statements (see body/mod.rs Seq's
+                // diverging-then narrowing), but `let mut x = OPT`
+                // in Rust source still types as `Option<T>` and
+                // subsequent reads fail E0308. The let-else form
+                // hands Rust the same narrowing the body-typer has
+                // already proven, no `.unwrap()` or rebind required.
+                if i + 1 <= last {
+                    if let Some(rendered) = try_fuse_let_else(&exprs[i], &exprs[i + 1]) {
+                        lines.push(format!("{rendered};"));
+                        i += 2;
+                        continue;
+                    }
+                }
+                let e = &exprs[i];
                 let s = if i == last {
                     emit_expr_tail(e)
                 } else {
@@ -675,6 +697,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                 } else {
                     lines.push(format!("{s};"));
                 }
+                i += 1;
             }
             lines.join("\n")
         }
@@ -789,6 +812,74 @@ fn emit_expr_inner(e: &Expr) -> String {
         // file in Phase 2 expands this until full coverage.
         other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
     }
+}
+
+/// Detect the Ruby idiom
+///   x = OPT
+///   return ... if x.nil?
+/// (or `raise ... if x.nil?`) — two adjacent Seq statements where the
+/// first assigns a local from an Option-typed expression and the
+/// second is a guard `if` whose then-branch diverges and whose
+/// else-branch is empty. Emit as
+///   let Some(x) = <opt> else { <then-branch> };
+/// The body-typer's flow-narrowing already proves the rest of the
+/// block sees `x` as non-nil; let-else gives Rust the same shape
+/// without an extra `.unwrap()` rebind.
+fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<String> {
+    use crate::ty::Ty;
+    // Stmt 0 must be a let assignment to a local Var whose RHS has
+    // Option-shaped type (Union<T, Nil>).
+    let ExprNode::Assign { target, value } = &*assign.node else {
+        return None;
+    };
+    let LValue::Var { name: assign_name, .. } = target else {
+        return None;
+    };
+    let value_is_option = matches!(
+        value.ty.as_ref(),
+        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
+    );
+    if !value_is_option {
+        return None;
+    }
+
+    // Stmt 1 must be an If whose:
+    //   - cond is `<assign_name>.nil?`
+    //   - then-branch diverges (typed Bottom — Return/Raise produce that)
+    //   - else-branch is Nil-shaped (empty, the `if cond; ...; end` form)
+    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
+        return None;
+    };
+    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name: cond_name, .. } = &*cond_recv.node else {
+        return None;
+    };
+    if cond_name != assign_name {
+        return None;
+    }
+    let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
+    let else_is_nil = matches!(
+        &*else_branch.node,
+        ExprNode::Lit { value: Literal::Nil }
+    );
+    if !then_diverges || !else_is_nil {
+        return None;
+    }
+
+    let value_s = emit_expr(value);
+    // The then-branch is divergent — its emit shape is a Return/Raise
+    // statement. `emit_expr_tail` produces e.g. `return None` or
+    // `panic!(...)`; either works as the body of a let-else block.
+    let diverge_s = emit_expr_tail(then_branch);
+    Some(format!(
+        "let Some({}) = {value_s} else {{ {diverge_s} }}",
+        assign_name.as_str()
+    ))
 }
 
 /// Indent every line of `s` by `level` four-space blocks. Used for

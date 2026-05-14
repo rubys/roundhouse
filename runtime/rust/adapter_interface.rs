@@ -29,17 +29,17 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::active_record_adapter::ActiveRecordAdapter;
+use crate::active_record_adapter::{ActiveRecordAdapter, Row};
 
 struct NotConfigured;
 impl ActiveRecordAdapter for NotConfigured {
-    fn all(&self, _t: String) -> Vec<Value> {
+    fn all(&self, _t: String) -> Vec<Row> {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn find(&self, _t: String, _id: i64) -> Option<Value> {
+    fn find(&self, _t: String, _id: i64) -> Option<Row> {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn r#where(&self, _t: String, _c: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, _t: String, _c: HashMap<String, Value>) -> Vec<Row> {
         panic!("ActiveRecord.adapter was not set before use")
     }
     fn count(&self, _t: String) -> i64 {
@@ -81,13 +81,13 @@ impl AdapterInterface {
 }
 
 impl ActiveRecordAdapter for AdapterInterface {
-    fn all(&self, t: String) -> Vec<Value> {
+    fn all(&self, t: String) -> Vec<Row> {
         self.0.all(t)
     }
-    fn find(&self, t: String, id: i64) -> Option<Value> {
+    fn find(&self, t: String, id: i64) -> Option<Row> {
         self.0.find(t, id)
     }
-    fn r#where(&self, t: String, c: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, t: String, c: HashMap<String, Value>) -> Vec<Row> {
         self.0.r#where(t, c)
     }
     fn count(&self, t: String) -> i64 {
