@@ -970,6 +970,23 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // because the lowerer hasn't synthesized an LValue::Index for it).
     if let Some(r) = recv {
         if method == "[]" && args.len() == 1 {
+            // Slice/Vec indexing needs `usize`. Ruby integers (including
+            // numeric loop counters like `let mut i = 0_i64`) lower to
+            // `i64`; without a cast the `Index<i64>` impl is missing
+            // and rustc rejects with E0277. Recv-type-aware: only
+            // fires when recv is Ty::Array and the index expression's
+            // Ty is Ty::Int. HashMap indexing keeps the bare form
+            // (HashMap<K, V> indexes by &K, the user-supplied key
+            // is already the right type).
+            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
+                && matches!(args[0].ty.as_ref(), Some(crate::ty::Ty::Int))
+            {
+                return format!(
+                    "{}[({}) as usize]",
+                    emit_expr(r),
+                    emit_expr(&args[0])
+                );
+            }
             return format!("{}[{}]", emit_expr(r), emit_expr(&args[0]));
         }
         // Ruby `String#[](start, length)` — byte-slice with start +
@@ -1081,6 +1098,26 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             let recv_s = emit_expr(r);
             let sep_s = emit_expr(&args[0]);
             return format!("{recv_s}.split({sep_s}).collect::<Vec<&str>>()");
+        }
+        // `arr.length` / `str.length` — Ruby returns Integer.
+        // Rust's `.len()` returns `usize`, but Ruby Integers lower
+        // to `i64` everywhere else (`while i < arr.length`, `if
+        // arr.length == 0`). Emit as `(recv.len() as i64)` on
+        // sized receivers so downstream i64 arithmetic / comparison
+        // compiles without a per-call-site widen. Untyped receivers
+        // fall through to the generic `.length -> .len()` bridge
+        // (their value-shape may not even support `.len()`).
+        if method == "length"
+            && args.is_empty()
+            && matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { .. })
+                    | Some(crate::ty::Ty::Hash { .. })
+                    | Some(crate::ty::Ty::Str)
+                    | Some(crate::ty::Ty::Sym)
+            )
+        {
+            return format!("({}.len() as i64)", emit_expr(r));
         }
         // `str.capitalize` — Ruby's "first letter uppercase, rest
         // lowercase". Rust's String has no direct analog; inline a
