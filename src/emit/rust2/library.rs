@@ -103,6 +103,13 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
             matches!(m.receiver, MethodReceiver::Instance)
                 && m.name.as_str() != "initialize"
                 && !method_reads_self(&m.body)
+                // Abstract-stub bodies (just `raise NotImplementedError`)
+                // are the per-class contract markers. They don't read
+                // self by construction, but per-model subclasses override
+                // them — and callers reach the overrides through
+                // instance dispatch (`record.dom_prefix()`). Classify
+                // those as `&self` methods so the call site resolves.
+                && !is_raise_only_body(&m.body)
         })
         .map(|m| m.name.as_str().to_string())
         .collect();
@@ -239,6 +246,29 @@ fn emit_module_singleton(
     body_result?;
     out.push_str("}\n");
     Ok(out)
+}
+
+/// `true` when the method body is a bare `raise X` call. The ingest
+/// pipeline parses Ruby `raise NotImplementedError, "..."` as
+/// `Send { recv: None, method: "raise", args: [...] }`, NOT as
+/// `ExprNode::Raise` (which is unused in this codebase). Abstract-
+/// contract stubs (the `raise NotImplementedError, "..."` convention
+/// in `runtime/ruby/`) satisfy this — they're meant to be overridden,
+/// and call sites reach the overrides through `record.method()`
+/// instance dispatch. Classifying those as static would break that
+/// dispatch path (associated-function call form only).
+fn is_raise_only_body(body: &Expr) -> bool {
+    fn is_raise_send(e: &Expr) -> bool {
+        matches!(
+            &*e.node,
+            ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise"
+        )
+    }
+    match &*body.node {
+        ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise" => true,
+        ExprNode::Seq { exprs } if exprs.len() == 1 => is_raise_send(&exprs[0]),
+        _ => false,
+    }
 }
 
 /// Static-method probe: returns `true` when the method body
