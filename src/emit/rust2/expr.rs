@@ -1256,6 +1256,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         {
             return format!("({}.len() as i64)", emit_expr(r));
         }
+        // Recv-Ty-aware method bridge — mirrors the structure of
+        // `typescript/expr.rs`'s match-on-recv-ty around lines
+        // 1972–2245. Each Ruby method on Array/Str/Sym/Hash gets a
+        // Rust-shaped lowering; unrecognized names fall through to
+        // the generic dispatch + rewrite_method_name table below.
+        // Recv-aware so user-defined methods of the same name on
+        // other types still resolve through the regular path.
+        if let Some(rendered) = dispatch_method_by_recv_ty(r, method, args) {
+            return rendered;
+        }
         // `str.capitalize` — Ruby's "first letter uppercase, rest
         // lowercase". Rust's String has no direct analog; inline a
         // small block that chains uppercase-first + lowercase-rest.
@@ -1390,6 +1400,120 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     }
 }
 
+/// Recv-Ty-aware method bridges — Ruby method calls whose Rust
+/// analog differs by receiver type. Mirrors the structure of
+/// `typescript/expr.rs`'s recv-ty match block (around lines
+/// 1972–2245). Returns `Some(emitted)` when a bridge fires; `None`
+/// when the recv ty / method combo isn't handled here and should
+/// fall through to the generic dispatch path.
+///
+/// Predicates retain their trailing `?` at this level — the
+/// generic `rewrite_method_name` does the suffix strip later, but
+/// the Ty-aware bridges match on the Ruby-shape names directly.
+///
+/// Where Ruby methods return Integer (`.length`, `.size`, `.count`),
+/// the bridge inserts `(... as i64)` so downstream arithmetic /
+/// comparisons against Ruby loop counters (`let mut i = 0_i64`)
+/// compile without per-callsite widens.
+fn dispatch_method_by_recv_ty(
+    recv: &Expr,
+    method: &str,
+    args: &[Expr],
+) -> Option<String> {
+    use crate::ty::Ty;
+    let recv_s = emit_expr(recv);
+    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    match recv.ty.as_ref() {
+        Some(Ty::Array { .. }) => match method {
+            "size" | "length" | "count" if args.is_empty() => {
+                Some(format!("({recv_s}.len() as i64)"))
+            }
+            "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
+            "any?" if args.is_empty() => Some(format!("!{recv_s}.is_empty()")),
+            // `first` / `last` on Vec return Option<&T>; `.cloned()`
+            // gives Option<T> matching Ruby's nil-or-value semantics.
+            "first" if args.is_empty() => Some(format!("{recv_s}.first().cloned()")),
+            "last" if args.is_empty() => Some(format!("{recv_s}.last().cloned()")),
+            // `to_a` on an Array is the identity in Ruby.
+            "to_a" if args.is_empty() => Some(recv_s.clone()),
+            // `reverse` / `sort` return new arrays in Ruby. Clone-
+            // then-mutate keeps the receiver intact and produces an
+            // owned Vec the caller can pass on.
+            "reverse" if args.is_empty() => Some(format!(
+                "{{ let mut __v = {recv_s}.clone(); __v.reverse(); __v }}"
+            )),
+            "sort" if args.is_empty() => Some(format!(
+                "{{ let mut __v = {recv_s}.clone(); __v.sort(); __v }}"
+            )),
+            // `join` — Ruby's no-arg default is `$,` (typically nil
+            // → ""); explicit `""` matches that. Single-arg form
+            // delegates to the Rust `Vec::join` which accepts &str.
+            "join" if args.is_empty() => Some(format!("{recv_s}.join(\"\")")),
+            "join" if args.len() == 1 => {
+                Some(format!("{recv_s}.join({})", args_s[0]))
+            }
+            _ => None,
+        },
+        Some(Ty::Str) | Some(Ty::Sym) => match method {
+            "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
+            "size" | "length" if args.is_empty() => {
+                Some(format!("({recv_s}.len() as i64)"))
+            }
+            "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
+            "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
+            // `strip` → `trim()` returns &str; `.to_string()` forces
+            // owned to match Ruby's `String#strip` return shape.
+            "strip" if args.is_empty() => {
+                Some(format!("{recv_s}.trim().to_string()"))
+            }
+            // `reverse` on String — Rust has no direct method;
+            // `.chars().rev().collect::<String>()` matches Ruby's
+            // codepoint-reversal semantics.
+            "reverse" if args.is_empty() => Some(format!(
+                "{recv_s}.chars().rev().collect::<String>()"
+            )),
+            // `chars` returns Array<String> in Ruby; mirror with
+            // `Vec<String>` (each char converted to a one-char String).
+            "chars" if args.is_empty() => Some(format!(
+                "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
+            )),
+            "start_with?" if args.len() == 1 => {
+                Some(format!("{recv_s}.starts_with({})", args_s[0]))
+            }
+            "end_with?" if args.len() == 1 => {
+                Some(format!("{recv_s}.ends_with({})", args_s[0]))
+            }
+            "include?" if args.len() == 1 => {
+                Some(format!("{recv_s}.contains({})", args_s[0]))
+            }
+            _ => None,
+        },
+        Some(Ty::Hash { .. }) => match method {
+            // `key?` / `has_key?` / `include?` all probe key
+            // presence on a Hash. HashMap has `contains_key`.
+            "key?" | "has_key?" | "include?" if args.len() == 1 => {
+                Some(format!("{recv_s}.contains_key({})", args_s[0]))
+            }
+            "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
+            "any?" if args.is_empty() => Some(format!("!{recv_s}.is_empty()")),
+            "size" | "length" if args.is_empty() => {
+                Some(format!("({recv_s}.len() as i64)"))
+            }
+            "keys" if args.is_empty() => Some(format!(
+                "{recv_s}.keys().cloned().collect::<Vec<_>>()"
+            )),
+            "values" if args.is_empty() => Some(format!(
+                "{recv_s}.values().cloned().collect::<Vec<_>>()"
+            )),
+            // `dup` / `clone` make a shallow copy. HashMap::clone()
+            // matches both.
+            "dup" | "clone" if args.is_empty() => Some(format!("{recv_s}.clone()")),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Ruby method names → Rust analog. Generic (recv-type-agnostic)
 /// table; a richer pass keyed on the receiver's `Ty` can layer on
 /// later when ambiguities show up in real emit. The `?` / `!` strip
@@ -1406,20 +1530,6 @@ fn rewrite_method_name(m: &str) -> String {
         "has_key?" => "contains_key",
         "include?" => "contains",
         "delete" => "remove",
-        // Ruby String predicates spelled without the final `s`.
-        // The body-typer strips trailing `?` before this match runs,
-        // so the names land here without their predicate marker.
-        "start_with" => "starts_with",
-        "end_with" => "ends_with",
-        // Ruby casing methods. Rust's `to_uppercase` / `to_lowercase`
-        // on &str / String return String, matching Ruby's
-        // `.upcase` / `.downcase` semantics.
-        "upcase" => "to_uppercase",
-        "downcase" => "to_lowercase",
-        // Ruby Hash#dup makes a shallow copy. HashMap doesn't have
-        // `.dup` but `.clone()` is the same shape and produces a
-        // new owned HashMap with the same entries.
-        "dup" => "clone",
         other => other,
     };
     sanitize_ident(bridged)
