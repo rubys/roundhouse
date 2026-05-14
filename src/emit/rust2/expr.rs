@@ -1400,15 +1400,15 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         // `.get(K) -> Option<&V>`; bridge via `.cloned()` (nil
         // default; `Option::None` unifies trivially) or
         // `.cloned().unwrap_or(default)` otherwise. Recv must be a
-        // Ty::Hash that's a real value at the call site — skip
-        // Const-typed receivers (e.g. `STATUS_CODES.fetch(...)` where
-        // STATUS_CODES is an emit-time top-level Hash constant whose
-        // `pub const` declaration is still a TODO; the legacy `::`
-        // form was already broken there).
+        // Ty::Hash that's a real value at the call site.
+        // Const receivers (e.g. `STATUS_CODES.fetch(...)`) are
+        // accepted now that module-level Hash constants emit as
+        // `static NAME: LazyLock<HashMap<...>>` — the LazyLock
+        // auto-deref makes `STATUS_CODES.get(&k)` resolve through to
+        // the inner HashMap.
         if method == "fetch"
             && args.len() == 2
             && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Hash { .. }))
-            && !matches!(&*r.node, ExprNode::Const { .. })
         {
             let recv_s = emit_expr(r);
             let key_s = emit_expr(&args[0]);

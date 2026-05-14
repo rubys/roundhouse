@@ -10,7 +10,7 @@ use std::fmt::Write;
 use super::method::{emit_instance_method, emit_module_method};
 use super::ty::rust_ty;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, Literal, LValue};
 use crate::ty::Ty;
 
 /// Module mode — flat list of `def self.*` helpers (e.g.
@@ -512,17 +512,128 @@ fn is_comparison_method(m: &str) -> bool {
 }
 
 /// Top-level constant declaration. Crystal: `NAME = VALUE`. TS:
-/// `const NAME = VALUE;`. Rust: `pub const NAME: T = VALUE;` — but
-/// the type and value rendering depends on the expression. Phase
-/// 2.1 stub returns a TODO; runtime files that use module-level
-/// constants land in Phase 2.9 (view_helpers).
-pub fn format_constant(name: &str, value: &str) -> String {
-    format!("// TODO rust2 const: pub const {name}: _ = {value};")
+/// `const NAME = VALUE;`. Rust picks a declaration shape per value
+/// kind — `pub const NAME: T = V;` for scalars, `static NAME:
+/// LazyLock<HashMap<K, V>> = LazyLock::new(|| HashMap::from([...]))`
+/// for Hash literals, `static NAME: LazyLock<Regex> = LazyLock::new(|| ...)`
+/// for regex literals. Fully-qualified paths (`std::sync::LazyLock`,
+/// `regex::Regex`) avoid per-file imports — the rust2 emit table
+/// doesn't pre-declare them and constants are emitted before classes.
+pub fn format_constant(name: &str, value: &Expr) -> String {
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Int { value: v } } => {
+            format!("pub const {name}: i64 = {v}_i64;")
+        }
+        ExprNode::Lit { value: Literal::Float { value: v } } => {
+            let s = v.to_string();
+            let lit = if s.contains('.') { s } else { format!("{s}.0") };
+            format!("pub const {name}: f64 = {lit};")
+        }
+        ExprNode::Lit { value: Literal::Bool { value: v } } => {
+            format!("pub const {name}: bool = {v};")
+        }
+        ExprNode::Lit { value: Literal::Str { value: v } } => {
+            format!("pub const {name}: &str = {v:?};")
+        }
+        ExprNode::Lit { value: Literal::Sym { value: v } } => {
+            format!("pub const {name}: &str = {:?};", v.as_str())
+        }
+        ExprNode::Lit { value: Literal::Regex { pattern, .. } } => {
+            // Use a raw string for the pattern so backslashes don't
+            // need re-escaping. Ruby's regex syntax differs from
+            // Rust's regex crate in some edge cases (lookbehind,
+            // named captures); the framework Ruby's regex usage is
+            // limited to character classes today, which both crates
+            // share.
+            format!(
+                "static {name}: std::sync::LazyLock<regex::Regex> = \
+                 std::sync::LazyLock::new(|| regex::Regex::new({pattern:?}).unwrap());"
+            )
+        }
+        ExprNode::Hash { entries, .. } => format_hash_constant(name, entries),
+        ExprNode::Array { elements, .. } => format_array_constant(name, elements),
+        _ => format!("// TODO rust2 const: {name} = {:?}", value.node),
+    }
 }
 
-/// Expression emit for runtime-side constant value rendering.
-/// Phase 2.1 stub; constants land in Phase 2.9 (view_helpers
-/// HTML_ESCAPES).
-pub fn emit_expr_for_runtime(_e: &Expr) -> String {
-    "/* TODO rust2: emit_expr_for_runtime */".to_string()
+fn format_hash_constant(name: &str, entries: &[(Expr, Expr)]) -> String {
+    // Infer key/value types from the first entry. The body-typer's
+    // Hash literal inference unifies across entries, so all keys and
+    // all values share a type — sampling [0] is enough.
+    let (key_ty, val_ty) = match entries.first() {
+        Some((k, v)) => (rust_ty_for_constant_key(k), rust_ty_for_constant(v)),
+        None => ("&'static str".to_string(), "&'static str".to_string()),
+    };
+    let mut pairs: Vec<String> = Vec::new();
+    for (k, v) in entries {
+        let k_s = render_constant_key(k);
+        let v_s = render_constant_value(v);
+        pairs.push(format!("({k_s}, {v_s})"));
+    }
+    let pairs_s = pairs.join(", ");
+    format!(
+        "static {name}: std::sync::LazyLock<std::collections::HashMap<{key_ty}, {val_ty}>> = \
+         std::sync::LazyLock::new(|| std::collections::HashMap::from([{pairs_s}]));"
+    )
+}
+
+fn format_array_constant(name: &str, elements: &[Expr]) -> String {
+    let elem_ty = match elements.first() {
+        Some(e) => rust_ty_for_constant(e),
+        None => "&'static str".to_string(),
+    };
+    let items: Vec<String> = elements.iter().map(render_constant_value).collect();
+    let items_s = items.join(", ");
+    format!(
+        "static {name}: std::sync::LazyLock<Vec<{elem_ty}>> = \
+         std::sync::LazyLock::new(|| vec![{items_s}]);"
+    )
+}
+
+/// Hash key type — Symbol/String keys both become `&'static str` so
+/// `HashMap::get(&key)` from a runtime `&str` resolves. Other key
+/// shapes fall back to the value-type rule (untested but mechanical).
+fn rust_ty_for_constant_key(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { .. } } | ExprNode::Lit { value: Literal::Str { .. } } => {
+            "&'static str".to_string()
+        }
+        _ => rust_ty_for_constant(e),
+    }
+}
+
+fn rust_ty_for_constant(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Int { .. } } => "i64".to_string(),
+        ExprNode::Lit { value: Literal::Float { .. } } => "f64".to_string(),
+        ExprNode::Lit { value: Literal::Bool { .. } } => "bool".to_string(),
+        ExprNode::Lit { value: Literal::Str { .. } } => "&'static str".to_string(),
+        ExprNode::Lit { value: Literal::Sym { .. } } => "&'static str".to_string(),
+        _ => "&'static str".to_string(),
+    }
+}
+
+/// Render a constant key (Hash) as a Rust expression. Symbol keys
+/// become string literals (matching Ruby's source-level
+/// `Symbol#to_s`); string keys quote with `{:?}`-style escaping.
+fn render_constant_key(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        _ => render_constant_value(e),
+    }
+}
+
+fn render_constant_value(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Int { value } } => format!("{value}_i64"),
+        ExprNode::Lit { value: Literal::Float { value } } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
+        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        _ => format!("/* TODO rust2 const value: {:?} */", e.node),
+    }
 }

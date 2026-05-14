@@ -42,11 +42,14 @@ use std::path::PathBuf;
 pub struct TargetEmit {
     pub emit_module: fn(&[MethodDef]) -> Result<String, String>,
     pub emit_library_class: fn(&LibraryClass) -> Result<String, String>,
-    pub emit_expr_for_runtime: fn(&Expr) -> String,
     pub format_import: fn(name: &str, source: &str) -> String,
     /// Format a top-level constant declaration. TS: `const NAME = VALUE;`.
     /// Crystal: `NAME = VALUE` (no `const` keyword, no terminator).
-    pub format_constant: fn(name: &str, value_expr: &str) -> String,
+    /// Rust picks `pub const`, `pub static`, or `static LazyLock` based
+    /// on the value's IR shape — passing the Expr itself lets each
+    /// target decide internally instead of pattern-matching a
+    /// pre-rendered string.
+    pub format_constant: fn(name: &str, value: &Expr) -> String,
     /// Wrap a body in the target's namespace syntax. TS resolves
     /// namespaces through imports + qualified-name registration in
     /// treeshake, so this is a no-op (`namespace` arg ignored). Crystal
@@ -58,7 +61,6 @@ pub struct TargetEmit {
 const TS_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::typescript::emit_module,
     emit_library_class: crate::emit::typescript::emit_library_class,
-    emit_expr_for_runtime: crate::emit::typescript::emit_expr_for_runtime,
     format_import: ts_format_import,
     format_constant: ts_format_constant,
     wrap_namespace: ts_wrap_namespace,
@@ -74,14 +76,16 @@ fn ts_format_import(name: &str, source: &str) -> String {
     format!("import {{ {name} }} from \"{source}\";\n")
 }
 
-fn ts_format_constant(name: &str, value: &str) -> String {
-    format!("const {name} = {value};")
+fn ts_format_constant(name: &str, value: &Expr) -> String {
+    format!(
+        "const {name} = {};",
+        crate::emit::typescript::emit_expr_for_runtime(value)
+    )
 }
 
 const CRYSTAL_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::crystal::emit_module,
     emit_library_class: crate::emit::crystal::emit_library_class,
-    emit_expr_for_runtime: crate::emit::crystal::emit_expr_for_runtime,
     format_import: crystal_format_import,
     format_constant: crystal_format_constant,
     wrap_namespace: crystal_wrap_namespace,
@@ -139,16 +143,15 @@ fn crystal_format_import(_name: &str, source: &str) -> String {
 
 /// Crystal: top-level constant `NAME = VALUE` (no `const` keyword,
 /// no statement terminator).
-fn crystal_format_constant(name: &str, value: &str) -> String {
-    format!("{name} = {value}")
+fn crystal_format_constant(name: &str, value: &Expr) -> String {
+    format!("{name} = {}", crate::emit::crystal::emit_expr_for_runtime(value))
 }
 
 const RUST_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::rust2::library::emit_module,
     emit_library_class: crate::emit::rust2::library::emit_library_class,
-    emit_expr_for_runtime: crate::emit::rust2::library::emit_expr_for_runtime,
     format_import: rust_format_import,
-    format_constant: rust_format_constant,
+    format_constant: crate::emit::rust2::library::format_constant,
     wrap_namespace: rust_wrap_namespace,
 };
 
@@ -165,13 +168,6 @@ fn rust_format_import(name: &str, source: &str) -> String {
     format!("use crate::{source}::{name};\n")
 }
 
-/// Rust: `pub const NAME: T = VALUE;`. Phase 2.1 stub — type
-/// inference at constant declarations isn't trivial, so for now
-/// we emit a TODO comment until Phase 2.9 (view_helpers'
-/// HTML_ESCAPES) forces a real implementation.
-fn rust_format_constant(name: &str, value: &str) -> String {
-    format!("// TODO rust2 const: pub const {name}: _ = {value};")
-}
 
 /// Strategy: each entry picks one of two pipelines.
 ///
@@ -708,7 +704,7 @@ where
             for (name, value) in &constants {
                 body.push_str(&format!(
                     "{}\n",
-                    (target.format_constant)(name.as_str(), &(target.emit_expr_for_runtime)(value)),
+                    (target.format_constant)(name.as_str(), value),
                 ));
             }
             if !constants.is_empty() {
@@ -742,7 +738,7 @@ where
             for (name, value) in &constants {
                 body.push_str(&format!(
                     "{}\n",
-                    (target.format_constant)(name.as_str(), &(target.emit_expr_for_runtime)(value)),
+                    (target.format_constant)(name.as_str(), value),
                 ));
             }
             if !constants.is_empty() {
