@@ -1143,6 +1143,23 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // pluralize() in the inflector module). Implicit-self bare calls
     // emit as bare function calls.
     if recv.is_none() {
+        // `require "X"` inside a method body — Ruby's lazy load
+        // statement. Rust resolves cross-file deps through top-level
+        // `use` imports (the runtime_loader's `imports` field), so
+        // the inline `require` has nothing to do at runtime. Emit as
+        // a comment so the line stays inert.
+        if method == "require" {
+            let arg_repr = args_s.join(", ");
+            return format!("/* require({arg_repr}) — no-op in rust2 */");
+        }
+        // Ruby's class-method `new` (implicit-self call to Class#new
+        // inside a `def self.X` body). Lowers to `Send { recv: None,
+        // method: "new" }`. Rust analog inside an `impl Type` is
+        // `Self::new(args)` — the constructor's canonical Rust name
+        // (matches `emit_instance_method`'s `is_init` lowering).
+        if method == "new" && in_class_method() {
+            return format!("Self::new({})", args_s.join(", "));
+        }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
