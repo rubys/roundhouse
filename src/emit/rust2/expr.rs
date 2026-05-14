@@ -938,6 +938,28 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // Binary operators (==, !=, <, >, +, -, *, /) ingest as Send
     // with `method` as the operator name. Ruby `a == b` lowers to
     // `Send { recv: a, method: ==, args: [b] }`.
+    // Ruby's `+` on strings concatenates; Rust's `&str + &str`
+    // doesn't compile (need owned LHS), and `"a" + b + "c"` chains
+    // would need cascading allocations. Emit string concatenation
+    // as `format!("{}{}", a, b)` — handles every (&str, &str),
+    // (&str, String), (String, &str), and chained-format!s as
+    // single allocations through format_args!. Recv-type-aware: only
+    // fires on Ty::Str/Ty::Sym receivers; numeric `+` keeps its
+    // binary-operator emit below.
+    if method == "+"
+        && recv.is_some()
+        && args.len() == 1
+        && matches!(
+            recv.unwrap().ty.as_ref(),
+            Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
+        )
+    {
+        return format!(
+            "format!(\"{{}}{{}}\", {}, {})",
+            emit_expr(recv.unwrap()),
+            emit_expr(&args[0]),
+        );
+    }
     if matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/")
         && recv.is_some()
         && args.len() == 1
