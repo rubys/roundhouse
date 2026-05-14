@@ -81,9 +81,9 @@ impl Default for FrameworkTestAdapter {
 }
 
 impl ActiveRecordAdapter for FrameworkTestAdapter {
-    fn all(&self, table_name: &str) -> Vec<Value> {
+    fn all(&self, table_name: String) -> Vec<Value> {
         let s = self.inner.lock().expect("framework test adapter lock");
-        match s.tables.get(table_name) {
+        match s.tables.get(&table_name) {
             Some(t) => t
                 .values()
                 .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
@@ -92,17 +92,17 @@ impl ActiveRecordAdapter for FrameworkTestAdapter {
         }
     }
 
-    fn find(&self, table_name: &str, id: i64) -> Option<Value> {
+    fn find(&self, table_name: String, id: i64) -> Option<Value> {
         let s = self.inner.lock().expect("framework test adapter lock");
         s.tables
-            .get(table_name)
+            .get(&table_name)
             .and_then(|t| t.get(&id))
             .map(|row| Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
     }
 
-    fn r#where(&self, table_name: &str, conditions: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, table_name: String, conditions: HashMap<String, Value>) -> Vec<Value> {
         let s = self.inner.lock().expect("framework test adapter lock");
-        let Some(t) = s.tables.get(table_name) else {
+        let Some(t) = s.tables.get(&table_name) else {
             return Vec::new();
         };
         t.values()
@@ -111,37 +111,36 @@ impl ActiveRecordAdapter for FrameworkTestAdapter {
             .collect()
     }
 
-    fn count(&self, table_name: &str) -> i64 {
+    fn count(&self, table_name: String) -> i64 {
         let s = self.inner.lock().expect("framework test adapter lock");
-        s.tables.get(table_name).map_or(0, |t| t.len() as i64)
+        s.tables.get(&table_name).map_or(0, |t| t.len() as i64)
     }
 
-    fn exists(&self, table_name: &str, id: i64) -> bool {
+    fn exists(&self, table_name: String, id: i64) -> bool {
         let s = self.inner.lock().expect("framework test adapter lock");
         s.tables
-            .get(table_name)
+            .get(&table_name)
             .map_or(false, |t| t.contains_key(&id))
     }
 
-    fn insert(&self, table_name: &str, attributes: HashMap<String, Value>) -> i64 {
+    fn insert(&self, table_name: String, attributes: HashMap<String, Value>) -> i64 {
         let mut s = self.inner.lock().expect("framework test adapter lock");
-        if !s.tables.contains_key(table_name) {
+        if !s.tables.contains_key(&table_name) {
             panic!("table {table_name} not created");
         }
         let explicit = attributes.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-        let current = *s.next_ids.get(table_name).unwrap_or(&0);
+        let current = *s.next_ids.get(&table_name).unwrap_or(&0);
         let id = if explicit != 0 { explicit } else { current + 1 };
-        s.next_ids
-            .insert(table_name.to_string(), current.max(id));
+        s.next_ids.insert(table_name.clone(), current.max(id));
         let mut row = attributes;
         row.insert("id".to_string(), Value::from(id));
-        s.tables.get_mut(table_name).unwrap().insert(id, row);
+        s.tables.get_mut(&table_name).unwrap().insert(id, row);
         id
     }
 
-    fn update(&self, table_name: &str, id: i64, attributes: HashMap<String, Value>) {
+    fn update(&self, table_name: String, id: i64, attributes: HashMap<String, Value>) {
         let mut s = self.inner.lock().expect("framework test adapter lock");
-        let Some(t) = s.tables.get_mut(table_name) else {
+        let Some(t) = s.tables.get_mut(&table_name) else {
             return;
         };
         let Some(existing) = t.get_mut(&id) else {
@@ -153,16 +152,16 @@ impl ActiveRecordAdapter for FrameworkTestAdapter {
         existing.insert("id".to_string(), Value::from(id));
     }
 
-    fn delete(&self, table_name: &str, id: i64) {
+    fn delete(&self, table_name: String, id: i64) {
         let mut s = self.inner.lock().expect("framework test adapter lock");
-        if let Some(t) = s.tables.get_mut(table_name) {
+        if let Some(t) = s.tables.get_mut(&table_name) {
             t.remove(&id);
         }
     }
 
-    fn truncate(&self, table_name: &str) {
+    fn truncate(&self, table_name: String) {
         let mut s = self.inner.lock().expect("framework test adapter lock");
-        s.tables.insert(table_name.to_string(), HashMap::new());
-        s.next_ids.insert(table_name.to_string(), 0);
+        s.tables.insert(table_name.clone(), HashMap::new());
+        s.next_ids.insert(table_name, 0);
     }
 }

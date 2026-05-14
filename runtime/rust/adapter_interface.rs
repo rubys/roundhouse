@@ -33,31 +33,31 @@ use crate::active_record_adapter::ActiveRecordAdapter;
 
 struct NotConfigured;
 impl ActiveRecordAdapter for NotConfigured {
-    fn all(&self, _t: &str) -> Vec<Value> {
+    fn all(&self, _t: String) -> Vec<Value> {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn find(&self, _t: &str, _id: i64) -> Option<Value> {
+    fn find(&self, _t: String, _id: i64) -> Option<Value> {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn r#where(&self, _t: &str, _c: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, _t: String, _c: HashMap<String, Value>) -> Vec<Value> {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn count(&self, _t: &str) -> i64 {
+    fn count(&self, _t: String) -> i64 {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn exists(&self, _t: &str, _id: i64) -> bool {
+    fn exists(&self, _t: String, _id: i64) -> bool {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn insert(&self, _t: &str, _a: HashMap<String, Value>) -> i64 {
+    fn insert(&self, _t: String, _a: HashMap<String, Value>) -> i64 {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn update(&self, _t: &str, _id: i64, _a: HashMap<String, Value>) {
+    fn update(&self, _t: String, _id: i64, _a: HashMap<String, Value>) {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn delete(&self, _t: &str, _id: i64) {
+    fn delete(&self, _t: String, _id: i64) {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn truncate(&self, _t: &str) {
+    fn truncate(&self, _t: String) {
         panic!("ActiveRecord.adapter was not set before use")
     }
 }
@@ -81,31 +81,31 @@ impl AdapterInterface {
 }
 
 impl ActiveRecordAdapter for AdapterInterface {
-    fn all(&self, t: &str) -> Vec<Value> {
+    fn all(&self, t: String) -> Vec<Value> {
         self.0.all(t)
     }
-    fn find(&self, t: &str, id: i64) -> Option<Value> {
+    fn find(&self, t: String, id: i64) -> Option<Value> {
         self.0.find(t, id)
     }
-    fn r#where(&self, t: &str, c: HashMap<String, Value>) -> Vec<Value> {
+    fn r#where(&self, t: String, c: HashMap<String, Value>) -> Vec<Value> {
         self.0.r#where(t, c)
     }
-    fn count(&self, t: &str) -> i64 {
+    fn count(&self, t: String) -> i64 {
         self.0.count(t)
     }
-    fn exists(&self, t: &str, id: i64) -> bool {
+    fn exists(&self, t: String, id: i64) -> bool {
         self.0.exists(t, id)
     }
-    fn insert(&self, t: &str, a: HashMap<String, Value>) -> i64 {
+    fn insert(&self, t: String, a: HashMap<String, Value>) -> i64 {
         self.0.insert(t, a)
     }
-    fn update(&self, t: &str, id: i64, a: HashMap<String, Value>) {
+    fn update(&self, t: String, id: i64, a: HashMap<String, Value>) {
         self.0.update(t, id, a)
     }
-    fn delete(&self, t: &str, id: i64) {
+    fn delete(&self, t: String, id: i64) {
         self.0.delete(t, id)
     }
-    fn truncate(&self, t: &str) {
+    fn truncate(&self, t: String) {
         self.0.truncate(t)
     }
 }
