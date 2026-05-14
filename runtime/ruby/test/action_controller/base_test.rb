@@ -58,10 +58,11 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal 200, @controller.status
   end
 
-  def test_render_accepts_explicit_integer_status
-    @controller.render("err", status: 422)
-    assert_equal 422, @controller.status
-  end
+  # `render(..., status: 422)` (Integer literal) is no longer part of the
+  # public API. `status:` is monomorphic Symbol — callers needing an
+  # explicit integer code coerce at the call site. The contraction
+  # gives every backend compiler a stable input shape (see
+  # project_compilers_were_ready.md for the design rationale).
 
   def test_render_accepts_symbolic_status
     @controller.render("err", status: :unprocessable_entity)
@@ -114,16 +115,14 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal "", @controller.body
   end
 
-  def test_head_accepts_integer_status
-    @controller.head(404)
-    assert_equal 404, @controller.status
-  end
+  # `head(404)` (Integer literal) — same contraction as render's status:
+  # parameter. Symbol-only now.
 
   # ── resolve_status ──────────────────────────────────────────
 
-  def test_resolve_status_passes_integer_through
-    assert_equal 418, @controller.resolve_status(418)
-  end
+  # The Integer pass-through case (`resolve_status(418)`) is removed
+  # along with the `untyped` parameter; the Symbol-only contract makes
+  # `STATUS_CODES.fetch(s, 200)` the entire body.
 
   def test_resolve_status_maps_known_symbols
     assert_equal 200, @controller.resolve_status(:ok)

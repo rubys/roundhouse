@@ -59,7 +59,7 @@ module ActionController
     # `render :show, status: :created, location: @article` idiom for
     # POST 201 responses. Distinct from redirect_to (which uses a 3xx
     # status); main.rb dispatches on status, not on @location nil-ness.
-    def render(body, status: 200, content_type: nil, location: nil)
+    def render(body, status: :ok, content_type: nil, location: nil)
       @body   = body
       @status = resolve_status(status)
       @content_type = content_type unless content_type.nil?
@@ -93,8 +93,10 @@ module ActionController
       nil
     end
 
+    # Monomorphic on Symbol — real-blog never passes a literal Integer
+    # status, so the previous `is_a?(Integer)` pass-through branch is
+    # contracted away. Symbol -> Integer via the STATUS_CODES table.
     def resolve_status(s)
-      return s if s.is_a?(Integer)
       STATUS_CODES.fetch(s, 200)
     end
   end

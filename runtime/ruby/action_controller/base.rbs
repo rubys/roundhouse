@@ -48,31 +48,34 @@ module ActionController
     def process_action: (Symbol _action_name) -> void
 
     # `render(body, status:, content_type:, location:)` — sets @body,
-    # @status, and optionally @content_type / @location. Returns nil
-    # per Rails convention.
+    # @status, and optionally @content_type / @location. `status:` is
+    # monomorphic Symbol (was untyped Symbol|Integer; real-blog only
+    # passes Symbol forms — `:ok`, `:created`, `:unprocessable_entity`
+    # etc. — and STATUS_CODES maps them). Callers needing a literal
+    # integer code coerce upstream.
     def render: (
       String body,
-      ?status: untyped,
+      ?status: Symbol,
       ?content_type: String?,
       ?location: untyped
     ) -> void
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
-    # @status, @flash entries. `status` accepts Symbol or Integer
-    # (resolve_status handles both); declared `untyped` to match.
+    # @status, @flash entries. `status:` typed Symbol (see render).
     def redirect_to: (
       String path,
       ?notice: String?,
       ?alert: String?,
-      ?status: untyped
+      ?status: Symbol
     ) -> void
 
     # `head(:no_content, content_type: "application/json")` — empty
     # body, status only; content_type optional.
-    def head: (untyped status, ?content_type: String?) -> void
+    def head: (Symbol status, ?content_type: String?) -> void
 
-    # `s` may be Integer or Symbol. Body narrows via `is_a?(Integer)`;
-    # the Symbol branch reads STATUS_CODES.
-    def resolve_status: (untyped s) -> Integer
+    # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
+    # pass-through was previously supported via `is_a?(Integer)`
+    # narrowing; that branch is removed since real-blog never uses it.
+    def resolve_status: (Symbol s) -> Integer
   end
 end
