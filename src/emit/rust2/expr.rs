@@ -1437,6 +1437,47 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             let sep_s = emit_expr(&args[0]);
             return format!("{recv_s}.split({sep_s}).collect::<Vec<&str>>()");
         }
+        // `s.gsub(pattern, table)` with a `Ty::Class { Regexp }` first
+        // arg and a `Ty::Hash` second arg — the canonical Ruby idiom
+        // for table-driven character replacement (used by
+        // `view_helpers.html_escape` and `json_builder.encode_string`).
+        // Rust analog: `pattern.replace_all(&s, |caps| table[&caps[0]])`
+        // returning the owned String. The pattern is typically a
+        // module-level `LazyLock<Regex>` constant, the table a
+        // `LazyLock<HashMap<&'static str, &'static str>>` — both auto-
+        // deref to their inner types at the call site.
+        if method == "gsub"
+            && args.len() == 2
+            && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+            && matches!(
+                args[0].ty.as_ref().map(peel_nil),
+                Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+            )
+            && matches!(args[1].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Hash { .. }))
+        {
+            let recv_s = emit_expr(r);
+            let pat_s = emit_expr(&args[0]);
+            let table_s = emit_expr(&args[1]);
+            return format!(
+                "{pat_s}.replace_all(&{recv_s}, |__caps: &regex::Captures| -> String \
+                 {{ (*{table_s}.get(&__caps[0]).unwrap_or(&\"\")).to_string() }}).into_owned()"
+            );
+        }
+        // `s.gsub(needle, replacement)` — both String args. Ruby
+        // returns a new string with all occurrences substituted;
+        // Rust's `str::replace(needle, replacement)` is the direct
+        // analog (same all-occurrences semantics, returns owned String).
+        if method == "gsub"
+            && args.len() == 2
+            && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+            && matches!(args[0].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+            && matches!(args[1].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+        {
+            let recv_s = emit_expr(r);
+            let needle_s = emit_expr(&args[0]);
+            let repl_s = emit_expr(&args[1]);
+            return format!("{recv_s}.replace({needle_s}, {repl_s})");
+        }
         // `arr.length` / `str.length` — Ruby returns Integer.
         // Rust's `.len()` returns `usize`, but Ruby Integers lower
         // to `i64` everywhere else (`while i < arr.length`, `if

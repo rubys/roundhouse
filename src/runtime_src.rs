@@ -193,6 +193,16 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         let elem_ty = type_of_literal_node(&first)?;
         return Some(Ty::Array { elem: Box::new(elem_ty) });
     }
+    // Regex literal -> Ty::Class { Regexp }. The body-typer's existing
+    // Regexp dispatch (instance methods `match?`, `source`, etc.)
+    // resolves through this; per-target emit picks the appropriate
+    // regex shape (LazyLock<regex::Regex> in rust2, RegExp in TS, etc.).
+    if node.as_regular_expression_node().is_some() {
+        return Some(Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::new("Regexp")),
+            args: vec![],
+        });
+    }
     None
 }
 
