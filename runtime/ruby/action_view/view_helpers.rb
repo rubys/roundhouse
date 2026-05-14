@@ -69,18 +69,18 @@ module ActionView
   
     HTML_ESCAPE_PATTERN = /[&<>"']/.freeze
   
+    # Monomorphic: param typed String. Callers handle nil/non-String
+    # coercion explicitly. Contracts the dispatch surface so every
+    # backend compiler sees a stable input shape.
     def self.html_escape(s)
-      return "" if s.nil?
-      s.to_s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
+      s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
-  
+
     def self.truncate(s, length: 30, omission: "...")
-      return "" if s.nil?
-      str = s.to_s
-      return str if str.length <= length
+      return s if s.length <= length
       cutoff = length - omission.length
       cutoff = 0 if cutoff < 0
-      "#{str[0, cutoff]}#{omission}"
+      "#{s[0, cutoff]}#{omission}"
     end
   
     # ── DOM helpers ──────────────────────────────────────────────────
@@ -296,7 +296,9 @@ module ActionView
             id: "#{@model_name}_#{field}",
           }.merge(opts.to_h)
         )
-        "<textarea#{attrs}>#{ViewHelpers.html_escape(value)}</textarea>"
+        # `@model[field]` is untyped per Base#[]; coerce to String at
+        # the boundary so html_escape sees its String-typed contract.
+        "<textarea#{attrs}>#{ViewHelpers.html_escape(value.to_s)}</textarea>"
       end
   
       def submit(label = nil, opts = {})
@@ -373,10 +375,14 @@ module ActionView
           v.each do |inner_k, inner_v|
             next if inner_v.nil?
             inner_name = inner_k.to_s.tr("_", "-")
-            pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v)}\""
+            # Coerce untyped Hash values to String before html_escape;
+            # html_escape's contract is `(String) -> String` and the
+            # untyped values flowing through Hash[String, untyped]
+            # need explicit stringification.
+            pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
           end
         else
-          pairs << " #{name}=\"#{html_escape(v)}\""
+          pairs << " #{name}=\"#{html_escape(v.to_s)}\""
         end
       end
       pairs.join

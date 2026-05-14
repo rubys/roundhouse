@@ -57,9 +57,12 @@ class ViewHelpersTest < Minitest::Test
 
   # ── escaping / formatting ──────────────────────────────────
 
-  def test_html_escape_handles_nil
-    assert_equal "", ViewHelpers.html_escape(nil)
-  end
+  # html_escape was previously polymorphic (accepted nil and stringified
+  # internally). The monomorphic contract — `(String) -> String` —
+  # pushes that responsibility to callers. `render_attrs` and
+  # `text_area` (the only internal callers that previously passed
+  # non-String) now wrap values in `.to_s` at the call site. The
+  # nil-passing behavior is intentionally no longer supported.
 
   def test_html_escape_replaces_special_chars
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.html_escape("<b>hi</b>")
@@ -78,9 +81,9 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "abcdefg...", ViewHelpers.truncate("abcdefghijklmnop", length: 10)
   end
 
-  def test_truncate_handles_nil
-    assert_equal "", ViewHelpers.truncate(nil, length: 10)
-  end
+  # truncate is monomorphic — `(String, length:, omission:) -> String`.
+  # The previous nil-handling came with html_escape's nil-handling;
+  # both are now caller responsibility.
 
   def test_truncate_custom_omission
     assert_equal "abc[…]", ViewHelpers.truncate("abcdefghij", length: 6, omission: "[…]")

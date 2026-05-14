@@ -24,15 +24,22 @@ module ActionView
     def self.set_yield: (String content) -> void
   
     # ── escaping / formatting ───────────────────────────────────────
-  
-    # `s` is genuinely polymorphic (String, Integer, nil — anything the
-    # caller's interpolation produces). Body returns "" for nil and
-    # `s.to_s.gsub(...)` otherwise; result is always String.
-    def self.html_escape: (untyped s) -> String
-  
-    # `length:` and `omission:` are keyword args with defaults. `s`
-    # accepts nil; result is always String.
-    def self.truncate: (untyped s, ?length: Integer, ?omission: String) -> String
+
+    # Monomorphic by design: callers stringify before passing in. The
+    # body has no nil/Symbol coercion — every input is already a
+    # String. Internal callers (render_attrs, text_area) wrap their
+    # potentially-non-String values with `.to_s` at the call site
+    # rather than forcing html_escape to handle every shape. Trades
+    # caller-side discipline for a far simpler dispatch profile every
+    # backend compiler (V8, YJIT, ZJIT, Spinel, rustc) can specialize
+    # against.
+    def self.html_escape: (String s) -> String
+
+    # Same monomorphization rationale as html_escape: callers handle
+    # nil/non-String coercion explicitly. Real-blog's only caller
+    # passes `article.body` (typed String per the model RBS) so the
+    # contraction lands without source churn.
+    def self.truncate: (String s, ?length: Integer, ?omission: String) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Three call shapes:
@@ -48,11 +55,12 @@ module ActionView
     def self.record_dom_prefix: (untyped record) -> String
   
     # ── HTML element helpers ────────────────────────────────────────
-    # `text` is the link/button label (any value html_escape can stringify).
-    # `href` is the URL path. `opts` is the attribute hash (Symbol or
-    # String keys; values flatten through render_attrs).
-    def self.link_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
-    def self.button_to: (untyped text, String href, ?Hash[Symbol, untyped] opts) -> String
+    # `text` is the link/button label — typed String (was untyped).
+    # Callers passing a record or other value handle the stringify at
+    # the call site. `href` is the URL path. `opts` is the attribute
+    # hash (Symbol or String keys; values flatten through render_attrs).
+    def self.link_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
+    def self.button_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
   
     def self.csrf_meta_tags: () -> String
     def self.csp_meta_tag: () -> String
