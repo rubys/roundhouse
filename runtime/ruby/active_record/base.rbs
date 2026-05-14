@@ -69,6 +69,15 @@ module ActiveRecord
     def attributes: () -> Hash[Symbol, untyped]
     def assign_from_row: (Hash[String, untyped] _row) -> void
 
+    # Per-model DOM prefix (`"article"`, `"comment"`). Used by
+    # `ActionView::ViewHelpers.dom_id(record)` to build CSS-id strings
+    # like `"article_42"`. Synthesized per-model by the lowerer (see
+    # `push_dom_prefix_method` in `model_to_library`); the Base
+    # declaration here is abstract — the per-model body produces the
+    # actual constant string at transpile time.
+    %a{abstract}
+    def dom_prefix: () -> String
+
     # `[]/[]=` are defined on Base as raise-NotImplementedError
     # markers; subclasses (per-model emitted classes) override with
     # their column-specific indexer. The Base body is required so

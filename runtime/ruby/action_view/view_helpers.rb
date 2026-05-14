@@ -84,30 +84,27 @@ module ActionView
     end
   
     # ── DOM helpers ──────────────────────────────────────────────────
-  
-    def self.dom_id(prefix, id_or_suffix = nil)
-      # Discriminate on `prefix.is_a?(String)` first — Crystal's
-      # static type narrowing needs the type guard on `prefix` to
-      # know `prefix.id` is safe in the record branches. Ruby
-      # behavior is equivalent.
-      if prefix.is_a?(String)
-        # `dom_id("article", 42)` — explicit prefix + integer id
-        "#{prefix}_#{id_or_suffix}"
-      elsif id_or_suffix.nil?
-        # `dom_id(article)` — pass a record
-        "#{record_dom_prefix(prefix)}_#{prefix.id}"
+
+    # Monomorphic: param typed `ActiveRecord::Base`. Was previously a
+    # String|Base union dispatched via `prefix.is_a?(String)`; real-blog
+    # only ever calls it with a record, so the String branch is
+    # contracted away. Callers needing the explicit-prefix form spell it
+    # out directly: `"article_#{id}"`.
+    #
+    # The per-model class name (`"article"`, `"comment"`) reaches dom_id
+    # via `record.dom_prefix` — an instance method synthesized per-model
+    # by the lowerer. Replaces the previous `record.class.name.downcase`
+    # runtime introspection; the synthesizer knows the model name at
+    # transpile time so no compiler has to chase the reflection chain.
+    def self.dom_id(record, suffix = nil)
+      if suffix.nil?
+        # `dom_id(article)` -> "article_3"
+        "#{record.dom_prefix}_#{record.id}"
       else
-        # `dom_id(article, :comments_count)` — record + suffix.
-        # Rails puts the suffix BEFORE the model_name in the resulting
-        # id (e.g. `comments_count_article_3`), not after — match that
-        # order so cross-target compare passes.
-        "#{id_or_suffix}_#{record_dom_prefix(prefix)}_#{prefix.id}"
+        # `dom_id(article, :comments_count)` -> "comments_count_article_3"
+        # (Rails order: suffix BEFORE model name in the resulting id.)
+        "#{suffix}_#{record.dom_prefix}_#{record.id}"
       end
-    end
-  
-    def self.record_dom_prefix(record)
-      # Singularized class name; for the blog we just lowercase.
-      record.class.name.downcase
     end
   
     # ── HTML element helpers ─────────────────────────────────────────

@@ -39,7 +39,7 @@ use crate::ty::{Row, Ty};
 
 use self::associations::{push_association_methods, push_dependent_destroy};
 use self::broadcasts::push_broadcasts_methods;
-use self::markers::{push_block_callback_methods, push_unknown_marker_methods};
+use self::markers::{push_block_callback_methods, push_dom_prefix_method, push_unknown_marker_methods};
 use self::adapter_emit::push_adapter_methods;
 use self::schema::push_schema_methods;
 use self::validations::push_validate_method;
@@ -393,6 +393,7 @@ fn build_methods(
     push_association_methods(&mut methods, model);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
+    push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
     push_block_callback_methods(&mut methods, model);
 

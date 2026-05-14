@@ -42,17 +42,19 @@ module ActionView
     def self.truncate: (String s, ?length: Integer, ?omission: String) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
-    # Three call shapes:
-    #   dom_id(record)                  — prefix is a record, suffix nil
-    #   dom_id(record, :comments_count) — record + Symbol/String suffix
-    #   dom_id("article", 42)           — explicit String prefix + id
-    # `prefix` is genuinely polymorphic (record OR String); `id_or_suffix`
-    # is nil/Symbol/String/Integer. Result is always String.
-    def self.dom_id: (untyped prefix, ?untyped id_or_suffix) -> String
-  
-    # `record.class.name.downcase` — record is a model instance;
-    # accessing `.class.name` works on any object, so accept untyped.
-    def self.record_dom_prefix: (untyped record) -> String
+    # Monomorphic record-shape: dom_id takes an ActiveRecord::Base
+    # subclass instance (was String|Base; the String case is contracted
+    # away — callers wanting "article_42" spell it directly). Two call
+    # shapes:
+    #   dom_id(record)                  -> "article_42"
+    #   dom_id(record, :comments_count) -> "comments_count_article_42"
+    #
+    # The per-model class name reaches dom_id through `record.dom_prefix`
+    # — a synthesized per-model instance method (lowerer-emitted, see
+    # `push_dom_prefix_method` in model_to_library). This replaces the
+    # previous `record_dom_prefix(record)` helper that called
+    # `record.class.name.downcase` (runtime introspection).
+    def self.dom_id: (ActiveRecord::Base record, ?Symbol? suffix) -> String
   
     # ── HTML element helpers ────────────────────────────────────────
     # `text` is the link/button label — typed String (was untyped).

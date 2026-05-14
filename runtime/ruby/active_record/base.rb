@@ -159,6 +159,17 @@ module ActiveRecord
       raise NotImplementedError, "assign_from_row must be overridden by subclass"
     end
 
+    # Per-model DOM prefix string ("article", "comment", ...). The
+    # lowerer's `push_dom_prefix_method` synthesizes the actual constant-
+    # returning body per concrete model so `dom_id(record)` resolves to
+    # a known string at transpile time across every target (no
+    # `record.class.name.downcase` reflection chain). The Base body
+    # raises — calling `dom_prefix` on a bare ActiveRecord::Base would
+    # indicate the per-model synthesizer didn't run for this class.
+    def dom_prefix
+      raise NotImplementedError, "dom_prefix must be overridden by subclass"
+    end
+
     # ---- Persistence state ------------------------------------------
 
     def persisted?

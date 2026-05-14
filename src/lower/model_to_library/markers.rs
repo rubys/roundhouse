@@ -21,6 +21,35 @@ use crate::ty::Ty;
 
 use super::{fn_sig, seq, with_ty};
 
+/// Per-model `dom_prefix` instance method returning the snake_case
+/// model name as a String literal. Used by
+/// `ActionView::ViewHelpers.dom_id(record)` to build CSS-id strings
+/// at transpile time rather than via runtime introspection
+/// (`record.class.name.downcase` previously). The synthesizer runs for
+/// every concrete model — abstract bases (ApplicationRecord) get their
+/// dom_prefix from `runtime/ruby/active_record/base.rb`'s raise-stub
+/// since they're never instantiated directly.
+pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model) {
+    let prefix = crate::naming::snake_case(model.name.0.as_str());
+    methods.push(MethodDef {
+        name: Symbol::from("dom_prefix"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: prefix } },
+            ),
+            Ty::Str,
+        ),
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+    });
+}
+
 /// `primary_abstract_class` marks a model as the abstract base of a Rails
 /// app. Lowered to `def self.abstract?; true; end` — the explicit form
 /// spinel-blog's runtime expects.
