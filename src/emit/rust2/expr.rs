@@ -221,10 +221,19 @@ where
     let mut counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     collect_var_assign_counts(body, &mut counts);
-    let mut_vars: std::collections::HashSet<String> = counts
+    let mut mut_vars: std::collections::HashSet<String> = counts
         .into_iter()
         .filter_map(|(name, n)| if n > 1 { Some(name) } else { None })
         .collect();
+    // Vars used as the receiver of any Send call: the method may
+    // take `&mut self` (e.g. `instance.save()` on a freshly-bound
+    // `let instance = Self::new(...)`). Without `let mut`, the
+    // borrow checker rejects with E0596. Conservative — flags every
+    // method-receiver use as mut, even read-only ones. Rust emits a
+    // benign `unused_mut` warning for those; the alternative would
+    // require receiver-aware Ty inspection (whether `save` takes
+    // `&mut self` vs `&self`) which the body-typer doesn't surface.
+    collect_var_send_receivers(body, &mut mut_vars);
     let prev_mut = MUT_VARS.with(|c| c.replace(mut_vars));
     let prev_declared =
         DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
@@ -232,6 +241,59 @@ where
     MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
     DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
     r
+}
+
+fn collect_var_send_receivers(
+    e: &Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match &*e.node {
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                if let ExprNode::Var { name, .. } = &*r.node {
+                    out.insert(name.as_str().to_string());
+                }
+                collect_var_send_receivers(r, out);
+            }
+            args.iter().for_each(|a| collect_var_send_receivers(a, out));
+            if let Some(b) = block { collect_var_send_receivers(b, out); }
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_var_send_receivers(recv, out);
+            }
+            collect_var_send_receivers(value, out);
+        }
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_send_receivers(e, out)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_var_send_receivers(cond, out);
+            collect_var_send_receivers(then_branch, out);
+            collect_var_send_receivers(else_branch, out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_var_send_receivers(cond, out);
+            collect_var_send_receivers(body, out);
+        }
+        ExprNode::Return { value } => collect_var_send_receivers(value, out),
+        ExprNode::Hash { entries, .. } => entries.iter().for_each(|(k, v)| {
+            collect_var_send_receivers(k, out);
+            collect_var_send_receivers(v, out);
+        }),
+        ExprNode::Array { elements, .. } => {
+            elements.iter().for_each(|e| collect_var_send_receivers(e, out))
+        }
+        ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
+            if let InterpPart::Expr { expr } = p {
+                collect_var_send_receivers(expr, out);
+            }
+        }),
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_var_send_receivers(left, out);
+            collect_var_send_receivers(right, out);
+        }
+        ExprNode::Lambda { body, .. } => collect_var_send_receivers(body, out),
+        _ => {}
+    }
 }
 
 fn collect_var_assign_counts(
