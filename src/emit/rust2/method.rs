@@ -162,6 +162,46 @@ fn tail_expression(e: &crate::expr::Expr) -> &crate::expr::Expr {
     }
 }
 
+/// `true` when:
+///   - return type is an owned class type T (`Ty::Class { ... }`)
+///   - body's tail expression is `SelfRef` — i.e., the method ends
+///     in bare `self` to return the receiver
+/// The implicit receiver in instance methods is `&self` (or `&mut self`);
+/// returning bare `self` produces `&Base` / `&mut Base`, which
+/// doesn't match the owned `Base` return type. Wrapping the tail with
+/// `.clone()` resolves it (struct emit derives Clone).
+fn needs_function_tail_self_clone(body: &crate::expr::Expr, return_ty: Option<&Ty>) -> bool {
+    use crate::expr::ExprNode;
+    let return_is_owned_class = matches!(return_ty, Some(Ty::Class { .. }));
+    if !return_is_owned_class {
+        return false;
+    }
+    matches!(&*tail_expression(body).node, ExprNode::SelfRef)
+}
+
+/// Replace the last non-blank line `self` -> `self.clone()`. Leaves
+/// other tail shapes untouched (those go through different paths).
+fn clone_last_self_expression(body: &str) -> String {
+    let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
+    let last_idx = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+        .map(|(i, _)| i);
+    if let Some(idx) = last_idx {
+        let trimmed = lines[idx].trim_end_matches(';').to_string();
+        let leading: String = lines[idx]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect();
+        if trimmed.trim_start() == "self" {
+            lines[idx] = format!("{leading}self.clone()");
+        }
+    }
+    lines.join("\n")
+}
+
 /// Wrap the last non-blank line of the body string in `Some(...)`.
 /// The last line is the body's tail expression (single line or
 /// multi-line — the emit produces one Rust expression per body tail).
@@ -288,6 +328,11 @@ pub(super) fn emit_instance_method(
     // expr.rs as `return None`); this is for the implicit tail.
     let body = if !is_init && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
         wrap_last_expression_with_some(&body)
+    } else if !is_init && needs_function_tail_self_clone(&m.body, return_ty.as_ref()) {
+        // `def reload; ...; self; end` returning Base — `self` is
+        // `&self` / `&mut self`, but the return type is the owned
+        // `Base`. Clone the tail self to satisfy the owned shape.
+        clone_last_self_expression(&body)
     } else {
         body
     };

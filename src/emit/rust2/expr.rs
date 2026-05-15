@@ -781,8 +781,18 @@ fn emit_expr_inner(e: &Expr) -> String {
                         Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
                     )
                 });
+                // `return self` in a method declared `-> Base` (owned
+                // return). `self` is `&self` / `&mut self`; bare emit
+                // produces `return self` typed as `&Base` /
+                // `&mut Base`. Clone to satisfy the owned return type.
+                let needs_self_clone = matches!(&*value.node, ExprNode::SelfRef)
+                    && CURRENT_RETURN_TY.with(|c| {
+                        matches!(c.borrow().as_ref(), Some(crate::ty::Ty::Class { .. }))
+                    });
                 if needs_to_string {
                     format!("return {}.to_string()", emit_expr_tail(value))
+                } else if needs_self_clone {
+                    "return self.clone()".to_string()
                 } else {
                     format!("return {}", emit_expr_tail(value))
                 }
