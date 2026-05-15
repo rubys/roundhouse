@@ -57,7 +57,7 @@ module ActionController
       String body,
       ?status: Symbol,
       ?content_type: String?,
-      ?location: untyped
+      ?location: String?
     ) -> void
 
     # `redirect_to(path, notice:, alert:, status:)` — sets @location,
