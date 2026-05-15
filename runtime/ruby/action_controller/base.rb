@@ -20,6 +20,10 @@ module ActionController
     forbidden:             403,
     not_found:             404,
     unprocessable_entity:  422,
+    # Rails 8.1.x scaffold renamed `:unprocessable_entity` →
+    # `:unprocessable_content` mid-version. Alias both so emit follows
+    # whichever the fixture's scaffold currently produces.
+    unprocessable_content: 422,
     internal_server_error: 500,
   }.freeze
 

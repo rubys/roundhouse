@@ -130,7 +130,7 @@ fn emit_go_ctrl_test_send(
         }
         Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
             "success" => "resp.AssertOk()".to_string(),
-            "unprocessable_entity" => "resp.AssertUnprocessable()".to_string(),
+            "unprocessable_entity" | "unprocessable_content" => "resp.AssertUnprocessable()".to_string(),
             other => format!("resp.AssertStatus(200) // TODO: {other:?}"),
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {

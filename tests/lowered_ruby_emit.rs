@@ -845,17 +845,29 @@ fn controllers_new_action_views_call_uses_action_name_not_method_name() {
 #[test]
 fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
     // create's `respond_to` block has the HTML-branch
-    // `render :new, status: :unprocessable_entity` after unwrap_respond_to.
+    // `render :new, status: :unprocessable_*` after unwrap_respond_to.
     // Should rewrite to `render(Views::Articles.new(@article), status: ...)`.
+    // Rails 8.1.x scaffold renamed `:unprocessable_entity` →
+    // `:unprocessable_content` mid-version; accept either since the
+    // fixture's exact keyword depends on which point release of Rails
+    // generate-fixture's `gem install rails` resolved.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
+    let create_entity =
+        "render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
+    let create_content =
+        "render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
     assert!(
-        src.contains("render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)"),
+        src.contains(create_entity) || src.contains(create_content),
         "expected Views call in create's else branch; got:\n{src}",
     );
-    // update has the parallel `render :edit, status: :unprocessable_entity`.
+    // update has the parallel `render :edit, status: :unprocessable_*`.
+    let update_entity =
+        "render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
+    let update_content =
+        "render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
     assert!(
-        src.contains("render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)"),
+        src.contains(update_entity) || src.contains(update_content),
         "expected Views call in update's else branch; got:\n{src}",
     );
 }

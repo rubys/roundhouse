@@ -89,7 +89,7 @@ pub fn status_sym_to_code(sym: &str) -> u16 {
         "bad_request" => 400,
         "unauthorized" => 401,
         "not_found" => 404,
-        "unprocessable_entity" => 422,
+        "unprocessable_entity" | "unprocessable_content" => 422,
         _ => 500,
     }
 }

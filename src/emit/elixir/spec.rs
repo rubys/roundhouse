@@ -526,7 +526,7 @@ fn emit_ex_ctrl_test_send(
         }
         Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
             "success" => "TestResponse.assert_ok(resp)".to_string(),
-            "unprocessable_entity" => "TestResponse.assert_unprocessable(resp)".to_string(),
+            "unprocessable_entity" | "unprocessable_content" => "TestResponse.assert_unprocessable(resp)".to_string(),
             other => format!("TestResponse.assert_status(resp, 200) # TODO: {other:?}"),
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {

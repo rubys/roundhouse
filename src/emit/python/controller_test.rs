@@ -107,7 +107,7 @@ fn emit_py_ctrl_test_send(
         }
         Some(ControllerTestSend::AssertResponse { sym }) => match sym.as_str() {
             "success" => "resp.assert_ok()".to_string(),
-            "unprocessable_entity" => "resp.assert_unprocessable()".to_string(),
+            "unprocessable_entity" | "unprocessable_content" => "resp.assert_unprocessable()".to_string(),
             other => format!("resp.assert_status(200)  # TODO: {other:?}"),
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {

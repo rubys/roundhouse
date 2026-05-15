@@ -329,6 +329,9 @@ const RESPONSE_SYMBOLS: Record<string, number> = {
   forbidden: 403,
   not_found: 404,
   unprocessable_entity: 422,
+  // Alias for Rails 8.1.x scaffold's `:unprocessable_content` rename;
+  // see runtime/typescript/minitest.ts for the rationale.
+  unprocessable_content: 422,
   internal_server_error: 500,
   missing: 404,
 };

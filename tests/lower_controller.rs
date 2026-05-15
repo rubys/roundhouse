@@ -573,6 +573,8 @@ fn status_sym_to_code_maps_rails_symbols() {
     assert_eq!(status_sym_to_code("ok"), 200);
     assert_eq!(status_sym_to_code("see_other"), 303);
     assert_eq!(status_sym_to_code("unprocessable_entity"), 422);
+    // Rails 8.1.x scaffold rename — alias.
+    assert_eq!(status_sym_to_code("unprocessable_content"), 422);
     assert_eq!(status_sym_to_code("made_up_code"), 500);
 }
 

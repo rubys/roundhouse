@@ -335,6 +335,11 @@ abstract class RoundhouseTest
     unauthorized:         401,
     forbidden:            403,
     unprocessable_entity: 422,
+    # Rails 8.1.x scaffold renamed `:unprocessable_entity` →
+    # `:unprocessable_content` mid-version (HTTP 422 description
+    # churn). Alias both so emit follows whichever the fixture's
+    # scaffold currently produces.
+    unprocessable_content: 422,
     internal_server_error: 500,
   }
 
