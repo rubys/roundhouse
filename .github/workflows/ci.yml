@@ -43,7 +43,7 @@ jobs:
               --exclude='./fixtures/real-blog/log' \
               -czf real-blog.tar.gz fixtures/real-blog
       - name: Upload fixture
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: real-blog-fixture
           path: real-blog.tar.gz
@@ -84,7 +84,7 @@ jobs:
           cp spinel-src/spinel_codegen.rb  spinel-dist/
           cp -R spinel-src/lib             spinel-dist/lib
       - name: Upload spinel toolchain
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: spinel-dist
           path: spinel-dist
@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -120,7 +120,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -161,7 +161,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -252,7 +252,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -272,7 +272,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -304,7 +304,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -324,7 +324,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -350,7 +350,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -370,7 +370,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -394,7 +394,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -418,7 +418,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -443,7 +443,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -468,7 +468,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -502,7 +502,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -547,7 +547,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -555,7 +555,7 @@ jobs:
       - name: cargo run --bin build-site
         run: cargo run --release --bin build-site
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
