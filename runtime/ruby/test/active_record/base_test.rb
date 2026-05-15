@@ -64,13 +64,15 @@ class BaseTest < Minitest::Test
     # let Base's primitives stay empty for spinel polymorphic dispatch
     # (see runtime/ruby/active_record/base.rb). Static `Item.table_name`
     # avoids the test-lowerer's `self.class` → `class` self-stripping
-    # corner case.
+    # corner case; explicit `attributes()` because the TS emitter
+    # currently drops parens from bare-name method calls (emits as
+    # method reference instead of invocation).
     def _adapter_insert
-      ActiveRecord.adapter.insert(Item.table_name, attributes)
+      ActiveRecord.adapter.insert(Item.table_name, attributes())
     end
 
     def _adapter_update
-      ActiveRecord.adapter.update(Item.table_name, @id, attributes)
+      ActiveRecord.adapter.update(Item.table_name, @id, attributes())
     end
 
     def _adapter_delete
@@ -298,6 +300,24 @@ class BaseTest < Minitest::Test
       @title = title if title.is_a?(String)
       @created_at = created_at if created_at.is_a?(String)
       @updated_at = updated_at if updated_at.is_a?(String)
+    end
+
+    # See BaseTest::Item for the rationale — legacy 12-method-shim
+    # opt-in so Base's primitives can stay empty for spinel polymorphic
+    # dispatch. Crystal's strict typing also requires concrete returns
+    # here: Base's empty `_adapter_insert` returns Nil, but the save
+    # path expects Int64; the explicit override threads through to
+    # adapter.insert which returns the rowid.
+    def _adapter_insert
+      ActiveRecord.adapter.insert(Timestamped.table_name, attributes())
+    end
+
+    def _adapter_update
+      ActiveRecord.adapter.update(Timestamped.table_name, @id, attributes())
+    end
+
+    def _adapter_delete
+      ActiveRecord.adapter.delete(Timestamped.table_name, @id)
     end
 
     # Base#fill_timestamps writes via `self[:col] = ...` — provide
