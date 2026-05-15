@@ -253,10 +253,15 @@ fn count_top_level_var_assignments(
 ) {
     match &*body.node {
         ExprNode::Seq { exprs } => {
+            // Nested Seqs (from IR-rewrites like new_kwargs_to_setters
+            // that replace a single statement with a multi-stmt Seq)
+            // count as part of the same "top level" for declare/reassign
+            // purposes. Without recursion, an `Assign` inside a nested
+            // Seq stays invisible to the reassigned-set, then emits as
+            // `const x = …` even when a later stmt reassigns `x` — TS
+            // rejects with "Cannot assign to 'x' because it is a constant."
             for e in exprs {
-                if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
-                    *out.entry(name.clone()).or_insert(0) += 1;
-                }
+                count_top_level_var_assignments(e, out);
             }
         }
         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
@@ -734,6 +739,29 @@ pub(super) fn emit_stmt_with_state(
             }
             out.push('}');
             out
+        }
+        // Nested Seq at statement position — flatten one level so each
+        // child emits as its own statement (with its own declare/reassign
+        // bookkeeping). Without this, the default arm routes through
+        // `emit_expr` which collapses the Seq into a `;`-joined expr
+        // string AND treats inner Assigns as expressions (dropping the
+        // target binding). Surfaces when an IR-rewrite replaces a single
+        // statement-position node with a multi-stmt Seq — e.g.
+        // `lower::new_kwargs_to_setters` turning
+        // `c = C.new(k:v,…)` into `c = C.new; c.k = v; …`.
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let mut lines: Vec<String> = Vec::with_capacity(exprs.len());
+            for (i, sub) in exprs.iter().enumerate() {
+                let sub_is_last = is_last && i == exprs.len() - 1;
+                lines.push(emit_stmt_with_state(
+                    sub,
+                    sub_is_last,
+                    void_return,
+                    reassigned,
+                    declared,
+                ));
+            }
+            lines.join("\n")
         }
         _ => {
             if is_last && !void_return {

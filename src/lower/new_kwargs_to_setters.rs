@@ -1,5 +1,6 @@
-//! Rewrite `<Class>.new(kw1: v1, kw2: v2, …)` into the explicit setter
-//! chain that target-shape ARs and structs uniformly support.
+//! Rewrite `<target> = <Class>.new(kw1: v1, kw2: v2, …)` into the
+//! explicit setter chain that target-shape ARs and structs uniformly
+//! support.
 //!
 //! Why this exists: kwarg construction is the canonical Rails idiom
 //! for ad-hoc model instantiation (`Article.new(title: "")` in tests,
@@ -18,55 +19,102 @@
 //!     pay a runtime Hash literal alloc + N gets + N setter dispatches
 //!     when explicit setters would be N direct field writes.
 //!
-//! The IR-level rewrite makes the explicit-setter shape canonical at
-//! lowering time so every emit consumes the same primitive form.
-//! Mirrors `feedback_monomorphize_polymorphic_apis`: when an idiom
-//! is compiler-hostile across N targets, rewrite at the IR rather
-//! than teach N emitters to handle it.
+//! Mirrors `feedback_monomorphize_polymorphic_apis`: when an idiom is
+//! compiler-hostile across N targets, rewrite at the IR rather than
+//! teach N emitters to handle it.
 //!
-//! Shape: `Foo.new(a: 1, b: 2)` rewrites to a `Seq` containing
+//! Shape: `article = Foo.new(a: 1, b: 2)` rewrites to a statement-
+//! position `Seq` that targets the same lvalue for setters:
 //!
 //!   ```ruby
-//!   tmp = Foo.new
-//!   tmp.a = 1
-//!   tmp.b = 2
-//!   tmp
+//!   article = Foo.new
+//!   article.a = 1
+//!   article.b = 2
 //!   ```
 //!
-//! where `tmp` is a synthesized var named `__new_<Class>_tmp`. The
-//! same name reuses across rewrites for the same class — harmless
-//! since the var gets reassigned at each use.
+//! Reusing the assignment target as the setter receiver avoids a
+//! synthesized temp variable and keeps everything in statement
+//! position — important for TypeScript, where `Assign` in expression
+//! position drops the target binding (so a temp-Seq in expression
+//! position would emit `tmp = X` as bare `X` and lose the binding).
 //!
-//! Rewrite invariant — fires only when:
-//!   - receiver is a `Const` (class literal),
-//!   - method is exactly `"new"`,
-//!   - args is exactly one `Hash` with `kwargs: true`,
-//!   - every key in that Hash is a `Sym` literal.
+//! Rewrite invariant — fires only when ALL hold:
+//!   - the node is an `Assign { target: Var | Ivar, value }`,
+//!   - `value` is `Send { recv: Some(Const(_)), method: "new", args: [Hash{kwargs:true, …}] }`,
+//!   - the Hash has at least one entry,
+//!   - every key is a `Sym` literal.
 //!
 //! `Model.new(typed_params_struct)` (positional Params arg) and
 //! `Model.new(some_hash_var)` (variable Hash arg) both fall through
-//! unchanged.
+//! unchanged. So do non-`Assign` call sites — `Article.new(title:"")
+//! .save`, function-arg position, etc. — those are rare in lowered
+//! IR but if they appear we leave them alone rather than risk a
+//! broken expression-position rewrite.
 
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{Symbol, VarId};
-use crate::span::Span;
+use crate::ident::Symbol;
 
 pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
+    let rewritten = rewrite_assigns(expr);
+    flatten_seq_in_seq(&rewritten)
+}
+
+/// `Seq([A, Seq([B, C]), D])` → `Seq([A, B, C, D])`. Applied
+/// recursively. Direct-child Seqs only — `If { then_branch: Seq(…) }`
+/// keeps its branch Seq intact (else-Seqs stay distinct from the
+/// enclosing if's parent block). The typer treats a Seq as a scope
+/// boundary; without flattening, vars assigned inside a rewrite-
+/// synthesized Seq don't propagate to subsequent statements in the
+/// outer body, leaving downstream `Var` reads with unresolved type
+/// variables (`Ty::Var(TyVar(0))`).
+fn flatten_seq_in_seq(e: &Expr) -> Expr {
+    crate::lower::controller_to_library::util::map_expr(e, &|node| {
+        let ExprNode::Seq { exprs } = &*node.node else {
+            return None;
+        };
+        let has_nested_seq = exprs
+            .iter()
+            .any(|s| matches!(&*s.node, ExprNode::Seq { .. }));
+        if !has_nested_seq {
+            return None;
+        }
+        let mut flat: Vec<Expr> = Vec::with_capacity(exprs.len());
+        for sub in exprs {
+            if let ExprNode::Seq { exprs: inner } = &*sub.node {
+                flat.extend(inner.iter().cloned());
+            } else {
+                flat.push(sub.clone());
+            }
+        }
+        Some(Expr::new(node.span, ExprNode::Seq { exprs: flat }))
+    })
+}
+
+fn rewrite_assigns(expr: &Expr) -> Expr {
     crate::lower::controller_to_library::util::map_expr(expr, &|e| {
+        // Outer must be Assign with a singleton lvalue target.
+        let ExprNode::Assign { target, value } = &*e.node else {
+            return None;
+        };
+        if !matches!(target, LValue::Var { .. } | LValue::Ivar { .. }) {
+            return None;
+        }
+
+        // Inner must be `<Const>.new(<one-kwarg-hash>)`.
         let ExprNode::Send {
             recv: Some(recv),
             method,
             args,
             block: None,
             ..
-        } = &*e.node
+        } = &*value.node
         else {
             return None;
         };
         if method.as_str() != "new" {
             return None;
         }
-        let ExprNode::Const { path } = &*recv.node else {
+        let ExprNode::Const { .. } = &*recv.node else {
             return None;
         };
         if args.len() != 1 {
@@ -90,14 +138,24 @@ pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
             kw_pairs.push((kn.clone(), v.clone()));
         }
 
-        let class_name = path
-            .last()
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_else(|| "X".to_string());
-        let tmp_name = Symbol::from(format!("__new_{class_name}_tmp"));
         let span = e.span;
 
-        let tmp_read = || Expr::new(span, ExprNode::Var { id: VarId(0), name: tmp_name.clone() });
+        // Rebuild the setter receiver from the target lvalue. Same
+        // VarId / name preserves the assignment binding; the typer
+        // will re-thread types on the post-rewrite Seq.
+        let make_recv = |span| -> Expr {
+            match target {
+                LValue::Var { id, name } => Expr::new(
+                    span,
+                    ExprNode::Var { id: *id, name: name.clone() },
+                ),
+                LValue::Ivar { name } => Expr::new(
+                    span,
+                    ExprNode::Ivar { name: name.clone() },
+                ),
+                _ => unreachable!("guarded above"),
+            }
+        };
 
         let zero_arg_new = Expr::new(
             recv.span,
@@ -110,11 +168,11 @@ pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
             },
         );
 
-        let mut exprs: Vec<Expr> = Vec::with_capacity(kw_pairs.len() + 2);
+        let mut exprs: Vec<Expr> = Vec::with_capacity(kw_pairs.len() + 1);
         exprs.push(Expr::new(
             span,
             ExprNode::Assign {
-                target: LValue::Var { id: VarId(0), name: tmp_name.clone() },
+                target: target.clone(),
                 value: zero_arg_new,
             },
         ));
@@ -123,7 +181,7 @@ pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
             exprs.push(Expr::new(
                 v.span,
                 ExprNode::Send {
-                    recv: Some(tmp_read()),
+                    recv: Some(make_recv(v.span)),
                     method: setter,
                     args: vec![v],
                     block: None,
@@ -131,7 +189,6 @@ pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
                 },
             ));
         }
-        exprs.push(tmp_read());
 
         Some(Expr::new(span, ExprNode::Seq { exprs }))
     })
@@ -141,7 +198,7 @@ pub fn rewrite_new_kwargs(expr: &Expr) -> Expr {
 mod tests {
     use super::*;
     use crate::expr::{Expr, ExprNode, Literal};
-    use crate::ident::Symbol;
+    use crate::ident::{Symbol, VarId};
     use crate::span::Span;
 
     fn sym_lit(s: &str) -> Expr {
@@ -165,7 +222,7 @@ mod tests {
         )
     }
 
-    fn kwargs_send(class: &str, pairs: &[(&str, Expr)]) -> Expr {
+    fn new_with_kwargs(class: &str, pairs: &[(&str, Expr)]) -> Expr {
         let entries: Vec<(Expr, Expr)> = pairs
             .iter()
             .map(|(k, v)| (sym_lit(k), v.clone()))
@@ -186,22 +243,40 @@ mod tests {
         )
     }
 
+    fn assign_var(name: &str, value: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from(name) },
+                value,
+            },
+        )
+    }
+
     #[test]
-    fn rewrites_kwargs_new_into_seq_with_setters() {
-        let before = kwargs_send("Article", &[("title", str_lit("hi")), ("body", str_lit("x"))]);
+    fn rewrites_var_assign_of_kwargs_new_into_setter_seq() {
+        let before = assign_var(
+            "article",
+            new_with_kwargs("Article", &[("title", str_lit("hi")), ("body", str_lit("x"))]),
+        );
         let after = rewrite_new_kwargs(&before);
+
         let ExprNode::Seq { exprs } = &*after.node else {
             panic!("expected Seq, got {:?}", after.node);
         };
-        // 1 Assign + 2 setters + 1 trailing Var read = 4
-        assert_eq!(exprs.len(), 4);
+        // 1 Assign + 2 setters = 3 stmts. No trailing temp read —
+        // the original assignment captures the value via its target.
+        assert_eq!(exprs.len(), 3);
 
-        // First: tmp = Article.new
-        let ExprNode::Assign { target: LValue::Var { name: tmp_name, .. }, value } = &*exprs[0].node
+        // First: article = Article.new (zero-arg).
+        let ExprNode::Assign {
+            target: LValue::Var { name: tname, .. },
+            value,
+        } = &*exprs[0].node
         else {
             panic!("expected Assign as first Seq elem");
         };
-        assert_eq!(tmp_name.as_str(), "__new_Article_tmp");
+        assert_eq!(tname.as_str(), "article");
         let ExprNode::Send { recv: Some(r), method, args, .. } = &*value.node else {
             panic!("expected zero-arg Send for new");
         };
@@ -209,35 +284,55 @@ mod tests {
         assert_eq!(method.as_str(), "new");
         assert!(args.is_empty());
 
-        // Setter calls — each Send on tmp, method "<key>=", arg = value.
+        // Setters target `article` directly (no temp var).
         for (i, key) in ["title", "body"].iter().enumerate() {
             let ExprNode::Send { recv: Some(r), method, args, .. } = &*exprs[i + 1].node else {
                 panic!("expected Send for setter #{i}");
             };
             let ExprNode::Var { name, .. } = &*r.node else {
-                panic!("expected tmp Var as setter recv");
+                panic!("expected Var as setter recv, got {:?}", r.node);
             };
-            assert_eq!(name.as_str(), "__new_Article_tmp");
+            assert_eq!(name.as_str(), "article");
             assert_eq!(method.as_str(), &format!("{key}="));
             assert_eq!(args.len(), 1);
         }
+    }
 
-        // Trailing Var read.
-        let ExprNode::Var { name, .. } = &*exprs[3].node else {
-            panic!("expected Var as last Seq elem");
+    #[test]
+    fn rewrites_ivar_assign_of_kwargs_new() {
+        let before = Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: Symbol::from("article") },
+                value: new_with_kwargs("Article", &[("title", str_lit("hi"))]),
+            },
+        );
+        let after = rewrite_new_kwargs(&before);
+
+        let ExprNode::Seq { exprs } = &*after.node else {
+            panic!("expected Seq");
         };
-        assert_eq!(name.as_str(), "__new_Article_tmp");
+        assert_eq!(exprs.len(), 2);
+
+        // Setter recv is `@article` (Ivar), matching the assignment target.
+        let ExprNode::Send { recv: Some(r), method, .. } = &*exprs[1].node else {
+            panic!("expected Send for setter");
+        };
+        let ExprNode::Ivar { name } = &*r.node else {
+            panic!("expected Ivar as setter recv");
+        };
+        assert_eq!(name.as_str(), "article");
+        assert_eq!(method.as_str(), "title=");
     }
 
     #[test]
     fn leaves_positional_arg_unchanged() {
-        // `Article.new(article_params)` — single positional arg that
-        // isn't a Hash literal. Must not rewrite.
+        // `Article.new(article_params)` — positional Var arg.
         let positional = Expr::new(
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: Symbol::from("article_params") },
         );
-        let before = Expr::new(
+        let new_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(const_recv("Article")),
@@ -247,21 +342,21 @@ mod tests {
                 parenthesized: true,
             },
         );
+        let before = assign_var("article", new_call);
         let after = rewrite_new_kwargs(&before);
-        // Outer node unchanged — same Send shape.
-        assert!(matches!(&*after.node, ExprNode::Send { .. }));
+        // Outer Assign unchanged.
+        assert!(matches!(&*after.node, ExprNode::Assign { .. }));
     }
 
     #[test]
     fn leaves_non_kwarg_hash_unchanged() {
-        // `Article.new("title" => "x")` — string-keyed Hash with
-        // `kwargs: false`. Not a kwarg form; leave alone.
+        // `Article.new("title" => "x")` — string-keyed Hash, kwargs: false.
         let entries: Vec<(Expr, Expr)> = vec![(str_lit("title"), str_lit("hi"))];
         let hash = Expr::new(
             Span::synthetic(),
             ExprNode::Hash { entries, kwargs: false },
         );
-        let before = Expr::new(
+        let new_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(const_recv("Article")),
@@ -271,34 +366,19 @@ mod tests {
                 parenthesized: true,
             },
         );
+        let before = assign_var("article", new_call);
         let after = rewrite_new_kwargs(&before);
-        assert!(matches!(&*after.node, ExprNode::Send { .. }));
+        assert!(matches!(&*after.node, ExprNode::Assign { .. }));
     }
 
     #[test]
-    fn leaves_non_const_recv_unchanged() {
-        // `obj.new(...)` — receiver is a method call, not a Const.
-        // Rare but possible; leave alone.
-        let recv = Expr::new(
-            Span::synthetic(),
-            ExprNode::Var { id: VarId(0), name: Symbol::from("obj") },
-        );
-        let entries = vec![(sym_lit("title"), str_lit("hi"))];
-        let hash = Expr::new(
-            Span::synthetic(),
-            ExprNode::Hash { entries, kwargs: true },
-        );
-        let before = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(recv),
-                method: Symbol::from("new"),
-                args: vec![hash],
-                block: None,
-                parenthesized: true,
-            },
-        );
-        let after = rewrite_new_kwargs(&before);
+    fn leaves_bare_send_unchanged() {
+        // `Article.new(title: "x")` NOT in an Assign — function-arg
+        // position, method-chain receiver, etc. We don't rewrite
+        // because the temp-Seq form would lose the binding when
+        // emitted in expression position by some targets (TS, …).
+        let bare = new_with_kwargs("Article", &[("title", str_lit("hi"))]);
+        let after = rewrite_new_kwargs(&bare);
         assert!(matches!(&*after.node, ExprNode::Send { .. }));
     }
 }
