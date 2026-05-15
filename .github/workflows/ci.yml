@@ -28,7 +28,7 @@ jobs:
   generate-fixture:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -43,7 +43,7 @@ jobs:
               --exclude='./fixtures/real-blog/log' \
               -czf real-blog.tar.gz fixtures/real-blog
       - name: Upload fixture
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: real-blog-fixture
           path: real-blog.tar.gz
@@ -64,7 +64,7 @@ jobs:
   build-spinel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: rubys/spinel
           ref: master
@@ -84,7 +84,7 @@ jobs:
           cp spinel-src/spinel_codegen.rb  spinel-dist/
           cp -R spinel-src/lib             spinel-dist/lib
       - name: Upload spinel toolchain
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: spinel-dist
           path: spinel-dist
@@ -98,10 +98,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -117,10 +117,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -132,10 +132,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -158,16 +158,16 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
@@ -187,11 +187,11 @@ jobs:
     # minutes). See project_framework_test_transpile.md.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
       - name: cargo test --test framework_tests_typescript -- --ignored
@@ -211,7 +211,7 @@ jobs:
     # framework-tests-ruby.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Crystal
@@ -234,7 +234,7 @@ jobs:
     # emit through the spinel AOT compiler when end-to-end runnable.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
@@ -249,18 +249,19 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24'
+          cache: false
       - name: cargo test --test go_toolchain -- --ignored
         run: cargo test --test go_toolchain -- --ignored --nocapture
 
@@ -268,10 +269,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -300,10 +301,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -320,16 +321,16 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: cargo test --test python_toolchain -- --ignored
@@ -346,10 +347,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -366,10 +367,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -390,10 +391,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -404,7 +405,7 @@ jobs:
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
       - name: scripts/compare typescript
@@ -414,10 +415,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -428,9 +429,10 @@ jobs:
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24'
+          cache: false
       - name: scripts/compare go
         run: scripts/compare go
 
@@ -438,10 +440,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -463,10 +465,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -477,11 +479,11 @@ jobs:
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
       - name: scripts/compare python
         run: scripts/compare python
 
@@ -497,10 +499,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -515,7 +517,7 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
       - name: scripts/compare ruby
@@ -542,10 +544,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: real-blog-fixture
       - name: Extract fixture
@@ -553,7 +555,7 @@ jobs:
       - name: cargo run --bin build-site
         run: cargo run --release --bin build-site
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: _site
 
@@ -567,4 +569,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
