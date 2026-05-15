@@ -115,6 +115,7 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "base64.rb",
         "json.rb",
         "importmap.rb",
+        "type_seeds.rb",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),

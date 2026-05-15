@@ -27,6 +27,13 @@ require_relative "../runtime/importmap"
 require_relative "../config/importmap"
 require_relative "../config/routes"
 
+# Type-seed pins for spinel-AOT inference. Calls each framework /
+# emitted-model method whose typed callers aren't reachable from a
+# given test file's call graph with concrete args, giving spinel one
+# typed call site per method. See `runtime/type_seeds.rb` for the
+# rationale.
+require_relative "../runtime/type_seeds"
+
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3
 # gem; FFI shim under spinel-compiled binaries once matz/spinel#405
