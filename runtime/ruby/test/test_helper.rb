@@ -17,6 +17,13 @@
 
 require "minitest/autorun"
 
+# Base64 / JSON are CRuby stdlib here (the framework tests run under
+# stock CRuby with no transpile step). Required up-front so
+# action_view/view_helpers's turbo_stream_from has them available
+# without inline requires (which spinel-target would warn on).
+require "base64"
+require "json"
+
 FRAMEWORK_RUBY = File.expand_path("..", __dir__)
 $LOAD_PATH.unshift(FRAMEWORK_RUBY)
 

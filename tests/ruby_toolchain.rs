@@ -112,6 +112,9 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "sqlite_adapter.rb",
         "cgi_io.rb",
         "broadcasts.rb",
+        "base64.rb",
+        "json.rb",
+        "importmap.rb",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),
