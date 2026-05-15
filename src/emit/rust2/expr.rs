@@ -790,6 +790,43 @@ fn emit_expr_inner(e: &Expr) -> String {
                 );
                 let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
                 if lhs_is_option {
+                    // `hash[k] || default` — the body-typer types
+                    // `hash[k]` as `Option<V>` (nil-on-miss), but
+                    // rust2 emits `Send { method: "[]" }` as the Rust
+                    // `Index` form `hash[k]` (panic-on-miss, returns
+                    // `&V`). The Or rewrite's `.unwrap_or(default)`
+                    // would call unwrap_or on a `V`, not Option<V>.
+                    // Detect the pattern and emit
+                    //   `recv.get(k).cloned().unwrap_or(default)`
+                    // directly — actually produces Option<V> the body-
+                    // typer promised. Peel the recv's Union<Hash, Nil>
+                    // (module-singleton ivars get widened by the flow-
+                    // typer).
+                    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*left.node {
+                        if method.as_str() == "[]"
+                            && args.len() == 1
+                            && matches!(
+                                r.ty.as_ref().map(peel_nil),
+                                Some(crate::ty::Ty::Hash { .. })
+                            )
+                        {
+                            let recv_s = emit_expr(r);
+                            let key_s = emit_expr(&args[0]);
+                            // String default literal -> `.to_string()`
+                            // so unwrap_or's arg type matches the
+                            // Option's inner type (HashMap<String, String>
+                            // → Option<String>, default must be String).
+                            let default_s = match &*right.node {
+                                ExprNode::Lit { value: Literal::Str { .. } } => {
+                                    format!("{}.to_string()", emit_expr(right))
+                                }
+                                _ => emit_expr(right),
+                            };
+                            return format!(
+                                "{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"
+                            );
+                        }
+                    }
                     return format!(
                         "{}.unwrap_or({})",
                         emit_expr(left),
