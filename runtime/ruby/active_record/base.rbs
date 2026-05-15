@@ -160,7 +160,7 @@ module ActiveRecord
     # the last expression returns — `nil` for the false branches,
     # `untyped` from `self[]=` otherwise. Declare `void` since
     # callers ignore the result.
-    def fill_timestamps: (creating: bool) -> void
+    def fill_timestamps: (bool creating) -> void
 
     def valid?: () -> bool
 

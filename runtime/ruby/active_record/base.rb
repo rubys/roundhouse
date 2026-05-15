@@ -21,8 +21,12 @@ module ActiveRecord
     # declaration, so the runtime `ActiveRecord::Validations` mixin no
     # longer ships. `errors` is reached via implicit-self Send in the
     # lowered IR; defining it here keeps that call resolvable.
+    # `@errors` is initialized to `[]` in `initialize` — the prior
+    # defensive `@errors = [] if @errors.nil?` lazy-init was redundant
+    # AND compiler-hostile for typed targets (Rust struct types
+    # `@errors` as `Vec<String>`, not `Option<Vec<String>>`; `.nil?`
+    # on a Vec doesn't exist).
     def errors
-      @errors = [] if @errors.nil?
       @errors
     end
 
@@ -279,14 +283,14 @@ module ActiveRecord
       before_save
       if new_record?
         before_create
-        fill_timestamps(creating: true)
+        fill_timestamps(true)
         @id = _adapter_insert
         @persisted = true
         after_create
         after_create_commit
       else
         before_update
-        fill_timestamps(creating: false)
+        fill_timestamps(false)
         _adapter_update
         after_update
         after_update_commit
@@ -364,7 +368,13 @@ module ActiveRecord
     # subclass declares those columns in `schema_columns`. Uses the
     # subclass's `[]=` to assign — no `instance_variable_set`. Mirrors
     # the Rails ActiveRecord::Timestamp callback semantics (UTC ISO-8601).
-    def fill_timestamps(creating:)
+    # Positional `creating` (was kwarg `creating:`). Kwargs in Ruby
+    # call sites lower to a Hash arg; rust2 emit doesn't yet unflatten
+    # the Hash back to a positional bool, so the call becomes
+    # `fill_timestamps({"creating" => true})` and fails to match the
+    # method's `bool` param. Positional sidesteps that — TS/Crystal
+    # accept either shape, Rust gets the simpler one.
+    def fill_timestamps(creating)
       cols = self.class.schema_columns
       now = Time.now.utc.iso8601
       self[:updated_at] = now if cols.include?(:updated_at)
