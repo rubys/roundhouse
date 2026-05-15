@@ -102,11 +102,12 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	# CRuby-runnable shim. Applied after the manifest explode so
 	# it's the final state regardless of what the archive emitted.
 	mv $(RUBY_OUT)/runtime/db_cruby.rb $(RUBY_OUT)/runtime/db.rb
-	# Ruby-target overlay: Rakefile (replaces base), config.ru,
+	# Ruby-target overlay: main.rb (CGI-shaped, replaces scaffold's
+	# Tep-based dispatch), Rakefile (replaces base), config.ru,
 	# config/puma.rb. Applied AFTER the manifest explode so the
-	# overlay's Rakefile isn't reverted by the scaffold-walk that
-	# build-site does. Spinel target doesn't get these (it uses
-	# the base Makefile + eventually sphttp + fibers).
+	# overlay isn't reverted by the scaffold-walk that build-site
+	# does. Spinel target doesn't get these (it uses the base
+	# scaffold's Tep::Server-based main.rb + the vendored tep tree).
 	cp -r runtime/spinel/scaffold/ruby_overlay/. $(RUBY_OUT)/
 	# Source-app static files: app/javascript/* (importmap-served
 	# JS modules) and public/* (icons, robots.txt). Build-site

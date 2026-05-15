@@ -6,11 +6,8 @@ module ActionDispatch
   # value channel.
   class Session
     @data: Hash[String, untyped]
-    @dirty: bool
 
     def initialize: (?Hash[untyped, untyped]? other) -> void
-
-    def dirty: () -> bool
 
     def []: (untyped key) -> untyped
     def []=: (untyped key, untyped value) -> untyped
@@ -27,16 +24,5 @@ module ActionDispatch
     def each: () { (String, untyped) -> void } -> Session
     def to_h: () -> Hash[String, untyped]
     def merge: (untyped other) -> Session
-
-    # Cookie envelope (Path 3a — see session.rb header).
-    def load_from: (String? cookie_value, String? secret) -> bool
-    def to_cookie_value: (String secret) -> String
-
-    def self._timing_safe_eq: (String a, String b) -> bool
-    def self._url_escape: (String s) -> String
-    def self._url_unescape: (String s) -> String
-    def self._hex_char: (Integer n) -> String
-    def self._hex_nibble: (String c) -> Integer
-    def self._parse_query: (String s) -> Hash[String, String]
   end
 end
