@@ -902,13 +902,35 @@ fn emit_hash(entries: &[(Expr, Expr)]) -> String {
     if entries.is_empty() {
         return "std::collections::HashMap::new()".to_string();
     }
-    // Non-empty hash literal: build via `HashMap::from([...])`. Works
-    // for any K, V where K: Hash + Eq; relies on the surrounding
-    // type context (let-binding or struct-field type) to infer the
-    // HashMap's type parameters.
+    // Tuple-type unification: `HashMap::from([(k, v), ...])` infers
+    // its key/value types from the FIRST tuple. Subsequent tuples
+    // must share that type exactly. The Ruby body-typer's view of
+    // `{ type: "submit", value: text }` is uniformly `Hash<Sym, Str>`,
+    // but the rust2 emit treats `Ty::Str` as `String` while string
+    // literals default to `&'static str` — heterogeneous tuples
+    // result. Force every string-literal value to `String` (via
+    // `.to_string()`) when ANY entry's value is non-literal-string
+    // (the case that proves the surrounding map is String-typed).
+    // Keys stay as-is — they're typically all literal and Rust's
+    // `Borrow<&str>` lets `HashMap<&str, _>` accept owned String
+    // keys at the merge_attrs boundary without forcing per-key
+    // coercion.
+    let has_non_literal_str_value = entries.iter().any(|(_, v)| {
+        !matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            && matches!(v.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
+    });
     let pairs: Vec<String> = entries
         .iter()
-        .map(|(k, v)| format!("({}, {})", emit_expr(k), emit_expr(v)))
+        .map(|(k, v)| {
+            let v_s = if has_non_literal_str_value
+                && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            {
+                format!("{}.to_string()", emit_expr(v))
+            } else {
+                emit_expr(v)
+            };
+            format!("({}, {v_s})", emit_expr(k))
+        })
         .collect();
     format!("std::collections::HashMap::from([{}])", pairs.join(", "))
 }

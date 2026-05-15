@@ -116,7 +116,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 
     let mut out = String::new();
 
-    // Struct declaration.
+    // Struct declaration. Derive `Clone` because Ruby semantics treat
+    // model instances as freely cloneable (every assignment and
+    // method-call argument-pass implicitly copies a reference, and
+    // the framework Ruby's `attr_reader` getters and `.dup` patterns
+    // expect to hand out independent copies). Each ivar type must
+    // itself be Clone — every type rust2 emits today (i64, String,
+    // bool, Vec<T: Clone>, HashMap<String, serde_json::Value>,
+    // Option<T: Clone>, Class names → Clone'd) satisfies that. If a
+    // future non-Clone ivar lands, this derive will fail at compile
+    // time and we'll need a per-class override.
+    writeln!(out, "#[derive(Clone)]").unwrap();
     writeln!(out, "pub struct {name} {{").unwrap();
     for (fname, ty) in &ivars {
         writeln!(out, "    {fname}: {},", rust_ty(ty)).unwrap();
