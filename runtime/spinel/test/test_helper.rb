@@ -20,7 +20,12 @@ require_relative "../runtime/active_record"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"
 require_relative "../runtime/action_controller"
+require_relative "../runtime/action_view"
 require_relative "../runtime/json_builder"
+require_relative "../runtime/broadcasts"
+require_relative "../runtime/importmap"
+require_relative "../config/importmap"
+require_relative "../config/routes"
 
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3
@@ -49,23 +54,13 @@ module SchemaSetup
   end
 end
 
-# Eager-load every emitted fixture file so each `*Fixtures` module is
-# available regardless of which test file required which subset.
-# Mirrors Rails's "all fixtures load on each test" convention — a test
-# that destroys an article expects its associated comments to exist
-# even when its `require_relative` block names only `articles`.
-#
-# Under spinel AOT, dynamic `Dir[…]` + `require` is unavailable; emit
-# instead injects explicit `require_relative` lines for each fixture
-# into every test file's preamble (see `src/emit/ruby.rs`). This block
-# is a CRuby-side fallback that's idempotent when the explicit emit
-# paths already loaded the fixtures.
-if defined?(File) && File.respond_to?(:directory?)
-  fixtures_dir = File.expand_path("fixtures", __dir__)
-  if File.directory?(fixtures_dir)
-    Dir[File.join(fixtures_dir, "*.rb")].sort.each { |f| require f }
-  end
-end
+# Fixture files are loaded via explicit `require_relative` lines
+# injected into each test file's preamble by `src/emit/ruby.rs`
+# (which is required under spinel AOT, where dynamic `Dir[…]` + `require`
+# isn't available). The previous CRuby-only Dir-glob fallback was
+# removed — emit always injects explicit requires so the fallback was
+# always dead in practice, and the dynamic-method block produced
+# spurious "emitting 0" warnings under spinel.
 
 # Walks `Object.constants` for `*Fixtures` modules and dispatches their
 # `_fixtures_load!` (emitted by `lower_fixtures_to_library_classes`).

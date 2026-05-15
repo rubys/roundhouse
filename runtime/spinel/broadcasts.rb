@@ -13,6 +13,20 @@ module Broadcasts
   LOG = []
   TRANSPORTS = []
 
+  # Type-seed stub: pins TRANSPORTS' element type so spinel can
+  # dispatch `broadcast(stream, fragment)` correctly inside `record`.
+  # The real transport is wired by the target overlay (CRuby's
+  # config.ru calls `set_transport(Cable::Registry)` at boot, which
+  # clears+replaces this stub; spinel-AOT will pass an sphttp-side
+  # equivalent once the substrate lands). Without this seed, spinel
+  # has no caller of `set_transport` and defaults its `transport`
+  # param to int, poisoning TRANSPORTS' element type.
+  class SeedTransport
+    def broadcast(stream, fragment)
+      nil
+    end
+  end
+
   def self.reset_log!
     LOG.clear
   end
@@ -65,4 +79,16 @@ module Broadcasts
       %(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
     end
   end
+
+  # Module-load type-seed (positioned after `set_transport` def so
+  # the dispatch resolves at load time). The `set_transport` call
+  # pins TRANSPORTS' element type; the standalone `broadcast(…, …)`
+  # call pins SeedTransport#broadcast's param types (without it,
+  # spinel can't propagate from `TRANSPORTS[0].broadcast(stream,
+  # fragment)` in `record` back to the method's signature). Target
+  # overlays that wire a real transport via `set_transport(…)`
+  # overwrite this stub.
+  _seed_transport = SeedTransport.new
+  _seed_transport.broadcast("", "")
+  set_transport(_seed_transport)
 end
