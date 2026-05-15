@@ -33,6 +33,7 @@ pub mod importmap_to_library;
 pub mod jbuilder_to_library;
 pub mod library_extras;
 pub mod model_to_library;
+pub mod new_kwargs_to_setters;
 pub mod routes;
 pub mod routes_to_library;
 pub mod schema_to_library;

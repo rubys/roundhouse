@@ -217,6 +217,12 @@ pub fn lower_test_modules_with_inner(
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
             method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
+            // Rewrite `<Class>.new(kw1: v1, …)` → explicit setter chain.
+            // Runs in the same statement-shape pass as the assoc-create
+            // rewrite — both produce IR that the re-typing pass below
+            // walks and re-types. See module docs for full rationale.
+            method.body =
+                crate::lower::new_kwargs_to_setters::rewrite_new_kwargs(&method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
         out.push(LoweredTestModule {
