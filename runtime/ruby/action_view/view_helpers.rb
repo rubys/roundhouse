@@ -250,8 +250,6 @@ module ActionView
     # the compare harness's existing ignore rule strips the suffix
     # so the unsigned base64 value matches Rails' signed value.
     def self.turbo_stream_from(stream)
-      require "base64"
-      require "json"
       encoded = Base64.strict_encode64(JSON.generate(stream))
       %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
     end

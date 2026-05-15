@@ -13,6 +13,8 @@ require "minitest/autorun"
 # the future Spinel-AOT target's tree will contain its own
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
+require_relative "../runtime/base64"
+require_relative "../runtime/json"
 require_relative "../runtime/db"
 require_relative "../runtime/active_record"
 require_relative "../config/schema"
