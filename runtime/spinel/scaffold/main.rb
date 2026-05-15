@@ -154,9 +154,12 @@ end
 # triggered — tests call Main.run themselves with constructed I/O.
 #
 # Spinel-AOT entry: configure DB then start Tep::Server with Main as
-# the app. CRuby script-mode also takes this path now; the prior CGI
-# smoke (REQUEST_METHOD=GET PATH_INFO=/articles ruby main.rb) is parked
-# behind the Tep::Server adoption.
+# the app. This file is the spinel-target main.rb — only consumed by
+# `make build` → compiled native binary. The CRuby development path
+# uses `ruby_overlay/main.rb` (Puma/Rack), which keeps the
+# `__FILE__ == $PROGRAM_NAME` guard because under Puma the file is
+# required, not invoked directly.
+#
 # Tep::Server expects an app object with a `dispatch(req, res)`
 # instance method. Wrap Main's class-method dispatch in a thin
 # instance so spinel resolves @app.dispatch through normal user-class
@@ -167,9 +170,14 @@ class MainApp
   end
 end
 
-if __FILE__ == $PROGRAM_NAME
-  Main.configure_default_adapter!
-  port = (ENV["PORT"] || "3000").to_i
-  workers = (ENV["WORKERS"] || "1").to_i
-  Tep::Server.new(MainApp.new).run(port, workers, false)
-end
+# Unconditional entry — the spinel-compiled binary's sole purpose is
+# to start the server. `if __FILE__ == $PROGRAM_NAME` would have
+# gated this in CRuby script mode, but under spinel-AOT `__FILE__`
+# is the source file name (`"main.rb"`) and `$PROGRAM_NAME` is the
+# binary's argv[0] (e.g. `"./build/blog"`), so the guard always
+# returns false. The Ruby-overlay sibling keeps the guard for its
+# Puma/Rack-required-from-config.ru shape.
+Main.configure_default_adapter!
+port = (ENV["PORT"] || "3000").to_i
+workers = (ENV["WORKERS"] || "1").to_i
+Tep::Server.new(MainApp.new).run(port, workers, false)
