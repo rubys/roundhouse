@@ -69,6 +69,8 @@ jobs:
           repository: rubys/spinel
           ref: master
           path: spinel-src
+      - name: make deps (fetch vendored libprism)
+        run: make -C spinel-src deps
       - name: make all
         run: make -C spinel-src all
       - name: Stage artifact tree
