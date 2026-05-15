@@ -45,7 +45,14 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     };
     let param_types = collect_param_types(m);
     let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
-        super::expr::with_method_scope(&m.body, || emit_expr(&m.body))
+        super::expr::with_method_scope(&m.body, || {
+            // Same as emit_instance_method: enable the return-tail
+            // flag so the body's top-level expression (Seq tail / If
+            // branches in tail position) sees `in_return_tail() == true`
+            // and can apply return-type-aware coercions (Some-wrap
+            // for Option<T>-returning class methods, etc.).
+            super::expr::with_return_tail(true, || super::expr::emit_expr_tail(&m.body))
+        })
     })));
     // Function-tail Some(...) wrap — same logic as emit_instance_method.
     // Class methods that return Option<T> need their last expression

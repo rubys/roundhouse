@@ -266,7 +266,12 @@ module ActiveRecord
     # empty. Real-blog tests use it after a create-action redirect:
     # `assert_redirected_to article_url(Article.last)`. Implemented
     # via `all` rather than an adapter primitive so every adapter
-    # gets it for free.
+    # gets it for free. Explicit empty?-ternary because Crystal's
+    # `Array#last` raises on empty (Ruby returns nil), and `records[-1]`
+    # avoids Rust's negative-indexing-panic in the empty-case dead
+    # branch. The Rust emit of this method still has a residual gap
+    # (`records[-1]` emits as `records[(-1_i64) as usize]` which is
+    # also wrong) — flagged for a future Vec.last() bridge.
     def self.last
       records = all
       records.empty? ? nil : records[-1]

@@ -526,6 +526,18 @@ fn emit_expr_inner(e: &Expr) -> String {
             // flag: an `if/else` in tail position has both branches in
             // tail position; the cond is not.
             if else_is_nil {
+                // In the tail position of an `Option<T>`-returning
+                // function, emit `if X { Some(Y) } else { None }` so
+                // the if-expression's type matches the function
+                // return. Otherwise emit the statement-form `if X { Y }`
+                // (returns `()`, OK for void statement context).
+                if in_return_tail() && current_return_is_option() {
+                    return format!(
+                        "if {} {{ Some({}) }} else {{ None }}",
+                        emit_expr(cond),
+                        emit_expr_tail(then_branch),
+                    );
+                }
                 return format!("if {} {{ {} }}", emit_expr(cond), emit_expr_tail(then_branch));
             }
             // `STMT unless COND` lowers to `If { cond, then: Nil, else:
@@ -534,6 +546,13 @@ fn emit_expr_inner(e: &Expr) -> String {
             // incompatible types") doesn't surface. Symmetric with
             // the else_is_nil case above.
             if then_is_nil {
+                if in_return_tail() && current_return_is_option() {
+                    return format!(
+                        "if !({}) {{ Some({}) }} else {{ None }}",
+                        emit_expr(cond),
+                        emit_expr_tail(else_branch),
+                    );
+                }
                 return format!(
                     "if !({}) {{ {} }}",
                     emit_expr(cond),
@@ -578,7 +597,14 @@ fn emit_expr_inner(e: &Expr) -> String {
                         let closure = if body_s.contains('\n') {
                             format!("|({k}, {v})| {{\n{}\n}}", indent(&body_s, 1))
                         } else {
-                            format!("|({k}, {v})| {{ {body_s} }}")
+                            // Trailing `;` on the body so the closure
+                            // produces `()`. `.for_each` requires
+                            // `FnMut(&T) -> ()`; without the `;` the
+                            // body's tail expression value becomes
+                            // the closure return, which fails the
+                            // unit-return signature on e.g.
+                            // `records.each { |r| r.destroy }`.
+                            format!("|({k}, {v})| {{ {body_s}; }}")
                         };
                         return format!("{recv_s}.iter().for_each({closure})");
                     }
@@ -587,9 +613,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                         let p = params[0].as_str();
                         let body_s = emit_expr(body);
                         let closure = if body_s.contains('\n') {
-                            format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))
+                            format!("|{p}| {{\n{};\n}}", indent(&body_s, 1))
                         } else {
-                            format!("|{p}| {{ {body_s} }}")
+                            format!("|{p}| {{ {body_s}; }}")
                         };
                         return format!("{recv_s}.iter_mut().for_each({closure})");
                     }
