@@ -44,9 +44,17 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
         _ => None,
     };
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty, || super::expr::with_class_method_scope(|| {
+    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
         super::expr::with_method_scope(&m.body, || emit_expr(&m.body))
     })));
+    // Function-tail Some(...) wrap — same logic as emit_instance_method.
+    // Class methods that return Option<T> need their last expression
+    // wrapped in `Some(...)` when the body-typer typed it as T.
+    let body = if needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
+        wrap_last_expression_with_some(&body)
+    } else {
+        body
+    };
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
@@ -111,6 +119,79 @@ fn rust_param_ty(ty: &Ty) -> String {
         Ty::Str | Ty::Sym => "&str".to_string(),
         other => rust_ty(other),
     }
+}
+
+/// `true` when:
+///   - return type is `Option<T>` (Union<T, Nil>)
+///   - body's tail expression is T-typed (NOT Option<T>, NOT Nil)
+///   - body's tail is NOT a Return statement (those are explicit)
+///   - body's tail is NOT a divergent expression (raise/etc.)
+fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty>) -> bool {
+    use crate::expr::ExprNode;
+    let return_is_option = matches!(
+        return_ty,
+        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
+    );
+    if !return_is_option {
+        return false;
+    }
+    let tail = tail_expression(body);
+    // Skip if tail is a Return/Raise/diverging — already handles its
+    // own return shape.
+    match &*tail.node {
+        ExprNode::Return { .. } => return false,
+        _ => {}
+    }
+    let tail_is_option = matches!(
+        tail.ty.as_ref(),
+        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
+    ) || matches!(tail.ty.as_ref(), Some(Ty::Nil) | Some(Ty::Bottom));
+    tail.ty.is_some() && !tail_is_option
+}
+
+/// Walk into the body's tail expression: for a Seq, the last element;
+/// otherwise the body itself. Recurses for nested Seqs so e.g. a body
+/// of `Seq [stmt, Seq[a, b]]` returns `b`.
+fn tail_expression(e: &crate::expr::Expr) -> &crate::expr::Expr {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            tail_expression(exprs.last().unwrap())
+        }
+        _ => e,
+    }
+}
+
+/// Wrap the last non-blank line of the body string in `Some(...)`.
+/// The last line is the body's tail expression (single line or
+/// multi-line — the emit produces one Rust expression per body tail).
+/// Special-case bare `self` — `Some(self)` would produce
+/// `Option<&Base>` (the receiver is `&self`/`&mut self`); use
+/// `Some(self.clone())` to match the function's owned `Option<Base>`
+/// return type. Struct emit derives Clone so this resolves cleanly.
+fn wrap_last_expression_with_some(body: &str) -> String {
+    let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
+    let last_idx = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+        .map(|(i, _)| i);
+    if let Some(idx) = last_idx {
+        let trimmed = lines[idx].trim_end_matches(';').to_string();
+        let leading: String = lines[idx]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect();
+        let content = trimmed.trim_start();
+        let wrapped = if content == "self" {
+            "Some(self.clone())".to_string()
+        } else {
+            format!("Some({content})")
+        };
+        lines[idx] = format!("{leading}{wrapped}");
+    }
+    lines.join("\n")
 }
 
 /// Emit a single instance method. `mutates_self` decides the
@@ -182,7 +263,7 @@ pub(super) fn emit_instance_method(
     // Option-ness from RBS to Var reads inside the body, so this is
     // the authoritative source for "is this param Option-typed".
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty, || super::expr::with_method_scope(&m.body, || {
+    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_method_scope(&m.body, || {
         if is_init {
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
             super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
@@ -198,6 +279,18 @@ pub(super) fn emit_instance_method(
             })
         }
     })));
+    // Function-tail Some(...) wrap: if the method returns Option<T>
+    // and the body's tail expression is T-typed (non-Option), wrap
+    // the last line in `Some(...)`. The Ruby idiom returns the last
+    // expression's value; the body-typer carries the per-expression
+    // type but doesn't insert Option-wrapping itself — that's emit
+    // work. Distinct from `Return { Lit::Nil }` (already handled in
+    // expr.rs as `return None`); this is for the implicit tail.
+    let body = if !is_init && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
+        wrap_last_expression_with_some(&body)
+    } else {
+        body
+    };
     let body_lines: Vec<&str> = body.lines().collect();
     let last_idx = body_lines.len().saturating_sub(1);
     for (i, line) in body_lines.iter().enumerate() {
