@@ -50,7 +50,7 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------------------
-  # Build the spinel AOT compiler from rubys/spinel@master and publish
+  # Build the spinel AOT compiler from matz/spinel@master and publish
   # the toolchain as an artifact. Downstream toolchain-spinel /
   # compare-spinel jobs download + chmod +x and either prepend to PATH
   # or pass SPINEL=.../spinel to the scaffold Makefile (runtime/spinel/
@@ -66,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: rubys/spinel
+          repository: matz/spinel
           ref: master
           path: spinel-src
       - name: make deps (fetch vendored libprism)
@@ -316,6 +316,48 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test ruby_toolchain -- --ignored
         run: cargo test --test ruby_toolchain -- --ignored --nocapture
+
+  # -------------------------------------------------------------------
+  # Spinel-AOT toolchain. Same emit pipeline as toolchain-ruby (lowered
+  # real-blog + target-specific tests), but the runner is the spinel
+  # AOT compiler from build-spinel. Each emitted test file compiles to
+  # a native binary via `$SPINEL <file>.rb -o <bin>`; each binary
+  # runs and asserts exit 0 (autorun shim emits explicit per-test
+  # dispatch — no minitest at_exit).
+  #
+  # Requires libsqlite3-dev at link time (the binaries `-lsqlite3`).
+  # ubuntu-latest ships libsqlite3-0 (runtime) but not the dev linker
+  # symlink, so we install it explicitly.
+  toolchain-spinel:
+    needs: [generate-fixture, build-spinel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spinel_parse \
+                   spinel-dist/spinel_analyze spinel-dist/spinel_codegen
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - name: cargo test --test spinel_toolchain -- --ignored
+        run: cargo test --test spinel_toolchain -- --ignored --nocapture
 
   toolchain-python:
     needs: generate-fixture
