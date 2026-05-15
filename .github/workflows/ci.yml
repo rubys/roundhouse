@@ -50,6 +50,45 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------------------
+  # Build the spinel AOT compiler from rubys/spinel@master and publish
+  # the toolchain as an artifact. Downstream toolchain-spinel /
+  # compare-spinel jobs download + chmod +x and either prepend to PATH
+  # or pass SPINEL=.../spinel to the scaffold Makefile (runtime/spinel/
+  # scaffold/Makefile honors SPINEL ?= spinel).
+  #
+  # The `spinel` shell wrapper resolves spinel_parse / spinel_analyze /
+  # spinel_codegen / lib/ relative to its own directory, so the tree
+  # ships as a unit. Tracking master rather than pinning a SHA — bump
+  # to a pin if upstream churn turns flaky.
+  # -------------------------------------------------------------------
+  build-spinel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rubys/spinel
+          ref: master
+          path: spinel-src
+      - name: make all
+        run: make -C spinel-src all
+      - name: Stage artifact tree
+        run: |
+          mkdir spinel-dist
+          cp spinel-src/spinel             spinel-dist/
+          cp spinel-src/spinel_parse       spinel-dist/
+          cp spinel-src/spinel_analyze     spinel-dist/
+          cp spinel-src/spinel_codegen     spinel-dist/
+          cp spinel-src/spinel_analyze.rb  spinel-dist/
+          cp spinel-src/spinel_codegen.rb  spinel-dist/
+          cp -R spinel-src/lib             spinel-dist/lib
+      - name: Upload spinel toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: spinel-dist
+          path: spinel-dist
+          retention-days: 1
+
+  # -------------------------------------------------------------------
   # Library correctness. Runs the default (non-ignored) test suite:
   # ingest / analyze / IR round-trip / per-target emit snapshot tests.
   # -------------------------------------------------------------------
