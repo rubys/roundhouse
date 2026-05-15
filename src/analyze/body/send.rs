@@ -603,7 +603,16 @@ pub(super) fn hash_method(
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
         "keys" => Ty::Array { elem: Box::new(key.clone()) },
-        "fetch" => value.clone(),
+        // `Hash#fetch(k, default)` returns the value at k or `default`
+        // when missing. The default can be any value (including nil)
+        // — Ruby's idiomatic `hash.fetch(k, nil)` produces
+        // `Union<value, Nil>`. Conservatively widen to that shape so
+        // emit can decide between `.get().cloned()` (Option<V>) and
+        // `.get().cloned().unwrap_or(default)` (V) at the call site.
+        // The per-target emit's fetch bridge already returns
+        // Option-shaped Rust expressions for the nil-default case;
+        // typing as Union<V, Nil> here matches that contract.
+        "fetch" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
         "merge" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
