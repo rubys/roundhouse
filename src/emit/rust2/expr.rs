@@ -1538,6 +1538,39 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     return format!("&{}[{range_s}]", emit_expr(r));
                 }
             }
+            // Negative-int literal index on Vec/Str (`arr[-1]` = last
+            // element, `arr[-2]` = second to last). Rust's `Index`
+            // panics on negative-cast-to-usize (`(-1_i64) as usize`
+            // is a huge number). Rewrite to `recv[recv.len() - N]`
+            // where N is the absolute negative. Mirrors the TS emit
+            // (`recv[recv.length-N]`) at line ~1600 of typescript/expr.rs.
+            // Only fires for literal negatives — dynamic negative
+            // indices would need a runtime branch, which the framework
+            // patterns we ship today don't require.
+            if matches!(
+                recv_ty,
+                Some(crate::ty::Ty::Array { .. })
+                    | Some(crate::ty::Ty::Str)
+                    | Some(crate::ty::Ty::Sym)
+            ) {
+                if let ExprNode::Lit { value: Literal::Int { value } } = &*args[0].node {
+                    if *value < 0 {
+                        let recv_s = emit_expr(r);
+                        let abs = -value;
+                        // Vec<T>::Index returns `&T`; clone to produce
+                        // the owned `T` Ruby's `arr[-1]` semantics
+                        // delivers. Callers (e.g. `Base.last`'s tail
+                        // wrapped in `Some(...)`) need owned T to
+                        // match the `Option<T>` return type.
+                        if matches!(recv_ty, Some(crate::ty::Ty::Array { .. })) {
+                            return format!(
+                                "{recv_s}[{recv_s}.len() - {abs}_usize].clone()"
+                            );
+                        }
+                        return format!("{recv_s}[{recv_s}.len() - {abs}_usize]");
+                    }
+                }
+            }
             // Slice/Vec indexing needs `usize`. Ruby integers (including
             // numeric loop counters like `let mut i = 0_i64`) lower to
             // `i64`; without a cast the `Index<i64>` impl is missing
