@@ -56,6 +56,26 @@ class BaseTest < Minitest::Test
       title = row["title"]
       @title = title if title.is_a?(String)
     end
+
+    # Legacy 12-method-shim routing. Production models override
+    # `_adapter_insert`/etc. directly with per-table `Db.exec` calls
+    # (Level-3 emit); Item is the only hand-written subclass still
+    # exercising the `ActiveRecord.adapter.*` path. Explicit overrides
+    # let Base's primitives stay empty for spinel polymorphic dispatch
+    # (see runtime/ruby/active_record/base.rb). Static `Item.table_name`
+    # avoids the test-lowerer's `self.class` → `class` self-stripping
+    # corner case.
+    def _adapter_insert
+      ActiveRecord.adapter.insert(Item.table_name, attributes)
+    end
+
+    def _adapter_update
+      ActiveRecord.adapter.update(Item.table_name, @id, attributes)
+    end
+
+    def _adapter_delete
+      ActiveRecord.adapter.delete(Item.table_name, @id)
+    end
   end
 
   def setup

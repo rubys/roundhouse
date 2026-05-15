@@ -82,24 +82,22 @@ module ActiveRecord
     # _adapter_insert / _adapter_update / _adapter_delete are
     # instance methods (not class methods) so Base#save / Base#destroy
     # call them via implicit-self dispatch — bypassing the
-    # `self.class.<async_method>` chain that the TS emitter
-    # mishandles under the libsql async profile (the await lifts to
-    # the receiver Send and the Promise from the call is dropped).
-    # Lowerer-emitted per-model overrides go straight to `Db.exec` /
-    # `Db.last_insert_rowid`; these defaults route through the
-    # legacy adapter for hand-written subclasses (framework_ruby_unit
-    # `Item`).
-    def _adapter_insert
-      ActiveRecord.adapter.insert(self.class.table_name, attributes)
-    end
-
-    def _adapter_update
-      ActiveRecord.adapter.update(self.class.table_name, @id, attributes)
-    end
-
-    def _adapter_delete
-      ActiveRecord.adapter.delete(self.class.table_name, @id)
-    end
+    # Abstract per-instance adapter primitives. Subclasses MUST
+    # override — lowerer-emitted models (Article, Comment, …) get
+    # `Db.exec` + `Db.last_insert_rowid` overrides per the Level-3
+    # adapter-emit pipeline; hand-written subclasses opt into the
+    # legacy `ActiveRecord.adapter.*` shim explicitly (see
+    # `BaseTest::Item` in active_record/base_test.rb).
+    #
+    # Empty bodies are load-bearing for spinel-AOT: spinel's polymorphic
+    # dispatch generates a class-id switch only when the base method
+    # body is empty (matching the `after_create_commit`/etc. callback
+    # pattern); a concrete base body causes monomorphic inlining to
+    # base, which then no-ops because `ActiveRecord.adapter` isn't
+    # wired under the Level-3 architecture.
+    def _adapter_insert; end
+    def _adapter_update; end
+    def _adapter_delete; end
 
     def self._adapter_count
       ActiveRecord.adapter.count(table_name)
@@ -154,14 +152,15 @@ module ActiveRecord
       raise NotImplementedError, "[]= must be overridden by subclass"
     end
 
-    # Subclasses override to mutate state from a row hash. Error
-    # message intentionally omits `self.class.name` — `.name`-style
-    # reflection diverges across the 7 targets (`this.constructor.name`
-    # vs `__MODULE__` vs `std::any::type_name`); the runtime stack
-    # trace already identifies the receiver's class.
-    def assign_from_row(_row)
-      raise NotImplementedError, "assign_from_row must be overridden by subclass"
-    end
+    # Subclasses MUST override to mutate state from a row hash. Empty
+    # base body (rather than `raise NotImplementedError`) so spinel-AOT
+    # generates a class-id switch at call sites — a concrete base body
+    # causes monomorphic inlining to base, which then no-ops because
+    # subclass overrides never get dispatched. See same pattern on
+    # `_adapter_insert`/etc. above. The raise was a safety net for a
+    # case that never fires in practice (every concrete model
+    # overrides).
+    def assign_from_row(_row); end
 
     # Per-model DOM prefix string ("article", "comment", ...). The
     # lowerer's `push_dom_prefix_method` synthesizes the actual constant-
