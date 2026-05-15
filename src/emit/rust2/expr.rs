@@ -695,6 +695,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                         continue;
                     }
                 }
+                // Standalone guard-clause unwrap: a Seq stmt of the
+                // form `if x.nil? { return Y }` (or raise) where `x`
+                // is a Var. The body-typer narrows `x` to non-nil for
+                // subsequent statements, but in Rust source `x` is
+                // still `Option<T>` — subsequent `x.method()` calls
+                // fail. Rewrite to `let Some(x) = x else { return Y; };`
+                // — rebinds `x` to the unwrapped value, matching the
+                // body-typer's narrowing.
+                if let Some(rendered) = try_emit_param_guard_unwrap(&exprs[i]) {
+                    lines.push(format!("{rendered};"));
+                    i += 1;
+                    continue;
+                }
                 let e = &exprs[i];
                 // Trailing `nil` in a void-return Ruby method
                 // (`@x = y; nil` shape) — Lit::Nil emits as `None`
@@ -753,7 +766,26 @@ fn emit_expr_inner(e: &Expr) -> String {
                     "return".to_string()
                 }
             } else {
-                format!("return {}", emit_expr_tail(value))
+                // String-literal return value in a String-returning
+                // function: append `.to_string()`. The literal emits as
+                // `&'static str` but the function signature is `String`.
+                // This handles `return "" if X.nil?` patterns in
+                // encode_string / encode_datetime where the early-exit
+                // string needs to match the return type.
+                let needs_to_string = matches!(
+                    &*value.node,
+                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                ) && CURRENT_RETURN_TY.with(|c| {
+                    matches!(
+                        c.borrow().as_ref(),
+                        Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
+                    )
+                });
+                if needs_to_string {
+                    format!("return {}.to_string()", emit_expr_tail(value))
+                } else {
+                    format!("return {}", emit_expr_tail(value))
+                }
             }
         }
         ExprNode::While { cond, body, until_form } => {
@@ -877,6 +909,56 @@ fn emit_expr_inner(e: &Expr) -> String {
         // file in Phase 2 expands this until full coverage.
         other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
     }
+}
+
+/// Detect a standalone Ruby guard-clause on a Var/param:
+///   return X if name.nil?
+/// (or `raise X if name.nil?`). The body-typer narrows `name` to
+/// non-nil for subsequent statements via the diverging-then narrowing
+/// in Seq, but in Rust source `name` is still `Option<T>` from its
+/// parameter declaration / earlier let. Emit
+///   let Some(name) = name else { <then-branch> };
+/// which rebinds `name` to the unwrapped value — matches the body-
+/// typer's narrowing without changing the param signature.
+///
+/// Distinct from `try_fuse_let_else`: that helper handles `let x =
+/// OPT; if x.nil? { ... }` (assign-then-guard). This one handles a
+/// guard alone, where the unwrapped binding is a function param or
+/// previously-introduced local.
+fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<String> {
+    use crate::ty::Ty;
+    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
+        return None;
+    };
+    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name: var_name, .. } = &*cond_recv.node else {
+        return None;
+    };
+    let recv_is_option = matches!(
+        cond_recv.ty.as_ref(),
+        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
+    );
+    if !recv_is_option {
+        return None;
+    }
+    let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
+    let else_is_nil = matches!(
+        &*else_branch.node,
+        ExprNode::Lit { value: Literal::Nil }
+    );
+    if !then_diverges || !else_is_nil {
+        return None;
+    }
+    let diverge_s = emit_expr_tail(then_branch);
+    Some(format!(
+        "let Some({name}) = {name} else {{ {diverge_s} }}",
+        name = var_name.as_str()
+    ))
 }
 
 /// Detect the Ruby idiom
