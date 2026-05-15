@@ -153,6 +153,15 @@ pub(super) fn current_return_is_option() -> bool {
     })
 }
 
+/// True when the enclosing function returns unit (`()` — declared
+/// `-> void` in RBS, `Ty::Nil` in IR). The trailing `nil` of a void-
+/// shaped Ruby method's body needs to emit as `()` (or nothing),
+/// NOT as `None` (which is the Option::None constructor and would
+/// produce an E0308 in a void function context).
+pub(super) fn current_return_is_unit() -> bool {
+    CURRENT_RETURN_TY.with(|c| matches!(c.borrow().as_ref(), Some(crate::ty::Ty::Nil)))
+}
+
 /// Run `f` with the module-singleton emit mode active. Used by
 /// `library.rs` when the class shape signals a Ruby
 /// `class << self; ... end` (every method is a class method).
@@ -687,6 +696,25 @@ fn emit_expr_inner(e: &Expr) -> String {
                     }
                 }
                 let e = &exprs[i];
+                // Trailing `nil` in a void-return Ruby method
+                // (`@x = y; nil` shape) — Lit::Nil emits as `None`
+                // (Option::None constructor), which fails E0308 in a
+                // function declared `-> ()`. Drop the trailing Nil
+                // entirely; Rust functions implicitly return `()` at
+                // the end of a block.
+                if i == last
+                    && current_return_is_unit()
+                    && matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+                {
+                    if !lines.is_empty() {
+                        let last_line = lines.last_mut().unwrap();
+                        if !last_line.ends_with(';') {
+                            last_line.push(';');
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
                 let s = if i == last {
                     emit_expr_tail(e)
                 } else {
