@@ -2106,13 +2106,27 @@ fn dispatch_method_by_recv_ty(
             // matches both.
             "dup" | "clone" if args.is_empty() => Some(format!("{recv_s}.clone()")),
             // `hash.delete(k)` — Ruby removes by key, returns the
-            // removed value (or nil). HashMap::remove takes `&K` and
-            // returns `Option<V>`. Emit-side only; user-defined
-            // classes with their own `delete(...)` method (e.g.
-            // `ActiveRecordAdapter::delete(table, id)`) bypass this
-            // arm because the recv-Ty match fails.
+            // removed value (or nil). HashMap::remove takes `&Q where
+            // K: Borrow<Q>` and returns `Option<V>`. Emit-side only;
+            // user-defined classes with their own `delete(...)` method
+            // (e.g. `ActiveRecordAdapter::delete(table, id)`) bypass
+            // this arm because the recv-Ty match fails.
+            //
+            // The `&` prefix is needed when the arg emits as `String`
+            // (owned) but skipped when it's already `&str` (a literal
+            // or borrowed). For HashMap<String, _>, `.remove("k")`
+            // works (`&str` borrows from `str`); `.remove(&"k")`
+            // fails (`&&str`, String doesn't Borrow<&str>).
             "delete" if args.len() == 1 => {
-                Some(format!("{recv_s}.remove(&{})", args_s[0]))
+                let key_emit = if matches!(
+                    &*args[0].node,
+                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                ) {
+                    args_s[0].clone()
+                } else {
+                    format!("&{}", args_s[0])
+                };
+                Some(format!("{recv_s}.remove({key_emit})"))
             }
             _ => None,
         },
