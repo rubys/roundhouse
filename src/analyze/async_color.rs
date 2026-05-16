@@ -518,6 +518,21 @@ fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
     let Some(recv) = recv else {
         return false;
     };
+    // `Const` receivers (`Route.new(...)`, `MatchResult.new(...)` —
+    // class-reference call sites) don't carry a `.ty` because they
+    // refer to the class itself, not a value. Pull the leaf segment
+    // out of the const path and match against the known-sync set so
+    // `Class.new(...)` for router-internal data classes doesn't
+    // propagate async coloring through a name collision (e.g. an
+    // adapter's `.new` in the async-names set).
+    if let ExprNode::Const { path } = &*recv.node {
+        if let Some(last) = path.last() {
+            let name = last.as_str();
+            if matches!(name, "Route" | "MatchResult") {
+                return true;
+            }
+        }
+    }
     let Some(ty) = &recv.ty else {
         return false;
     };
@@ -538,6 +553,14 @@ fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
                     | "Hash"
                     | "String"
                     | "Symbol"
+                    // Router-internal data classes: pure-construction
+                    // `Route.new(...)` rows in `Routes.table` + the
+                    // `MatchResult.new(...)` return from `Router.match`.
+                    // No async work in either constructor; without this,
+                    // the libsql adapter's name-collision with `new`
+                    // propagates async through every routes-table emit.
+                    | "Route"
+                    | "MatchResult"
             )
         }
         _ => false,

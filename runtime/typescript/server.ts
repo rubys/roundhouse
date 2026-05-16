@@ -435,11 +435,12 @@ function openDatabase(dbPath: string, schemaStatements: string[]): void {
 
 /** One row from the emitted `Routes.table()` / `Routes.root()`. The
  *  routes lowerer emits these as symbol-keyed Ruby hashes whose TS
- *  rendering is `Record<string, any>` — TS doesn't narrow Record to
- *  a struct shape, so we mirror that here for type compatibility
- *  with the lowered output. Reads always go through `route["method"]`
- *  etc., never struct member access. */
-export type RouteRow = Record<string, any>;
+ *  rendering is the typed `Route` class from the transpiled router.
+ *  Per-field accessors (`route.verb`, `route.controller`, etc.)
+ *  rather than bracket-string lookup; the prior `Record<string, any>`
+ *  alias is gone now that the lowerer emits `new Route(...)` rows. */
+import { Route as RouteClass } from "./router.js";
+export type RouteRow = RouteClass;
 
 /** Constructable controller shape — bare class. Each emitted
  *  controller exports its class; `main.ts` builds a

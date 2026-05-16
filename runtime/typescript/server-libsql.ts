@@ -352,7 +352,8 @@ async function openDatabase(dbPath: string, schemaStatements: string[]): Promise
 
 // ── Public entry point ─────────────────────────────────────────
 
-export type RouteRow = Record<string, any>;
+import { Route as RouteClass } from "./router.js";
+export type RouteRow = RouteClass;
 export type ControllerClass = new () => any;
 
 export interface StartOptions {

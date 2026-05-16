@@ -32,7 +32,12 @@ import { Session } from "../../src/session.js";
 // `installRoutes` is the seam — call it from a generated bootstrap
 // step that runs before `discover_tests`.
 
-type RouteRow = Record<string, any>;
+// Emitted layout: this file lands at `test/_runtime/minitest-async.ts`;
+// the transpiled `router.ts` lands at `src/router.ts`. Resolve via
+// the `../../src/router.js` relative path so tsc finds Route as a
+// concrete class.
+import { Route as RouteClass } from "../../src/router.js";
+type RouteRow = RouteClass;
 type ControllerClass = new () => any;
 
 let testDispatchTable: RouteRow[] = [];

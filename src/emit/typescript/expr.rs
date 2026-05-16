@@ -155,6 +155,20 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
     let Some(recv) = recv else {
         return false;
     };
+    // `Const` receivers (`Route.new(...)`, `MatchResult.new(...)`)
+    // don't carry a `.ty` because they refer to the class itself, not
+    // a value. Match the leaf segment against the known-sync set so
+    // the `Class.new(...)` call site doesn't get `(await ...)`-wrapped
+    // when an unrelated class's `new` is in the active async set.
+    // Mirrors `analyze::async_color::recv_is_known_sync`.
+    if let ExprNode::Const { path } = &*recv.node {
+        if let Some(last) = path.last() {
+            let name = last.as_str();
+            if matches!(name, "Route" | "MatchResult") {
+                return true;
+            }
+        }
+    }
     let Some(ty) = &recv.ty else {
         return false;
     };
@@ -174,6 +188,8 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
                     | "Hash"
                     | "String"
                     | "Symbol"
+                    | "Route"
+                    | "MatchResult"
             )
         }
         _ => false,
