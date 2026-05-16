@@ -194,9 +194,6 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         ivars.iter().cloned().collect();
     let body_result = super::expr::with_ivar_types(ivar_type_map, || super::expr::with_static_methods(static_method_names.clone(), || {
         for m in &class.methods {
-            if matches!(m.name.as_str(), "[]" | "[]=") {
-                continue;
-            }
             if !first {
                 writeln!(out).unwrap();
             }

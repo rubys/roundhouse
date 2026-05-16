@@ -1313,10 +1313,7 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             // `recv[k] = v` on a Flash / Session struct dispatches to
             // the hand-written `.set(key, value)` method (no
             // IndexMut impl; the runtime/rust/flash.rs etc. surface
-            // explicit setters). Other Ty::Class indexers and
-            // HashMap-typed receivers keep the bracket-assignment
-            // emit — HashMap implements IndexMut, model classes
-            // override `[]=` per-column (a separate IR path).
+            // explicit setters).
             if let Some(crate::ty::Ty::Class { id, .. }) = recv.ty.as_ref() {
                 let cls = id.0.as_str();
                 if matches!(cls, "Flash" | "Session"
@@ -1328,6 +1325,44 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                         emit_expr(index),
                     );
                 }
+                // Other Ty::Class receivers (ActiveRecord::Base and
+                // friends) route through the `set_index` method emit
+                // (per the operator-method rewrite in `sanitize_ident`).
+                // Wrap String RHS with `serde_json::Value::from` because
+                // `def []=` is declared `(Symbol, untyped) -> untyped`
+                // (RBS in `active_record/base.rbs`), which renders the
+                // value param as `serde_json::Value`. Already-Value RHS
+                // pass through; non-built-in classes get the method
+                // call; `Hash` / `Array` / built-in containers fall
+                // through to the bracket-assignment emit below.
+                if !is_builtin_container_class(cls) {
+                    let coerced_rhs = coerce_to_value(value, &rhs);
+                    return format!(
+                        "{}.set_index({}, {coerced_rhs})",
+                        emit_expr(recv),
+                        emit_expr(index),
+                    );
+                }
+            }
+            // HashMap doesn't implement `IndexMut` — `recv[k] = v`
+            // requires `.insert(k, v)`. The Ruby source's
+            // `hash[key] = value` lowers as an `Assign { target:
+            // LValue::Index }` and pre-rust2 emit used the bracket
+            // form, which rustc rejects (E0594 "cannot assign to data
+            // in an index"). Recv-aware dispatch: Ty::Hash → `.insert`,
+            // other built-in containers (Array indexable by usize)
+            // keep the bracket-assign form for now.
+            //
+            // Wrap in `{ ...; }` so the assignment evaluates to `()`.
+            // `HashMap::insert` returns `Option<V>` (previous value)
+            // which rustc rejects in `if cond { recv[k]=v }` no-else
+            // contexts (E0317). Trailing `;` inside the block discards.
+            if matches!(recv.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) {
+                return format!(
+                    "{{ {}.insert({}, {rhs}); }}",
+                    emit_expr(recv),
+                    emit_expr(index),
+                );
             }
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }
@@ -1639,6 +1674,20 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     emit_expr(&args[0])
                 );
             }
+            // Ty::Class non-builtin recv: route `recv[k]` through the
+            // `get_index` method emitted by `sanitize_ident`'s `[]` →
+            // `get_index` rewrite. Built-in containers (Hash, Array)
+            // and HWIA / Flash / Session keep the bracket form.
+            if let Some(crate::ty::Ty::Class { id, .. }) = recv_ty {
+                let cls = id.0.as_str();
+                if !is_builtin_container_class(cls) {
+                    return format!(
+                        "{}.get_index({})",
+                        emit_expr(r),
+                        emit_expr(&args[0])
+                    );
+                }
+            }
             return format!("{}[{}]", emit_expr(r), emit_expr(&args[0]));
         }
         // Ruby `String#[](start, length)` — byte-slice with start +
@@ -1691,6 +1740,33 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         emit_expr(&args[1]),
                     );
                 }
+                // Non-builtin Ty::Class — route through `set_index`
+                // (the `[]=` operator-method rewrite). Wrap value RHS
+                // with Value::from when its Ty isn't already
+                // serde_json::Value-shaped.
+                if !is_builtin_container_class(cls) {
+                    let rhs = emit_expr(&args[1]);
+                    let coerced_rhs = coerce_to_value(&args[1], &rhs);
+                    return format!(
+                        "{}.set_index({}, {coerced_rhs})",
+                        emit_expr(r),
+                        emit_expr(&args[0]),
+                    );
+                }
+            }
+            // Ty::Hash recv via Send-`[]=` — HashMap doesn't implement
+            // IndexMut, so `recv[k] = v` syntax fails (E0594). Mirror
+            // the LValue::Index Ty::Hash branch and route through
+            // `.insert(k, v)`. Wrap in `{ ...; }` for the no-else
+            // `if cond { ... }` context (HashMap::insert returns
+            // Option<V>; trailing `;` makes the block `()` typed).
+            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) {
+                return format!(
+                    "{{ {}.insert({}, {}); }}",
+                    emit_expr(r),
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                );
             }
             return format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1]));
         }
@@ -1876,15 +1952,22 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     }} }}"
             );
         }
-        // `value.nil?` on a `Ty::Untyped` receiver — `serde_json::Value`
-        // exposes `.is_null()` (not `.is_none`, which is the Option
-        // method the generic `nil?` bridge below produces). Recv-type
-        // aware: the generic bridge stays in place for Option-typed
-        // receivers (the typical case for Ruby `attr_reader` getters
-        // typed `T?`).
+        // `value.nil?` on a `Ty::Untyped` or unresolved-Var receiver —
+        // `serde_json::Value` exposes `.is_null()` (not `.is_none`,
+        // which is the Option method the generic `nil?` bridge below
+        // produces). The Var-typed case covers receivers the body-
+        // typer didn't fully resolve (e.g. `value = @model[field]`
+        // where `@model[field]` is typed Untyped per Base's RBS but
+        // the local-let propagation leaves `value`'s recv ty
+        // unresolved at the emit-walk's view of the Var-read site).
+        // The generic bridge stays in place for true Option-typed
+        // receivers (typical Ruby `attr_reader` getters typed `T?`).
         if method == "nil?"
             && args.is_empty()
-            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+            && matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. })
+            )
         {
             return format!("{}.is_null()", emit_expr(r));
         }
@@ -2193,7 +2276,53 @@ fn rewrite_method_name(m: &str) -> String {
 /// Public so `method.rs` can use the same rule at `pub fn`
 /// definition sites — defines and call sites share the transform
 /// so name agreement holds across both.
+/// Built-in container classes whose `[]` / `[]=` should stay as the
+/// Rust bracket-index syntax (`HashMap`, `Vec`, etc. via Index/IndexMut).
+/// User-defined classes route through the `get_index` / `set_index`
+/// method rewrite instead.
+pub(super) fn is_builtin_container_class(name: &str) -> bool {
+    let last = name.rsplit("::").next().unwrap_or(name);
+    matches!(
+        last,
+        "Hash" | "HashWithIndifferentAccess" | "Array" | "String"
+            | "Flash" | "Session"
+            | "Parameters"
+            | "Errors" | "ErrorCollection"
+    )
+}
+
+/// Wrap an emitted RHS with `serde_json::Value::from(...)` when the
+/// expression's Ty isn't already `serde_json::Value`. Used by the
+/// `set_index` call-site emit (Ty::Class indexer dispatch) — the
+/// `def []=(_, untyped)` signature renders the value param as Value,
+/// so a String/Int/Bool RHS needs explicit conversion.
+pub(super) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
+    use crate::ty::Ty;
+    let already_value = matches!(
+        value.ty.as_ref(),
+        Some(Ty::Untyped)
+            | Some(Ty::Var { .. })
+            | Some(Ty::Record { .. })
+            | Some(Ty::Hash { .. })
+    );
+    if already_value {
+        rhs.to_string()
+    } else {
+        format!("serde_json::Value::from({rhs})")
+    }
+}
+
 pub(super) fn sanitize_ident(name: &str) -> String {
+    // Operator-method names from Ruby don't translate to Rust syntax;
+    // emit them as descriptive Rust identifiers. Call sites are
+    // rewritten to match in `emit_assign` (LValue::Index) and the
+    // Send-`[]`/`[]=` paths in `emit_send_method`.
+    if name == "[]" {
+        return "get_index".to_string();
+    }
+    if name == "[]=" {
+        return "set_index".to_string();
+    }
     let s = if let Some(base) = name.strip_suffix('!') {
         // `bang!` collides with the non-bang sibling after `?`-strip,
         // so suffix with `_bang` rather than dropping the marker.
