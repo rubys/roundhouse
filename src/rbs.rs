@@ -297,14 +297,64 @@ fn method_signature_ty(
         ));
     };
 
-    let mut params = Vec::new();
     let method_name = method.name().as_str().to_string();
+    let (mut params, ret) = parse_function_type_to_fn(&fn_type, &method_name, scope)?;
+
+    // Block signature: `{ (...) -> T }` — captured on method_type, not
+    // fn_type. Parse the block's function type into a `Ty::Fn` (with
+    // empty Block on its own — blocks-of-blocks aren't a thing in Ruby
+    // and RBS doesn't model them). Rust2 emit consumes the inner Fn to
+    // render an `f: impl FnOnce(...) -> R` closure param.
+    let block_ty = if let Some(block_node) = method_type.block() {
+        if let Node::FunctionType(block_fn_type) = block_node.type_() {
+            let (block_params, block_ret) =
+                parse_function_type_to_fn(&block_fn_type, &method_name, scope)?;
+            Some(Ty::Fn {
+                params: block_params,
+                block: None,
+                ret: Box::new(block_ret),
+                effects: EffectSet::pure(),
+            })
+        } else {
+            // Untyped or proc-typed block — keep the placeholder for
+            // backward compatibility with code paths that only checked
+            // presence-of-block.
+            Some(Ty::Untyped)
+        }
+    } else {
+        None
+    };
+    if let Some(ref bty) = block_ty {
+        params.push(Param {
+            name: Symbol::new("block"),
+            ty: bty.clone(),
+            kind: ParamKind::Block,
+        });
+    }
+
+    Ok(Ty::Fn {
+        params,
+        block: block_ty.map(Box::new),
+        ret: Box::new(ret),
+        effects: EffectSet::pure(),
+    })
+}
+
+/// Parse a single RBS `FunctionType` into `(params, ret)`. Shared
+/// between method signatures and block signatures (the latter parses
+/// the same shape — `(args) -> T` — at a deeper position).
+fn parse_function_type_to_fn(
+    fn_type: &ruby_rbs::node::FunctionTypeNode<'_>,
+    method_name: &str,
+    scope: Option<&str>,
+) -> Result<(Vec<Param>, Ty), String> {
+    let mut params = Vec::new();
 
     collect_function_params(
         fn_type.required_positionals().iter(),
         &mut params,
         ParamKind::Required,
-        &method_name,
+        method_name,
         "required",
         scope,
     )?;
@@ -312,7 +362,7 @@ fn method_signature_ty(
         fn_type.optional_positionals().iter(),
         &mut params,
         ParamKind::Optional,
-        &method_name,
+        method_name,
         "optional",
         scope,
     )?;
@@ -342,14 +392,14 @@ fn method_signature_ty(
         fn_type.trailing_positionals().iter(),
         &mut params,
         ParamKind::Required,
-        &method_name,
+        method_name,
         "trailing",
         scope,
     )?;
 
     // Required keywords: `k: Ty` (no default marker on the RBS side).
     for (key, value) in fn_type.required_keywords().iter() {
-        let name = keyword_name(&key, &method_name, "required keyword")?;
+        let name = keyword_name(&key, method_name, "required keyword")?;
         let Node::FunctionParam(fn_param) = value else {
             return Err(format!(
                 "method `{method_name}` required keyword `{}` is not a FunctionParam",
@@ -366,7 +416,7 @@ fn method_signature_ty(
 
     // Optional keywords: `?k: Ty`.
     for (key, value) in fn_type.optional_keywords().iter() {
-        let name = keyword_name(&key, &method_name, "optional keyword")?;
+        let name = keyword_name(&key, method_name, "optional keyword")?;
         let Node::FunctionParam(fn_param) = value else {
             return Err(format!(
                 "method `{method_name}` optional keyword `{}` is not a FunctionParam",
@@ -408,28 +458,7 @@ fn method_signature_ty(
     }
 
     let ret = ty_from_node(&fn_type.return_type(), scope)?;
-
-    // Block signature: `{ (...) -> T }` — captured on method_type, not
-    // fn_type. For now we only surface its presence via the block
-    // param in `Ty::Fn`; full block-signature typing is a future step.
-    // Use `Ty::Untyped` (not `Var`) for the placeholder: it's an
-    // author-signed declaration that the block exists with a yet-to-be-
-    // typed signature, not an inference gap.
-    let block = method_type.block().map(|_| Box::new(Ty::Untyped));
-    if block.is_some() {
-        params.push(Param {
-            name: Symbol::new("block"),
-            ty: Ty::Untyped,
-            kind: ParamKind::Block,
-        });
-    }
-
-    Ok(Ty::Fn {
-        params,
-        block,
-        ret: Box::new(ret),
-        effects: EffectSet::pure(),
-    })
+    Ok((params, ret))
 }
 
 fn keyword_name(key: &Node<'_>, method_name: &str, category: &str) -> Result<Symbol, String> {

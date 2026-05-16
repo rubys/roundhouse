@@ -70,33 +70,37 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
 }
 
 fn render_params(m: &MethodDef) -> String {
-    if m.params.is_empty() {
-        return "()".to_string();
-    }
-    // Filter `Block` params out of the signature before length-matching:
-    // the Ruby `def` syntax omits `&block` from `m.params` but the
+    // Pull positional + kwarg sig params (filter Block — handled separately).
+    // The Ruby `def` syntax omits `&block` from `m.params` but the
     // RBS-derived signature appends a `Block` Param at the end. Without
     // this filter, `def self.form_with(model:, ...)` (5 params) +
     // RBS-block (6th sig param) trips the length-mismatch fallback
-    // and renders every param as `()`. Block consumption rides
-    // through `yield` in the body; emit doesn't surface the block
-    // param in the Rust signature.
-    let sig_params_filtered: Option<Vec<&crate::ty::Param>> = m.signature.as_ref().and_then(|s| {
-        if let Ty::Fn { params, .. } = s {
-            Some(
-                params
-                    .iter()
-                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-                    .collect(),
-            )
-        } else {
-            None
+    // and renders every param as `()`.
+    let (sig_params_filtered, block_param): (
+        Option<Vec<&crate::ty::Param>>,
+        Option<&crate::ty::Param>,
+    ) = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) => {
+            let non_block: Vec<&crate::ty::Param> = params
+                .iter()
+                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                .collect();
+            let block = params
+                .iter()
+                .find(|p| matches!(p.kind, crate::ty::ParamKind::Block));
+            (Some(non_block), block)
         }
-    });
+        _ => (None, None),
+    };
+
+    if m.params.is_empty() && block_param.is_none() {
+        return "()".to_string();
+    }
+
     let sig_params = sig_params_filtered
         .as_ref()
         .filter(|sp| sp.len() == m.params.len());
-    let parts: Vec<String> = m
+    let mut parts: Vec<String> = m
         .params
         .iter()
         .enumerate()
@@ -108,7 +112,42 @@ fn render_params(m: &MethodDef) -> String {
             }
         })
         .collect();
+
+    // Append `f: impl FnOnce(P1, P2, ...) -> R` when the signature
+    // declares a block with a typed Fn signature. `yield(args)` in the
+    // body emits as `f(args)` (per `emit_send`'s Yield arm); the closure
+    // param is the receiving side of that call. Untyped/proc-typed
+    // blocks fall back to a permissive `Box<dyn Fn>`-shaped closure —
+    // body still references `f`, so the binding has to exist. RBS
+    // block-signature parsing (src/rbs.rs::parse_function_type_to_fn)
+    // produces `Ty::Fn`; older `Ty::Untyped` block placeholders use
+    // the permissive fallback path.
+    if let Some(bp) = block_param {
+        parts.push(render_block_closure_param(&bp.ty));
+    }
+
     format!("({})", parts.join(", "))
+}
+
+/// Render the `f: impl FnOnce(...) -> R` parameter that backs `yield`
+/// in the body. `block_ty` should be a `Ty::Fn` parsed from the RBS
+/// block clause; falls back to a permissive `serde_json::Value`-typed
+/// closure when the block was left as `Ty::Untyped`.
+fn render_block_closure_param(block_ty: &Ty) -> String {
+    if let Ty::Fn { params, ret, .. } = block_ty {
+        let arg_tys: Vec<String> = params
+            .iter()
+            .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+            .map(|p| rust_param_ty(&p.ty))
+            .collect();
+        let ret_s = rust_ty(ret);
+        format!("f: impl FnOnce({}) -> {}", arg_tys.join(", "), ret_s)
+    } else {
+        // Permissive fallback for blocks the RBS didn't sign with a
+        // signature. Author-signed Untyped accepts any args + returns
+        // a String (the common form-helper shape).
+        "f: impl FnOnce(serde_json::Value) -> String".to_string()
+    }
 }
 
 fn render_return(m: &MethodDef) -> String {
