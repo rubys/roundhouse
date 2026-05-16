@@ -471,7 +471,28 @@ fn apply_str_coercion(raw: String, e: &Expr) -> String {
 fn emit_expr_inner(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        ExprNode::Var { name, .. } => {
+            // Narrowing write-back: when the body-typer narrows
+            // `content_type` (Option<String>) to `String` inside an
+            // `unless content_type.nil?` body, e.ty reflects the
+            // narrowed type but the Rust binding is still
+            // `Option<String>` (per the function signature). Insert
+            // `.clone().unwrap()` so the rendered RHS matches what
+            // downstream coercion paths see in `e.ty`. Only fires when
+            // the param table declares Option-shape AND the narrowed
+            // e.ty is the unwrapped variant — the common nil-narrowing
+            // pattern. The `.clone()` keeps the binding usable on
+            // multiple reads in the same scope.
+            let n = name.as_str();
+            if let Some(narrowed) = &e.ty {
+                if let Some(param) = param_ty(n) {
+                    if is_option_of(&param, narrowed) {
+                        return format!("{n}.clone().unwrap()");
+                    }
+                }
+            }
+            n.to_string()
+        }
         ExprNode::Ivar { name } => {
             if in_module_singleton() {
                 // Module-singleton ivar read — pull through the
@@ -1404,13 +1425,17 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
         }
         _ => (field_ty.clone(), false),
     };
-    // Authoritative RHS Ty: if `value` is a bare Var read of a
-    // declared param, look up the param's RBS type — the body-typer
-    // sometimes erases the Option-ness on Var reads and the param
-    // table is the source of truth. Otherwise fall back to the
-    // body-typer's `value.ty`.
+    // Authoritative RHS Ty: prefer the body-typer's `value.ty` when
+    // set — it reflects flow-sensitive narrowing (e.g. `content_type`
+    // inside `unless content_type.nil?` narrowed from `Option<String>`
+    // to `String`). Falling back to `param_ty(name)` would re-broaden
+    // the type to the RBS-declared (un-narrowed) param ty, which then
+    // triggers a spurious `.unwrap()` chain at the coercion site
+    // (action_controller_base render's E0599). The param-table fallback
+    // remains for callers that bypass the body-typer or land here
+    // before typing (value.ty == None).
     let effective_value_ty = match &*value.node {
-        ExprNode::Var { name, .. } => param_ty(name.as_str()).or_else(|| value.ty.clone()),
+        ExprNode::Var { name, .. } => value.ty.clone().or_else(|| param_ty(name.as_str())),
         _ => value.ty.clone(),
     };
     // If the RHS is itself an Option (Union{Nil, _}), it already
@@ -2276,6 +2301,24 @@ fn rewrite_method_name(m: &str) -> String {
 /// Public so `method.rs` can use the same rule at `pub fn`
 /// definition sites — defines and call sites share the transform
 /// so name agreement holds across both.
+/// True when `outer` is a `Union<inner, Nil>` (Option-shape) and
+/// `inner` matches the unwrapped type. Used by the Var-emit narrowing
+/// write-back to detect when the body-typer's narrowed type is the
+/// `Option<T>` → `T` form (the common `unless x.nil?` pattern).
+fn is_option_of(outer: &crate::ty::Ty, inner: &crate::ty::Ty) -> bool {
+    let crate::ty::Ty::Union { variants } = outer else {
+        return false;
+    };
+    if variants.len() != 2 {
+        return false;
+    }
+    let has_nil = variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil));
+    let other = variants
+        .iter()
+        .find(|v| !matches!(v, crate::ty::Ty::Nil));
+    matches!(other, Some(o) if has_nil && o == inner)
+}
+
 /// Built-in container classes whose `[]` / `[]=` should stay as the
 /// Rust bracket-index syntax (`HashMap`, `Vec`, etc. via Index/IndexMut).
 /// User-defined classes route through the `get_index` / `set_index`

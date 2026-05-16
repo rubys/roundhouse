@@ -1043,6 +1043,78 @@ mod tests {
         assert!(variants.contains(&Ty::Int), "variants: {variants:?}");
     }
 
+    #[test]
+    fn narrowing_writes_back_to_var_ty_inside_assign_in_else_branch() {
+        // `if x.nil? then nil else @y = x end` — same shape as the
+        // postfix `@y = x unless x.nil?` form. The Var{x} sits inside
+        // an Assign, which is inside the else-branch. The Var's .ty
+        // should still narrow to String — i.e. write-back has to
+        // propagate through every nested node the body-typer walks.
+        let then_branch = nil_lit();
+        let assign = synth(ExprNode::Assign {
+            target: LValue::Ivar { name: Symbol::from("y") },
+            value: var("x"),
+        });
+        let if_expr = synth(ExprNode::If {
+            cond: send(Some(var("x")), "nil?", vec![]),
+            then_branch,
+            else_branch: assign,
+        });
+        let mut expr = if_expr;
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("x", optional_str());
+        typer.analyze_expr(&mut expr, &ctx);
+
+        let ExprNode::If { else_branch, .. } = &*expr.node else {
+            panic!("expected If");
+        };
+        let ExprNode::Assign { value, .. } = &*else_branch.node else {
+            panic!("expected Assign in else");
+        };
+        assert_eq!(
+            value.ty,
+            Some(Ty::Str),
+            "Var{{x}} inside Assign{{value:}} in else should narrow to Str; \
+             got {:?}",
+            value.ty,
+        );
+    }
+
+    #[test]
+    fn narrowing_writes_back_to_var_ty_in_else_branch() {
+        // `if x.nil? then nil else x end` — x narrows to String in the
+        // else branch; the Var{x} read inside else should carry ty=Str
+        // on its Expr, not the un-narrowed Option<String>. This is the
+        // "narrowing write-back" gate — emit-side coercion paths read
+        // value.ty directly, and a stale Option<String> there triggers
+        // spurious .to_string().unwrap() chains (E0599 on rust2's
+        // action_controller_base render).
+        let then_branch = nil_lit();
+        let else_branch = var("x");
+        let if_expr = synth(ExprNode::If {
+            cond: send(Some(var("x")), "nil?", vec![]),
+            then_branch,
+            else_branch,
+        });
+        let mut expr = if_expr;
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local("x", optional_str());
+        typer.analyze_expr(&mut expr, &ctx);
+
+        let ExprNode::If { else_branch, .. } = &*expr.node else {
+            panic!("expected If");
+        };
+        assert_eq!(
+            else_branch.ty,
+            Some(Ty::Str),
+            "else-branch Var{{x}} should reflect narrowed (non-nil) type"
+        );
+    }
+
     // ── block return propagation (7b) ──────────────────────────────
 
     use crate::expr::BlockStyle;
