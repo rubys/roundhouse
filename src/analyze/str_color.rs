@@ -136,6 +136,21 @@ pub fn build_registry(
     reg
 }
 
+/// Build a registry from a Module-mode method list (no enclosing
+/// LibraryClass). rust2's `emit_module` calls this when coloring
+/// `def self.*` runtime methods (router.rb, view_helpers.rb's
+/// module-level helpers) that the runtime loader's Library-mode
+/// transform closure doesn't see.
+pub fn build_registry_from_methods(methods: &[MethodDef]) -> CallableRegistry {
+    let mut reg = CallableRegistry::new();
+    for method in methods {
+        let sig = signature_from_method(method);
+        reg.methods.entry(method.name.clone()).or_insert(sig);
+    }
+    register_hand_written_runtime(&mut reg);
+    reg
+}
+
 fn signature_from_method(method: &MethodDef) -> CallableSig {
     from_sig(method.signature.as_ref(), method.params.len())
 }
@@ -278,7 +293,13 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
     // Annotate THIS node first (if it's string-typed and there's an
     // expectation that differs from what we'll produce), then recurse
     // with appropriate per-child expectations.
-    if is_str_ty(e.ty.as_ref()) {
+    //
+    // Treat known string-producing Sends (`to_s`, `to_str`, etc.) as
+    // string-typed even when the body-typer didn't annotate `e.ty` —
+    // the body-typer's Ty propagation doesn't fully cover Sends on
+    // `serde_json::Value` and similar untyped receivers, but the
+    // method name alone tells us the result will emit as `String`.
+    if is_str_ty(e.ty.as_ref()) || is_known_str_send(e) {
         if let (Some(producer), ParentExpect::Color(consumer)) = (producer_color(e), expect) {
             if let Some(c) = coercion_for(producer, consumer) {
                 e.str_coercion = Some(c);
@@ -335,11 +356,35 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                 count += walk(r, ParentExpect::None, ctx);
             }
             // Args: look up the callee's per-param color and apply.
+            //
+            // Special case for `[]=` and `[]` on a known Hash receiver:
+            // derive arg colors from the Hash's K/V types instead of
+            // the registry. The registry's name-only lookup would
+            // otherwise hit a same-named method on a different class
+            // (e.g. ActiveRecord::Base's `[]=` with column-name &str
+            // param shape) and apply the wrong expectation.
+            let hash_kv = recv
+                .as_ref()
+                .and_then(|r| r.ty.as_ref())
+                .and_then(|t| match t {
+                    Ty::Hash { key, value } => Some((key.as_ref(), value.as_ref())),
+                    _ => None,
+                });
             let sig = ctx.registry.sig_for_method(method);
             for (i, arg) in args.iter_mut().enumerate() {
-                let expect = sig
-                    .and_then(|s| s.param_str_colors.get(i).copied().flatten())
-                    .map_or(ParentExpect::None, ParentExpect::Color);
+                let expect = match (hash_kv, method.as_str(), i) {
+                    (Some((k_ty, _)), "[]=", 0) | (Some((k_ty, _)), "[]", 0) => {
+                        color_for_param_ty(k_ty)
+                            .map_or(ParentExpect::None, ParentExpect::Color)
+                    }
+                    (Some((_, v_ty)), "[]=", 1) => {
+                        color_for_return_ty(v_ty)
+                            .map_or(ParentExpect::None, ParentExpect::Color)
+                    }
+                    _ => sig
+                        .and_then(|s| s.param_str_colors.get(i).copied().flatten())
+                        .map_or(ParentExpect::None, ParentExpect::Color),
+                };
                 count += walk(arg, expect, ctx);
             }
             if let Some(b) = block {
@@ -553,6 +598,23 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
 
 fn is_str_ty(ty: Option<&Ty>) -> bool {
     matches!(ty, Some(Ty::Str) | Some(Ty::Sym))
+}
+
+/// True when `e` is a `Send` calling a method that always produces
+/// a `String`-emitted result in rust2, regardless of receiver type.
+/// Covers cases where the body-typer didn't propagate `Ty::Str` (most
+/// commonly Sends on `serde_json::Value` or other untyped receivers).
+/// The method name list is conservative: only methods whose rust2
+/// emit is always `.to_string()`-shaped or returns `String`.
+fn is_known_str_send(e: &Expr) -> bool {
+    if let ExprNode::Send { method, .. } = e.node.as_ref() {
+        matches!(
+            method.as_str(),
+            "to_s" | "to_str" | "to_string" | "inspect" | "downcase" | "upcase" | "capitalize"
+        )
+    } else {
+        false
+    }
 }
 
 /// Unify two If-branch producer colors. If both branches are

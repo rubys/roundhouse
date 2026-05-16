@@ -939,8 +939,15 @@ fn emit_expr_inner(e: &Expr) -> String {
                             // so unwrap_or's arg type matches the
                             // Option's inner type (HashMap<String, String>
                             // → Option<String>, default must be String).
+                            // Defer to `analyze::str_color` when it's
+                            // already annotated the literal (Phase 2 tail
+                            // propagation from the BoolOp's surrounding
+                            // expectation); double-applying produces
+                            // `("").to_string().to_string()`.
                             let default_s = match &*right.node {
-                                ExprNode::Lit { value: Literal::Str { .. } } => {
+                                ExprNode::Lit { value: Literal::Str { .. } }
+                                    if right.str_coercion.is_none() =>
+                                {
                                     format!("{}.to_string()", emit_expr(right))
                                 }
                                 _ => emit_expr(right),
@@ -1132,7 +1139,13 @@ fn emit_hash(entries: &[(Expr, Expr)]) -> String {
     let pairs: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            let v_s = if has_non_literal_str_value
+            // Defer to `analyze::str_color` when it's already
+            // annotated the literal — the pass owns this coercion
+            // (Phase 2.4 hash homogeneity); double-applying produces
+            // `("post").to_string().to_string()`.
+            let str_color_handled = v.str_coercion.is_some();
+            let v_s = if !str_color_handled
+                && has_non_literal_str_value
                 && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
             {
                 format!("{}.to_string()", emit_expr(v))
