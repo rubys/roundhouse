@@ -397,9 +397,19 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // value-positions inheriting the surrounding expectation
             // (Rust requires `if` arms to agree on type, so applying
             // the same expectation to both is the right call).
+            //
+            // Additionally, when the parent imposes no expectation
+            // but the two branches' producer colors disagree, unify
+            // them to the more-owned color. Without this, `let x = if
+            // cond { lit } else { string_call() }` infers a Rust
+            // type-mismatch error.
             count += walk(cond, ParentExpect::None, ctx);
-            count += walk(then_branch, tail_expect, ctx);
-            count += walk(else_branch, tail_expect, ctx);
+            let branch_expect = match tail_expect {
+                ParentExpect::Color(_) => tail_expect,
+                ParentExpect::None => unify_branches_expect(then_branch, else_branch),
+            };
+            count += walk(then_branch, branch_expect, ctx);
+            count += walk(else_branch, branch_expect, ctx);
         }
         ExprNode::BoolOp { left, right, .. } => {
             // `a || b` evaluates to whichever side short-circuits;
@@ -415,14 +425,29 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             }
         }
         ExprNode::Hash { entries, .. } => {
+            // Tuple-type unification: `HashMap::from([(k1, v1), ...])`
+            // infers its key/value types from the FIRST tuple. If any
+            // subsequent entry's value has a different ownership color
+            // (e.g., first is `&str` literal, second is a String var),
+            // the compiler rejects. Compute the "homogeneous color"
+            // across all entries' values (and separately keys) and
+            // propagate as expectation so literals get ToOwned'd into
+            // the dominant Owned color when needed.
+            let value_expect =
+                hash_homogeneous_expect(entries.iter().map(|(_, v)| v));
+            let key_expect =
+                hash_homogeneous_expect(entries.iter().map(|(k, _)| k));
             for (k, v) in entries.iter_mut() {
-                count += walk(k, ParentExpect::None, ctx);
-                count += walk(v, ParentExpect::None, ctx);
+                count += walk(k, key_expect, ctx);
+                count += walk(v, value_expect, ctx);
             }
         }
         ExprNode::Array { elements, .. } => {
+            // `vec![...]` infers element type from the first element.
+            // Same homogeneity story as Hash above.
+            let elem_expect = hash_homogeneous_expect(elements.iter());
             for el in elements.iter_mut() {
-                count += walk(el, ParentExpect::None, ctx);
+                count += walk(el, elem_expect, ctx);
             }
         }
         ExprNode::Case { scrutinee, arms } => {
@@ -506,6 +531,101 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
 
 fn is_str_ty(ty: Option<&Ty>) -> bool {
     matches!(ty, Some(Ty::Str) | Some(Ty::Sym))
+}
+
+/// Unify two If-branch producer colors. If both branches are
+/// string-typed but produce different colors (e.g. then yields a
+/// literal, else yields a String from a Send), Rust rejects the
+/// resulting If as a type mismatch. Return the more-owned color as
+/// the expectation so coercions land on the literal side.
+fn unify_branches_expect(then_branch: &Expr, else_branch: &Expr) -> ParentExpect {
+    let then_likely_owned = branch_likely_owned(then_branch);
+    let else_likely_owned = branch_likely_owned(else_branch);
+    let then_has_literal = branch_has_string_literal(then_branch);
+    let else_has_literal = branch_has_string_literal(else_branch);
+    if (then_likely_owned && else_has_literal) || (else_likely_owned && then_has_literal) {
+        ParentExpect::Color(StrColor::Owned)
+    } else {
+        ParentExpect::None
+    }
+}
+
+/// True when this branch's tail-position emit is likely String-shaped
+/// (Send, StringInterp, Ivar, or a Var/Send chain). Conservative —
+/// only inspects the immediate tail expression of a Seq, not deeper.
+fn branch_likely_owned(e: &Expr) -> bool {
+    matches!(
+        tail_expr(e).node.as_ref(),
+        ExprNode::Send { .. }
+            | ExprNode::StringInterp { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Var { .. }
+    )
+}
+
+fn branch_has_string_literal(e: &Expr) -> bool {
+    matches!(
+        tail_expr(e).node.as_ref(),
+        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+    )
+}
+
+/// Peel a Seq down to its tail expression (the value the Seq
+/// produces). Other shapes are their own tail.
+fn tail_expr(e: &Expr) -> &Expr {
+    match e.node.as_ref() {
+        ExprNode::Seq { exprs } => exprs.last().map_or(e, tail_expr),
+        _ => e,
+    }
+}
+
+/// Compute the homogeneous expectation for an iterator of sibling
+/// string expressions (Hash entries, Array elements). Rust infers the
+/// collection's element type from the first entry, so if ANY entry
+/// is non-literal-string the collection settles as `String`-typed and
+/// other entries (typically `&'static str` literals) need ToOwned.
+///
+/// Treats any non-literal `Ty::Str` expression as `Owned`-producing
+/// regardless of its computed producer color — covers local `Var`s
+/// bound from `format!()`/method calls (which `producer_color` would
+/// mis-classify as `Borrowed` until Phase 2.6 lands a local-let
+/// symbol table). The downside is over-coercion: a literal in a
+/// hash whose other entries are all `&str`-typed local Vars will get
+/// an unneeded `ToOwned`; Rust then infers `HashMap<_, String>` and
+/// accepts it. Suboptimal vs. ideal `HashMap<_, &str>`, but the
+/// alternative — over-strict `&str` inference — fails compilation,
+/// which is strictly worse.
+fn hash_homogeneous_expect<'a, I: Iterator<Item = &'a Expr>>(entries: I) -> ParentExpect {
+    let mut has_string_literal = false;
+    let mut has_likely_owned = false;
+    for e in entries {
+        match e.node.as_ref() {
+            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } } => {
+                has_string_literal = true;
+            }
+            // Non-literal string-producing shapes — Var (which our
+            // producer_color hardcodes as Borrowed but is usually a
+            // local holding String at runtime), Send (Ty::Str return
+            // emits as String), Ivar (String field read), StringInterp
+            // (format!() yields String). Trigger the Owned expectation
+            // whenever any of these appear alongside a literal entry,
+            // even if the Var's Ty annotation is missing (the
+            // body-typer doesn't always propagate Ty to Var reads
+            // bound from non-let RHS shapes like `x = label || ...`).
+            ExprNode::Var { .. }
+            | ExprNode::Send { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::StringInterp { .. } => {
+                has_likely_owned = true;
+            }
+            _ => {}
+        }
+    }
+    if has_string_literal && has_likely_owned {
+        ParentExpect::Color(StrColor::Owned)
+    } else {
+        ParentExpect::None
+    }
 }
 
 // ---------------------------------------------------------------------------
