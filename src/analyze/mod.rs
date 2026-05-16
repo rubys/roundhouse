@@ -25,6 +25,7 @@
 
 mod body;
 pub mod async_color;
+pub mod str_color;
 
 pub use body::{BodyTyper, ClassInfo, Ctx};
 

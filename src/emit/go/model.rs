@@ -182,6 +182,7 @@ fn rewrite_bare_attrs_to_receiver(
         effects: crate::effect::EffectSet::pure(),
         leading_blank_line: false,
         diagnostic: None,
+        str_coercion: None,
     };
     let new_node = match &*e.node {
         ExprNode::Send { recv: None, method, args, block: None, parenthesized }
@@ -343,6 +344,7 @@ fn rewrite_bare_attrs_to_receiver(
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
         diagnostic: e.diagnostic.clone(),
+        str_coercion: e.str_coercion,
     }
 }
 

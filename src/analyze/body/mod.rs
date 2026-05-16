@@ -453,6 +453,7 @@ impl<'a> BodyTyper<'a> {
                         effects: crate::effect::EffectSet::default(),
                         leading_blank_line: false,
                         diagnostic: None,
+                        str_coercion: None,
                     });
                 }
 

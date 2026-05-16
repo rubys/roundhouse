@@ -362,5 +362,6 @@ where
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
         diagnostic: expr.diagnostic.clone(),
+        str_coercion: expr.str_coercion,
     }
 }

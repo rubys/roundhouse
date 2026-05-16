@@ -301,6 +301,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
+        str_coercion: None,
     };
     MethodDef {
         name: field.clone(),
@@ -325,6 +326,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
+        str_coercion: None,
     };
     let body = Expr {
         span: Span::synthetic(),
@@ -336,6 +338,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
+        str_coercion: None,
     };
     MethodDef {
         name: Symbol::from(format!("{}=", field.as_str())),
@@ -622,6 +625,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 effects: EffectSet::default(),
                 leading_blank_line: false,
                 diagnostic: None,
+                str_coercion: None,
             };
             let value = Expr {
                 span: Span::synthetic(),
@@ -630,6 +634,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 effects: EffectSet::default(),
                 leading_blank_line: false,
                 diagnostic: None,
+                str_coercion: None,
             };
             (key, value)
         })
@@ -644,6 +649,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
+        str_coercion: None,
     };
     let ret_ty = Ty::Hash {
         key: Box::new(Ty::Str),
@@ -811,6 +817,7 @@ pub fn rewrite_typed_bracket_to_field(
             effects: e.effects.clone(),
             leading_blank_line: e.leading_blank_line,
             diagnostic: None,
+            str_coercion: None,
         })
     })
 }

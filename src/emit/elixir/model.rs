@@ -763,6 +763,7 @@ fn rewrite_bare_attrs_to_ivars_ex(e: &Expr, attrs: &[Symbol]) -> Expr {
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
         diagnostic: e.diagnostic.clone(),
+        str_coercion: e.str_coercion,
     }
 }
 

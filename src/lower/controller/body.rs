@@ -142,6 +142,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool) -> Expr {
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
         diagnostic: expr.diagnostic.clone(),
+        str_coercion: expr.str_coercion,
     }
 }
 
