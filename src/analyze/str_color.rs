@@ -357,10 +357,32 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         }
         ExprNode::Assign { target, value } => {
             // Ivar assignment: field is `String`, so RHS must be Owned.
-            // Other LValues don't impose a string constraint today.
+            // Index assignment into a Hash<_, Str>: HashMap stores
+            // `String` values, so RHS string must be Owned too. Other
+            // LValues don't impose a string constraint today.
             let expect = match target {
                 LValue::Ivar { .. } if is_str_ty(value.ty.as_ref()) => {
                     ParentExpect::Color(StrColor::Owned)
+                }
+                LValue::Index { recv, index } => {
+                    // Walk the recv + index first (their own positions
+                    // are independent of the assignment's RHS color),
+                    // then derive the RHS expectation from the Hash's
+                    // value type.
+                    count += walk(recv, ParentExpect::None, ctx);
+                    count += walk(index, ParentExpect::None, ctx);
+                    match recv.ty.as_ref() {
+                        Some(Ty::Hash { value: v_ty, .. })
+                            if matches!(v_ty.as_ref(), Ty::Str | Ty::Sym) =>
+                        {
+                            ParentExpect::Color(StrColor::Owned)
+                        }
+                        _ => ParentExpect::None,
+                    }
+                }
+                LValue::Attr { recv, .. } => {
+                    count += walk(recv, ParentExpect::None, ctx);
+                    ParentExpect::None
                 }
                 _ => ParentExpect::None,
             };
