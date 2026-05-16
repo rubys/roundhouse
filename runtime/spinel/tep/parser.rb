@@ -5,9 +5,10 @@ module Tep
   class Parser
     # Returns a fully-populated Request, or nil if the blob is malformed.
     def self.parse(blob)
-      # Note: Spinel's String#index returns -1 (not nil) when not found.
+      # String#index returns nil (not -1) when not found — matches CRuby.
+      # See matz/spinel#532; spinel 0210389 fixed the prior -1 sentinel.
       end_of_headers = blob.index("\r\n\r\n")
-      if end_of_headers < 0
+      if end_of_headers.nil?
         return nil
       end
       headers_blob = blob[0, end_of_headers]
@@ -28,7 +29,7 @@ module Tep
       req.http_version = first_parts[2]
 
       qmark = req.raw_path.index("?")
-      if qmark < 0
+      if qmark.nil?
         req.path = req.raw_path
       else
         req.path  = req.raw_path[0, qmark]
@@ -40,7 +41,7 @@ module Tep
       while i < lines.length
         line = lines[i]
         colon = line.index(":")
-        if colon >= 0
+        unless colon.nil?
           name  = line[0, colon].downcase
           value = line[colon + 1, line.length - colon - 1].strip
           req.req_headers[name] = value
@@ -60,7 +61,7 @@ module Tep
       if cookie_blob.length > 0
         cookie_blob.split(";").each do |pair|
           eq = pair.index("=")
-          if eq > 0
+          if !eq.nil? && eq > 0
             cname  = pair[0, eq].strip
             cvalue = pair[eq + 1, pair.length - eq - 1].strip
             req.cookies[cname] = Url.unescape(cvalue)

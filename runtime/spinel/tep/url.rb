@@ -109,26 +109,26 @@ module Tep
         slash = rest.index("/")
         hostport = rest
         tail     = "/"
-        if slash >= 0
+        unless slash.nil?
           hostport = rest[0, slash]
           tail     = rest[slash, rest.length - slash]
         end
         colon = hostport.index(":")
-        if colon >= 0
+        if colon.nil?
+          out["host"] = hostport
+        else
           out["host"] = hostport[0, colon]
           out["port"] = hostport[colon + 1, hostport.length - colon - 1]
-        else
-          out["host"] = hostport
         end
         rest = tail
       end
 
       qi = rest.index("?")
-      if qi >= 0
+      if qi.nil?
+        out["path"] = rest
+      else
         out["path"]  = rest[0, qi]
         out["query"] = rest[qi + 1, rest.length - qi - 1]
-      else
-        out["path"] = rest
       end
       if out["path"].length == 0
         out["path"] = "/"
@@ -146,7 +146,7 @@ module Tep
       pairs.each do |pair|
         if pair.length > 0
           eq = pair.index("=")
-          if eq < 0
+          if eq.nil?
             h[Url.unescape(pair)] = ""
           else
             k = pair[0, eq]
