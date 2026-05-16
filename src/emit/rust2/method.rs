@@ -73,10 +73,29 @@ fn render_params(m: &MethodDef) -> String {
     if m.params.is_empty() {
         return "()".to_string();
     }
-    let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
-        _ => None,
-    };
+    // Filter `Block` params out of the signature before length-matching:
+    // the Ruby `def` syntax omits `&block` from `m.params` but the
+    // RBS-derived signature appends a `Block` Param at the end. Without
+    // this filter, `def self.form_with(model:, ...)` (5 params) +
+    // RBS-block (6th sig param) trips the length-mismatch fallback
+    // and renders every param as `()`. Block consumption rides
+    // through `yield` in the body; emit doesn't surface the block
+    // param in the Rust signature.
+    let sig_params_filtered: Option<Vec<&crate::ty::Param>> = m.signature.as_ref().and_then(|s| {
+        if let Ty::Fn { params, .. } = s {
+            Some(
+                params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    });
+    let sig_params = sig_params_filtered
+        .as_ref()
+        .filter(|sp| sp.len() == m.params.len());
     let parts: Vec<String> = m
         .params
         .iter()
