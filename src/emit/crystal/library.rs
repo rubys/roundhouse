@@ -69,6 +69,7 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
             enclosing_class: Some(module_id.0.clone()),
             kind: AccessorKind::Method,
             is_async: false,
+            mutates_self: false,
         })
         .collect();
     LibraryClass {

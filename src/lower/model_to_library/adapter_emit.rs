@@ -95,6 +95,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -120,6 +121,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -159,6 +161,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -194,6 +197,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -215,6 +219,7 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -238,6 +243,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -263,6 +269,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -282,6 +289,7 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -419,6 +427,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 

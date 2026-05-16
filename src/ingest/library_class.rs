@@ -270,6 +270,7 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         enclosing_class: Some(owner.0.clone()),
         kind: crate::dialect::AccessorKind::AttributeReader,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -302,6 +303,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         enclosing_class: Some(owner.0.clone()),
         kind: crate::dialect::AccessorKind::AttributeWriter,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -418,6 +420,7 @@ pub(super) fn ingest_library_method(
         // that didn't use the attr_* sugar.
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     })
 }
 

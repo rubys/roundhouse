@@ -313,6 +313,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -350,6 +351,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeWriter,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -602,6 +604,7 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -665,6 +668,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 

@@ -645,6 +645,7 @@ fn action_to_method(
         enclosing_class: Some(controller.name.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 

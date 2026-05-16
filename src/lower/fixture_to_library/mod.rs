@@ -63,6 +63,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
                 enclosing_class: Some(owner_id.0.clone()),
                 kind: AccessorKind::Method,
                 is_async: false,
+            mutates_self: false,
             }
         })
         .collect();
@@ -82,6 +83,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         enclosing_class: Some(owner_id.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 
     LibraryClass {

@@ -139,6 +139,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let runtime_units = crate::runtime_loader::rust_units(|_path, mut classes| {
         let registry = crate::analyze::str_color::build_registry(&classes, &[]);
         crate::analyze::str_color::color_classes(&mut classes, &registry);
+        // Annotate every instance method's `mutates_self` flag. Used by
+        // `emit/rust2/library.rs` to pick `&self` vs `&mut self` at the
+        // method-emit boundary. Lifted out of emit per the
+        // self-describing-IR pattern — Crystal/Go/Kotlin/Swift can
+        // consume the same flag without recomputing.
+        crate::analyze::mutates_self::propagate(&mut classes);
         classes
     })
     .expect("rust runtime transpile failed (Ruby source error)");

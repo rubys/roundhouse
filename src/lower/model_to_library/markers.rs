@@ -50,6 +50,7 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
         enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 }
 
@@ -92,6 +93,7 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
                         enclosing_class: Some(model.name.0.clone()),
                         kind: AccessorKind::AttributeReader,
                         is_async: false,
+            mutates_self: false,
                     });
                 }
             }
@@ -123,6 +125,7 @@ pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
             is_async: false,
+            mutates_self: false,
         });
     }
 }
@@ -199,6 +202,7 @@ pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &
                 enclosing_class: Some(model.name.0.clone()),
                 kind: AccessorKind::Method,
                 is_async: false,
+            mutates_self: false,
             });
         }
     }

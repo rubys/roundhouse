@@ -60,6 +60,7 @@ pub(super) fn synthesize_process_action(
         enclosing_class: Some(enclosing_class),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 

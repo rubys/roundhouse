@@ -77,6 +77,7 @@ fn synth_has_many_reader(
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -155,6 +156,7 @@ fn synth_belongs_to_reader(
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -225,5 +227,6 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
         enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 }

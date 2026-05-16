@@ -118,6 +118,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -145,6 +146,7 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeWriter,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -251,6 +253,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 

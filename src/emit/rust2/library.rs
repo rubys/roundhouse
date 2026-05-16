@@ -126,36 +126,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         .map(|m| m.name.as_str().to_string())
         .collect();
 
-    // Transitive mutates-self set. Seed with methods that have a local
-    // write (`@ivar = …`, `self[k] = v`, `self.attr = v`), then propagate
-    // to fixed point: a method also mutates if it `Send`s to another
-    // `self.method` that's already in the set. Without this propagation,
-    // `save!` (which calls `save`) emits as `&self` while its body needs
-    // `&mut self` — E0596.
-    let mut mutating_methods: std::collections::HashSet<String> = class
+    // `mutates_self` flag is filled by `analyze::mutates_self::propagate`
+    // alongside the str_color pass in `emit/rust2.rs`'s transform
+    // closure. Build the per-class mutating-name set from the flags
+    // for the `static_method_names` exclusion check + the existing
+    // call-site method-mutates logic that the body emit consults.
+    let mutating_methods: std::collections::HashSet<String> = class
         .methods
         .iter()
-        .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
-        .filter(|m| method_mutates_self(&m.body))
+        .filter(|m| m.mutates_self)
         .map(|m| m.name.as_str().to_string())
         .collect();
-    loop {
-        let before = mutating_methods.len();
-        for m in &class.methods {
-            if !matches!(m.receiver, MethodReceiver::Instance) {
-                continue;
-            }
-            if mutating_methods.contains(m.name.as_str()) {
-                continue;
-            }
-            if calls_self_method_in(&m.body, &mutating_methods) {
-                mutating_methods.insert(m.name.as_str().to_string());
-            }
-        }
-        if mutating_methods.len() == before {
-            break;
-        }
-    }
 
     let mut out = String::new();
 
@@ -537,106 +518,6 @@ fn walk_collect_ivars(
         ExprNode::Return { value } => walk_collect_ivars(value, order, observed),
         _ => {}
     }
-}
-
-/// Receiver-kind heuristic: returns `true` when the method body
-/// contains any write to instance state (`@ivar = …`, `self[k] = v`,
-/// `self.attr = v`). Lands as Phase 2.2's first design choice; if the
-/// heuristic misclassifies in practice the lifting path is the
-/// [self-describing IR](feedback_self_describing_ir) pattern — add a
-/// `mutates_self` flag to `MethodDef` and let lowerers fill it.
-fn method_mutates_self(body: &Expr) -> bool {
-    fn walk(e: &Expr) -> bool {
-        match &*e.node {
-            ExprNode::Assign { target, .. } => match target {
-                LValue::Ivar { .. } => true,
-                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
-                    matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
-                        || walk(recv)
-                }
-                LValue::Var { .. } => false,
-            },
-            // `self[k] = v` and `self.foo = v` lower as `Send`s to
-            // `[]=` / setter-suffixed methods, not Assign. Same for
-            // `@data[k] = v` — direct ivar mutation via index assign
-            // (HWIA `set` / `delete`). Treat all of these as mutation.
-            ExprNode::Send { recv: Some(recv), method, .. }
-                if matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
-                    && (method.as_str() == "[]=" || method.as_str().ends_with('='))
-                    && !is_comparison_method(method.as_str()) =>
-            {
-                true
-            }
-            ExprNode::Seq { exprs } => exprs.iter().any(walk),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond) || walk(then_branch) || walk(else_branch)
-            }
-            ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
-            ExprNode::Send { recv, args, block, .. } => {
-                recv.as_ref().map(|r| walk(r)).unwrap_or(false)
-                    || args.iter().any(walk)
-                    || block.as_ref().map(|b| walk(b)).unwrap_or(false)
-            }
-            ExprNode::Return { value } => walk(value),
-            _ => false,
-        }
-    }
-    walk(body)
-}
-
-/// Walk `body` looking for `Send { recv: SelfRef, method: M }` where
-/// `M` is in `mutating`. Used by the transitive mutates-self pass:
-/// `save!` calls `self.save` (mutating) → `save!` mutates too. Only
-/// SelfRef receivers count — Ivar-recv calls (`@x.push(y)`) might
-/// mutate `@x`'s pointee, but tracking that requires whole-program
-/// analysis and the locally-defined `LValue::Index { recv: Ivar }`
-/// case in `method_mutates_self` already covers the framework Ruby
-/// usage (`@data[k] = v`).
-fn calls_self_method_in(
-    body: &Expr,
-    mutating: &std::collections::HashSet<String>,
-) -> bool {
-    fn walk(e: &Expr, mutating: &std::collections::HashSet<String>) -> bool {
-        match &*e.node {
-            ExprNode::Send { recv: Some(recv), method, args, block, .. } => {
-                if matches!(&*recv.node, ExprNode::SelfRef)
-                    && mutating.contains(method.as_str())
-                {
-                    return true;
-                }
-                walk(recv, mutating)
-                    || args.iter().any(|a| walk(a, mutating))
-                    || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
-            }
-            ExprNode::Send { recv: None, method, args, block, .. } => {
-                if mutating.contains(method.as_str()) {
-                    return true;
-                }
-                args.iter().any(|a| walk(a, mutating))
-                    || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
-            }
-            ExprNode::Seq { exprs } => exprs.iter().any(|x| walk(x, mutating)),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond, mutating)
-                    || walk(then_branch, mutating)
-                    || walk(else_branch, mutating)
-            }
-            ExprNode::While { cond, body, .. } => {
-                walk(cond, mutating) || walk(body, mutating)
-            }
-            ExprNode::Return { value } => walk(value, mutating),
-            ExprNode::Assign { value, .. } => walk(value, mutating),
-            _ => false,
-        }
-    }
-    walk(body, mutating)
-}
-
-/// Trailing-`=` filter: `==`, `!=`, `<=`, `>=` end with `=` but are
-/// comparison sends, not setters. The setter heuristic above needs
-/// to exclude them.
-fn is_comparison_method(m: &str) -> bool {
-    matches!(m, "==" | "!=" | "<=" | ">=" | "<=>" | "===" | "=~")
 }
 
 /// Top-level constant declaration. Crystal: `NAME = VALUE`. TS:

@@ -355,6 +355,17 @@ pub struct MethodDef {
     /// nothing propagates, emit is unchanged.
     #[serde(default)]
     pub is_async: bool,
+    /// True when the method body mutates instance state — either
+    /// directly (`@ivar = …`, `self[k] = v`, `self.attr = v`) or
+    /// transitively (calls another method on `self` that does).
+    /// Filled by `analyze::mutates_self` as an IR-side annotation;
+    /// strict-typed targets (Rust `&mut self`, Crystal `def` vs
+    /// mutating-flag conventions, future Kotlin/Swift) read the
+    /// flag to pick the receiver shape at emit time. Permissive
+    /// targets (TS, Ruby) ignore it. Defaults to `false`; the
+    /// analyze pass overrides per class via the transitive walk.
+    #[serde(default)]
+    pub mutates_self: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]

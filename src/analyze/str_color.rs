@@ -808,6 +808,7 @@ mod tests {
             enclosing_class: None,
             kind: AccessorKind::Method,
             is_async: false,
+            mutates_self: false,
         }
     }
 

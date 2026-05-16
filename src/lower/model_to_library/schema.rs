@@ -51,6 +51,7 @@ pub(super) fn push_schema_methods(
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 
     // def self.schema_columns
@@ -78,6 +79,7 @@ pub(super) fn push_schema_methods(
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 
     // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
@@ -148,6 +150,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -176,6 +179,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeWriter,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -246,6 +250,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -326,6 +331,7 @@ pub(super) fn push_from_params_method(
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     });
 }
 
@@ -414,6 +420,7 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -473,6 +480,7 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -559,6 +567,7 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -601,6 +610,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -638,6 +648,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -723,6 +734,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -833,6 +845,7 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }
 
@@ -910,5 +923,6 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     }
 }

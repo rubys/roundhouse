@@ -218,6 +218,7 @@ fn ingest_method(
         // Source-defined `def` in a Rails model — Method by default.
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
+            mutates_self: false,
     })
 }
 
