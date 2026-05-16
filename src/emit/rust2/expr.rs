@@ -438,7 +438,8 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     // child expression is, by default, not in return tail. The Seq /
     // Return / If arms re-enable the flag for their tail children via
     // `emit_expr_tail`.
-    with_return_tail(false, || emit_expr_inner(e))
+    let raw = with_return_tail(false, || emit_expr_inner(e));
+    apply_str_coercion(raw, e)
 }
 
 /// Tail-preserving emit. Caller is responsible for ensuring this is
@@ -446,7 +447,25 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 /// `Seq`'s last expression, `Return`'s value, `If`'s branches when
 /// the `If` itself is in tail position).
 pub(super) fn emit_expr_tail(e: &Expr) -> String {
-    emit_expr_inner(e)
+    apply_str_coercion(emit_expr_inner(e), e)
+}
+
+/// Wrap `raw` with the str-coercion shape recorded by
+/// `analyze::str_color`. Single application point so per-node match
+/// arms in `emit_expr_inner` can keep producing the natural
+/// non-coerced shape; coercions land here based on `e.str_coercion`
+/// once and don't have to be re-derived per node kind.
+///
+/// Defensive parens around the inner emit keep the surrounding
+/// expression context safe — `&` and `.to_string()` both have
+/// surprising precedence when the inner is a method-call chain or
+/// arithmetic expression.
+fn apply_str_coercion(raw: String, e: &Expr) -> String {
+    match e.str_coercion {
+        None => raw,
+        Some(crate::expr::StrCoercion::Borrow) => format!("&({raw})"),
+        Some(crate::expr::StrCoercion::ToOwned) => format!("({raw}).to_string()"),
+    }
 }
 
 fn emit_expr_inner(e: &Expr) -> String {
@@ -798,15 +817,23 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // This handles `return "" if X.nil?` patterns in
                 // encode_string / encode_datetime where the early-exit
                 // string needs to match the return type.
-                let needs_to_string = matches!(
-                    &*value.node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-                ) && CURRENT_RETURN_TY.with(|c| {
-                    matches!(
-                        c.borrow().as_ref(),
-                        Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
+                //
+                // Skip when `analyze::str_color` already annotated the
+                // value — the new pass owns return-value ownership
+                // coloring; double-applying the peephole would yield
+                // `(value).to_string().to_string()`.
+                let str_color_handled = value.str_coercion.is_some();
+                let needs_to_string = !str_color_handled
+                    && matches!(
+                        &*value.node,
+                        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
                     )
-                });
+                    && CURRENT_RETURN_TY.with(|c| {
+                        matches!(
+                            c.borrow().as_ref(),
+                            Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
+                        )
+                    });
                 // `return self` in a method declared `-> Base` (owned
                 // return). `self` is `&self` / `&mut self`; bare emit
                 // produces `return self` typed as `&Base` /
@@ -1346,12 +1373,23 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
     );
     // Three coercion paths:
     //   1. `T → T`               — emit unchanged
-    //   2. `Ty::Str → String`    — append `.to_string()` (cover &str-to-String)
+    //   2. `Ty::Str → String`    — handled by `analyze::str_color`
+    //                              when `value.str_coercion` is set
+    //                              (the new pass owns Ivar-assign
+    //                              ownership annotation since Phase
+    //                              2.1). Fall back to the legacy
+    //                              `.to_string()` peephole only when
+    //                              the pass produced no annotation —
+    //                              covers callers that bypass the
+    //                              pass (e.g. app-level code not yet
+    //                              colored).
     //   3. `Option<T> → T`       — append `.unwrap()` (Ruby idiom
     //                              `@x = y unless y.nil?` lowers the
     //                              body to plain `@x = y`; the guard
     //                              proves Some at the assignment site)
-    let coerced = if matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+    let str_color_handled = value.str_coercion.is_some();
+    let coerced = if !str_color_handled
+        && matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
         && matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
     {
         format!("{rhs}.to_string()")

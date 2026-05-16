@@ -126,10 +126,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` files
-    // converted to Rust at app emit time. Identity transform on
-    // parsed classes; tree-shake comes in a later pass.
-    let runtime_units = crate::runtime_loader::rust_units(|_path, classes| classes)
-        .expect("rust runtime transpile failed (Ruby source error)");
+    // converted to Rust at app emit time. Tree-shake comes in a
+    // later pass; today's transform runs the str_color pass to
+    // annotate `Expr.str_coercion` per Ty::Str expression. Phase 2
+    // wires `emit/rust2/expr.rs` to consume those annotations and
+    // retire the IVAR_TYPES/PARAM_TYPES peepholes.
+    //
+    // Per-unit registry (no cross-unit knowledge): most string-typed
+    // calls in a runtime file resolve to other methods in the same
+    // file. Cross-unit miscompiles, if they surface, get added to
+    // `register_hand_written_runtime` against the concrete site.
+    let runtime_units = crate::runtime_loader::rust_units(|_path, mut classes| {
+        let registry = crate::analyze::str_color::build_registry(&classes, &[]);
+        crate::analyze::str_color::color_classes(&mut classes, &registry);
+        classes
+    })
+    .expect("rust runtime transpile failed (Ruby source error)");
     for unit in runtime_units {
         files.push(EmittedFile {
             path: unit.out_path,

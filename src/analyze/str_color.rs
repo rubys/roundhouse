@@ -238,12 +238,20 @@ pub fn color_functions(
 
 /// Annotate a single method body. Returns the number of expressions
 /// that received a coercion (0 if every site already agreed).
+///
+/// The body itself is in tail / value position — its result is the
+/// method's return value, so we seed the walk with the return color
+/// as the parent expectation. Tail-position propagation through
+/// Seq / If / Case / BeginRescue arms picks up implicit-tail string
+/// literals (`def name; "x"; end` shape) the same as an explicit
+/// `Return { value: lit }`.
 pub fn color_method(method: &mut MethodDef, registry: &CallableRegistry) -> usize {
     let return_color = registry
         .sig_for_method(&method.name)
         .and_then(|s| s.return_str_color);
     let mut ctx = WalkCtx { registry, return_color };
-    walk(&mut method.body, ParentExpect::None, &mut ctx)
+    let expect = return_color.map_or(ParentExpect::None, ParentExpect::Color);
+    walk(&mut method.body, expect, &mut ctx)
 }
 
 /// Per-walk context — what the surrounding code expects at the
@@ -279,7 +287,12 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
         }
     }
     // Recurse, passing the right per-position expectation to children.
-    count += walk_children(e, ctx);
+    // `expect` is forwarded to tail/value-position children (Seq tail,
+    // If both branches, Case arm bodies, BoolOp both sides,
+    // BeginRescue body + rescue bodies) so an implicit-tail string
+    // literal inside a method body inherits the function's return
+    // color the same way an explicit `return` value does.
+    count += walk_children(e, expect, ctx);
     count
 }
 
@@ -307,7 +320,13 @@ fn producer_color(e: &Expr) -> Option<StrColor> {
 }
 
 /// Recurse into children with the right per-position expectation.
-fn walk_children(e: &mut Expr, ctx: &mut WalkCtx<'_>) -> usize {
+/// `tail_expect` is the expectation inherited from the parent — it
+/// flows through to tail/value-position children (Seq tail, If/Case
+/// arms, BoolOp sides, BeginRescue body/rescue bodies). Children in
+/// non-value positions (Send args, While condition, Range bounds)
+/// get their own per-position expectation (callee param color for
+/// args; None elsewhere).
+fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
     let mut count = 0;
     match e.node.as_mut() {
         ExprNode::Send { recv, args, block, method, .. } => {
@@ -363,22 +382,30 @@ fn walk_children(e: &mut Expr, ctx: &mut WalkCtx<'_>) -> usize {
             count += walk(body, ParentExpect::None, ctx);
         }
         ExprNode::Seq { exprs } => {
-            // Only the tail expression carries the surrounding
-            // expectation (it's the value of the Seq). Phase 1 leaves
-            // that propagation to the parent — a Seq inside a Return
-            // is rewritten by the lowerer into Return(tail) typically.
-            for sub in exprs.iter_mut() {
-                count += walk(sub, ParentExpect::None, ctx);
+            // The tail expression carries the surrounding expectation
+            // (it's the value of the Seq); earlier expressions are
+            // statement-position and have no string-color constraint.
+            if let Some((last, rest)) = exprs.split_last_mut() {
+                for sub in rest.iter_mut() {
+                    count += walk(sub, ParentExpect::None, ctx);
+                }
+                count += walk(last, tail_expect, ctx);
             }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
+            // Cond is a boolean position. Both branches are
+            // value-positions inheriting the surrounding expectation
+            // (Rust requires `if` arms to agree on type, so applying
+            // the same expectation to both is the right call).
             count += walk(cond, ParentExpect::None, ctx);
-            count += walk(then_branch, ParentExpect::None, ctx);
-            count += walk(else_branch, ParentExpect::None, ctx);
+            count += walk(then_branch, tail_expect, ctx);
+            count += walk(else_branch, tail_expect, ctx);
         }
         ExprNode::BoolOp { left, right, .. } => {
-            count += walk(left, ParentExpect::None, ctx);
-            count += walk(right, ParentExpect::None, ctx);
+            // `a || b` evaluates to whichever side short-circuits;
+            // both produce the value, so both inherit the expectation.
+            count += walk(left, tail_expect, ctx);
+            count += walk(right, tail_expect, ctx);
         }
         ExprNode::StringInterp { parts } => {
             for part in parts.iter_mut() {
@@ -401,7 +428,8 @@ fn walk_children(e: &mut Expr, ctx: &mut WalkCtx<'_>) -> usize {
         ExprNode::Case { scrutinee, arms } => {
             count += walk(scrutinee, ParentExpect::None, ctx);
             for arm in arms.iter_mut() {
-                count += walk(&mut arm.body, ParentExpect::None, ctx);
+                // Arm body is value-position; arm guard is boolean.
+                count += walk(&mut arm.body, tail_expect, ctx);
                 if let Some(g) = arm.guard.as_mut() {
                     count += walk(g, ParentExpect::None, ctx);
                 }
@@ -420,19 +448,31 @@ fn walk_children(e: &mut Expr, ctx: &mut WalkCtx<'_>) -> usize {
             }
         }
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            count += walk(body, ParentExpect::None, ctx);
+            // The block's value is whichever of body / rescue body /
+            // else branch executes — all are value-position. `ensure`
+            // runs for side effects, its value is discarded.
+            count += walk(body, tail_expect, ctx);
             for rc in rescues.iter_mut() {
-                count += walk(&mut rc.body, ParentExpect::None, ctx);
+                count += walk(&mut rc.body, tail_expect, ctx);
             }
             if let Some(eb) = else_branch {
-                count += walk(eb, ParentExpect::None, ctx);
+                count += walk(eb, tail_expect, ctx);
             }
             if let Some(en) = ensure {
                 count += walk(en, ParentExpect::None, ctx);
             }
         }
         ExprNode::Lambda { body, .. } => {
+            // Lambda body's color is the lambda's RESULT, not the
+            // surrounding expression's value — block-return color
+            // would need its own lookup. Phase 1 doesn't model it.
             count += walk(body, ParentExpect::None, ctx);
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            // `expr rescue fallback` — both sides are value-position
+            // and inherit the surrounding expectation.
+            count += walk(expr, tail_expect, ctx);
+            count += walk(fallback, tail_expect, ctx);
         }
         ExprNode::Yield { args } | ExprNode::Super { args: Some(args) } => {
             for arg in args.iter_mut() {
@@ -441,10 +481,6 @@ fn walk_children(e: &mut Expr, ctx: &mut WalkCtx<'_>) -> usize {
         }
         ExprNode::Raise { value } => {
             count += walk(value, ParentExpect::None, ctx);
-        }
-        ExprNode::RescueModifier { expr, fallback } => {
-            count += walk(expr, ParentExpect::None, ctx);
-            count += walk(fallback, ParentExpect::None, ctx);
         }
         ExprNode::MultiAssign { value, .. } => {
             count += walk(value, ParentExpect::None, ctx);
