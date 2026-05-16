@@ -32,7 +32,7 @@ module Roundhouse
     # action: Symbol }]`). Crystal renders that record as a NamedTuple,
     # and the lowerer emits route rows via the matching shorthand
     # literal (`{method: "GET", ...}`).
-    alias RouteRow = NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
+    alias RouteRow = ActionDispatch::Router::Route
     @@routes : Array(RouteRow) = [] of RouteRow
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
     @@session : ActionDispatch::Session = ActionDispatch::Session.new
@@ -116,15 +116,13 @@ module Roundhouse
         return
       end
 
-      # The transpiled router's match() returns a Hash whose value
-      # type is the union of all field types (String | Symbol | HWIA).
-      # Narrow each access to the field's known type — the framework
-      # contract guarantees these shapes; Crystal needs explicit casts.
-      ctrl_sym = matched[:controller].as(Symbol)
-      action = matched[:action].as(Symbol)
-      # path_params is now `Hash(String, String)` (URL captures) —
-      # earlier HWIA shape forced an `untyped` value channel.
-      path_params = matched[:path_params].as(Hash(String, String))
+      # `matched` is now a typed `ActionDispatch::Router::MatchResult`
+      # (was a `Hash[Symbol, untyped]` requiring explicit `.as(T)` per
+      # field). Per-field types are baked into the class definition;
+      # no narrowing or casts needed.
+      ctrl_sym = matched.controller
+      action = matched.action
+      path_params = matched.path_params
       ctrl_class = @@controllers[ctrl_sym]?
       if ctrl_class.nil?
         context.response.status_code = 500

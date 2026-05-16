@@ -659,7 +659,7 @@ fn emit_main_cr(app: &App) -> EmittedFile {
     if has_routes {
         s.push_str("  routes: Routes.table,\n");
     } else {
-        s.push_str("  routes: [] of NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol),\n");
+        s.push_str("  routes: [] of ActionDispatch::Router::Route,\n");
     }
     if has_root {
         s.push_str("  root_route: Routes.root,\n");

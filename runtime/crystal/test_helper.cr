@@ -295,12 +295,12 @@ abstract class RoundhouseTest
       fail("no route for #{method} #{path}")
     end
     matched = matched.not_nil!
-    ctrl_class = RoundhouseTest.controllers[matched[:controller]]?
+    ctrl_class = RoundhouseTest.controllers[matched.controller]?
     if ctrl_class.nil?
-      fail("no controller registered for #{matched[:controller]}")
+      fail("no controller registered for #{matched.controller}")
     end
     merged = {} of String => Roundhouse::ParamValue
-    matched[:path_params].each { |k, v| merged[k] = v.as(Roundhouse::ParamValue) }
+    matched.path_params.each { |k, v| merged[k] = v.as(Roundhouse::ParamValue) }
     body.each { |k, v| merged[k] = v }
     ctrl = ctrl_class.not_nil!.new
     ctrl.params = merged
@@ -308,7 +308,7 @@ abstract class RoundhouseTest
     ctrl.flash = @__flash
     ctrl.request_method = method
     ctrl.request_path = path
-    ctrl.process_action(matched[:action])
+    ctrl.process_action(matched.action)
     @__body = ctrl.body || ""
     @__status = ctrl.status || 200_i64
     @__location = ctrl.location || ""
@@ -429,7 +429,7 @@ abstract class RoundhouseTest
   # below) resets the in-memory DB and re-runs each fixture loader
   # so every spec starts from a clean state.
 
-  alias RouteRow = NamedTuple(method: String, pattern: String, controller: Symbol, action: Symbol)
+  alias RouteRow = ::ActionDispatch::Router::Route
 
   @@routes : Array(RouteRow) = [] of RouteRow
   @@controllers : Hash(Symbol, ::ActionController::Base.class) =

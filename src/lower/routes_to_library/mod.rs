@@ -18,22 +18,22 @@ use crate::App;
 use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, InterpPart, Literal};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::lower::routes::{flatten_routes, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
 
-/// Build the `Routes` dispatch module — `Routes.table -> Array<Hash>`
-/// (one hash per concrete `(method, pattern, controller, action)`)
-/// and `Routes.root -> Hash` (the shorthand `root "c#a"` route, when
-/// present). Empty when `app.routes` has no entries.
+/// Build the `Routes` dispatch module — `Routes.table -> Array<Route>`
+/// (one `Route` instance per concrete `(verb, pattern, controller,
+/// action)`) and `Routes.root -> Route` (the shorthand `root "c#a"`
+/// route, when present). Empty when `app.routes` has no entries.
 ///
-/// Symbol-keyed hashes (`{ method:, pattern:, controller:, action: }`)
-/// matching the spinel-blog runtime's `Router.match(method, path,
-/// table)` convention. TS callers see the same data shape via the
-/// universal LibraryFunction emit (string keys in TS, symbol keys
-/// in Ruby — Sym renders as a quoted string in TS object literals).
+/// Each entry is `ActionDispatch::Router::Route.new(...)` — a typed
+/// class with `verb`/`pattern`/`controller`/`action` accessors —
+/// rather than a `Hash[Symbol, untyped]`. Strict-typed targets (Rust,
+/// Crystal) get a real per-field type at every access; permissive
+/// targets (TS, Ruby) keep working without runtime change.
 ///
 /// Separate from `RouteHelpers` (URL-helper functions like
 /// `article_path(id)`) because the two artifacts serve different
@@ -52,9 +52,10 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     let (root_routes, table_routes): (Vec<&FlatRoute>, Vec<&FlatRoute>) =
         flat.iter().partition(|r| r.path == "/");
 
-    let route_hash_ty = Ty::Hash {
-        key: Box::new(Ty::Sym),
-        value: Box::new(Ty::Untyped),
+    let route_class_id = ClassId(Symbol::from("ActionDispatch::Router::Route"));
+    let route_ty = Ty::Class {
+        id: route_class_id.clone(),
+        args: vec![],
     };
 
     let mut out: Vec<LibraryFunction> = Vec::new();
@@ -65,12 +66,12 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             ExprNode::Array {
                 elements: table_routes
                     .iter()
-                    .map(|r| build_route_hash(r, &route_hash_ty))
+                    .map(|r| build_route_new(r, &route_class_id, &route_ty))
                     .collect(),
                 style: ArrayStyle::Brackets,
             },
         ),
-        Ty::Array { elem: Box::new(route_hash_ty.clone()) },
+        Ty::Array { elem: Box::new(route_ty.clone()) },
     );
     out.push(LibraryFunction {
         module_path: module_path.clone(),
@@ -79,20 +80,20 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         body: table_body,
         signature: Some(fn_sig(
             vec![],
-            Ty::Array { elem: Box::new(route_hash_ty.clone()) },
+            Ty::Array { elem: Box::new(route_ty.clone()) },
         )),
         effects: EffectSet::default(),
         is_async: false,
     });
 
     if let Some(r) = root_routes.first() {
-        let root_body = build_route_hash(r, &route_hash_ty);
+        let root_body = build_route_new(r, &route_class_id, &route_ty);
         out.push(LibraryFunction {
             module_path,
             name: Symbol::from("root"),
             params: Vec::new(),
             body: root_body,
-            signature: Some(fn_sig(vec![], route_hash_ty)),
+            signature: Some(fn_sig(vec![], route_ty)),
             effects: EffectSet::default(),
             is_async: false,
         });
@@ -101,12 +102,16 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     out
 }
 
-/// Build one route hash literal: `{ method: "GET", pattern: "/x",
-/// controller: :articles, action: :index }`. Method is a string;
-/// controller and action are symbols matching what the spinel
-/// router's `Router.match` expects.
-fn build_route_hash(r: &FlatRoute, hash_ty: &Ty) -> Expr {
-    let method_str = match r.method {
+/// Build `ActionDispatch::Router::Route.new("GET", "/x", :articles,
+/// :index)`. Per-field types are baked into the Route class definition
+/// in `runtime/ruby/action_dispatch/router.rb` (and its RBS sidecar),
+/// so strict-typed targets resolve each accessor against its declared
+/// type rather than an untyped value channel. Positional (not kwarg)
+/// args — per-target emitters convert kwarg-style def to positional
+/// pub fn but don't unpack kwarg-style call sites; matches the
+/// positional `initialize` signature.
+fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
+    let verb_str = match r.method {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",
         HttpMethod::Put => "PUT",
@@ -117,30 +122,34 @@ fn build_route_hash(r: &FlatRoute, hash_ty: &Ty) -> Expr {
         HttpMethod::Any => "ANY",
     };
     let controller_sym = controller_symbol(r.controller.0.as_str());
-    let entries = vec![
-        (
-            lit_sym(Symbol::from("method")),
-            lit_str(method_str.to_string()),
-        ),
-        (
-            lit_sym(Symbol::from("pattern")),
-            lit_str(r.path.clone()),
-        ),
-        (
-            lit_sym(Symbol::from("controller")),
-            lit_sym(Symbol::from(controller_sym)),
-        ),
-        (
-            lit_sym(Symbol::from("action")),
-            lit_sym(r.action.clone()),
-        ),
+    let args = vec![
+        lit_str(verb_str.to_string()),
+        lit_str(r.path.clone()),
+        lit_sym(Symbol::from(controller_sym)),
+        lit_sym(r.action.clone()),
     ];
+    let class_path: Vec<Symbol> = class_id
+        .0
+        .as_str()
+        .split("::")
+        .map(Symbol::from)
+        .collect();
+    let recv = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: class_path },
+    );
     with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Hash { entries, kwargs: false },
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("new"),
+                args,
+                block: None,
+                parenthesized: true,
+            },
         ),
-        hash_ty.clone(),
+        route_ty.clone(),
     )
 }
 

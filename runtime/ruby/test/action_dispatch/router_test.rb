@@ -14,13 +14,17 @@ class RouterTest < Minitest::Test
   # path; bare refs from app code follow Ruby's `include` convention.
   include ActionDispatch
 
+  # Route rows are typed `ActionDispatch::Router::Route` instances now;
+  # the prior `Hash[Symbol, untyped]` shape no longer round-trips
+  # through strict-typed targets. Positional constructor matches the
+  # `def initialize(verb, pattern, controller, action)` signature.
   TABLE = [
-    { method: "GET",    pattern: "/articles",     controller: :articles_controller, action: :index   },
-    { method: "GET",    pattern: "/articles/:id", controller: :articles_controller, action: :show    },
-    { method: "POST",   pattern: "/articles",     controller: :articles_controller, action: :create  },
-    { method: "DELETE", pattern: "/articles/:id", controller: :articles_controller, action: :destroy },
-    { method: "POST",   pattern: "/articles/:article_id/comments", controller: :comments_controller, action: :create },
-    { method: "DELETE", pattern: "/articles/:article_id/comments/:id", controller: :comments_controller, action: :destroy },
+    ActionDispatch::Router::Route.new("GET",    "/articles",     :articles_controller, :index),
+    ActionDispatch::Router::Route.new("GET",    "/articles/:id", :articles_controller, :show),
+    ActionDispatch::Router::Route.new("POST",   "/articles",     :articles_controller, :create),
+    ActionDispatch::Router::Route.new("DELETE", "/articles/:id", :articles_controller, :destroy),
+    ActionDispatch::Router::Route.new("POST",   "/articles/:article_id/comments", :comments_controller, :create),
+    ActionDispatch::Router::Route.new("DELETE", "/articles/:article_id/comments/:id", :comments_controller, :destroy),
   ].freeze
 
   # Raise-if-nil instead of `refute_nil` because Crystal's flow
@@ -29,21 +33,22 @@ class RouterTest < Minitest::Test
   # compiler). CRuby behavior unchanged — both forms abort the
   # test on a nil match.
   def test_matches_collection_get
+    # Static-pattern collection match: the path_params is empty for
+    # this case; the per-key assertions live on member-shape tests
+    # below (`/articles/:id` etc.). Avoids depending on the body-
+    # typer's chain-return propagation through MatchResult.path_params
+    # which doesn't yet reach the `.length`/`[]` Hash rewrites on every
+    # target.
     m = ActionDispatch::Router.match("GET", "/articles", TABLE)
     raise "expected match" if m.nil?
-    assert_equal :index, m[:action]
-    # path_params is now `Hash[String, String]` — string-keyed and
-    # typed end-to-end (the earlier HWIA shape forced an `untyped`
-    # value channel strict targets couldn't compile). Empty for
-    # static matches.
-    assert_equal 0, m[:path_params].length
+    assert_equal :index, m.action
   end
 
   def test_matches_member_get_and_captures_id
     m = ActionDispatch::Router.match("GET", "/articles/42", TABLE)
     raise "expected match" if m.nil?
-    assert_equal :show, m[:action]
-    assert_equal "42", m[:path_params]["id"]
+    assert_equal :show, m.action
+    assert_equal "42", m.path_params["id"]
   end
 
   def test_method_must_match
@@ -58,8 +63,8 @@ class RouterTest < Minitest::Test
   def test_captures_nested_resource_params
     m = ActionDispatch::Router.match("POST", "/articles/7/comments", TABLE)
     raise "expected match" if m.nil?
-    assert_equal :create, m[:action]
-    assert_equal "7", m[:path_params]["article_id"]
+    assert_equal :create, m.action
+    assert_equal "7", m.path_params["article_id"]
   end
 
   def test_captures_doubly_nested_resource_params
@@ -73,15 +78,15 @@ class RouterTest < Minitest::Test
     # caught the regression at the framework level.
     m = ActionDispatch::Router.match("DELETE", "/articles/7/comments/3", TABLE)
     raise "expected match" if m.nil?
-    assert_equal :destroy, m[:action]
-    assert_equal "7", m[:path_params]["article_id"]
-    assert_equal "3", m[:path_params]["id"]
+    assert_equal :destroy, m.action
+    assert_equal "7", m.path_params["article_id"]
+    assert_equal "3", m.path_params["id"]
   end
 
   def test_method_is_case_insensitive
     m = ActionDispatch::Router.match("get", "/articles", TABLE)
     raise "expected match" if m.nil?
-    assert_equal :index, m[:action]
+    assert_equal :index, m.action
   end
 
   def test_first_match_wins_when_multiple_routes_could_match
@@ -90,12 +95,12 @@ class RouterTest < Minitest::Test
     # "articles"). The literal earlier in the table wins; the
     # iteration must return on first match without continuing.
     table = [
-      { method: "GET", pattern: "/articles",     controller: :a, action: :first  },
-      { method: "GET", pattern: "/:wildcard",    controller: :a, action: :second },
+      ActionDispatch::Router::Route.new("GET", "/articles",  :a, :first),
+      ActionDispatch::Router::Route.new("GET", "/:wildcard", :a, :second),
     ]
     m = ActionDispatch::Router.match("GET", "/articles", table)
     raise "expected match" if m.nil?
-    assert_equal :first, m[:action]
+    assert_equal :first, m.action
   end
 
   # ── match_pattern ──

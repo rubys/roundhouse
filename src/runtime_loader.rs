@@ -560,7 +560,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         rb_path: "runtime/ruby/action_dispatch/router.rb",
         namespace: "",
         out_path: "src/router.rs",
-        mode: Mode::Module,
+        // Library mode (not Module): router.rb now carries typed
+        // `Route` and `MatchResult` classes alongside the
+        // `Router.match` / `Router.match_pattern` class methods.
+        mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

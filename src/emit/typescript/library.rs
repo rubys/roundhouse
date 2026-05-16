@@ -697,6 +697,14 @@ const JUNTOS_EXPORTS: &[&str] = &[
 /// so the dispatcher only needs to recognize the bare leaf names.
 const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("Router", "router"),
+    // Route and MatchResult are nested classes under
+    // `ActionDispatch::Router` in the source; the TS emit collapses
+    // namespaced consts to bare names (see emit_const at expr.rs:949),
+    // so test transpile + framework code that build a route table
+    // reach them as `new Route(...)` / `new MatchResult(...)` and the
+    // import collector needs to know they live in the router module.
+    ("Route", "router"),
+    ("MatchResult", "router"),
     ("RecordNotFound", "errors"),
     ("RecordInvalid", "errors"),
     ("FormBuilder", "view_helpers"),

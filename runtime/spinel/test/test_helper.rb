@@ -218,11 +218,11 @@ module RequestDispatch
     ViewHelpers.reset_slots!
     matched = Router.match(method, path, Routes.table)
     raise "No route matches #{method} #{path}" if matched.nil?
-    controller = case matched[:controller]
+    controller = case matched.controller
                  when :articles then ArticlesController.new
                  when :comments then CommentsController.new
                  end
-    merged = matched[:path_params].dup
+    merged = matched.path_params.dup
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
@@ -233,7 +233,7 @@ module RequestDispatch
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     controller.request_method = method
     controller.request_path   = path
-    controller.process_action(matched[:action])
+    controller.process_action(matched.action)
     @__flash = controller.flash
     @__response = ActionResponse.new(
       status:   controller.status,

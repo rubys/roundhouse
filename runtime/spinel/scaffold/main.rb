@@ -123,8 +123,8 @@ module Main
       return
     end
 
-    controller = Main.instantiate_controller(matched[:controller])
-    merged = matched[:path_params].dup
+    controller = Main.instantiate_controller(matched.controller)
+    merged = matched.path_params.dup
     req.params.each { |k, v| merged[k] = v }
     controller.params  = merged
     controller.session = ActionDispatch::Session.new
@@ -132,7 +132,7 @@ module Main
     controller.request_format = request_format
 
     begin
-      controller.process_action(matched[:action])
+      controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"

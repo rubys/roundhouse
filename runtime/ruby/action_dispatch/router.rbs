@@ -1,24 +1,45 @@
-# Path router: matches (method, path) against a hand-written route
-# table and resolves to (controller, action, path_params).
+# Path router: matches (method, path) against a typed route table
+# and resolves to (controller, action, path_params).
 module ActionDispatch
   module Router
-    # Match a request against the route table. Each row is a typed
-    # record `{method:, pattern:, controller:, action:}` — record
-    # types instead of `Hash[Symbol, untyped]` so strict-typed
-    # targets (Crystal, Rust) compile against per-key types and
-    # don't fall through to an `untyped` value channel.
+    # One typed entry in the route table. `verb` (not `method`) to
+    # avoid shadowing Ruby's `Object#method` reflection method.
+    class Route
+      def verb: () -> String
+      def pattern: () -> String
+      def controller: () -> Symbol
+      def action: () -> Symbol
+
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action) -> void
+    end
+
+    # Successful match result: the resolved controller + action symbols
+    # plus the path parameters extracted from the URL pattern.
+    class MatchResult
+      def controller: () -> Symbol
+      def action: () -> Symbol
+      def path_params: () -> Hash[String, String]
+
+      def initialize: (Symbol controller, Symbol action, Hash[String, String] path_params) -> void
+    end
+
+    # Match a request against the route table. Returns a MatchResult
+    # on success; nil otherwise.
+    #
+    # Absolute `::ActionDispatch::Router::Route` (not bare or partially
+    # qualified): the RBS class-ref resolver's drop-innermost-segment
+    # heuristic mishandles nested classes, and the ingest path registers
+    # the class under its fully-qualified name. The absolute form bypasses
+    # both lookups and matches the registry exactly.
     def self.match: (
       String method,
       String path,
-      Array[{ method: String, pattern: String, controller: Symbol, action: Symbol }] table
-    ) -> { controller: Symbol, action: Symbol, path_params: Hash[String, String] }?
-  
+      Array[::ActionDispatch::Router::Route] table
+    ) -> ::ActionDispatch::Router::MatchResult?
+
     # Match a path against a `:name`-segment pattern. Returns a
     # `Hash[String, String]` of captured params (URL segments are
-    # always strings), or nil if no match. The flat string-string
-    # shape replaces an earlier HWIA so strict-typed targets
-    # (Crystal, Rust) can compile against the route layer without
-    # falling through to an `untyped` value channel.
+    # always strings), or nil if no match.
     def self.match_pattern: (
       String pattern,
       String path

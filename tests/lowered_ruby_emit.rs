@@ -469,17 +469,18 @@ fn routes_require_application_controller_plus_each_referenced_controller() {
 #[test]
 fn routes_table_expands_resources_block_into_concrete_entries() {
     // `resources :articles` expands to 7 entries (index, new, create,
-    // show, edit, update, destroy). The spinel TABLE hash form is
-    // `{ method: "VERB", pattern: "/path", controller: :sym, action: :sym }`.
+    // show, edit, update, destroy). Route rows are typed `Route.new(...)`
+    // positional constructor calls — `Route.new(verb, pattern,
+    // controller, action)`.
     let src = lowered_real_blog_routes();
     for line in [
-        r#"{ method: "GET", pattern: "/articles", controller: :articles, action: :index }"#,
-        r#"{ method: "GET", pattern: "/articles/new", controller: :articles, action: :new }"#,
-        r#"{ method: "POST", pattern: "/articles", controller: :articles, action: :create }"#,
-        r#"{ method: "GET", pattern: "/articles/:id", controller: :articles, action: :show }"#,
-        r#"{ method: "GET", pattern: "/articles/:id/edit", controller: :articles, action: :edit }"#,
-        r#"{ method: "PATCH", pattern: "/articles/:id", controller: :articles, action: :update }"#,
-        r#"{ method: "DELETE", pattern: "/articles/:id", controller: :articles, action: :destroy }"#,
+        r#"ActionDispatch::Router::Route.new("GET", "/articles", :articles, :index)"#,
+        r#"ActionDispatch::Router::Route.new("GET", "/articles/new", :articles, :new)"#,
+        r#"ActionDispatch::Router::Route.new("POST", "/articles", :articles, :create)"#,
+        r#"ActionDispatch::Router::Route.new("GET", "/articles/:id", :articles, :show)"#,
+        r#"ActionDispatch::Router::Route.new("GET", "/articles/:id/edit", :articles, :edit)"#,
+        r#"ActionDispatch::Router::Route.new("PATCH", "/articles/:id", :articles, :update)"#,
+        r#"ActionDispatch::Router::Route.new("DELETE", "/articles/:id", :articles, :destroy)"#,
     ] {
         assert!(src.contains(line), "missing route entry:\n  {line}\nin:\n{src}");
     }
@@ -492,20 +493,20 @@ fn routes_nest_child_resource_under_parent_id_scope() {
     // create + destroy; index/new/show/edit/update are dropped.
     let src = lowered_real_blog_routes();
     assert!(
-        src.contains(r#"{ method: "POST", pattern: "/articles/:article_id/comments", controller: :comments, action: :create }"#),
+        src.contains(r#"ActionDispatch::Router::Route.new("POST", "/articles/:article_id/comments", :comments, :create)"#),
         "{src}",
     );
     assert!(
-        src.contains(r#"{ method: "DELETE", pattern: "/articles/:article_id/comments/:id", controller: :comments, action: :destroy }"#),
+        src.contains(r#"ActionDispatch::Router::Route.new("DELETE", "/articles/:article_id/comments/:id", :comments, :destroy)"#),
         "{src}",
     );
     // Filtered actions must not appear.
     assert!(
-        !src.contains(r#"controller: :comments, action: :index"#),
+        !src.contains(r#":comments, :index"#),
         "only:[:create, :destroy] should drop :index; got:\n{src}",
     );
     assert!(
-        !src.contains(r#"controller: :comments, action: :show"#),
+        !src.contains(r#":comments, :show"#),
         "{src}",
     );
 }
@@ -520,7 +521,7 @@ fn routes_extract_root_into_separate_method() {
     let src = lowered_real_blog_routes();
     assert!(
         src.contains(
-            r#"{ method: "GET", pattern: "/", controller: :articles, action: :index }"#
+            r#"ActionDispatch::Router::Route.new("GET", "/", :articles, :index)"#
         ),
         "{src}",
     );
@@ -530,7 +531,7 @@ fn routes_extract_root_into_separate_method() {
     let table_section = src.split("def self.table").nth(1).unwrap()
         .split("def self.root").next().unwrap();
     assert!(
-        !table_section.contains("pattern: \"/\""),
+        !table_section.contains("\"/\","),
         "root should be hoisted out of table; got table:\n{table_section}",
     );
 }
@@ -542,8 +543,8 @@ fn routes_order_literal_segments_before_id_patterns() {
     // already orders this way (standard_resource_actions has new before
     // show); regression test against future reordering.
     let src = lowered_real_blog_routes();
-    let pos_new = src.find(r#"pattern: "/articles/new""#).expect("/articles/new missing");
-    let pos_show = src.find(r#"pattern: "/articles/:id", controller: :articles, action: :show"#)
+    let pos_new = src.find(r#""GET", "/articles/new""#).expect("/articles/new missing");
+    let pos_show = src.find(r#""GET", "/articles/:id", :articles, :show"#)
         .expect("/articles/:id show missing");
     assert!(pos_new < pos_show, "literal segment must precede :id pattern");
 }

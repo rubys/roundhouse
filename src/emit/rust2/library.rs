@@ -126,6 +126,37 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         .map(|m| m.name.as_str().to_string())
         .collect();
 
+    // Transitive mutates-self set. Seed with methods that have a local
+    // write (`@ivar = …`, `self[k] = v`, `self.attr = v`), then propagate
+    // to fixed point: a method also mutates if it `Send`s to another
+    // `self.method` that's already in the set. Without this propagation,
+    // `save!` (which calls `save`) emits as `&self` while its body needs
+    // `&mut self` — E0596.
+    let mut mutating_methods: std::collections::HashSet<String> = class
+        .methods
+        .iter()
+        .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
+        .filter(|m| method_mutates_self(&m.body))
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+    loop {
+        let before = mutating_methods.len();
+        for m in &class.methods {
+            if !matches!(m.receiver, MethodReceiver::Instance) {
+                continue;
+            }
+            if mutating_methods.contains(m.name.as_str()) {
+                continue;
+            }
+            if calls_self_method_in(&m.body, &mutating_methods) {
+                mutating_methods.insert(m.name.as_str().to_string());
+            }
+        }
+        if mutating_methods.len() == before {
+            break;
+        }
+    }
+
     let mut out = String::new();
 
     // Struct declaration. Derive `Clone` because Ruby semantics treat
@@ -178,7 +209,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
                 }
                 MethodReceiver::Instance => {
                     let is_static = static_method_names.contains(m.name.as_str());
-                    let mutates = method_mutates_self(&m.body);
+                    let mutates = mutating_methods.contains(m.name.as_str());
                     emit_instance_method(m, mutates, is_static, &name, &ivars)?
                 }
             };
@@ -554,6 +585,54 @@ fn method_mutates_self(body: &Expr) -> bool {
         }
     }
     walk(body)
+}
+
+/// Walk `body` looking for `Send { recv: SelfRef, method: M }` where
+/// `M` is in `mutating`. Used by the transitive mutates-self pass:
+/// `save!` calls `self.save` (mutating) → `save!` mutates too. Only
+/// SelfRef receivers count — Ivar-recv calls (`@x.push(y)`) might
+/// mutate `@x`'s pointee, but tracking that requires whole-program
+/// analysis and the locally-defined `LValue::Index { recv: Ivar }`
+/// case in `method_mutates_self` already covers the framework Ruby
+/// usage (`@data[k] = v`).
+fn calls_self_method_in(
+    body: &Expr,
+    mutating: &std::collections::HashSet<String>,
+) -> bool {
+    fn walk(e: &Expr, mutating: &std::collections::HashSet<String>) -> bool {
+        match &*e.node {
+            ExprNode::Send { recv: Some(recv), method, args, block, .. } => {
+                if matches!(&*recv.node, ExprNode::SelfRef)
+                    && mutating.contains(method.as_str())
+                {
+                    return true;
+                }
+                walk(recv, mutating)
+                    || args.iter().any(|a| walk(a, mutating))
+                    || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
+            }
+            ExprNode::Send { recv: None, method, args, block, .. } => {
+                if mutating.contains(method.as_str()) {
+                    return true;
+                }
+                args.iter().any(|a| walk(a, mutating))
+                    || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
+            }
+            ExprNode::Seq { exprs } => exprs.iter().any(|x| walk(x, mutating)),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond, mutating)
+                    || walk(then_branch, mutating)
+                    || walk(else_branch, mutating)
+            }
+            ExprNode::While { cond, body, .. } => {
+                walk(cond, mutating) || walk(body, mutating)
+            }
+            ExprNode::Return { value } => walk(value, mutating),
+            ExprNode::Assign { value, .. } => walk(value, mutating),
+            _ => false,
+        }
+    }
+    walk(body, mutating)
 }
 
 /// Trailing-`=` filter: `==`, `!=`, `<=`, `>=` end with `=` but are
