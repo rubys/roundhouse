@@ -36,9 +36,13 @@ module JsonBuilder
   # NOT add the surrounding quotes — `encode_value` wraps a String
   # value in quotes; callers building object keys interpolate the
   # raw escape result inside their own `"…"`.
+  #
+  # Non-nil contract: callers (encode_value, encode_datetime, lowered
+  # template bodies) narrow nil before reaching here. Strict-typed
+  # targets (Rust, Crystal) compile against `String` directly without
+  # Option-wrapping at every call site.
   def self.encode_string(s)
-    return "" if s.nil?
-    s.to_s.gsub(ESCAPE_PATTERN, ESCAPES)
+    s.gsub(ESCAPE_PATTERN, ESCAPES)
   end
 
   # Render a scalar Ruby value as its JSON fragment, complete with

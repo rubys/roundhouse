@@ -21,10 +21,6 @@ class JsonBuilderTest < Minitest::Test
     assert_equal "a\\nb\\tc\\rd", JsonBuilder.encode_string("a\nb\tc\rd")
   end
 
-  def test_encode_string_nil_returns_empty
-    assert_equal "", JsonBuilder.encode_string(nil)
-  end
-
   # ── encode_value ───────────────────────────────────────────────
 
   def test_encode_value_nil
