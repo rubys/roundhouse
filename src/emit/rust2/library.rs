@@ -173,7 +173,8 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // prevent bleeding between siblings.
     let ivar_type_map: std::collections::HashMap<String, Ty> =
         ivars.iter().cloned().collect();
-    let body_result = super::expr::with_ivar_types(ivar_type_map, || super::expr::with_static_methods(static_method_names.clone(), || {
+    let class_method_param_tys = collect_class_method_param_tys(&class.methods);
+    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_ivar_types(ivar_type_map, || super::expr::with_static_methods(static_method_names.clone(), || {
         for m in &class.methods {
             if !first {
                 writeln!(out).unwrap();
@@ -200,7 +201,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
             }
         }
         Ok::<(), String>(())
-    }));
+    })));
     body_result?;
     out.push_str("}\n");
     Ok(out)
@@ -251,7 +252,8 @@ fn emit_module_singleton(
     writeln!(out, "impl {name} {{").unwrap();
     let ivar_type_map: std::collections::HashMap<String, Ty> =
         ivars.iter().cloned().collect();
-    let body_result = super::expr::with_module_singleton(true, || {
+    let class_method_param_tys = collect_class_method_param_tys(&class.methods);
+    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_module_singleton(true, || {
         super::expr::with_ivar_types(ivar_type_map, || {
             let mut first = true;
             for m in &class.methods {
@@ -275,7 +277,7 @@ fn emit_module_singleton(
             }
             Ok::<(), String>(())
         })
-    });
+    }));
     body_result?;
     out.push_str("}\n");
     Ok(out)
@@ -360,6 +362,30 @@ fn method_reads_self(body: &Expr) -> bool {
 /// observed ivar set with each entry's inferred type (the analyzer
 /// fills `Expr.ty` during typing; an unset `ty` falls back to
 /// `Ty::Untyped` and renders as `serde_json::Value`).
+/// Build a `method_name → positional_param_Tys` map for one class.
+/// Block + keyword-rest params are filtered out so the call-site
+/// positional index lines up with the resulting vector. Used by
+/// `with_class_method_param_tys` to seed the callee-back-propagation
+/// lookup in emit_send for `Self::method(args)` calls.
+fn collect_class_method_param_tys(
+    methods: &[MethodDef],
+) -> std::collections::HashMap<String, Vec<Ty>> {
+    use crate::ty::ParamKind;
+    let mut out = std::collections::HashMap::new();
+    for m in methods {
+        let tys: Vec<Ty> = match m.signature.as_ref() {
+            Some(Ty::Fn { params, .. }) => params
+                .iter()
+                .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
+                .map(|p| p.ty.clone())
+                .collect(),
+            _ => continue,
+        };
+        out.insert(m.name.as_str().to_string(), tys);
+    }
+    out
+}
+
 fn collect_ivar_types(methods: &[MethodDef]) -> Vec<(String, Ty)> {
     // Phase 1: walk every method body and record every Ty observed
     // assigning to each ivar — both direct `@x =` (Ivar lvalue) and

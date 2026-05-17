@@ -90,6 +90,20 @@ thread_local! {
     static BACK_PROPAGATED_HASH_LOCALS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
+    /// Method-name → positional-param-Ty map for the currently-
+    /// emitting class. Populated by `library.rs` via
+    /// `with_class_method_param_tys` before walking each class's
+    /// methods. The Send walker for `Self::method(args)` consults
+    /// this table to coerce args whose Hash<K, V> shape disagrees
+    /// with the callee's declared param type — the
+    /// `view_helpers::button_to → Self::render_attrs(form_attrs)`
+    /// shape where `form_attrs` is locally `HashMap<&str, String>`
+    /// but render_attrs declares `Hash[String, untyped]` =
+    /// `HashMap<String, Value>`.
+    static CLASS_METHOD_PARAM_TYS: std::cell::RefCell<
+        std::collections::HashMap<String, Vec<crate::ty::Ty>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
     /// Variable names read more than once in the current method body.
     /// Populated by `with_method_scope`'s pre-pass via
     /// `collect_var_read_counts`. Consumed by the `Var` emit arm to
@@ -546,6 +560,30 @@ where
     let r = f();
     STATIC_METHODS.with(|c| *c.borrow_mut() = prev);
     r
+}
+
+/// Set the current class's method-name → positional-param-Tys
+/// table for the duration of `f`. Used by `library.rs` to seed the
+/// `Self::method(args)` arg-coercion lookup in emit_send.
+pub(super) fn with_class_method_param_tys<F, R>(
+    map: std::collections::HashMap<String, Vec<crate::ty::Ty>>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = CLASS_METHOD_PARAM_TYS.with(|c| c.replace(map));
+    let r = f();
+    CLASS_METHOD_PARAM_TYS.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+/// Look up the current class's method param types by method name.
+/// Returns None outside any class scope or when the method isn't
+/// in the current class's table.
+fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
+    CLASS_METHOD_PARAM_TYS
+        .with(|c| c.borrow().get(method).and_then(|tys| tys.get(idx).cloned()))
 }
 
 fn in_constructor() -> bool {
@@ -1546,6 +1584,33 @@ fn emit_array(elements: &[Expr]) -> String {
     // emitted runtime files actually want to build their state.
     let parts: Vec<String> = elements.iter().map(emit_expr).collect();
     format!("vec![{}]", parts.join(", "))
+}
+
+/// If `arg` is a Var (possibly wrapped in `.clone()`) with a
+/// recorded Hash local_var_ty, return (K, V). Used by the
+/// `Self::method` callee-back-propagation in emit_send: when the
+/// callee's param is `Hash<_, Untyped>` we need to know the arg's
+/// local-typed shape to decide whether to insert the value-coercion
+/// transform.
+fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
+    // Peel one `.clone()` shell: the rust2 auto-clone-on-multi-read
+    // path produces `name.clone()` for some Var reads.
+    let inner: &Expr = match &*arg.node {
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "clone" && args.is_empty() =>
+        {
+            r
+        }
+        _ => arg,
+    };
+    let name = match &*inner.node {
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        _ => return None,
+    };
+    match local_var_ty(&name)? {
+        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        _ => None,
+    }
 }
 
 /// If `recv` is a Var whose `local_var_ty` was set via
@@ -2609,10 +2674,45 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // (`def self.X` bodies): Ruby's `self` *is* the class there, so
     // every `self.method(args)` is class-level dispatch.
     if matches!(&*r.node, ExprNode::SelfRef) && (is_static_method(method) || in_class_method()) {
-        if args_s.is_empty() {
+        // Callee-back-propagation: when the callee's declared param[i]
+        // is `Hash<K, V>` and the arg expression is a Var whose
+        // `local_var_ty` is a different `Hash<K', V'>` (or
+        // body-typer-derived but with mismatched K/V), insert a
+        // `into_iter().map().collect()` transform. The button_to →
+        // render_attrs(form_attrs) pattern is the canonical case:
+        // form_attrs is locally `HashMap<&str, String>` (from
+        // `{action: …, method: "post"}.to_h`), render_attrs takes
+        // `HashMap<String, serde_json::Value>`.
+        let coerced: Vec<String> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let raw = emit_expr(a);
+                match (
+                    class_method_param_ty(method, i),
+                    arg_hash_var_local_ty(a),
+                ) {
+                    (Some(crate::ty::Ty::Hash { key: pk, value: pv }), Some((_lk, _lv)))
+                        if matches!(pv.as_ref(), crate::ty::Ty::Untyped) =>
+                    {
+                        // Param value is `Untyped` → renders as `Value`
+                        // in rust2. Local arg's value is non-Value (Str
+                        // / Sym / etc.). Coerce values via Value::from;
+                        // keys via .to_string() to land at String keys
+                        // regardless of body-typer Sym/Str divergence.
+                        let _ = pk; // K is the same shape in both (String); no-op
+                        format!(
+                            "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
+                        )
+                    }
+                    _ => raw,
+                }
+            })
+            .collect();
+        if coerced.is_empty() {
             return format!("Self::{rewritten_method}()");
         }
-        return format!("Self::{rewritten_method}({})", args_s.join(", "));
+        return format!("Self::{rewritten_method}({})", coerced.join(", "));
     }
     let recv_s = emit_expr(r);
     // Static method dispatch — `Type.method(args)` in Ruby becomes
