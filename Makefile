@@ -84,6 +84,19 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	      runtime/ruby/inflector.rb runtime/ruby/json_builder.rb \
 	      $(RUBY_OUT)/runtime/
 	cp runtime/spinel/*.rb $(RUBY_OUT)/runtime/
+	# Runtime RBS lives under sig/runtime/, not runtime/, so every
+	# .rbs in the tree sits under one sig/ root. spinel's --rbs DIR
+	# and Steep both walk a single tree. Strip any .rbs that rode
+	# along the subdir cp -r above, then mirror runtime/ruby/**/*.rbs
+	# into sig/runtime/ (catches top-level files like inflector.rbs
+	# that the by-name .rb copy above explicitly skipped).
+	find $(RUBY_OUT)/runtime -name '*.rbs' -delete
+	mkdir -p $(RUBY_OUT)/sig/runtime
+	find runtime/ruby -name '*.rbs' | while IFS= read -r f; do \
+	  rel="$${f#runtime/ruby/}"; \
+	  mkdir -p "$(RUBY_OUT)/sig/runtime/$$(dirname "$$rel")"; \
+	  cp "$$f" "$(RUBY_OUT)/sig/runtime/$$rel"; \
+	done
 	cargo run --release --bin build-site -- fixtures/real-blog $(RUBY_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
@@ -172,6 +185,15 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	      runtime/ruby/inflector.rb runtime/ruby/json_builder.rb \
 	      $(SPINEL_OUT)/runtime/
 	cp runtime/spinel/*.rb $(SPINEL_OUT)/runtime/
+	# Runtime RBS lives under sig/runtime/ (see RUBY_OUT block above
+	# for rationale — one sig/ root for spinel --rbs DIR + Steep).
+	find $(SPINEL_OUT)/runtime -name '*.rbs' -delete
+	mkdir -p $(SPINEL_OUT)/sig/runtime
+	find runtime/ruby -name '*.rbs' | while IFS= read -r f; do \
+	  rel="$${f#runtime/ruby/}"; \
+	  mkdir -p "$(SPINEL_OUT)/sig/runtime/$$(dirname "$$rel")"; \
+	  cp "$$f" "$(SPINEL_OUT)/sig/runtime/$$rel"; \
+	done
 	# Vendored Tep transport (FFI HTTP server) — replaces CGI dispatch.
 	# sphttp.o is precompiled here so spinel's ffi_cflags substitution
 	# lands a path that exists at the moment spinel reads net.rb.

@@ -201,16 +201,20 @@ fn spinel_files(app: &roundhouse::App) -> Result<Vec<(String, String)>, String> 
     // Spinel-target primitives flat under runtime/.
     walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
 
-    // Framework Ruby modules + bridge .rb files under runtime/.
+    // Framework Ruby modules + bridge .rb files under runtime/. The
+    // companion `.rbs` sidecars route to `sig/runtime/` (one sig/
+    // root for `spinel --rbs DIR` + Steep — see
+    // project_rbs_emit_landed.md).
     for sub in [
         "active_record",
         "action_view",
         "action_controller",
         "action_dispatch",
     ] {
-        walk_dir_into(
+        walk_dir_partitioned(
             &Path::new("runtime/ruby").join(sub),
             &format!("runtime/{sub}/"),
+            &format!("sig/runtime/{sub}/"),
             &mut files,
         )?;
     }
@@ -221,10 +225,16 @@ fn spinel_files(app: &roundhouse::App) -> Result<Vec<(String, String)>, String> 
         "action_dispatch",
         "inflector",
     ] {
-        let p = Path::new("runtime/ruby").join(format!("{stem}.rb"));
-        let content = fs::read_to_string(&p)
-            .map_err(|e| format!("read {}: {e}", p.display()))?;
+        let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
+        let content = fs::read_to_string(&rb)
+            .map_err(|e| format!("read {}: {e}", rb.display()))?;
         files.push((format!("runtime/{stem}.rb"), content));
+        let rbs = Path::new("runtime/ruby").join(format!("{stem}.rbs"));
+        if rbs.exists() {
+            let rbs_content = fs::read_to_string(&rbs)
+                .map_err(|e| format!("read {}: {e}", rbs.display()))?;
+            files.push((format!("sig/runtime/{stem}.rbs"), rbs_content));
+        }
     }
 
     // Emit on top — overrides any path the scaffold/runtime walks
@@ -308,6 +318,56 @@ fn walk_dir_into(
 /// is in `exts`. Used to gather `runtime/spinel/*.rb` without
 /// recursing into `runtime/spinel/{scaffold,test}` (those are walked
 /// separately into different output prefixes).
+/// Walk `src` recursively, routing `.rb` files under `rb_prefix` and
+/// `.rbs` files under `rbs_prefix`. Other extensions and dotfiles are
+/// skipped. Used to split runtime/ruby/<sub>/ between the load-path
+/// tree (runtime/) and the typed sidecar tree (sig/runtime/) in one
+/// pass.
+fn walk_dir_partitioned(
+    src: &Path,
+    rb_prefix: &str,
+    rbs_prefix: &str,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    if !src.exists() {
+        return Err(format!("missing {}/", src.display()));
+    }
+    let mut stack: Vec<(std::path::PathBuf, String)> =
+        vec![(src.to_path_buf(), String::new())];
+    while let Some((dir, sub)) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read entry: {e}"))?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
+            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
+                continue;
+            }
+            let nested = format!("{sub}{name_str}");
+            if ty.is_dir() {
+                stack.push((path, format!("{nested}/")));
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let prefix = match ext {
+                "rb" => rb_prefix,
+                "rbs" => rbs_prefix,
+                _ => continue,
+            };
+            let content = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            out.push((format!("{prefix}{nested}"), content));
+        }
+    }
+    Ok(())
+}
+
 fn walk_dir_flat(
     src: &Path,
     exts: &[&str],
