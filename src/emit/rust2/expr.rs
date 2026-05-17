@@ -118,6 +118,28 @@ thread_local! {
     /// reference (which fails Display). Empty outside method body.
     static PARAM_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Names of locals that the Seq emit has rebound to their unwrapped
+    /// shape via `let Some(x) = x else { ... };` (see
+    /// `try_fuse_let_else` / `try_emit_param_guard_unwrap`). Subsequent
+    /// Var reads of these names must NOT re-apply the narrowing-write-
+    /// back `.clone().unwrap()` — the let-Some already produced an
+    /// owned T. Without this scope, json_builder.rs::encode_datetime
+    /// double-unwraps `s` and yields `s.clone().unwrap()` on a String.
+    static REBOUND_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Per-Seq tracking of local-var declared types. Populated by
+    /// `Assign { LValue::Var, value }` sites with `value.ty` known.
+    /// Read by the narrowing-aware Var emit so a local `params =
+    /// match_pattern(...)` (Option<HashMap>) participates in the same
+    /// narrowing+unwrap dance as an Option-typed function param —
+    /// `unless params.nil?; ...; params; end` then emits a single
+    /// `.clone().unwrap()` at the use site, matching the body-typer's
+    /// narrowing. Snapshot-restored alongside REBOUND_VARS by the
+    /// Seq emit's scope wrapper.
+    static LOCAL_VAR_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 pub(super) fn with_param_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
@@ -132,6 +154,53 @@ where
 
 pub(super) fn param_ty(name: &str) -> Option<crate::ty::Ty> {
     PARAM_TYPES.with(|c| c.borrow().get(name).cloned())
+}
+
+fn is_rebound_var(name: &str) -> bool {
+    REBOUND_VARS.with(|c| c.borrow().contains(name))
+}
+
+fn mark_rebound_var(name: &str) {
+    REBOUND_VARS.with(|c| {
+        c.borrow_mut().insert(name.to_string());
+    });
+}
+
+fn local_var_ty(name: &str) -> Option<crate::ty::Ty> {
+    LOCAL_VAR_TYPES.with(|c| c.borrow().get(name).cloned())
+}
+
+fn mark_local_var_ty(name: &str, ty: crate::ty::Ty) {
+    LOCAL_VAR_TYPES.with(|c| {
+        c.borrow_mut().insert(name.to_string(), ty);
+    });
+}
+
+/// Lookup a Var's declared type. Returns the function param's declared
+/// Ty if present, else the most recent local assignment's RHS ty
+/// recorded by the Seq emit. Used by the narrowing-aware Var read so
+/// the same `.clone().unwrap()` Option-unwrap fires for `params =
+/// match_pattern(...)` locals as for function params declared
+/// `Option<T>` in RBS.
+fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
+    param_ty(name).or_else(|| local_var_ty(name))
+}
+
+/// Snapshot the current REBOUND_VARS + LOCAL_VAR_TYPES, run `f`, then
+/// restore the snapshot. Used by Seq emit to scope let-Some rebinds
+/// and local declarations to the current Seq — nested blocks shouldn't
+/// leak their bindings outward, and the surrounding emit shouldn't see
+/// declarations from a child Seq.
+fn with_rebound_vars_scope<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev_rebound = REBOUND_VARS.with(|c| c.borrow().clone());
+    let prev_locals = LOCAL_VAR_TYPES.with(|c| c.borrow().clone());
+    let r = f();
+    REBOUND_VARS.with(|c| *c.borrow_mut() = prev_rebound);
+    LOCAL_VAR_TYPES.with(|c| *c.borrow_mut() = prev_locals);
+    r
 }
 
 pub(super) fn with_current_return_ty<F, R>(ty: Option<crate::ty::Ty>, f: F) -> R
@@ -485,9 +554,20 @@ fn emit_expr_inner(e: &Expr) -> String {
             // multiple reads in the same scope.
             let n = name.as_str();
             if let Some(narrowed) = &e.ty {
-                if let Some(param) = param_ty(n) {
-                    if is_option_of(&param, narrowed) {
+                if let Some(declared) = var_decl_ty(n) {
+                    if is_option_of(&declared, narrowed) && !is_rebound_var(n) {
                         return format!("{n}.clone().unwrap()");
+                    }
+                    // Value narrowing via `is_a?(Class)`: a param typed
+                    // Untyped (→ `serde_json::Value`) narrowed inside an
+                    // `if v.is_a?(String)` branch needs `.as_str().unwrap()`
+                    // shape so the value participates in str-typed call
+                    // sites. Without this, `encode_string(v)` in
+                    // json_builder.rs gets `Value` where `&str` is expected.
+                    if matches!(declared, crate::ty::Ty::Untyped) {
+                        if let Some(coerce) = value_narrowing_coercion(narrowed) {
+                            return format!("{n}.{coerce}");
+                        }
                     }
                 }
             }
@@ -731,7 +811,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("f({})", args_s.join(", "))
         }
-        ExprNode::Seq { exprs } => {
+        ExprNode::Seq { exprs } => with_rebound_vars_scope(|| {
             // Rust statements are `;`-terminated; the last expression
             // is the block's value (no trailing `;`). Multi-statement
             // method bodies render natural Rust shape this way. The
@@ -757,7 +837,8 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // hands Rust the same narrowing the body-typer has
                 // already proven, no `.unwrap()` or rebind required.
                 if i + 1 <= last {
-                    if let Some(rendered) = try_fuse_let_else(&exprs[i], &exprs[i + 1]) {
+                    if let Some((name, rendered)) = try_fuse_let_else(&exprs[i], &exprs[i + 1]) {
+                        mark_rebound_var(&name);
                         lines.push(format!("{rendered};"));
                         i += 2;
                         continue;
@@ -771,7 +852,8 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // fail. Rewrite to `let Some(x) = x else { return Y; };`
                 // — rebinds `x` to the unwrapped value, matching the
                 // body-typer's narrowing.
-                if let Some(rendered) = try_emit_param_guard_unwrap(&exprs[i]) {
+                if let Some((name, rendered)) = try_emit_param_guard_unwrap(&exprs[i]) {
+                    mark_rebound_var(&name);
                     lines.push(format!("{rendered};"));
                     i += 1;
                     continue;
@@ -809,7 +891,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                 i += 1;
             }
             lines.join("\n")
-        }
+        }),
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::Return { value } => {
             let is_nil = matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
@@ -865,10 +947,24 @@ fn emit_expr_inner(e: &Expr) -> String {
                     && CURRENT_RETURN_TY.with(|c| {
                         matches!(c.borrow().as_ref(), Some(crate::ty::Ty::Class { .. }))
                     });
+                // `return X` in an Option<T>-returning fn where X is
+                // typed T (non-Option). The body-typer never inserts
+                // Some-wrap; it's emit's job. Without this, an
+                // `unless cond; return MatchResult.new(...); end` in
+                // router.rb fails with "expected Option<MatchResult>,
+                // found MatchResult".
+                let needs_some_wrap = current_return_is_option()
+                    && match value.ty.as_ref() {
+                        Some(t) if !is_option_ty(t) => true,
+                        None => false,
+                        _ => false,
+                    };
                 if needs_to_string {
                     format!("return {}.to_string()", emit_expr_tail(value))
                 } else if needs_self_clone {
                     "return self.clone()".to_string()
+                } else if needs_some_wrap {
+                    format!("return Some({})", emit_expr_tail(value))
                 } else {
                     format!("return {}", emit_expr_tail(value))
                 }
@@ -1018,7 +1114,7 @@ fn emit_expr_inner(e: &Expr) -> String {
 /// OPT; if x.nil? { ... }` (assign-then-guard). This one handles a
 /// guard alone, where the unwrapped binding is a function param or
 /// previously-introduced local.
-fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<String> {
+fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
     use crate::ty::Ty;
     let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
         return None;
@@ -1048,9 +1144,10 @@ fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<String> {
         return None;
     }
     let diverge_s = emit_expr_tail(then_branch);
-    Some(format!(
-        "let Some({name}) = {name} else {{ {diverge_s} }}",
-        name = var_name.as_str()
+    let n = var_name.as_str().to_string();
+    Some((
+        n.clone(),
+        format!("let Some({n}) = {n} else {{ {diverge_s} }}"),
     ))
 }
 
@@ -1065,7 +1162,7 @@ fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<String> {
 /// The body-typer's flow-narrowing already proves the rest of the
 /// block sees `x` as non-nil; let-else gives Rust the same shape
 /// without an extra `.unwrap()` rebind.
-fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<String> {
+fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
     use crate::ty::Ty;
     // Stmt 0 must be a let assignment to a local Var whose RHS has
     // Option-shaped type (Union<T, Nil>).
@@ -1116,9 +1213,10 @@ fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<String> {
     // statement. `emit_expr_tail` produces e.g. `return None` or
     // `panic!(...)`; either works as the body of a let-else block.
     let diverge_s = emit_expr_tail(then_branch);
-    Some(format!(
-        "let Some({}) = {value_s} else {{ {diverge_s} }}",
-        assign_name.as_str()
+    let n = assign_name.as_str().to_string();
+    Some((
+        n.clone(),
+        format!("let Some({n}) = {value_s} else {{ {diverge_s} }}"),
     ))
 }
 
@@ -1271,6 +1369,17 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
     match target {
         LValue::Var { name, .. } => {
             let name_str = name.as_str().to_string();
+            // Track local-var declared type for the narrowing-aware
+            // Var read (params = match_pattern(...) → Option<HashMap>,
+            // then `unless params.nil?; ...; params; end` reads need
+            // `.clone().unwrap()`). Only records on first assignment —
+            // subsequent rebinds in the same Seq leave the recorded
+            // declared type alone (Rust's `mut` binding type is fixed).
+            if let Some(ty) = value.ty.as_ref() {
+                if local_var_ty(&name_str).is_none() {
+                    mark_local_var_ty(&name_str, ty.clone());
+                }
+            }
             let already_declared =
                 DECLARED_VARS.with(|c| c.borrow().contains(&name_str));
             if already_declared {
@@ -1339,8 +1448,30 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             // explicit setters).
             if let Some(crate::ty::Ty::Class { id, .. }) = recv.ty.as_ref() {
                 let cls = id.0.as_str();
-                if matches!(cls, "Flash" | "Session"
-                    | "ActionDispatch::Flash" | "ActionDispatch::Session")
+                if matches!(cls, "Flash" | "ActionDispatch::Flash")
+                {
+                    // Flash::set takes `Option<String>` (per
+                    // runtime/rust/flash.rs:47). Session::set takes
+                    // bare `String`. Wrap a non-Option-shaped rhs in
+                    // `Some(...)` so the narrowed-Var emit
+                    // (`notice.clone().unwrap()`) reaches a typed slot.
+                    let rhs_is_option = matches!(
+                        value.ty.as_ref(),
+                        Some(crate::ty::Ty::Union { variants })
+                            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                    );
+                    let wrapped = if rhs_is_option {
+                        rhs.clone()
+                    } else {
+                        format!("Some({rhs})")
+                    };
+                    return format!(
+                        "{}.set({}, {wrapped})",
+                        emit_expr(recv),
+                        emit_expr(index),
+                    );
+                }
+                if matches!(cls, "Session" | "ActionDispatch::Session")
                 {
                     return format!(
                         "{}.set({}, {rhs})",
@@ -1757,9 +1888,29 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 },
             };
             if let Some(cls) = recv_class.as_deref() {
-                if matches!(cls, "Flash" | "Session"
-                    | "ActionDispatch::Flash" | "ActionDispatch::Session")
-                {
+                if matches!(cls, "Flash" | "ActionDispatch::Flash") {
+                    // Flash::set takes Option<String>; wrap non-Option
+                    // rhs in Some(...). See the LValue::Index Flash
+                    // branch above — same shape, just the Send-form
+                    // entry point (`@flash.[]=(k, v)` in the lowered IR).
+                    let rhs = emit_expr(&args[1]);
+                    let rhs_is_option = matches!(
+                        args[1].ty.as_ref(),
+                        Some(crate::ty::Ty::Union { variants })
+                            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                    );
+                    let wrapped = if rhs_is_option {
+                        rhs
+                    } else {
+                        format!("Some({rhs})")
+                    };
+                    return format!(
+                        "{}.set({}, {wrapped})",
+                        emit_expr(r),
+                        emit_expr(&args[0]),
+                    );
+                }
+                if matches!(cls, "Session" | "ActionDispatch::Session") {
                     return format!(
                         "{}.set({}, {})",
                         emit_expr(r),
@@ -2159,6 +2310,16 @@ fn dispatch_method_by_recv_ty(
             "join" if args.len() == 1 => {
                 Some(format!("{recv_s}.join({})", args_s[0]))
             }
+            // `arr.include?(x)` — Ruby's Array membership test. Rust's
+            // `Vec::contains` takes `&T`, so `cols.contains("k")` fails
+            // when `cols: Vec<String>` (the literal is `&str`, not
+            // `&String`). `iter().any(|c| c == arg)` sidesteps the
+            // Borrow constraint and works for any element type with
+            // a `PartialEq` impl against the arg expression.
+            "include?" | "contains?" if args.len() == 1 => Some(format!(
+                "{recv_s}.iter().any(|__c| __c == {})",
+                args_s[0]
+            )),
             _ => None,
         },
         Some(Ty::Str) | Some(Ty::Sym) => match method {
@@ -2307,6 +2468,32 @@ fn rewrite_method_name(m: &str) -> String {
 /// `inner` matches the unwrapped type. Used by the Var-emit narrowing
 /// write-back to detect when the body-typer's narrowed type is the
 /// `Option<T>` → `T` form (the common `unless x.nil?` pattern).
+/// Given a narrowed Ty inside an `is_a?(Class)` branch on a
+/// `serde_json::Value`-typed binding, return the `.as_X().unwrap()`
+/// (or similar) coercion shape that extracts the inner value, or
+/// None if the narrowed Ty doesn't map to a Value accessor.
+fn value_narrowing_coercion(narrowed: &crate::ty::Ty) -> Option<&'static str> {
+    match narrowed {
+        crate::ty::Ty::Str => Some("as_str().unwrap()"),
+        crate::ty::Ty::Bool => Some("as_bool().unwrap()"),
+        crate::ty::Ty::Int => Some("as_i64().unwrap()"),
+        crate::ty::Ty::Float => Some("as_f64().unwrap()"),
+        _ => None,
+    }
+}
+
+/// True if `ty` is `Option<T>` shape — a `Union { variants }` containing
+/// exactly two variants, one of which is `Nil`. Mirrors rust2's
+/// Option emit convention; the `is_option_of` variant adds a check
+/// that the non-Nil variant matches a specific inner type.
+fn is_option_ty(ty: &crate::ty::Ty) -> bool {
+    matches!(
+        ty,
+        crate::ty::Ty::Union { variants }
+            if variants.len() == 2 && variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    )
+}
+
 fn is_option_of(outer: &crate::ty::Ty, inner: &crate::ty::Ty) -> bool {
     let crate::ty::Ty::Union { variants } = outer else {
         return false;

@@ -62,6 +62,12 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     } else {
         body
     };
+    // Empty Ruby body (`def x; end`) renders as an empty body string.
+    // Non-Unit return types still need a tail expression — inject the
+    // type's default value. Hand-written abstract slots like
+    // `_adapter_insert; end` in active_record/base.rb (load-bearing
+    // empty per the spinel-AOT comment) take this path.
+    let body = synthesize_default_body_if_empty(body, return_ty.as_ref());
     for line in body.lines() {
         writeln!(out, "    {line}").unwrap();
     }
@@ -401,6 +407,11 @@ pub(super) fn emit_instance_method(
     } else {
         body
     };
+    let body = if !is_init {
+        synthesize_default_body_if_empty(body, return_ty.as_ref())
+    } else {
+        body
+    };
     let body_lines: Vec<&str> = body.lines().collect();
     let last_idx = body_lines.len().saturating_sub(1);
     for (i, line) in body_lines.iter().enumerate() {
@@ -517,6 +528,29 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
 /// compiler will reject (E0277) if the concrete type doesn't
 /// derive Default — that's a clearer error than the
 /// "cannot find value" the alternative produces.
+/// If `body` is empty/whitespace-only and the function's declared
+/// return type is non-Unit, replace it with a single line containing
+/// the type's default value. Ruby `def x; end` returns nil, which the
+/// emitter renders as an empty body string — Rust requires a tail
+/// expression matching the return type. Hand-written abstract slots
+/// in framework Ruby (e.g. `_adapter_insert; end` in
+/// runtime/ruby/active_record/base.rb, intentionally empty per the
+/// spinel-AOT polymorphic-dispatch comment) take this path; subclasses
+/// override and the Base body should never actually be called.
+fn synthesize_default_body_if_empty(body: String, return_ty: Option<&Ty>) -> String {
+    if !body.trim().is_empty() {
+        return body;
+    }
+    let ret = match return_ty {
+        Some(t) => t,
+        None => return body,
+    };
+    if matches!(ret, Ty::Nil) {
+        return body;
+    }
+    default_value_for_ty(ret)
+}
+
 fn default_value_for_ty(ty: &Ty) -> String {
     match ty {
         Ty::Int => "0_i64".to_string(),

@@ -245,7 +245,11 @@ pub fn color_functions(
         let return_color = registry
             .sig_for_function(&func.name)
             .and_then(|s| s.return_str_color);
-        let mut ctx = WalkCtx { registry, return_color };
+        let mut ctx = WalkCtx {
+        registry,
+        return_color,
+        owned_str_locals: std::collections::HashSet::new(),
+    };
         annotated += walk(&mut func.body, ParentExpect::None, &mut ctx);
     }
     annotated
@@ -264,7 +268,11 @@ pub fn color_method(method: &mut MethodDef, registry: &CallableRegistry) -> usiz
     let return_color = registry
         .sig_for_method(&method.name)
         .and_then(|s| s.return_str_color);
-    let mut ctx = WalkCtx { registry, return_color };
+    let mut ctx = WalkCtx {
+        registry,
+        return_color,
+        owned_str_locals: std::collections::HashSet::new(),
+    };
     let expect = return_color.map_or(ParentExpect::None, ParentExpect::Color);
     walk(&mut method.body, expect, &mut ctx)
 }
@@ -277,6 +285,15 @@ pub fn color_method(method: &mut MethodDef, registry: &CallableRegistry) -> usiz
 struct WalkCtx<'a> {
     registry: &'a CallableRegistry,
     return_color: Option<StrColor>,
+    /// Local Vars known to be bound to owned `String` (via a Seq-level
+    /// `Assign { LValue::Var, value: Ty::Str }`). Reads of these names
+    /// have `producer_color = Owned`, not the default `Borrowed` (which
+    /// assumes function-param shape). Without this, a callee whose
+    /// param is `&str` gets the local String passed without a `&`
+    /// borrow coercion — and Rust rejects the call (no String→&str
+    /// auto-coercion at arg position). The set scopes per-Seq via
+    /// snapshot-restore so nested blocks don't leak bindings outward.
+    owned_str_locals: std::collections::HashSet<Symbol>,
 }
 
 /// What the parent of the current expression expects from a string
@@ -432,6 +449,15 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                 _ => ParentExpect::None,
             };
             count += walk(value, expect, ctx);
+            // After walking the RHS, record local Var bindings to owned
+            // String into the per-Seq tracking set. Reads of these names
+            // downstream emit as `Owned` (not the default `Borrowed`)
+            // so a `&str`-expecting callee triggers Borrow coercion.
+            if let LValue::Var { name, .. } = target {
+                if is_str_ty(value.ty.as_ref()) {
+                    ctx.owned_str_locals.insert(name.clone());
+                }
+            }
         }
         ExprNode::Return { value } => {
             // Return value must match the function's return color.
@@ -452,12 +478,19 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // The tail expression carries the surrounding expectation
             // (it's the value of the Seq); earlier expressions are
             // statement-position and have no string-color constraint.
+            //
+            // Snapshot+restore the owned-str-locals set so a nested
+            // Seq's let-bindings don't leak outward. Walks of preceding
+            // Seq statements DO add to this Seq's set so subsequent
+            // statements see the bindings (mirrors Rust block scoping).
+            let snapshot = ctx.owned_str_locals.clone();
             if let Some((last, rest)) = exprs.split_last_mut() {
                 for sub in rest.iter_mut() {
                     count += walk(sub, ParentExpect::None, ctx);
                 }
                 count += walk(last, tail_expect, ctx);
             }
+            ctx.owned_str_locals = snapshot;
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             // Cond is a boolean position. Both branches are
