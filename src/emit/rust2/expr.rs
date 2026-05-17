@@ -728,9 +728,31 @@ fn emit_expr_inner(e: &Expr) -> String {
                             // `records.each { |r| r.destroy }`.
                             format!("|({k}, {v})| {{ {body_s}; }}")
                         };
+                        // `Hash<Untyped, Untyped>` is the post-narrowing
+                        // shape `is_a?(Hash)` produces for a Value-typed
+                        // var (analyze/body/narrowing.rs:122). Runtime
+                        // storage stays `serde_json::Value`, which has
+                        // no `.iter()` — route through `.as_object()`
+                        // for a `serde_json::Map<String, Value>` whose
+                        // `.iter()` yields `(&String, &Value)`.
+                        let value_shaped = matches!(
+                            r.ty.as_ref(),
+                            Some(crate::ty::Ty::Hash { key, value })
+                                if matches!(**key, crate::ty::Ty::Untyped)
+                                    && matches!(**value, crate::ty::Ty::Untyped)
+                        );
+                        if value_shaped {
+                            return format!(
+                                "{recv_s}.as_object().unwrap().iter().for_each({closure})"
+                            );
+                        }
                         return format!("{recv_s}.iter().for_each({closure})");
                     }
-                    if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) && params.len() == 1 {
+                    let is_array_after_peel = matches!(
+                        r.ty.as_ref().map(peel_nil),
+                        Some(crate::ty::Ty::Array { .. })
+                    );
+                    if is_array_after_peel && params.len() == 1 {
                         let recv_s = emit_expr(r);
                         let p = params[0].as_str();
                         let body_s = emit_expr(body);
@@ -739,7 +761,25 @@ fn emit_expr_inner(e: &Expr) -> String {
                         } else {
                             format!("|{p}| {{ {body_s}; }}")
                         };
-                        return format!("{recv_s}.iter_mut().for_each({closure})");
+                        // `Option<Vec<T>>` recv (`Union<Nil, Array>`):
+                        // `.iter().flatten().for_each(...)` so the
+                        // closure receives `&T` from the inner Vec
+                        // rather than `Vec<T>` from Option's iter (one
+                        // item if Some). Read-only `iter()` because
+                        // mutating-through-Option needs an as_mut +
+                        // unwrap chain that's overkill for the read-
+                        // only `parts << ...` framework Ruby uses.
+                        let was_option = matches!(
+                            r.ty.as_ref(),
+                            Some(crate::ty::Ty::Union { variants })
+                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                        );
+                        let iter_chain = if was_option {
+                            ".iter().flatten()"
+                        } else {
+                            ".iter_mut()"
+                        };
+                        return format!("{recv_s}{iter_chain}.for_each({closure})");
                     }
                 }
             }
@@ -776,8 +816,27 @@ fn emit_expr_inner(e: &Expr) -> String {
                             } else {
                                 format!("|{p}| {{ {body_s} }}")
                             };
+                            // `Option<Vec<T>>` recv — `.iter().flatten()`
+                            // borrows the Option, yields `&Vec<T>` then
+                            // `&T`. `iter` (not `into_iter`) so a follow-
+                            // up `recv.each` against the same Option
+                            // (the `javascript_importmap_tags` shape:
+                            // `pins.map { ... }; pins.each { ... }`)
+                            // doesn't trip a borrow-after-move. The
+                            // closure receives `&T`; Display/Index on
+                            // `&Value` matches Ruby's by-value yield.
+                            let was_option = matches!(
+                                r.ty.as_ref(),
+                                Some(crate::ty::Ty::Union { variants })
+                                    if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                            );
+                            let iter_chain = if was_option {
+                                ".iter().flatten()"
+                            } else {
+                                ".into_iter()"
+                            };
                             return format!(
-                                "{recv_s}.into_iter().map({closure}).collect::<Vec<_>>()"
+                                "{recv_s}{iter_chain}.map({closure}).collect::<Vec<_>>()"
                             );
                         }
                     }
@@ -1076,10 +1135,26 @@ fn emit_expr_inner(e: &Expr) -> String {
                             );
                         }
                     }
+                    // `Option<Untyped>` (Value) `||` String literal —
+                    // the default's `&str` doesn't unify with `Value`.
+                    // Wrap with `serde_json::Value::from(...)` so
+                    // `form_class || "button_to"` (button_to defaults)
+                    // emits as `form_class.unwrap_or(Value::from(...))`.
+                    let lhs_inner_untyped = matches!(
+                        left.ty.as_ref().map(peel_nil),
+                        Some(crate::ty::Ty::Untyped)
+                    );
+                    let rhs_is_str = matches!(right.ty.as_ref(), Some(crate::ty::Ty::Str));
+                    let rhs_s = emit_expr(right);
+                    let default_s = if lhs_inner_untyped && rhs_is_str {
+                        format!("serde_json::Value::from({rhs_s})")
+                    } else {
+                        rhs_s
+                    };
                     return format!(
                         "{}.unwrap_or({})",
                         emit_expr(left),
-                        emit_expr(right),
+                        default_s,
                     );
                 }
                 if !lhs_is_bool && left.ty.is_some() {
@@ -2023,6 +2098,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             }
             let default_s = emit_expr(&args[1]);
             return format!("{recv_s}.get({key_s}).cloned().unwrap_or({default_s})");
+        }
+        // `s.tr(from, to)` — character translation. Limited to
+        // single-char from/to (the framework Ruby use case is
+        // `inner_k.to_s.tr("_", "-")` in render_attrs). Multi-char
+        // and ranges fall through to generic dispatch so the gap
+        // surfaces as a compile error rather than silently mis-
+        // emitting. Mirrors the TypeScript emit's `tr` peephole.
+        if method == "tr" && args.len() == 2 {
+            if let (
+                ExprNode::Lit { value: Literal::Str { value: from } },
+                ExprNode::Lit { value: Literal::Str { value: to } },
+            ) = (&*args[0].node, &*args[1].node)
+            {
+                if from.chars().count() == 1 && to.chars().count() == 1 {
+                    let recv_s = emit_expr(r);
+                    return format!("{recv_s}.replace({from:?}, {to:?})");
+                }
+            }
         }
         // `str.split(sep)` — Ruby returns an Array; Rust returns a
         // lazy `Split` iterator that doesn't support `.len()` or

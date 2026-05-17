@@ -14,7 +14,7 @@
 //!
 //! Called from the `If` arm in the body-typer's `compute` match.
 
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{BoolOpKind, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::Ty;
 
@@ -66,6 +66,17 @@ pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
                 }
                 _ => None,
             }
+        }
+        // `A && B` is true iff both A and B are true, so a narrowing
+        // predicate in either conjunct applies in the surrounding If's
+        // then-branch. Single-pred return is the common-case
+        // approximation — the dominant pattern is the nil-guarded
+        // method call (`!x.nil? && x.foo != "bar"`) where the
+        // narrowing rides on the left conjunct. Composing narrowings
+        // on different vars across both conjuncts would need a Vec
+        // return; defer until a real shape demands it.
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            extract_narrowing(left).or_else(|| extract_narrowing(right))
         }
         _ => None,
     }

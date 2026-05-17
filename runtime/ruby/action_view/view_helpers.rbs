@@ -94,8 +94,15 @@ module ActionView
     # is the form-attribute hash. Block yields a FormBuilder; block
     # returns the form body String. Body-typer threads the block
     # return through the form-wrapping concatenation.
+    #
+    # `model` typed `ActiveRecord::Base` — the param flows straight
+    # into `FormBuilder.new(model, ...)`, whose constructor declares
+    # Base; an `untyped` here forces strict-typed targets to bridge
+    # `Value → Base` at the call site (no real coercion exists).
+    # Real-blog callers always pass a Base subclass, so the tighter
+    # signature matches actual usage.
     def self.form_with: (
-      model: untyped,
+      model: ActiveRecord::Base,
       model_name: String,
       action: String,
       ?method: Symbol,
