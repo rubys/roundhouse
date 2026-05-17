@@ -8,6 +8,8 @@
 //! sanitize the name, wrap the block body as a method body, tag the
 //! kind as `Method`.
 
+pub mod inline_assertions;
+
 use std::collections::HashMap;
 
 use crate::analyze::ClassInfo;
@@ -217,6 +219,11 @@ pub fn lower_test_modules_with_inner(
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
             method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
+            // Inline assert_*/refute_* sends — replaces vacuous
+            // Minitest dispatch with real `raise` so spinel's
+            // assertion-correctness signal is non-fake. See
+            // project_spinel_assertions_vacuous.md for context.
+            method.body = inline_assertions::inline_assertions(&method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
         out.push(LoweredTestModule {

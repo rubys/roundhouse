@@ -292,17 +292,20 @@ module RequestDispatch
               when Integer then expected_match == actual
               else false
               end
-    assert matches,
-      "expected response #{expected.inspect}, got status=#{actual} body=#{response.body[0, 200].inspect}"
+    # Direct `raise unless` rather than delegating to `assert` — spinel
+    # doesn't ship `Minitest::Assertions`, so the inherited `assert`
+    # body emits as a vacuous 0 and lets failures pass silently. Same
+    # rationale for the other helpers in this file. See
+    # project_spinel_assertions_vacuous.md.
+    raise "expected response #{expected.inspect}, got status=#{actual} body=#{response.body[0, 200].inspect}" unless matches
   end
 
   # Two-argument form retained for hand-written spinel-blog tests
   # (`assert_redirected_to "/articles/1", res`); single-argument form
   # used by emitted tests pulls from the dispatch-stashed response.
   def assert_redirected_to(expected_path, response = @__response)
-    assert response.redirect?,
-      "expected a redirect, got status=#{response.status} location=#{response.location.inspect}"
-    assert_equal expected_path, response.location
+    raise "expected a redirect, got status=#{response.status} location=#{response.location.inspect}" unless response.redirect?
+    raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected_path == response.location
   end
 
   # Minimal `assert_select` shim — body-substring matching, NOT a real
@@ -331,20 +334,16 @@ module RequestDispatch
                 else
                   Regexp.new(Regexp.escape(content))
                 end
-      assert pattern.match?(body),
-        "expected #{selector.inspect} containing #{content.inspect} in response body"
+      raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless pattern.match?(body)
     elsif selector.start_with?("#")
       id = selector.split(" ", 2).first[1..]
-      assert body.include?(%(id="#{id}")),
-        "expected element with id #{id.inspect} in response body"
+      raise "expected element with id #{id.inspect} in response body" unless body.include?(%(id="#{id}"))
     elsif selector.include?(".")
       _tag, cls = selector.split(".", 2)
-      assert body.include?(%(class="#{cls})) || body.match?(/class="[^"]*\b#{Regexp.escape(cls)}\b/),
-        "expected element with class #{cls.inspect} in response body"
+      raise "expected element with class #{cls.inspect} in response body" unless body.include?(%(class="#{cls})) || body.match?(/class="[^"]*\b#{Regexp.escape(cls)}\b/)
     else
       tag = selector[/\A[a-z]+/]
-      assert tag && body.include?("<#{tag}"),
-        "expected #{selector.inspect} in response body"
+      raise "expected #{selector.inspect} in response body" unless tag && body.include?("<#{tag}")
     end
     yield if block
   end
