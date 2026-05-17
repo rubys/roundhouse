@@ -113,8 +113,7 @@ fn generate_project(fixture: &Path, scratch: &Path) {
 
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let opts = ruby::SpinelEmitOpts { autorun_shim: true };
-    for file in ruby::emit_spinel_with(&app, opts) {
+    for file in ruby::emit_spinel(&app) {
         let path = scratch.join(&file.path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("mkdir emit parent");

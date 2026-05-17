@@ -1,5 +1,3 @@
-require "minitest/autorun"
-
 # Copied verbatim to <out>/test/test_helper.rb (by `make ruby-transpile`
 # or `tests/ruby_toolchain.rs`). `__dir__` is `<out>/test/`, so the
 # `require_relative` paths walk up one level to reach `runtime/`, `config/`,
@@ -7,6 +5,16 @@ require "minitest/autorun"
 # is mandatory because spinel's AOT model only follows static
 # `require_relative` chains — bare `require` with `$LOAD_PATH` lookup is a
 # CRuby-only mechanism that the AOT compiler cannot resolve.
+#
+# No `require "minitest/*"` — emitted tests inherit from
+# `TestBase` (defined below), not `Minitest::Test`. Every test file
+# ends with an explicit per-test driver shim (see
+# emit/ruby.rs::render_autorun_shim) so there's nothing to autorun.
+# Independent of Minitest entirely: insulates the emit from matz-
+# analyzer changes around how spinel infers the Minitest::Test reopen
+# (the original fragility motivating this rewrite), and frees CRuby
+# runs from Minitest's `Minitest::Test#initialize(name)` argument
+# expectation that the shim's zero-arg `.new` can't satisfy.
 #
 # The Ruby-target tree contains a single `runtime/db.rb` (gem-backed,
 # materialized from `runtime/spinel/db_cruby.rb` at transpile time);
@@ -124,56 +132,35 @@ class ActionResponse
   end
 end
 
-# ActiveSupport::TestCase compatibility shims — emitted tests inherit
-# from Minitest::Test (rewritten at emit time from `ActiveSupport::
-# TestCase`) but call AS-extension assertion methods. Reopen Minitest::
-# Test so every test class picks them up without a parent change.
-class Minitest::Test
-  # Equivalent of Rails's transactional fixtures: every test starts
-  # with a freshly-truncated DB plus the canonical fixture rows. Runs
-  # before user `setup` (Minitest's documented `before_setup` →
-  # `setup` → `after_setup` ordering). Hand-written tests that call
-  # `SchemaSetup.reset!` themselves get a redundant-but-idempotent
-  # second truncate; harmless.
-  def before_setup
-    super
+# Base class for every emitted test. Roundhouse-owned, no Minitest
+# dependency. The Rails `class XTest < ActiveSupport::TestCase` form
+# is rewritten at emit time (see src/emit/ruby.rs) so emitted tests
+# inherit from TestBase directly. Provides the no-op lifecycle hooks
+# the shim calls (`setup` / `teardown`) plus the per-test DB reset
+# (`SchemaSetup.reset!` if defined).
+class TestBase
+  # Zero-arg initializer; the shim does `__t = XTest.new` per test
+  # method (no Minitest-style name argument needed).
+  def initialize
+  end
+
+  # Per-test isolation: shim calls `__t.setup` between `__t = .new`
+  # and `__t.test_X`; we run the DB reset first so user `setup`
+  # methods see fresh state. (Subclasses that override `setup`
+  # invoke `super` — same Minitest before_setup → setup ordering.)
+  def setup
     SchemaSetup.reset! if defined?(SchemaSetup)
   end
 
-  def assert_not(value, msg = nil)
-    refute(value, msg)
-  end
-
-  def assert_not_nil(value, msg = nil)
-    refute_nil(value, msg)
-  end
-
-  # Evaluates `expression` (a String containing Ruby code) before and
-  # after `block`, asserting the integer delta matches `change`. Mirror
-  # of ActiveSupport::Testing::Assertions#assert_difference for the
-  # single-expression case the lowered tests use.
-  def assert_difference(expression, change = 1)
-    before = eval(expression)
-    yield
-    after = eval(expression)
-    assert_equal(before + change, after,
-      "#{expression} didn't change by #{change}")
-  end
-
-  # `assert_no_difference("Comment.count") { ... }` — companion of
-  # assert_difference fixed at delta 0. Same single-expression form
-  # the lowered tests use.
-  def assert_no_difference(expression)
-    before = eval(expression)
-    yield
-    after = eval(expression)
-    assert_equal(before, after, "#{expression} changed (was #{before}, now #{after})")
+  # Default no-op so the shim's `__t.teardown` resolves on test
+  # classes that don't define one.
+  def teardown
   end
 end
 
 # `ActionDispatch::IntegrationTest` parent — Rails controller tests
-# inherit from this. Define it as a Minitest::Test subclass that mixes
-# in RequestDispatch so the emitted `class XControllerTest <
+# inherit from this. Define it as a TestBase subclass that mixes in
+# RequestDispatch so the emitted `class XControllerTest <
 # ActionDispatch::IntegrationTest` resolves without an emit-time
 # parent rewrite. Lives below RequestDispatch's definition (defined
 # below) so the include resolves.
@@ -185,7 +172,7 @@ module RequestDispatch
 end
 
 module ActionDispatch
-  class IntegrationTest < Minitest::Test
+  class IntegrationTest < TestBase
     include RequestDispatch
   end
 end

@@ -338,35 +338,22 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
     PathBuf::from(format!("app/views/{view_name}_json.rb"))
 }
 
-/// Per-call emit options for `emit_spinel_with`. Reserved for behavior
-/// that diverges between the CRuby (`bundle exec ruby`) and spinel-AOT
-/// runner paths — both consume `emit_spinel`'s output, but spinel-AOT
-/// needs explicit per-test dispatch (see `autorun_shim`).
-#[derive(Default, Clone, Copy)]
-pub struct SpinelEmitOpts {
-    /// Append an explicit per-test driver to each test file. Required
-    /// for the spinel-AOT runner — minitest's `at_exit { Minitest.run }`
-    /// + `ObjectSpace.each_object` autorun mechanism isn't reachable
-    /// under spinel's static require chain. The shim materializes the
-    /// dispatch at emit time, mirroring the role Crystal's
-    /// `macro inherited` plays at Crystal compile time and TS's
-    /// `discover_tests(klass)` plays at JS load time. Default `false`
-    /// so CRuby paths (ruby_toolchain, framework_tests_ruby, build-site)
-    /// stay clean — autorun fires there and the shim would double-run.
-    pub autorun_shim: bool,
-}
-
 /// Spinel-shape emit: lowered IR rendered as runnable Ruby. Composes
 /// the five `emit_lowered_*` functions into a single project — schema,
 /// routes, models, controllers, views — laid out under the spinel
 /// target's directory shape (app/, config/, test/). The natural
 /// validation target of the lowering pipeline: CRuby executes the
 /// output until spinel grows its own test runner.
+///
+/// Every emitted test file ends with an explicit per-test driver
+/// shim (`render_autorun_shim`). Mirrors the role Crystal's
+/// `macro inherited` plays at Crystal compile time and TS's
+/// `discover_tests(klass)` plays at JS load time. The shim works
+/// under both CRuby and spinel-AOT — same file, same mechanism, no
+/// reliance on Minitest's at_exit autorun (which spinel can't see and
+/// which would have CRuby double-run every test if combined with the
+/// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
-    emit_spinel_with(app, SpinelEmitOpts::default())
-}
-
-pub fn emit_spinel_with(app: &App, opts: SpinelEmitOpts) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.push(emit_lowered_schema(app));
     files.push(emit_lowered_routes(app));
@@ -486,18 +473,21 @@ pub fn emit_spinel_with(app: &App, opts: SpinelEmitOpts) -> Vec<EmittedFile> {
         // walk that `FixtureLoader.load_all!` uses under CRuby is not
         // reachable under spinel-AOT; materializing the list at emit
         // time is the AOT-friendly analog.
-        let reset_lines: Vec<String> = if opts.autorun_shim {
-            let mut lines = Vec::new();
-            for model in &app.models {
-                lines.push(format!("{}._adapter_truncate", model.name.0.as_str()));
+        let mut reset_lines: Vec<String> = Vec::new();
+        for model in &app.models {
+            // Only models with a backing schema table get an
+            // `_adapter_truncate` (synthesized by push_adapter_methods
+            // under the same gate). Abstract parents like
+            // ApplicationRecord have no table → no truncate method →
+            // calling it falls through to ActiveRecord::Base and
+            // raises NotImplementedError. Skip them here.
+            if app.schema.tables.contains_key(&model.table.0) {
+                reset_lines.push(format!("{}._adapter_truncate", model.name.0.as_str()));
             }
-            for lc in &fixture_lcs {
-                lines.push(format!("{}._fixtures_load!", lc.name.0.as_str()));
-            }
-            lines
-        } else {
-            Vec::new()
-        };
+        }
+        for lc in &fixture_lcs {
+            reset_lines.push(format!("{}._fixtures_load!", lc.name.0.as_str()));
+        }
         for lowered in &test_lowered {
             let lc = &lowered.test_class;
             let class_name = lc.name.0.as_str();
@@ -508,16 +498,26 @@ pub fn emit_spinel_with(app: &App, opts: SpinelEmitOpts) -> Vec<EmittedFile> {
                 "models"
             };
             let out_path = PathBuf::from(format!("test/{dir}/{stem}_test.rb"));
-            // Map Rails's `ActiveSupport::TestCase` parent to plain
-            // `Minitest::Test` for the spinel runtime — AS isn't part of
-            // the framework runtime; assertion-method gaps are bridged
-            // by shims in test_helper.rb (assert_not, assert_difference,
-            // etc.). Ruby-target-specific rewrite, so it lives here
-            // rather than in the lowerer.
+            // Map both `ActiveSupport::TestCase` (Rails app tests) and
+            // `Minitest::Test` (framework's own tests) to roundhouse-
+            // owned `TestBase` (defined in test_helper.rb). Insulates
+            // emitted tests from Minitest's class hierarchy —
+            // assert_*/refute_* are already inlined as `raise` by the
+            // inline_assertions lowerer, and the per-test shim
+            // replaces Minitest's autorun. The zero-arg `X.new` the
+            // shim emits requires this rewrite: `Minitest::Test#
+            // initialize(name)` requires a method-name argument, so
+            // inheriting from it directly breaks the shim under
+            // CRuby. Ruby-target-specific rewrite, lives here rather
+            // than in the lowerer.
             let mut lc_for_emit = lc.clone();
-            if matches!(&lc.parent, Some(p) if p.0.as_str() == "ActiveSupport::TestCase") {
+            if matches!(
+                &lc.parent,
+                Some(p) if p.0.as_str() == "ActiveSupport::TestCase"
+                    || p.0.as_str() == "Minitest::Test"
+            ) {
                 lc_for_emit.parent = Some(crate::ident::ClassId(
-                    crate::ident::Symbol::from("Minitest::Test"),
+                    crate::ident::Symbol::from("TestBase"),
                 ));
             }
             let mut emitted = library::emit_library_class_decl_with_synthesized(
@@ -590,9 +590,7 @@ pub fn emit_spinel_with(app: &App, opts: SpinelEmitOpts) -> Vec<EmittedFile> {
                 writeln!(preamble, "require_relative \"../fixtures/{stem}\"").unwrap();
             }
             emitted.content = format!("{preamble}{}", emitted.content);
-            if opts.autorun_shim {
-                emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
-            }
+            emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
             files.push(emitted);
         }
     }
@@ -600,11 +598,11 @@ pub fn emit_spinel_with(app: &App, opts: SpinelEmitOpts) -> Vec<EmittedFile> {
     files
 }
 
-/// Explicit per-test driver appended to each emitted test file under
-/// `SpinelEmitOpts { autorun_shim: true }`. Materializes the
-/// `reset → fixture-load → setup → test_X → teardown` lifecycle for
-/// every `test_*` instance method in `lc`. See
-/// `SpinelEmitOpts::autorun_shim` for why this is necessary on
+/// Explicit per-test driver appended to each emitted test file.
+/// Materializes the `reset → fixture-load → setup → test_X →
+/// teardown` lifecycle for every `test_*` instance method in `lc`.
+/// Replaces Minitest's at_exit autorun (not reachable under spinel-
+/// AOT; would double-run with the shim under CRuby). See
 /// spinel-AOT.
 ///
 /// `reset_lines` carries pre-rendered `<Model>._adapter_truncate` +

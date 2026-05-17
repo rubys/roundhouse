@@ -128,7 +128,9 @@ end
 
 # Reopen Minitest::Test with the AS-flavor assertions framework
 # tests need. Keeps the tests' assertion vocabulary consistent
-# with the spinel-blog suite + Rails conventions.
+# with the spinel-blog suite + Rails conventions. Used by the
+# bare-source `framework_ruby_tests_pass` gate (CRuby + Minitest
+# autorun).
 class Minitest::Test
   def assert_not(value, msg = nil)
     refute(value, msg)
@@ -136,5 +138,24 @@ class Minitest::Test
 
   def assert_not_nil(value, msg = nil)
     refute_nil(value, msg)
+  end
+end
+
+# Roundhouse-owned test parent. Used by `framework_tests_ruby` — the
+# gate that ingests these same test files, runs `emit_spinel` over
+# them, and then executes the emitted output under CRuby. The emit
+# rewrites `class XTest < Minitest::Test` to `< TestBase` so the
+# per-test shim's zero-arg `XTest.new` works (Minitest::Test's
+# `initialize(name)` requires a method-name argument). Same shape
+# as `runtime/spinel/test/test_helper.rb`'s TestBase — uniform
+# across both ruby targets, no Minitest dependency in the emit path.
+class TestBase
+  def initialize
+  end
+
+  def setup
+  end
+
+  def teardown
   end
 end
