@@ -6,12 +6,19 @@
 //! failures actually raise, the spinel binary exits nonzero, and
 //! `make spinel-test` consumes it as a fail signal.
 //!
-//! Patterns rewritten at the call site (real-blog Phase 1):
+//! Patterns rewritten at the call site:
 //!   - `assert_equal a, b`              → `raise "…" if a != b`
-//!   - `assert v` / `assert_predicate v, :sym` (TODO)
+//!   - `assert v`                       → `raise "…" if !v`
 //!   - `assert_not v` / `refute v`      → `raise "…" if v`
 //!   - `assert_nil v`                   → `raise "…" if !v.nil?`
 //!   - `assert_not_nil v` / `refute_nil v` → `raise "…" if v.nil?`
+//!   - `assert_empty c`                 → `raise "…" if !c.empty?`
+//!   - `assert_includes c, x`           → `raise "…" if !c.include?(x)`
+//!   - `assert_kind_of K, x`            → `raise "…" if !x.is_a?(K)`
+//!   - `assert_instance_of K, x`        → `raise "…" if !x.instance_of?(K)`
+//!   - `assert_match pat, val`          → `raise "…" if !(val =~ pat)`
+//!   - `assert_operator a, :op, b`      → `raise "…" if !a.op(b)` (op from Symbol literal)
+//!   - `assert_predicate o, :sym`       → `raise "…" if !o.sym` (sym from Symbol literal)
 //!   - `assert_difference("X.m"[, d]) { body }` → before/after capture
 //!   - `assert_no_difference("X.m") { body }`   → same, delta 0
 //!
@@ -198,6 +205,16 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 msg,
             ))
         }
+        "refute_equal" | "assert_not_equal" if args.len() >= 2 => {
+            // Inverted assert_equal — raise *if* the values are equal.
+            let a = args[0].clone();
+            let b = args[1].clone();
+            Some(raise_if(
+                span,
+                send_method(span, a, "==", vec![b]),
+                "refute_equal failed".to_string(),
+            ))
+        }
         "assert" if args.len() == 1 => {
             let cond = args[0].clone();
             Some(raise_if(span, not_expr(span, cond), "assertion failed".to_string()))
@@ -222,11 +239,197 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "refute_nil failed".to_string(),
             ))
         }
+        "assert_empty" if args.len() == 1 => {
+            let coll = args[0].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, coll, "empty?", vec![])),
+                "assert_empty failed".to_string(),
+            ))
+        }
+        "assert_includes" if args.len() >= 2 => {
+            let coll = args[0].clone();
+            let item = args[1].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, coll, "include?", vec![item])),
+                "assert_includes failed".to_string(),
+            ))
+        }
+        "assert_kind_of" if args.len() >= 2 => {
+            // `assert_kind_of Klass, x` — order matches Minitest (class first).
+            let klass = args[0].clone();
+            let val = args[1].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, val, "is_a?", vec![klass])),
+                "assert_kind_of failed".to_string(),
+            ))
+        }
+        "assert_instance_of" if args.len() >= 2 => {
+            let klass = args[0].clone();
+            let val = args[1].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, val, "instance_of?", vec![klass])),
+                "assert_instance_of failed".to_string(),
+            ))
+        }
+        "assert_match" if args.len() >= 2 => {
+            // `assert_match pat, val` — Minitest accepts pattern-then-value;
+            // emit `val =~ pat` (Ruby's regex match operator handles either
+            // Regexp or String pattern argument).
+            let pat = args[0].clone();
+            let val = args[1].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, val, "=~", vec![pat])),
+                "assert_match failed".to_string(),
+            ))
+        }
+        "assert_operator" if args.len() >= 3 => {
+            // `assert_operator a, :op, b` — the operator is a Symbol literal
+            // we can read at lowering time. Emit `a.<op>(b)` directly so the
+            // assertion compiles under spinel (no `.send`).
+            let op = match &*args[1].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                _ => return None, // non-literal op — leave for typer
+            };
+            let lhs = args[0].clone();
+            let rhs = args[2].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, lhs, &op, vec![rhs])),
+                "assert_operator failed".to_string(),
+            ))
+        }
+        "assert_predicate" if args.len() >= 2 => {
+            // `assert_predicate obj, :sym` — Symbol literal gives us the
+            // method name at lowering time. Emit `obj.<sym>()` directly.
+            let sym = match &*args[1].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                _ => return None,
+            };
+            let obj = args[0].clone();
+            Some(raise_if(
+                span,
+                not_expr(span, send_method(span, obj, &sym, vec![])),
+                "assert_predicate failed".to_string(),
+            ))
+        }
+        "refute_predicate" if args.len() >= 2 => {
+            // Inverted assert_predicate — raise *if* the predicate holds.
+            let sym = match &*args[1].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                _ => return None,
+            };
+            let obj = args[0].clone();
+            Some(raise_if(
+                span,
+                send_method(span, obj, &sym, vec![]),
+                "refute_predicate failed".to_string(),
+            ))
+        }
+        "assert_raises" if !args.is_empty() => {
+            lower_assert_raises(span, args, block.as_ref())
+        }
         "assert_difference" | "assert_no_difference" => {
             lower_difference(span, method.as_str(), args, block.as_ref())
         }
         _ => None,
     }
+}
+
+/// `assert_raises(ErrorClass) { body }` → Seq of:
+///   __raised = nil
+///   begin
+///     <block body>
+///   rescue ErrorClass => __caught
+///     __raised = __caught
+///   end
+///   raise "assert_raises failed" if __raised.nil?
+///   __raised
+///
+/// Matches Minitest's `assert_raises` contract: returns the caught
+/// exception so callers can write `err = assert_raises(K) { ... };
+/// assert_match(/foo/, err.message)`. The expected-class arg(s)
+/// become the `rescue` classes. Non-block call bails — leaves the
+/// Send in place for the typer to surface.
+fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Option<Expr> {
+    let block_body = match block.map(|b| &*b.node) {
+        Some(ExprNode::Lambda { body, .. }) => body.clone(),
+        _ => return None,
+    };
+    let raised_name = Symbol::from("__raised");
+    let caught_name = Symbol::from("__caught");
+    let init = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: raised_name.clone() },
+            value: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+    // Inside the rescue body: __raised = __caught
+    let capture = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: raised_name.clone() },
+            value: Expr::new(
+                span,
+                ExprNode::Var { id: VarId(0), name: caught_name.clone() },
+            ),
+        },
+    );
+    let begin_rescue = Expr::new(
+        span,
+        ExprNode::BeginRescue {
+            body: block_body,
+            rescues: vec![RescueClause {
+                classes: args.to_vec(),
+                binding: Some(caught_name),
+                body: capture,
+            }],
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        },
+    );
+    let check = raise_if(
+        span,
+        send_method(
+            span,
+            Expr::new(span, ExprNode::Var { id: VarId(0), name: raised_name.clone() }),
+            "nil?",
+            vec![],
+        ),
+        "assert_raises failed".to_string(),
+    );
+    // Final expr in the Seq is the caught exception — gives the
+    // surrounding `err = assert_raises(...) { ... }` its value.
+    let yield_caught = Expr::new(
+        span,
+        ExprNode::Var { id: VarId(0), name: raised_name },
+    );
+    // Wrap the Seq in an explicit `begin … end` so the whole thing
+    // is a single expression in assignment contexts (`err =
+    // assert_raises(...) { ... }`). Without the wrapper, the Seq
+    // would flatten into the surrounding Seq (the
+    // `ExprNode::Seq` flatten arm in map_expr), and the RHS of
+    // `err = ...` would silently swallow only the first statement.
+    let body = Expr::new(
+        span,
+        ExprNode::Seq { exprs: vec![init, begin_rescue, check, yield_caught] },
+    );
+    Some(Expr::new(
+        span,
+        ExprNode::BeginRescue {
+            body,
+            rescues: vec![],
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        },
+    ))
 }
 
 /// `assert_difference("Article.count"[, delta]) { body }` → Seq of

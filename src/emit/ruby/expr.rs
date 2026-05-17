@@ -375,9 +375,16 @@ pub(super) fn emit_send_base(
     // valid Ruby, but the prefix form is the idiomatic one and what
     // the validation lowerer's negation patterns expect to emit
     // (e.g. `unless cond` modifier from a wrapped `!cond` cond).
+    //
+    // Wrap operand in parens — `!` binds tighter than the binary
+    // operators (`<`, `==`, `=~`, `||`, etc.), so `!recv.op(arg)`
+    // emitted as `!recv < arg` would parse as `(!recv) < arg`.
+    // Explicit parens preserve the intended `!(recv.op(arg))`. For
+    // simple-identifier operands the parens are harmless extra
+    // characters; for Send/comparison operands they're necessary.
     if m == "!" && args_s.is_empty() {
         if let Some(r) = recv {
-            return format!("!{}", emit_expr(r));
+            return format!("!({})", emit_expr(r));
         }
     }
     // SelfRef receivers come from the body-typer's self-dispatch
