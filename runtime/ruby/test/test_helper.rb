@@ -158,4 +158,25 @@ class TestBase
 
   def teardown
   end
+
+  # `assert_operator a, :op, b` is deliberately not lowered by
+  # inline_assertions (Class-subclass `<`/`>` checks don't translate
+  # to TS, which has no operator-on-class-object equivalent). Each
+  # target's test_helper provides the method natively; here under
+  # CRuby we just delegate to the operator method.
+  def assert_operator(lhs, op, rhs, msg = nil)
+    return if lhs.send(op, rhs)
+    raise(msg || "assert_operator failed: #{lhs.inspect} #{op} #{rhs.inspect}")
+  end
+
+  # Not lowered for the same nilable-value reason as assert_operator —
+  # the cross-target-safe form would need per-target regex API
+  # handling. Ruby's `=~` handles nil values cleanly (nil =~ /.../
+  # returns nil = falsy); each target's test_helper provides its own
+  # method.
+  def assert_match(pattern, value, msg = nil)
+    raise(msg || "assert_match: expected non-nil") if value.nil?
+    return if value =~ pattern
+    raise(msg || "assert_match failed: expected #{value.inspect} to match #{pattern.inspect}")
+  end
 end

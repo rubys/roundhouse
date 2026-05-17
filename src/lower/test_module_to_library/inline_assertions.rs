@@ -16,8 +16,10 @@
 //!   - `assert_includes c, x`           → `raise "…" if !c.include?(x)`
 //!   - `assert_kind_of K, x`            → `raise "…" if !x.is_a?(K)`
 //!   - `assert_instance_of K, x`        → `raise "…" if !x.instance_of?(K)`
-//!   - `assert_match pat, val`          → `raise "…" if !(val =~ pat)`
-//!   - `assert_operator a, :op, b`      → `raise "…" if !a.op(b)` (op from Symbol literal)
+//!   (`assert_match` and `assert_operator` deliberately not lowered —
+//!   nilable-value handling and Class-subclass `<` checks aren't
+//!   cross-target-safe. Each target's test_helper handles them; Ruby's
+//!   TestBase provides both.)
 //!   - `assert_predicate o, :sym`       → `raise "…" if !o.sym` (sym from Symbol literal)
 //!   - `assert_difference("X.m"[, d]) { body }` → before/after capture
 //!   - `assert_no_difference("X.m") { body }`   → same, delta 0
@@ -275,34 +277,13 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_instance_of failed".to_string(),
             ))
         }
-        "assert_match" if args.len() >= 2 => {
-            // `assert_match pat, val` — Minitest accepts pattern-then-value;
-            // emit `val =~ pat` (Ruby's regex match operator handles either
-            // Regexp or String pattern argument).
-            let pat = args[0].clone();
-            let val = args[1].clone();
-            Some(raise_if(
-                span,
-                not_expr(span, send_method(span, val, "=~", vec![pat])),
-                "assert_match failed".to_string(),
-            ))
-        }
-        "assert_operator" if args.len() >= 3 => {
-            // `assert_operator a, :op, b` — the operator is a Symbol literal
-            // we can read at lowering time. Emit `a.<op>(b)` directly so the
-            // assertion compiles under spinel (no `.send`).
-            let op = match &*args[1].node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-                _ => return None, // non-literal op — leave for typer
-            };
-            let lhs = args[0].clone();
-            let rhs = args[2].clone();
-            Some(raise_if(
-                span,
-                not_expr(span, send_method(span, lhs, &op, vec![rhs])),
-                "assert_operator failed".to_string(),
-            ))
-        }
+        // `assert_match` and `assert_operator` deliberately NOT lowered:
+        //   - `assert_match` needs nilable-value handling that differs
+        //     per target (Ruby nil-safe `=~`, Crystal `String?` typing,
+        //     TS regex API). Each target's test_helper provides the
+        //     method natively; Ruby's TestBase provides one too.
+        //   - `assert_operator` can use Class-subclass `<` checks which
+        //     TS has no equivalent for. Same story — left as a Send.
         "assert_predicate" if args.len() >= 2 => {
             // `assert_predicate obj, :sym` — Symbol literal gives us the
             // method name at lowering time. Emit `obj.<sym>()` directly.

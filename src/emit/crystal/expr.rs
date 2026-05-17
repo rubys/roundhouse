@@ -516,15 +516,23 @@ fn emit_node(n: &ExprNode) -> String {
             s.push_str(&indent_lines(&emit_expr(body), 1));
             s.push('\n');
             for rc in rescues {
+                // Crystal rescue syntax differs from Ruby:
+                //   - `rescue Class` (no binding)
+                //   - `rescue binding : Class` (binding REQUIRES a class
+                //     type; no bare `rescue => binding` form)
+                //   - Multiple classes: `rescue binding : C1 | C2`
                 s.push_str("rescue");
-                if !rc.classes.is_empty() {
-                    let cs: Vec<String> = rc.classes.iter().map(emit_expr).collect();
+                let cs: Vec<String> = rc.classes.iter().map(emit_expr).collect();
+                if let Some(name) = &rc.binding {
+                    let ty = if cs.is_empty() {
+                        "Exception".to_string()
+                    } else {
+                        cs.join(" | ")
+                    };
+                    s.push_str(&format!(" {name} : {ty}"));
+                } else if !cs.is_empty() {
                     s.push(' ');
                     s.push_str(&cs.join(", "));
-                }
-                if let Some(name) = &rc.binding {
-                    s.push_str(&format!(" : {}", cs_or_exception(rc)));
-                    s.push_str(&format!(" => {name}"));
                 }
                 s.push('\n');
                 s.push_str(&indent_lines(&emit_expr(&rc.body), 1));
@@ -1001,6 +1009,18 @@ pub(super) fn emit_send_base(
     // an `ExprNode::Raise`.
     if recv.is_none() && method.as_str() == "raise" && args_s.len() == 2 {
         return format!("raise {}.new({})", args_s[0], args_s[1]);
+    }
+    // Unary `!` Send (`Send { recv: cond, method: "!", args: [] }`) →
+    // prefix form `!(cond)`. Wrap the operand in parens — `!` binds
+    // tighter than binary operators (`<`, `==`, etc.), so
+    // `!recv.op(arg)` would parse as `(!recv) < arg` when the inner
+    // Send emits as infix (`A < B`). Explicit parens preserve the
+    // intended `!(recv.op(arg))`. Mirrors the same arm in Ruby's
+    // emit (src/emit/ruby/expr.rs).
+    if method.as_str() == "!" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("!({})", emit_expr(r));
+        }
     }
     // Cross-target nil-safe Hash read: Ruby `h.fetch(key, nil)` returns
     // the value or nil for missing key. Crystal's `Hash#fetch(K, V)`

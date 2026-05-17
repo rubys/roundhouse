@@ -1011,7 +1011,30 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 *parenthesized,
             )
         }
-        ExprNode::Assign { target: _, value } => emit_expr(value),
+        ExprNode::Assign { target, value } => {
+            // Expression-position assignment — preserve the side effect.
+            // JS `a = b` is an expression that both assigns and yields
+            // the value. Previously this arm dropped the target and
+            // emitted just `value`, which silently lost the assignment
+            // when the expression appeared inside an IIFE (e.g., the
+            // assert_raises BeginRescue-wrapped body).
+            let value_s = emit_expr(value);
+            match target {
+                LValue::Var { name, .. } => {
+                    format!("{} = {}", escape_reserved_word(name.as_str()), value_s)
+                }
+                LValue::Ivar { name } => {
+                    format!("this.{} = {}", ts_field_name(name.as_str()), value_s)
+                }
+                LValue::Attr { recv, name } => {
+                    format!("{}.{} = {}", emit_expr(recv), name.as_str(), value_s)
+                }
+                LValue::Index { recv, index } => {
+                    format!("{}[{}] = {}", emit_expr(recv), emit_expr(index), value_s)
+                }
+                _ => value_s,
+            }
+        }
         ExprNode::Seq { exprs } => {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
@@ -1161,14 +1184,33 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // an IIFE so the whole thing evaluates to a value. Single
             // bare `rescue` is common; multi-clause becomes an
             // instanceof chain in the catch body.
-            let body_s = emit_expr(body);
+            //
+            // Seq bodies render as statements with the last expression
+            // returned. A naive `return <seq>` breaks because the seq's
+            // first statement would become the return arg and the rest
+            // unreachable.
+            let body_inner = match &*body.node {
+                ExprNode::Seq { exprs } if !exprs.is_empty() => {
+                    let mut s = String::new();
+                    let last_idx = exprs.len() - 1;
+                    for (i, stmt) in exprs.iter().enumerate() {
+                        if i == last_idx {
+                            s.push_str(&format!("return {};", emit_expr(stmt)));
+                        } else {
+                            s.push_str(&format!("{}; ", emit_expr(stmt)));
+                        }
+                    }
+                    s
+                }
+                _ => format!("return {};", emit_expr(body)),
+            };
             let catch_body = build_catch_body(rescues);
             let ensure_s = match ensure {
                 Some(e) => format!(" finally {{ {}; }}", emit_expr(e)),
                 None => String::new(),
             };
             format!(
-                "(() => {{ try {{ return {body_s}; }} catch (e) {{ {catch_body} }}{ensure_s} }})()"
+                "(() => {{ try {{ {body_inner} }} catch (e) {{ {catch_body} }}{ensure_s} }})()"
             )
         }
         ExprNode::RescueModifier { expr, fallback } => {
@@ -1248,15 +1290,28 @@ fn build_catch_body(rescues: &[crate::expr::RescueClause]) -> String {
     if rescues.is_empty() {
         return "throw e;".to_string();
     }
+    // Rescue binding (`rescue Err => name`) — alias the catch variable
+    // `e` to the source-named binding so the rescue body's references
+    // resolve. Emits `const <name> = e;` before the rescue body.
+    let bind_alias = |rc: &crate::expr::RescueClause| -> String {
+        match &rc.binding {
+            Some(name) => format!("const {name} = e; "),
+            None => String::new(),
+        }
+    };
     // Bare rescue (no explicit classes) catches everything.
     if rescues.len() == 1 && rescues[0].classes.is_empty() {
-        return format!("return {};", emit_expr(&rescues[0].body));
+        return format!("{}return {};", bind_alias(&rescues[0]), emit_expr(&rescues[0].body));
     }
     let mut out = String::new();
     let mut has_bare_catchall = false;
     for (i, rc) in rescues.iter().enumerate() {
         if rc.classes.is_empty() {
-            out.push_str(&format!(" else {{ return {}; }}", emit_expr(&rc.body)));
+            out.push_str(&format!(
+                " else {{ {}return {}; }}",
+                bind_alias(rc),
+                emit_expr(&rc.body)
+            ));
             has_bare_catchall = true;
             break;
         }
@@ -1267,8 +1322,9 @@ fn build_catch_body(rescues: &[crate::expr::RescueClause]) -> String {
             .map(|c| format!("e instanceof {}", emit_expr(c)))
             .collect();
         out.push_str(&format!(
-            "{keyword} ({}) {{ return {}; }}",
+            "{keyword} ({}) {{ {}return {}; }}",
             instanceof_s.join(" || "),
+            bind_alias(rc),
             emit_expr(&rc.body)
         ));
     }

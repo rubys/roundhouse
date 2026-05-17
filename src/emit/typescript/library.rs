@@ -1375,6 +1375,13 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             collect_class_refs(body, out);
             for r in rescues {
+                // Rescue classes — e.g. `rescue RecordNotFound => …`
+                // — also reference class names that need importing.
+                // Without this, `e instanceof RecordNotFound` emits a
+                // ReferenceError at runtime.
+                for c in &r.classes {
+                    collect_class_refs(c, out);
+                }
                 collect_class_refs(&r.body, out);
             }
             if let Some(e) = else_branch {
