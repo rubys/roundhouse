@@ -79,6 +79,18 @@ fn render_class(lc: &LibraryClass) -> String {
 }
 
 fn render_method(m: &MethodDef) -> String {
+    // Class-receiver methods can't be attr_reader / attr_writer at the
+    // RBS surface — the `attr_*` shorthand only describes instance
+    // attributes, and an `attr_reader name?: bool` form lacks any way
+    // to express singleton-scope. `def self.abstract?; true; end` flows
+    // through the lowerer with AccessorKind::AttributeReader (predicate
+    // shape, no body argument), but emitting it as `attr_reader
+    // abstract?: bool` then trips spinel's RBS extractor into adding an
+    // ivar named `@abstract?` — invalid C identifier. Fall through to
+    // `def self.name` rendering for any class-receiver method.
+    if matches!(m.receiver, MethodReceiver::Class) {
+        return render_def(m);
+    }
     match m.kind {
         AccessorKind::AttributeReader => render_attr_reader(m),
         AccessorKind::AttributeWriter => render_attr_writer(m),

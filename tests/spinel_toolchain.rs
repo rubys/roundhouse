@@ -35,6 +35,31 @@ fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
 }
 
+/// Move every `<scratch>/runtime/**/*.rbs` to `<scratch>/sig/runtime/<rel>.rbs`.
+/// Mirrors the top-level Makefile's RUBY_OUT layout (f6d2b87): one `sig/`
+/// root for both hand-authored runtime RBS and roundhouse-emitted app RBS.
+fn reroute_runtime_rbs_to_sig(scratch: &Path) {
+    let runtime_dir = scratch.join("runtime");
+    let sig_runtime = scratch.join("sig").join("runtime");
+    fn walk(dir: &Path, runtime_root: &Path, sig_root: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, runtime_root, sig_root);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rbs") {
+                let rel = path.strip_prefix(runtime_root).expect("under runtime/");
+                let dst = sig_root.join(rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir sig parent");
+                }
+                std::fs::rename(&path, &dst).expect("mv .rbs to sig/");
+            }
+        }
+    }
+    walk(&runtime_dir, &runtime_dir, &sig_runtime);
+}
+
 fn copy_tree(src: &Path, dst: &Path) {
     if src.is_dir() {
         std::fs::create_dir_all(dst).expect("mkdir");
@@ -110,6 +135,14 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         scratch.join("runtime").join("db.rb"),
     )
     .expect("copy db.rb -> runtime/db.rb");
+
+    // Reroute runtime .rbs sidecars from `runtime/<rel>.rbs` to
+    // `sig/runtime/<rel>.rbs` — matches the top-level Makefile's
+    // `make ruby-build` shape (RUBY_OUT layout in f6d2b87). Keeps
+    // every .rbs under one `sig/` root so spinel's `--rbs sig` and
+    // Steep both walk a single tree. The `copy_tree(runtime/ruby/<sub>)`
+    // above brings .rbs alongside .rb; this post-pass moves them.
+    reroute_runtime_rbs_to_sig(scratch);
 
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);

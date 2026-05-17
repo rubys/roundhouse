@@ -108,7 +108,7 @@ SPINEL_TEST_RBS  := $(addsuffix .rb,$(SPINEL_TESTS))
 
 $(BUILD)/test/%: test/%.rb $(RUBY_SRC)
 	@mkdir -p $(dir $@)
-	$(SPINEL) $< -o $@
+	$(SPINEL) --rbs sig $< -o $@
 
 .PHONY: spinel-test spinel-test-build cruby-test
 spinel-test-build: $(SPINEL_TEST_BINS)
