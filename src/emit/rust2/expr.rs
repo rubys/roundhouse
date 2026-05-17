@@ -81,6 +81,15 @@ thread_local! {
     static DECLARED_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
+    /// Variable names whose `local_var_ty` was set from the
+    /// back-propagated function-return type (`empty_hash_return_ty`),
+    /// not from the value's body-typer `Ty`. The Send `[]=` peephole
+    /// uses this to know the recorded type is authoritative — for
+    /// body-typer-derived `r.ty` the storage may disagree (e.g.
+    /// `Hash<Sym, Str>` in IR but `HashMap<&str, String>` in emit).
+    static BACK_PROPAGATED_HASH_LOCALS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
     /// Variable names read more than once in the current method body.
     /// Populated by `with_method_scope`'s pre-pass via
     /// `collect_var_read_counts`. Consumed by the `Var` emit arm to
@@ -342,10 +351,13 @@ where
     let prev_declared =
         DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
     let prev_clone = CLONE_VARS.with(|c| c.replace(clone_vars));
+    let prev_back_prop = BACK_PROPAGATED_HASH_LOCALS
+        .with(|c| c.replace(std::collections::HashSet::new()));
     let r = f();
     MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
     DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
     CLONE_VARS.with(|c| *c.borrow_mut() = prev_clone);
+    BACK_PROPAGATED_HASH_LOCALS.with(|c| *c.borrow_mut() = prev_back_prop);
     r
 }
 
@@ -1536,6 +1548,69 @@ fn emit_array(elements: &[Expr]) -> String {
     format!("vec![{}]", parts.join(", "))
 }
 
+/// If `recv` is a Var whose `local_var_ty` was set via
+/// back-propagation (`empty_hash_return_ty`), return its (K, V)
+/// types. Gated on the back-propagation set so the Send `[]=`
+/// peephole only coerces args when the recorded type is
+/// authoritative — body-typer-derived types may disagree with the
+/// emit's actual storage (e.g. `Hash<Sym, Str>` in IR but `HashMap<
+/// &str, String>` in emit for a `{action: …, method: "post"}.to_h`
+/// literal).
+fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
+    let name = match &*recv.node {
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        _ => return None,
+    };
+    let is_back_propagated =
+        BACK_PROPAGATED_HASH_LOCALS.with(|c| c.borrow().contains(&name));
+    if !is_back_propagated {
+        return None;
+    }
+    match local_var_ty(&name)? {
+        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        _ => None,
+    }
+}
+
+/// Return `Hash<K, V>` when `value` is the empty `{}` literal AND
+/// the enclosing function's declared return type is `Hash<K, V>` (or
+/// `Option<Hash<K, V>>`). `None` otherwise. The back-propagated type
+/// pins a local HashMap's K/V before subsequent inserts narrow them
+/// in the wrong direction (`&str` keys + values from local borrowed
+/// source data). See `match_pattern` in
+/// `runtime/ruby/action_dispatch/router.rb`: `params = {}; params[
+/// pp[1..]] = ap; …; return params`. Used both for the let
+/// annotation AND for subsequent `.insert`-arg coercion via
+/// `local_var_ty`.
+fn empty_hash_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
+    let is_empty_hash = matches!(
+        &*value.node,
+        ExprNode::Hash { entries, .. } if entries.is_empty()
+    );
+    if !is_empty_hash {
+        return None;
+    }
+    let ret_ty = CURRENT_RETURN_TY.with(|c| c.borrow().clone());
+    match ret_ty {
+        Some(crate::ty::Ty::Hash { key, value }) => Some(crate::ty::Ty::Hash { key, value }),
+        Some(crate::ty::Ty::Union { variants }) => variants.into_iter().find(|v| {
+            matches!(v, crate::ty::Ty::Hash { .. })
+        }),
+        _ => None,
+    }
+}
+
+fn empty_hash_return_annotation(value: &Expr) -> String {
+    match empty_hash_return_ty(value) {
+        Some(crate::ty::Ty::Hash { key, value }) => format!(
+            ": std::collections::HashMap<{}, {}>",
+            super::ty::rust_ty(&key),
+            super::ty::rust_ty(&value),
+        ),
+        _ => String::new(),
+    }
+}
+
 fn emit_assign(target: &LValue, value: &Expr) -> String {
     let rhs = emit_expr(value);
     match target {
@@ -1547,9 +1622,22 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             // `.clone().unwrap()`). Only records on first assignment —
             // subsequent rebinds in the same Seq leave the recorded
             // declared type alone (Rust's `mut` binding type is fixed).
-            if let Some(ty) = value.ty.as_ref() {
-                if local_var_ty(&name_str).is_none() {
-                    mark_local_var_ty(&name_str, ty.clone());
+            //
+            // For empty-HashMap inits in Hash-returning functions, the
+            // back-propagated `Hash<K, V>` ty takes precedence over the
+            // body-typer's `Hash<Untyped, Untyped>` view — subsequent
+            // `.insert` emits use this to coerce args to the right
+            // K/V color.
+            if local_var_ty(&name_str).is_none() {
+                let back_propagated = empty_hash_return_ty(value);
+                if back_propagated.is_some() {
+                    BACK_PROPAGATED_HASH_LOCALS.with(|c| {
+                        c.borrow_mut().insert(name_str.clone());
+                    });
+                }
+                let ty = back_propagated.or_else(|| value.ty.clone());
+                if let Some(t) = ty {
+                    mark_local_var_ty(&name_str, t);
                 }
             }
             let already_declared =
@@ -1558,13 +1646,31 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                 return format!("{name_str} = {rhs}");
             }
             let needs_mut = MUT_VARS.with(|c| c.borrow().contains(&name_str));
+            // Type-annotate empty HashMap literals when the enclosing
+            // function returns a Hash<K, V> (or Option<Hash<K, V>>). The
+            // pattern: `params = {}; ...; params[k] = v; ...; return
+            // params`. Without an annotation, Rust infers params' type
+            // from the FIRST `.insert(k, v)` — often `HashMap<&str,
+            // &str>` when the source values are `&str`-typed locals,
+            // which then mismatches the function's declared `Hash<
+            // String, String>?` return. Annotating up front pins the
+            // K/V types so str_color's Assign-Index coercion fires on
+            // the inserts and the return-site type-checks.
+            //
+            // Heuristic: empty-HashMap init + Hash-returning function.
+            // False positive — the local is never returned — is benign:
+            // the annotation matches what the inserts produce in
+            // practice (the str_color coercion lifts &str → String).
+            // Over-applying is preferable to under-applying because
+            // the wrong inference fails noisily.
+            let annot = empty_hash_return_annotation(value);
             DECLARED_VARS.with(|c| {
                 c.borrow_mut().insert(name_str.clone());
             });
             if needs_mut {
-                format!("let mut {name_str} = {rhs}")
+                format!("let mut {name_str}{annot} = {rhs}")
             } else {
-                format!("let {name_str} = {rhs}")
+                format!("let {name_str}{annot} = {rhs}")
             }
         }
         LValue::Ivar { name } => {
@@ -2168,13 +2274,39 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // `.insert(k, v)`. Wrap in `{ ...; }` for the no-else
             // `if cond { ... }` context (HashMap::insert returns
             // Option<V>; trailing `;` makes the block `()` typed).
-            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) {
-                return format!(
-                    "{{ {}.insert({}, {}); }}",
-                    emit_expr(r),
-                    emit_expr(&args[0]),
-                    emit_expr(&args[1]),
-                );
+            //
+            // K/V coercion via `local_var_ty`: when the recv is a Var
+            // whose locally-tracked type (e.g. back-propagated from
+            // the function's return signature, see
+            // `empty_hash_return_ty`) is `Hash<Str|Sym, Str|Sym>`, the
+            // body-typer's IR-level `r.ty` may still be the
+            // `Hash<Untyped, Untyped>` shape from the `{}` init — so
+            // str_color's Hash-recv coloring doesn't fire and the args
+            // arrive un-coerced. Append `.to_string()` per arg whose
+            // K/V slot is String-shaped. Idempotent for already-String.
+            let recv_hash_kv = recv_var_back_propagated_hash_kv(r);
+            let is_hash_recv =
+                matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+                    || recv_hash_kv.is_some();
+            if is_hash_recv {
+                let coerce_str = |slot: Option<&crate::ty::Ty>, raw: String| -> String {
+                    match slot {
+                        Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => {
+                            format!("({raw}).to_string()")
+                        }
+                        _ => raw,
+                    }
+                };
+                let k = emit_expr(&args[0]);
+                let v = emit_expr(&args[1]);
+                let (kk, vv) = match &recv_hash_kv {
+                    Some((k_ty, v_ty)) => (
+                        coerce_str(Some(k_ty), k),
+                        coerce_str(Some(v_ty), v),
+                    ),
+                    None => (k, v),
+                };
+                return format!("{{ {}.insert({kk}, {vv}); }}", emit_expr(r));
             }
             return format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1]));
         }
