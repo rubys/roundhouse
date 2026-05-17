@@ -1495,6 +1495,22 @@ fn emit_hash(entries: &[(Expr, Expr)]) -> String {
         !matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
             && matches!(v.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
     });
+    // Tail-position return-type coercion: when the literal is the
+    // method body's tail AND the declared return is `Hash<String, V>`
+    // (lowerer-synthesized `attributes` returning `HashMap<String,
+    // Value>` is the canonical case), coerce keys to String and
+    // values to V's storage. Without this, `HashMap::from([("body",
+    // self.body), ("article_id", self.article_id), …])` infers from
+    // the first tuple's value type (String, or i64) and trips
+    // E0308 on the heterogeneous values and at the return site.
+    let return_hash_kv: Option<(crate::ty::Ty, crate::ty::Ty)> = if in_return_tail() {
+        match CURRENT_RETURN_TY.with(|c| c.borrow().clone()) {
+            Some(crate::ty::Ty::Hash { key, value }) => Some((*key, *value)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let pairs: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
@@ -1503,15 +1519,37 @@ fn emit_hash(entries: &[(Expr, Expr)]) -> String {
             // (Phase 2.4 hash homogeneity); double-applying produces
             // `("post").to_string().to_string()`.
             let str_color_handled = v.str_coercion.is_some();
-            let v_s = if !str_color_handled
+            let v_raw = emit_expr(v);
+            let v_s = if let Some((_, ref v_ty)) = return_hash_kv {
+                // Use the per-param coercion helper — handles
+                // Value::from for Untyped-target values, .to_string()
+                // for Str-target values, etc.
+                coerce_arg_for_param_ty(v, v_ty)
+            } else if !str_color_handled
                 && has_non_literal_str_value
                 && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
             {
-                format!("{}.to_string()", emit_expr(v))
+                format!("{v_raw}.to_string()")
             } else {
-                emit_expr(v)
+                v_raw
             };
-            format!("({}, {v_s})", emit_expr(k))
+            let k_raw = emit_expr(k);
+            let k_s = if let Some((ref k_ty, _)) = return_hash_kv {
+                match k_ty {
+                    crate::ty::Ty::Str | crate::ty::Ty::Sym
+                        if matches!(
+                            &*k.node,
+                            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                        ) && k.str_coercion.is_none() =>
+                    {
+                        format!("{k_raw}.to_string()")
+                    }
+                    _ => k_raw,
+                }
+            } else {
+                k_raw
+            };
+            format!("({k_s}, {v_s})")
         })
         .collect();
     format!("std::collections::HashMap::from([{}])", pairs.join(", "))
@@ -1598,7 +1636,41 @@ fn emit_array(elements: &[Expr]) -> String {
     // surrounding type context infer the element type. The macro form
     // is the Rust idiom for `Vec<T>` literals and matches how the
     // emitted runtime files actually want to build their state.
-    let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+    //
+    // Tail-position return-type coercion: when this Array literal is
+    // the method body's tail value AND the declared return is
+    // `Vec<String>` / `Vec<Sym>` (e.g. lowerer-synthesized
+    // `schema_columns` returning `Vec<String>` from a
+    // `vec!["id", "body", …]` of `&'static str` literals), coerce each
+    // entry to `String` via `.to_string()`. Without this the literal
+    // infers as `Vec<&str>` and the return-site type-checks fail.
+    let coerce_to_string_elem = in_return_tail()
+        && CURRENT_RETURN_TY.with(|c| {
+            matches!(
+                c.borrow().as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(elem.as_ref(), crate::ty::Ty::Str | crate::ty::Ty::Sym)
+            )
+        });
+    let parts: Vec<String> = elements
+        .iter()
+        .map(|e| {
+            let raw = emit_expr(e);
+            if coerce_to_string_elem
+                && matches!(
+                    &*e.node,
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
+                )
+                && e.str_coercion.is_none()
+            {
+                format!("{raw}.to_string()")
+            } else {
+                raw
+            }
+        })
+        .collect();
     format!("vec![{}]", parts.join(", "))
 }
 
@@ -1710,6 +1782,43 @@ fn empty_hash_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
     }
 }
 
+/// Wrap an RHS with `Some(...)` when the variable's recorded
+/// `local_var_ty` is `Option<T>` and the RHS produces non-Option
+/// `T` (or anything coercible into Option<_>). Used by emit_assign
+/// for reassign sites where `let mut result = None;` (Option<X>)
+/// is followed by `result = instance` (X) inside a conditional —
+/// the lowerer-synthesized accumulator pattern in `_adapter_find_*`.
+///
+/// `self` rhs is special-cased: the method takes `&self`/`&mut self`
+/// so `self` is a reference. Owning the inner type for `Option<T>`
+/// requires `.clone()`, which the function-tail-return path already
+/// does via `needs_self_clone`; we mirror that here.
+fn some_wrap_for_assign(name: &str, value: &Expr, rhs: &str) -> String {
+    let Some(declared) = local_var_ty(name) else {
+        return rhs.to_string();
+    };
+    if !is_option_ty(&declared) {
+        return rhs.to_string();
+    }
+    // RHS already Option-shaped? Skip the wrap.
+    let rhs_is_option = value
+        .ty
+        .as_ref()
+        .map(|t| is_option_ty(t))
+        .unwrap_or(false);
+    if rhs_is_option {
+        return rhs.to_string();
+    }
+    // `self` rhs in a `&self`/`&mut self` method: `Some(self)` would
+    // produce `Option<&Self>`. The lowered `_adapter_save` shape
+    // (`result = self` inside the if-step branch) wants the owned
+    // `Option<Self>`, so clone.
+    if matches!(&*value.node, ExprNode::SelfRef) {
+        return format!("Some({rhs}.clone())");
+    }
+    format!("Some({rhs})")
+}
+
 fn empty_hash_return_annotation(value: &Expr) -> String {
     match empty_hash_return_ty(value) {
         Some(crate::ty::Ty::Hash { key, value }) => format!(
@@ -1717,7 +1826,34 @@ fn empty_hash_return_annotation(value: &Expr) -> String {
             super::ty::rust_ty(&key),
             super::ty::rust_ty(&value),
         ),
-        _ => String::new(),
+        _ => match none_init_option_return_ty(value) {
+            Some(t) => format!(": {}", super::ty::rust_ty(&t)),
+            None => String::new(),
+        },
+    }
+}
+
+/// `Option<T>` (or the unioned `Union<T, Nil>`) when `value` is the
+/// `nil` literal AND the enclosing function returns `Option<T>`.
+/// Mirrors `empty_hash_return_ty` for the lowerer's `_adapter_find_
+/// by_id` accumulator pattern: `result = nil; if step? ; result =
+/// instance ; end ; result`. Without the annotation, Rust infers the
+/// `let mut result = None` binding from the first non-None
+/// reassignment, which produces a concrete `Article` instead of the
+/// declared `Option<Article>` and trips E0308 at every reassign +
+/// the return.
+fn none_init_option_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
+    let is_nil_lit = matches!(
+        &*value.node,
+        ExprNode::Lit { value: Literal::Nil }
+    );
+    if !is_nil_lit {
+        return None;
+    }
+    let ret_ty = CURRENT_RETURN_TY.with(|c| c.borrow().clone());
+    match ret_ty {
+        Some(t) if is_option_ty(&t) => Some(t),
+        _ => None,
     }
 }
 
@@ -1739,7 +1875,8 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             // `.insert` emits use this to coerce args to the right
             // K/V color.
             if local_var_ty(&name_str).is_none() {
-                let back_propagated = empty_hash_return_ty(value);
+                let back_propagated = empty_hash_return_ty(value)
+                    .or_else(|| none_init_option_return_ty(value));
                 if back_propagated.is_some() {
                     BACK_PROPAGATED_HASH_LOCALS.with(|c| {
                         c.borrow_mut().insert(name_str.clone());
@@ -1753,7 +1890,17 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             let already_declared =
                 DECLARED_VARS.with(|c| c.borrow().contains(&name_str));
             if already_declared {
-                return format!("{name_str} = {rhs}");
+                // Some-wrap when the binding was declared `Option<T>`
+                // (typically `let mut result = None;`) and the new
+                // RHS is plain `T`. Without this, `result = instance.
+                // clone()` after `result = None` fails E0308. Same
+                // shape as the function-tail Some-wrap but applied
+                // at the LValue::Var assign site, which catches the
+                // lowerer-synthesized `result = instance; ...;
+                // result` accumulator pattern in
+                // `_adapter_find_by_id` / `find` and friends.
+                let rhs_wrapped = some_wrap_for_assign(&name_str, value, &rhs);
+                return format!("{name_str} = {rhs_wrapped}");
             }
             let needs_mut = MUT_VARS.with(|c| c.borrow().contains(&name_str));
             // Type-annotate empty HashMap literals when the enclosing
@@ -2843,6 +2990,33 @@ fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
         if let Some(coerce) = value_narrowing_coercion(param_ty) {
             return format!("({raw}).{coerce}");
         }
+    }
+
+    // Family 4: primitive → Value. Callee/target slot wants
+    // `serde_json::Value` (`Untyped`), arg is a concrete primitive
+    // (Str/Sym/Int/Float/Bool) — wrap with `Value::from(...)`.
+    // Closes the `attributes` return shape where each model field
+    // (String/i64/Bool) needs to land in HashMap<String, Value>;
+    // also fires inside tail-position HashMap literals via
+    // emit_hash's return-type-driven coercion.
+    //
+    // `Value::from` takes by value; for Ivar reads of non-Copy
+    // fields (`self.body` typed `String`), the raw is `self.body`
+    // which is `&String` (we're inside `&self`/`&mut self`).
+    // Wrapping moves out of the shared borrow (E0507). Clone the
+    // field first to materialize the owned value.
+    if matches!(param_ty, Ty::Untyped)
+        && matches!(
+            arg_ty_peeled,
+            Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
+        )
+    {
+        let needs_clone = matches!(&*arg.node, ExprNode::Ivar { .. })
+            && !matches!(arg_ty_peeled, Some(Ty::Int | Ty::Float | Ty::Bool));
+        if needs_clone {
+            return format!("serde_json::Value::from({raw}.clone())");
+        }
+        return format!("serde_json::Value::from({raw})");
     }
 
     if matches!(param_ty, Ty::Str | Ty::Sym) && arg.str_coercion.is_none() {
