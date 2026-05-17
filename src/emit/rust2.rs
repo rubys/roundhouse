@@ -85,6 +85,19 @@ const RT_ADAPTER_INTERFACE_SOURCE: &str =
 const RT_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/framework_test_adapter.rs");
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
+const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
+
+/// `use crate::*;` imports prepended to every emitted app-model
+/// file. The lowerer (`src/lower/model_to_library/adapter_emit.rs`)
+/// emits bare references to `Db.prepare(...)`, `Self.column_int(...)`,
+/// etc.; without these imports those references E0433 even though
+/// the modules are declared in `src/lib.rs`. `#[allow(unused_imports)]`
+/// suppresses the warning when a given model doesn't reach every
+/// item (most models don't broadcast, e.g.).
+const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::db::Db;
+";
 
 /// Emit a `rust2`-shaped project for `app`. Phase 2.1+: minimal
 /// scaffold + transpiled framework runtime files. Phase 5 (in
@@ -115,6 +128,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/adapter_interface.rs", RT_ADAPTER_INTERFACE_SOURCE),
         ("src/framework_test_adapter.rs", RT_FRAMEWORK_TEST_ADAPTER_SOURCE),
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
+        ("src/db.rs", RT_DB_SOURCE),
     ] {
         files.push(EmittedFile {
             path: PathBuf::from(path),
@@ -175,12 +189,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         crate::analyze::mutates_self::propagate(&mut model_lcs);
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
-            let content = match library::emit_library_class(lc) {
+            let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => {
                     panic!("rust2 model emit failed for {}: {e}", lc.name.0.as_str());
                 }
             };
+            // App-model emit calls into the rust2 primitive runtime
+            // (`Db::prepare`, etc.) and the transpiled framework
+            // runtime (`Base`, `Broadcasts`, …). Prepend `use crate::*`
+            // imports for the known surface. Over-imports are
+            // harmless under Rust's `#[allow(unused_imports)]`
+            // permissive default; under-imports trip E0433. Add new
+            // entries here when a follow-up phase surfaces another
+            // bare reference.
+            let content = format!("{MODEL_IMPORTS}{body}");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,

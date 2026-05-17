@@ -14,11 +14,13 @@
 //!     Used by `main.rs` on server startup. `with_conn` reaches
 //!     either slot (test thread-local first, then process mutex).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
+use rusqlite::types::Value;
 use rusqlite::Connection;
 
 thread_local! {
@@ -107,6 +109,182 @@ pub fn open_production_db(path: &str, schema_sql: &str) {
         .expect("enable foreign keys");
     conn.execute_batch(schema_sql).expect("apply schema");
     *PROD_CONN.lock().expect("prod DB mutex") = Some(conn);
+}
+
+// ── Low-level prepare/step/column API ───────────────────────────────
+//
+// Per-statement state lives in a thread-local `STATEMENTS` table; the
+// opaque `i64` stmt id indexes into it. Rows materialize on `prepare`
+// — rusqlite's `Statement`/`Rows` borrow chain from `Connection` is
+// awkward to thread through a `RefCell<HashMap<i64, _>>`, so we eat
+// the up-front allocation in exchange for a self-contained per-stmt
+// entry. Matches `runtime/crystal/db.cr`'s `Roundhouse::Db` API
+// shape so the lowered model bodies (`Db.prepare(sql)`, `Db.step?
+// (stmt)`, etc., from `src/lower/model_to_library/adapter_emit.rs`)
+// emit the same calls under both targets.
+
+/// A materialized prepared-statement entry: all rows fetched up front
+/// + a cursor position + the most recently-stepped row snapshot.
+struct StmtEntry {
+    rows: Vec<Vec<Value>>,
+    pos: usize,
+    current: Option<Vec<Value>>,
+}
+
+thread_local! {
+    static STATEMENTS: RefCell<HashMap<i64, StmtEntry>> =
+        RefCell::new(HashMap::new());
+    static NEXT_STMT_ID: Cell<i64> = const { Cell::new(0) };
+    static LAST_INSERT_ROWID: Cell<i64> = const { Cell::new(0) };
+}
+
+/// `Db` namespace — the lowerer (`src/lower/model_to_library/
+/// adapter_emit.rs` + `src/lower/arel/visitor.rs`) emits
+/// `Db.prepare(sql)` / `Db.step?(stmt)` / `Db.column_int(stmt, i)`
+/// against the synthesized per-model adapter methods. Mirrors the
+/// Crystal target's `Roundhouse::Db` module member-for-member.
+pub struct Db;
+
+impl Db {
+    /// Run a one-shot DDL/INSERT/UPDATE/DELETE. Captures
+    /// `last_insert_rowid` so the subsequent accessor returns the
+    /// freshly-inserted id (the typical `Db.exec(insert_sql);
+    /// id = Db.last_insert_rowid` shape in lowered persistence).
+    pub fn exec(sql: &str) {
+        with_conn(|conn| {
+            conn.execute_batch(sql).expect("Db::exec");
+            LAST_INSERT_ROWID.with(|c| c.set(conn.last_insert_rowid()));
+        });
+    }
+
+    /// Prepare a SELECT, materialize every row, return the opaque
+    /// stmt id. Subsequent `step` / `column_*` / `finalize` calls take
+    /// the id by value.
+    pub fn prepare(sql: &str) -> i64 {
+        let rows: Vec<Vec<Value>> = with_conn(|conn| {
+            let mut stmt = conn.prepare(sql).expect("Db::prepare");
+            let n_cols = stmt.column_count();
+            let mut out: Vec<Vec<Value>> = Vec::new();
+            let mut rows = stmt.query([]).expect("Db::prepare query");
+            while let Some(row) = rows.next().expect("Db::prepare step") {
+                let mut col_vec = Vec::with_capacity(n_cols);
+                for i in 0..n_cols {
+                    let v: Value = row.get(i).expect("Db::prepare col");
+                    col_vec.push(v);
+                }
+                out.push(col_vec);
+            }
+            out
+        });
+        let id = NEXT_STMT_ID.with(|c| {
+            let n = c.get() + 1;
+            c.set(n);
+            n
+        });
+        STATEMENTS.with(|s| {
+            s.borrow_mut().insert(
+                id,
+                StmtEntry { rows, pos: 0, current: None },
+            );
+        });
+        id
+    }
+
+    /// Advance the cursor. Snapshots the current row into the entry
+    /// and returns true; clears the snapshot + returns false when
+    /// exhausted. Idempotent on unknown stmt ids (returns false).
+    pub fn step(stmt_id: i64) -> bool {
+        STATEMENTS.with(|s| {
+            let mut map = s.borrow_mut();
+            let Some(entry) = map.get_mut(&stmt_id) else { return false };
+            if entry.pos < entry.rows.len() {
+                entry.current = Some(entry.rows[entry.pos].clone());
+                entry.pos += 1;
+                true
+            } else {
+                entry.current = None;
+                false
+            }
+        })
+    }
+
+    /// Read an integer column from the row most recently stepped.
+    /// NULL coerces to 0 (matches Crystal/TS shims); non-Int variants
+    /// best-effort coerce.
+    pub fn column_int(stmt_id: i64, i: i64) -> i64 {
+        STATEMENTS.with(|s| {
+            let map = s.borrow();
+            let Some(entry) = map.get(&stmt_id) else { return 0 };
+            let Some(row) = entry.current.as_ref() else { return 0 };
+            match row.get(i as usize) {
+                Some(Value::Integer(v)) => *v,
+                Some(Value::Real(v)) => *v as i64,
+                Some(Value::Text(t)) => t.parse().unwrap_or(0),
+                _ => 0,
+            }
+        })
+    }
+
+    /// Read a text column. NULL → "" (matches Crystal/TS); numeric
+    /// variants stringify.
+    pub fn column_text(stmt_id: i64, i: i64) -> String {
+        STATEMENTS.with(|s| {
+            let map = s.borrow();
+            let Some(entry) = map.get(&stmt_id) else { return String::new() };
+            let Some(row) = entry.current.as_ref() else { return String::new() };
+            match row.get(i as usize) {
+                Some(Value::Text(t)) => t.clone(),
+                Some(Value::Integer(v)) => v.to_string(),
+                Some(Value::Real(v)) => v.to_string(),
+                Some(Value::Blob(b)) => String::from_utf8_lossy(b).into_owned(),
+                _ => String::new(),
+            }
+        })
+    }
+
+    /// Read a boolean column. SQLite stores booleans as 0/1 integers
+    /// — widen to bool. Nulls coerce to false.
+    pub fn column_bool(stmt_id: i64, i: i64) -> bool {
+        Self::column_int(stmt_id, i) != 0
+    }
+
+    /// Drop the stmt-table entry. Idempotent on unknown ids.
+    pub fn finalize(stmt_id: i64) {
+        STATEMENTS.with(|s| {
+            s.borrow_mut().remove(&stmt_id);
+        });
+    }
+
+    /// Last-row-id from the most recent `exec`. SQLite-specific.
+    pub fn last_insert_rowid() -> i64 {
+        LAST_INSERT_ROWID.with(|c| c.get())
+    }
+
+    /// SQL-quote a string literal. Single quotes doubled per SQLite's
+    /// escape rule; no other byte transforms.
+    pub fn escape_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('\'');
+        for ch in s.chars() {
+            if ch == '\'' {
+                out.push_str("''");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('\'');
+        out
+    }
+
+    /// Render an integer for SQL inlining.
+    pub fn escape_int(n: i64) -> String {
+        n.to_string()
+    }
+
+    /// SQLite stores booleans as 0/1 integers.
+    pub fn escape_bool(b: bool) -> String {
+        (if b { "1" } else { "0" }).to_string()
+    }
 }
 
 #[cfg(test)]
