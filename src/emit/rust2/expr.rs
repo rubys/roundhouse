@@ -571,14 +571,12 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // the if-expression's type matches the function
                 // return. Otherwise emit the statement-form `if X { Y }`
                 // (returns `()`, OK for void statement context).
+                let cond_s = emit_expr(cond);
+                let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
                 if in_return_tail() && current_return_is_option() {
-                    return format!(
-                        "if {} {{ Some({}) }} else {{ None }}",
-                        emit_expr(cond),
-                        emit_expr_tail(then_branch),
-                    );
+                    return format!("if {cond_s} {{ Some({then_s}) }} else {{ None }}");
                 }
-                return format!("if {} {{ {} }}", emit_expr(cond), emit_expr_tail(then_branch));
+                return format!("if {cond_s} {{ {then_s} }}");
             }
             // `STMT unless COND` lowers to `If { cond, then: Nil, else:
             // STMT }` — emit as the negated single-branch form so the
@@ -586,25 +584,29 @@ fn emit_expr_inner(e: &Expr) -> String {
             // incompatible types") doesn't surface. Symmetric with
             // the else_is_nil case above.
             if then_is_nil {
+                let cond_s = emit_expr(cond);
+                let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
                 if in_return_tail() && current_return_is_option() {
                     return format!(
-                        "if !({}) {{ Some({}) }} else {{ None }}",
-                        emit_expr(cond),
-                        emit_expr_tail(else_branch),
+                        "if !({cond_s}) {{ Some({else_s}) }} else {{ None }}"
                     );
                 }
                 return format!(
-                    "if !({}) {{ {} }}",
-                    emit_expr(cond),
-                    emit_expr_tail(else_branch),
+                    "if !({cond_s}) {{ {else_s} }}"
                 );
             }
-            format!(
-                "if {} {{ {} }} else {{ {} }}",
-                emit_expr(cond),
-                emit_expr_tail(then_branch),
-                emit_expr_tail(else_branch),
-            )
+            // Per-branch DECLARED_VARS scope: each branch's body is a
+            // separate Rust scope, so a `let json = X` in one branch
+            // doesn't carry the binding into the other branch or the
+            // statements after the if. Snapshot/restore around each
+            // branch emit so a subsequent `json = Y` re-emits as
+            // `let json = Y` (first-use-in-the-new-scope) rather than
+            // a bare `json = Y` that fails E0425. Mirrors how Rust
+            // scoping actually works.
+            let cond_s = emit_expr(cond);
+            let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
+            let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
+            format!("if {cond_s} {{ {then_s} }} else {{ {else_s} }}")
         }
         ExprNode::Send { recv, method, args, block, .. } => {
             // `recv.each { ... }` on Hash / Vec — Ruby returns the
@@ -2317,6 +2319,18 @@ fn is_option_of(outer: &crate::ty::Ty, inner: &crate::ty::Ty) -> bool {
         .iter()
         .find(|v| !matches!(v, crate::ty::Ty::Nil));
     matches!(other, Some(o) if has_nil && o == inner)
+}
+
+/// Snapshot the DECLARED_VARS set, run `f`, then restore the snapshot.
+/// Used around each If/While/loop branch's body emit so a `let x = …`
+/// inside one branch doesn't suppress the `let` on a fresh `x = …` in
+/// the next branch or after the if. Rust scopes are per-block; the
+/// emit tracker mirrors that with this stack-like wrap.
+pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
+    let snapshot = DECLARED_VARS.with(|c| c.borrow().clone());
+    let r = f();
+    DECLARED_VARS.with(|c| *c.borrow_mut() = snapshot);
+    r
 }
 
 /// Built-in container classes whose `[]` / `[]=` should stay as the
