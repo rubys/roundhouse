@@ -88,6 +88,13 @@ pub struct CallableSig {
 pub struct CallableRegistry {
     methods: HashMap<Symbol, CallableSig>,
     functions: HashMap<Symbol, CallableSig>,
+    /// Class-scoped method signatures. Keyed `(class_name, method_name)`
+    /// so `MatchResult::new` resolves to MatchResult's `new` signature
+    /// rather than whichever class's `new` was inserted first into the
+    /// flat `methods` table. Falls back to `methods` (name-only) when
+    /// the recv is not a Const-class reference (`route.foo` etc.) or
+    /// the class isn't in the registry (external types).
+    class_methods: HashMap<Symbol, HashMap<Symbol, CallableSig>>,
 }
 
 impl CallableRegistry {
@@ -101,6 +108,19 @@ impl CallableRegistry {
 
     pub fn sig_for_function(&self, name: &Symbol) -> Option<&CallableSig> {
         self.functions.get(name)
+    }
+
+    /// Class-scoped method lookup. Returns the sig for `class::method`
+    /// when both are registered. Used by the Send walker when the
+    /// receiver is a `Const` (class reference) — disambiguates same-
+    /// named methods on different classes (e.g. every class has
+    /// `new`).
+    pub fn sig_for_class_method(
+        &self,
+        class: &Symbol,
+        method: &Symbol,
+    ) -> Option<&CallableSig> {
+        self.class_methods.get(class).and_then(|m| m.get(method))
     }
 }
 
@@ -123,9 +143,37 @@ pub fn build_registry(
 ) -> CallableRegistry {
     let mut reg = CallableRegistry::new();
     for class in classes {
+        // Register class-scoped sigs under the bare class name (last
+        // `::`-segment). rust2 emit strips namespaces the same way
+        // (`MatchResult`, not `ActionDispatch::Router::MatchResult`),
+        // and the call-site lookup uses `path.last()` from the Const
+        // recv. Storing under the bare name lines them up.
+        let bare = class
+            .name
+            .0
+            .as_str()
+            .rsplit("::")
+            .next()
+            .unwrap_or(class.name.0.as_str());
+        let class_name = Symbol::from(bare);
         for method in &class.methods {
             let sig = signature_from_method(method);
-            reg.methods.entry(method.name.clone()).or_insert(sig);
+            reg.methods.entry(method.name.clone()).or_insert(sig.clone());
+            reg.class_methods
+                .entry(class_name.clone())
+                .or_default()
+                .insert(method.name.clone(), sig.clone());
+            // Ruby `Class.new(args)` invokes `initialize(args)` — the
+            // call site uses `new`, but the IR's method table records
+            // the body as `initialize`. Alias under `new` so the
+            // class-scoped lookup at the `MatchResult.new(...)` call
+            // finds the constructor's param sig.
+            if method.name.as_str() == "initialize" {
+                reg.class_methods
+                    .entry(class_name.clone())
+                    .or_default()
+                    .insert(Symbol::from("new"), sig);
+            }
         }
     }
     for func in functions {
@@ -479,7 +527,19 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                     Ty::Hash { key, value } => Some((key.as_ref(), value.as_ref())),
                     _ => None,
                 });
-            let sig = ctx.registry.sig_for_method(method);
+            // Class-scoped lookup first when the recv is a Const
+            // (`MatchResult::new(...)`). The flat `methods` table is
+            // name-only and would hit whichever class's `new` was
+            // registered first; the class-scoped table disambiguates.
+            // Fall back to name-only for non-Const recvs (`record.foo`)
+            // and for classes outside the registry.
+            let class_sig = recv.as_ref().and_then(|r| match &*r.node {
+                ExprNode::Const { path } => path
+                    .last()
+                    .and_then(|cls| ctx.registry.sig_for_class_method(cls, method)),
+                _ => None,
+            });
+            let sig = class_sig.or_else(|| ctx.registry.sig_for_method(method));
             for (i, arg) in args.iter_mut().enumerate() {
                 let expect = match (hash_kv, method.as_str(), i) {
                     (Some((k_ty, _)), "[]=", 0) | (Some((k_ty, _)), "[]", 0) => {
