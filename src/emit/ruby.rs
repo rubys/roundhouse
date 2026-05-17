@@ -22,6 +22,7 @@ const SPINEL_TEST_HELPER: &str =
 
 mod expr;
 mod library;
+mod rbs;
 mod shared;
 
 // External API: the historical surface kept for `tests/` and `bin/`.
@@ -131,10 +132,10 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     }
 
     lcs.iter()
-        .map(|lc| {
+        .flat_map(|lc| {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{stem}.rb"));
-            library::emit_library_class_decl_with_synthesized(
+            library::emit_library_class_pair_with_synthesized(
                 lc,
                 app,
                 out_path,
@@ -153,6 +154,14 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
 pub fn emit_lowered_schema(app: &App) -> EmittedFile {
     let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
     library::emit_module_file(&funcs, app, PathBuf::from("config/schema.rb"))
+}
+
+/// Pair variant of `emit_lowered_schema` — produces both `.rb` and
+/// `.rbs`. Replaces `emit_lowered_schema` at call sites that want
+/// the typed sidecar emitted alongside.
+pub fn emit_lowered_schema_pair(app: &App) -> Vec<EmittedFile> {
+    let funcs = crate::lower::lower_schema_to_library_functions(&app.schema);
+    library::emit_module_file_pair(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
 /// Emit `config/routes.rb` in spinel-blog shape — a `Routes` module
@@ -265,14 +274,14 @@ fn emit_lowered_controllers_from_lcs(
         .collect();
 
     lcs.iter()
-        .map(|lc| {
+        .flat_map(|lc| {
             let file_stem = crate::naming::snake_case(lc.name.0.as_str());
             let out_path = if lc.origin.is_some() {
                 PathBuf::from(format!("app/models/{file_stem}.rb"))
             } else {
                 PathBuf::from(format!("app/controllers/{file_stem}.rb"))
             };
-            library::emit_library_class_decl_with_synthesized(
+            library::emit_library_class_pair_with_synthesized(
                 lc,
                 app,
                 out_path,
@@ -297,10 +306,10 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     app.views
         .iter()
         .filter(|v| v.format.as_str() == "html")
-        .map(|v| {
+        .flat_map(|v| {
             let lc = crate::lower::lower_view_to_library_class(v, app);
             let out_path = view_output_path(v.name.as_str());
-            library::emit_library_class_decl(&lc, app, out_path)
+            library::emit_library_class_pair(&lc, app, out_path)
         })
         .collect()
 }
@@ -314,10 +323,10 @@ pub fn emit_lowered_jbuilder_views(app: &App) -> Vec<EmittedFile> {
     app.views
         .iter()
         .filter(|v| v.format.as_str() == "json")
-        .map(|v| {
+        .flat_map(|v| {
             let lc = crate::lower::lower_jbuilder_to_library_class(v, app);
             let out_path = jbuilder_view_output_path(v.name.as_str());
-            library::emit_library_class_decl(&lc, app, out_path)
+            library::emit_library_class_pair(&lc, app, out_path)
         })
         .collect()
 }
@@ -355,11 +364,19 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
-    files.push(emit_lowered_schema(app));
+    files.extend(emit_lowered_schema_pair(app));
+    // routes.rb gets a require-relative header prepended (see
+    // emit_lowered_routes); emit the .rb via that path, then derive
+    // the .rbs sidecar from the same funcs without the header.
+    let route_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
     files.push(emit_lowered_routes(app));
+    files.extend(rbs_only_from_funcs(
+        &route_funcs,
+        PathBuf::from("config/routes.rb"),
+    ));
     let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     if !importmap_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file_pair(
             &importmap_funcs,
             app,
             PathBuf::from("config/importmap.rb"),
@@ -376,7 +393,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // is being kept for backward compat until callers migrate).
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     if !route_helper_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file_pair(
             &route_helper_funcs,
             app,
             PathBuf::from("app/route_helpers.rb"),
@@ -387,7 +404,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // the TS pipeline; was previously missing from spinel emit.
     let seeds_funcs = crate::lower::lower_seeds_to_library_functions(app);
     if !seeds_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file_pair(
             &seeds_funcs,
             app,
             PathBuf::from("db/seeds.rb"),
@@ -424,7 +441,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     for lc in &fixture_lcs {
         let stem = fixture_file_stem(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("test/fixtures/{stem}.rb"));
-        files.push(library::emit_library_class_decl(lc, app, out_path));
+        files.extend(library::emit_library_class_pair(lc, app, out_path));
     }
 
     // Test modules — lower each `XTest` class into a `LibraryClass`
@@ -591,11 +608,32 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             }
             emitted.content = format!("{preamble}{}", emitted.content);
             emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
+            let rbs_path = emitted.path.clone();
             files.push(emitted);
+            // RBS sidecar for the test class — describes the test
+            // methods' (untyped, () -> void) signatures plus any
+            // inferred helpers. No preamble / autorun shim — RBS is
+            // pure type info, the runtime bootstrap doesn't apply.
+            files.push(library::emit_rbs_sidecar(&lc_for_emit, &rbs_path));
         }
     }
 
     files
+}
+
+/// Render RBS for a `LibraryFunction` group without emitting the .rb.
+/// Used by `emit_spinel` for files whose .rb emit has custom
+/// post-processing (e.g. `config/routes.rb`'s require-header
+/// prepend) — the .rb flows through the bespoke path while the
+/// `.rbs` is derived once from the same lowered functions.
+fn rbs_only_from_funcs(
+    funcs: &[crate::dialect::LibraryFunction],
+    rb_path: PathBuf,
+) -> Vec<EmittedFile> {
+    if funcs.is_empty() {
+        return Vec::new();
+    }
+    vec![library::emit_rbs_sidecar_from_funcs(funcs, &rb_path)]
 }
 
 /// Explicit per-test driver appended to each emitted test file.

@@ -21,12 +21,44 @@ use crate::naming::{singularize, snake_case};
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     app.library_classes
         .iter()
-        .map(|lc| {
+        .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-            emit_library_class_decl(lc, app, out_path)
+            emit_library_class_pair(lc, app, out_path)
         })
         .collect()
+}
+
+/// Emit both the `.rb` file and its `.rbs` sidecar for a single
+/// LibraryClass. The sidecar carries the typed-signature view of the
+/// same class shape — spinel reads it as an inference hint (see
+/// project_rbs_emit_opportunity.md / spinel#571), and Steep/TypeProf
+/// can consume it from the CRuby target.
+pub(super) fn emit_library_class_pair(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+) -> Vec<EmittedFile> {
+    let rb = emit_library_class_decl(lc, app, out_path.clone());
+    let rbs = super::rbs::emit_library_class_rbs(lc, &out_path);
+    vec![rb, rbs]
+}
+
+/// Pair variant for callers that pass synthesized sibling anchors.
+pub(super) fn emit_library_class_pair_with_synthesized(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+    synthesized_siblings: &[(String, String)],
+) -> Vec<EmittedFile> {
+    let rb = emit_library_class_decl_with_synthesized(
+        lc,
+        app,
+        out_path.clone(),
+        synthesized_siblings,
+    );
+    let rbs = super::rbs::emit_library_class_rbs(lc, &out_path);
+    vec![rb, rbs]
 }
 
 /// Emit a group of LibraryFunctions sharing a `module_path` as a
@@ -55,6 +87,39 @@ pub(super) fn emit_module_file(
     }
     let lc = synthesize_module_lc(funcs);
     emit_library_class_decl(&lc, app, out_path)
+}
+
+/// Pair variant of `emit_module_file` — emits both `.rb` and `.rbs`.
+pub(super) fn emit_module_file_pair(
+    funcs: &[crate::dialect::LibraryFunction],
+    app: &App,
+    out_path: PathBuf,
+) -> Vec<EmittedFile> {
+    if funcs.is_empty() {
+        return vec![EmittedFile { path: out_path, content: String::new() }];
+    }
+    let lc = synthesize_module_lc(funcs);
+    let rb = emit_library_class_decl(&lc, app, out_path.clone());
+    let rbs = super::rbs::emit_library_class_rbs(&lc, &out_path);
+    vec![rb, rbs]
+}
+
+/// Emit only the `.rbs` sidecar for a `LibraryClass`. Used when the
+/// `.rb` emit has bespoke post-processing the pair helpers can't
+/// model (e.g. test files with autorun shim + preamble).
+pub(super) fn emit_rbs_sidecar(lc: &LibraryClass, rb_path: &std::path::Path) -> EmittedFile {
+    super::rbs::emit_library_class_rbs(lc, rb_path)
+}
+
+/// Emit only the `.rbs` sidecar derived from a `LibraryFunction` group.
+/// Companion to `emit_rbs_sidecar` for module-shaped output whose `.rb`
+/// emit flows through a bespoke path (e.g. `config/routes.rb`).
+pub(super) fn emit_rbs_sidecar_from_funcs(
+    funcs: &[crate::dialect::LibraryFunction],
+    rb_path: &std::path::Path,
+) -> EmittedFile {
+    let lc = synthesize_module_lc(funcs);
+    super::rbs::emit_library_class_rbs(&lc, rb_path)
 }
 
 fn synthesize_module_lc(

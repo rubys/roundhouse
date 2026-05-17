@@ -76,7 +76,11 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         app.library_classes.push(lc);
     }
     let files = emit_library(&app);
-    assert_eq!(files.len(), 2, "one file per LibraryClass");
+    let rb_count = files
+        .iter()
+        .filter(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rb"))
+        .count();
+    assert_eq!(rb_count, 2, "one .rb file per LibraryClass");
 
     let invalid_file = files
         .iter()
@@ -141,8 +145,12 @@ fn inflector_rb_ingests_module_as_namespace() {
         app.library_classes.push(lc);
     }
     let files = emit_library(&app);
-    assert_eq!(files.len(), 1);
-    let content = &files[0].content;
+    let rb_files: Vec<_> = files
+        .iter()
+        .filter(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rb"))
+        .collect();
+    assert_eq!(rb_files.len(), 1);
+    let content = &rb_files[0].content;
 
     // Module emitted as `module Inflector` (preserved); singleton
     // method emits as `def self.x`.
