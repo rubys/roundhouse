@@ -1614,6 +1614,24 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             format!("{}.{name} = {rhs}", emit_expr(recv))
         }
         LValue::Index { recv, index } => {
+            // Module-singleton Ivar `[]=`: `@slots[k] = v` in a
+            // `def self.foo` body needs to mutate the static
+            // `Mutex<Option<HashMap>>` slot through
+            // `get_or_insert_with` — not the cloned snapshot the
+            // default Ivar-read emit returns. Otherwise the write
+            // lands on a temporary that's dropped before the
+            // surrounding statement finishes; the mutation is lost
+            // (silent runtime bug) and Rust catches the surface
+            // `&str` vs `String` mismatch via the `HashMap<String,
+            // String>` value type.
+            //
+            // Key + value get `.to_string()` appended unconditionally
+            // — view_helpers' `@slots[slot] = value` passes `&str`
+            // for both, and str_color's Hash-recv-K/V coloring
+            // doesn't fire here (the body-typer types `@slots` from
+            // the empty `{}` init as `Hash<Untyped, Untyped>`, not
+            // the RBS-declared `Hash<Symbol, String>`). The append is
+            // idempotent on already-String shapes.
             // `recv[k] = v` on a Flash / Session struct dispatches to
             // the hand-written `.set(key, value)` method (no
             // IndexMut impl; the runtime/rust/flash.rs etc. surface
@@ -2054,6 +2072,29 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             );
         }
         if method == "[]=" && args.len() == 2 {
+            // Module-singleton Ivar `[]=`: `@slots[k] = v` in a
+            // `def self.foo` body needs to mutate the static
+            // `Mutex<Option<HashMap>>` slot through
+            // `get_or_insert_with`. The default Ivar-read emit
+            // returns a cloned snapshot; bracket-writing into that
+            // clone is a silent runtime bug AND fails the surface
+            // type-check (`HashMap<String, String>` value type vs
+            // `&str` arg, which is what `view_helpers.rs:76/92`
+            // reported). Key/value get `.to_string()` appended —
+            // the body-typer types `@slots` from the `{}` init as
+            // `Hash<Untyped, Untyped>`, so the str_color Hash-K/V
+            // coloring doesn't fire here; an unconditional append
+            // is idempotent on already-String shapes.
+            if in_module_singleton() {
+                if let ExprNode::Ivar { name } = &*r.node {
+                    let slot = module_singleton_slot_name(name.as_str());
+                    let k = emit_expr(&args[0]);
+                    let v = emit_expr(&args[1]);
+                    return format!(
+                        "{{ {slot}.lock().unwrap().get_or_insert_with(std::collections::HashMap::new).insert(({k}).to_string(), ({v}).to_string()); }}"
+                    );
+                }
+            }
             // Mirror the LValue::Index Flash/Session bridge — when
             // the Send-shape `recv.[]=(k, v)` lands on a Flash or
             // Session typed receiver, route through the hand-written
