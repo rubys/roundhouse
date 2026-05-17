@@ -13,7 +13,9 @@
 //!   - `assert_nil v`                   → `raise "…" if !v.nil?`
 //!   - `assert_not_nil v` / `refute_nil v` → `raise "…" if v.nil?`
 //!   - `assert_empty c`                 → `raise "…" if !c.empty?`
+//!   - `assert_not_empty c` / `refute_empty c` → `raise "…" if c.empty?`
 //!   - `assert_includes c, x`           → `raise "…" if !c.include?(x)`
+//!   - `refute_includes c, x`           → `raise "…" if c.include?(x)`
 //!   - `assert_kind_of K, x`            → `raise "…" if !x.is_a?(K)`
 //!   - `assert_instance_of K, x`        → `raise "…" if !x.instance_of?(K)`
 //!   (`assert_match` and `assert_operator` deliberately not lowered —
@@ -249,6 +251,14 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_empty failed".to_string(),
             ))
         }
+        "assert_not_empty" | "refute_empty" if args.len() == 1 => {
+            let coll = args[0].clone();
+            Some(raise_if(
+                span,
+                send_method(span, coll, "empty?", vec![]),
+                "refute_empty failed".to_string(),
+            ))
+        }
         "assert_includes" if args.len() >= 2 => {
             let coll = args[0].clone();
             let item = args[1].clone();
@@ -256,6 +266,15 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 span,
                 not_expr(span, send_method(span, coll, "include?", vec![item])),
                 "assert_includes failed".to_string(),
+            ))
+        }
+        "refute_includes" if args.len() >= 2 => {
+            let coll = args[0].clone();
+            let item = args[1].clone();
+            Some(raise_if(
+                span,
+                send_method(span, coll, "include?", vec![item]),
+                "refute_includes failed".to_string(),
             ))
         }
         "assert_kind_of" if args.len() >= 2 => {

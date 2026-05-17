@@ -51,135 +51,25 @@ export function installRoutes(
 }
 
 export class Test {
-  // ── Core assertions ──────────────────────────────────────────
-  assert(cond: any, msg?: string): void {
-    assert.ok(cond, msg);
-  }
+  // ── Assertions kept here ─────────────────────────────────────
+  //
+  // The inline_assertions lowerer rewrites most assert_*/refute_*
+  // calls to inline `if (!cond) { throw … }` at the call site
+  // (src/lower/test_module_to_library/inline_assertions.rs).
+  // Methods retained here are the ones whose semantics differ
+  // enough across targets that uniform inline emit isn't safe:
+  //
+  //   - `assert_match`: Ruby `=~` and Crystal `Regex#matches?` have
+  //     incompatible nilable-value handling; the cross-target inline
+  //     shape would need per-target regex API mapping.
+  //   - `assert_operator`: Class-subclass `<` (e.g., `assert_operator
+  //     A, :<, B` for "A is a subclass of B") is a Ruby/Crystal
+  //     idiom with no operator-on-class-object analog in TS — needs
+  //     a runtime prototype-chain walk here.
 
-  assert_equal(expected: any, actual: any, msg?: string): void {
-    assert.deepStrictEqual(actual, expected, msg);
-  }
-
-  assert_not(cond: any, msg?: string): void {
-    assert.ok(!cond, msg);
-  }
-
-  assert_not_equal(expected: any, actual: any, msg?: string): void {
-    assert.notDeepStrictEqual(actual, expected, msg);
-  }
-
-  assert_nil(value: any, msg?: string): void {
-    // Ruby `nil` maps to either `null` or `undefined` in TS depending on
-    // which idiom the framework code uses (Map.get → undefined, explicit
-    // `null` for "absent" → null). Accept both.
-    if (value !== null && value !== undefined) {
-      assert.fail(msg ?? `expected nil, got ${JSON.stringify(value)}`);
-    }
-  }
-
-  assert_not_nil(value: any, msg?: string): void {
-    assert.notStrictEqual(value, null, msg);
-    assert.notStrictEqual(value, undefined, msg);
-  }
-
-  assert_empty(collection: any, msg?: string): void {
-    assert.strictEqual(collectionSize(collection, "assert_empty"), 0, msg);
-  }
-
-  assert_not_empty(collection: any, msg?: string): void {
-    assert.notStrictEqual(collectionSize(collection, "assert_not_empty"), 0, msg);
-  }
-
-  assert_includes(collection: any, item: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.ok(collection.includes(item), msg);
-    } else if (collection && typeof collection.has === "function") {
-      assert.ok(collection.has(item), msg);
-    } else {
-      assert.fail(`assert_includes: unsupported collection type for ${item}`);
-    }
-  }
-
-  assert_kind_of(klass: any, obj: any, msg?: string): void {
-    if (typeof klass !== "function") {
-      assert.fail(msg ?? `assert_kind_of: expected class, got ${klass}`);
-    }
-    if (!(obj instanceof klass)) {
-      assert.fail(
-        msg ??
-          `expected ${typeof obj === "object" && obj !== null ? obj.constructor.name : String(obj)} to be a kind of ${klass.name}`,
-      );
-    }
-  }
-
-  assert_instance_of(klass: any, obj: any, msg?: string): void {
-    this.assert_kind_of(klass, obj, msg);
-  }
-
-  // Ruby's `assert_predicate obj, :foo?` evaluates `obj.foo?` and
-  // asserts the result is truthy. The TS emit renames Ruby
-  // predicate methods (`def persisted?` → `is_persisted()`) and
-  // bang methods (`def save!` → `save_bang()`); the symbol arrives
-  // here in either the original or sanitized form. Try the
-  // common name shapes in order: bare, `is_<name>` (predicate),
-  // `<name>_p` (older sanitization), `<name>_bang`. Also accept
-  // a property of the same name (attribute reader / declared field).
-  assert_predicate(obj: any, sym: string, msg?: string): void {
-    const raw = sym.startsWith(":") ? sym.slice(1) : sym;
-    const stripped = raw.replace(/[?!]$/, "");
-    const candidates = [
-      raw,
-      stripped,
-      `is_${stripped}`,
-      `${stripped}_p`,
-      `${stripped}_bang`,
-    ];
-    for (const candidate of candidates) {
-      const fn = obj?.[candidate];
-      if (typeof fn === "function") {
-        if (fn.call(obj)) return;
-        assert.fail(msg ?? `expected ${candidate} to be truthy`);
-      }
-      if (fn !== undefined) {
-        if (fn) return;
-        assert.fail(msg ?? `expected ${candidate} to be truthy`);
-      }
-    }
-    assert.fail(msg ?? `${raw} not found on receiver`);
-  }
-
-  refute_predicate(obj: any, sym: string, msg?: string): void {
-    const raw = sym.startsWith(":") ? sym.slice(1) : sym;
-    const stripped = raw.replace(/[?!]$/, "");
-    const candidates = [
-      raw,
-      stripped,
-      `is_${stripped}`,
-      `${stripped}_p`,
-      `${stripped}_bang`,
-    ];
-    for (const candidate of candidates) {
-      const fn = obj?.[candidate];
-      if (typeof fn === "function") {
-        if (!fn.call(obj)) return;
-        assert.fail(msg ?? `expected ${candidate} to be falsy`);
-      }
-      if (fn !== undefined) {
-        if (!fn) return;
-        assert.fail(msg ?? `expected ${candidate} to be falsy`);
-      }
-    }
-    assert.fail(msg ?? `${raw} not found on receiver`);
-  }
-
-  refute_includes(collection: any, item: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.ok(!collection.includes(item), msg);
-    } else if (collection && typeof collection.has === "function") {
-      assert.ok(!collection.has(item), msg);
-    } else {
-      assert.fail(`refute_includes: unsupported collection type for ${item}`);
-    }
+  assert_match(pattern: RegExp | string, value: string, msg?: string): void {
+    const re = typeof pattern === "string" ? new RegExp(pattern) : pattern;
+    assert.match(value, re, msg);
   }
 
   // Ruby's `assert_operator a, :op, b` evaluates `a.send(op, b)`. The
@@ -210,69 +100,6 @@ export class Test {
       default: assert.fail(`assert_operator: unsupported op ${op}`);
     }
     assert.ok(result, msg ?? `expected ${left} ${opStr} ${right}`);
-  }
-
-  assert_match(pattern: RegExp | string, value: string, msg?: string): void {
-    const re = typeof pattern === "string" ? new RegExp(pattern) : pattern;
-    assert.match(value, re, msg);
-  }
-
-  assert_raises(_errClass: any, body: () => any): any {
-    let caught: any = null;
-    try {
-      body();
-    } catch (e) {
-      caught = e;
-    }
-    if (caught === null) {
-      assert.fail("expected block to raise");
-    }
-    return caught;
-  }
-
-  // Rails' `assert_difference("Model.count", +1) do … end` form.
-  // Two surface shapes survive translation:
-  //   assert_difference(expr, body)               — count diff = 1
-  //   assert_difference(expr, delta, body)        — count diff = delta
-  // The expression form is JS-eval-style which we don't support
-  // here — accept callable form. If given a string, treat as
-  // a no-op difference check (presence-of-call semantics).
-  assert_difference(
-    expr: string | (() => number),
-    deltaOrBody: number | (() => any),
-    body?: () => any,
-  ): any {
-    const [delta, runBody] = typeof deltaOrBody === "function"
-      ? [1, deltaOrBody]
-      : [deltaOrBody, body!];
-    const before = typeof expr === "function" ? expr() : 0;
-    const result = runBody();
-    const after = typeof expr === "function" ? expr() : 0;
-    if (typeof expr === "function") {
-      assert.strictEqual(after - before, delta, `expected difference of ${delta}`);
-    }
-    return result;
-  }
-
-  assert_no_difference(expr: string | (() => number), body: () => any): any {
-    const before = typeof expr === "function" ? expr() : 0;
-    const result = body();
-    const after = typeof expr === "function" ? expr() : 0;
-    assert.strictEqual(after, before, "expected no difference");
-    return result;
-  }
-
-  // Minitest's refute_* family — equivalent to assert_not_*.
-  refute(cond: any, msg?: string): void {
-    this.assert_not(cond, msg);
-  }
-
-  refute_equal(expected: any, actual: any, msg?: string): void {
-    this.assert_not_equal(expected, actual, msg);
-  }
-
-  refute_nil(value: any, msg?: string): void {
-    this.assert_not_nil(value, msg);
   }
 
   skip(msg?: string): void {
@@ -455,29 +282,6 @@ const RESPONSE_SYMBOLS: Record<string, number> = {
  *  appears in matching HTML. `#id` → `id="id"`, `.class` →
  *  `class"`, bare tag → `<tag`. Compound selectors split and pick
  *  the first chunk. */
-/** Robust collection-size probe used by assert_empty / assert_not_empty.
- *  Accepts: arrays, strings, classes with `length()` method (HWIA),
- *  classes with numeric `size` property (Map/Set), plain objects
- *  (counts own enumerable keys). */
-function collectionSize(collection: any, label: string): number {
-  if (Array.isArray(collection) || typeof collection === "string") {
-    return collection.length;
-  }
-  if (collection && typeof collection.length === "function") {
-    return collection.length();
-  }
-  if (collection && typeof collection.size === "number") {
-    return collection.size;
-  }
-  if (collection && typeof collection.length === "number") {
-    return collection.length;
-  }
-  if (collection && typeof collection === "object") {
-    return Object.keys(collection).length;
-  }
-  assert.fail(`${label}: unsupported collection type for ${collection}`);
-}
-
 function selectorFragment(selector: string): string {
   const first = selector.split(/\s+/)[0] ?? "";
   if (first.startsWith("#")) return `id="${first.slice(1)}"`;

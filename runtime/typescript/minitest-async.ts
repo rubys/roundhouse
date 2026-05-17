@@ -53,130 +53,15 @@ export function installRoutes(
 }
 
 export class Test {
-  // ── Core assertions ──────────────────────────────────────────
-  assert(cond: any, msg?: string): void {
-    assert.ok(cond, msg);
-  }
-
-  assert_equal(expected: any, actual: any, msg?: string): void {
-    assert.deepStrictEqual(actual, expected, msg);
-  }
-
-  assert_not(cond: any, msg?: string): void {
-    assert.ok(!cond, msg);
-  }
-
-  assert_not_equal(expected: any, actual: any, msg?: string): void {
-    assert.notDeepStrictEqual(actual, expected, msg);
-  }
-
-  assert_nil(value: any, msg?: string): void {
-    assert.strictEqual(value, null, msg);
-  }
-
-  assert_not_nil(value: any, msg?: string): void {
-    assert.notStrictEqual(value, null, msg);
-    assert.notStrictEqual(value, undefined, msg);
-  }
-
-  assert_empty(collection: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.strictEqual(collection.length, 0, msg);
-    } else if (collection && typeof collection.size === "number") {
-      assert.strictEqual(collection.size, 0, msg);
-    } else if (collection && typeof collection === "object") {
-      assert.strictEqual(Object.keys(collection).length, 0, msg);
-    } else {
-      assert.fail(`assert_empty: unsupported collection type for ${collection}`);
-    }
-  }
-
-  assert_not_empty(collection: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.notStrictEqual(collection.length, 0, msg);
-    } else if (collection && typeof collection.size === "number") {
-      assert.notStrictEqual(collection.size, 0, msg);
-    } else if (collection && typeof collection === "object") {
-      assert.notStrictEqual(Object.keys(collection).length, 0, msg);
-    } else {
-      assert.fail(`assert_not_empty: unsupported collection type for ${collection}`);
-    }
-  }
-
-  assert_includes(collection: any, item: any, msg?: string): void {
-    if (Array.isArray(collection) || typeof collection === "string") {
-      assert.ok(collection.includes(item), msg);
-    } else if (collection && typeof collection.has === "function") {
-      assert.ok(collection.has(item), msg);
-    } else {
-      assert.fail(`assert_includes: unsupported collection type for ${item}`);
-    }
-  }
+  // The inline_assertions lowerer rewrites most assert_*/refute_*
+  // calls inline (src/lower/test_module_to_library/inline_assertions.
+  // rs). Methods retained here are the ones not lowered uniformly
+  // (cross-target friction with nilable values / class-subclass `<`).
+  // Symmetric with the sync `minitest.ts` Test class.
 
   assert_match(pattern: RegExp | string, value: string, msg?: string): void {
     const re = typeof pattern === "string" ? new RegExp(pattern) : pattern;
     assert.match(value, re, msg);
-  }
-
-  assert_raises(_errClass: any, body: () => any): any {
-    let caught: any = null;
-    try {
-      body();
-    } catch (e) {
-      caught = e;
-    }
-    if (caught === null) {
-      assert.fail("expected block to raise");
-    }
-    return caught;
-  }
-
-  // Rails' `assert_difference("Model.count", +1) do … end` form.
-  // Two surface shapes survive translation:
-  //   assert_difference(expr, body)               — count diff = 1
-  //   assert_difference(expr, delta, body)        — count diff = delta
-  // The expression form is JS-eval-style which we don't support
-  // here — accept callable form. If given a string, treat as
-  // a no-op difference check (presence-of-call semantics).
-  async assert_difference(
-    expr: string | (() => number | Promise<number>),
-    deltaOrBody: number | (() => any),
-    body?: () => any,
-  ): Promise<any> {
-    const [delta, runBody] = typeof deltaOrBody === "function"
-      ? [1, deltaOrBody]
-      : [deltaOrBody, body!];
-    const before = typeof expr === "function" ? await expr() : 0;
-    const result = await runBody();
-    const after = typeof expr === "function" ? await expr() : 0;
-    if (typeof expr === "function") {
-      assert.strictEqual(after - before, delta, `expected difference of ${delta}`);
-    }
-    return result;
-  }
-
-  async assert_no_difference(
-    expr: string | (() => number | Promise<number>),
-    body: () => any,
-  ): Promise<any> {
-    const before = typeof expr === "function" ? await expr() : 0;
-    const result = await body();
-    const after = typeof expr === "function" ? await expr() : 0;
-    assert.strictEqual(after, before, "expected no difference");
-    return result;
-  }
-
-  // Minitest's refute_* family — equivalent to assert_not_*.
-  refute(cond: any, msg?: string): void {
-    this.assert_not(cond, msg);
-  }
-
-  refute_equal(expected: any, actual: any, msg?: string): void {
-    this.assert_not_equal(expected, actual, msg);
-  }
-
-  refute_nil(value: any, msg?: string): void {
-    this.assert_not_nil(value, msg);
   }
 
   skip(msg?: string): void {
