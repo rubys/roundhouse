@@ -1260,6 +1260,20 @@ fn emit_expr_inner(e: &Expr) -> String {
                         {
                             let recv_s = emit_expr(r);
                             let key_s = emit_expr(&args[0]);
+                            // Hash<_, Untyped> recv → `.get(k).cloned()`
+                            // returns `Option<serde_json::Value>`. A
+                            // primitive default (literal int / bool /
+                            // string) needs `serde_json::Value::from(...)`
+                            // to type-unify. Closes the
+                            // `attrs[:id] || 0` shape in lowered model
+                            // bodies (`self.id = attrs[:id] || 0` →
+                            // `self.set_id(attrs.get("id").cloned()
+                            // .unwrap_or(serde_json::Value::from(0)))`).
+                            let value_ty_untyped = matches!(
+                                r.ty.as_ref().map(peel_nil),
+                                Some(crate::ty::Ty::Hash { value, .. })
+                                    if matches!(value.as_ref(), crate::ty::Ty::Untyped)
+                            );
                             // String default literal -> `.to_string()`
                             // so unwrap_or's arg type matches the
                             // Option's inner type (HashMap<String, String>
@@ -1269,32 +1283,34 @@ fn emit_expr_inner(e: &Expr) -> String {
                             // propagation from the BoolOp's surrounding
                             // expectation); double-applying produces
                             // `("").to_string().to_string()`.
-                            let default_s = match &*right.node {
-                                ExprNode::Lit { value: Literal::Str { .. } }
-                                    if right.str_coercion.is_none() =>
-                                {
-                                    format!("{}.to_string()", emit_expr(right))
+                            let default_s = if value_ty_untyped {
+                                coerce_to_value_default(right, emit_expr(right))
+                            } else {
+                                match &*right.node {
+                                    ExprNode::Lit { value: Literal::Str { .. } }
+                                        if right.str_coercion.is_none() =>
+                                    {
+                                        format!("{}.to_string()", emit_expr(right))
+                                    }
+                                    _ => emit_expr(right),
                                 }
-                                _ => emit_expr(right),
                             };
                             return format!(
                                 "{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"
                             );
                         }
                     }
-                    // `Option<Untyped>` (Value) `||` String literal —
-                    // the default's `&str` doesn't unify with `Value`.
-                    // Wrap with `serde_json::Value::from(...)` so
-                    // `form_class || "button_to"` (button_to defaults)
-                    // emits as `form_class.unwrap_or(Value::from(...))`.
+                    // `Option<Untyped>` (Value) `||` literal — the
+                    // default needs to be `Value`-shaped. Closes the
+                    // `form_class || "button_to"` shape and any other
+                    // Option<Value>.unwrap_or(<primitive>) site.
                     let lhs_inner_untyped = matches!(
                         left.ty.as_ref().map(peel_nil),
                         Some(crate::ty::Ty::Untyped)
                     );
-                    let rhs_is_str = matches!(right.ty.as_ref(), Some(crate::ty::Ty::Str));
                     let rhs_s = emit_expr(right);
-                    let default_s = if lhs_inner_untyped && rhs_is_str {
-                        format!("serde_json::Value::from({rhs_s})")
+                    let default_s = if lhs_inner_untyped {
+                        coerce_to_value_default(right, rhs_s)
                     } else {
                         rhs_s
                     };
@@ -1584,6 +1600,35 @@ fn emit_array(elements: &[Expr]) -> String {
     // emitted runtime files actually want to build their state.
     let parts: Vec<String> = elements.iter().map(emit_expr).collect();
     format!("vec![{}]", parts.join(", "))
+}
+
+/// Wrap a literal/Var default with `serde_json::Value::from(...)`
+/// when it's going to be passed to an `unwrap_or` on an
+/// `Option<serde_json::Value>`. Skip the wrap when the expression
+/// already produces a `Value`. Used by the BoolOp::Or peepholes for
+/// `hash[k] || default` against `Hash<_, Untyped>` recvs (lowered
+/// model bodies' `attrs[:col] || 0` style) and the
+/// Option<Untyped>.unwrap_or-literal catch-all.
+fn coerce_to_value_default(default_expr: &Expr, raw: String) -> String {
+    use crate::ty::Ty;
+    let primitive = matches!(
+        default_expr.ty.as_ref(),
+        Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
+    ) || matches!(
+        &*default_expr.node,
+        ExprNode::Lit {
+            value: Literal::Str { .. }
+                | Literal::Sym { .. }
+                | Literal::Int { .. }
+                | Literal::Float { .. }
+                | Literal::Bool { .. }
+        }
+    );
+    if primitive {
+        format!("serde_json::Value::from({raw})")
+    } else {
+        raw
+    }
 }
 
 /// If `arg` is a Var (possibly wrapped in `.clone()`) with a
@@ -2686,34 +2731,46 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         let coerced: Vec<String> = args
             .iter()
             .enumerate()
-            .map(|(i, a)| {
-                let raw = emit_expr(a);
-                match (
-                    class_method_param_ty(method, i),
-                    arg_hash_var_local_ty(a),
-                ) {
-                    (Some(crate::ty::Ty::Hash { key: pk, value: pv }), Some((_lk, _lv)))
-                        if matches!(pv.as_ref(), crate::ty::Ty::Untyped) =>
-                    {
-                        // Param value is `Untyped` → renders as `Value`
-                        // in rust2. Local arg's value is non-Value (Str
-                        // / Sym / etc.). Coerce values via Value::from;
-                        // keys via .to_string() to land at String keys
-                        // regardless of body-typer Sym/Str divergence.
-                        let _ = pk; // K is the same shape in both (String); no-op
-                        format!(
-                            "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
-                        )
-                    }
-                    _ => raw,
-                }
-            })
+            .map(|(i, a)| coerce_arg_for_class_method(method, i, a))
             .collect();
         if coerced.is_empty() {
             return format!("Self::{rewritten_method}()");
         }
         return format!("Self::{rewritten_method}({})", coerced.join(", "));
     }
+    // Callee-back-propagation for two recv shapes:
+    //
+    // 1. **SelfRef instance method** (`self.set_id(arg)`): callee is
+    //    a sibling method on the current class. Use
+    //    `CLASS_METHOD_PARAM_TYS` (populated by `library.rs` at class
+    //    emit start) to look up the param Tys. Closes the lowered
+    //    model `self.set_id(row["id"])` shape (Value → i64 coercion).
+    // 2. **Const class method** (`Db::escape_string(self.body)`):
+    //    callee is in a hand-written runtime module not surfaced
+    //    through the per-class registry. Hardcoded
+    //    `external_class_method_param_tys` covers Db today; future
+    //    modules add entries as their sites surface.
+    let final_args: Vec<String> = if matches!(&*r.node, ExprNode::SelfRef) {
+        args.iter()
+            .enumerate()
+            .map(|(i, a)| coerce_arg_for_class_method(method, i, a))
+            .collect()
+    } else if let ExprNode::Const { path } = &*r.node {
+        let class = path.last().map(|s| s.as_str()).unwrap_or("");
+        if let Some(param_tys) = external_class_method_param_tys(class, method) {
+            args.iter()
+                .enumerate()
+                .map(|(i, a)| match param_tys.get(i) {
+                    Some(pt) => coerce_arg_for_param_ty(a, pt),
+                    None => emit_expr(a),
+                })
+                .collect()
+        } else {
+            args_s
+        }
+    } else {
+        args_s
+    };
     let recv_s = emit_expr(r);
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const
@@ -2724,10 +2781,105 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     } else {
         "."
     };
-    if args_s.is_empty() {
+    if final_args.is_empty() {
         format!("{recv_s}{dispatch}{rewritten_method}()")
     } else {
-        format!("{recv_s}{dispatch}{rewritten_method}({})", args_s.join(", "))
+        format!("{recv_s}{dispatch}{rewritten_method}({})", final_args.join(", "))
+    }
+}
+
+/// Apply callee-back-propagation coercion for a single arg in a
+/// class-/instance-method call where the callee is in
+/// `CLASS_METHOD_PARAM_TYS`. Covers three coercion families:
+///
+/// 1. **HashMap shape transform**: callee `Hash<_, Untyped>` with arg
+///    `Hash<_, *>` of differing K/V → wrap with `.into_iter().map().
+///    collect()` into `HashMap<String, Value>`.
+/// 2. **Value → primitive**: callee `Str|Int|Bool|Float` with arg
+///    typed Untyped (Value) → `.as_X().unwrap()` via
+///    `value_narrowing_coercion`. Closes the `self.set_id(row["id"])`
+///    shape in lowered model `assign_from_row` / `new` bodies.
+/// 3. **String → &str**: callee `Str|Sym` (rust2 emits `&str` for
+///    these param positions) with arg typed `Str|Sym` from a
+///    non-literal source (Var/Send/Ivar — produces owned String) →
+///    `&(arg)`. The body-typer's view + str_color may already
+///    handle some of these; the call-site path catches the rest.
+fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) -> String {
+    let Some(param_ty) = class_method_param_ty(method, idx) else {
+        return emit_expr(arg);
+    };
+    coerce_arg_for_param_ty(arg, &param_ty)
+}
+
+/// Core callee-back-propagation coercion: given an arg's `Expr` and
+/// the callee's declared param `Ty`, return the emit string with the
+/// appropriate coercion applied. Three families:
+///
+/// 1. **HashMap shape transform**: callee `Hash<_, Untyped>` with arg
+///    `Hash<_, *>` of differing K/V → wrap with `.into_iter().map().
+///    collect()` into `HashMap<String, Value>`.
+/// 2. **Value → primitive**: callee `Str|Int|Bool|Float` with arg's
+///    body-typer Ty (post-Nil peel) `Untyped` (Value) → append
+///    `.as_X().unwrap()` via `value_narrowing_coercion`.
+/// 3. **String → &str (Borrow)**: callee `Str|Sym` (rust2 emits
+///    `&str` for these param positions) with arg from a non-literal
+///    String-producing source (Var/Send/Ivar) → `&(raw)`.
+fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
+    use crate::ty::Ty;
+    let raw = emit_expr(arg);
+    let arg_ty_peeled = arg.ty.as_ref().map(peel_nil);
+
+    if let Ty::Hash { value: pv, .. } = param_ty {
+        if matches!(pv.as_ref(), Ty::Untyped) {
+            if let Some((_lk, _lv)) = arg_hash_var_local_ty(arg) {
+                return format!(
+                    "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
+                );
+            }
+        }
+    }
+
+    if matches!(arg_ty_peeled, Some(Ty::Untyped)) {
+        if let Some(coerce) = value_narrowing_coercion(param_ty) {
+            return format!("({raw}).{coerce}");
+        }
+    }
+
+    if matches!(param_ty, Ty::Str | Ty::Sym) && arg.str_coercion.is_none() {
+        let arg_is_owned = matches!(arg_ty_peeled, Some(Ty::Str | Ty::Sym))
+            && matches!(
+                &*arg.node,
+                ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
+            );
+        if arg_is_owned {
+            return format!("&({raw})");
+        }
+    }
+
+    raw
+}
+
+/// Per-method positional-param Tys for hand-written runtime modules
+/// (`Db`, future `Broadcasts`, etc.) that aren't surfaced through
+/// `CLASS_METHOD_PARAM_TYS`. The Const-recv dispatch in emit_send
+/// consults this so `Db::prepare(format!(...))` (String arg, `&str`
+/// param) inserts the Borrow coercion automatically — same pattern
+/// the Self::method path applies for in-class callees.
+fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
+    use crate::ty::Ty;
+    match (class, method) {
+        ("Db", "prepare") => Some(vec![Ty::Str]),
+        ("Db", "exec") => Some(vec![Ty::Str]),
+        ("Db", "step") => Some(vec![Ty::Int]),
+        ("Db", "column_int") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_text") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_bool") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "finalize") => Some(vec![Ty::Int]),
+        ("Db", "escape_string") => Some(vec![Ty::Str]),
+        ("Db", "escape_int") => Some(vec![Ty::Int]),
+        ("Db", "escape_bool") => Some(vec![Ty::Bool]),
+        ("Db", "last_insert_rowid") => Some(vec![]),
+        _ => None,
     }
 }
 
