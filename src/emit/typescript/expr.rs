@@ -1230,6 +1230,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // Wrap value in parens for precedence safety.
             format!("({} as {})", emit_expr(value), super::ty::ts_ty(target_ty))
         }
+        ExprNode::Raise { value } => {
+            // `throw` is a statement in JS/TS, but emit_expr is also
+            // called in expression positions (ternary arms, last-
+            // expression-of-method). Wrap in an IIFE so the same emit
+            // form works at both statement and expression position.
+            // Matches the `Next` arm above; the surrounding If/Seq
+            // emitter wraps the IIFE call in `(...)();` at statement
+            // position, which is valid noise.
+            format!("(() => {{ throw {}; }})()", emit_expr(value))
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

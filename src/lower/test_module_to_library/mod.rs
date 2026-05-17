@@ -223,6 +223,10 @@ pub fn lower_test_modules_with_inner(
             // Minitest dispatch with real `raise` so spinel's
             // assertion-correctness signal is non-fake. See
             // project_spinel_assertions_vacuous.md for context.
+            // Cross-target by design: each target's emit renders
+            // ExprNode::Raise as its native halt-with-message (Ruby
+            // `raise`, Crystal `raise`, TS `throw`, …) — see the
+            // issue's "Cross-target benefits" table.
             method.body = inline_assertions::inline_assertions(&method.body);
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
