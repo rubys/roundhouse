@@ -2031,19 +2031,26 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return format!("{}[{}]", emit_expr(r), emit_expr(&args[0]));
         }
         // Ruby `String#[](start, length)` — byte-slice with start +
-        // length. Rust has no `Index<(usize, usize)>` for `&str`; lower
-        // to a range slice. Args land here as `i64` from the body-typer,
-        // hence the `as usize` casts. `&recv[..]` makes the result
-        // `&str` regardless of whether `recv` is `String` or `&str`.
-        // Caveat: `start_s` is duplicated in the emitted source; fine
-        // for the literal/local arg shapes seen in practice (`str[0,
+        // length. Ruby's substring semantics are owned (a fresh
+        // `String` each call), so the emit produces owned `String`
+        // via `.to_string()` on the slice. Without ownership, a
+        // pattern like `ms = padded[0, 3]` reassigns an outer-scope
+        // binding to a slice of an inner-scope local (`padded` drops
+        // at end of the if-block), tripping E0597. Producing String
+        // at the slice site matches Ruby semantics + lets the
+        // multi-assign coordination in `analyze::str_color` line up
+        // the binding's declared type (`let mut ms: String = …`)
+        // with subsequent slice assignments. Args land here as `i64`
+        // from the body-typer, hence the `as usize` casts. Caveat:
+        // `start_s` is duplicated in the emitted source; fine for
+        // the literal/local arg shapes seen in practice (`str[0,
         // 10]`, `str[0, cutoff]`).
         if method == "[]" && args.len() == 2 {
             let recv_s = emit_expr(r);
             let start_s = emit_expr(&args[0]);
             let len_s = emit_expr(&args[1]);
             return format!(
-                "&{recv_s}[({start_s}) as usize..(({start_s}) + ({len_s})) as usize]"
+                "(&{recv_s}[({start_s}) as usize..(({start_s}) + ({len_s})) as usize]).to_string()"
             );
         }
         if method == "[]=" && args.len() == 2 {

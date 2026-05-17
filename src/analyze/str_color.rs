@@ -249,6 +249,7 @@ pub fn color_functions(
         registry,
         return_color,
         owned_str_locals: std::collections::HashSet::new(),
+        owned_init_vars: std::collections::HashSet::new(),
     };
         annotated += walk(&mut func.body, ParentExpect::None, &mut ctx);
     }
@@ -272,6 +273,7 @@ pub fn color_method(method: &mut MethodDef, registry: &CallableRegistry) -> usiz
         registry,
         return_color,
         owned_str_locals: std::collections::HashSet::new(),
+        owned_init_vars: std::collections::HashSet::new(),
     };
     let expect = return_color.map_or(ParentExpect::None, ParentExpect::Color);
     walk(&mut method.body, expect, &mut ctx)
@@ -294,6 +296,16 @@ struct WalkCtx<'a> {
     /// auto-coercion at arg position). The set scopes per-Seq via
     /// snapshot-restore so nested blocks don't leak bindings outward.
     owned_str_locals: std::collections::HashSet<Symbol>,
+    /// Multi-assign coordination: Vars assigned more than once where
+    /// at least one assignment produces `Owned`. Rust infers the
+    /// binding's type from the FIRST assignment, so an init like
+    /// `let mut ms = "000"` types `ms: &'static str` and a later
+    /// `ms = padded[0, 3].to_string()` fails type-mismatch. Populated
+    /// by the Seq pre-pass; consumed by the Assign arm to force the
+    /// `expect` to Owned for any assignment whose target Var is in
+    /// the set — including the first-init, so the init's literal/
+    /// borrow gets `.to_string()`'d up front.
+    owned_init_vars: std::collections::HashSet<Symbol>,
 }
 
 /// What the parent of the current expression expects from a string
@@ -317,7 +329,22 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
     // `serde_json::Value` and similar untyped receivers, but the
     // method name alone tells us the result will emit as `String`.
     if is_str_ty(e.ty.as_ref()) || is_known_str_send(e) {
-        if let (Some(producer), ParentExpect::Color(consumer)) = (producer_color(e), expect) {
+        // Phase 2.6: ctx-aware producer color. A `Var` read whose name
+        // is in `ctx.owned_str_locals` (populated by the Seq walker
+        // when a `let x = …Owned-RHS` is seen) produces an owned
+        // `String` at emit time, not the Phase-1-hardcoded `Borrowed`.
+        // The override lives here (rather than inside `producer_color`)
+        // so the static helper keeps its ctx-free signature for other
+        // callers (the Seq walker itself reads `producer_color` to
+        // decide whether to insert a name into `owned_str_locals` —
+        // recursing through ctx-aware logic would be circular).
+        let producer = match e.node.as_ref() {
+            ExprNode::Var { name, .. } if ctx.owned_str_locals.contains(name) => {
+                Some(StrColor::Owned)
+            }
+            _ => producer_color(e),
+        };
+        if let (Some(producer), ParentExpect::Color(consumer)) = (producer, expect) {
             if let Some(c) = coercion_for(producer, consumer) {
                 e.str_coercion = Some(c);
                 count += 1;
@@ -337,6 +364,71 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
 /// Compute what color the EMIT of this expression will produce, before
 /// any coercion is applied. Returns `None` for non-string positions or
 /// shapes Phase 1 doesn't model yet (e.g. unification across branches).
+/// Recursively collect Var names that have at least one Owned-
+/// producing assignment anywhere in the subtree. Used by the Seq
+/// walker's multi-assign pre-pass: a Var reassigned to an Owned
+/// String inside a nested `if`-branch needs its outer-Seq init
+/// (`let mut ms = "000"`) coerced to Owned too, or the binding
+/// type pins as `&str` and the later assignment mismatches.
+///
+/// Walks the same shapes as `collect_var_send_receivers` in
+/// `src/emit/rust2/expr.rs` — Seq, If, While, Send (incl. block),
+/// Assign, etc. — so a Var-assignment hidden behind any
+/// control-flow node still surfaces.
+fn collect_owned_var_assignments(
+    e: &Expr,
+    out: &mut std::collections::HashSet<Symbol>,
+) {
+    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+        if is_str_ty(value.ty.as_ref())
+            && matches!(producer_color(value), Some(StrColor::Owned))
+        {
+            out.insert(name.clone());
+        }
+    }
+    match &*e.node {
+        ExprNode::Seq { exprs } => {
+            exprs.iter().for_each(|e| collect_owned_var_assignments(e, out));
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_owned_var_assignments(cond, out);
+            collect_owned_var_assignments(then_branch, out);
+            collect_owned_var_assignments(else_branch, out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_owned_var_assignments(cond, out);
+            collect_owned_var_assignments(body, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_owned_var_assignments(scrutinee, out);
+            for arm in arms.iter() {
+                if let Some(g) = arm.guard.as_ref() {
+                    collect_owned_var_assignments(g, out);
+                }
+                collect_owned_var_assignments(&arm.body, out);
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                collect_owned_var_assignments(r, out);
+            }
+            args.iter().for_each(|a| collect_owned_var_assignments(a, out));
+            if let Some(b) = block {
+                collect_owned_var_assignments(b, out);
+            }
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_owned_var_assignments(recv, out);
+            }
+            collect_owned_var_assignments(value, out);
+        }
+        ExprNode::Return { value } => collect_owned_var_assignments(value, out),
+        ExprNode::Lambda { body, .. } => collect_owned_var_assignments(body, out),
+        _ => {}
+    }
+}
+
 fn producer_color(e: &Expr) -> Option<StrColor> {
     match e.node.as_ref() {
         ExprNode::Lit { value: Literal::Str { .. } } => Some(StrColor::Static),
@@ -446,6 +538,16 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                     count += walk(recv, ParentExpect::None, ctx);
                     ParentExpect::None
                 }
+                // Multi-assign coordination: if this Var appears in
+                // `owned_init_vars` (the Seq pre-pass found at least
+                // one Owned-producing assignment to this name), force
+                // every assignment's RHS — including the literal/Borrow
+                // init — to coerce to Owned. Without this, the init's
+                // `&str` would pin the binding type and a later
+                // `name = …String` would type-mismatch.
+                LValue::Var { name, .. } if ctx.owned_init_vars.contains(name) => {
+                    ParentExpect::Color(StrColor::Owned)
+                }
                 _ => ParentExpect::None,
             };
             count += walk(value, expect, ctx);
@@ -453,8 +555,20 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // String into the per-Seq tracking set. Reads of these names
             // downstream emit as `Owned` (not the default `Borrowed`)
             // so a `&str`-expecting callee triggers Borrow coercion.
+            //
+            // Gate on `producer_color(value) == Some(Owned)` rather
+            // than just `is_str_ty`: `let form_method = if c { "get" }
+            // else { "post" }` is `Ty::Str` but its Rust storage is
+            // `&'static str` (Rust infers `&str` from an If of two
+            // `&str` literals). Marking such locals as Owned would
+            // remove the `.to_string()` coercion that the surrounding
+            // HashMap-literal needs, and break inference downstream.
+            // Only Send/StringInterp/Ivar RHS reliably produce owned
+            // `String`; `producer_color` answers the question.
             if let LValue::Var { name, .. } = target {
-                if is_str_ty(value.ty.as_ref()) {
+                if is_str_ty(value.ty.as_ref())
+                    && matches!(producer_color(value), Some(StrColor::Owned))
+                {
                     ctx.owned_str_locals.insert(name.clone());
                 }
             }
@@ -483,14 +597,27 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             // Seq's let-bindings don't leak outward. Walks of preceding
             // Seq statements DO add to this Seq's set so subsequent
             // statements see the bindings (mirrors Rust block scoping).
-            let snapshot = ctx.owned_str_locals.clone();
+            //
+            // Pre-pass for multi-assign coordination: find Vars that
+            // have ANY Owned-producing assignment in this Seq. All
+            // their assignments — including the first/init — get
+            // coerced to Owned (via the Assign arm's expect override
+            // above). Without this, `let mut ms = "000"; ms =
+            // padded[0,3].to_string()` would mismatch (ms inferred
+            // `&str` from the init, then String later).
+            let snapshot_locals = ctx.owned_str_locals.clone();
+            let snapshot_init = ctx.owned_init_vars.clone();
+            for sub in exprs.iter() {
+                collect_owned_var_assignments(sub, &mut ctx.owned_init_vars);
+            }
             if let Some((last, rest)) = exprs.split_last_mut() {
                 for sub in rest.iter_mut() {
                     count += walk(sub, ParentExpect::None, ctx);
                 }
                 count += walk(last, tail_expect, ctx);
             }
-            ctx.owned_str_locals = snapshot;
+            ctx.owned_str_locals = snapshot_locals;
+            ctx.owned_init_vars = snapshot_init;
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             // Cond is a boolean position. Both branches are
