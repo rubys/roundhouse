@@ -1,12 +1,10 @@
 //! RBS sidecar emission for library-shape Ruby output.
 //!
-//! Produces `.rbs` files alongside `.rb` files for the spinel/ruby
-//! emit pipeline. Spinel uses RBS as a typing hint (see spinel#571);
-//! supplying RBS lets spinel skip its own inference where roundhouse
-//! has already done it, reducing boxing in the generated code.
-//!
-//! The same files also feed Steep/TypeProf when the CRuby target is
-//! consumed by Ruby tooling.
+//! Produces `.rbs` files under a top-level `sig/` tree mirroring the
+//! `.rb` layout (`app/models/article.rb` → `sig/app/models/article.rbs`).
+//! Spinel #571 walks `--rbs DIR` recursively and accepts either
+//! layout, but Steep / TypeProf auto-discover `sig/` by convention —
+//! so this layout costs zero extra config for either consumer.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -16,11 +14,25 @@ use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::ty::{Param, ParamKind, Ty};
 
 /// Emit an `.rbs` sidecar for a single `LibraryClass`. The output
-/// path is `rb_path` with the extension swapped to `.rbs`.
+/// path mirrors `rb_path` under a top-level `sig/` tree with the
+/// extension swapped to `.rbs`.
 pub(super) fn emit_library_class_rbs(lc: &LibraryClass, rb_path: &Path) -> EmittedFile {
-    let path = rb_path.with_extension("rbs");
+    let path = sig_path_for(rb_path);
     let content = render_class(lc);
     EmittedFile { path, content }
+}
+
+/// Compute the `sig/`-rooted destination path for a `.rb` source path.
+/// `app/models/article.rb` → `sig/app/models/article.rbs`. Idempotent
+/// if `rb_path` already starts with `sig/` (defensive — currently no
+/// caller passes such a path).
+fn sig_path_for(rb_path: &Path) -> PathBuf {
+    let with_rbs_ext = rb_path.with_extension("rbs");
+    if with_rbs_ext.starts_with("sig") {
+        with_rbs_ext
+    } else {
+        PathBuf::from("sig").join(with_rbs_ext)
+    }
 }
 
 fn render_class(lc: &LibraryClass) -> String {
