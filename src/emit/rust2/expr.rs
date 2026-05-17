@@ -81,6 +81,18 @@ thread_local! {
     static DECLARED_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
+    /// Variable names read more than once in the current method body.
+    /// Populated by `with_method_scope`'s pre-pass via
+    /// `collect_var_read_counts`. Consumed by the `Var` emit arm to
+    /// append `.clone()` on every read when the type is non-Copy —
+    /// over-clones the lexically-last read by one (cheap; the alternative
+    /// is a final-use analysis the rust2 emit doesn't track). Closes
+    /// the canonical "use after move" pattern: `let t = ...; if c1
+    /// { f(t) }; if c2 { f(t) }` (no else dominates either way), and
+    /// HashMap-literal entries that name the same Var in two values.
+    static CLONE_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
     /// Ivar name → declared field type for the struct currently being
     /// emitted. Set by `library.rs` around each `impl` block so
     /// `emit_assign` can coerce mismatched RHS types (the canonical
@@ -312,12 +324,28 @@ where
     // require receiver-aware Ty inspection (whether `save` takes
     // `&mut self` vs `&self`) which the body-typer doesn't surface.
     collect_var_send_receivers(body, &mut mut_vars);
+    // Pre-pass for `CLONE_VARS`: any local name read more than once
+    // syntactically. Read-counts don't equal move-counts (literal
+    // arguments, method-call receivers that take `&self`, narrowing-
+    // rewritten reads via `.clone().unwrap()` etc. don't consume) —
+    // but the over-clone is cheap and correct. The Var emit arm
+    // gates the .clone() on `!is_copy_ty(e.ty)` so Int/Bool reads
+    // stay unsuffixed.
+    let mut read_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    collect_var_read_counts(body, &mut read_counts);
+    let clone_vars: std::collections::HashSet<String> = read_counts
+        .into_iter()
+        .filter_map(|(name, n)| if n > 1 { Some(name) } else { None })
+        .collect();
     let prev_mut = MUT_VARS.with(|c| c.replace(mut_vars));
     let prev_declared =
         DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
+    let prev_clone = CLONE_VARS.with(|c| c.replace(clone_vars));
     let r = f();
     MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
     DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
+    CLONE_VARS.with(|c| *c.borrow_mut() = prev_clone);
     r
 }
 
@@ -370,6 +398,64 @@ fn collect_var_send_receivers(
             collect_var_send_receivers(right, out);
         }
         ExprNode::Lambda { body, .. } => collect_var_send_receivers(body, out),
+        _ => {}
+    }
+}
+
+/// Count `ExprNode::Var` reads per name across the method body.
+/// Mirrors `collect_var_assign_counts`'s recursive walk shape but
+/// counts reads instead of assignments. Names with count > 1 land
+/// in `CLONE_VARS` so the `Var` emit arm appends `.clone()` for
+/// non-Copy types — the use-after-move guard that closes
+/// `view_helpers::submit`'s HashMap-literal-repeats and
+/// `active_record::Base::fill_timestamps`'s `now` across two ifs.
+fn collect_var_read_counts(
+    e: &Expr,
+    out: &mut std::collections::HashMap<String, usize>,
+) {
+    match &*e.node {
+        ExprNode::Var { name, .. } => {
+            *out.entry(name.as_str().to_string()).or_insert(0) += 1;
+        }
+        ExprNode::Assign { target, value } => {
+            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
+                collect_var_read_counts(recv, out);
+            }
+            collect_var_read_counts(value, out);
+        }
+        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_read_counts(e, out)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_var_read_counts(cond, out);
+            collect_var_read_counts(then_branch, out);
+            collect_var_read_counts(else_branch, out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_var_read_counts(cond, out);
+            collect_var_read_counts(body, out);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv { collect_var_read_counts(r, out); }
+            args.iter().for_each(|a| collect_var_read_counts(a, out));
+            if let Some(b) = block { collect_var_read_counts(b, out); }
+        }
+        ExprNode::Return { value } => collect_var_read_counts(value, out),
+        ExprNode::Hash { entries, .. } => entries.iter().for_each(|(k, v)| {
+            collect_var_read_counts(k, out);
+            collect_var_read_counts(v, out);
+        }),
+        ExprNode::Array { elements, .. } => {
+            elements.iter().for_each(|e| collect_var_read_counts(e, out))
+        }
+        ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
+            if let InterpPart::Expr { expr } = p {
+                collect_var_read_counts(expr, out);
+            }
+        }),
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_var_read_counts(left, out);
+            collect_var_read_counts(right, out);
+        }
+        ExprNode::Lambda { body, .. } => collect_var_read_counts(body, out),
         _ => {}
     }
 }
@@ -570,6 +656,17 @@ fn emit_expr_inner(e: &Expr) -> String {
                         }
                     }
                 }
+            }
+            // Multi-read non-Copy local: clone on every read so a
+            // later use-after-the-first doesn't trip E0382. The pre-
+            // pass in `with_method_scope` records names read > 1
+            // times; the type-gate keeps Int/Bool/Float reads
+            // suffix-free. Over-clones the lexically-last read by
+            // one, fine until a final-use analysis lands.
+            let needs_clone = CLONE_VARS.with(|c| c.borrow().contains(n));
+            let is_non_copy = e.ty.as_ref().map(|t| !is_copy_ty(t)).unwrap_or(false);
+            if needs_clone && is_non_copy {
+                return format!("{n}.clone()");
             }
             n.to_string()
         }
@@ -1898,14 +1995,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // Ty is Ty::Int. HashMap indexing keeps the bare form
             // (HashMap<K, V> indexes by &K, the user-supplied key
             // is already the right type).
-            if matches!(recv_ty, Some(crate::ty::Ty::Array { .. }))
-                && matches!(arg_ty, Some(crate::ty::Ty::Int))
-            {
-                return format!(
-                    "{}[({}) as usize]",
-                    emit_expr(r),
-                    emit_expr(&args[0])
-                );
+            if let Some(crate::ty::Ty::Array { elem }) = recv_ty {
+                if matches!(arg_ty, Some(crate::ty::Ty::Int)) {
+                    // `Vec<T>::Index` returns `&T`; passing the result
+                    // to a function taking `T` by value (the typical
+                    // Ruby-emit consuming-arg shape) requires
+                    // materializing an owned T. Append `.clone()` for
+                    // non-Copy element types — mirrors the negative-
+                    // index branch's clone (the same E0507 motivates
+                    // both). Copy elems (i64, f64, bool) need no
+                    // suffix.
+                    let suffix = if is_copy_ty(elem) { "" } else { ".clone()" };
+                    return format!(
+                        "{}[({}) as usize]{}",
+                        emit_expr(r),
+                        emit_expr(&args[0]),
+                        suffix
+                    );
+                }
             }
             // Ty::Class non-builtin recv: route `recv[k]` through the
             // `get_index` method emitted by `sanitize_ident`'s `[]` →
