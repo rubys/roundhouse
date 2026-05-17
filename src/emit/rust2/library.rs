@@ -213,15 +213,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 ///
 /// Produces:
 ///
-///     pub struct ActiveRecord;
+/// ```text
+/// pub struct ActiveRecord;
 ///
-///     static ADAPTER: std::sync::Mutex<Option<Value>> =
-///         std::sync::Mutex::new(None);
+/// static ADAPTER: std::sync::Mutex<Option<Value>> =
+///     std::sync::Mutex::new(None);
 ///
-///     impl ActiveRecord {
-///         pub fn adapter() -> Value { ... }
-///         pub fn set_adapter(value: Value) { ... }
-///     }
+/// impl ActiveRecord {
+///     pub fn adapter() -> Value { ... }
+///     pub fn set_adapter(value: Value) { ... }
+/// }
+/// ```
 fn emit_module_singleton(
     name: &str,
     ivars: &[(String, Ty)],
