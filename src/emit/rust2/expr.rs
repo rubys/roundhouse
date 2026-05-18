@@ -3010,7 +3010,21 @@ fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
 
     if let Ty::Hash { value: pv, .. } = param_ty {
         if matches!(pv.as_ref(), Ty::Untyped) {
+            // Var arg with a local Hash type that doesn't match —
+            // wrap with the K/V-coercing conversion.
             if let Some((_lk, _lv)) = arg_hash_var_local_ty(arg) {
+                return format!(
+                    "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
+                );
+            }
+            // Hash-literal arg: HashMap::from([…]) typically infers
+            // `HashMap<&str, T>` from the first entry, which won't
+            // unify with the callee's `HashMap<String, Value>` even
+            // when each entry's value is String/Int/Bool. Apply the
+            // same transform unconditionally — the conversion takes
+            // any IntoIterator<Item = (impl Into<String>, impl
+            // Into<Value>)> through ours.
+            if matches!(&*arg.node, ExprNode::Hash { .. }) {
                 return format!(
                     "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
                 );
@@ -3120,6 +3134,10 @@ fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
 /// the Self::method path applies for in-class callees.
 fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
     use crate::ty::Ty;
+    let hash_str_untyped = || Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Untyped),
+    };
     match (class, method) {
         ("Db", "prepare") => Some(vec![Ty::Str]),
         ("Db", "exec") => Some(vec![Ty::Str]),
@@ -3132,6 +3150,13 @@ fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crat
         ("Db", "escape_int") => Some(vec![Ty::Int]),
         ("Db", "escape_bool") => Some(vec![Ty::Bool]),
         ("Db", "last_insert_rowid") => Some(vec![]),
+        // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
+        // emits kwargs as a HashMap; the runtime shim accepts that
+        // shape and pulls named fields out (see
+        // `runtime/rust/broadcasts.rs::record`).
+        ("Broadcasts", "append" | "prepend" | "replace" | "remove") => {
+            Some(vec![hash_str_untyped()])
+        }
         _ => None,
     }
 }

@@ -86,6 +86,7 @@ const RT_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/framework_test_adapter.rs");
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
 const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
+const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.rs");
 
 /// `use crate::*;` imports prepended to every emitted app-model
 /// file. The lowerer (`src/lower/model_to_library/adapter_emit.rs`)
@@ -97,6 +98,8 @@ const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
 const MODEL_IMPORTS: &str = "\
 #[allow(unused_imports)]
 use crate::db::Db;
+#[allow(unused_imports)]
+use crate::broadcasts::Broadcasts;
 ";
 
 /// Emit a `rust2`-shaped project for `app`. Phase 2.1+: minimal
@@ -129,6 +132,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/framework_test_adapter.rs", RT_FRAMEWORK_TEST_ADAPTER_SOURCE),
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
         ("src/db.rs", RT_DB_SOURCE),
+        ("src/broadcasts.rs", RT_BROADCASTS_SOURCE),
     ] {
         files.push(EmittedFile {
             path: PathBuf::from(path),
