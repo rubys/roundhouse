@@ -414,11 +414,28 @@ fn collect_ivar_types(methods: &[MethodDef]) -> Vec<(String, Ty)> {
     // same backing field on the emitted struct). Preserve first-seen
     // order so the struct's field declaration order matches the
     // source's `def initialize` order.
+    //
+    // Two passes:
+    //   pass 1 — walk_collect_ivars records writes (assignments)
+    //   pass 2 — walk_collect_ivar_reads records reads ONLY for ivars
+    //            with zero writes (inherited-from-parent surface like
+    //            controller `@flash`/`@session`/`@params`, which AC::
+    //            Base writes from outside the controller class body).
+    // Without the read-pass, the struct emit omits inherited fields
+    // and downstream `self.flash[:notice] = ...` hits E0609. With
+    // read-pass that doesn't gate on no-writes, ivars already typed
+    // by writes get widened by re-observation and break framework
+    // runtime emit (e.g. `Base.flash` typed Option<Flash> mistakenly).
     let mut order: Vec<String> = Vec::new();
     let mut observed: std::collections::HashMap<String, Vec<Ty>> =
         std::collections::HashMap::new();
     for m in methods {
         walk_collect_ivars(&m.body, &mut order, &mut observed);
+    }
+    let written: std::collections::HashSet<String> =
+        observed.keys().cloned().collect();
+    for m in methods {
+        walk_collect_ivar_reads(&m.body, &written, &mut order, &mut observed);
     }
     // Phase 2: unify each ivar's observed-type list into one Ty.
     // Rules:
@@ -565,6 +582,71 @@ fn walk_collect_ivars(
             walk_collect_ivars(body, order, observed);
         }
         ExprNode::Return { value } => walk_collect_ivars(value, order, observed),
+        _ => {}
+    }
+}
+
+/// Second-pass walk that records ivar READS (not writes) — only for
+/// ivars NOT already observed via writes. Closes the inherited-ivar
+/// gap for controllers (`@flash`, `@session`, `@params` set by AC::
+/// Base, read inside actions). Ivars with at least one write skip
+/// this pass entirely — the write-based ty rules already cover them.
+fn walk_collect_ivar_reads(
+    e: &Expr,
+    written: &std::collections::HashSet<String>,
+    order: &mut Vec<String>,
+    observed: &mut std::collections::HashMap<String, Vec<Ty>>,
+) {
+    fn record(
+        name: &str,
+        ty: Ty,
+        order: &mut Vec<String>,
+        observed: &mut std::collections::HashMap<String, Vec<Ty>>,
+    ) {
+        let k = name.to_string();
+        if !order.iter().any(|n| n == &k) {
+            order.push(k.clone());
+        }
+        observed.entry(k).or_default().push(ty);
+    }
+    match &*e.node {
+        ExprNode::Ivar { name } => {
+            let n = name.as_str();
+            if !written.contains(n) {
+                if let Some(ty) = e.ty.as_ref() {
+                    if !matches!(ty, Ty::Untyped | Ty::Var { .. }) {
+                        record(n, ty.clone(), order, observed);
+                    }
+                }
+            }
+        }
+        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+            walk_collect_ivar_reads(value, written, order, observed);
+        }
+        ExprNode::Assign {
+            target: LValue::Attr { recv, .. },
+            value,
+        } if matches!(&*recv.node, ExprNode::SelfRef) => {
+            walk_collect_ivar_reads(value, written, order, observed);
+        }
+        ExprNode::Seq { exprs } => {
+            exprs.iter().for_each(|e| walk_collect_ivar_reads(e, written, order, observed))
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_collect_ivar_reads(cond, written, order, observed);
+            walk_collect_ivar_reads(then_branch, written, order, observed);
+            walk_collect_ivar_reads(else_branch, written, order, observed);
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv { walk_collect_ivar_reads(r, written, order, observed); }
+            args.iter().for_each(|a| walk_collect_ivar_reads(a, written, order, observed));
+            if let Some(b) = block { walk_collect_ivar_reads(b, written, order, observed); }
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_collect_ivar_reads(cond, written, order, observed);
+            walk_collect_ivar_reads(body, written, order, observed);
+        }
+        ExprNode::Return { value } => walk_collect_ivar_reads(value, written, order, observed),
         _ => {}
     }
 }

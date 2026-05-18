@@ -161,6 +161,21 @@ fn calls_self_method_in(body: &Expr, mutating: &HashSet<String>) -> bool {
             }
             ExprNode::Return { value } => walk(value, mutating),
             ExprNode::Assign { value, .. } => walk(value, mutating),
+            // `case scrutinee; when …; body; end` — each arm body can
+            // call mutating sibling methods. The canonical case: the
+            // controller lowerer-synthesized `process_action`'s body
+            // is a Case dispatching `action_name` → `self.index()` /
+            // `self.show()` / `self.create()` etc. The action methods
+            // mutate ivars (Articles@articles, ...), so process_action
+            // transitively mutates. Without Case traversal, the
+            // transitive seed never reaches the action calls and
+            // process_action emits as `&self`, blowing every action
+            // dispatch with E0596.
+            ExprNode::Case { scrutinee, arms } => {
+                walk(scrutinee, mutating)
+                    || arms.iter().any(|a| walk(&a.body, mutating))
+            }
+            ExprNode::Cast { value, .. } => walk(value, mutating),
             _ => false,
         }
     }

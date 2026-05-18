@@ -63,7 +63,25 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     // the user's stripped `key` may emit ambiguously when the recv
     // is untyped serde_json::Value. Live with the noise until type-
     // aware bridging lands.
-    let rewritten_method = rewrite_method_name(method);
+    // Arity-disambiguate `render` for AC::Base shim:
+    //   self.render(content)            → self.render(content)
+    //   self.render(content, opts_hash) → self.render_with(content, opts)
+    // Rust forbids two methods of the same name with different
+    // arities, but Ruby's `render` is overloaded by call shape. The
+    // shim provides both methods under different names; this rewrite
+    // routes the 2-arg form to `render_with`. Conservative — only
+    // applies when recv is SelfRef (in a controller body) and method
+    // is exactly "render". Other render-named methods on other
+    // recvs (e.g. a hypothetical `template.render`) stay unchanged.
+    let effective_method: String = if method == "render"
+        && args.len() == 2
+        && matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
+    {
+        "render_with".to_string()
+    } else {
+        method.to_string()
+    };
+    let rewritten_method = rewrite_method_name(&effective_method);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Free functions / module functions (Inflector.pluralize → bare
     // pluralize() in the inflector module). Implicit-self bare calls

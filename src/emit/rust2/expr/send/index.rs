@@ -125,12 +125,22 @@ pub(super) fn try_recv_typed_method(
                     ));
                 }
             }
-            // Ty::Class non-builtin recv: route `recv[k]` through the
-            // `get_index` method emitted by `sanitize_ident`'s `[]` →
-            // `get_index` rewrite. Built-in containers (Hash, Array)
-            // and HWIA / Flash / Session keep the bracket form.
+            // Ty::Class recv routing. Flash / Session expose `[]` via
+            // a `.get(k)` method (the framework runtime's HWIA-shape
+            // shim) rather than `Index`; emit accordingly. Non-builtin
+            // Ty::Class recv routes through the `get_index` method
+            // (the `sanitize_ident`'s `[]` → `get_index` rewrite).
+            // Builtin containers (Hash, Array) keep the bracket form.
             if let Some(crate::ty::Ty::Class { id, .. }) = recv_ty {
                 let cls = id.0.as_str();
+                let cls_leaf = cls.rsplit("::").next().unwrap_or(cls);
+                if matches!(cls_leaf, "Flash" | "Session") {
+                    return Some(format!(
+                        "{}.get({})",
+                        emit_expr(r),
+                        emit_expr(&args[0])
+                    ));
+                }
                 if !is_builtin_container_class(cls) {
                     return Some(format!(
                         "{}.get_index({})",

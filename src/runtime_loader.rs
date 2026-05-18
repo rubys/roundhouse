@@ -554,7 +554,11 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         rb_path: "runtime/ruby/json_builder.rb",
         namespace: "",
         out_path: "src/json_builder.rs",
-        mode: Mode::Module,
+        // Library mode parallel to inflector — emit `pub struct
+        // JsonBuilder; impl JsonBuilder { pub fn encode_string ... }`
+        // so the jbuilder view lowerer's `JsonBuilder::encode_string(...)`
+        // qualified-call resolves.
+        mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

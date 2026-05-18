@@ -164,6 +164,18 @@ pub(super) fn dispatch_method_by_recv_ty(
             "size" | "length" if args.is_empty() => {
                 Some(format!("({recv_s}.len() as i64)"))
             }
+            // `str.to_i` → Ruby semantics: parse leading digits, 0 on
+            // parse failure / non-numeric input. Rust's `parse::<i64>`
+            // is stricter (full-string match); `unwrap_or(0)` covers
+            // the failure path. `&str` and `String` both expose
+            // `.parse()` so this works uniformly across the recv-Ty
+            // Str/Sym arms.
+            "to_i" if args.is_empty() => {
+                Some(format!("({recv_s}.parse::<i64>().unwrap_or(0))"))
+            }
+            "to_f" if args.is_empty() => {
+                Some(format!("({recv_s}.parse::<f64>().unwrap_or(0.0))"))
+            }
             "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
             "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
             // `strip` → `trim()` returns &str; `.to_string()` forces

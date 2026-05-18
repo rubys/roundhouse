@@ -111,6 +111,8 @@ use crate::inflector::{self, Inflector};
 #[allow(unused_imports)]
 use crate::importmap::{self, Importmap};
 #[allow(unused_imports)]
+use crate::json_builder::{self, JsonBuilder};
+#[allow(unused_imports)]
 use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
@@ -128,6 +130,10 @@ use crate::flash::Flash;
 #[allow(unused_imports)]
 use crate::session::Session;
 #[allow(unused_imports)]
+use crate::param_value::ParamValue;
+#[allow(unused_imports)]
+use crate::db::Db;
+#[allow(unused_imports)]
 use crate::route_helpers::{self, RouteHelpers};
 #[allow(unused_imports)]
 use crate::view_helpers::{self, ViewHelpers};
@@ -142,6 +148,8 @@ use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvali
 ";
 
 const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::param_value::ParamValue;
 #[allow(unused_imports)]
 use crate::db::Db;
 #[allow(unused_imports)]
@@ -308,7 +316,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let mut view_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.clone().into_iter().collect();
         view_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
-        let raw_lcs = crate::lower::lower_views_to_library_classes(&app.views, app, view_extras);
+        // HTML views + JSON jbuilder views fold into the same per-
+        // directory module (`Views::Articles`). The html lowerer
+        // produces `index` / `show` / `_article`; the jbuilder lowerer
+        // produces `index_json` / `show_json` / `_article_json` under
+        // the same struct name. Controller render branches dispatch
+        // by `request_format`-driven name selection — both variants
+        // need to land on the same `impl Articles { ... }`.
+        let mut raw_lcs = crate::lower::lower_views_to_library_classes(
+            &app.views,
+            app,
+            view_extras.clone(),
+        );
+        raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
+            &app.views,
+            app,
+            view_extras,
+        ));
         let mut merged: std::collections::BTreeMap<String, crate::dialect::LibraryClass> =
             std::collections::BTreeMap::new();
         for lc in raw_lcs {
@@ -450,6 +474,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn destroy(&mut self) {{ self._adapter_delete(); }}\n\
                         pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
                         pub fn persisted(&self) -> bool {{ self.id != 0 }}\n\
+                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 )
@@ -538,7 +563,29 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 });
                 model_param_entries.push((stem, struct_name));
             } else {
-                let content = format!("{CONTROLLER_IMPORTS}{body}");
+                // AC::Base inheritance shim — appended `impl <Name>`
+                // block providing the request-lifecycle helpers that
+                // controller bodies invoke as `Send`s on self. The
+                // field-shape ivars (`flash`, `session`, `params`,
+                // ...) come from `walk_collect_ivars`'s read-only
+                // ivar surface and land on the struct naturally. The
+                // methods below stub the AC::Base contract for now —
+                // `render` echoes its arg, `request_format` returns
+                // "html", `redirect_to` / `head` are no-ops. Real
+                // plumbing (HTTP response state, content negotiation)
+                // is later runtime work; the goal here is compile-
+                // clean so the aggregate error count moves.
+                let ac_shim = format!(
+                    "\nimpl {name} {{\n\
+                    \x20   pub fn render(&self, content: String) -> String {{ content }}\n\
+                    \x20   pub fn render_with(&self, content: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) -> String {{ content }}\n\
+                    \x20   pub fn request_format(&self) -> String {{ \"html\".to_string() }}\n\
+                    \x20   pub fn redirect_to(&self, _url: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
+                    \x20   pub fn head(&self, _status: &str) {{ }}\n\
+                    }}\n",
+                    name = lc.name.0.as_str()
+                );
+                let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}");
                 files.push(EmittedFile {
                     path: PathBuf::from(format!("src/controllers/{stem}.rs")),
                     content,
@@ -777,26 +824,30 @@ fn collect_global_class_methods(
         let raw = lc.name.0.as_str();
         let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
         let entry = out.entry(class_name).or_default();
+        // Collect ALL methods (Class + Instance), since constructor
+        // candidates (`initialize`) live in instance methods but are
+        // reached at call sites as `Article::new(...)`. The instance
+        // entry doubles as the class-method registry for any same-
+        // name call across the recv kinds. The downstream caller
+        // (emit_send Const-recv arm) picks the entry by method name;
+        // it doesn't care about receiver kind.
         for m in &lc.methods {
-            if !matches!(m.receiver, MethodReceiver::Class) {
-                continue;
-            }
             let tys: Vec<Ty> = match m.signature.as_ref() {
                 Some(Ty::Fn { params, .. }) => params
                     .iter()
                     .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
                     .map(|p| p.ty.clone())
                     .collect(),
-                // No typed signature — fall back to the method's
-                // declared param count, all Ty::Untyped. The
-                // synth_default_for_ty path won't pad Untyped slots
-                // (no sensible default), so caller-arity mismatches
-                // for untyped methods still surface — but at least
-                // the method is present in the registry, which
-                // resolves the more common case where the lowerer
-                // populated `signature`.
                 _ => m.params.iter().map(|_| Ty::Untyped).collect(),
             };
+            // Alias `initialize` → `new` so `Article::new(args)`
+            // dispatches against the constructor's param list (Ruby
+            // syntactic difference; Rust always names the constructor
+            // `new`). Mirrors the same alias in `collect_class_method
+            // _param_tys` (library.rs) used for self-class lookups.
+            if m.name.as_str() == "initialize" {
+                entry.insert("new".to_string(), tys.clone());
+            }
             entry.insert(m.name.as_str().to_string(), tys);
         }
     }
