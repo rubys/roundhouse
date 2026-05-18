@@ -4,7 +4,7 @@
 //! (Lit, Var, Send `==`, StringInterp, If). Extended file-by-file
 //! through Phase 2 as each runtime file forces new IR shapes.
 
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue};
 
 mod assign;
 mod control;
@@ -13,16 +13,12 @@ mod send;
 mod util;
 use assign::emit_assign;
 use control::{emit_bool_op, emit_case, emit_if, emit_return, emit_seq, emit_while};
-use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_is_a, emit_string_interp};
+use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_string_interp};
 pub(super) use literal::emit_literal;
 use send::{cast_via_value_for_union, coerce_arg_for_field_ty, emit_send};
 pub(super) use send::coerce_arg_for_param_ty;
-pub(super) use util::{
-    arm_body_already_value, coerce_to_value, emit_case_pattern, indent,
-    is_builtin_container_class, is_copy_ty, is_option_of, is_option_ty,
-    peel_nil, rewrite_method_name, sanitize_ident,
-    synth_default_for_ty, ty_contains_untyped, value_narrowing_coercion,
-};
+pub(super) use util::sanitize_ident;
+use util::{indent, is_copy_ty, is_option_of, peel_nil, value_narrowing_coercion};
 
 thread_local! {
     /// True while rendering the body of a `pub fn new(...) -> Self`
