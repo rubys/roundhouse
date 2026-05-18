@@ -87,6 +87,13 @@ module ActionView
     # JSON.generate handles either, so untyped here.
     def self.turbo_stream_from: (untyped stream) -> String
   
+    # ── form_with primitives ───────────────────────────────────────
+    # Small typed-scalar helpers callable from macro-inlined form_with
+    # expansions. See view_helpers.rb for the runtime/macro split
+    # rationale.
+    def self.csrf_token_hidden_input: () -> String
+    def self.method_override_input: (Symbol method) -> String
+
     # ── form_with ───────────────────────────────────────────────────
     # `model` is the record (Base subclass instance); `model_name` is
     # the form-prefix string ("article", "comment"); `action` is the

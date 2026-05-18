@@ -230,6 +230,26 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, %(name="csrf-param")
   end
 
+  def test_csrf_token_hidden_input
+    out = ViewHelpers.csrf_token_hidden_input
+    assert_equal %(<input type="hidden" name="authenticity_token" value="">), out
+  end
+
+  def test_method_override_input_emits_for_patch
+    out = ViewHelpers.method_override_input(:patch)
+    assert_equal %(<input type="hidden" name="_method" value="patch">), out
+  end
+
+  def test_method_override_input_emits_for_delete
+    assert_equal %(<input type="hidden" name="_method" value="delete">),
+                 ViewHelpers.method_override_input(:delete)
+  end
+
+  def test_method_override_input_empty_for_get_post
+    assert_equal "", ViewHelpers.method_override_input(:get)
+    assert_equal "", ViewHelpers.method_override_input(:post)
+  end
+
   def test_csp_meta_tag_returns_empty_when_unconfigured
     # Matches Rails' dev-mode behavior and the other targets' runtimes.
     assert_equal "", ViewHelpers.csp_meta_tag

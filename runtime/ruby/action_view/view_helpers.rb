@@ -254,6 +254,37 @@ module ActionView
       %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{encoded}--unsigned"></turbo-cable-stream-source>)
     end
   
+    # ── form_with primitives ─────────────────────────────────────────
+    # Small typed-scalar helpers callable from macro-inlined form_with
+    # expansions. Centralizes semantics that may evolve (real signed
+    # tokens, CSP nonces) so they live in one runtime file rather than
+    # being baked into every form_with call site at lower time.
+
+    # Rails injects an authenticity_token hidden input as the first
+    # child of every form_with-rendered form (after the optional
+    # _method override). The compare harness blanks the value via an
+    # existing AttributeRule, so emitting an empty value is sufficient
+    # for parity. When real signing arrives, this is the one place to
+    # hook the signer.
+    def self.csrf_token_hidden_input
+      %(<input type="hidden" name="authenticity_token" value="">)
+    end
+
+    # Rails emits `<input type="hidden" name="_method" value="patch">`
+    # for forms whose semantic method is PATCH/PUT/DELETE (form's HTML
+    # `method` attribute stays "post"; the server routes off _method).
+    # Returns the empty string for get/post — the inline macro emits
+    # this unconditionally and relies on the empty-string case being a
+    # no-op concat.
+    def self.method_override_input(method)
+      method_str = method.to_s
+      if method_str == "get" || method_str == "post"
+        ""
+      else
+        %(<input type="hidden" name="_method" value="#{method_str}">)
+      end
+    end
+
     # ── form builder (used as `form_with` block-yielded value) ────────
   
     class FormBuilder
