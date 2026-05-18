@@ -1,0 +1,109 @@
+# RBS sidecar for runtime/spinel/test/test_helper.rb. Matches the
+# convention used across runtime/ruby/ (hand-maintained signatures
+# alongside each .rb), extended here into the spinel-target test
+# shim where it was previously absent.
+#
+# Where signatures are permissive (`untyped` for some param/return
+# types), it's because the underlying Ruby surface is genuinely
+# polymorphic — params hashes carry mixed Symbol/String keys and
+# arbitrary leaf values, assertion helpers receive `untyped` lhs/rhs.
+# Methods whose Ruby body has a single statically-determinable shape
+# (notably `stringify_keys` after its restructure to inline the
+# Hash-vs-leaf check at call sites) get concrete signatures — keeps
+# inference clean across every strict-typed target.
+
+module SchemaSetup
+  def self.reset!: () -> void
+end
+
+module FixtureLoader
+  def self.load_all!: () -> void
+end
+
+# Captured response from a dispatched in-process request. The four
+# attr_readers + `?` query methods are exercised by emitted controller
+# tests via `assert_response` / `assert_redirected_to` / `assert_select`.
+class ActionResponse
+  def status: () -> Integer
+  def body: () -> String
+  def location: () -> String?
+  def flash: () -> ActionDispatch::Flash
+
+  def initialize: (
+    status: Integer,
+    body: String,
+    location: String?,
+    flash: ActionDispatch::Flash
+  ) -> void
+
+  def redirect?: () -> bool
+  def success?: () -> bool
+  def unprocessable?: () -> bool
+end
+
+# Base class for every emitted test. Roundhouse-owned, no Minitest
+# dependency. `setup` / `teardown` are no-op lifecycle hooks the per-
+# test shim invokes; subclasses override and may `super`.
+class TestBase
+  def initialize: () -> void
+  def setup: () -> void
+  def teardown: () -> void
+
+  # `assert_operator` and `assert_match` aren't lowered by
+  # inline_assertions (operator-on-class-object and nil-handling
+  # divergence respectively). Method bodies stay; RBS pins their
+  # contracts. `op` is the operator symbol (:<, :>, :==, :>=, etc.).
+  def assert_operator: (untyped lhs, Symbol op, untyped rhs, ?String? msg) -> void
+  def assert_match: (Regexp pattern, String? value, ?String? msg) -> void
+end
+
+# ActionDispatch::IntegrationTest parent — emitted controller tests
+# inherit from this. Pure mixin of RequestDispatch; no methods of its
+# own here.
+module ActionDispatch
+  class IntegrationTest < TestBase
+  end
+end
+
+# In-process request dispatch. The four HTTP-verb helpers route
+# through `dispatch_request`. `stringify_keys` is strictly typed
+# `(Hash) -> Hash`; the polymorphism (Hash vs leaf) lives in the
+# caller's ternary, not on this boundary. Keeps inference clean
+# across every strict-typed target.
+module RequestDispatch
+  def get: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
+  def post: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
+  def patch: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
+  def delete: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
+
+  def dispatch_request: (
+    String method,
+    String path,
+    Hash[untyped, untyped] params
+  ) -> ActionResponse
+
+  # Recursive Hash-keys-to-strings. Strictly `(Hash) -> Hash`; non-
+  # Hash values are filtered out at the call site (caller wraps the
+  # call in `v.is_a?(Hash) ? stringify_keys(v) : v`). Return value
+  # type is `Hash[String, untyped]` — keys always String via `k.to_s`,
+  # values are recursive Hash | original-leaf, both unified as untyped.
+  def stringify_keys: (Hash[untyped, untyped] hash) -> Hash[String, untyped]
+
+  def assert_response: (Symbol | Integer expected, ?ActionResponse response) -> void
+  def assert_redirected_to: (String expected_path, ?ActionResponse response) -> void
+
+  # Two positional + optional content/opts forms + optional block.
+  # Selector is always String; second arg is either the content
+  # string to match against the rendered tag, or an options Hash, or
+  # nil. Returns void (raises on mismatch).
+  def assert_select: (
+    String selector,
+    ?(String | Hash[Symbol, untyped])? content_or_opts,
+    ?Hash[Symbol, untyped]? opts
+  ) { () -> void } -> void
+       | (
+    String selector,
+    ?(String | Hash[Symbol, untyped])? content_or_opts,
+    ?Hash[Symbol, untyped]? opts
+  ) -> void
+end

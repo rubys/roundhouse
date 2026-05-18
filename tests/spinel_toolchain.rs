@@ -35,20 +35,20 @@ fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
 }
 
-/// Move every `<scratch>/runtime/**/*.rbs` to `<scratch>/sig/runtime/<rel>.rbs`.
-/// Mirrors the top-level Makefile's RUBY_OUT layout (f6d2b87): one `sig/`
-/// root for both hand-authored runtime RBS and roundhouse-emitted app RBS.
+/// Move every `<scratch>/{runtime,test}/**/*.rbs` to
+/// `<scratch>/sig/{runtime,test}/<rel>.rbs`. Mirrors the top-level
+/// Makefile's RUBY_OUT layout (f6d2b87): one `sig/` root for both
+/// hand-authored RBS (runtime tree + test_helper) and roundhouse-emitted
+/// app RBS.
 fn reroute_runtime_rbs_to_sig(scratch: &Path) {
-    let runtime_dir = scratch.join("runtime");
-    let sig_runtime = scratch.join("sig").join("runtime");
-    fn walk(dir: &Path, runtime_root: &Path, sig_root: &Path) {
+    fn walk(dir: &Path, src_root: &Path, sig_root: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else { return; };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, runtime_root, sig_root);
+                walk(&path, src_root, sig_root);
             } else if path.extension().and_then(|s| s.to_str()) == Some("rbs") {
-                let rel = path.strip_prefix(runtime_root).expect("under runtime/");
+                let rel = path.strip_prefix(src_root).expect("under src root");
                 let dst = sig_root.join(rel);
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).expect("mkdir sig parent");
@@ -57,7 +57,13 @@ fn reroute_runtime_rbs_to_sig(scratch: &Path) {
             }
         }
     }
+    let runtime_dir = scratch.join("runtime");
+    let sig_runtime = scratch.join("sig").join("runtime");
     walk(&runtime_dir, &runtime_dir, &sig_runtime);
+
+    let test_dir = scratch.join("test");
+    let sig_test = scratch.join("sig").join("test");
+    walk(&test_dir, &test_dir, &sig_test);
 }
 
 fn copy_tree(src: &Path, dst: &Path) {

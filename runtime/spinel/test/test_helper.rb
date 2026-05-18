@@ -235,8 +235,10 @@ module RequestDispatch
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
-    # request-body parser would produce in production.
-    params.each { |k, v| merged[k.to_s] = stringify_keys(v) }
+    # request-body parser would produce in production. The is_a?(Hash)
+    # check is inline at the call site (not inside stringify_keys) so
+    # the helper itself stays strictly typed as `(Hash) -> Hash`.
+    params.each { |k, v| merged[k.to_s] = v.is_a?(Hash) ? stringify_keys(v) : v }
     controller.params  = merged
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
@@ -257,10 +259,18 @@ module RequestDispatch
   # nested hashes (Ruby's idiomatic shape); the wire-level request
   # body parser would produce String keys. Used to normalize at the
   # harness boundary so @params has the production shape.
-  def stringify_keys(value)
-    return value unless value.is_a?(Hash)
+  #
+  # Strictly typed `(Hash) -> Hash` — the polymorphism (Hash vs leaf)
+  # lives at the call site's ternary, not on this function's boundary.
+  # Keeps inference clean across every target's strict typer (avoids
+  # the spinel #585 early-return-vs-Hash-build unification gap, and
+  # the Rust/Crystal/Kotlin equivalent of "force the whole signature
+  # to Value-everywhere").
+  def stringify_keys(hash)
     out = {}
-    value.each { |k, v| out[k.to_s] = stringify_keys(v) }
+    hash.each do |k, v|
+      out[k.to_s] = v.is_a?(Hash) ? stringify_keys(v) : v
+    end
     out
   end
 
