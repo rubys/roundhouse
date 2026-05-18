@@ -97,6 +97,17 @@ $(RUBY_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	  mkdir -p "$(RUBY_OUT)/sig/runtime/$$(dirname "$$rel")"; \
 	  cp "$$f" "$(RUBY_OUT)/sig/runtime/$$rel"; \
 	done
+	# Same one-sig-root policy for hand-maintained test-tree RBS
+	# (e.g., runtime/spinel/test/test_helper.rbs). Without this the
+	# sidecar lands at <out>/test/test_helper.rbs where spinel's
+	# `--rbs sig` flag doesn't reach it.
+	find $(RUBY_OUT)/test -name '*.rbs' -delete
+	mkdir -p $(RUBY_OUT)/sig/test
+	find runtime/spinel/test -name '*.rbs' | while IFS= read -r f; do \
+	  rel="$${f#runtime/spinel/test/}"; \
+	  mkdir -p "$(RUBY_OUT)/sig/test/$$(dirname "$$rel")"; \
+	  cp "$$f" "$(RUBY_OUT)/sig/test/$$rel"; \
+	done
 	cargo run --release --bin build-site -- fixtures/real-blog $(RUBY_OUT)/.emit
 	ruby -rjson -rfileutils -e ' \
 	  m = JSON.parse(File.read(ARGV[0])); \
@@ -193,6 +204,17 @@ $(SPINEL_OUT)/.stamp: fixtures/real-blog runtime/ruby runtime/spinel
 	  rel="$${f#runtime/ruby/}"; \
 	  mkdir -p "$(SPINEL_OUT)/sig/runtime/$$(dirname "$$rel")"; \
 	  cp "$$f" "$(SPINEL_OUT)/sig/runtime/$$rel"; \
+	done
+	# Same one-sig-root policy for hand-maintained test-tree RBS
+	# (e.g., runtime/spinel/test/test_helper.rbs). Without this the
+	# sidecar lands at <out>/test/test_helper.rbs where spinel's
+	# `--rbs sig` flag doesn't reach it.
+	find $(SPINEL_OUT)/test -name '*.rbs' -delete
+	mkdir -p $(SPINEL_OUT)/sig/test
+	find runtime/spinel/test -name '*.rbs' | while IFS= read -r f; do \
+	  rel="$${f#runtime/spinel/test/}"; \
+	  mkdir -p "$(SPINEL_OUT)/sig/test/$$(dirname "$$rel")"; \
+	  cp "$$f" "$(SPINEL_OUT)/sig/test/$$rel"; \
 	done
 	# Vendored Tep transport (FFI HTTP server) — replaces CGI dispatch.
 	# sphttp.o is precompiled here so spinel's ffi_cflags substitution

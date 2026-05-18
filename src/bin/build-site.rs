@@ -195,8 +195,17 @@ fn spinel_files(app: &roundhouse::App) -> Result<Vec<(String, String)>, String> 
     // server/, tools/, app/views.rb, app/assets/, README.md, etc.
     walk_dir_into(Path::new("runtime/spinel/scaffold"), "", &mut files)?;
 
-    // Target-specific tests under test/.
-    walk_dir_into(Path::new("runtime/spinel/test"), "test/", &mut files)?;
+    // Target-specific tests under test/. `.rb` files land under
+    // test/, `.rbs` sidecars route to sig/test/ — same one-sig-root
+    // policy as runtime/<sub>/ below. Without partitioning, hand-
+    // maintained sidecars (e.g. test/test_helper.rbs) would land at
+    // <out>/test/ where spinel's `--rbs sig` flag doesn't reach them.
+    walk_dir_partitioned(
+        Path::new("runtime/spinel/test"),
+        "test/",
+        "sig/test/",
+        &mut files,
+    )?;
 
     // Spinel-target primitives flat under runtime/.
     walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
