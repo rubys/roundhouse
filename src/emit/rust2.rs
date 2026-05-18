@@ -207,7 +207,42 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // permissive default; under-imports trip E0433. Add new
             // entries here when a follow-up phase surfaces another
             // bare reference.
-            let content = format!("{MODEL_IMPORTS}{body}");
+            //
+            // AR::Base inheritance shim — Rust lacks class inheritance,
+            // so methods carried by `runtime/ruby/active_record/base.rb`
+            // (`mark_persisted!`, `errors`, `save`, `update`) aren't
+            // automatically available on the lowered per-model struct.
+            // Append a minimal impl block for the three methods that
+            // call sites synthesized by the model lowerer reach:
+            // `mark_persisted_bang` (no-op), `errors` (returns empty
+            // `Vec<String>`), `save` (drives validate + returns true).
+            // Behavioral simplifications — lifecycle callbacks not
+            // fired, errors not accumulated across validate→save — are
+            // acceptable for Phase 5 compile-cleanup; later sessions
+            // route through the lowerer's specialization-always-on
+            // path (project_specialization_strategy.md) for the per-
+            // model body restoration.
+            //
+            // Gate on `_adapter_insert` to skip ApplicationRecord
+            // (abstract, no table) and synthesized Row classes (no
+            // adapter methods).
+            let needs_ar_shim = lc
+                .methods
+                .iter()
+                .any(|m| m.name.as_str() == "_adapter_insert");
+            let ar_shim = if needs_ar_shim {
+                format!(
+                    "\nimpl {name} {{\n\
+                        pub fn mark_persisted_bang(&mut self) {{ }}\n\
+                        pub fn errors(&self) -> Vec<String> {{ Vec::new() }}\n\
+                        pub fn save(&mut self) -> bool {{ self.validate(); true }}\n\
+                    }}\n",
+                    name = lc.name.0.as_str()
+                )
+            } else {
+                String::new()
+            };
+            let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,

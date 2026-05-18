@@ -468,18 +468,18 @@ fn build_class_info(
         "mark_persisted!",
         fn_sig(vec![], Ty::Nil),
     );
-    // `errors` returns the same shape Validations.rb's ivar holds —
-    // `Array[untyped]` (the framework runtime uses a plain Ruby
-    // Array, mutated via `<<`/`push` and read via `empty?`/`count`/
-    // `each`). The juntos hand-written ApplicationRecord wrapped
-    // this in an ErrorCollection class, but the transpiled framework
-    // keeps it primitive. Type-aware Array dispatch (`empty?` →
-    // `length === 0`, `each` → `forEach`, etc.) handles all the
-    // call sites uniformly.
+    // `errors` returns `Array[String]` — matches both the framework
+    // Ruby (`runtime/ruby/active_record/base.rb`, where `@errors` is
+    // declared `Array[String]` in the `.rbs` sidecar) and every
+    // validation-rule push site (every `errors << "..."` arm in
+    // `validations.rs` shoves a String literal). The earlier
+    // `Array[untyped]` predated the RBS sidecar; widening was load-
+    // bearing for nothing. Tightening to `Str` lets rust2's `<<` emit
+    // pick the Vec<String>-shaped push coercion uniformly.
     insert_default(
         &mut info.instance_methods,
         "errors",
-        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Untyped) }),
+        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
     );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
     insert_default(

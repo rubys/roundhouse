@@ -2455,11 +2455,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     }
     // Array append: `arr << x` Ruby idiom → `arr.push(x)` in Rust.
     // Recv-type-aware: only fires for Vec/Array-typed receivers so
-    // user-defined `<<` operators on other types stay intact.
+    // user-defined `<<` operators on other types stay intact. The
+    // arg is coerced into the elem type so push() type-checks:
+    // Vec<String>::push wants owned `String`, but the body-typer
+    // often hands us &str literals or borrowed `&str`. `<<` is
+    // value-semantic in Ruby (Array#<< takes any object, no borrow
+    // distinction), so eager `.to_string()` on the literal side is
+    // the right Rust analog. Other elem types pass through unchanged
+    // — when more callers surface, extend this match arm in place.
     if method == "<<" && args.len() == 1 {
         if let Some(r) = recv {
-            if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
-                return format!("{}.push({})", emit_expr(r), emit_expr(&args[0]));
+            if let Some(crate::ty::Ty::Array { elem }) = r.ty.as_ref() {
+                let arg_rendered = match (elem.as_ref(), args[0].ty.as_ref()) {
+                    (crate::ty::Ty::Str | crate::ty::Ty::Sym, Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)) => {
+                        format!("({}).to_string()", emit_expr(&args[0]))
+                    }
+                    _ => emit_expr(&args[0]),
+                };
+                return format!("{}.push({})", emit_expr(r), arg_rendered);
             }
         }
     }
