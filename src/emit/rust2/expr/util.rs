@@ -1,0 +1,247 @@
+//! Pure helpers — no thread-local state, no IR walks, just type and
+//! string transformations. Extracted from `expr/mod.rs` so the
+//! variant-emit files can share them without dragging in the emit
+//! match.
+
+use crate::expr::{Expr, ExprNode, Literal};
+
+/// Conservative `Copy`-trait check for Rust target types. Numeric +
+/// bool + nil are Copy; String/Vec/HashMap/Option/Class are not.
+/// Used by the `Ivar` arm to decide whether a tail-position read
+/// needs `.clone()` to avoid moving out of `&self`. `Ty::Untyped`
+/// commits to `serde_json::Value` which is non-Copy.
+pub(crate) fn is_copy_ty(t: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    // Sym maps to `String` in rust2 (see `ty.rs::rust_ty`), so it's
+    // non-Copy despite being a primitive-shaped Ruby type.
+    matches!(t, Ty::Int | Ty::Bool | Ty::Nil | Ty::Float)
+}
+
+/// Peel `Union<T, Nil>` to `T` for dispatch-time matching. Returns the
+/// original Ty unchanged if it isn't a 2-variant `T | Nil` union.
+/// Mirrors `analyze::body::peel_nilable` — kept locally so emit doesn't
+/// reach across into a private analyzer helper.
+pub(crate) fn peel_nil(ty: &crate::ty::Ty) -> &crate::ty::Ty {
+    use crate::ty::Ty;
+    if let Ty::Union { variants } = ty {
+        if variants.len() == 2 {
+            if let Some(idx) = variants.iter().position(|v| matches!(v, Ty::Nil)) {
+                return &variants[1 - idx];
+            }
+        }
+    }
+    ty
+}
+
+/// True if `ty` is `Option<T>` shape — a `Union { variants }` containing
+/// exactly two variants, one of which is `Nil`.
+pub(crate) fn is_option_ty(ty: &crate::ty::Ty) -> bool {
+    matches!(
+        ty,
+        crate::ty::Ty::Union { variants }
+            if variants.len() == 2 && variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    )
+}
+
+pub(crate) fn is_option_of(outer: &crate::ty::Ty, inner: &crate::ty::Ty) -> bool {
+    let crate::ty::Ty::Union { variants } = outer else {
+        return false;
+    };
+    if variants.len() != 2 {
+        return false;
+    }
+    let has_nil = variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil));
+    let other = variants
+        .iter()
+        .find(|v| !matches!(v, crate::ty::Ty::Nil));
+    matches!(other, Some(o) if has_nil && o == inner)
+}
+
+/// Given a narrowed Ty inside an `is_a?(Class)` branch on a
+/// `serde_json::Value`-typed binding, return the `.as_X().unwrap()`
+/// (or similar) coercion shape that extracts the inner value, or
+/// None if the narrowed Ty doesn't map to a Value accessor.
+pub(crate) fn value_narrowing_coercion(narrowed: &crate::ty::Ty) -> Option<&'static str> {
+    match narrowed {
+        crate::ty::Ty::Str => Some("as_str().unwrap()"),
+        crate::ty::Ty::Bool => Some("as_bool().unwrap()"),
+        crate::ty::Ty::Int => Some("as_i64().unwrap()"),
+        crate::ty::Ty::Float => Some("as_f64().unwrap()"),
+        _ => None,
+    }
+}
+
+/// Synthesize a default-value Rust expression for a missing arg
+/// position. Mirrors the Ruby default-arg semantics for the
+/// shapes the lowerer-synthesized constructors use (`attrs = {}`
+/// → `HashMap::new()`).
+pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Hash { .. } => Some("std::collections::HashMap::new()".to_string()),
+        Ty::Array { .. } => Some("vec![]".to_string()),
+        Ty::Str | Ty::Sym => Some("String::new()".to_string()),
+        Ty::Int => Some("0_i64".to_string()),
+        Ty::Float => Some("0.0_f64".to_string()),
+        Ty::Bool => Some("false".to_string()),
+        Ty::Untyped => Some("serde_json::Value::Null".to_string()),
+        _ => None,
+    }
+}
+
+/// True when an arm body's emit is already `Value`-shaped (Ivar
+/// read in a class whose field is typed `Untyped`, or a Send
+/// already wrapped with `Value::from`). Conservative — over-wraps
+/// won't cause a type error since `Value::from(Value)` doesn't
+/// impl, so we only skip the wrap on the shapes that emit_expr
+/// has already coerced.
+pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
+    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+        || matches!(
+            &*body.node,
+            ExprNode::Lit { value: Literal::Nil }
+        )
+}
+
+/// True when `ty` contains a `Ty::Untyped` anywhere — directly or
+/// inside a `Union` variant. Used to gate Value-coercion decisions.
+pub(crate) fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Untyped => true,
+        Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
+        _ => false,
+    }
+}
+
+/// Emit a Case `Pattern` as a Rust `match` arm pattern. The
+/// lowerer-synthesized `synth_index_read`/`synth_index_write` use
+/// `Pattern::Lit { value: Symbol }` against an `&str`-typed
+/// scrutinee — emit as a string-literal pattern. Other shapes fall
+/// through to `_` until they're needed.
+pub(crate) fn emit_case_pattern(p: &crate::expr::Pattern) -> String {
+    use crate::expr::Pattern;
+    match p {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Lit { value } => match value {
+            Literal::Str { value } => format!("{value:?}"),
+            Literal::Sym { value } => format!("{:?}", value.as_str()),
+            Literal::Int { value } => value.to_string(),
+            Literal::Bool { value } => value.to_string(),
+            Literal::Nil => "_".to_string(),
+            _ => "_".to_string(),
+        },
+        Pattern::Bind { name } => name.as_str().to_string(),
+        _ => "_".to_string(),
+    }
+}
+
+/// Indent every non-empty line in `s` by `level` × 4 spaces.
+pub(crate) fn indent(s: &str, level: usize) -> String {
+    let pad = "    ".repeat(level);
+    s.lines()
+        .map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Built-in container classes whose `[]` / `[]=` should stay as the
+/// Rust bracket-index syntax (`HashMap`, `Vec`, etc. via Index/IndexMut).
+/// User-defined classes route through the `get_index` / `set_index`
+/// method rewrite instead.
+pub(crate) fn is_builtin_container_class(name: &str) -> bool {
+    let last = name.rsplit("::").next().unwrap_or(name);
+    matches!(
+        last,
+        "Hash" | "HashWithIndifferentAccess" | "Array" | "String"
+            | "Flash" | "Session"
+            | "Parameters"
+            | "Errors" | "ErrorCollection"
+    )
+}
+
+/// Wrap an emitted RHS with `serde_json::Value::from(...)` when the
+/// expression's Ty isn't already `serde_json::Value`. Used by the
+/// `set_index` call-site emit (Ty::Class indexer dispatch) — the
+/// `def []=(_, untyped)` signature renders the value param as Value,
+/// so a String/Int/Bool RHS needs explicit conversion.
+pub(crate) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
+    use crate::ty::Ty;
+    let already_value = matches!(
+        value.ty.as_ref(),
+        Some(Ty::Untyped)
+            | Some(Ty::Var { .. })
+            | Some(Ty::Record { .. })
+            | Some(Ty::Hash { .. })
+    );
+    if already_value {
+        rhs.to_string()
+    } else {
+        format!("serde_json::Value::from({rhs})")
+    }
+}
+
+/// Sanitize a Ruby identifier for Rust:
+/// * `foo!` → `foo_bang`. Preserves the distinction vs the non-bang
+///   sibling (`def create` vs `def create!` both exist on AR::Base).
+/// * `foo?` (predicate) → `foo`.
+/// * `foo=` (setter) → `set_foo`.
+/// * `[]` / `[]=` → `get_index` / `set_index`.
+/// * Reserved Rust keywords → `r#keyword` raw-identifier form.
+pub(crate) fn sanitize_ident(name: &str) -> String {
+    if name == "[]" {
+        return "get_index".to_string();
+    }
+    if name == "[]=" {
+        return "set_index".to_string();
+    }
+    let s = if let Some(base) = name.strip_suffix('!') {
+        return format!("{base}_bang");
+    } else if let Some(base) = name.strip_suffix('=') {
+        return format!("set_{base}");
+    } else if let Some(base) = name.strip_suffix('?') {
+        base
+    } else {
+        name
+    };
+    if is_rust_keyword(s) {
+        format!("r#{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Ruby method names → Rust analog. Generic (recv-type-agnostic)
+/// table; a richer pass keyed on the receiver's `Ty` can layer on
+/// later when ambiguities show up in real emit.
+pub(crate) fn rewrite_method_name(m: &str) -> String {
+    let bridged = match m {
+        "to_s" => "to_string",
+        "length" => "len",
+        "nil?" => "is_none",
+        "empty?" => "is_empty",
+        "key?" => "contains_key",
+        "has_key?" => "contains_key",
+        "include?" => "contains",
+        other => other,
+    };
+    sanitize_ident(bridged)
+}
+
+/// Rust 2024 reserved-word set. The `r#ident` raw-identifier form
+/// lifts the keyword restriction so user-defined names like `match`,
+/// `loop`, `type` can become function/struct names.
+pub(crate) fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
+            | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
+            | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub"
+            | "ref" | "return" | "self" | "Self" | "static" | "struct"
+            | "trait" | "true" | "type" | "unsafe" | "use" | "where"
+            | "while" | "async" | "await" | "dyn"
+            | "abstract" | "become" | "box" | "do" | "final" | "macro"
+            | "override" | "priv" | "typeof" | "unsized" | "virtual"
+            | "yield" | "try"
+    )
+}
