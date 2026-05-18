@@ -109,9 +109,36 @@ use crate::route_helpers::{self, RouteHelpers};
 #[allow(unused_imports)]
 use crate::inflector::{self, Inflector};
 #[allow(unused_imports)]
+use crate::importmap::{self, Importmap};
+#[allow(unused_imports)]
 use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
+";
+
+/// Prelude for emitted controller files. Controllers call into the
+/// view layer (`Articles::index(...)`), models, ActionDispatch
+/// (Flash/Session), and the broadcasts shim. Same `#[allow(unused_
+/// imports)]` discipline as MODEL_IMPORTS / VIEW_IMPORTS.
+const CONTROLLER_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::action_controller_base::{self, Base};
+#[allow(unused_imports)]
+use crate::flash::Flash;
+#[allow(unused_imports)]
+use crate::session::Session;
+#[allow(unused_imports)]
+use crate::route_helpers::{self, RouteHelpers};
+#[allow(unused_imports)]
+use crate::view_helpers::{self, ViewHelpers};
+#[allow(unused_imports)]
+use crate::broadcasts::Broadcasts;
+#[allow(unused_imports)]
+use crate::models::*;
+#[allow(unused_imports)]
+use crate::views::*;
+#[allow(unused_imports)]
+use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
 ";
 
 const MODEL_IMPORTS: &str = "\
@@ -251,7 +278,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helpers_lc: Option<crate::dialect::LibraryClass> = if !route_helper_funcs.is_empty() {
-        let mut lcs = vec![route_helpers_library_class(&route_helper_funcs)];
+        let mut lcs = vec![module_funcs_to_library_class("RouteHelpers", &route_helper_funcs)];
+        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        Some(lcs.into_iter().next().unwrap())
+    } else {
+        None
+    };
+
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    let importmap_lc: Option<crate::dialect::LibraryClass> = if !importmap_funcs.is_empty() {
+        let mut lcs = vec![module_funcs_to_library_class("Importmap", &importmap_funcs)];
         let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
         crate::analyze::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -298,13 +336,58 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec::new()
     };
 
+    // Fixtures — synthesize `<Resource>Fixtures` LibraryClasses from
+    // `test/fixtures/*.yml`. Each fixture file becomes a
+    // `<Resource>Fixtures` module with class methods returning the
+    // hydrated records by name. Used by tests; production builds w/o
+    // tests skip emission via the `app.test_modules` gate parallel
+    // to Crystal's pattern.
+    let mut fixture_lcs: Vec<crate::dialect::LibraryClass> =
+        if !app.fixtures.is_empty() {
+            let mut lcs = crate::lower::lower_fixtures_to_library_classes(app);
+            let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+            crate::analyze::str_color::color_classes(&mut lcs, &registry);
+            crate::analyze::mutates_self::propagate(&mut lcs);
+            lcs
+        } else {
+            Vec::new()
+        };
+
+    // Controllers — extras include model_registry + view_lcs +
+    // route_helper extras (mirror Crystal's `controller_extras` setup).
+    // The lowerer also synthesizes `<Resource>Params` classes (origin
+    // is Some) which belong under `src/models/` not `src/controllers/`,
+    // following the Crystal pattern.
+    let mut controller_lcs: Vec<crate::dialect::LibraryClass> = if !app.controllers.is_empty() {
+        let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+            model_registry.clone().into_iter().collect();
+        controller_extras.extend(crate::lower::library_extras::extras_from_lcs(&view_lcs));
+        controller_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
+        let mut lcs = crate::lower::lower_controllers_with_arel_and_views(
+            &app.controllers,
+            controller_extras,
+            Some(&app.schema),
+            &app.views,
+        );
+        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        lcs
+    } else {
+        Vec::new()
+    };
+
     let global_methods = collect_global_class_methods(
         &model_lcs,
         route_helpers_lc.as_ref(),
+        importmap_lc.as_ref(),
         &view_lcs,
+        &controller_lcs,
+        &fixture_lcs,
     );
-    // Avoid unused-mut warning if neither models nor views populated.
-    let _ = (&mut model_lcs, &mut view_lcs);
+    // Avoid unused-mut warnings on the lowered LC accumulators when
+    // any one of them is empty for the current fixture.
+    let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);
 
     crate::emit::rust2::expr::with_global_class_methods(global_methods, || {
     if !model_lcs.is_empty() {
@@ -393,6 +476,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
+    if let Some(lc) = &importmap_lc {
+        let body = match library::emit_library_class(lc) {
+            Ok(s) => s,
+            Err(e) => panic!("rust2 importmap emit failed: {e}"),
+        };
+        files.push(EmittedFile {
+            path: PathBuf::from("src/importmap.rs"),
+            content: body,
+        });
+    }
+
     if !view_lcs.is_empty() {
         let mut view_entries: Vec<(String, String)> = Vec::new();
         for lc in &view_lcs {
@@ -413,6 +507,104 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             view_entries.push((stem, struct_name));
         }
         files.push(emit_views_mod_rs(&view_entries));
+    }
+
+    // Controllers — controller LCs with `origin: None` go to
+    // `src/controllers/<stem>.rs`; synthesized `<Resource>Params`
+    // classes (origin: Some) go to `src/models/<stem>.rs` since they
+    // belong to the model layer conceptually. Mirrors Crystal's
+    // routing.
+    if !controller_lcs.is_empty() {
+        let mut controller_entries: Vec<(String, String)> = Vec::new();
+        let mut model_param_entries: Vec<(String, String)> = Vec::new();
+        for lc in &controller_lcs {
+            let raw = lc.name.0.as_str();
+            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+            let stem = crate::naming::snake_case(&struct_name);
+            let body = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => {
+                    panic!("rust2 controller emit failed for {}: {e}", lc.name.0.as_str());
+                }
+            };
+            if lc.origin.is_some() {
+                // Synthesized `<Resource>Params` — emit under
+                // `src/models/`. Re-use MODEL_IMPORTS so adapter/db/
+                // sibling-model references resolve.
+                let content = format!("{MODEL_IMPORTS}{body}");
+                files.push(EmittedFile {
+                    path: PathBuf::from(format!("src/models/{stem}.rs")),
+                    content,
+                });
+                model_param_entries.push((stem, struct_name));
+            } else {
+                let content = format!("{CONTROLLER_IMPORTS}{body}");
+                files.push(EmittedFile {
+                    path: PathBuf::from(format!("src/controllers/{stem}.rs")),
+                    content,
+                });
+                controller_entries.push((stem, struct_name));
+            }
+        }
+        if !controller_entries.is_empty() {
+            files.push(emit_controllers_mod_rs(&controller_entries));
+        }
+        // Augment src/models/mod.rs entries with the synthesized
+        // params classes. emit_models_mod_rs already emitted earlier
+        // — re-emit if there are params classes. (Idempotent: we
+        // simply replace the previous models/mod.rs in `files` by
+        // appending; the EmittedFile path is unique-keyed by emitters
+        // downstream — last write wins for files w/ same path.)
+        if !model_param_entries.is_empty() {
+            let mut all_models = model_lcs.clone();
+            // Wrap synthesized entries as fake LibraryClasses with
+            // just the name so the existing aggregator helper works.
+            // Already emitted as files; just need them indexed in
+            // mod.rs.
+            for (stem, struct_name) in &model_param_entries {
+                use crate::dialect::LibraryClass;
+                use crate::ident::ClassId;
+                all_models.push(LibraryClass {
+                    name: ClassId(crate::ident::Symbol::from(struct_name.as_str())),
+                    is_module: false,
+                    parent: None,
+                    includes: Vec::new(),
+                    methods: Vec::new(),
+                    origin: None,
+                });
+                let _ = stem;
+            }
+            files.push(emit_models_mod_rs(&all_models));
+        }
+    }
+
+    // Fixtures — each `<Resource>Fixtures` LibraryClass becomes one
+    // file under `src/fixtures/`. The aggregator `src/fixtures/mod.rs`
+    // declares them so the test harness can reach `ArticleFixtures::
+    // load(...)` style methods.
+    if !fixture_lcs.is_empty() {
+        let mut fixture_entries: Vec<(String, String)> = Vec::new();
+        for lc in &fixture_lcs {
+            let raw = lc.name.0.as_str();
+            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+            let stem = crate::naming::snake_case(
+                struct_name.strip_suffix("Fixtures").unwrap_or(&struct_name),
+            );
+            let body = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => {
+                    panic!("rust2 fixture emit failed for {}: {e}", lc.name.0.as_str());
+                }
+            };
+            // Fixtures reference models; reuse MODEL_IMPORTS.
+            let content = format!("{MODEL_IMPORTS}{body}");
+            files.push(EmittedFile {
+                path: PathBuf::from(format!("src/fixtures/{stem}.rs")),
+                content,
+            });
+            fixture_entries.push((stem, struct_name));
+        }
+        files.push(emit_fixtures_mod_rs(&fixture_entries));
     }
     }); // end with_global_class_methods
 
@@ -519,6 +711,44 @@ fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     }
 }
 
+/// `src/fixtures/mod.rs` aggregator — same shape as the other
+/// per-directory aggregators.
+fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
+    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut entries = entries.to_vec();
+    entries.sort();
+    entries.dedup();
+    for (stem, _) in &entries {
+        lines.push(format!("pub mod {stem};"));
+    }
+    for (stem, name) in &entries {
+        lines.push(format!("pub use {stem}::{name};"));
+    }
+    EmittedFile {
+        path: PathBuf::from("src/fixtures/mod.rs"),
+        content: lines.join("\n") + "\n",
+    }
+}
+
+/// `src/controllers/mod.rs` aggregator — same shape as
+/// `emit_models_mod_rs` / `emit_views_mod_rs`.
+fn emit_controllers_mod_rs(entries: &[(String, String)]) -> EmittedFile {
+    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut entries = entries.to_vec();
+    entries.sort();
+    entries.dedup();
+    for (stem, _) in &entries {
+        lines.push(format!("pub mod {stem};"));
+    }
+    for (stem, name) in &entries {
+        lines.push(format!("pub use {stem}::{name};"));
+    }
+    EmittedFile {
+        path: PathBuf::from("src/controllers/mod.rs"),
+        content: lines.join("\n") + "\n",
+    }
+}
+
 /// Build the cross-LC class-method registry consumed by emit_send's
 /// Const-recv dispatch. Each LC's class methods get folded into a
 /// per-class table keyed by method name; cross-class callers (a
@@ -532,7 +762,10 @@ fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
 fn collect_global_class_methods(
     model_lcs: &[crate::dialect::LibraryClass],
     route_helpers_lc: Option<&crate::dialect::LibraryClass>,
+    importmap_lc: Option<&crate::dialect::LibraryClass>,
     view_lcs: &[crate::dialect::LibraryClass],
+    controller_lcs: &[crate::dialect::LibraryClass],
+    fixture_lcs: &[crate::dialect::LibraryClass],
 ) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>> {
     use crate::dialect::{LibraryClass, MethodReceiver};
     use crate::ty::{ParamKind, Ty};
@@ -578,25 +811,32 @@ fn collect_global_class_methods(
     if let Some(lc) = route_helpers_lc {
         collect_one(lc, &mut out);
     }
+    if let Some(lc) = importmap_lc {
+        collect_one(lc, &mut out);
+    }
     for lc in view_lcs {
+        collect_one(lc, &mut out);
+    }
+    for lc in controller_lcs {
+        collect_one(lc, &mut out);
+    }
+    for lc in fixture_lcs {
         collect_one(lc, &mut out);
     }
     out
 }
 
-/// Build a synthetic `LibraryClass` for `RouteHelpers` from the
-/// route-helper functions produced by `lower_routes_to_library_functions`.
-/// Each `LibraryFunction` becomes a class method (`receiver: Class`)
-/// on a single `RouteHelpers` module-shaped class — that matches the
-/// `RouteHelpers::article_path(...)` call shape the view lowerer
-/// emits. The library-class emit path then takes it through
-/// `emit_module_singleton` automatically (every method is class-
-/// receiver).
-fn route_helpers_library_class(
+/// Build a synthetic `LibraryClass` from a flat list of
+/// `LibraryFunction`s sharing a module path. Each function becomes a
+/// class-receiver method on the synthetic class; the library emit
+/// path handles it via `emit_module_singleton`. Used for
+/// `RouteHelpers` / `Importmap` and analogous module-only outputs
+/// from the per-module lowerers.
+fn module_funcs_to_library_class(
+    name: &str,
     funcs: &[crate::dialect::LibraryFunction],
 ) -> crate::dialect::LibraryClass {
     use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-    use crate::effect::EffectSet;
     use crate::ident::ClassId;
     let methods: Vec<MethodDef> = funcs
         .iter()
@@ -607,14 +847,14 @@ fn route_helpers_library_class(
             body: f.body.clone(),
             signature: f.signature.clone(),
             effects: f.effects.clone(),
-            enclosing_class: Some(crate::ident::Symbol::from("RouteHelpers")),
+            enclosing_class: Some(crate::ident::Symbol::from(name)),
             kind: AccessorKind::Method,
             is_async: f.is_async,
             mutates_self: false,
         })
         .collect();
     LibraryClass {
-        name: ClassId(crate::ident::Symbol::from("RouteHelpers")),
+        name: ClassId(crate::ident::Symbol::from(name)),
         is_module: true,
         parent: None,
         includes: Vec::new(),
