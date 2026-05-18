@@ -862,10 +862,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // the if-expression's type matches the function
                 // return. Otherwise emit the statement-form `if X { Y }`
                 // (returns `()`, OK for void statement context).
+                //
+                // `Some({ then_s })` instead of `Some(then_s)` so a
+                // multi-statement Seq branch (the common case for
+                // lowerer-inlined adapter-find bodies — `let stmt =
+                // …; let mut result = None; … result`) parses: `Some`
+                // takes an expression and a bare statement list isn't
+                // one, but a `{ … }` block evaluating to its tail
+                // expression is. Adds harmless redundant braces for
+                // single-expression branches.
                 let cond_s = emit_expr(cond);
                 let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
                 if in_return_tail() && current_return_is_option() {
-                    return format!("if {cond_s} {{ Some({then_s}) }} else {{ None }}");
+                    return format!("if {cond_s} {{ Some({{ {then_s} }}) }} else {{ None }}");
                 }
                 return format!("if {cond_s} {{ {then_s} }}");
             }
@@ -879,7 +888,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                 let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
                 if in_return_tail() && current_return_is_option() {
                     return format!(
-                        "if !({cond_s}) {{ Some({else_s}) }} else {{ None }}"
+                        "if !({cond_s}) {{ Some({{ {else_s} }}) }} else {{ None }}"
                     );
                 }
                 return format!(
