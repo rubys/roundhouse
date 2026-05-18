@@ -259,22 +259,40 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // run inside `with_global_class_methods` so the Const-recv
     // dispatch in `emit_send` consults the registry as its third
     // fallback.
-    // Use `lower_models_with_registry` (not the simpler
-    // `lower_models_to_library_classes`) so the per-class ClassInfo
-    // is available downstream. View lowering needs it as extras so
-    // the view body-typer can resolve `article.comments()` to
-    // `Vec<Comment>` (and thus dispatch `.size()` / `.each` through
-    // `try_recv_typed_method`'s Ty::Array arm). Without the model
-    // registry feeding the view lowerer, those method chains land
-    // with `recv.ty == None` and the Vec bridges don't fire.
+    // Collect `<Resource>Params` specs from controllers up front so
+    // the model lowerer can synthesize `<Model>::from_params(p:
+    // <Resource>Params)` factories — controller `Model.new
+    // (<resource>_params)` call sites are rewritten to
+    // `Model.from_params(...)` by `rewrite_model_new_to_from_params`,
+    // and the model needs the matching factory for those to resolve.
+    // Mirrors typescript.rs / crystal.rs.
+    let params_specs_full =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs_simple: std::collections::BTreeMap<
+        crate::ident::Symbol,
+        Vec<crate::ident::Symbol>,
+    > = params_specs_full
+        .iter()
+        .map(|(r, s)| (r.clone(), s.fields.clone()))
+        .collect();
+
+    // Use `lower_models_with_registry_and_params` (not the simpler
+    // `lower_models_with_registry`) so the per-class ClassInfo +
+    // params-driven `from_params` factories are wired. View lowering
+    // needs the registry as extras so the view body-typer can resolve
+    // `article.comments()` to `Vec<Comment>` (and thus dispatch
+    // `.size()` / `.each` through `try_recv_typed_method`'s Ty::Array
+    // arm). Without it, those method chains land with `recv.ty ==
+    // None` and the Vec bridges don't fire.
     let (mut model_lcs, model_registry): (
         Vec<crate::dialect::LibraryClass>,
         std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     ) = if !app.models.is_empty() {
-        let (mut lcs, registry) = crate::lower::lower_models_with_registry(
+        let (mut lcs, registry) = crate::lower::lower_models_with_registry_and_params(
             &app.models,
             &app.schema,
             vec![],
+            &params_specs_simple,
         );
         let str_color_registry = crate::analyze::str_color::build_registry(&lcs, &[]);
         crate::analyze::str_color::color_classes(&mut lcs, &str_color_registry);

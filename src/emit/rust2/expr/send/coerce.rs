@@ -92,32 +92,45 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("serde_json::Value::from({raw})");
     }
 
-    // Family 5: Class → owned-Class clone. Callee declares an owned
-    // `Article` param; the caller hands `self` (which is `&Article`
-    // inside an `&self`/`&mut self` instance method) or any local
-    // Var/Ivar whose Rust shape is `&Class` (e.g. a borrowed
-    // function parameter). Without `.clone()` the call site trips
-    // E0308 ("expected `Article`, found `&Article`"). Conservative
-    // firing: SelfRef + Var + Ivar — these always emit as the bare
-    // name without ownership transfer. Const-typed args (`Article`
-    // as a Const, like `Article::new(...)`) already return owned;
-    // Send arms returning owned Class don't need a clone either.
+    // Family 5: owned-T clone for Ivar / Var / SelfRef args feeding
+    // a callee param that takes owned non-Copy T. The caller's
+    // `self.X` Ivar read produces `self.X` (a borrowed-from-&self
+    // place expression); passing it to an owned param trips E0507
+    // ("cannot move out of self.X which is behind a shared
+    // reference") or E0308 ("expected T, found &T"). Inserting
+    // `.clone()` materializes the owned value.
     //
-    // The model lowerer's `broadcasts_to` expansion is the canonical
-    // case: `Articles::article(self, None, None)` inside an `&self`
-    // body. The `Articles::article` view method's first param is
-    // typed `Article` (owned) by the view lowerer's
-    // `build_view_signature`.
-    if let Ty::Class { id: param_id, .. } = param_ty {
-        let arg_class_matches = matches!(
-            arg.ty.as_ref(),
-            Some(Ty::Class { id, .. }) if id == param_id
-        );
-        let arg_is_self_or_local = matches!(
+    // The model lowerer's `broadcasts_to` expansion (`Articles::
+    // article(self, None, None)`) and the controller lowerer's
+    // `<Model>::from_params(self.params)` rewrite are the canonical
+    // cases: the first hands owned Class param; the second hands an
+    // owned HashMap param.
+    //
+    // Conservative firing: only when arg.ty matches the callee's
+    // param ty exactly AND arg is SelfRef/Var/Ivar (always emit as a
+    // borrowed-place reference, not owned). Send arms returning
+    // owned T don't need a clone; Const-typed args don't either.
+    if matches!(
+        param_ty,
+        Ty::Class { .. } | Ty::Hash { .. } | Ty::Array { .. }
+    ) {
+        // Outer-shape match suffices — Hash<Str, Untyped> and
+        // Hash<Str, Class(ParamValue)> both render as
+        // `HashMap<String, serde_json::Value>` at Rust level (since
+        // ParamValue is a type alias for Value). A strict
+        // `arg.ty == param_ty` gate misses these. Class arms still
+        // demand id-equality so `Article` ≠ `Comment` for the clone.
+        let outer_shape_matches = match (param_ty, arg.ty.as_ref()) {
+            (Ty::Class { id: pid, .. }, Some(Ty::Class { id: aid, .. })) => pid == aid,
+            (Ty::Hash { .. }, Some(Ty::Hash { .. })) => true,
+            (Ty::Array { .. }, Some(Ty::Array { .. })) => true,
+            _ => false,
+        };
+        let arg_is_borrowed_place = matches!(
             &*arg.node,
             ExprNode::SelfRef | ExprNode::Var { .. } | ExprNode::Ivar { .. }
         );
-        if arg_class_matches && arg_is_self_or_local {
+        if outer_shape_matches && arg_is_borrowed_place {
             return format!("{raw}.clone()");
         }
     }

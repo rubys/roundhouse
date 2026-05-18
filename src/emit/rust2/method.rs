@@ -435,12 +435,28 @@ pub(super) fn emit_instance_method(
         // with the Self literal. Force-terminate the last user-body
         // line for the constructor case so the appended Self literal
         // is a distinct expression on its own line.
+        // Unit-return tail terminator: when the method returns Nil
+        // (the lowered controller-action shape — actions have no
+        // explicit return; their bodies' tail is `self.render(...)`
+        // returning String), the body's tail expression value would
+        // become the function's return value and trip
+        // "expected `()`, found `String`". Append `;` to discard.
+        // Skips the case where the tail is already a block-shaped
+        // expression (closes with `}`) since those are statements
+        // with no value, or a return statement.
+        let returns_unit = !is_init
+            && matches!(return_ty.as_ref(), Some(Ty::Nil) | None);
+        let needs_unit_terminator = returns_unit
+            && i == last_idx
+            && !line.trim_end().ends_with(';')
+            && !line.trim_end().ends_with('{')
+            && !line.trim_end().ends_with('}');
         let needs_terminator = is_init
             && i == last_idx
             && !line.trim_end().ends_with(';')
             && !line.trim_end().ends_with('{')
             && !line.trim_end().ends_with('}');
-        if needs_terminator {
+        if needs_terminator || needs_unit_terminator {
             writeln!(out, "    {line};").unwrap();
         } else {
             writeln!(out, "    {line}").unwrap();

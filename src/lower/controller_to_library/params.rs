@@ -269,6 +269,7 @@ pub fn synthesize_params_classes(specs: &BTreeMap<Symbol, ParamsSpec>) -> Vec<Li
 
 fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     let mut methods: Vec<MethodDef> = Vec::new();
+    methods.push(synth_params_initialize(&spec.class_id, &spec.fields));
     for field in &spec.fields {
         methods.push(synth_attr_reader(&spec.class_id, field));
         methods.push(synth_attr_writer(&spec.class_id, field));
@@ -286,6 +287,64 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
             resource: spec.resource.clone(),
             fields: spec.fields.clone(),
         }),
+    }
+}
+
+/// `def initialize` — zero-arg constructor that assigns each permitted
+/// field to the empty string. Mirrors `synth_row_initialize` in
+/// `model_to_library/row.rs`: the `from_raw` factory body calls
+/// `instance = new`, then per-field setters; strict-typed targets
+/// (Rust) need the explicit constructor since they don't have the
+/// Ruby/Crystal/TS auto-init-from-attr_accessor convention. All
+/// fields are `Ty::Str` (CGI string-typed) per `synth_attr_reader`'s
+/// rule, so the literal default is consistently `""`.
+fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    let mut stmts: Vec<Expr> = Vec::new();
+    for field in fields {
+        let rhs = Expr {
+            span: Span::synthetic(),
+            node: Box::new(ExprNode::Lit {
+                value: Literal::Str { value: String::new() },
+            }),
+            ty: Some(Ty::Str),
+            effects: EffectSet::default(),
+            leading_blank_line: false,
+            diagnostic: None,
+            str_coercion: None,
+        };
+        stmts.push(Expr {
+            span: Span::synthetic(),
+            node: Box::new(ExprNode::Assign {
+                target: LValue::Ivar { name: field.clone() },
+                value: rhs,
+            }),
+            ty: Some(Ty::Nil),
+            effects: EffectSet::default(),
+            leading_blank_line: false,
+            diagnostic: None,
+            str_coercion: None,
+        });
+    }
+    let body = Expr {
+        span: Span::synthetic(),
+        node: Box::new(ExprNode::Seq { exprs: stmts }),
+        ty: Some(Ty::Nil),
+        effects: EffectSet::default(),
+        leading_blank_line: false,
+        diagnostic: None,
+        str_coercion: None,
+    };
+    MethodDef {
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
     }
 }
 
