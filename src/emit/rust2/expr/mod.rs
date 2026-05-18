@@ -7,10 +7,12 @@
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 
 mod assign;
+mod control;
 mod literal;
 mod send;
 mod util;
 use assign::emit_assign;
+use control::{emit_bool_op, emit_case, emit_if, emit_return, emit_seq, emit_while};
 use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_is_a, emit_string_interp};
 pub(super) use literal::emit_literal;
 use send::{cast_via_value_for_union, coerce_arg_for_field_ty, emit_send};
@@ -211,7 +213,7 @@ fn is_rebound_var(name: &str) -> bool {
     REBOUND_VARS.with(|c| c.borrow().contains(name))
 }
 
-fn mark_rebound_var(name: &str) {
+pub(super) fn mark_rebound_var(name: &str) {
     REBOUND_VARS.with(|c| {
         c.borrow_mut().insert(name.to_string());
     });
@@ -242,7 +244,7 @@ fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
 /// and local declarations to the current Seq — nested blocks shouldn't
 /// leak their bindings outward, and the surrounding emit shouldn't see
 /// declarations from a child Seq.
-fn with_rebound_vars_scope<F, R>(f: F) -> R
+pub(super) fn with_rebound_vars_scope<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -551,7 +553,7 @@ fn collect_var_assign_counts(
     }
 }
 
-fn render_self_literal() -> String {
+pub(super) fn render_self_literal() -> String {
     CONSTRUCTOR_FIELDS.with(|c| {
         let fields = c.borrow();
         if fields.is_empty() {
@@ -805,101 +807,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             path.last().map(|s| s.to_string()).unwrap_or_default()
         }
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            // Ruby `cond ? a : b` and `if cond; a; else b; end` both
-            // lower to `ExprNode::If`. The lowerer also produces this
-            // shape for the modifier forms `STMT if COND` / `STMT
-            // unless COND`, with the absent else branch synthesized
-            // as `Nil`. Two cases trigger statement-form `if cond {
-            // ... }` (no else clause):
-            //   1. then diverges (Return/Raise) AND else is Nil —
-            //      `return X if cond`. The else is dead code after
-            //      the diverging then.
-            //   2. else is Nil (period) — `errors << "msg" if cond`
-            //      style. The implicit else=nil in Ruby returns nil
-            //      from the conditional; in Rust the statement form
-            //      returns `()` from the conditional, which matches
-            //      `Option<...>::None` and statement-position uses
-            //      well enough that it's the right default.
-            // Both-branches-present cases (ternary, `if/else/end`
-            // with non-Nil else) keep the expression form.
-            let else_is_nil = matches!(
-                &*else_branch.node,
-                ExprNode::Lit { value: Literal::Nil }
-            );
-            let then_is_nil = matches!(
-                &*then_branch.node,
-                ExprNode::Lit { value: Literal::Nil }
-            );
-            // Branches inherit the enclosing function's return-tail
-            // flag: an `if/else` in tail position has both branches in
-            // tail position; the cond is not.
-            if else_is_nil {
-                // In the tail position of an `Option<T>`-returning
-                // function, emit `if X { Some(Y) } else { None }` so
-                // the if-expression's type matches the function
-                // return. Otherwise emit the statement-form `if X { Y }`
-                // (returns `()`, OK for void statement context).
-                //
-                // `Some({ then_s })` instead of `Some(then_s)` so a
-                // multi-statement Seq branch (the common case for
-                // lowerer-inlined adapter-find bodies — `let stmt =
-                // …; let mut result = None; … result`) parses: `Some`
-                // takes an expression and a bare statement list isn't
-                // one, but a `{ … }` block evaluating to its tail
-                // expression is. Adds harmless redundant braces for
-                // single-expression branches.
-                let cond_s = emit_expr(cond);
-                let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
-                if in_return_tail() && current_return_is_option() {
-                    // Skip the Some wrap when the inner branch already
-                    // produces an `Option<T>` — Comment#article's
-                    // adapter-find body ends in `result` where rust2
-                    // typed the let-binding `Option<Article>` via
-                    // `none_init_option_return_ty` back-prop. Wrapping
-                    // again would produce `Option<Option<T>>`.
-                    if tail_produces_option(then_branch) {
-                        return format!("if {cond_s} {{ {{ {then_s} }} }} else {{ None }}");
-                    }
-                    return format!("if {cond_s} {{ Some({{ {then_s} }}) }} else {{ None }}");
-                }
-                return format!("if {cond_s} {{ {then_s} }}");
-            }
-            // `STMT unless COND` lowers to `If { cond, then: Nil, else:
-            // STMT }` — emit as the negated single-branch form so the
-            // Nil-vs-Assign branch mismatch (E0308 "if and else have
-            // incompatible types") doesn't surface. Symmetric with
-            // the else_is_nil case above.
-            if then_is_nil {
-                let cond_s = emit_expr(cond);
-                let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
-                if in_return_tail() && current_return_is_option() {
-                    if tail_produces_option(else_branch) {
-                        return format!(
-                            "if !({cond_s}) {{ {{ {else_s} }} }} else {{ None }}"
-                        );
-                    }
-                    return format!(
-                        "if !({cond_s}) {{ Some({{ {else_s} }}) }} else {{ None }}"
-                    );
-                }
-                return format!(
-                    "if !({cond_s}) {{ {else_s} }}"
-                );
-            }
-            // Per-branch DECLARED_VARS scope: each branch's body is a
-            // separate Rust scope, so a `let json = X` in one branch
-            // doesn't carry the binding into the other branch or the
-            // statements after the if. Snapshot/restore around each
-            // branch emit so a subsequent `json = Y` re-emits as
-            // `let json = Y` (first-use-in-the-new-scope) rather than
-            // a bare `json = Y` that fails E0425. Mirrors how Rust
-            // scoping actually works.
-            let cond_s = emit_expr(cond);
-            let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
-            let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
-            format!("if {cond_s} {{ {then_s} }} else {{ {else_s} }}")
-        }
+        ExprNode::If { cond, then_branch, else_branch } => emit_if(cond, then_branch, else_branch),
         ExprNode::Send { recv, method, args, block, .. } => {
             // `recv.each { ... }` on Hash / Vec — Ruby returns the
             // receiver after iterating; Rust has no `each` method on
@@ -1082,176 +990,10 @@ fn emit_expr_inner(e: &Expr) -> String {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("f({})", args_s.join(", "))
         }
-        ExprNode::Seq { exprs } => with_rebound_vars_scope(|| {
-            // Rust statements are `;`-terminated; the last expression
-            // is the block's value (no trailing `;`). Multi-statement
-            // method bodies render natural Rust shape this way. The
-            // tail expression inherits the enclosing function's
-            // return-tail flag (`emit_expr_tail`) so e.g. a bare
-            // `@field` at the end of a getter body becomes
-            // `self.field.clone()`.
-            let mut lines = Vec::with_capacity(exprs.len());
-            let last = exprs.len().saturating_sub(1);
-            let mut i = 0;
-            while i < exprs.len() {
-                // Guard-clause let-else fusion: detect
-                //   let x = OPT;
-                //   if x.nil? { return nil };  (or raise, etc.)
-                //   ... uses of x narrowed to non-nil ...
-                // and emit as
-                //   let Some(x) = OPT else { return None };
-                // The body-typer narrows `x` to non-nil for the
-                // subsequent statements (see body/mod.rs Seq's
-                // diverging-then narrowing), but `let mut x = OPT`
-                // in Rust source still types as `Option<T>` and
-                // subsequent reads fail E0308. The let-else form
-                // hands Rust the same narrowing the body-typer has
-                // already proven, no `.unwrap()` or rebind required.
-                if i + 1 <= last {
-                    if let Some((name, rendered)) = try_fuse_let_else(&exprs[i], &exprs[i + 1]) {
-                        mark_rebound_var(&name);
-                        lines.push(format!("{rendered};"));
-                        i += 2;
-                        continue;
-                    }
-                }
-                // Standalone guard-clause unwrap: a Seq stmt of the
-                // form `if x.nil? { return Y }` (or raise) where `x`
-                // is a Var. The body-typer narrows `x` to non-nil for
-                // subsequent statements, but in Rust source `x` is
-                // still `Option<T>` — subsequent `x.method()` calls
-                // fail. Rewrite to `let Some(x) = x else { return Y; };`
-                // — rebinds `x` to the unwrapped value, matching the
-                // body-typer's narrowing.
-                if let Some((name, rendered)) = try_emit_param_guard_unwrap(&exprs[i]) {
-                    mark_rebound_var(&name);
-                    lines.push(format!("{rendered};"));
-                    i += 1;
-                    continue;
-                }
-                let e = &exprs[i];
-                // Trailing `nil` in a void-return Ruby method
-                // (`@x = y; nil` shape) — Lit::Nil emits as `None`
-                // (Option::None constructor), which fails E0308 in a
-                // function declared `-> ()`. Drop the trailing Nil
-                // entirely; Rust functions implicitly return `()` at
-                // the end of a block.
-                if i == last
-                    && current_return_is_unit()
-                    && matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
-                {
-                    if !lines.is_empty() {
-                        let last_line = lines.last_mut().unwrap();
-                        if !last_line.ends_with(';') {
-                            last_line.push(';');
-                        }
-                    }
-                    i += 1;
-                    continue;
-                }
-                let s = if i == last {
-                    emit_expr_tail(e)
-                } else {
-                    emit_expr(e)
-                };
-                if i == last {
-                    lines.push(s);
-                } else {
-                    lines.push(format!("{s};"));
-                }
-                i += 1;
-            }
-            lines.join("\n")
-        }),
+        ExprNode::Seq { exprs } => emit_seq(exprs),
         ExprNode::Assign { target, value } => emit_assign(target, value),
-        ExprNode::Return { value } => {
-            let is_nil = matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
-            // Constructor early returns produce `Self { fields }` —
-            // Ruby's `return if cond` lowers to `Return { Nil }`, but
-            // a `pub fn new(...) -> Self` body returning bare `()`
-            // wouldn't typecheck. Explicit `return <expr>` keeps its
-            // value (callers wanting different early-return values
-            // can still write `return Self::new(...)` etc).
-            if in_constructor() && is_nil {
-                return format!("return {}", render_self_literal());
-            }
-            if is_nil {
-                // `return nil` in a method declared `-> T?` (lowered
-                // as `Option<T>`) must emit `return None`; bare
-                // `return` is E0069 outside `() / Unit` returns. Plain
-                // `return` is still correct for `void` Ruby methods
-                // (RBS `-> void` lowers to `Ty::Nil` → Rust `()`).
-                if current_return_is_option() {
-                    "return None".to_string()
-                } else {
-                    "return".to_string()
-                }
-            } else {
-                // String-literal return value in a String-returning
-                // function: append `.to_string()`. The literal emits as
-                // `&'static str` but the function signature is `String`.
-                // This handles `return "" if X.nil?` patterns in
-                // encode_string / encode_datetime where the early-exit
-                // string needs to match the return type.
-                //
-                // Skip when `analyze::str_color` already annotated the
-                // value — the new pass owns return-value ownership
-                // coloring; double-applying the peephole would yield
-                // `(value).to_string().to_string()`.
-                let str_color_handled = value.str_coercion.is_some();
-                let needs_to_string = !str_color_handled
-                    && matches!(
-                        &*value.node,
-                        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-                    )
-                    && CURRENT_RETURN_TY.with(|c| {
-                        matches!(
-                            c.borrow().as_ref(),
-                            Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
-                        )
-                    });
-                // `return self` in a method declared `-> Base` (owned
-                // return). `self` is `&self` / `&mut self`; bare emit
-                // produces `return self` typed as `&Base` /
-                // `&mut Base`. Clone to satisfy the owned return type.
-                let needs_self_clone = matches!(&*value.node, ExprNode::SelfRef)
-                    && CURRENT_RETURN_TY.with(|c| {
-                        matches!(c.borrow().as_ref(), Some(crate::ty::Ty::Class { .. }))
-                    });
-                // `return X` in an Option<T>-returning fn where X is
-                // typed T (non-Option). The body-typer never inserts
-                // Some-wrap; it's emit's job. Without this, an
-                // `unless cond; return MatchResult.new(...); end` in
-                // router.rb fails with "expected Option<MatchResult>,
-                // found MatchResult".
-                let needs_some_wrap = current_return_is_option()
-                    && match value.ty.as_ref() {
-                        Some(t) if !is_option_ty(t) => true,
-                        None => false,
-                        _ => false,
-                    };
-                if needs_to_string {
-                    format!("return {}.to_string()", emit_expr_tail(value))
-                } else if needs_self_clone {
-                    "return self.clone()".to_string()
-                } else if needs_some_wrap {
-                    format!("return Some({})", emit_expr_tail(value))
-                } else {
-                    format!("return {}", emit_expr_tail(value))
-                }
-            }
-        }
-        ExprNode::While { cond, body, until_form } => {
-            // Rust has no `until`; rewrite to `while !cond` for parity.
-            let cond_s = emit_expr(cond);
-            let body_s = emit_expr(body);
-            let cond_clause = if *until_form {
-                format!("!({cond_s})")
-            } else {
-                cond_s
-            };
-            format!("while {cond_clause} {{\n{}\n}}", indent(&body_s, 1))
-        }
+        ExprNode::Return { value } => emit_return(value),
+        ExprNode::While { cond, body, until_form } => emit_while(cond, body, *until_form),
         ExprNode::Hash { entries, .. } => emit_hash(entries),
         ExprNode::Array { elements, .. } => emit_array(elements),
         ExprNode::Range { begin, end, exclusive } => {
@@ -1277,126 +1019,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             }
             format!("{b}{op}{e}")
         }
-        ExprNode::BoolOp { op, left, right, .. } => {
-            // Ruby `a && b` / `a || b` are truthy-on-non-nil-non-false,
-            // not bool-typed. Rust's `||` / `&&` are bool-only — direct
-            // emit only works when both operands are already Ty::Bool.
-            //
-            // For `Or` with a non-bool LHS, the idiomatic Ruby use is
-            // "default value if LHS is nil/missing": `a || b` →
-            //   - LHS Option<T>: `a.unwrap_or(b)`
-            //   - LHS non-Option (String/Int/Class instance): `a`
-            //     alone (Ruby's non-nil values are all truthy, so the
-            //     RHS branch is unreachable when LHS is statically
-            //     non-null)
-            //
-            // For `And`, the result-of-a-truthy-chain idiom is less
-            // common; keep the literal `&&` for bool LHS and otherwise
-            // fall back to evaluating LHS-then-RHS via Rust's `if let`
-            // shape would be involved — for now keep the literal form
-            // and let bool cases work; non-bool `And` is exotic enough
-            // to surface separately.
-            if matches!(op, crate::expr::BoolOpKind::Or) {
-                let lhs_is_option = matches!(
-                    left.ty.as_ref(),
-                    Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-                );
-                let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
-                if lhs_is_option {
-                    // `hash[k] || default` — the body-typer types
-                    // `hash[k]` as `Option<V>` (nil-on-miss), but
-                    // rust2 emits `Send { method: "[]" }` as the Rust
-                    // `Index` form `hash[k]` (panic-on-miss, returns
-                    // `&V`). The Or rewrite's `.unwrap_or(default)`
-                    // would call unwrap_or on a `V`, not Option<V>.
-                    // Detect the pattern and emit
-                    //   `recv.get(k).cloned().unwrap_or(default)`
-                    // directly — actually produces Option<V> the body-
-                    // typer promised. Peel the recv's Union<Hash, Nil>
-                    // (module-singleton ivars get widened by the flow-
-                    // typer).
-                    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*left.node {
-                        if method.as_str() == "[]"
-                            && args.len() == 1
-                            && matches!(
-                                r.ty.as_ref().map(peel_nil),
-                                Some(crate::ty::Ty::Hash { .. })
-                            )
-                        {
-                            let recv_s = emit_expr(r);
-                            let key_s = emit_expr(&args[0]);
-                            // Hash<_, Untyped> recv → `.get(k).cloned()`
-                            // returns `Option<serde_json::Value>`. A
-                            // primitive default (literal int / bool /
-                            // string) needs `serde_json::Value::from(...)`
-                            // to type-unify. Closes the
-                            // `attrs[:id] || 0` shape in lowered model
-                            // bodies (`self.id = attrs[:id] || 0` →
-                            // `self.set_id(attrs.get("id").cloned()
-                            // .unwrap_or(serde_json::Value::from(0)))`).
-                            let value_ty_untyped = matches!(
-                                r.ty.as_ref().map(peel_nil),
-                                Some(crate::ty::Ty::Hash { value, .. })
-                                    if matches!(value.as_ref(), crate::ty::Ty::Untyped)
-                            );
-                            // String default literal -> `.to_string()`
-                            // so unwrap_or's arg type matches the
-                            // Option's inner type (HashMap<String, String>
-                            // → Option<String>, default must be String).
-                            // Defer to `analyze::str_color` when it's
-                            // already annotated the literal (Phase 2 tail
-                            // propagation from the BoolOp's surrounding
-                            // expectation); double-applying produces
-                            // `("").to_string().to_string()`.
-                            let default_s = if value_ty_untyped {
-                                coerce_to_value_default(right, emit_expr(right))
-                            } else {
-                                match &*right.node {
-                                    ExprNode::Lit { value: Literal::Str { .. } }
-                                        if right.str_coercion.is_none() =>
-                                    {
-                                        format!("{}.to_string()", emit_expr(right))
-                                    }
-                                    _ => emit_expr(right),
-                                }
-                            };
-                            return format!(
-                                "{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"
-                            );
-                        }
-                    }
-                    // `Option<Untyped>` (Value) `||` literal — the
-                    // default needs to be `Value`-shaped. Closes the
-                    // `form_class || "button_to"` shape and any other
-                    // Option<Value>.unwrap_or(<primitive>) site.
-                    let lhs_inner_untyped = matches!(
-                        left.ty.as_ref().map(peel_nil),
-                        Some(crate::ty::Ty::Untyped)
-                    );
-                    let rhs_s = emit_expr(right);
-                    let default_s = if lhs_inner_untyped {
-                        coerce_to_value_default(right, rhs_s)
-                    } else {
-                        rhs_s
-                    };
-                    return format!(
-                        "{}.unwrap_or({})",
-                        emit_expr(left),
-                        default_s,
-                    );
-                }
-                if !lhs_is_bool && left.ty.is_some() {
-                    // Statically non-nil — RHS is unreachable in Ruby
-                    // semantics. Drop it.
-                    return emit_expr(left);
-                }
-            }
-            let op_s = match op {
-                crate::expr::BoolOpKind::And => "&&",
-                crate::expr::BoolOpKind::Or => "||",
-            };
-            format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
-        }
+        ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(op, left, right),
         // `case scrutinee; when Pat; body; …; end` → Rust `match`.
         // Used by the model lowerer's `synth_index_read` /
         // `synth_index_write` (get_index / set_index), which dispatch
@@ -1415,40 +1038,7 @@ fn emit_expr_inner(e: &Expr) -> String {
         // primitive (an Ivar read of `String`/`i64`/etc.); wrap with
         // `serde_json::Value::from(...)` so the match unifies on
         // `Value` regardless of which arm fired.
-        ExprNode::Case { scrutinee, arms } => {
-            let scrutinee_s = emit_expr(scrutinee);
-            let return_ty = CURRENT_RETURN_TY.with(|c| c.borrow().clone());
-            let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
-            let arm_strs: Vec<String> = arms
-                .iter()
-                .map(|arm| {
-                    let pat_s = emit_case_pattern(&arm.pattern);
-                    // Emit the arm body via `emit_expr_tail` so the
-                    // Ivar arm sees `IN_RETURN_TAIL=true` and adds
-                    // `.clone()` for non-Copy fields. Without that,
-                    // `Value::from(self.body)` in the wrapped form
-                    // below moves out of `&self.body` (E0507).
-                    let body_s = emit_expr_tail(&arm.body);
-                    let body_wrapped = if return_is_value
-                        && !arm_body_already_value(&arm.body)
-                    {
-                        format!("serde_json::Value::from({body_s})")
-                    } else {
-                        body_s
-                    };
-                    format!("        {pat_s} => {{ {body_wrapped} }}")
-                })
-                .collect();
-            let default_arm = if return_is_value {
-                "serde_json::Value::Null".to_string()
-            } else {
-                "()".to_string()
-            };
-            format!(
-                "match {scrutinee_s} {{\n{}\n        _ => {default_arm},\n    }}",
-                arm_strs.join(",\n"),
-            )
-        }
+        ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
         // `Cast { value, target_ty }` — explicit type narrowing the
         // model lowerer emits at adapter-row sites. The lowerer's
         // `synth_from_row` wraps each `row.<col>` accessor with a
@@ -1482,165 +1072,12 @@ fn emit_expr_inner(e: &Expr) -> String {
     }
 }
 
-/// Detect a standalone Ruby guard-clause on a Var/param:
-///   return X if name.nil?
-/// (or `raise X if name.nil?`). The body-typer narrows `name` to
-/// non-nil for subsequent statements via the diverging-then narrowing
-/// in Seq, but in Rust source `name` is still `Option<T>` from its
-/// parameter declaration / earlier let. Emit
-///   let Some(name) = name else { <then-branch> };
-/// which rebinds `name` to the unwrapped value — matches the body-
-/// typer's narrowing without changing the param signature.
-///
-/// Distinct from `try_fuse_let_else`: that helper handles `let x =
-/// OPT; if x.nil? { ... }` (assign-then-guard). This one handles a
-/// guard alone, where the unwrapped binding is a function param or
-/// previously-introduced local.
-fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
-    use crate::ty::Ty;
-    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
-        return None;
-    };
-    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
-        return None;
-    };
-    if method.as_str() != "nil?" || !args.is_empty() {
-        return None;
-    }
-    let ExprNode::Var { name: var_name, .. } = &*cond_recv.node else {
-        return None;
-    };
-    let recv_is_option = matches!(
-        cond_recv.ty.as_ref(),
-        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
-    );
-    if !recv_is_option {
-        return None;
-    }
-    let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
-    let else_is_nil = matches!(
-        &*else_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
-    );
-    if !then_diverges || !else_is_nil {
-        return None;
-    }
-    let diverge_s = emit_expr_tail(then_branch);
-    let n = var_name.as_str().to_string();
-    Some((
-        n.clone(),
-        format!("let Some({n}) = {n} else {{ {diverge_s} }}"),
-    ))
-}
-
-/// Detect the Ruby idiom
-///   x = OPT
-///   return ... if x.nil?
-/// (or `raise ... if x.nil?`) — two adjacent Seq statements where the
-/// first assigns a local from an Option-typed expression and the
-/// second is a guard `if` whose then-branch diverges and whose
-/// else-branch is empty. Emit as
-///   let Some(x) = <opt> else { <then-branch> };
-/// The body-typer's flow-narrowing already proves the rest of the
-/// block sees `x` as non-nil; let-else gives Rust the same shape
-/// without an extra `.unwrap()` rebind.
-fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
-    use crate::ty::Ty;
-    // Stmt 0 must be a let assignment to a local Var whose RHS has
-    // Option-shaped type (Union<T, Nil>).
-    let ExprNode::Assign { target, value } = &*assign.node else {
-        return None;
-    };
-    let LValue::Var { name: assign_name, .. } = target else {
-        return None;
-    };
-    let value_is_option = matches!(
-        value.ty.as_ref(),
-        Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
-    );
-    if !value_is_option {
-        return None;
-    }
-
-    // Stmt 1 must be an If whose:
-    //   - cond is `<assign_name>.nil?`
-    //   - then-branch diverges (typed Bottom — Return/Raise produce that)
-    //   - else-branch is Nil-shaped (empty, the `if cond; ...; end` form)
-    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
-        return None;
-    };
-    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
-        return None;
-    };
-    if method.as_str() != "nil?" || !args.is_empty() {
-        return None;
-    }
-    let ExprNode::Var { name: cond_name, .. } = &*cond_recv.node else {
-        return None;
-    };
-    if cond_name != assign_name {
-        return None;
-    }
-    let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
-    let else_is_nil = matches!(
-        &*else_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
-    );
-    if !then_diverges || !else_is_nil {
-        return None;
-    }
-
-    let value_s = emit_expr(value);
-    // The then-branch is divergent — its emit shape is a Return/Raise
-    // statement. `emit_expr_tail` produces e.g. `return None` or
-    // `panic!(...)`; either works as the body of a let-else block.
-    let diverge_s = emit_expr_tail(then_branch);
-    let n = assign_name.as_str().to_string();
-    Some((
-        n.clone(),
-        format!("let Some({n}) = {value_s} else {{ {diverge_s} }}"),
-    ))
-}
-
-
-/// Wrap a literal/Var default with `serde_json::Value::from(...)`
-/// when it's going to be passed to an `unwrap_or` on an
-/// `Option<serde_json::Value>`. Skip the wrap when the expression
-/// already produces a `Value`. Used by the BoolOp::Or peepholes for
-/// `hash[k] || default` against `Hash<_, Untyped>` recvs (lowered
-/// model bodies' `attrs[:col] || 0` style) and the
-/// Option<Untyped>.unwrap_or-literal catch-all.
-fn coerce_to_value_default(default_expr: &Expr, raw: String) -> String {
-    use crate::ty::Ty;
-    let primitive = matches!(
-        default_expr.ty.as_ref(),
-        Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
-    ) || matches!(
-        &*default_expr.node,
-        ExprNode::Lit {
-            value: Literal::Str { .. }
-                | Literal::Sym { .. }
-                | Literal::Int { .. }
-                | Literal::Float { .. }
-                | Literal::Bool { .. }
-        }
-    );
-    if primitive {
-        format!("serde_json::Value::from({raw})")
-    } else {
-        raw
-    }
-}
-
-/// If `arg` is a Var (possibly wrapped in `.clone()`) with a
-/// recorded Hash local_var_ty, return (K, V). Used by the
-/// `Self::method` callee-back-propagation in emit_send: when the
-/// callee's param is `Hash<_, Untyped>` we need to know the arg's
-/// local-typed shape to decide whether to insert the value-coercion
-/// transform.
+/// If `arg` is a Var (possibly wrapped in `.clone()`) with a recorded
+/// Hash local_var_ty, return (K, V). Used by send.rs's Self::method
+/// callee-back-propagation: when the callee's param is `Hash<_,
+/// Untyped>` we need to know the arg's local-typed shape to decide
+/// whether to insert the value-coercion transform.
 pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
-    // Peel one `.clone()` shell: the rust2 auto-clone-on-multi-read
-    // path produces `name.clone()` for some Var reads.
     let inner: &Expr = match &*arg.node {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if method.as_str() == "clone" && args.is_empty() =>
@@ -1659,22 +1096,16 @@ pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate:
     }
 }
 
-/// If `recv` is a Var whose `local_var_ty` was set via
-/// back-propagation (`empty_hash_return_ty`), return its (K, V)
-/// types. Gated on the back-propagation set so the Send `[]=`
-/// peephole only coerces args when the recorded type is
-/// authoritative — body-typer-derived types may disagree with the
-/// emit's actual storage (e.g. `Hash<Sym, Str>` in IR but `HashMap<
-/// &str, String>` in emit for a `{action: …, method: "post"}.to_h`
-/// literal).
+/// If `recv` is a Var whose `local_var_ty` was set via back-propagation
+/// (`empty_hash_return_ty` in assign.rs), return its (K, V) types.
+/// Gated on the back-propagation set so the Send `[]=` peephole only
+/// coerces args when the recorded type is authoritative.
 pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
     let name = match &*recv.node {
         ExprNode::Var { name, .. } => name.as_str().to_string(),
         _ => return None,
     };
-    let is_back_propagated =
-        BACK_PROPAGATED_HASH_LOCALS.with(|c| c.borrow().contains(&name));
-    if !is_back_propagated {
+    if !is_back_propagated_hash(&name) {
         return None;
     }
     match local_var_ty(&name)? {
@@ -1683,75 +1114,15 @@ pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty
     }
 }
 
-
-
 /// Snapshot the DECLARED_VARS set, run `f`, then restore the snapshot.
 /// Used around each If/While/loop branch's body emit so a `let x = …`
 /// inside one branch doesn't suppress the `let` on a fresh `x = …` in
 /// the next branch or after the if. Rust scopes are per-block; the
-/// emit tracker mirrors that with this stack-like wrap.
+/// emit tracker mirrors that.
 pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
     let snapshot = DECLARED_VARS.with(|c| c.borrow().clone());
     let r = f();
     DECLARED_VARS.with(|c| *c.borrow_mut() = snapshot);
     r
 }
-
-/// True when the branch's tail expression — after walking through a
-/// trailing `Seq` — is a Var read whose recorded `local_var_ty` is
-/// already `Option<T>`. Used by the tail-position Some-wrap to avoid
-/// re-wrapping an Option-shaped value into `Option<Option<T>>` (the
-/// belongs_to-method body's `result` accumulator pattern: rust2's
-/// `none_init_option_return_ty` back-prop typed `let mut result:
-/// Option<Article> = None`, so the Seq's tail Var read already
-/// produces `Option<Article>`).
-///
-/// Walks one Seq level (the lowerer's belongs_to bodies wrap the
-/// adapter-find sequence in a single Seq); nested Seqs aren't
-/// expected. Returns false on any non-Var tail to keep the Some-wrap
-/// firing for the literal/expression branch shapes that genuinely
-/// need it (`if x then 5 else nil end`-style).
-fn tail_produces_option(branch: &Expr) -> bool {
-    // Identify the tail Var name (single-level Seq peel, plus direct
-    // `Var`-as-branch). LOCAL_VAR_TYPES at this point has already
-    // been scope-restored by the Seq's `with_rebound_vars_scope`, so
-    // we can't read it back — instead walk the Seq's stmts for the
-    // `Assign { Var{name}, Nil }` pattern that triggered
-    // `none_init_option_return_ty`'s back-prop during emit. When that
-    // assign is present AND the function returns `Option<_>`, the
-    // emitted let-binding annotated the var as `Option<T>` and every
-    // subsequent rebind landed there — so the tail Var read produces
-    // `Option<T>`.
-    let (tail_name, exprs) = match &*branch.node {
-        ExprNode::Seq { exprs } => match exprs.last() {
-            Some(last) => match &*last.node {
-                ExprNode::Var { name, .. } => (Some(name.as_str().to_string()), exprs.as_slice()),
-                _ => return false,
-            },
-            None => return false,
-        },
-        ExprNode::Var { name, .. } => (Some(name.as_str().to_string()), &[] as &[Expr]),
-        _ => return false,
-    };
-    let Some(name) = tail_name else { return false };
-    if !current_return_is_option() {
-        return false;
-    }
-    // Single-Var-as-branch can't carry the init pattern alone — the
-    // Var was bound somewhere in the enclosing scope. Without local_
-    // var_ty we don't know whether it's Option-typed; play it safe
-    // and assume it is (matches the lowerer's accumulator shape).
-    if exprs.is_empty() {
-        return true;
-    }
-    exprs.iter().any(|e| matches!(
-        &*e.node,
-        ExprNode::Assign {
-            target: crate::expr::LValue::Var { name: assign_name, .. },
-            value,
-        } if assign_name.as_str() == name
-            && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
-    ))
-}
-
 
