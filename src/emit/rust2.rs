@@ -224,18 +224,29 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // run inside `with_global_class_methods` so the Const-recv
     // dispatch in `emit_send` consults the registry as its third
     // fallback.
-    let mut model_lcs: Vec<crate::dialect::LibraryClass> = if !app.models.is_empty() {
-        let mut lcs = crate::lower::lower_models_to_library_classes(
+    // Use `lower_models_with_registry` (not the simpler
+    // `lower_models_to_library_classes`) so the per-class ClassInfo
+    // is available downstream. View lowering needs it as extras so
+    // the view body-typer can resolve `article.comments()` to
+    // `Vec<Comment>` (and thus dispatch `.size()` / `.each` through
+    // `try_recv_typed_method`'s Ty::Array arm). Without the model
+    // registry feeding the view lowerer, those method chains land
+    // with `recv.ty == None` and the Vec bridges don't fire.
+    let (mut model_lcs, model_registry): (
+        Vec<crate::dialect::LibraryClass>,
+        std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    ) = if !app.models.is_empty() {
+        let (mut lcs, registry) = crate::lower::lower_models_with_registry(
             &app.models,
             &app.schema,
             vec![],
         );
-        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        let str_color_registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &str_color_registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
-        lcs
+        (lcs, registry)
     } else {
-        Vec::new()
+        (Vec::new(), std::collections::HashMap::new())
     };
 
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
@@ -250,7 +261,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     };
 
     let mut view_lcs: Vec<crate::dialect::LibraryClass> = if !app.views.is_empty() {
-        let raw_lcs = crate::lower::lower_views_to_library_classes(&app.views, app, vec![]);
+        // Seed the view lowerer's body-typer with the model registry
+        // + route_helpers function signatures so cross-class method
+        // dispatch (`article.comments()` → Vec<Comment>) types
+        // through. Without this, the view body-typer flatters every
+        // model-method recv as Untyped and downstream recv-typed
+        // method bridges (Vec.size/each, Hash.size, etc.) miss.
+        let mut view_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+            model_registry.clone().into_iter().collect();
+        view_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
+        let raw_lcs = crate::lower::lower_views_to_library_classes(&app.views, app, view_extras);
         let mut merged: std::collections::BTreeMap<String, crate::dialect::LibraryClass> =
             std::collections::BTreeMap::new();
         for lc in raw_lcs {
@@ -346,6 +366,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn save(&mut self) -> bool {{ self.validate(); true }}\n\
                         pub fn destroy(&mut self) {{ self._adapter_delete(); }}\n\
                         pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
+                        pub fn persisted(&self) -> bool {{ self.id != 0 }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 )

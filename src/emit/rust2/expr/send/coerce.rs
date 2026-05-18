@@ -92,6 +92,36 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("serde_json::Value::from({raw})");
     }
 
+    // Family 5: Class → owned-Class clone. Callee declares an owned
+    // `Article` param; the caller hands `self` (which is `&Article`
+    // inside an `&self`/`&mut self` instance method) or any local
+    // Var/Ivar whose Rust shape is `&Class` (e.g. a borrowed
+    // function parameter). Without `.clone()` the call site trips
+    // E0308 ("expected `Article`, found `&Article`"). Conservative
+    // firing: SelfRef + Var + Ivar — these always emit as the bare
+    // name without ownership transfer. Const-typed args (`Article`
+    // as a Const, like `Article::new(...)`) already return owned;
+    // Send arms returning owned Class don't need a clone either.
+    //
+    // The model lowerer's `broadcasts_to` expansion is the canonical
+    // case: `Articles::article(self, None, None)` inside an `&self`
+    // body. The `Articles::article` view method's first param is
+    // typed `Article` (owned) by the view lowerer's
+    // `build_view_signature`.
+    if let Ty::Class { id: param_id, .. } = param_ty {
+        let arg_class_matches = matches!(
+            arg.ty.as_ref(),
+            Some(Ty::Class { id, .. }) if id == param_id
+        );
+        let arg_is_self_or_local = matches!(
+            &*arg.node,
+            ExprNode::SelfRef | ExprNode::Var { .. } | ExprNode::Ivar { .. }
+        );
+        if arg_class_matches && arg_is_self_or_local {
+            return format!("{raw}.clone()");
+        }
+    }
+
     if matches!(param_ty, Ty::Str | Ty::Sym) && arg.str_coercion.is_none() {
         // Peek through `Cast` wrappers — the model lowerer wraps row
         // accessors in `Cast { Send(row.col), col_ty }` to bridge

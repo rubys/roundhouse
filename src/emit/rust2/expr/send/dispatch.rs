@@ -59,7 +59,7 @@ pub(super) fn dispatch_method_by_recv_ty(
     args: &[Expr],
 ) -> Option<String> {
     use crate::ty::Ty;
-    let recv_s = emit_expr(recv);
+    let raw_recv_s = emit_expr(recv);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Peel `Union<T, Nil>` to `T` for dispatch. The body-typer reports
     // Ruby's nil-on-miss shape but rust2 emits panic-on-miss, so the
@@ -67,6 +67,65 @@ pub(super) fn dispatch_method_by_recv_ty(
     // would miss every `let x = arr[i]` binding (whose recorded Ty is
     // `Union<Str, Nil>`).
     let recv_ty = recv.ty.as_ref().map(peel_nil);
+    // The Rust binding for a Var recv may be `Option<T>` even when
+    // the body-typer already narrowed e.ty to `T` (after `if !x
+    // .nil?`). Without unwrap, `notice.is_empty()` on
+    // `notice: Option<String>` raises E0599. Gate on the PARAM_TYPES/
+    // LOCAL_VAR_TYPES side so only true Option-typed locals get the
+    // unwrap — `let pp = vec[i].clone()` records `Ty::Str` in
+    // LOCAL_VAR_TYPES (the assignment unwraps the body-typer's
+    // `Option<String>` Hash/Array index Ty), so dispatch on pp
+    // skips the wrap.
+    // The view lowerer emits a bare param read as `Send { recv: None,
+    // method: X, args: [] }` (Ruby implicit-self). At emit time the
+    // param-shadow check in `emit_send` rewrites it back to a Var
+    // read, but as a *recv* the shape is still the Send node. Treat
+    // both shapes as Var-like for the binding-is-Option check.
+    let var_name: Option<&str> = match &*recv.node {
+        ExprNode::Var { name, .. } => Some(name.as_str()),
+        ExprNode::Send { recv: None, method, args, .. } if args.is_empty() => {
+            let n = method.as_str();
+            if super::super::param_ty(n).is_some() {
+                Some(n)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    // Only insert `.clone().unwrap()` here when the Var emit DIDN'T
+    // already do so. Var emit's narrowing-write-back at expr/mod.rs
+    // fires when `e.ty` is the narrowed type (T) but the declared
+    // binding is `Option<T>` — and produces `name.clone().unwrap()`.
+    // If recv.ty matches the declared binding (still Option), Var
+    // emit didn't unwrap and we need to. If recv.ty equals the
+    // peeled type, Var emit already unwrapped and we'd be doubling.
+    // Only check PARAM_TYPES (not LOCAL_VAR_TYPES) here: function
+    // params are declared with their exact Rust signature, so
+    // `param_ty("notice") = Option<String>` faithfully reflects the
+    // runtime binding. LOCAL_VAR_TYPES, by contrast, stores the
+    // body-typer view at assign time — which says `Option<T>` for a
+    // `let x = arr[i].clone()` even though rust2's emit unwraps at
+    // assign time to make x a plain `String`. Including locals here
+    // would double-unwrap (`pp.clone().clone().unwrap()` on a
+    // String-typed pp in router.rs).
+    let binding_is_option = match var_name {
+        Some(n) => {
+            let declared = super::super::param_ty(n);
+            let is_opt = matches!(declared, Some(ref t) if super::super::util::is_option_ty(t));
+            let still_option_at_recv = matches!(
+                recv.ty.as_ref(),
+                Some(t) if super::super::util::is_option_ty(t)
+            );
+            is_opt && still_option_at_recv
+        }
+        None => false,
+    };
+    let recv_s = if binding_is_option {
+        format!("({raw_recv_s}.clone().unwrap())")
+    } else {
+        raw_recv_s
+    };
     match recv_ty {
         Some(Ty::Array { .. }) => match method {
             "size" | "length" | "count" if args.is_empty() => {
