@@ -352,6 +352,18 @@ fn method_reads_self(body: &Expr) -> bool {
                     || end.as_ref().map(|e| walk(e)).unwrap_or(false)
             }
             ExprNode::Yield { args } => args.iter().any(walk),
+            // `case scrutinee; when …; body; end` — the per-arm
+            // bodies + scrutinee can reach self via Ivar reads or
+            // direct self-references. Lowerer-synthesized
+            // `get_index` / `set_index` are the canonical case
+            // (each arm reads/writes a `@col` Ivar); without this
+            // arm both methods misclassified as static and emitted
+            // without a `&self` receiver, blowing every Ivar
+            // reference into E0424.
+            ExprNode::Case { scrutinee, arms } => {
+                walk(scrutinee) || arms.iter().any(|a| walk(&a.body))
+            }
+            ExprNode::Cast { value, .. } => walk(value),
             _ => false,
         }
     }

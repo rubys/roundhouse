@@ -596,6 +596,42 @@ fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::ty::Ty>> {
         .with(|c| c.borrow().get(method).cloned())
 }
 
+/// Emit a Case `Pattern` as a Rust `match` arm pattern. The
+/// lowerer-synthesized `synth_index_read`/`synth_index_write` use
+/// `Pattern::Lit { value: Symbol }` against an `&str`-typed
+/// scrutinee — emit as a string-literal pattern. Other shapes fall
+/// through to `_` until they're needed.
+fn emit_case_pattern(p: &crate::expr::Pattern) -> String {
+    use crate::expr::Pattern;
+    match p {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Lit { value } => match value {
+            Literal::Str { value } => format!("{value:?}"),
+            Literal::Sym { value } => format!("{:?}", value.as_str()),
+            Literal::Int { value } => value.to_string(),
+            Literal::Bool { value } => value.to_string(),
+            Literal::Nil => "_".to_string(),
+            _ => "_".to_string(),
+        },
+        Pattern::Bind { name } => name.as_str().to_string(),
+        _ => "_".to_string(),
+    }
+}
+
+/// True when an arm body's emit is already `Value`-shaped (Ivar
+/// read in a class whose field is typed `Untyped`, or a Send
+/// already wrapped with `Value::from`). Conservative — over-wraps
+/// won't cause a type error since `Value::from(Value)` doesn't
+/// impl, so we only skip the wrap on the shapes that emit_expr
+/// has already coerced.
+fn arm_body_already_value(body: &Expr) -> bool {
+    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+        || matches!(
+            &*body.node,
+            ExprNode::Lit { value: Literal::Nil }
+        )
+}
+
 /// Synthesize a default-value Rust expression for a missing arg
 /// position. Mirrors the Ruby default-arg semantics for the
 /// shapes the lowerer-synthesized constructors use (`attrs = {}`
@@ -1360,18 +1396,84 @@ fn emit_expr_inner(e: &Expr) -> String {
             };
             format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
         }
+        // `case scrutinee; when Pat; body; …; end` → Rust `match`.
+        // Used by the model lowerer's `synth_index_read` /
+        // `synth_index_write` (get_index / set_index), which dispatch
+        // on a Symbol-typed `name` param against per-column literal
+        // patterns. The scrutinee's rust2 storage is `&str` (Sym
+        // params lower to `&str`), so Sym-literal patterns emit as
+        // `"name"` string literals.
+        //
+        // Wildcard arm: synthesized based on the enclosing return
+        // type — `Value::Null` for `Value`-returning fns
+        // (`get_index`), `()` for unit-returning fns (`set_index`).
+        // Without an `_` arm, the match isn't exhaustive over `&str`
+        // and Rust rejects with E0004.
+        //
+        // For `Value`-returning fns each arm's body is a concrete
+        // primitive (an Ivar read of `String`/`i64`/etc.); wrap with
+        // `serde_json::Value::from(...)` so the match unifies on
+        // `Value` regardless of which arm fired.
+        ExprNode::Case { scrutinee, arms } => {
+            let scrutinee_s = emit_expr(scrutinee);
+            let return_ty = CURRENT_RETURN_TY.with(|c| c.borrow().clone());
+            let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+            let arm_strs: Vec<String> = arms
+                .iter()
+                .map(|arm| {
+                    let pat_s = emit_case_pattern(&arm.pattern);
+                    // Emit the arm body via `emit_expr_tail` so the
+                    // Ivar arm sees `IN_RETURN_TAIL=true` and adds
+                    // `.clone()` for non-Copy fields. Without that,
+                    // `Value::from(self.body)` in the wrapped form
+                    // below moves out of `&self.body` (E0507).
+                    let body_s = emit_expr_tail(&arm.body);
+                    let body_wrapped = if return_is_value
+                        && !arm_body_already_value(&arm.body)
+                    {
+                        format!("serde_json::Value::from({body_s})")
+                    } else {
+                        body_s
+                    };
+                    format!("        {pat_s} => {{ {body_wrapped} }}")
+                })
+                .collect();
+            let default_arm = if return_is_value {
+                "serde_json::Value::Null".to_string()
+            } else {
+                "()".to_string()
+            };
+            format!(
+                "match {scrutinee_s} {{\n{}\n        _ => {default_arm},\n    }}",
+                arm_strs.join(",\n"),
+            )
+        }
         // `Cast { value, target_ty }` — explicit type narrowing the
         // model lowerer emits at adapter-row sites. The lowerer's
         // `synth_from_row` wraps each `row.<col>` accessor with a
-        // Cast to the column's declared type; `synth_from_raw`
-        // wraps the per-arm `value` (Value-typed) with a Cast to
-        // the column type so `set_<col>` gets the concrete shape.
-        // Delegate to `coerce_arg_for_field_ty` which handles
-        // Value→primitive + owned-String coercion uniformly (and
-        // returns the raw expr when source and target already
-        // agree).
+        // Cast to the column's declared type; `synth_index_write`
+        // wraps the per-arm `value` (column-union → emits as
+        // `serde_json::Value` in rust2) with a Cast to the column
+        // type so `@<col> = value.as(T)` gets the concrete shape.
+        //
+        // First try the body-typer-aware `coerce_arg_for_field_ty`;
+        // if that returns the raw value unchanged AND the target is
+        // a primitive AND the value's rust2-emit type is Value
+        // (Untyped OR multi-variant non-Nilable Union), apply the
+        // Value→primitive coercion explicitly. The body-typer's
+        // Union-of-columns Ty doesn't peel to Untyped, but rust2
+        // renders it as `serde_json::Value` at the param site —
+        // `value.as(i64)` then needs `.as_i64().unwrap()`.
         ExprNode::Cast { value, target_ty } => {
-            coerce_arg_for_field_ty(value, target_ty)
+            let coerced = coerce_arg_for_field_ty(value, target_ty);
+            let raw = emit_expr(value);
+            if coerced != raw {
+                coerced
+            } else if let Some(c) = cast_via_value_for_union(value, target_ty) {
+                c
+            } else {
+                coerced
+            }
         }
         // Catch-all for IR shapes not yet implemented. Each new runtime
         // file in Phase 2 expands this until full coverage.
@@ -3144,6 +3246,42 @@ fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     raw
 }
 
+/// When a Cast's source type renders as `serde_json::Value` at the
+/// rust2 emit (a non-Nilable multi-variant Union — `Union<i64,
+/// String, …>` from the lowerer-synthesized column-union types), and
+/// the target type is a primitive (`Str`/`Sym`/`Int`/`Float`/
+/// `Bool`), emit the corresponding `.as_X().unwrap()` coercion.
+/// Without this, `value.as(i64)` would emit as bare `value`
+/// against an `i64`-typed Ivar field — `set_index` arm bodies trip
+/// E0308.
+fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) -> Option<String> {
+    use crate::ty::Ty;
+    // Check if the source's rust2-rendered Ty would be `Value`. The
+    // ty.rs Union arm falls back to `serde_json::Value` for any
+    // non-Nilable multi-variant Union (single Option<T> renders as
+    // `Option<T>`, not Value).
+    let value_shaped = match value.ty.as_ref() {
+        Some(Ty::Union { variants }) => {
+            let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+            !(variants.len() == 2 && has_nil)
+        }
+        _ => false,
+    };
+    if !value_shaped {
+        return None;
+    }
+    let raw = emit_expr(value);
+    match target_ty {
+        Ty::Str | Ty::Sym => {
+            Some(format!("({raw}).as_str().unwrap().to_string()"))
+        }
+        Ty::Int => Some(format!("({raw}).as_i64().unwrap()")),
+        Ty::Float => Some(format!("({raw}).as_f64().unwrap()")),
+        Ty::Bool => Some(format!("({raw}).as_bool().unwrap()")),
+        _ => None,
+    }
+}
+
 /// Field-position coercion: variant of `coerce_arg_for_param_ty`
 /// for the constructor's `let <field> = <value>` rewrite. Two
 /// differences from param-position coercion:
@@ -3182,6 +3320,12 @@ fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> String {
 /// whose body-typer-recorded `Ty` is a multi-layer Union (the
 /// `BoolOp::Or` pattern `hash[k] || default` types as
 /// `Union<Union<Untyped, Nil>, T>`, which `peel_nil` doesn't strip).
+///
+/// Also treats non-Option multi-variant Unions as Value-shaped:
+/// rust2's `ty::rust_ty` renders these as `serde_json::Value` (see
+/// `option_shape`-unwrap fallback). So a `Union<i64, String, …>`
+/// from the lowerer-synthesized column-union types behaves like
+/// Value at the emit boundary.
 fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {

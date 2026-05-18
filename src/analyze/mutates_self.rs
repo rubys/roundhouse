@@ -108,6 +108,16 @@ fn has_local_mutation(body: &Expr) -> bool {
                     || block.as_ref().map(|b| walk(b)).unwrap_or(false)
             }
             ExprNode::Return { value } => walk(value),
+            // `case scrutinee; when …; body; end` — each arm body can
+            // contain `@ivar = …` writes (lowerer-synthesized
+            // `set_index` has one arm per column doing
+            // `@<col> = value.as(T)`). Without this, set_index
+            // misclassifies as non-mutating and emits as `&self`,
+            // blowing every Assign LValue::Ivar into E0594.
+            ExprNode::Case { scrutinee, arms } => {
+                walk(scrutinee) || arms.iter().any(|a| walk(&a.body))
+            }
+            ExprNode::Cast { value, .. } => walk(value),
             _ => false,
         }
     }

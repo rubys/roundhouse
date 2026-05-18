@@ -29,7 +29,16 @@ pub fn rust_ty(ty: &Ty) -> String {
         }
         Ty::Record { .. } => "serde_json::Value".to_string(),
         Ty::Union { variants } => option_shape(variants).unwrap_or_else(|| {
-            "Box<dyn std::any::Any>".to_string()
+            // Multi-variant non-Nilable unions (lowerer-synthesized
+            // `set_index`/`get_index` value/return Tys are a
+            // column-Ty union: `Union<i64, String, …>`) render as
+            // `serde_json::Value`. The original `Box<dyn Any>`
+            // required consumers to `.downcast::<T>()`, which doesn't
+            // match the Ruby/Crystal `value.as(T)` shape the
+            // lowerer's `Cast` emits — and
+            // `coerce_arg_for_field_ty` already bridges Value →
+            // primitive via `.as_X().unwrap()`.
+            "serde_json::Value".to_string()
         }),
         Ty::Class { id, .. } => {
             let name = id.0.as_str();

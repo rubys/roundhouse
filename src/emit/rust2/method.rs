@@ -397,7 +397,16 @@ pub(super) fn emit_instance_method(
     // type but doesn't insert Option-wrapping itself — that's emit
     // work. Distinct from `Return { Lit::Nil }` (already handled in
     // expr.rs as `return None`); this is for the implicit tail.
-    let body = if !is_init && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
+    // Skip Some-wrap for setter methods — `render_return` drops the
+    // signature's return type to `()` for `def x=` and `def []=`, but
+    // `needs_function_tail_some_wrap` looks at the IR signature
+    // (which the lowerer types as the assigned value's union). The
+    // mismatch produces `Some(match name { … })` against a unit-
+    // returning fn, which mangles into `Some(})` when
+    // `wrap_last_expression_with_some` operates on the multi-line
+    // match's closing brace.
+    let is_setter = m.name.as_str().ends_with('=');
+    let body = if !is_init && !is_setter && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
         wrap_last_expression_with_some(&body)
     } else if !is_init && needs_function_tail_self_clone(&m.body, return_ty.as_ref()) {
         // `def reload; ...; self; end` returning Base — `self` is
