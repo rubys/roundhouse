@@ -2180,6 +2180,38 @@ fn field_let_annotation(ivar_name: &str) -> String {
 }
 
 fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // Constructor `self.field = value` rewrite: `pub fn new(...) ->
+    // Self` has no `self` until the closing `Self { ... }` literal,
+    // but the lowerer-synthesized `def initialize` body emits
+    // `Send { recv: SelfRef, method: "<field>=" }` calls (matching
+    // Ruby's `self.col = attrs[:col]` shape). Emit as `let <field>
+    // = <value>` so the closing struct literal's shorthand binding
+    // picks up the local of the same name. `collect_ivars_assigned_
+    // in_body` recognizes this same pattern (instead of just
+    // LValue::Ivar / LValue::Attr assigns) so the default-init pass
+    // skips fields the body already set.
+    if in_constructor()
+        && args.len() == 1
+        && method.ends_with('=')
+        && !method.starts_with('[')
+    {
+        if let Some(r) = recv {
+            if matches!(&*r.node, ExprNode::SelfRef) {
+                let field = &method[..method.len() - 1];
+                // Coerce the value to the struct field's declared
+                // type so the closing `Self { ... }` literal's
+                // shorthand binding picks up a same-typed local.
+                // Field-position coercion differs from param-position:
+                // String fields want owned `String` (not the `&str`
+                // that `.as_str().unwrap()` produces for &str params).
+                let rhs = match ivar_field_ty(field) {
+                    Some(fty) => coerce_arg_for_field_ty(&args[0], &fty),
+                    None => emit_expr(&args[0]),
+                };
+                return format!("let {field} = {rhs}");
+            }
+        }
+    }
     // Stdlib class-method bridges. The Ruby source's `Time.now.utc.iso8601`,
     // `Base64.strict_encode64(...)`, `JSON.generate(...)` patterns
     // refer to Ruby stdlib that doesn't exist in Rust. Recognize the
@@ -3031,6 +3063,53 @@ fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     }
 
     raw
+}
+
+/// Field-position coercion: variant of `coerce_arg_for_param_ty`
+/// for the constructor's `let <field> = <value>` rewrite. Two
+/// differences from param-position coercion:
+///
+/// 1. **String fields want owned `String`**, not `&str`. Param
+///    positions accept `&str` (rust2 emits `Str/Sym` params as
+///    `&str`) but struct fields store owned `String`. After the
+///    Value→`&str` `.as_str().unwrap()`, append `.to_string()`.
+/// 2. **Union-containing-Untyped triggers Value-narrowing too** —
+///    `BoolOp::Or` of `hash[k] || 0` (Option<Value> || Int) gets
+///    body-typed `Union<Union<Untyped, Nil>, Int>`, neither peel_nil
+///    nor a flat Union-of-Untyped+Nil. Recursively probe for
+///    Untyped in the Ty tree so the Value-shaped emit gets coerced.
+fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> String {
+    use crate::ty::Ty;
+    let raw = emit_expr(arg);
+    let value_shaped = arg.ty.as_ref().map(ty_contains_untyped).unwrap_or(false);
+    if value_shaped {
+        let coercion = match field_ty {
+            Ty::Str | Ty::Sym => Some("as_str().unwrap().to_string()"),
+            Ty::Int => Some("as_i64().unwrap()"),
+            Ty::Float => Some("as_f64().unwrap()"),
+            Ty::Bool => Some("as_bool().unwrap()"),
+            _ => None,
+        };
+        if let Some(c) = coercion {
+            return format!("({raw}).{c}");
+        }
+    }
+    raw
+}
+
+/// Recursively check whether `ty` contains `Untyped` anywhere — at
+/// the top level or nested inside any `Union`. Used by
+/// `coerce_arg_for_field_ty` to recognize Value-shaped expressions
+/// whose body-typer-recorded `Ty` is a multi-layer Union (the
+/// `BoolOp::Or` pattern `hash[k] || default` types as
+/// `Union<Union<Untyped, Nil>, T>`, which `peel_nil` doesn't strip).
+fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Untyped => true,
+        Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
+        _ => false,
+    }
 }
 
 /// Per-method positional-param Tys for hand-written runtime modules

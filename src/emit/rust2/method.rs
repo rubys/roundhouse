@@ -497,6 +497,24 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
                 }
                 walk(value, out);
             }
+            // Lowerer-synthesized constructor setter: `Send { recv:
+            // SelfRef, method: "<field>=" }` (Ruby's `self.col = value`
+            // shape). Treat the same as a direct Ivar/Attr assign so
+            // the default-init pass in `emit_instance_method` skips
+            // these fields — the `Send` emit in `expr.rs` rewrites
+            // them to `let <field> = …` in constructor context.
+            ExprNode::Send { recv: Some(r), method, args, .. }
+                if matches!(&*r.node, ExprNode::SelfRef)
+                    && args.len() == 1
+                    && method.as_str().ends_with('=')
+                    && !method.as_str().starts_with('[') =>
+            {
+                let raw = method.as_str();
+                out.insert(raw[..raw.len() - 1].to_string());
+                for a in args {
+                    walk(a, out);
+                }
+            }
             ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk(e, out)),
             ExprNode::If { cond, then_branch, else_branch } => {
                 walk(cond, out);
