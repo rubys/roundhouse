@@ -3173,6 +3173,37 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         } else {
             args_s
         }
+    } else if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Class { .. }))
+        && method.ends_with('=')
+        && args.len() == 1
+    {
+        // Setter convention coercion for instance-Send recvs whose Ty
+        // is a known class: `instance.set_<col>(value)` came from the
+        // model lowerer's `attr_writer` shim, where the setter param
+        // ty equals the column ty. rust2 emits `Ty::Str/Sym` params
+        // as `&str`, but the lowerer hands String-shaped args at
+        // sites like `instance.set_body(row.body())` (where
+        // `row.body()` returns owned `String`). Wrap owned-String
+        // sources with `&(...)` so the borrow matches. Non-Str
+        // setter args (`set_id(i64)`) pass through unchanged.
+        //
+        // Heuristic — the Const-recv arm above uses an explicit
+        // param-Tys table; for instance-Sends we don't have a global
+        // sibling registry yet, so the setter-name + arg-Ty + owned-
+        // node combo carries the same signal. Limited to one-arg
+        // calls because that's the AR `set_<col>` shape; broader
+        // setter shapes (multi-arg) can opt in later.
+        let mut out: Vec<String> = Vec::with_capacity(1);
+        let coerced = coerce_arg_for_param_ty(
+            &args[0],
+            // Use the arg's body-typer Ty as the param Ty: setter
+            // params for Str cols are typed Str, matching the row
+            // accessor's return Ty. For non-Str args the coerce
+            // function returns the bare emit.
+            args[0].ty.as_ref().unwrap_or(&crate::ty::Ty::Untyped),
+        );
+        out.push(coerced);
+        out
     } else {
         args_s
     };
@@ -3292,11 +3323,24 @@ fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     }
 
     if matches!(param_ty, Ty::Str | Ty::Sym) && arg.str_coercion.is_none() {
-        let arg_is_owned = matches!(arg_ty_peeled, Some(Ty::Str | Ty::Sym))
-            && matches!(
-                &*arg.node,
+        // Peek through `Cast` wrappers — the model lowerer wraps row
+        // accessors in `Cast { Send(row.col), col_ty }` to bridge
+        // Crystal's nilable row holder, but rust2's row class is
+        // already non-Nilable so the Cast renders as the bare inner
+        // call. The "is this owned String?" check has to see the
+        // inner node to fire.
+        let owned_producing_node = |n: &ExprNode| {
+            matches!(
+                n,
                 ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
-            );
+            )
+        };
+        let arg_is_owned = matches!(arg_ty_peeled, Some(Ty::Str | Ty::Sym))
+            && (owned_producing_node(&*arg.node)
+                || matches!(
+                    &*arg.node,
+                    ExprNode::Cast { value, .. } if owned_producing_node(&*value.node)
+                ));
         if arg_is_owned {
             return format!("&({raw})");
         }

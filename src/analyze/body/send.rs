@@ -311,8 +311,18 @@ impl<'a> BodyTyper<'a> {
                 // a class returns the class's name as String;
                 // `superclass`, `ancestors` are class-introspection
                 // returning a Class / Array<Class> respectively.
+                //
+                // `clone` and `dup` are universally available on every
+                // Ruby Object and return an instance of the same
+                // class — `Article.new.clone` is still an `Article`.
+                // Without this arm the lookup falls through to Var,
+                // which masks downstream coercion (e.g. rust2's
+                // setter-arg Borrow path keys on `recv: Ty::Class`
+                // to wrap String→&str at `instance.clone().set_body
+                // (row.body())` sites).
                 match method.as_str() {
                     "name" => return Ty::Str,
+                    "clone" | "dup" => return Ty::Class { id: id.clone(), args: args.clone() },
                     "superclass" => return Ty::Class {
                         id: ClassId(Symbol::from("Class")),
                         args: vec![],
