@@ -20,7 +20,7 @@ use dispatch::external_class_method_param_tys;
 use index::try_recv_typed_method;
 use ops::{
     try_array_push, try_binary_operator, try_constructor_field_assign,
-    try_stdlib_class_method, try_unary_not,
+    try_stdlib_class_method, try_string_append, try_unary_not,
 };
 
 use super::util::{rewrite_method_name, synth_default_for_ty};
@@ -29,11 +29,27 @@ use super::{
 };
 
 pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // Ruby implicit-self resolves a bare identifier to the enclosing
+    // method's parameter when one shares the name (e.g. view partial
+    // `def self.article(article, ...)` body references `article` as
+    // the local, not as `Articles::article` recursion). The view
+    // lowerer emits these as `Send { recv: None, method, args: [] }`
+    // — same shape as a zero-arg static method call. Without this
+    // filter, `ViewHelpers::dom_id(article)` emits as
+    // `ViewHelpers::dom_id(article())`, which Rust rejects with
+    // E0618 (expected function, found `Article`). Match the
+    // enclosing-param-name shape and emit the bare Var read.
+    //
+    // Mirrors `is_enclosing_param_name` in `src/emit/typescript/expr.rs`.
+    if recv.is_none() && args.is_empty() && super::param_ty(method).is_some() {
+        return super::util::sanitize_ident(method);
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }
     if let Some(s) = try_unary_not(recv, method, args) { return s; }
     if let Some(s) = try_array_push(recv, method, args) { return s; }
+    if let Some(s) = try_string_append(recv, method, args) { return s; }
     if let Some(s) = try_recv_typed_method(recv, method, args) { return s; }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
@@ -128,7 +144,8 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         // where path.last() matches the class currently being
         // emitted — `Article::new()` from inside `impl Article`.
         let param_tys = external_class_method_param_tys(class, method)
-            .or_else(|| current_class_method_param_tys(method));
+            .or_else(|| current_class_method_param_tys(method))
+            .or_else(|| super::global_class_method_param_tys(class, method));
         if let Some(param_tys) = param_tys {
             let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(args.len()));
             for (i, _) in param_tys.iter().enumerate() {

@@ -538,7 +538,12 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         rb_path: "runtime/ruby/inflector.rb",
         namespace: "",
         out_path: "src/inflector.rs",
-        mode: Mode::Module,
+        // Library (not Module) so the emit produces `pub struct
+        // Inflector; impl Inflector { pub fn pluralize(...) }` —
+        // matches the view-lowered IR's qualified call shape
+        // `Inflector::pluralize(...)`. TS resolves the same shape via
+        // `import * as Inflector`; Rust needs the struct.
+        mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

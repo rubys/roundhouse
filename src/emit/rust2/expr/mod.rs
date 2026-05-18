@@ -118,6 +118,21 @@ thread_local! {
         std::collections::HashMap<String, Vec<crate::ty::Ty>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
+    /// Cross-LC registry: `(ClassName, method) → Vec<Ty>` for every
+    /// class method visible at app-emit time. Populated by `rust2.rs::emit`
+    /// once all LCs (models, views, route_helpers) are lowered, then
+    /// installed via `with_global_class_methods` around the per-file
+    /// emit loop. Consulted by emit_send's Const-recv dispatch as the
+    /// third fallback (after `external_class_method_param_tys` and
+    /// `current_class_method_param_tys`) so a model's `Articles::
+    /// article(self)` call into a view module finds the callee's full
+    /// param-Ty list and pads missing trailing optionals with
+    /// `synth_default_for_ty` defaults. Without this fallback,
+    /// cross-class arity mismatches surface as E0061.
+    static GLOBAL_CLASS_METHODS: std::cell::RefCell<
+        std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
     /// Variable names read more than once in the current method body.
     /// Populated by `with_method_scope`'s pre-pass via
     /// `collect_var_read_counts`. Consumed by the `Var` emit arm to
@@ -608,6 +623,40 @@ pub(super) fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::t
 pub(super) fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::ty::Ty>> {
     CLASS_METHOD_PARAM_TYS
         .with(|c| c.borrow().get(method).cloned())
+}
+
+/// Run `f` with the cross-LC class-method registry installed. Used
+/// by `rust2.rs::emit` to wrap the per-file emit loop once the
+/// global map is built from every lowered LC.
+pub(crate) fn with_global_class_methods<F, R>(
+    map: std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = GLOBAL_CLASS_METHODS.with(|c| c.replace(map));
+    let r = f();
+    GLOBAL_CLASS_METHODS.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+/// Cross-class lookup: `(ClassName, method) → Vec<Ty>` for a callee
+/// in a different LC than the currently-emitting class. Used by the
+/// Const-recv dispatch as a fallback when the local
+/// `current_class_method_param_tys` misses (the callee isn't a
+/// sibling method on the same class). Returns the full positional-
+/// param Ty list; emit_send pads missing trailing args via
+/// `synth_default_for_ty`.
+pub(super) fn global_class_method_param_tys(
+    class: &str,
+    method: &str,
+) -> Option<Vec<crate::ty::Ty>> {
+    GLOBAL_CLASS_METHODS.with(|c| {
+        c.borrow()
+            .get(class)
+            .and_then(|methods| methods.get(method).cloned())
+    })
 }
 
 fn in_constructor() -> bool {

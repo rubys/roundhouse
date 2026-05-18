@@ -95,6 +95,25 @@ const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.r
 /// the modules are declared in `src/lib.rs`. `#[allow(unused_imports)]`
 /// suppresses the warning when a given model doesn't reach every
 /// item (most models don't broadcast, e.g.).
+/// Prelude for emitted view files. View bodies call into ViewHelpers
+/// (link_to, pluralize, dom_id, ...), RouteHelpers (article_path,
+/// ...), Inflector (humanize, ...), and any model class reached by
+/// `render @article` partials. Over-imports are harmless under
+/// `#[allow(unused_imports)]`; under-imports surface as E0433 on
+/// bare references the lowerer leaves unqualified.
+const VIEW_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::view_helpers::{self, ViewHelpers, FormBuilder};
+#[allow(unused_imports)]
+use crate::route_helpers::{self, RouteHelpers};
+#[allow(unused_imports)]
+use crate::inflector::{self, Inflector};
+#[allow(unused_imports)]
+use crate::models::*;
+#[allow(unused_imports)]
+use crate::views::*;
+";
+
 const MODEL_IMPORTS: &str = "\
 #[allow(unused_imports)]
 use crate::db::Db;
@@ -196,20 +215,79 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // (emitted by `emit_models_mod_rs`) lists them, and
     // `emit_lib_rs` declares `pub mod models;` when the directory
     // exists.
-    if !app.models.is_empty() {
-        let mut model_lcs = crate::lower::lower_models_to_library_classes(
+
+    // Phase 5 — lower all app code (models, route_helpers, views) up
+    // front. Build a cross-LC class-method registry so model emit's
+    // `Articles::article(self)` calls into a view module find the
+    // callee's full param-Ty list and pad missing trailing optionals
+    // with `synth_default_for_ty` defaults. The per-file emits below
+    // run inside `with_global_class_methods` so the Const-recv
+    // dispatch in `emit_send` consults the registry as its third
+    // fallback.
+    let mut model_lcs: Vec<crate::dialect::LibraryClass> = if !app.models.is_empty() {
+        let mut lcs = crate::lower::lower_models_to_library_classes(
             &app.models,
             &app.schema,
             vec![],
         );
-        // Run str_color + mutates_self on the lowered classes —
-        // same pipeline the runtime units go through above. App
-        // models call into the framework runtime (`ActiveRecord::
-        // Base`), so the str-coercion annotations need to be
-        // consistent across boundaries.
-        let registry = crate::analyze::str_color::build_registry(&model_lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut model_lcs, &registry);
-        crate::analyze::mutates_self::propagate(&mut model_lcs);
+        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        lcs
+    } else {
+        Vec::new()
+    };
+
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    let route_helpers_lc: Option<crate::dialect::LibraryClass> = if !route_helper_funcs.is_empty() {
+        let mut lcs = vec![route_helpers_library_class(&route_helper_funcs)];
+        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        Some(lcs.into_iter().next().unwrap())
+    } else {
+        None
+    };
+
+    let mut view_lcs: Vec<crate::dialect::LibraryClass> = if !app.views.is_empty() {
+        let raw_lcs = crate::lower::lower_views_to_library_classes(&app.views, app, vec![]);
+        let mut merged: std::collections::BTreeMap<String, crate::dialect::LibraryClass> =
+            std::collections::BTreeMap::new();
+        for lc in raw_lcs {
+            let raw = lc.name.0.as_str();
+            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+            merged
+                .entry(struct_name)
+                .and_modify(|acc: &mut crate::dialect::LibraryClass| {
+                    let seen: std::collections::BTreeSet<String> =
+                        acc.methods.iter().map(|m| m.name.as_str().to_string()).collect();
+                    for m in lc.methods.clone() {
+                        if !seen.contains(m.name.as_str()) {
+                            acc.methods.push(m);
+                        }
+                    }
+                })
+                .or_insert(lc);
+        }
+        let mut lcs: Vec<crate::dialect::LibraryClass> = merged.into_values().collect();
+        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
+        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        lcs
+    } else {
+        Vec::new()
+    };
+
+    let global_methods = collect_global_class_methods(
+        &model_lcs,
+        route_helpers_lc.as_ref(),
+        &view_lcs,
+    );
+    // Avoid unused-mut warning if neither models nor views populated.
+    let _ = (&mut model_lcs, &mut view_lcs);
+
+    crate::emit::rust2::expr::with_global_class_methods(global_methods, || {
+    if !model_lcs.is_empty() {
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
             let body = match library::emit_library_class(lc) {
@@ -283,41 +361,39 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_models_mod_rs(&model_lcs));
     }
 
-    // Phase 5b stubs — emit per-view-module `pub struct <Name>;` +
-    // generic-`<T>` methods returning `String::new()`. The model
-    // lowerer's `broadcasts_to` / `after_*_commit` expansions reach
-    // `Articles::article(self)` / `Comments::comment(self)` (and
-    // friends for other resources), so the modules must exist as
-    // types in scope. Real view rendering (HTML accumulation) lands
-    // later; stub structure mirrors the lowered LibraryClasses so
-    // when the real emit replaces the stub bodies the surrounding
-    // wiring (`mod.rs` aggregator + lib.rs declaration + MODEL_
-    // IMPORTS glob) stays unchanged.
-    if !app.views.is_empty() {
-        let view_lcs = crate::lower::lower_views_to_library_classes(&app.views, app, vec![]);
-        // Each view file lowers to its own `LibraryClass` keyed by
-        // `Views::<dir-camelized>`; multiple partials/actions in the
-        // same directory (articles/_article.html.erb +
-        // articles/index.html.erb + articles/show.html.erb + …)
-        // produce separate LibraryClasses with identical names but
-        // single-method bodies. Group them up so one Rust file per
-        // module ships every method side-by-side — otherwise the
-        // file-emit loop is a last-write-wins on the partials.
-        let mut grouped: std::collections::BTreeMap<String, Vec<&crate::dialect::LibraryClass>> =
-            std::collections::BTreeMap::new();
+    if let Some(lc) = &route_helpers_lc {
+        let body = match library::emit_library_class(lc) {
+            Ok(s) => s,
+            Err(e) => panic!("rust2 route_helpers emit failed: {e}"),
+        };
+        files.push(EmittedFile {
+            path: PathBuf::from("src/route_helpers.rs"),
+            content: body,
+        });
+    }
+
+    if !view_lcs.is_empty() {
+        let mut view_entries: Vec<(String, String)> = Vec::new();
         for lc in &view_lcs {
             let raw = lc.name.0.as_str();
             let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
-            grouped.entry(struct_name).or_default().push(lc);
-        }
-        let mut view_entries: Vec<(String, String)> = Vec::new();
-        for (struct_name, lcs) in &grouped {
-            let stem = crate::naming::snake_case(struct_name);
-            files.push(emit_view_stub(&stem, struct_name, lcs));
-            view_entries.push((stem, struct_name.clone()));
+            let stem = crate::naming::snake_case(&struct_name);
+            let body = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => {
+                    panic!("rust2 view emit failed for {}: {e}", lc.name.0.as_str());
+                }
+            };
+            let content = format!("{VIEW_IMPORTS}{body}");
+            files.push(EmittedFile {
+                path: PathBuf::from(format!("src/views/{stem}.rs")),
+                content,
+            });
+            view_entries.push((stem, struct_name));
         }
         files.push(emit_views_mod_rs(&view_entries));
     }
+    }); // end with_global_class_methods
 
     // src/lib.rs — declares the modules emitted above (hand-written +
     // transpiled). emit_lib_rs scans the emitted file list for stems
@@ -401,92 +477,8 @@ fn emit_models_mod_rs(lcs: &[crate::dialect::LibraryClass]) -> EmittedFile {
     }
 }
 
-/// Phase 5b stub for one view module. Emits a unit struct (`pub
-/// struct <Name>;`) carrying one stub method per lowered MethodDef,
-/// each fully generic over its parameters and returning
-/// `String::new()`. Param Tys / body shape from the lowerer are
-/// thrown away — the goal is to satisfy `Articles::article(<arg>)`
-/// type resolution from the model layer, not to render HTML.
-///
-/// The fully-generic signature (`fn show<T1, T2, T3>(_: T1, _: T2,
-/// _: T3) -> String`) papers over the caller's arg shapes — both
-/// `&Article` and owned `Article` (from `parent.clone()`) flow
-/// through uniformly. When real view emit lands, the signatures
-/// will tighten to the lowerer-typed params.
-fn emit_view_stub(
-    stem: &str,
-    struct_name: &str,
-    lcs: &[&crate::dialect::LibraryClass],
-) -> EmittedFile {
-    use crate::dialect::MethodReceiver;
-    let mut out = String::new();
-    out.push_str("// Generated by Roundhouse (rust2). Phase 5b stub.\n");
-    out.push_str(&format!("pub struct {struct_name};\n\n"));
-    out.push_str(&format!("impl {struct_name} {{\n"));
-    // Dedup method names — multiple LibraryClass instances may
-    // declare identical methods if e.g. the lowerer routes a
-    // partial through two passes; keep the first.
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for lc in lcs {
-        for m in &lc.methods {
-            if !matches!(m.receiver, MethodReceiver::Class) {
-                continue;
-            }
-            let raw_name = m.name.as_str();
-            let sanitized = sanitize_view_method_name(raw_name);
-            if !seen.insert(sanitized.clone()) {
-                continue;
-            }
-            // Only count required (no-default) params for the stub
-            // arity. Ruby/Crystal/Spinel/TS each fill optional defaults
-            // at the call site automatically, but Rust requires every
-            // positional arg explicit. The model lowerer's
-            // `broadcasts_to` expansion only passes the required model
-            // arg (`Articles::article(self)`) — the view's `notice`
-            // / `alert` / locals defaults stay unset. Filtering to
-            // required params matches the actual call shape; when real
-            // view emit lands it'll wire all params back with
-            // `Option<T>` plumbing.
-            let arity = m.params.iter().filter(|p| p.default.is_none()).count();
-            if arity == 0 {
-                out.push_str(&format!(
-                    "    pub fn {sanitized}() -> String {{ String::new() }}\n"
-                ));
-            } else {
-                let generics: Vec<String> = (0..arity).map(|i| format!("T{i}")).collect();
-                let params: Vec<String> = generics.iter().map(|g| format!("_: {g}")).collect();
-                out.push_str(&format!(
-                    "    pub fn {sanitized}<{}>({}) -> String {{ String::new() }}\n",
-                    generics.join(", "),
-                    params.join(", ")
-                ));
-            }
-        }
-    }
-    out.push_str("}\n");
-    EmittedFile {
-        path: PathBuf::from(format!("src/views/{stem}.rs")),
-        content: out,
-    }
-}
-
-/// Sanitize a view method name for Rust. Ruby idiom allows `?` /
-/// `!` suffixes on method names (`empty?`, `save!`); the stub
-/// drops `?` and converts `!` → `_bang`, matching rust2's main
-/// `sanitize_ident` for call-site agreement. Bare alphanumeric
-/// names pass through.
-fn sanitize_view_method_name(name: &str) -> String {
-    if let Some(stripped) = name.strip_suffix('!') {
-        return format!("{stripped}_bang");
-    }
-    if let Some(stripped) = name.strip_suffix('?') {
-        return stripped.to_string();
-    }
-    name.to_string()
-}
-
 /// `src/views/mod.rs` aggregator — same shape as `emit_models_mod_rs`:
-/// declares each stub module as `pub mod <stem>;` and re-exports the
+/// declares each view module as `pub mod <stem>;` and re-exports the
 /// struct as `pub use <stem>::<Name>;` so `use crate::views::*;` in
 /// MODEL_IMPORTS pulls `Articles` / `Comments` / etc. into scope.
 fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
@@ -503,5 +495,109 @@ fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     EmittedFile {
         path: PathBuf::from("src/views/mod.rs"),
         content: lines.join("\n") + "\n",
+    }
+}
+
+/// Build the cross-LC class-method registry consumed by emit_send's
+/// Const-recv dispatch. Each LC's class methods get folded into a
+/// per-class table keyed by method name; cross-class callers (a
+/// model's `Articles::article(self)`, a view's `Inflector::pluralize
+/// (...)`, etc.) consult this map via `global_class_method_param_tys`
+/// when neither `external_class_method_param_tys` nor
+/// `current_class_method_param_tys` resolves. Pulls signature data
+/// from `MethodDef.signature` when present; methods without a typed
+/// signature get an empty Tys vec and the Const-recv arity-pad path
+/// no-ops (same behavior as no entry).
+fn collect_global_class_methods(
+    model_lcs: &[crate::dialect::LibraryClass],
+    route_helpers_lc: Option<&crate::dialect::LibraryClass>,
+    view_lcs: &[crate::dialect::LibraryClass],
+) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>> {
+    use crate::dialect::{LibraryClass, MethodReceiver};
+    use crate::ty::{ParamKind, Ty};
+
+    fn collect_one(
+        lc: &LibraryClass,
+        out: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<Ty>>>,
+    ) {
+        let raw = lc.name.0.as_str();
+        let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        let entry = out.entry(class_name).or_default();
+        for m in &lc.methods {
+            if !matches!(m.receiver, MethodReceiver::Class) {
+                continue;
+            }
+            let tys: Vec<Ty> = match m.signature.as_ref() {
+                Some(Ty::Fn { params, .. }) => params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
+                    .map(|p| p.ty.clone())
+                    .collect(),
+                // No typed signature — fall back to the method's
+                // declared param count, all Ty::Untyped. The
+                // synth_default_for_ty path won't pad Untyped slots
+                // (no sensible default), so caller-arity mismatches
+                // for untyped methods still surface — but at least
+                // the method is present in the registry, which
+                // resolves the more common case where the lowerer
+                // populated `signature`.
+                _ => m.params.iter().map(|_| Ty::Untyped).collect(),
+            };
+            entry.insert(m.name.as_str().to_string(), tys);
+        }
+    }
+
+    let mut out: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<Ty>>,
+    > = std::collections::HashMap::new();
+    for lc in model_lcs {
+        collect_one(lc, &mut out);
+    }
+    if let Some(lc) = route_helpers_lc {
+        collect_one(lc, &mut out);
+    }
+    for lc in view_lcs {
+        collect_one(lc, &mut out);
+    }
+    out
+}
+
+/// Build a synthetic `LibraryClass` for `RouteHelpers` from the
+/// route-helper functions produced by `lower_routes_to_library_functions`.
+/// Each `LibraryFunction` becomes a class method (`receiver: Class`)
+/// on a single `RouteHelpers` module-shaped class — that matches the
+/// `RouteHelpers::article_path(...)` call shape the view lowerer
+/// emits. The library-class emit path then takes it through
+/// `emit_module_singleton` automatically (every method is class-
+/// receiver).
+fn route_helpers_library_class(
+    funcs: &[crate::dialect::LibraryFunction],
+) -> crate::dialect::LibraryClass {
+    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+    use crate::effect::EffectSet;
+    use crate::ident::ClassId;
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from("RouteHelpers")),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
+        })
+        .collect();
+    LibraryClass {
+        name: ClassId(crate::ident::Symbol::from("RouteHelpers")),
+        is_module: true,
+        parent: None,
+        includes: Vec::new(),
+        methods,
+        origin: None,
     }
 }

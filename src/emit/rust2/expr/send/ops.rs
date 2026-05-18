@@ -148,11 +148,19 @@ pub(super) fn try_unary_not(
     method: &str,
     args: &[Expr],
 ) -> Option<String> {
-    if method != "!" || !args.is_empty() {
+    if method != "!" {
         return None;
     }
-    let r = recv?;
-    Some(format!("!{}", emit_expr(r)))
+    // Two surface forms reach here, both meaning "logical not":
+    //   Send { recv: Some(x), method: "!", args: [] }   — Ruby's `x.!()`
+    //   Send { recv: None,    method: "!", args: [x] }  — view_to_library's
+    //                                                     `not_x = send(None, "!", [x])`
+    let inner = match (recv, args) {
+        (Some(r), []) => r,
+        (None, [a]) => a,
+        _ => return None,
+    };
+    Some(format!("!({})", emit_expr(inner)))
 }
 
 /// Array append: `arr << x` Ruby idiom → `arr.push(x)` in Rust.
@@ -181,4 +189,44 @@ pub(super) fn try_array_push(
         _ => emit_expr(&args[0]),
     };
     Some(format!("{}.push({})", emit_expr(r), arg_rendered))
+}
+
+/// String append: `io << s` Ruby idiom → `io.push_str(&s)` in Rust.
+/// Used pervasively in lowered view bodies (`io = String.new; io <<
+/// helper(...); io`). Receiver is unambiguously a local `String`
+/// (the lowerer's `io = String.new` seed) and the arg can be `&str`
+/// literal or `String`; `push_str` wants `&str`, so we always borrow.
+///
+/// The fall-through emit prefixes the receiver with `.clone()` from
+/// the multi-read non-Copy detection — that's correct for general
+/// expressions but wrong here because `push_str` mutates in place.
+/// We emit the bare local name (no clone, no borrow) on the recv
+/// side. The lowerer guarantees `io` is a typed local; resolving
+/// through Var → emit_expr would re-apply the clone, so we strip
+/// it by emitting the var name directly when the recv is a Var.
+pub(super) fn try_string_append(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<String> {
+    if method != "<<" || args.len() != 1 {
+        return None;
+    }
+    let r = recv?;
+    if !matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)) {
+        return None;
+    }
+    let recv_rendered = match &*r.node {
+        ExprNode::Var { name, .. } => super::super::util::sanitize_ident(name.as_str()),
+        _ => emit_expr(r),
+    };
+    let arg = &args[0];
+    let arg_rendered = match arg.ty.as_ref() {
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => match &*arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => emit_expr(arg),
+            _ => format!("&{}", emit_expr(arg)),
+        },
+        _ => format!("&{}.to_string()", emit_expr(arg)),
+    };
+    Some(format!("{recv_rendered}.push_str({arg_rendered})"))
 }

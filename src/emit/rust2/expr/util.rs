@@ -85,6 +85,29 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
         Ty::Float => Some("0.0_f64".to_string()),
         Ty::Bool => Some("false".to_string()),
         Ty::Untyped => Some("serde_json::Value::Null".to_string()),
+        Ty::Nil => Some("None".to_string()),
+        // `T | Nil` Union maps to `Option<T>` in the rust2 emitter
+        // (see `ty::rust_ty` Union handling). Missing-arg default is
+        // `None` — but bare `None` carries no element type, so a
+        // downstream caller that disambiguates by signature (e.g.
+        // `pub fn x(notice: Option<String>, alert: Option<String>)`
+        // called as `x(None, None)` where both Nones leak into a
+        // surrounding HashMap literal) hits E0282. Emit the turbofish
+        // form so inference always has a concrete element type.
+        Ty::Union { variants } => {
+            let inner: Vec<&Ty> = variants
+                .iter()
+                .filter(|v| !matches!(v, Ty::Nil))
+                .collect();
+            if inner.len() == 1 {
+                Some(format!(
+                    "Option::<{}>::None",
+                    super::super::ty::rust_ty(inner[0])
+                ))
+            } else {
+                Some("None".to_string())
+            }
+        }
         _ => None,
     }
 }
@@ -194,6 +217,17 @@ pub(crate) fn sanitize_ident(name: &str) -> String {
     }
     if name == "[]=" {
         return "set_index".to_string();
+    }
+    // Single-char operator method names ("!", "+", "-", "*", "/", "%",
+    // "==", "<=>", etc.). These should never reach `sanitize_ident`
+    // — the dedicated `try_*` paths in `ops.rs` handle them — but if
+    // one slips through, the `_bang`/`set_` strippers below would
+    // produce `_bang` (empty base) or `set_` (empty base) which the
+    // call-site then references as a phantom function. Pass through
+    // verbatim so the error surfaces at the actual call site instead
+    // of as a synthetic identifier collision.
+    if name.chars().all(|c| !c.is_alphanumeric() && c != '_') {
+        return name.to_string();
     }
     let s = if let Some(base) = name.strip_suffix('!') {
         return format!("{base}_bang");
