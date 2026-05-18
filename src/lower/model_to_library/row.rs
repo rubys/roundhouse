@@ -74,6 +74,15 @@ fn build_row_class(model_name: &ClassId, table: &Table) -> LibraryClass {
         methods.push(synth_row_attr_writer(&row_class_id, col));
     }
 
+    // `def initialize; @col = default(col_ty); …; end` — Crystal/Spinel/
+    // Ruby pick this up implicitly via attr_accessor + Object#initialize
+    // defaults, but nominal-typed targets (Rust) need an explicit zero-
+    // arg constructor on the struct since `<Model>Row.new` is called
+    // bare by `from_raw`'s first line. Defaults match the column type
+    // (`""` for text, `0` for ints, `false` for bools) so the setter
+    // chain that follows always lands on a fully-typed slot.
+    methods.push(synth_row_initialize(&row_class_id, table));
+
     methods.push(synth_row_from_raw(&row_class_id, table));
 
     let fields: Vec<Symbol> = table.columns.iter().map(|c| c.name.clone()).collect();
@@ -147,6 +156,75 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         kind: AccessorKind::AttributeWriter,
         is_async: false,
             mutates_self: false,
+    }
+}
+
+/// `def initialize; @col = default(col_ty); …; end` — zero-arg
+/// constructor that seeds every column slot with a typed default.
+/// Strict-target emit (Rust, future Kotlin/Swift) needs an explicit
+/// `<Row>.new()` callable for the model lowerer's `from_raw` body
+/// (`let instance = ArticleRow.new()` then setter chain). Crystal /
+/// Spinel / Ruby get the same body but rely on Object#initialize
+/// when source omits one — emitting unconditionally keeps the IR
+/// shape uniform across targets.
+///
+/// Each `@col` is initialized via the column's literal-default form
+/// (lit_str("") / lit_int(0) / lit_bool(false) / lit_float(0.0)),
+/// matching `synth_default_for_ty` in rust2 emit — so the field's
+/// inferred type from `collect_ivar_types` (the assign-shape walker)
+/// agrees with the setter's `col_ty`, and the strict-target struct
+/// renders all five slots with their column types.
+fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
+    let mut stmts: Vec<Expr> = Vec::new();
+    for col in &table.columns {
+        let col_ty = ty_of_column(&col.col_type);
+        let default_lit = default_for_col_ty(&col_ty);
+        let typed_default = with_ty(default_lit, col_ty.clone());
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col.name.clone() },
+                value: typed_default,
+            },
+        ));
+    }
+    MethodDef {
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+    }
+}
+
+/// Per-Ty literal default for `synth_row_initialize`. Symmetric with
+/// rust2 emit's `synth_default_for_ty`; producing the IR-side literal
+/// avoids dragging emit-shape concerns into the lowerer.
+fn default_for_col_ty(ty: &Ty) -> Expr {
+    match ty {
+        Ty::Str | Ty::Sym => lit_str(String::new()),
+        Ty::Int => lit_int(0),
+        Ty::Float => Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Float { value: 0.0 },
+            },
+        ),
+        Ty::Bool => Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Bool { value: false },
+            },
+        ),
+        _ => Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: crate::expr::Literal::Nil },
+        ),
     }
 }
 

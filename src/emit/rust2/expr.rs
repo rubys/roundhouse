@@ -874,6 +874,15 @@ fn emit_expr_inner(e: &Expr) -> String {
                 let cond_s = emit_expr(cond);
                 let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
                 if in_return_tail() && current_return_is_option() {
+                    // Skip the Some wrap when the inner branch already
+                    // produces an `Option<T>` — Comment#article's
+                    // adapter-find body ends in `result` where rust2
+                    // typed the let-binding `Option<Article>` via
+                    // `none_init_option_return_ty` back-prop. Wrapping
+                    // again would produce `Option<Option<T>>`.
+                    if tail_produces_option(then_branch) {
+                        return format!("if {cond_s} {{ {{ {then_s} }} }} else {{ None }}");
+                    }
                     return format!("if {cond_s} {{ Some({{ {then_s} }}) }} else {{ None }}");
                 }
                 return format!("if {cond_s} {{ {then_s} }}");
@@ -887,6 +896,11 @@ fn emit_expr_inner(e: &Expr) -> String {
                 let cond_s = emit_expr(cond);
                 let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
                 if in_return_tail() && current_return_is_option() {
+                    if tail_produces_option(else_branch) {
+                        return format!(
+                            "if !({cond_s}) {{ {{ {else_s} }} }} else {{ None }}"
+                        );
+                    }
                     return format!(
                         "if !({cond_s}) {{ Some({{ {else_s} }}) }} else {{ None }}"
                     );
@@ -3740,6 +3754,63 @@ pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     DECLARED_VARS.with(|c| *c.borrow_mut() = snapshot);
     r
+}
+
+/// True when the branch's tail expression — after walking through a
+/// trailing `Seq` — is a Var read whose recorded `local_var_ty` is
+/// already `Option<T>`. Used by the tail-position Some-wrap to avoid
+/// re-wrapping an Option-shaped value into `Option<Option<T>>` (the
+/// belongs_to-method body's `result` accumulator pattern: rust2's
+/// `none_init_option_return_ty` back-prop typed `let mut result:
+/// Option<Article> = None`, so the Seq's tail Var read already
+/// produces `Option<Article>`).
+///
+/// Walks one Seq level (the lowerer's belongs_to bodies wrap the
+/// adapter-find sequence in a single Seq); nested Seqs aren't
+/// expected. Returns false on any non-Var tail to keep the Some-wrap
+/// firing for the literal/expression branch shapes that genuinely
+/// need it (`if x then 5 else nil end`-style).
+fn tail_produces_option(branch: &Expr) -> bool {
+    // Identify the tail Var name (single-level Seq peel, plus direct
+    // `Var`-as-branch). LOCAL_VAR_TYPES at this point has already
+    // been scope-restored by the Seq's `with_rebound_vars_scope`, so
+    // we can't read it back — instead walk the Seq's stmts for the
+    // `Assign { Var{name}, Nil }` pattern that triggered
+    // `none_init_option_return_ty`'s back-prop during emit. When that
+    // assign is present AND the function returns `Option<_>`, the
+    // emitted let-binding annotated the var as `Option<T>` and every
+    // subsequent rebind landed there — so the tail Var read produces
+    // `Option<T>`.
+    let (tail_name, exprs) = match &*branch.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(last) => match &*last.node {
+                ExprNode::Var { name, .. } => (Some(name.as_str().to_string()), exprs.as_slice()),
+                _ => return false,
+            },
+            None => return false,
+        },
+        ExprNode::Var { name, .. } => (Some(name.as_str().to_string()), &[] as &[Expr]),
+        _ => return false,
+    };
+    let Some(name) = tail_name else { return false };
+    if !current_return_is_option() {
+        return false;
+    }
+    // Single-Var-as-branch can't carry the init pattern alone — the
+    // Var was bound somewhere in the enclosing scope. Without local_
+    // var_ty we don't know whether it's Option-typed; play it safe
+    // and assume it is (matches the lowerer's accumulator shape).
+    if exprs.is_empty() {
+        return true;
+    }
+    exprs.iter().any(|e| matches!(
+        &*e.node,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { name: assign_name, .. },
+            value,
+        } if assign_name.as_str() == name
+            && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
+    ))
 }
 
 /// Built-in container classes whose `[]` / `[]=` should stay as the

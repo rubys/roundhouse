@@ -241,11 +241,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 .iter()
                 .any(|m| m.name.as_str() == "_adapter_insert");
             let ar_shim = if needs_ar_shim {
+                // `destroy` and `exists` are paired in:
+                //   - Article#dependent_destroy: `c.destroy()` over the
+                //     has_many comments collection (Comment side)
+                //   - Comment#validate's belongs_to inline check:
+                //     `Article::exists(self.article_id)` (Article side)
+                // Both are AR::Base methods in Crystal/Spinel/Ruby
+                // (inherited); Rust needs them on the concrete struct.
+                // Minimal stubs: `destroy` flips persisted+destroyed
+                // flags (no-op without state — current shim is
+                // intentionally stateless); `exists` routes through
+                // the lowerer-emitted `_adapter_exists_by_id`.
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ Vec::new() }}\n\
                         pub fn save(&mut self) -> bool {{ self.validate(); true }}\n\
+                        pub fn destroy(&mut self) {{ self._adapter_delete(); }}\n\
+                        pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 )
