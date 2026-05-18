@@ -586,6 +586,34 @@ fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
         .with(|c| c.borrow().get(method).and_then(|tys| tys.get(idx).cloned()))
 }
 
+/// Return the full Vec of positional param Tys for a method in the
+/// current class. Used by the Const-recv dispatch to check arity
+/// + pad missing trailing args with defaults — Ruby's `def
+/// initialize(attrs = {})` accepts zero-arg `Article.new`, but
+/// Rust requires the explicit `HashMap::new()` default.
+fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::ty::Ty>> {
+    CLASS_METHOD_PARAM_TYS
+        .with(|c| c.borrow().get(method).cloned())
+}
+
+/// Synthesize a default-value Rust expression for a missing arg
+/// position. Mirrors the Ruby default-arg semantics for the
+/// shapes the lowerer-synthesized constructors use (`attrs = {}`
+/// → `HashMap::new()`).
+fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Hash { .. } => Some("std::collections::HashMap::new()".to_string()),
+        Ty::Array { .. } => Some("vec![]".to_string()),
+        Ty::Str | Ty::Sym => Some("String::new()".to_string()),
+        Ty::Int => Some("0_i64".to_string()),
+        Ty::Float => Some("0.0_f64".to_string()),
+        Ty::Bool => Some("false".to_string()),
+        Ty::Untyped => Some("serde_json::Value::Null".to_string()),
+        _ => None,
+    }
+}
+
 fn in_constructor() -> bool {
     IN_CONSTRUCTOR.with(|c| c.get())
 }
@@ -1331,6 +1359,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                 crate::expr::BoolOpKind::Or => "||",
             };
             format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+        }
+        // `Cast { value, target_ty }` — explicit type narrowing the
+        // model lowerer emits at adapter-row sites. The lowerer's
+        // `synth_from_row` wraps each `row.<col>` accessor with a
+        // Cast to the column's declared type; `synth_from_raw`
+        // wraps the per-arm `value` (Value-typed) with a Cast to
+        // the column type so `set_<col>` gets the concrete shape.
+        // Delegate to `coerce_arg_for_field_ty` which handles
+        // Value→primitive + owned-String coercion uniformly (and
+        // returns the raw expr when source and target already
+        // agree).
+        ExprNode::Cast { value, target_ty } => {
+            coerce_arg_for_field_ty(value, target_ty)
         }
         // Catch-all for IR shapes not yet implemented. Each new runtime
         // file in Phase 2 expands this until full coverage.
@@ -2936,14 +2977,38 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             .collect()
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
-        if let Some(param_tys) = external_class_method_param_tys(class, method) {
-            args.iter()
-                .enumerate()
-                .map(|(i, a)| match param_tys.get(i) {
-                    Some(pt) => coerce_arg_for_param_ty(a, pt),
-                    None => emit_expr(a),
-                })
-                .collect()
+        // Try the hand-written runtime sigs first (Db, Broadcasts),
+        // then fall back to the current class's method table. The
+        // latter covers `Self::new(...)` / `Class::method(...)` shapes
+        // where path.last() matches the class currently being
+        // emitted — `Article::new()` from inside `impl Article`.
+        let param_tys = external_class_method_param_tys(class, method)
+            .or_else(|| current_class_method_param_tys(method));
+        if let Some(param_tys) = param_tys {
+            let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(args.len()));
+            for (i, _) in param_tys.iter().enumerate() {
+                match (args.get(i), param_tys.get(i)) {
+                    // Caller-supplied arg: apply per-param coercion.
+                    (Some(a), Some(pt)) => out.push(coerce_arg_for_param_ty(a, pt)),
+                    // Missing trailing arg: synthesize a default for
+                    // shapes that have one (Hash → HashMap::new(),
+                    // etc.). Ruby `def initialize(attrs = {})`
+                    // accepts zero-arg `Article.new`; Rust needs the
+                    // explicit default. Without this `Class::new()`
+                    // sites trip E0061.
+                    (None, Some(pt)) => match synth_default_for_ty(pt) {
+                        Some(d) => out.push(d),
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            // If caller passed MORE args than callee declares (rare —
+            // splat / overload patterns), append the extras un-coerced.
+            for a in args.iter().skip(param_tys.len()) {
+                out.push(emit_expr(a));
+            }
+            out
         } else {
             args_s
         }

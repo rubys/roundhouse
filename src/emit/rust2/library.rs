@@ -381,6 +381,15 @@ fn collect_class_method_param_tys(
                 .collect(),
             _ => continue,
         };
+        // Ruby `Class.new(args)` invokes `initialize(args)`; the IR
+        // call site uses "new" but the body's MethodDef.name is
+        // "initialize". Alias so `current_class_method_param_tys
+        // ("new")` resolves at `Self::new(...)` / `Article::new(...)`
+        // call sites (closes E0061 arity checks like the lowerer-
+        // synthesized `from_row` calling `Article.new` zero-arg).
+        if m.name.as_str() == "initialize" {
+            out.insert("new".to_string(), tys.clone());
+        }
         out.insert(m.name.as_str().to_string(), tys);
     }
     out
