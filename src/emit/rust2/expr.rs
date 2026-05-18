@@ -2974,6 +2974,43 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         {
             return format!("{}.is_null()", emit_expr(r));
         }
+        // `value.nil?` on a non-nilable primitive — body-typer says
+        // `Ty::Str` / `Ty::Int` / etc. Ruby/Crystal need the runtime
+        // check (Crystal's `property title : String?` is nilable; Ruby
+        // attrs default to nil), but rust2's struct field is the bare
+        // owned type with no `Option<...>` wrapper, so `.is_none()`
+        // would E0599. The static answer here is `false` — emit a
+        // constant and let LLVM fold the surrounding If. Side-effect-
+        // free recvs (`self.title`) drop out; expression-shaped recvs
+        // (a Send chain) need a tiny bind-and-discard, but the body
+        // -typer's nil? targets are almost always Ivar reads. Inline
+        // the bind only when the recv isn't a pure read.
+        if method == "nil?"
+            && args.is_empty()
+            && matches!(
+                r.ty.as_ref(),
+                Some(
+                    crate::ty::Ty::Str
+                        | crate::ty::Ty::Sym
+                        | crate::ty::Ty::Int
+                        | crate::ty::Ty::Float
+                        | crate::ty::Ty::Bool
+                )
+            )
+        {
+            let recv_pure = matches!(
+                &*r.node,
+                ExprNode::Ivar { .. }
+                    | ExprNode::Var { .. }
+                    | ExprNode::SelfRef
+                    | ExprNode::Lit { .. }
+                    | ExprNode::Const { .. }
+            );
+            if recv_pure {
+                return "false".to_string();
+            }
+            return format!("{{ let _ = {}; false }}", emit_expr(r));
+        }
         // `self.class.X(args)` — Ruby idiom for "dispatch X on the
         // class of self" (`@id` getter is an instance dispatch;
         // `table_name`, `schema_columns` are per-subclass class
