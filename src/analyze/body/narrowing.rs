@@ -207,7 +207,7 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
     }
 }
 
-fn remove_nil(ty: &Ty) -> Ty {
+pub(crate) fn remove_nil(ty: &Ty) -> Ty {
     match ty {
         Ty::Union { variants } => {
             let kept: Vec<Ty> = variants

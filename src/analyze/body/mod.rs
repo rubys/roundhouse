@@ -342,7 +342,7 @@ impl<'a> BodyTyper<'a> {
                 // see the refined type. Mirrors how the `If` arm
                 // threads narrowing into its then/else branches.
                 let pred = narrowing::extract_narrowing(left);
-                let right_ctx = match (&pred, op) {
+                let right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(ctx, p, true)
                     }
@@ -354,8 +354,20 @@ impl<'a> BodyTyper<'a> {
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
-                // of the two operand types.
-                union_of(lt, rt)
+                // of the two operand types. For `||`, Nil never wins
+                // — if left was Nil/false, control moves to right —
+                // so peel Nil from the left side before unioning.
+                // Closes the common `Option<T> || default_T` shape
+                // (BoolOp::Or in `content_for_get(:title) || "Real
+                // Blog"`) where the result type should be `T`, not
+                // `Union<Option<T>, T>`. The lt-narrowed form lets
+                // the rust2 emit's Family 4 (String → &str) fire.
+                let lt_peeled = if matches!(op, crate::expr::BoolOpKind::Or) {
+                    narrowing::remove_nil(&lt)
+                } else {
+                    lt
+                };
+                union_of(lt_peeled, rt)
             }
 
             ExprNode::RescueModifier { expr, fallback } => {

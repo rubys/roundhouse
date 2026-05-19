@@ -300,9 +300,25 @@ pub(super) fn emit_bool_op(
                 left.ty.as_ref().map(peel_nil),
                 Some(crate::ty::Ty::Untyped)
             );
+            // `Option<Str>` (rust2 emits as `Option<String>`) `||`
+            // literal-str — `unwrap_or` expects `String`, but Str
+            // literal emits as `&'static str`. Force `.to_string()` on
+            // the literal default so the type unifies.
+            let lhs_inner_str = matches!(
+                left.ty.as_ref().map(peel_nil),
+                Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
+            );
             let rhs_s = emit_expr(right);
             let default_s = if lhs_inner_untyped {
                 coerce_to_value_default(right, rhs_s)
+            } else if lhs_inner_str
+                && matches!(
+                    &*right.node,
+                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                )
+                && right.str_coercion.is_none()
+            {
+                format!("{rhs_s}.to_string()")
             } else {
                 rhs_s
             };

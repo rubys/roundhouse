@@ -418,11 +418,16 @@ pub(crate) fn insert_framework_stubs(
     // doesn't need to resolve symbols that can't appear.
     //
     // Layout slot helpers — `content_for_get(:title)` / `get_slot(:title)`
-    // return the previously-stored String; counterpart to content_for_set.
+    // return the previously-stored String, or nil when the slot was
+    // never set. Matches the framework Ruby RBS (`String?`) and the
+    // runtime semantics (`@slots.fetch(slot, nil)`). The Option<String>
+    // shape lets the rust2 coerce path (Family 7) thread through to
+    // `html_escape(content_for_get(:title))` without manual coercions.
+    let option_string = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
     for name in ["content_for_get", "get_slot"] {
         vh.class_methods.insert(
             Symbol::from(name),
-            fn_sig(vec![(Symbol::from("name"), Ty::Sym)], Ty::Str),
+            fn_sig(vec![(Symbol::from("name"), Ty::Sym)], option_string.clone()),
         );
     }
     // form_with macro-inline primitives (Wedge 1b-i). The inlined
