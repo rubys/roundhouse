@@ -250,6 +250,36 @@ fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
     param_ty(name).or_else(|| local_var_ty(name))
 }
 
+/// Shared narrowing-write-back: when the body-typer narrowed `name`
+/// from its declared `Option<T>` to `T` (or from `Untyped`→`T` via
+/// `is_a?`), produce the unwrap-shape that exposes the narrowed runtime
+/// value to downstream coercion. `narrowed_ty` is the Expr's `.ty`
+/// (post-narrowing) at the use site; `name` is the binding identifier.
+///
+/// Returns `None` when no narrowing transformation applies, leaving the
+/// caller to emit the bare identifier.
+///
+/// Called from both `ExprNode::Var` reads and the bareword param-read
+/// shortcut in `emit_send` (`Send { recv: None, method, args: [] }`
+/// where the lowerer emits implicit-self param references in view
+/// partials).
+pub(super) fn narrowed_param_read(
+    name: &str,
+    narrowed_ty: Option<&crate::ty::Ty>,
+) -> Option<String> {
+    let narrowed = narrowed_ty?;
+    let declared = var_decl_ty(name)?;
+    if is_option_of(&declared, narrowed) && !is_rebound_var(name) {
+        return Some(format!("{name}.clone().unwrap()"));
+    }
+    if matches!(declared, crate::ty::Ty::Untyped) {
+        if let Some(coerce) = value_narrowing_coercion(narrowed) {
+            return Some(format!("{name}.{coerce}"));
+        }
+    }
+    None
+}
+
 /// Snapshot the current REBOUND_VARS + LOCAL_VAR_TYPES, run `f`, then
 /// restore the snapshot. Used by Seq emit to scope let-Some rebinds
 /// and local declarations to the current Seq — nested blocks shouldn't
@@ -778,23 +808,8 @@ fn emit_expr_inner(e: &Expr) -> String {
             // pattern. The `.clone()` keeps the binding usable on
             // multiple reads in the same scope.
             let n = name.as_str();
-            if let Some(narrowed) = &e.ty {
-                if let Some(declared) = var_decl_ty(n) {
-                    if is_option_of(&declared, narrowed) && !is_rebound_var(n) {
-                        return format!("{n}.clone().unwrap()");
-                    }
-                    // Value narrowing via `is_a?(Class)`: a param typed
-                    // Untyped (→ `serde_json::Value`) narrowed inside an
-                    // `if v.is_a?(String)` branch needs `.as_str().unwrap()`
-                    // shape so the value participates in str-typed call
-                    // sites. Without this, `encode_string(v)` in
-                    // json_builder.rs gets `Value` where `&str` is expected.
-                    if matches!(declared, crate::ty::Ty::Untyped) {
-                        if let Some(coerce) = value_narrowing_coercion(narrowed) {
-                            return format!("{n}.{coerce}");
-                        }
-                    }
-                }
+            if let Some(s) = narrowed_param_read(n, e.ty.as_ref()) {
+                return s;
             }
             // Multi-read non-Copy local: clone on every read so a
             // later use-after-the-first doesn't trip E0382. The pre-
@@ -1007,7 +1022,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                     }
                 }
             }
-            let base = emit_send(recv.as_ref(), method.as_str(), args);
+            let base = emit_send(recv.as_ref(), method.as_str(), args, e.ty.as_ref());
             // A Send with attached block becomes a closure passed as
             // the last arg. `other.each do |k, v| ... end` (Ruby) →
             // `other.each(|k, v| { ... })` (Rust). Whether the

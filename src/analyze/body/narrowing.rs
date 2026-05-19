@@ -50,6 +50,16 @@ pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
         {
             extract_narrowing(inner).map(negate_pred)
         }
+        // Lowerer-synthesized negation — the view predicate rewrite
+        // (`src/lower/view_to_library/predicates.rs`) builds `!x` as
+        // `Send { recv: None, method: "!", args: [operand] }` rather
+        // than the parser's `operand.!` shape. Recognize that variant
+        // too so a lowered `!notice.nil?` participates in narrowing.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "!" && args.len() == 1 =>
+        {
+            extract_narrowing(&args[0]).map(negate_pred)
+        }
         ExprNode::Send { recv: Some(target), method, args, .. } => {
             match (method.as_str(), args.as_slice()) {
                 ("nil?", []) => var_key(target).map(NarrowPred::IsNil),
@@ -95,6 +105,22 @@ fn var_key(e: &Expr) -> Option<VarKey> {
     match &*e.node {
         ExprNode::Var { name, .. } => Some(VarKey::Local(name.clone())),
         ExprNode::Ivar { name } => Some(VarKey::Ivar(name.clone())),
+        // Bareword implicit-self read — view-partial lowering emits
+        // param references as `Send { recv: None, method: <name>,
+        // args: [], block: None }`, the same shape `compute` (body/
+        // mod.rs:406) resolves against `ctx.local_bindings`. Treat
+        // them as variable-references for narrowing too: without this,
+        // `if !notice.nil? && !notice.empty?` (lowered from
+        // `if notice.present?`) doesn't tighten `notice: Option<String>`
+        // to `String` in the body, leaving subsequent reads typed as
+        // Option and the emitter producing `&(notice)` against an
+        // `html_escape(&str)` site. `narrow_binding` no-ops when the
+        // name isn't a binding, so this is safe for non-param barewords.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() =>
+        {
+            Some(VarKey::Local(method.clone()))
+        }
         _ => None,
     }
 }

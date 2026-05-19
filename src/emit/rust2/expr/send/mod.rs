@@ -28,7 +28,12 @@ use super::{
     current_class_method_param_tys, emit_expr, in_class_method, is_static_method,
 };
 
-pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+pub(super) fn emit_send(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    outer_ty: Option<&crate::ty::Ty>,
+) -> String {
     // Ruby implicit-self resolves a bare identifier to the enclosing
     // method's parameter when one shares the name (e.g. view partial
     // `def self.article(article, ...)` body references `article` as
@@ -41,7 +46,18 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     // enclosing-param-name shape and emit the bare Var read.
     //
     // Mirrors `is_enclosing_param_name` in `src/emit/typescript/expr.rs`.
+    //
+    // Apply the same narrowing-write-back that `ExprNode::Var` reads
+    // use: when the body-typer narrowed the param from `Option<T>` to
+    // `T` (e.g. inside an `if !notice.nil? && !notice.empty?` body),
+    // emit `notice.clone().unwrap()` so the downstream `&str` site
+    // sees `String` (auto-derefs via `&`). Without this, the Send
+    // shape stayed as a bare `notice` while `Var` reads got unwrapped,
+    // breaking calls like `html_escape(&(notice))`.
     if recv.is_none() && args.is_empty() && super::param_ty(method).is_some() {
+        if let Some(s) = super::narrowed_param_read(method, outer_ty) {
+            return s;
+        }
         return super::util::sanitize_ident(method);
     }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
