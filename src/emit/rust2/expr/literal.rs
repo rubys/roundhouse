@@ -47,7 +47,38 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
             let str_color_handled = v.str_coercion.is_some();
             let v_raw = emit_expr(v);
             let v_s = if let Some((_, ref v_ty)) = return_hash_kv {
-                coerce_arg_for_param_ty(v, v_ty)
+                // Return-tail Hash storage: keys/values land in the
+                // declared HashMap<K, V>, not at a callee param. Family
+                // 4's `Str→&str` Borrow is wrong here — V is `String`
+                // (owned), not `&str`. For Str-storage of an Ivar/Var/
+                // Send (owned-String producers), emit `.clone()` and
+                // strip any prior Borrow str_coercion so the value is
+                // owned String at the storage slot. Other v_ty shapes
+                // fall through to the param-position coerce.
+                if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+                    && matches!(
+                        &*v.node,
+                        ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::Send { .. }
+                    )
+                {
+                    // Strip any leading `&(...)` Borrow coercion str_
+                    // color applied (it expected an &str arg position),
+                    // then clone for ownership at the storage slot.
+                    let bare = match v.str_coercion {
+                        Some(crate::expr::StrCoercion::Borrow) => {
+                            // `&(raw)` ⇒ `raw`
+                            v_raw
+                                .strip_prefix("&(")
+                                .and_then(|s| s.strip_suffix(")"))
+                                .map(|s| s.to_string())
+                                .unwrap_or(v_raw.clone())
+                        }
+                        _ => v_raw.clone(),
+                    };
+                    format!("{bare}.clone()")
+                } else {
+                    coerce_arg_for_param_ty(v, v_ty)
+                }
             } else if !str_color_handled
                 && has_non_literal_str_value
                 && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
