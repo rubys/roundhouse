@@ -1,94 +1,231 @@
-//! `form_with` capture lowering: turn `<%= form_with(opts) do |form|
-//! ...inner... %>` into a `ViewHelpers.form_with(restructured) do
-//! |form| body = String.new ; <walked inner> ; body end` call.
+//! `form_with` capture lowering: inline-expand `<%= form_with(opts) do
+//! |form| ...inner... %>` at lower time. The lowerer materializes the
+//! opening `<form ...>` tag, calls runtime helpers for CSRF + method
+//! override, constructs a typed FormBuilder, walks the inner body
+//! against the SAME outer accumulator (no inner `body =` capture),
+//! and emits the closing `</form>`. This retires the runtime
+//! `ViewHelpers.form_with(...)` call shape — its 5-way heterogeneous
+//! kwargs hash is the dominant Rust HashMap parity bug.
+//!
+//! FormBuilder (`form.label`, `form.text_field`, etc.) still
+//! dispatches as a runtime instance method — Wedge 1b-ii will inline
+//! those too. The per-call-site `opts: Hash[Sym, untyped]` argument
+//! on those methods is the smaller-but-still-real heterogeneity
+//! remaining after this wedge.
 
-use crate::expr::{Expr, ExprNode, InterpPart, Literal};
-use crate::ident::Symbol;
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::ident::{Symbol, VarId};
 use crate::naming::{singularize, snake_case};
 use crate::span::Span;
 
 use super::walker::walk_body;
 use super::{
-    accumulator_append_call, assign_accumulator_string_new, lit_str, lit_sym, send, var_ref,
-    ViewCtx,
+    accumulator_append_call, lit_str, lit_sym, send, view_helpers_call, ViewCtx,
 };
 
-/// Lower `<%= form_with(opts) do |form| ...inner... %>` into
-/// `<accumulator> << ViewHelpers.form_with(opts) do |form|
-///     body = String.new ; <walked inner> ; body
-/// end`. The block body is itself a compiled-ERB template; we
-/// recursively walk it with a fresh `body` accumulator so the
-/// inner `_buf = _buf + …` lines become `body << …` and the block
-/// returns the captured string.
-///
-/// The surface call's kwargs are restructured into the spinel
-/// runtime's required shape: `model:`, `model_name:` (singular of
-/// `resource_dir`), `action:` and `method:` (computed from
-/// `record.persisted?`), and `opts:` (any leftover surface kwargs).
-/// See `restructure_form_with_kwargs`.
-pub(super) fn emit_form_with_capture(args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Expr {
-    let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
-        return accumulator_append_call(lit_str(String::new()), ctx);
+/// Typed pieces extracted from a `form_with` call's surface kwargs.
+/// `model` is the record expression (or `Class.new` for non-persisted
+/// nested resources); `model_name` is the form-prefix string;
+/// `action` and `method` are computed (often via `.persisted?`
+/// conditionals); `opts_entries` carries any leftover non-`model:`
+/// kwargs that render as `<form>` tag attributes.
+pub(super) struct FormWithComponents {
+    pub(super) model: Expr,
+    pub(super) model_name: String,
+    pub(super) action: Expr,
+    pub(super) method: Expr,
+    pub(super) opts_entries: Vec<(Expr, Expr)>,
+}
+
+/// Inline-expand `<%= form_with(opts) do |form| ...inner... %>` at
+/// lower time. Returns a Vec of statements the caller splices into
+/// the outer accumulator's statement list. Walks the inner block body
+/// with the same outer `io` accumulator (no inner capture) so each
+/// `<%= form.text_field … %>` lands directly in the parent stream.
+pub(super) fn emit_form_with_inline(
+    args: &[Expr],
+    block: &Expr,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
     let form_param = params
         .first()
         .cloned()
         .unwrap_or_else(|| Symbol::from("form"));
 
-    // Resolve `model:` kwarg → record local name. The FormBuilder
-    // dispatch needs this so `form.text_field :title` can look up
-    // the record's attribute when emitting (a future slice; today
-    // the local name + form_param binding alone is enough).
     let record_local = find_kwarg_local_name(args);
 
+    let Some(comps) = classify_form_with_components(args, ctx) else {
+        // Non-resource form_with (no `model:` kwarg) — fall back to a
+        // safe-empty append so the file still parses. Real fixtures
+        // always pass `model:`; if this shape becomes load-bearing,
+        // synthesize a no-model expansion here.
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+
+    let mut out: Vec<Expr> = Vec::new();
+
+    // 1. Open `<form ...>` tag — built as a StringInterp with the
+    //    action expression spliced in. Order matches Rails'
+    //    `render_attrs({action:, "accept-charset":, method:}.merge(opts))`:
+    //    action, accept-charset, method, then user opts. The HTML
+    //    `method` attribute is always "post" for resource forms
+    //    (PATCH/DELETE flow through `_method` override below); :get
+    //    fixtures aren't exercised so we hard-code "post" here.
+    out.push(emit_open_form_tag(&comps, ctx));
+
+    // 2. Method override: `<input type="hidden" name="_method"
+    //    value="patch">` for non-get/post methods, empty string
+    //    otherwise. Runtime helper handles the branch.
+    out.push(accumulator_append_call(
+        view_helpers_call("method_override_input", vec![comps.method.clone()]),
+        ctx,
+    ));
+
+    // 3. CSRF token hidden input — emitted unconditionally to match
+    //    Rails' position (after _method, before the body).
+    out.push(accumulator_append_call(
+        view_helpers_call("csrf_token_hidden_input", Vec::new()),
+        ctx,
+    ));
+
+    // 4. Construct the typed FormBuilder directly: `form =
+    //    ActionView::ViewHelpers::FormBuilder.new(model, model_name,
+    //    action, method)`. The constructor's typed signature
+    //    (`(Base, String, String, Symbol)`) bypasses the prior
+    //    `ViewHelpers.form_with({…})` HashMap kwargs path entirely.
+    let form_builder_const = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const {
+            path: vec![
+                Symbol::from("ActionView"),
+                Symbol::from("ViewHelpers"),
+                Symbol::from("FormBuilder"),
+            ],
+        },
+    );
+    let fb_new = send(
+        Some(form_builder_const),
+        "new",
+        vec![
+            comps.model.clone(),
+            lit_str(comps.model_name.clone()),
+            comps.action.clone(),
+            comps.method.clone(),
+        ],
+        None,
+        true,
+    );
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: form_param.clone() },
+            value: fb_new,
+        },
+    ));
+
+    // 5. Walk the block body against the OUTER accumulator (no inner
+    //    `body = String.new` capture). `form` is registered as a
+    //    local so `form.X` dispatch resolves via the FormBuilder
+    //    instance-method stubs in `insert_framework_stubs`.
     let mut inner_ctx = ctx.with_locals([form_param.as_str().to_string()]);
-    inner_ctx.accumulator = "body".to_string();
-    // Register the form param unconditionally — the FormBuilder
-    // dispatch matches on the local NAME, not the record. The
-    // record-name metadata gets used by attribute-aware lowerings
-    // (future slice); a complex model expression like
-    // `[article, Comment.new]` leaves it empty.
     inner_ctx.form_records.push((
         form_param.as_str().to_string(),
         record_local.unwrap_or_default(),
     ));
+    out.extend(walk_body(body, &inner_ctx));
 
-    // Walk the inner template with the fresh accumulator. Wrap the
-    // walked stmts with the per-block prologue (`body = String.new`)
-    // and epilogue (trailing `body` for the block return value).
-    let mut block_body_stmts: Vec<Expr> = Vec::new();
-    block_body_stmts.push(assign_accumulator_string_new(&inner_ctx.accumulator));
-    block_body_stmts.extend(walk_body(body, &inner_ctx));
-    block_body_stmts.push(var_ref(Symbol::from(inner_ctx.accumulator.as_str())));
-    let inner_seq = super::seq(block_body_stmts);
+    // 6. Close `</form>`.
+    out.push(accumulator_append_call(
+        lit_str("</form>".to_string()),
+        ctx,
+    ));
 
-    let block_lambda = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lambda {
-            params: vec![form_param],
-            block_param: None,
-            body: inner_seq,
-            block_style: *block_style,
-        },
-    );
-
-    let restructured = restructure_form_with_kwargs(args, ctx);
-    let form_with_call = view_helpers_call_with_block("form_with", restructured, block_lambda);
-    accumulator_append_call(form_with_call, ctx)
+    out
 }
 
-/// Map the surface `form_with(model: rec, class: "...")` kwargs to
-/// the spinel runtime's expected shape:
-///   `model: rec, model_name: "<singular>", action: <expr>, method: <sym>, opts: { class: "..." }`
-/// where `action`/`method` branch on `rec.persisted?` so a new record
-/// posts to the collection path and an existing record patches the
-/// member path. `model_name` derives from `ctx.resource_dir`
-/// (e.g. `"articles"` → `"article"`). Unknown kwargs collect into
-/// `opts:` so the runtime can stringify them onto the `<form>` tag.
-fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+/// Build the opening `<form action="..." accept-charset="UTF-8"
+/// method="post"<opts>>` tag as one `<accumulator> << "<...>"`
+/// statement. Static text segments are folded into the surrounding
+/// `InterpPart::Text` so the emitted bytes match Rails'
+/// `render_attrs`-produced order: action, accept-charset, method,
+/// then user opts in source order. Action value flows through
+/// `ViewHelpers.html_escape` to match runtime semantics; opts values
+/// likewise (they may carry user-supplied strings).
+fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx) -> Expr {
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: "<form action=\"".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![comps.action.clone()]),
+    });
+    parts.push(InterpPart::Text {
+        value: "\" accept-charset=\"UTF-8\" method=\"post\"".to_string(),
+    });
+    for (k, v) in &comps.opts_entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+            // Non-symbol keys not exercised; skip silently to keep
+            // output well-formed.
+            continue;
+        };
+        parts.push(InterpPart::Text {
+            value: format!(" {}=\"", key.as_str()),
+        });
+        parts.push(InterpPart::Expr {
+            expr: view_helpers_call("html_escape", vec![simplify_opts_value(k, v)]),
+        });
+        parts.push(InterpPart::Text {
+            value: "\"".to_string(),
+        });
+    }
+    parts.push(InterpPart::Text {
+        value: ">".to_string(),
+    });
+    accumulator_append_call(
+        Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
+        ctx,
+    )
+}
+
+/// Simplify a single opts entry's value at lower time. Today only
+/// `class: [base, {key: pred, ...}]` gets collapsed; other shapes
+/// pass through unchanged. Matches the existing FormBuilder-side
+/// simplification so per-form-tag and per-input-attr behavior stay
+/// in sync.
+fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
+    let is_class_key = matches!(
+        &*k.node,
+        ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "class",
+    );
+    if is_class_key {
+        super::form_builder::simplify_class_array_pub(v)
+    } else {
+        v.clone()
+    }
+}
+
+/// Extract the typed pieces of a `form_with(...)` call's surface
+/// kwargs. Returns `None` when no `model:` kwarg is present — the
+/// non-resource form_with shape isn't exercised by real-blog and
+/// would need a separate derivation for `model_name`/`action`.
+///
+/// `action` and `method` come back as IR expressions, not literal
+/// values, because they're typically computed from `record.persisted?`
+/// (PATCH for existing records vs POST for new). The polymorphic
+/// array-model form (`model: [parent, Class.new]` for nested
+/// resources) returns the child as `model`, the child class's
+/// singular name as `model_name`, and a nested-collection path
+/// helper as `action` (method is :post since `Class.new` is never
+/// persisted).
+fn classify_form_with_components(
+    args: &[Expr],
+    ctx: &ViewCtx,
+) -> Option<FormWithComponents> {
     let mut model_expr: Option<Expr> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
-    let mut other_args: Vec<Expr> = Vec::new();
 
     for arg in args {
         if let ExprNode::Hash { entries, .. } = &*arg.node {
@@ -101,25 +238,11 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
                 }
                 opts_entries.push((k.clone(), v.clone()));
             }
-        } else {
-            other_args.push(arg.clone());
         }
     }
 
-    let Some(model) = model_expr else {
-        // No `model:` kwarg — pass through unchanged. Non-resource
-        // form_with isn't exercised by the fixture; if it becomes
-        // a real shape, derive `model_name`/`action` differently.
-        return args.to_vec();
-    };
+    let model = model_expr?;
 
-    // Polymorphic array form: `model: [parent, child]` (nested resource).
-    // Spinel-blog rewrites these as
-    // `model: <child>, model_name: "<child_singular>",
-    //  action: RouteHelpers.<parent_local>_<child_plural>_path(<parent>.id),
-    //  method: :post` (the `Class.new` last element is never persisted).
-    // Detected when `model:` is an Array literal whose last element is a
-    // `Class.new(...)` Send. Other array shapes fall through.
     let route_helpers = || {
         Expr::new(
             Span::synthetic(),
@@ -130,35 +253,23 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     if let Some((nested_model, nested_name, nested_action)) =
         nested_resource_form(&model, &route_helpers)
     {
-        let opts_hash = Expr::new(
-            Span::synthetic(),
-            ExprNode::Hash { entries: opts_entries, kwargs: false },
-        );
-        let entries: Vec<(Expr, Expr)> = vec![
-            (lit_sym(Symbol::from("model")), nested_model),
-            (lit_sym(Symbol::from("model_name")), lit_str(nested_name)),
-            (lit_sym(Symbol::from("action")), nested_action),
-            (lit_sym(Symbol::from("method")), lit_sym(Symbol::from("post"))),
-            (lit_sym(Symbol::from("opts")), opts_hash),
-        ];
-        let new_hash = Expr::new(
-            Span::synthetic(),
-            ExprNode::Hash { entries, kwargs: true },
-        );
-        let mut out = other_args;
-        out.push(new_hash);
-        return out;
+        return Some(FormWithComponents {
+            model: nested_model,
+            model_name: nested_name,
+            action: nested_action,
+            method: lit_sym(Symbol::from("post")),
+            opts_entries,
+        });
     }
 
     let plural = ctx.resource_dir.as_str();
     let singular = singularize(plural);
 
-    let model_name = lit_str(singular.clone());
-
     // record.persisted?
     let persisted = send(Some(model.clone()), "persisted?", Vec::new(), None, false);
 
-    // RouteHelpers.<singular>_path(record.id)
+    // RouteHelpers.<singular>_path(record.id) when persisted, else
+    // RouteHelpers.<plural>_path for new records.
     let model_id = send(Some(model.clone()), "id", Vec::new(), None, false);
     let member_path = send(
         Some(route_helpers()),
@@ -167,7 +278,6 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
         None,
         true,
     );
-    // RouteHelpers.<plural>_path
     let collection_path = send(
         Some(route_helpers()),
         &format!("{plural}_path"),
@@ -175,7 +285,6 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
         None,
         false,
     );
-
     let action = Expr::new(
         Span::synthetic(),
         ExprNode::If {
@@ -193,40 +302,13 @@ fn restructure_form_with_kwargs(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
         },
     );
 
-    let opts_hash = Expr::new(
-        Span::synthetic(),
-        ExprNode::Hash { entries: opts_entries, kwargs: false },
-    );
-
-    let new_entries: Vec<(Expr, Expr)> = vec![
-        (lit_sym(Symbol::from("model")), model),
-        (lit_sym(Symbol::from("model_name")), model_name),
-        (lit_sym(Symbol::from("action")), action),
-        (lit_sym(Symbol::from("method")), method),
-        (lit_sym(Symbol::from("opts")), opts_hash),
-    ];
-    // `kwargs: true` so the kwargs render bare (`model: rec, …`) at
-    // the call site, matching `f(a: 1, b: 2)` Ruby surface. The inner
-    // `opts:` value above stays braced because it's an explicit hash.
-    let new_hash = Expr::new(
-        Span::synthetic(),
-        ExprNode::Hash { entries: new_entries, kwargs: true },
-    );
-
-    let mut out = other_args;
-    out.push(new_hash);
-    out
-}
-
-/// `ViewHelpers.<method>(args) do |params| body end` — companion to
-/// `view_helpers_call` that takes an attached block. Used for
-/// capture-style helpers (`form_with`, `content_for` block-form).
-fn view_helpers_call_with_block(method: &str, args: Vec<Expr>, block: Expr) -> Expr {
-    let recv = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
-    );
-    send(Some(recv), method, args, Some(block), true)
+    Some(FormWithComponents {
+        model,
+        model_name: singular,
+        action,
+        method,
+        opts_entries,
+    })
 }
 
 /// Match `model: [parent, Class.new(...)]` (the polymorphic-array form

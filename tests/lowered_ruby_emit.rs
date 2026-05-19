@@ -1400,30 +1400,60 @@ fn lowered_form_partial_emits_module_method() {
 }
 
 #[test]
-fn lowered_form_partial_form_with_capture_uses_inner_body_accumulator() {
-    // `<%= form_with(...) do |form| ... %>` lowers to a
-    // `ViewHelpers.form_with(...) do |form| body = String.new ; … ;
-    // body end` capture. Inner template stmts append to `body`, not
-    // the outer `io`, so the captured string is what the form_with
-    // helper consumes.
+fn lowered_form_partial_form_with_inline_expansion() {
+    // `<%= form_with(...) do |form| ... %>` inline-expands at lower
+    // time (Wedge 1b-i of the macro-inline retirement): no runtime
+    // `ViewHelpers.form_with(...)` call, no inner `body =` capture.
+    // The lowerer emits the opening `<form ...>` tag directly,
+    // calls runtime helpers for CSRF + _method override, constructs
+    // a typed FormBuilder, and walks the body against the OUTER `io`
+    // accumulator (no fresh `body`).
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
+    // The runtime `ViewHelpers.form_with(...)` call must NOT appear.
     assert!(
-        src.contains("io << ActionView::ViewHelpers.form_with(model: article"),
-        "expected outer io append of form_with; got:\n{src}",
+        !src.contains("ViewHelpers.form_with"),
+        "ViewHelpers.form_with runtime call should be retired by inline expansion; got:\n{src}",
+    );
+    // No inner `body = String.new` capture — the body walks against
+    // the outer `io` directly.
+    assert!(
+        !src.contains("body = String.new"),
+        "form_with inline expansion should not introduce inner `body` accumulator; got:\n{src}",
+    );
+    // Opening `<form ...>` tag emitted via StringInterp with the
+    // action expression spliced in.
+    assert!(
+        src.contains("<form action=\\\""),
+        "expected inline open-form tag; got:\n{src}",
     );
     assert!(
-        src.contains("do |form|"),
-        "expected `do |form|` block; got:\n{src}",
+        src.contains("accept-charset=\\\"UTF-8\\\" method=\\\"post\\\""),
+        "expected static accept-charset + method=post in open tag; got:\n{src}",
     );
-    // Inner accumulator is `body`, not `io`.
+    // Runtime helpers fire for CSRF + _method override.
     assert!(
-        src.contains("body = String.new"),
-        "expected fresh `body = String.new` inside the form_with block; got:\n{src}",
+        src.contains("io << ActionView::ViewHelpers.method_override_input"),
+        "expected method_override_input call; got:\n{src}",
     );
     assert!(
-        src.contains("body << form.label"),
-        "expected `body << form.label(...)` (inner accumulator) inside the block; got:\n{src}",
+        src.contains("io << ActionView::ViewHelpers.csrf_token_hidden_input"),
+        "expected csrf_token_hidden_input call; got:\n{src}",
+    );
+    // Typed FormBuilder construction — no HashMap kwargs.
+    assert!(
+        src.contains("form = ActionView::ViewHelpers::FormBuilder.new(article, \"article\","),
+        "expected direct FormBuilder.new(article, \"article\", ...); got:\n{src}",
+    );
+    // Body appends are against `io` (outer accumulator), not `body`.
+    assert!(
+        src.contains("io << form.label"),
+        "expected `io << form.label(...)` against outer accumulator; got:\n{src}",
+    );
+    // Closing `</form>` literal.
+    assert!(
+        src.contains("io << \"</form>\""),
+        "expected closing `</form>` append; got:\n{src}",
     );
 }
 
@@ -1447,10 +1477,14 @@ fn lowered_form_partial_errors_predicate_rewrite() {
 fn lowered_form_partial_form_builder_methods() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
+    // FormBuilder method dispatch survives Wedge 1b-i (Wedge 1b-ii
+    // will inline these). The accumulator is now the outer `io` (no
+    // inner `body =` capture in the inline expansion).
+    //
     // `form.label :title` → `form.label(:title)` — pass-through.
     assert!(
-        src.contains("body << form.label(:title)"),
-        "expected form.label dispatch; got:\n{src}",
+        src.contains("io << form.label(:title)"),
+        "expected form.label dispatch against outer io; got:\n{src}",
     );
     // `form.text_field :title, class: [...]` collapses the array to a
     // single string and folds the kwargs into a positional Hash
@@ -1458,20 +1492,15 @@ fn lowered_form_partial_form_builder_methods() {
     // body-typer's normalize_trailing_kwargs flips kwargs=false). The
     // base + the FIRST hash key are joined; the first hash key is the
     // no-errors variant by convention in real-blog
-    // (`border-gray-400 focus:outline-blue-600`), so the 5 default
-    // compare paths (none of which exercise an error re-render) match
-    // Rails byte-for-byte. Failure-path renders would show stale class
-    // composition; the spinel-blog test suite covers them via
-    // hand-written assertions today.
+    // (`border-gray-400 focus:outline-blue-600`).
     assert!(
-        src.contains("body << form.text_field(:title, { class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\" })"),
+        src.contains("io << form.text_field(:title, { class: \"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\" })"),
         "expected form.text_field with class-array collapsed to base + first hash key in opts hash; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → `form.text_area(:body,
-    // { rows: 4, ... })` — alias normalized to underscore form, kwargs
-    // folded into positional Hash literal.
+    // { rows: 4, ... })` — alias normalized to underscore form.
     assert!(
-        src.contains("body << form.text_area(:body, { rows: 4"),
+        src.contains("io << form.text_area(:body, { rows: 4"),
         "expected form.textarea aliased to text_area with opts hash; got:\n{src}",
     );
     assert!(
@@ -1479,10 +1508,9 @@ fn lowered_form_partial_form_builder_methods() {
         "form.textarea alias should not survive; got:\n{src}",
     );
     // `form.submit class: "..."` → `form.submit(nil, { class: "..." })`
-    // — leading `nil` inserted when no positional arg was provided;
-    // kwargs folded into positional Hash literal.
+    // — leading `nil` inserted when no positional arg was provided.
     assert!(
-        src.contains("body << form.submit(nil, { class: "),
+        src.contains("io << form.submit(nil, { class: "),
         "expected leading-nil insertion on form.submit with opts hash; got:\n{src}",
     );
 }
@@ -1492,8 +1520,9 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
     // `<% article.errors.each do |error| %>...<% end %>` walks as a
-    // template-level each block, body indented under it and using
-    // the active accumulator (`body` since we're inside form_with).
+    // template-level each block. After Wedge 1b-i the active
+    // accumulator inside the form_with body is the outer `io` (no
+    // inner `body =` capture).
     assert!(
         src.contains("article.errors.each do |error|"),
         "expected article.errors.each block; got:\n{src}",
@@ -1502,7 +1531,7 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
     // errors-each adapter rewrite (spinel-runtime errors are plain
     // Strings, no `full_message` method). Auto-escape still applies.
     assert!(
-        src.contains("body << ActionView::ViewHelpers.html_escape(error)"),
+        src.contains("io << ActionView::ViewHelpers.html_escape(error)"),
         "expected html_escape on bare `error` (full_message stripped); got:\n{src}",
     );
     assert!(
@@ -1622,51 +1651,46 @@ fn lowered_show_view_turbo_stream_from_with_string_interp() {
 #[test]
 fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     // `<%= form_with model: [@article, Comment.new], ... do |form|
-    // %>` — polymorphic-array form_with for a nested resource.
-    // The lowerer rewrites it to spinel's expected shape:
-    // `model: Comment.new` (the child), `model_name: "comment"`,
-    // `action: RouteHelpers.article_comments_path(article.id)` (the
-    // nested collection path), `method: :post` (Class.new is never
-    // persisted). FormBuilder dispatch resolves inside the block.
+    // %>` — polymorphic-array form_with for a nested resource. After
+    // Wedge 1b-i: the form_with call inline-expands at lower time —
+    // no runtime ViewHelpers.form_with — and the FormBuilder
+    // constructor takes the typed components directly:
+    // `Comment.new, "comment", RouteHelpers.article_comments_path(article.id), :post`.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/show.rb");
     assert!(
-        src.contains("ActionView::ViewHelpers.form_with(model: Comment.new"),
-        "expected form_with with nested-array model rewritten to child; got:\n{src}",
+        !src.contains("ViewHelpers.form_with"),
+        "ViewHelpers.form_with runtime call should be retired; got:\n{src}",
     );
+    // FormBuilder constructed directly with the nested-resource
+    // components.
     assert!(
-        src.contains("model_name: \"comment\""),
-        "expected model_name derived from child class; got:\n{src}",
+        src.contains(
+            "form = ActionView::ViewHelpers::FormBuilder.new(Comment.new, \"comment\", RouteHelpers.article_comments_path(article.id), :post)"
+        ),
+        "expected nested-resource FormBuilder.new with child + collection path + :post; got:\n{src}",
     );
+    // FormBuilder dispatch — direct sends against the OUTER io
+    // accumulator (no inner `body` capture in the inline expansion).
+    // Trailing kwargs still fold into positional Hash literal
+    // (FormBuilder signature ends in `opts = {}`).
     assert!(
-        src.contains("action: RouteHelpers.article_comments_path(article.id)"),
-        "expected nested collection path action; got:\n{src}",
-    );
-    assert!(
-        src.contains("method: :post"),
-        "expected method :post (Class.new is never persisted); got:\n{src}",
-    );
-    // FormBuilder dispatch — direct sends, not wrapped in html_escape.
-    // Trailing kwargs fold into positional Hash literal (FormBuilder
-    // signature ends in `opts = {}`, see normalize_trailing_kwargs).
-    assert!(
-        src.contains("body << form.label(:commenter, { class: \"block font-medium\" })"),
+        src.contains("io << form.label(:commenter, { class: \"block font-medium\" })"),
         "expected form.label dispatch with opts hash; got:\n{src}",
     );
     assert!(
-        src.contains("body << form.text_field(:commenter, { class: \"block w-full border rounded p-2\" })"),
+        src.contains("io << form.text_field(:commenter, { class: \"block w-full border rounded p-2\" })"),
         "expected form.text_field dispatch with opts hash; got:\n{src}",
     );
     assert!(
-        src.contains("body << form.text_area(:body, { rows: 3"),
+        src.contains("io << form.text_area(:body, { rows: 3"),
         "expected form.text_area dispatch with opts hash (with textarea→text_area alias); got:\n{src}",
     );
     // `form.submit "Add Comment", class: "..."` — a positional
-    // String already, so no leading-nil insertion (unlike
-    // `form.submit class: "..."` in articles/_form.rb). Kwargs still
+    // String already, so no leading-nil insertion. Kwargs still
     // fold into the trailing positional Hash.
     assert!(
-        src.contains("body << form.submit(\"Add Comment\", { class: "),
+        src.contains("io << form.submit(\"Add Comment\", { class: "),
         "expected form.submit with positional label preserved + opts hash; got:\n{src}",
     );
     assert!(

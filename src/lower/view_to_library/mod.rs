@@ -433,6 +433,18 @@ pub(crate) fn insert_framework_stubs(
             fn_sig(vec![(Symbol::from("name"), Ty::Sym)], Ty::Str),
         );
     }
+    // form_with macro-inline primitives (Wedge 1b-i). The inlined
+    // form_with expansion calls these as small typed-scalar runtime
+    // helpers rather than baking CSRF/_method bytes into every form
+    // call site; future signed-token / CSP nonce work hooks here.
+    vh.class_methods.insert(
+        Symbol::from("csrf_token_hidden_input"),
+        fn_sig(vec![], Ty::Str),
+    );
+    vh.class_methods.insert(
+        Symbol::from("method_override_input"),
+        fn_sig(vec![(Symbol::from("method"), Ty::Sym)], Ty::Str),
+    );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(

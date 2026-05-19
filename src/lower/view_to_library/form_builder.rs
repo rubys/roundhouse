@@ -84,6 +84,15 @@ fn simplify_arg_class_array(arg: &Expr) -> Expr {
 ///
 /// Anything else (no string-literal first element, no hash second
 /// element) passes through unchanged.
+///
+/// `simplify_class_array_pub` is the same function under a module-
+/// visible name so the form_with inline expansion (form_with.rs)
+/// can reuse it for the form-tag's `class:` opts entry — keeps the
+/// per-form-tag and per-input-attr class composition in sync.
+pub(super) fn simplify_class_array_pub(v: &Expr) -> Expr {
+    simplify_class_array(v)
+}
+
 fn simplify_class_array(v: &Expr) -> Expr {
     let ExprNode::Array { elements, .. } = &*v.node else {
         return v.clone();

@@ -11,7 +11,7 @@ use crate::lower::view::{
 };
 
 use super::form_builder::emit_form_builder_call;
-use super::form_with::{emit_form_with_capture, is_errors_each, rewrite_errors_each_body};
+use super::form_with::{emit_form_with_inline, is_errors_each, rewrite_errors_each_body};
 use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
 use super::predicates::rewrite_predicates;
@@ -198,11 +198,13 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
 
     // form_with capture: `<%= form_with(opts) do |form| ...inner... %>`
-    // — wraps a sub-template. Lowers to a `ViewHelpers.form_with(opts)
-    // do |form| body = String.new; <walked inner>; body end` call,
-    // appended to the outer accumulator. The inner walk uses a fresh
-    // `body` accumulator so the captured string is the form contents
-    // (not concatenated to the outer io).
+    // — inline-expanded at lower time. Emits the opening `<form ...>`
+    // tag, runtime CSRF + _method override helpers, a typed
+    // FormBuilder constructor (no `ViewHelpers.form_with(HashMap)`
+    // call), the walked body directly against the outer accumulator,
+    // and the closing `</form>`. See `emit_form_with_inline` for the
+    // shape rationale (Wedge 1b-i of the form_with macro-inline
+    // retirement; tracking memo project_form_with_inlining.md).
     if let ExprNode::Send {
         recv: None,
         method,
@@ -212,7 +214,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if method.as_str() == "form_with" {
-            return vec![emit_form_with_capture(sa, block, ctx)];
+            return emit_form_with_inline(sa, block, ctx);
         }
     }
 
