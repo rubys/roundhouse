@@ -445,6 +445,27 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("method_override_input"),
         fn_sig(vec![(Symbol::from("method"), Ty::Sym)], Ty::Str),
     );
+    // `optional_value_attr(value: String?) -> String` — used by the
+    // inlined form.text_field expansion to emit ` value="..."` only
+    // when the record's attribute is non-nil-non-empty.
+    vh.class_methods.insert(
+        Symbol::from("optional_value_attr"),
+        fn_sig(
+            vec![(Symbol::from("value"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
+    // `escape_or_empty(value: String?) -> String` — used by the
+    // inlined form.text_area expansion: returns html_escape(value)
+    // when non-nil, "" when nil. Centralizes the nil-discipline so
+    // the macro doesn't re-emit the conditional per call site.
+    vh.class_methods.insert(
+        Symbol::from("escape_or_empty"),
+        fn_sig(
+            vec![(Symbol::from("value"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(
@@ -1112,6 +1133,40 @@ fn rewrite_lvalue(lv: &LValue) -> LValue {
     }
 }
 
+// ── FormBuilder binding ──────────────────────────────────────────
+
+/// Per-form_with state threaded through the inner block walk so
+/// `form.label`/`form.text_field` macro-expansion can synthesize
+/// the right attribute names and record-attribute reads at lower
+/// time. Populated by `form_with::emit_form_with_inline` when
+/// entering the block; consumed by
+/// `form_builder::emit_form_builder_inline` when a `form.X` Send is
+/// encountered during the walk.
+#[derive(Clone)]
+pub(super) struct FormBuilderBinding {
+    /// The block param name (e.g. "form" from `do |form|`). The
+    /// walker matches a `Send { recv: Some(Var(form_param)), … }`
+    /// against this to detect macro-call sites.
+    pub(super) form_param: String,
+    /// Form-prefix string used in `<input name="<model_name>[…]">`
+    /// and `<label for="<model_name>_<field>">`. Derived from the
+    /// resource dir's singular (or the child class's name for the
+    /// polymorphic-array nested-resource form).
+    pub(super) model_name: String,
+    /// Local Var to dispatch attribute readers on (e.g. `article` →
+    /// `article.title` for the value attr). For simple `model: <var>`
+    /// shapes this reuses the source local; for complex shapes
+    /// (`model: Comment.new`, `model: [parent, Class.new]`) the
+    /// inline expansion synthesizes a fresh `<form_param>_record`
+    /// local at form_with entry and stores its name here.
+    pub(super) record_var: Symbol,
+    /// Local Var holding the form method Symbol (`:patch` or `:post`).
+    /// Synthesized as `<form_param>_method` at form_with entry.
+    /// `form.submit`'s default-text expansion reads this to choose
+    /// "Update X" (patch) vs "Create X" (post).
+    pub(super) form_method_var: Symbol,
+}
+
 // ── ViewCtx ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1128,12 +1183,12 @@ pub(super) struct ViewCtx {
     /// → walk_stmt → emit_io_append so every accumulator append
     /// resolves to the right local.
     pub(super) accumulator: String,
-    /// FormBuilder bindings active at this scope: `(local_name,
-    /// record_name)` pairs. Populated when entering a `form_with`
-    /// block; consumed by the FormBuilder method dispatch so
-    /// `form.text_field :title` resolves to the bound record's
-    /// model. Cleared on block exit.
-    pub(super) form_records: Vec<(String, String)>,
+    /// FormBuilder bindings active at this scope. Populated when
+    /// entering a `form_with` block. The macro-inline form.X
+    /// dispatch (form_builder.rs) reads these to expand
+    /// `form.text_field :title` into direct HTML accumulation
+    /// (`<input name="<model_name>[<field>]" ... value=...>`).
+    pub(super) form_records: Vec<FormBuilderBinding>,
     /// Locals known to be nullable — the view's extra_params with a
     /// `nil` default (`notice`, `alert`, …). When a predicate
     /// (`recv.present?`, `recv.empty?`, …) targets one of these,

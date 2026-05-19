@@ -10,7 +10,7 @@ use crate::lower::view::{
     classify_form_builder_method, classify_render_partial, classify_view_helper, ViewHelperKind,
 };
 
-use super::form_builder::emit_form_builder_call;
+use super::form_builder::emit_form_builder_inline;
 use super::form_with::{emit_form_with_inline, is_errors_each, rewrite_errors_each_body};
 use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
@@ -219,11 +219,12 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
 
     // FormBuilder method dispatch: `<%= form.text_field :title, opts
-    // %>` where `form` is a known FormBuilder local. Pass through as
-    // `<accumulator> << form.<method>(args)` (raw — FormBuilder output
-    // is html-safe). `textarea` aliases to `text_area`; `submit` with
-    // no positional gets a leading `nil`. Class-array opts simplify
-    // to the base string entry.
+    // %>` where `form` is the active form_with block param. After
+    // Wedge 1b-ii these inline-expand to direct HTML accumulation —
+    // no runtime FormBuilder dispatch survives in lowered output.
+    // `textarea` alias normalizes to `text_area` via
+    // `classify_form_builder_method`; class-array opts simplify to
+    // base + first-key composition.
     if let ExprNode::Send {
         recv: Some(r),
         method,
@@ -233,10 +234,13 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if let ExprNode::Var { name, .. } = &*r.node {
-            if ctx.form_records.iter().any(|(n, _)| n == name.as_str()) {
+            if let Some(binding) = ctx
+                .form_records
+                .iter()
+                .find(|b| b.form_param == name.as_str())
+            {
                 if let Some(fb) = classify_form_builder_method(method.as_str()) {
-                    let call = emit_form_builder_call(name.clone(), fb, sa);
-                    return vec![accumulator_append_call(call, ctx)];
+                    return emit_form_builder_inline(binding, fb, sa, ctx);
                 }
             }
         }

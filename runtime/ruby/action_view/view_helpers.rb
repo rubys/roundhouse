@@ -285,6 +285,35 @@ module ActionView
       end
     end
 
+    # Rails' `text_field` (and field helpers) omits the `value`
+    # attribute entirely when the record's value is nil or an empty
+    # string — only emits ` value="<escaped>"` when there's content.
+    # Wraps the nil-or-empty check + html_escape so the macro-inline
+    # form.text_field expansion calls one typed helper instead of
+    # reconstructing the conditional at each call site.
+    def self.optional_value_attr(value)
+      if value.nil? || value.to_s.empty?
+        ""
+      else
+        %( value="#{html_escape(value.to_s)}")
+      end
+    end
+
+    # Inverse of `html_escape`'s nil-discipline: returns html_escape
+    # on the value when present, empty string when nil. Used by the
+    # macro-inline `form.text_area` expansion for the textarea body
+    # — Rails renders an empty body when the attribute is nil rather
+    # than the literal "null" / "nil". Keeping the conditional in
+    # one runtime function avoids re-emitting the nil-check at every
+    # call site.
+    def self.escape_or_empty(value)
+      if value.nil?
+        ""
+      else
+        html_escape(value.to_s)
+      end
+    end
+
     # ── form builder (used as `form_with` block-yielded value) ────────
   
     class FormBuilder

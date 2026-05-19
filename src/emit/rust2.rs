@@ -103,7 +103,7 @@ const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.r
 /// bare references the lowerer leaves unqualified.
 const VIEW_IMPORTS: &str = "\
 #[allow(unused_imports)]
-use crate::view_helpers::{self, ViewHelpers, FormBuilder};
+use crate::view_helpers::{self, ViewHelpers};
 #[allow(unused_imports)]
 use crate::route_helpers::{self, RouteHelpers};
 #[allow(unused_imports)]

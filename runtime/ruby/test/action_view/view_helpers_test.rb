@@ -250,6 +250,28 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.method_override_input(:post)
   end
 
+  def test_optional_value_attr_emits_for_non_empty
+    assert_equal %( value="hello"), ViewHelpers.optional_value_attr("hello")
+  end
+
+  def test_optional_value_attr_escapes_value
+    assert_equal %( value="&lt;tag&gt;"), ViewHelpers.optional_value_attr("<tag>")
+  end
+
+  def test_optional_value_attr_empty_for_nil_or_blank
+    assert_equal "", ViewHelpers.optional_value_attr(nil)
+    assert_equal "", ViewHelpers.optional_value_attr("")
+  end
+
+  def test_escape_or_empty_returns_escaped_value
+    assert_equal "hello", ViewHelpers.escape_or_empty("hello")
+    assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.escape_or_empty("<b>hi</b>")
+  end
+
+  def test_escape_or_empty_returns_empty_for_nil
+    assert_equal "", ViewHelpers.escape_or_empty(nil)
+  end
+
   def test_csp_meta_tag_returns_empty_when_unconfigured
     # Matches Rails' dev-mode behavior and the other targets' runtimes.
     assert_equal "", ViewHelpers.csp_meta_tag

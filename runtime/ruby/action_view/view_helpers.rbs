@@ -93,6 +93,8 @@ module ActionView
     # rationale.
     def self.csrf_token_hidden_input: () -> String
     def self.method_override_input: (Symbol method) -> String
+    def self.optional_value_attr: (String? value) -> String
+    def self.escape_or_empty: (String? value) -> String
 
     # ── form_with ───────────────────────────────────────────────────
     # `model` is the record (Base subclass instance); `model_name` is

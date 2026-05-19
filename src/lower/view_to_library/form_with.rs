@@ -20,7 +20,8 @@ use crate::span::Span;
 
 use super::walker::walk_body;
 use super::{
-    accumulator_append_call, lit_str, lit_sym, send, view_helpers_call, ViewCtx,
+    accumulator_append_call, lit_str, lit_sym, send, view_helpers_call,
+    FormBuilderBinding, ViewCtx,
 };
 
 /// Typed pieces extracted from a `form_with` call's surface kwargs.
@@ -67,6 +68,40 @@ pub(super) fn emit_form_with_inline(
 
     let mut out: Vec<Expr> = Vec::new();
 
+    // Bind locals before emitting the open tag so the open-tag's
+    // action interp can read them. `<form_param>_record` holds the
+    // model expression — reused as the receiver for `form.X`
+    // attribute reads. `<form_param>_method` holds the method symbol
+    // — read by `form.submit`'s default-text expansion. Reuse the
+    // source local for record when the source already named one
+    // (`model: article`); synthesize otherwise (`model: Comment.new`).
+    let form_param_str = form_param.as_str();
+    let record_var = match record_local.as_deref() {
+        Some(name) if !name.is_empty() => Symbol::from(name),
+        _ => {
+            let synth = format!("{form_param_str}_record");
+            out.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Var {
+                        id: VarId(0),
+                        name: Symbol::from(synth.as_str()),
+                    },
+                    value: comps.model.clone(),
+                },
+            ));
+            Symbol::from(synth)
+        }
+    };
+    let form_method_var = Symbol::from(format!("{form_param_str}_method"));
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: form_method_var.clone() },
+            value: comps.method.clone(),
+        },
+    ));
+
     // 1. Open `<form ...>` tag — built as a StringInterp with the
     //    action expression spliced in. Order matches Rails'
     //    `render_attrs({action:, "accept-charset":, method:}.merge(opts))`:
@@ -78,9 +113,14 @@ pub(super) fn emit_form_with_inline(
 
     // 2. Method override: `<input type="hidden" name="_method"
     //    value="patch">` for non-get/post methods, empty string
-    //    otherwise. Runtime helper handles the branch.
+    //    otherwise. Calls the runtime helper with the bound method
+    //    local so the conditional evaluates once.
+    let method_var_ref = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: form_method_var.clone() },
+    );
     out.push(accumulator_append_call(
-        view_helpers_call("method_override_input", vec![comps.method.clone()]),
+        view_helpers_call("method_override_input", vec![method_var_ref]),
         ctx,
     ));
 
@@ -91,53 +131,21 @@ pub(super) fn emit_form_with_inline(
         ctx,
     ));
 
-    // 4. Construct the typed FormBuilder directly: `form =
-    //    ActionView::ViewHelpers::FormBuilder.new(model, model_name,
-    //    action, method)`. The constructor's typed signature
-    //    (`(Base, String, String, Symbol)`) bypasses the prior
-    //    `ViewHelpers.form_with({…})` HashMap kwargs path entirely.
-    let form_builder_const = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const {
-            path: vec![
-                Symbol::from("ActionView"),
-                Symbol::from("ViewHelpers"),
-                Symbol::from("FormBuilder"),
-            ],
-        },
-    );
-    let fb_new = send(
-        Some(form_builder_const),
-        "new",
-        vec![
-            comps.model.clone(),
-            lit_str(comps.model_name.clone()),
-            comps.action.clone(),
-            comps.method.clone(),
-        ],
-        None,
-        true,
-    );
-    out.push(Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: form_param.clone() },
-            value: fb_new,
-        },
-    ));
-
-    // 5. Walk the block body against the OUTER accumulator (no inner
-    //    `body = String.new` capture). `form` is registered as a
-    //    local so `form.X` dispatch resolves via the FormBuilder
-    //    instance-method stubs in `insert_framework_stubs`.
-    let mut inner_ctx = ctx.with_locals([form_param.as_str().to_string()]);
-    inner_ctx.form_records.push((
-        form_param.as_str().to_string(),
-        record_local.unwrap_or_default(),
-    ));
+    // 4. Walk the block body against the OUTER accumulator. The
+    //    binding registered below feeds `form.X` macro expansion
+    //    (form_builder.rs::emit_form_builder_inline) — no runtime
+    //    FormBuilder construction; the form.X calls inline directly
+    //    to `<label>...`/`<input>...` HTML.
+    let mut inner_ctx = ctx.with_locals([form_param_str.to_string()]);
+    inner_ctx.form_records.push(FormBuilderBinding {
+        form_param: form_param_str.to_string(),
+        model_name: comps.model_name.clone(),
+        record_var,
+        form_method_var,
+    });
     out.extend(walk_body(body, &inner_ctx));
 
-    // 6. Close `</form>`.
+    // 5. Close `</form>`.
     out.push(accumulator_append_call(
         lit_str("</form>".to_string()),
         ctx,
