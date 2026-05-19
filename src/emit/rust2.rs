@@ -236,6 +236,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         classes
     })
     .expect("rust runtime transpile failed (Ruby source error)");
+    // Capture the parsed framework runtime LCs (ViewHelpers,
+    // JsonBuilder, Inflector, Router, ActionController::Base,
+    // ActiveRecord::Base) so the global class-method registry can
+    // resolve qualified calls like `ViewHelpers::html_escape(...)`
+    // and pad their param Tys for the Const-recv arm's coerce path.
+    // Without these entries, app-side calls into the runtime modules
+    // fall through `external_class_method_param_tys` /
+    // `current_class_method_param_tys` / `global_class_method_param_tys`
+    // with no signature, skipping the per-Ty coercion (Family 3
+    // primitive→Value, Family 4 String→&str borrow, Hash→HashMap
+    // conversions) and emitting args bare.
+    let runtime_lcs: Vec<crate::dialect::LibraryClass> = runtime_units
+        .iter()
+        .flat_map(|u| u.classes.iter().cloned())
+        .collect();
     for unit in runtime_units {
         files.push(EmittedFile {
             path: unit.out_path,
@@ -426,6 +441,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &view_lcs,
         &controller_lcs,
         &fixture_lcs,
+        &runtime_lcs,
     );
     // Avoid unused-mut warnings on the lowered LC accumulators when
     // any one of them is empty for the current fixture.
@@ -831,6 +847,7 @@ fn collect_global_class_methods(
     view_lcs: &[crate::dialect::LibraryClass],
     controller_lcs: &[crate::dialect::LibraryClass],
     fixture_lcs: &[crate::dialect::LibraryClass],
+    runtime_lcs: &[crate::dialect::LibraryClass],
 ) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>> {
     use crate::dialect::{LibraryClass, MethodReceiver};
     use crate::ty::{ParamKind, Ty};
@@ -890,6 +907,18 @@ fn collect_global_class_methods(
         collect_one(lc, &mut out);
     }
     for lc in fixture_lcs {
+        collect_one(lc, &mut out);
+    }
+    // Framework runtime LCs (ViewHelpers, JsonBuilder, Inflector,
+    // Router, ActiveRecord::Base, ActionController::Base) — parsed
+    // from `runtime/ruby/*.rb` via `runtime_loader::rust_units` and
+    // forwarded here so the global registry can answer Const-recv
+    // lookups for the qualified call shape `ViewHelpers::html_escape
+    // (...)`. The .rbs sidecars supply the signatures, so
+    // `MethodDef.signature` populates a real Ty vec (not the
+    // arity-only `Untyped` fallback) and the coerce_arg_for_param_ty
+    // families fire.
+    for lc in runtime_lcs {
         collect_one(lc, &mut out);
     }
     out
