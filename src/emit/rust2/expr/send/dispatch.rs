@@ -48,6 +48,36 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
     }
 }
 
+/// Per-method param-Ty fallback for the per-controller AC::Base shim
+/// methods (`render`, `render_with`, `redirect_to`, `head`,
+/// `request_format`). These are hand-coded strings appended to each
+/// controller's emitted file by `rust2.rs::emit` (see the `ac_shim`
+/// format-string around line 612) — they aren't LCs, so they don't
+/// surface through `collect_class_method_param_tys` nor through the
+/// `runtime_lcs` forwarded into the global registry.
+///
+/// Returns `Some(Ty)` only for arg positions that need coercion (the
+/// trailing opts-Hash arg for `render_with`/`redirect_to`). The
+/// owned-String body / url arg on `render`/`render_with`/
+/// `redirect_to` returns `None` so the caller emits bare (no Family
+/// 4 borrow wrap — those shim signatures take `String` not `&str`).
+///
+/// Keep these entries in lockstep with the literal shim text in
+/// `rust2.rs::emit`. If/when the shim's signature changes (e.g. to
+/// match the AC::Base .rbs contract), update both.
+pub(super) fn controller_shim_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
+    use crate::ty::Ty;
+    let hash_str_untyped = || Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Untyped),
+    };
+    match (method, idx) {
+        ("render_with", 1) => Some(hash_str_untyped()),
+        ("redirect_to", 1) => Some(hash_str_untyped()),
+        _ => None,
+    }
+}
+
 /// Recv-Ty-aware method bridges — Ruby method calls whose Rust analog
 /// differs by receiver type. Predicates retain their trailing `?` at
 /// this level. Where Ruby methods return Integer (`.length`, `.size`,

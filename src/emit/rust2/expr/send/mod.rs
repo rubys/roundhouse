@@ -130,7 +130,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         let coerced: Vec<String> = args
             .iter()
             .enumerate()
-            .map(|(i, a)| coerce_arg_for_class_method(method, i, a))
+            .map(|(i, a)| coerce_arg_for_class_method(&effective_method, i, a))
             .collect();
         if coerced.is_empty() {
             return format!("Self::{rewritten_method}()");
@@ -152,7 +152,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     let final_args: Vec<String> = if matches!(&*r.node, ExprNode::SelfRef) {
         args.iter()
             .enumerate()
-            .map(|(i, a)| coerce_arg_for_class_method(method, i, a))
+            .map(|(i, a)| coerce_arg_for_class_method(&effective_method, i, a))
             .collect()
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");

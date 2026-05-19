@@ -21,8 +21,16 @@ use super::super::{arg_hash_var_local_ty, class_method_param_ty, emit_expr};
 /// Apply callee-back-propagation coercion for a single arg in a
 /// class-/instance-method call where the callee is in
 /// `CLASS_METHOD_PARAM_TYS`. Defers to `coerce_arg_for_param_ty`.
+///
+/// Two-step lookup: current-class first (sibling method on the same
+/// LC), then the `controller_shim_method_param_ty` table for the
+/// per-controller AC::Base shim methods (`redirect_to`, `render_with`)
+/// whose signatures live as hand-coded text in `rust2.rs::emit` and
+/// thus aren't reachable through any LC-based registry.
 pub(super) fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) -> String {
-    let Some(param_ty) = class_method_param_ty(method, idx) else {
+    let param_ty = class_method_param_ty(method, idx)
+        .or_else(|| super::dispatch::controller_shim_method_param_ty(method, idx));
+    let Some(param_ty) = param_ty else {
         return emit_expr(arg);
     };
     coerce_arg_for_param_ty(arg, &param_ty)

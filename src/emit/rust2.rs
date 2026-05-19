@@ -611,8 +611,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // clean so the aggregate error count moves.
                 let ac_shim = format!(
                     "\nimpl {name} {{\n\
-                    \x20   pub fn render(&self, content: String) -> String {{ content }}\n\
-                    \x20   pub fn render_with(&self, content: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) -> String {{ content }}\n\
+                    \x20   pub fn render(&self, _content: String) {{ }}\n\
+                    \x20   pub fn render_with(&self, _content: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
                     \x20   pub fn request_format(&self) -> String {{ \"html\".to_string() }}\n\
                     \x20   pub fn redirect_to(&self, _url: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
                     \x20   pub fn head(&self, _status: &str) {{ }}\n\
