@@ -94,8 +94,14 @@ module ActionView
     # rationale.
     def self.csrf_token_hidden_input: () -> String
     def self.method_override_input: (Symbol method) -> String
-    def self.optional_value_attr: (String? value) -> String
-    def self.escape_or_empty: (String? value) -> String
+    # `value` accepts the abstract Base#[] return type (the union of
+    # all schema column types — Int64/String/Float/Bool plus Nil).
+    # Both helper bodies already nil-check and stringify uniformly,
+    # so widening to `untyped` keeps the call-site shape simple
+    # (`optional_value_attr(record[:field])`) without per-column
+    # casts.
+    def self.optional_value_attr: (untyped value) -> String
+    def self.escape_or_empty: (untyped value) -> String
 
     # ── attribute rendering ────────────────────────────────────────
     # `attrs` is a Hash whose keys are Symbol or String and whose

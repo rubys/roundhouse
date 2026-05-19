@@ -304,10 +304,22 @@ fn lit_str_coerce(e: Expr) -> Expr {
     }
 }
 
-/// `<record_var>.<field>` — read the record's attribute via the
-/// model's typed reader. Returns a Send (`Send { recv:
-/// Some(Var(record_var)), method: field, args: [], block: None }`)
-/// the body-typer resolves to the per-model attribute reader.
+/// `<record_var>[:<field>]` — read the record's attribute via the
+/// abstract indexer on `ActiveRecord::Base`. Matches the shape the
+/// retired runtime FormBuilder used (`@model[field]`).
+///
+/// Why `[]` over `.field()`: Crystal's strict-typing flow analysis
+/// treats schema-nullable column readers (`property title : String?`)
+/// as if they were non-nilable — the body-typer narrows by column
+/// type (`Ty::Str`), and the Crystal emit then wraps the read in
+/// `.not_nil!` to bridge the gap. For columns the schema says are
+/// nullable (e.g. `t.string "title"` without `null: false`), the
+/// `.not_nil!` crashes at runtime on new records where `@title` is
+/// genuinely nil. The `[]` form lands as a Send with non-empty args
+/// (the field Symbol), which the Crystal emit's not-nil rule skips
+/// — restoring the prior runtime FormBuilder's parity behavior. The
+/// `optional_value_attr` / `escape_or_empty` runtime helpers accept
+/// the resulting nullable / untyped value uniformly.
 fn record_field_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
     let record_ref = Expr::new(
         Span::synthetic(),
@@ -316,7 +328,13 @@ fn record_field_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
             name: binding.record_var.clone(),
         },
     );
-    send(Some(record_ref), field.as_str(), Vec::new(), None, false)
+    send(
+        Some(record_ref),
+        "[]",
+        vec![lit_sym(field)],
+        None,
+        false,
+    )
 }
 
 /// Extract the Symbol payload from a field-name arg (`:title`).

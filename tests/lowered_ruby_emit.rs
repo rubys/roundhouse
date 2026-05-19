@@ -1466,16 +1466,16 @@ fn lowered_form_partial_form_with_inline_expansion() {
         "expected inline text_field name/id attrs; got:\n{src}",
     );
     assert!(
-        src.contains("ActionView::ViewHelpers.optional_value_attr(article.title)"),
-        "expected optional_value_attr on article.title; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.optional_value_attr(article[:title])"),
+        "expected optional_value_attr on article[:title]; got:\n{src}",
     );
     assert!(
         src.contains("name=\\\"article[body]\\\" id=\\\"article_body\\\""),
         "expected inline text_area name/id attrs; got:\n{src}",
     );
     assert!(
-        src.contains("ActionView::ViewHelpers.escape_or_empty(article.body)"),
-        "expected escape_or_empty on article.body for text_area body; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.escape_or_empty(article[:body])"),
+        "expected escape_or_empty on article[:body] for text_area body; got:\n{src}",
     );
     // Submit with no label: default text branches on form_method.
     assert!(
@@ -1750,17 +1750,17 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     );
     assert!(
         src.contains(
-            "ActionView::ViewHelpers.optional_value_attr(form_record.commenter)"
+            "ActionView::ViewHelpers.optional_value_attr(form_record[:commenter])"
         ),
-        "expected optional_value_attr on form_record.commenter; got:\n{src}",
+        "expected optional_value_attr on form_record[:commenter]; got:\n{src}",
     );
     assert!(
         src.contains("name=\\\"comment[body]\\\" id=\\\"comment_body\\\""),
         "expected inline body text_area name/id; got:\n{src}",
     );
     assert!(
-        src.contains("ActionView::ViewHelpers.escape_or_empty(form_record.body)"),
-        "expected escape_or_empty on form_record.body; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.escape_or_empty(form_record[:body])"),
+        "expected escape_or_empty on form_record[:body]; got:\n{src}",
     );
     // `form.submit "Add Comment", class: "..."` — positional label
     // wins (no default-text conditional); appears as a literal in

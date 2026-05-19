@@ -436,24 +436,27 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("method_override_input"),
         fn_sig(vec![(Symbol::from("method"), Ty::Sym)], Ty::Str),
     );
-    // `optional_value_attr(value: String?) -> String` — used by the
+    // `optional_value_attr(value: untyped) -> String` — used by the
     // inlined form.text_field expansion to emit ` value="..."` only
-    // when the record's attribute is non-nil-non-empty.
+    // when the record's attribute is non-nil-non-empty. `untyped`
+    // (rather than `String?`) so the call site can pass the
+    // abstract Base#[] return type (`Int64 | String | … | Nil`)
+    // directly without per-column casts.
     vh.class_methods.insert(
         Symbol::from("optional_value_attr"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            vec![(Symbol::from("value"), Ty::Untyped)],
             Ty::Str,
         ),
     );
-    // `escape_or_empty(value: String?) -> String` — used by the
+    // `escape_or_empty(value: untyped) -> String` — used by the
     // inlined form.text_area expansion: returns html_escape(value)
-    // when non-nil, "" when nil. Centralizes the nil-discipline so
-    // the macro doesn't re-emit the conditional per call site.
+    // when non-nil, "" when nil. Same untyped rationale as
+    // `optional_value_attr` above.
     vh.class_methods.insert(
         Symbol::from("escape_or_empty"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            vec![(Symbol::from("value"), Ty::Untyped)],
             Ty::Str,
         ),
     );
