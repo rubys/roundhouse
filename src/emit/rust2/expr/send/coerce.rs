@@ -15,7 +15,7 @@
 
 use crate::expr::{Expr, ExprNode};
 
-use super::super::util::{peel_nil, ty_contains_untyped, value_narrowing_coercion};
+use super::super::util::{is_option_ty, peel_nil, ty_contains_untyped, value_narrowing_coercion};
 use super::super::{arg_hash_var_local_ty, class_method_param_ty, emit_expr};
 
 /// Apply callee-back-propagation coercion for a single arg in a
@@ -55,6 +55,27 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     use crate::ty::Ty;
     let raw = emit_expr(arg);
     let arg_ty_peeled = arg.ty.as_ref().map(peel_nil);
+
+    // Family 6: T → Option<T> Some-wrap. When the callee param is
+    // `Option<U>` (rust2's emit shape for RBS-declared `U?` / `T |
+    // nil`) and the arg's RAW body-typer Ty matches the peeled inner
+    // U exactly, wrap with `Some(...)`. Closes
+    // `JsonBuilder::encode_datetime(article.created_at())` where the
+    // model attribute returns owned `String` and the callee declared
+    // `String?`.
+    //
+    // Gate on RAW arg.ty (not peeled) so an arg whose own type is
+    // already `Option<U>` (e.g. `self.flash.get("notice")` →
+    // `Option<String>`) doesn't get double-wrapped to `Option<Option<U>>`.
+    // The body-typer already records the matching `Option<U>` shape
+    // on those args, so the bare emit type-checks against the
+    // `Option<U>` param without wrapping.
+    if is_option_ty(param_ty) {
+        let inner = peel_nil(param_ty);
+        if arg.ty.as_ref() == Some(inner) && !matches!(inner, Ty::Untyped) {
+            return format!("Some({raw})");
+        }
+    }
 
     if let Ty::Hash { value: pv, .. } = param_ty {
         if matches!(pv.as_ref(), Ty::Untyped) {
