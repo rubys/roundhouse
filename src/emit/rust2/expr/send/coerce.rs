@@ -64,15 +64,31 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // model attribute returns owned `String` and the callee declared
     // `String?`.
     //
-    // Gate on RAW arg.ty (not peeled) so an arg whose own type is
-    // already `Option<U>` (e.g. `self.flash.get("notice")` →
-    // `Option<String>`) doesn't get double-wrapped to `Option<Option<U>>`.
-    // The body-typer already records the matching `Option<U>` shape
-    // on those args, so the bare emit type-checks against the
-    // `Option<U>` param without wrapping.
+    // Two gates:
+    //
+    // 1. RAW arg.ty (not peeled) must equal the inner. An arg whose
+    //    own type is already `Option<U>` (e.g. `self.flash.get
+    //    ("notice")` → `Option<String>`) must NOT get double-wrapped
+    //    to `Option<Option<U>>`. The body-typer already records the
+    //    matching `Option<U>` shape, so the bare emit type-checks.
+    //
+    // 2. Arg must be from an owned-producing node (Var/Send/Ivar).
+    //    Literal-Str args (e.g. `ViewHelpers::dom_id(article,
+    //    "comments_count")` reaching `Option<String>`) emit as
+    //    `&'static str`, not owned `String`, so `Some(&str)` =
+    //    `Option<&str>` would mismatch `Option<String>`. Closing
+    //    that needs an inner `.to_string()` too — out of scope for
+    //    this wedge.
     if is_option_ty(param_ty) {
         let inner = peel_nil(param_ty);
-        if arg.ty.as_ref() == Some(inner) && !matches!(inner, Ty::Untyped) {
+        let owned_producing = matches!(
+            &*arg.node,
+            ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
+        );
+        if owned_producing
+            && arg.ty.as_ref() == Some(inner)
+            && !matches!(inner, Ty::Untyped)
+        {
             return format!("Some({raw})");
         }
     }
