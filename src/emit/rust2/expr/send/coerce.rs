@@ -13,7 +13,7 @@
 //!     field-position variants used by the Cast arm and the
 //!     constructor `self.field = value` rewrite.
 
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 
 use super::super::util::{is_option_ty, peel_nil, ty_contains_untyped, value_narrowing_coercion};
 use super::super::{arg_hash_var_local_ty, class_method_param_ty, emit_expr};
@@ -90,6 +90,20 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             && !matches!(inner, Ty::Untyped)
         {
             return format!("Some({raw})");
+        }
+        // Literal-Str arg → Option<String>: wrap with
+        // `Some(literal.to_string())` so the &'static str is promoted
+        // to owned `String` inside the Option. Closes the
+        // `ViewHelpers::dom_id(article, "comments_count")` shape where
+        // the suffix slot is declared `Option<String>` but the source
+        // passes a bare string literal.
+        if matches!(
+            &*arg.node,
+            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+        ) && matches!(inner, Ty::Str | Ty::Sym)
+            && arg.str_coercion.is_none()
+        {
+            return format!("Some({raw}.to_string())");
         }
     }
 
