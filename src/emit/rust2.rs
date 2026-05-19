@@ -87,6 +87,17 @@ const RT_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
 const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
 const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.rs");
+// Phase 6 HTTP/server/cable runtime — hand-written, shared with the
+// legacy rust emitter. `server::start` mounts axum, applies schema,
+// installs middleware (layout-wrap, method-override), and serves
+// `/cable` WebSockets via `cable::cable_handler`. `http::redirect` +
+// `http::html` are the response helpers emitted controllers use.
+// `test_support` provides `TestResponseExt` consumed by emitted
+// controller tests.
+const RT_HTTP_SOURCE: &str = include_str!("../../runtime/rust/http.rs");
+const RT_SERVER_SOURCE: &str = include_str!("../../runtime/rust/server.rs");
+const RT_CABLE_SOURCE: &str = include_str!("../../runtime/rust/cable.rs");
+const RT_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/rust/test_support.rs");
 
 /// `use crate::*;` imports prepended to every emitted app-model
 /// file. The lowerer (`src/lower/model_to_library/adapter_emit.rs`)
@@ -206,6 +217,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
         ("src/db.rs", RT_DB_SOURCE),
         ("src/broadcasts.rs", RT_BROADCASTS_SOURCE),
+        ("src/http.rs", RT_HTTP_SOURCE),
+        ("src/server.rs", RT_SERVER_SOURCE),
+        ("src/cable.rs", RT_CABLE_SOURCE),
+        ("src/test_support.rs", RT_TEST_SUPPORT_SOURCE),
     ] {
         files.push(EmittedFile {
             path: PathBuf::from(path),
@@ -252,9 +267,26 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .flat_map(|u| u.classes.iter().cloned())
         .collect();
     for unit in runtime_units {
+        let mut content = unit.content;
+        // Bare-fn compat shim for hand-written `runtime/rust/server.rs`,
+        // which calls `view_helpers::set_yield(...)` / `get_yield()` /
+        // `reset_render_state()` against a free-function surface. The
+        // transpiled `runtime/ruby/action_view/view_helpers.rb` exposes
+        // these as `impl ViewHelpers` methods (Mode::Library); without
+        // bare wrappers server.rs would need a per-target call shape.
+        // Appended to the emitted text rather than added to the Ruby
+        // source so TS/Crystal aren't polluted with rust-only adapters.
+        if unit.out_path.ends_with("view_helpers.rs") {
+            content.push_str(
+                "\n// rust2 compat: bare-fn wrappers consumed by server.rs.\n\
+                 pub fn reset_render_state() { ViewHelpers::reset_slots_bang() }\n\
+                 pub fn set_yield(content: &str) { ViewHelpers::set_yield(content) }\n\
+                 pub fn get_yield() -> String { ViewHelpers::get_yield() }\n",
+            );
+        }
         files.push(EmittedFile {
             path: unit.out_path,
-            content: unit.content,
+            content,
         });
     }
 
@@ -727,7 +759,18 @@ fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
         .collect();
     mods.sort();
     mods.dedup();
+    // Gate test-only modules behind `#[cfg(test)]` so `cargo build`
+    // (no test cfg) doesn't compile `test_support` (which uses the
+    // `axum-test` dev-dependency) or `fixtures` / `tests` (which
+    // reference test_support). Mirrors `src/emit/rust/cargo.rs`'s
+    // emit_lib_rs gating.
+    fn is_test_only(m: &str) -> bool {
+        matches!(m, "test_support" | "fixtures" | "tests")
+    }
     for m in &mods {
+        if is_test_only(m) {
+            lines.push("#[cfg(test)]".to_string());
+        }
         lines.push(format!("pub mod {m};"));
     }
     EmittedFile {
