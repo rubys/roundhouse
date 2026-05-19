@@ -193,8 +193,22 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
             )
         };
+        // Conservative "If-expr produces owned String": both branches
+        // are owned-producers AND the If's body-typer Ty is Str.
+        // Closes `html_escape(if persisted? { article_path(id) } else
+        // { articles_path() })` where each branch is a Send returning
+        // owned String. Borrowing the whole If-expr (`&(if ... {} else
+        // {})`) makes Rust coerce both arms' Strings into a shared
+        // `&str` via Deref.
+        let if_owned_producing = if let ExprNode::If { then_branch, else_branch, .. } = &*arg.node {
+            owned_producing_node(&*then_branch.node)
+                && owned_producing_node(&*else_branch.node)
+        } else {
+            false
+        };
         let arg_is_owned = matches!(arg_ty_peeled, Some(Ty::Str | Ty::Sym))
             && (owned_producing_node(&*arg.node)
+                || if_owned_producing
                 || matches!(
                     &*arg.node,
                     ExprNode::Cast { value, .. } if owned_producing_node(&*value.node)
