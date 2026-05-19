@@ -836,6 +836,44 @@ fn emit_expr_inner(e: &Expr) -> String {
             if let Some(s) = narrowed_param_read(n, e.ty.as_ref()) {
                 return s;
             }
+            // Local-Var narrowing-from-Value: when the body-typer
+            // narrows a Value-storage local (declared as
+            // `serde_json::Value` / `Roundhouse::ParamValue`) to a
+            // primitive via `is_a?(String/Integer/…)`, emit the
+            // `serde_json::Value::as_<primitive>().unwrap()` conversion
+            // at the Var read so the surrounding `if … { var } else
+            // { default }` branches unify on the primitive's borrowed
+            // form. Without this, the then-branch produces bare
+            // `Value` and the else-branch produces the primitive — the
+            // E0308 mismatch the `synth_from_raw`-emitted
+            // `if raw_field.is_a?(String) { raw_field } else { "" }`
+            // shape would otherwise trip. Restricted to primitive
+            // narrowings (Str/Sym/Int/Bool/Float) — Hash/Array
+            // narrowings keep their existing Cast-wrapped path.
+            if let (Some(narrowed), Some(declared)) = (
+                e.ty.as_ref(),
+                local_var_ty(n).as_ref(),
+            ) {
+                use crate::ty::Ty;
+                let declared_peeled = crate::emit::rust2::expr::util::peel_nil(declared);
+                let declared_is_value = matches!(declared_peeled, Ty::Untyped | Ty::Record { .. })
+                    || matches!(
+                        declared_peeled,
+                        Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+                    );
+                if declared_is_value {
+                    let coercion = match narrowed {
+                        Ty::Str | Ty::Sym => Some("as_str().unwrap()"),
+                        Ty::Int => Some("as_i64().unwrap()"),
+                        Ty::Float => Some("as_f64().unwrap()"),
+                        Ty::Bool => Some("as_bool().unwrap()"),
+                        _ => None,
+                    };
+                    if let Some(c) = coercion {
+                        return format!("{n}.{c}");
+                    }
+                }
+            }
             // Multi-read non-Copy local: clone on every read so a
             // later use-after-the-first doesn't trip E0382. The pre-
             // pass in `with_method_scope` records names read > 1

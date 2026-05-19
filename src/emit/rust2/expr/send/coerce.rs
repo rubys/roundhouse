@@ -136,8 +136,16 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
 
     // Family 3: primitive → Value. For Ivar reads of non-Copy fields,
     // `Value::from` takes by value and would move out of `&self`. Clone
-    // first to materialize the owned value.
-    if matches!(param_ty, Ty::Untyped)
+    // first to materialize the owned value. `Roundhouse::ParamValue`
+    // is a type alias for `serde_json::Value` (see `runtime/rust/
+    // param_value.rs`), so the Class form goes through the same
+    // primitive-wrap shape as the bare `Ty::Untyped` callee.
+    let param_renders_as_value = matches!(param_ty, Ty::Untyped)
+        || matches!(
+            param_ty,
+            Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+        );
+    if param_renders_as_value
         && matches!(
             arg_ty_peeled,
             Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
@@ -342,6 +350,74 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
         };
         if let Some(c) = coercion {
             return format!("({raw}).{c}");
+        }
+    }
+    // Value → HashMap<String, Value> narrowing. Covers Untyped /
+    // Record / Class(Roundhouse::ParamValue) sources — all of which
+    // rust2 renders as `serde_json::Value` — when the target field
+    // shape is the conventional `HashMap<String, ParamValue/Untyped>`.
+    // The `synth_from_raw` lowerer wraps the post-`is_a?(Hash)` Var
+    // in a Cast for this purpose, so a bare `raw_sub` site emits as
+    // `raw_sub.as_object().cloned().unwrap_or_default().into_iter().
+    // collect::<HashMap<_, _>>()`. Restricted to String-keyed maps
+    // with a Value-shaped value type so the Map → HashMap conversion's
+    // element types unify trivially.
+    //
+    // Source shape detection inspects both `arg.ty` (the body-typer's
+    // post-narrowing view: e.g. `Hash<Untyped, Untyped>` for a
+    // `raw_sub.is_a?(Hash)`-guarded Var read) AND the declared local
+    // var type via `local_var_ty` (the storage shape: Value /
+    // ParamValue). Either being Value-shaped triggers the conversion;
+    // a true `HashMap<Value, Value>` source would need neither, so a
+    // false positive here is rare and benign.
+    let is_value_shaped = |t: &Ty| -> bool {
+        // Peel an outer `Option<...>` (Union<T, Nil>) before checking,
+        // since the body-typer often types a `params.fetch(k, default)`
+        // result as `Union<ParamValue, Nil>` even when the actual Rust
+        // emit produces an `unwrap_or(...)`-flattened `Value`.
+        let inner = super::super::util::peel_nil(t);
+        matches!(inner, Ty::Untyped | Ty::Record { .. })
+            || matches!(
+                inner,
+                Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+            )
+    };
+    let arg_renders_as_value = arg.ty.as_ref().map(is_value_shaped).unwrap_or(false)
+        || {
+            // Walk through a `.clone()` wrap to reach the underlying
+            // Var name, then look up its declared local type.
+            let inner: &Expr = match &*arg.node {
+                ExprNode::Send { recv: Some(r), method, args: m_args, .. }
+                    if method.as_str() == "clone" && m_args.is_empty() =>
+                {
+                    r
+                }
+                _ => arg,
+            };
+            match &*inner.node {
+                ExprNode::Var { name, .. } => {
+                    super::super::local_var_ty(name.as_str())
+                        .as_ref()
+                        .map(is_value_shaped)
+                        .unwrap_or(false)
+                }
+                _ => false,
+            }
+        };
+    if arg_renders_as_value {
+        if let Ty::Hash { key, value } = field_ty {
+            if matches!(**key, Ty::Str | Ty::Sym) {
+                let value_is_value_shaped = matches!(**value, Ty::Untyped | Ty::Record { .. })
+                    || matches!(
+                        &**value,
+                        Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+                    );
+                if value_is_value_shaped {
+                    return format!(
+                        "{raw}.as_object().cloned().unwrap_or_default().into_iter().collect::<std::collections::HashMap<String, serde_json::Value>>()"
+                    );
+                }
+            }
         }
     }
     raw

@@ -516,12 +516,30 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
         ),
         Ty::Bool,
     );
+    // Then-branch wraps the `raw_sub` var read in a `Cast` to
+    // `Hash[String, ParamValue]`. The lowerer types `raw_sub` as the
+    // outer `ParamValue` (rust2 → `serde_json::Value`), so a bare Var
+    // read in the then arm renders as `Value` while the else arm's
+    // empty Hash literal renders as `HashMap<String, Value>` — the
+    // branches mismatch under strict typing. The Cast surfaces the
+    // narrowing intent so per-target emit can bridge: TS as-cast,
+    // Crystal `as Hash(...)`, rust2 inserts `.as_object().cloned().
+    // unwrap_or_default().into_iter().collect::<HashMap<_, _>>()`.
     let sub_narrowed = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::If {
                 cond: is_a_hash,
-                then_branch: var(&raw_sub, inner_hash_ty.clone()),
+                then_branch: with_ty(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Cast {
+                            value: var(&raw_sub, param_value_ty.clone()),
+                            target_ty: inner_hash_ty.clone(),
+                        },
+                    ),
+                    inner_hash_ty.clone(),
+                ),
                 else_branch: empty_hash(inner_hash_ty.clone()),
             },
         ),
