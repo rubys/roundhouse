@@ -155,7 +155,14 @@ pub(super) fn emit_seq(exprs: &[Expr]) -> String {
             } else {
                 emit_expr(e)
             };
-            if i == last {
+            // Unit-return tail: append `;` to discard the tail value.
+            // Without this, a `bool`-returning tail like
+            // `instance.save()` at the end of a `fn () -> ()` trips
+            // E0308. Lit::Nil tail was already handled above; this
+            // covers the non-Nil expression case (Send returning T,
+            // Var/Ivar reads, etc.). The `()` block-value falls
+            // through implicitly after the `;`.
+            if i == last && !current_return_is_unit() {
                 lines.push(s);
             } else {
                 lines.push(format!("{s};"));
