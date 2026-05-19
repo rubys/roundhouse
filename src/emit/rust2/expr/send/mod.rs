@@ -67,6 +67,7 @@ pub(super) fn emit_send(
     if let Some(s) = try_array_push(recv, method, args) { return s; }
     if let Some(s) = try_string_append(recv, method, args) { return s; }
     if let Some(s) = try_recv_typed_method(recv, method, args) { return s; }
+    if let Some(s) = try_view_helpers_dom_id(recv, method, args) { return s; }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
     // suffixes. The user-defined HWIA methods `key?`/`has_key?`/etc.
@@ -306,6 +307,76 @@ pub(super) fn emit_send(
     } else {
         format!("{recv_s}{dispatch}{rewritten_method}({})", final_args.join(", "))
     }
+}
+
+/// Inline `ViewHelpers::dom_id(record, suffix)` when `record`'s type
+/// is a known concrete model. Rust2 emits per-model structs (Article,
+/// Comment, …) but the runtime's `dom_id(record: Base, ...)` only
+/// accepts the abstract `Base` struct — there's no enum/trait bridge
+/// in either direction. The Ruby body is a one-liner format, so
+/// inlining at the call site lets the per-model `.id()` accessor +
+/// the snake_case'd class name (= the dom_prefix the lowerer
+/// synthesizes for each model) carry the result directly.
+///
+/// Returns `None` for any non-matching shape — opaque-typed recv,
+/// non-Const recv, recv-class without a Class Ty, etc. — so the
+/// regular dispatch loop runs.
+fn try_view_helpers_dom_id(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<String> {
+    if method != "dom_id" {
+        return None;
+    }
+    let r = recv?;
+    let ExprNode::Const { path } = &*r.node else { return None };
+    if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
+        return None;
+    }
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let record = &args[0];
+    let class_name = match record.ty.as_ref()? {
+        crate::ty::Ty::Class { id, .. } => id.0.as_str().to_string(),
+        _ => return None,
+    };
+    // Skip the runtime Base itself — when called with `Base`, fall
+    // through to the runtime helper (the abstract method raises, but
+    // that's the runtime's contract, not the peephole's concern).
+    if class_name == "Base" || class_name == "ActiveRecord::Base" {
+        return None;
+    }
+    let prefix = crate::naming::snake_case(
+        class_name.rsplit("::").next().unwrap_or(class_name.as_str()),
+    );
+    let record_s = emit_expr(record);
+    // 1-arg `dom_id(record)` → `"<prefix>_<id>"` with no suffix.
+    if args.len() == 1 {
+        return Some(format!(
+            "format!(\"{}_{{}}\", {}.clone().id())",
+            prefix, record_s,
+        ));
+    }
+    // 2-arg `dom_id(record, suffix)`. Suffix at IR level is either a
+    // literal Sym/Str (the lowerer threads `:comments_count` through
+    // as-is) or — rarely — a dynamic expression. Inline the literal
+    // form into the format! string for the cleanest emit; bail on
+    // dynamic shapes so the call falls back to the runtime helper
+    // (which we'd need to make generic for those to compile, but no
+    // real-blog site hits them today).
+    let suffix = &args[1];
+    let suffix_lit: Option<&str> = match &*suffix.node {
+        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
+        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.as_str()),
+        _ => None,
+    };
+    let suffix_lit = suffix_lit?;
+    Some(format!(
+        "format!(\"{}_{}_{{}}\", {}.clone().id())",
+        suffix_lit, prefix, record_s,
+    ))
 }
 
 /// Rewrite a positional-Hash call shape into a positional-only shape
