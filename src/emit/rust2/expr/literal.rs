@@ -113,15 +113,38 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
 /// return-type coercion forces string-literal elements to `String` when
 /// the function returns `Vec<String>` / `Vec<Sym>`.
 pub(super) fn emit_array(elements: &[Expr]) -> String {
-    let coerce_to_string_elem = in_return_tail()
-        && matches!(
-            current_return_ty().as_ref(),
-            Some(crate::ty::Ty::Array { elem })
-                if matches!(elem.as_ref(), crate::ty::Ty::Str | crate::ty::Ty::Sym)
-        );
+    let return_elem_ty: Option<crate::ty::Ty> = if in_return_tail() {
+        match current_return_ty() {
+            Some(crate::ty::Ty::Array { elem }) => Some(*elem),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let coerce_to_string_elem = matches!(
+        return_elem_ty.as_ref(),
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
+    );
+    // Ty::Record and Ty::Untyped both render as `serde_json::Value` at
+    // the rust2 emit. A Vec of either reaches the function tail wanting
+    // Value-shaped elements; route through coerce_arg_for_param_ty so
+    // the Hash-literal-to-Value transform fires per element.
+    let coerce_via_param_ty = matches!(
+        return_elem_ty.as_ref(),
+        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+    );
     let parts: Vec<String> = elements
         .iter()
         .map(|e| {
+            if coerce_via_param_ty {
+                // Vec<Value> return — route each element through the
+                // shared Family 3 / Hash-literal-to-Value transform so
+                // HashMap literals and primitive elements emit as
+                // `serde_json::Value` for the storage slot.
+                if let Some(ty) = return_elem_ty.as_ref() {
+                    return coerce_arg_for_param_ty(e, ty);
+                }
+            }
             let raw = emit_expr(e);
             if coerce_to_string_elem
                 && matches!(

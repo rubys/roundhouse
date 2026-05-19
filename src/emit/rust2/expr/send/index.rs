@@ -380,7 +380,17 @@ pub(super) fn try_recv_typed_method(
             if default_is_nil {
                 return Some(format!("{recv_s}.get({key_s}).cloned()"));
             }
-            let default_s = emit_expr(&args[1]);
+            // Coerce the default against the receiver's value Ty so a
+            // `{}` Hash literal default against `HashMap<String, Value>`
+            // renders as `Value::Object(...)`, not bare `HashMap::new()`
+            // (which trips E0308 at the unwrap_or slot).
+            let default_s = if let Some(crate::ty::Ty::Hash { value: rv, .. }) =
+                r.ty.as_ref().map(peel_nil)
+            {
+                super::coerce::coerce_arg_for_param_ty(&args[1], &rv)
+            } else {
+                emit_expr(&args[1])
+            };
             return Some(format!("{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"));
         }
         // `s.tr(from, to)` — character translation. Limited to

@@ -137,6 +137,22 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("serde_json::Value::from({raw})");
     }
 
+    // Family 3b: Hash literal → Value (Object). When callee/storage
+    // expects `serde_json::Value` (Ty::Untyped) or a Record (which
+    // rust2's ty.rs renders as Value too) and the arg is an inline
+    // Hash literal (`{ name: "x", path: "/y" }`), the bare emit is
+    // `HashMap::from([…])` which doesn't unify with Value. Reshape:
+    // convert keys to String, wrap each value in Value::from, then
+    // build a Value::Object. The Importmap pins literal is the
+    // canonical case (Vec<Record>).
+    if matches!(param_ty, Ty::Untyped | Ty::Record { .. })
+        && matches!(&*arg.node, ExprNode::Hash { .. })
+    {
+        return format!(
+            "serde_json::Value::Object({raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect())"
+        );
+    }
+
     // Family 5: owned-T clone for Ivar / Var / SelfRef args feeding
     // a callee param that takes owned non-Copy T. The caller's
     // `self.X` Ivar read produces `self.X` (a borrowed-from-&self
