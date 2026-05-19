@@ -30,6 +30,7 @@ mod helpers;
 mod partial;
 mod form_with;
 mod form_builder;
+mod attr_parts;
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};

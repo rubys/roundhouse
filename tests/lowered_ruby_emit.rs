@@ -1217,14 +1217,24 @@ fn lowered_index_view_rewrites_view_helpers() {
         "expected ViewHelpers.content_for_set rewrite; got:\n{src}",
     );
     // `<%= link_to "New article", new_article_path, class: "..." %>`
-    // → ViewHelpers.link_to with path-helper rewrite.
+    // → inline `<a href="<escaped>" class="...">New article</a>`
+    // (Stage 2 of the macro-inline retirement; no runtime
+    // ViewHelpers.link_to call survives).
     assert!(
-        src.contains("ActionView::ViewHelpers.link_to"),
-        "expected ViewHelpers.link_to rewrite; got:\n{src}",
+        !src.contains("ViewHelpers.link_to"),
+        "ViewHelpers.link_to runtime call should be retired by inline expansion; got:\n{src}",
+    );
+    assert!(
+        src.contains("<a href=\\\""),
+        "expected inline <a href> tag; got:\n{src}",
     );
     assert!(
         src.contains("RouteHelpers.new_article_path"),
         "expected RouteHelpers.new_article_path rewrite; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(\"New article\")") && src.contains("</a>"),
+        "expected escaped link text + closing </a>; got:\n{src}",
     );
 }
 
@@ -1348,23 +1358,34 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
 fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
-    // `<%= link_to article.title, article, ... %>` — the URL arg is a
-    // bare local record. Lowering rewrites to `RouteHelpers
-    // .article_path(article.id)`.
+    // Stage 2 macro-inline: each `link_to text, record, ...` expands
+    // to `<a href="<escaped>" class="...">text</a>` inline; no
+    // runtime `ViewHelpers.link_to` call survives.
     assert!(
-        src.contains("ActionView::ViewHelpers.link_to(article.title, RouteHelpers.article_path(article.id)"),
-        "expected link_to(text, RouteHelpers.article_path(article.id), …); got:\n{src}",
+        !src.contains("ViewHelpers.link_to"),
+        "ViewHelpers.link_to runtime call should be retired; got:\n{src}",
     );
-    // `<%= link_to "Show", article, ... %>` — same pattern, literal text.
+    // `link_to article.title, article, ...` — URL rewrites to
+    // `RouteHelpers.article_path(article.id)` and the text
+    // html-escapes through the interp.
     assert!(
-        src.contains("ActionView::ViewHelpers.link_to(\"Show\", RouteHelpers.article_path(article.id)"),
-        "expected `Show` link to article record; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(RouteHelpers.article_path(article.id))"),
+        "expected html_escape on article_path URL; got:\n{src}",
     );
-    // `<%= link_to "Edit", edit_article_path(article), ... %>` —
-    // path-helper URL with bare-local arg → `article.id`.
     assert!(
-        src.contains("ActionView::ViewHelpers.link_to(\"Edit\", RouteHelpers.edit_article_path(article.id)"),
-        "expected `Edit` link with edit_article_path(article.id); got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(article.title)"),
+        "expected html_escape on article.title link text; got:\n{src}",
+    );
+    // `link_to "Show", article, ...` — literal text.
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(\"Show\")"),
+        "expected html_escape on Show link text; got:\n{src}",
+    );
+    // `link_to "Edit", edit_article_path(article), ...` — path-helper
+    // URL with bare-local arg → article.id.
+    assert!(
+        src.contains("RouteHelpers.edit_article_path(article.id)"),
+        "expected edit_article_path(article.id); got:\n{src}",
     );
 }
 
@@ -1372,16 +1393,36 @@ fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
 fn lowered_article_partial_button_to_record_with_options() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
-    // `<%= button_to "Destroy", article, method: :delete, ... %>` —
-    // ButtonTo classifier produces a `RouteHelpers.article_path(.id)`
-    // URL and threads the opts hash through unchanged.
+    // Stage 2 macro-inline: `button_to "Destroy", article, method:
+    // :delete, ...` expands to the wrapping `<form>` + method
+    // override + `<button>` + CSRF inline shape; no runtime
+    // `ViewHelpers.button_to` call survives. method peeled out of
+    // opts feeds `method_override_input(:delete)`; class + data
+    // entries flow as `<button>` attrs (data-turbo-confirm
+    // flattens from the nested hash).
     assert!(
-        src.contains("ActionView::ViewHelpers.button_to(\"Destroy\", RouteHelpers.article_path(article.id)"),
-        "expected button_to with article_path; got:\n{src}",
+        !src.contains("ViewHelpers.button_to"),
+        "ViewHelpers.button_to runtime call should be retired; got:\n{src}",
     );
     assert!(
-        src.contains("method: :delete"),
-        "expected `method: :delete` opts entry; got:\n{src}",
+        src.contains("<form action=\\\""),
+        "expected inline <form action=...> wrapper; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(RouteHelpers.article_path(article.id))"),
+        "expected article_path URL in form action; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.method_override_input(:delete)"),
+        "expected method_override_input(:delete) call; got:\n{src}",
+    );
+    assert!(
+        src.contains("data-turbo-confirm=\\\""),
+        "expected flattened data-turbo-confirm attr; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.csrf_token_hidden_input"),
+        "expected csrf_token_hidden_input call; got:\n{src}",
     );
 }
 
@@ -1626,16 +1667,20 @@ fn lowered_comment_partial_nested_url_array_to_path_helper() {
     // `<%= button_to "Delete", [comment.article, comment], method:
     // :delete, ... %>` lowers the nested-resource array to
     // `RouteHelpers.article_comment_path(comment.article_id,
-    // comment.id)`. The parent `comment.article` is a belongs_to
-    // read; we use the FK column `comment.article_id` (avoiding the
-    // dereference) and the child `comment.id` directly.
+    // comment.id)`. Stage 2 macro-inline: the surrounding button_to
+    // expands inline (no runtime ViewHelpers.button_to call); the
+    // resolved nested path appears in the form's action attr.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/comments/_comment.rb");
     assert!(
+        !src.contains("ViewHelpers.button_to"),
+        "ViewHelpers.button_to runtime call should be retired; got:\n{src}",
+    );
+    assert!(
         src.contains(
-            "ActionView::ViewHelpers.button_to(\"Delete\", RouteHelpers.article_comment_path(comment.article_id, comment.id)"
+            "ActionView::ViewHelpers.html_escape(RouteHelpers.article_comment_path(comment.article_id, comment.id))"
         ),
-        "expected nested-array URL → article_comment_path with FK + id; got:\n{src}",
+        "expected nested-array URL → article_comment_path with FK + id in inline form action; got:\n{src}",
     );
 }
 
@@ -1920,10 +1965,20 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
         "expected named-partial dispatch; got:\n{src}",
     );
     // `<%= link_to "Show this article", @article, ... %>` — the URL
-    // arg is the bare local record (post-ivar-rewrite), so it
-    // resolves to `RouteHelpers.article_path(article.id)`.
+    // arg is the bare local record (post-ivar-rewrite). Stage 2
+    // macro-inline: expands to inline `<a href="<escaped>" ...>text</a>`;
+    // the URL still resolves to `RouteHelpers.article_path
+    // (article.id)`.
     assert!(
-        src.contains("ActionView::ViewHelpers.link_to(\"Show this article\", RouteHelpers.article_path(article.id)"),
-        "expected link_to(text, RouteHelpers.article_path(article.id)) for record-ref URL; got:\n{src}",
+        !src.contains("ViewHelpers.link_to"),
+        "ViewHelpers.link_to runtime call should be retired; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(RouteHelpers.article_path(article.id))"),
+        "expected article_path URL through html_escape in inline link; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(\"Show this article\")"),
+        "expected link text through html_escape; got:\n{src}",
     );
 }

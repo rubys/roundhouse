@@ -3,7 +3,7 @@
 //! `ViewHelpers.*` / `RouteHelpers.*` / `Inflector.*` Sends, and
 //! handles URL-position argument lowering.
 
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
 use crate::naming::singularize;
 use crate::span::Span;
@@ -13,6 +13,9 @@ use crate::lower::view::{
     ViewUrlArg,
 };
 
+use super::attr_parts::{
+    append_attr_parts, default_form_class, default_method_sym, string_interp, take_opt,
+};
 use super::{
     inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref, view_helpers_call,
     ViewCtx,
@@ -59,10 +62,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             "content_for_get",
             vec![lit_sym(Symbol::from(*slot))],
         )),
-        LinkTo { text, url, opts } => emit_link_or_button("link_to", text, url, *opts, ctx),
-        ButtonTo { text, target, opts } => {
-            emit_link_or_button("button_to", text, target, *opts, ctx)
-        }
+        LinkTo { text, url, opts } => emit_link_to_inline(text, url, *opts, ctx),
+        ButtonTo { text, target, opts } => emit_button_to_inline(text, target, *opts, ctx),
         // Layout-`<head>` helpers — bare zero-arg ViewHelpers calls.
         CsrfMetaTags => Some(view_helpers_call("csrf_meta_tags", Vec::new())),
         CspMetaTag => Some(view_helpers_call("csp_meta_tag", Vec::new())),
@@ -151,19 +152,123 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
     }
 }
 
-fn emit_link_or_button(
-    helper: &str,
+/// Inline-expand `link_to text, url, opts` into a single
+/// StringInterp Expr: `<a href="<escaped_href>"<opts>>
+/// <html_escape(text)></a>`. Retires the runtime `ViewHelpers.link_to`
+/// call (HashMap-shaped opts) — same architectural rationale as the
+/// form_with macro-inline (Wedges 1b-i + 1b-ii). The URL position
+/// goes through `emit_url_arg` so path-helpers + record refs
+/// resolve to `RouteHelpers.<x>_path(...)` calls before lowering
+/// into the interp.
+fn emit_link_to_inline(
     text: &Expr,
     url: &Expr,
     opts: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
     let url_expr = emit_url_arg(url, ctx)?;
-    let mut args = vec![text.clone(), url_expr];
-    if let Some(o) = opts {
-        args.push(o.clone());
-    }
-    Some(view_helpers_call(helper, args))
+    let opts_entries = hash_entries(opts);
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: "<a href=\"".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![url_expr]),
+    });
+    parts.push(InterpPart::Text {
+        value: "\"".to_string(),
+    });
+    append_attr_parts(&mut parts, &opts_entries);
+    parts.push(InterpPart::Text {
+        value: ">".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![text.clone()]),
+    });
+    parts.push(InterpPart::Text {
+        value: "</a>".to_string(),
+    });
+    Some(string_interp(parts))
+}
+
+/// Inline-expand `button_to text, url, opts` into the wrapping
+/// `<form action="..." method="post" class="<form_class>">...</form>`
+/// + method override hidden input + `<button>` + CSRF token hidden
+/// input shape Rails' runtime button_to produces. `method:` and
+/// `form_class:` are peeled off `opts` at lower time; the rest
+/// flow as `<button>` element attributes. CSRF + _method override
+/// go through the same runtime primitives form_with uses.
+fn emit_button_to_inline(
+    text: &Expr,
+    url: &Expr,
+    opts: Option<&Expr>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    let url_expr = emit_url_arg(url, ctx)?;
+    let mut opts_entries = hash_entries(opts);
+    let method_expr = take_opt(&mut opts_entries, "method").unwrap_or_else(default_method_sym);
+    let form_class_expr =
+        take_opt(&mut opts_entries, "form_class").unwrap_or_else(default_form_class);
+    // Remaining entries become `<button>` attributes.
+    let button_opts = opts_entries;
+
+    let mut parts: Vec<InterpPart> = Vec::new();
+    // <form action="<href>" method="post" class="<form_class>">
+    parts.push(InterpPart::Text {
+        value: "<form action=\"".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![url_expr]),
+    });
+    parts.push(InterpPart::Text {
+        value: "\" method=\"post\" class=\"".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![form_class_expr]),
+    });
+    parts.push(InterpPart::Text {
+        value: "\">".to_string(),
+    });
+    // _method hidden input (empty string when method is :get/:post).
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("method_override_input", vec![method_expr]),
+    });
+    // <button type="submit" <button_opts>>
+    parts.push(InterpPart::Text {
+        value: "<button type=\"submit\"".to_string(),
+    });
+    append_attr_parts(&mut parts, &button_opts);
+    parts.push(InterpPart::Text {
+        value: ">".to_string(),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![text.clone()]),
+    });
+    parts.push(InterpPart::Text {
+        value: "</button>".to_string(),
+    });
+    // CSRF authenticity_token hidden input.
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("csrf_token_hidden_input", Vec::new()),
+    });
+    parts.push(InterpPart::Text {
+        value: "</form>".to_string(),
+    });
+    Some(string_interp(parts))
+}
+
+/// Extract the entries Vec from a `Hash` literal opts arg, or empty
+/// when no opts were passed. Real-fixture call sites always pass
+/// literal Hash kwargs; a non-Hash opts arg falls through as empty
+/// (the helper renders with no extra attrs).
+fn hash_entries(opts: Option<&Expr>) -> Vec<(Expr, Expr)> {
+    let Some(o) = opts else {
+        return Vec::new();
+    };
+    let ExprNode::Hash { entries, .. } = &*o.node else {
+        return Vec::new();
+    };
+    entries.clone()
 }
 
 /// Translate the URL-position argument (`link_to text, URL, opts`)
