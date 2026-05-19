@@ -615,7 +615,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20   pub fn render_with(&self, _content: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
                     \x20   pub fn request_format(&self) -> String {{ \"html\".to_string() }}\n\
                     \x20   pub fn redirect_to(&self, _url: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
-                    \x20   pub fn head(&self, _status: &str) {{ }}\n\
+                    \x20   pub fn head(&self, _status: &str, _opts: std::collections::HashMap<String, serde_json::Value>) {{ }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 );

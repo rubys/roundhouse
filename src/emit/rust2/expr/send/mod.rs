@@ -166,10 +166,34 @@ pub(super) fn emit_send(
     //    `external_class_method_param_tys` covers Db today; future
     //    modules add entries as their sites surface.
     let final_args: Vec<String> = if matches!(&*r.node, ExprNode::SelfRef) {
-        args.iter()
+        let mut out: Vec<String> = args
+            .iter()
             .enumerate()
             .map(|(i, a)| coerce_arg_for_class_method(&effective_method, i, a))
-            .collect()
+            .collect();
+        // Trailing default-arg pad for AC::Base controller shims —
+        // Ruby `head :sym` (no kwargs) and `head :sym, content_type:`
+        // (with kwargs) call the same method, but the rust2 shim has
+        // fixed arity. `controller_shim_arity` reports the declared
+        // count; `controller_shim_method_param_ty` gives the Ty per
+        // index. `synth_default_for_ty` produces the literal
+        // (`HashMap::new()` for trailing opts). Without this padding,
+        // 1-arg `self.head(:not_found)` sites trip E0061 once the shim
+        // signature gains the kwargs param to absorb 2-arg calls.
+        if let Some(arity) = dispatch::controller_shim_arity(&effective_method) {
+            for i in out.len()..arity {
+                if let Some(pt) = dispatch::controller_shim_method_param_ty(&effective_method, i) {
+                    if let Some(d) = super::util::synth_default_for_ty(&pt) {
+                        out.push(d);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        out
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
         // Try the hand-written runtime sigs first (Db, Broadcasts),

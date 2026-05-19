@@ -74,6 +74,25 @@ pub(super) fn controller_shim_method_param_ty(method: &str, idx: usize) -> Optio
     match (method, idx) {
         ("render_with", 1) => Some(hash_str_untyped()),
         ("redirect_to", 1) => Some(hash_str_untyped()),
+        ("head", 1) => Some(hash_str_untyped()),
+        _ => None,
+    }
+}
+
+/// Total positional arity of an AC::Base shim method. Used by the
+/// SelfRef-recv dispatch in `emit_send` to pad missing trailing args
+/// with synth defaults — Ruby `head :sym` (no kwargs) calls the same
+/// underlying shape as `head :sym, content_type: ...`, but Rust needs
+/// the explicit `HashMap::new()` to satisfy the shim's fixed arity.
+/// Keep in lockstep with the shim text in `rust2.rs::emit` and the
+/// per-index `controller_shim_method_param_ty` table above.
+pub(super) fn controller_shim_arity(method: &str) -> Option<usize> {
+    match method {
+        "render" => Some(1),
+        "render_with" => Some(2),
+        "request_format" => Some(0),
+        "redirect_to" => Some(2),
+        "head" => Some(2),
         _ => None,
     }
 }
