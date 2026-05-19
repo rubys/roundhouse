@@ -173,13 +173,18 @@ pub(super) fn emit_send(
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
         // Try the hand-written runtime sigs first (Db, Broadcasts),
-        // then fall back to the current class's method table. The
-        // latter covers `Self::new(...)` / `Class::method(...)` shapes
-        // where path.last() matches the class currently being
-        // emitted — `Article::new()` from inside `impl Article`.
+        // then a cross-LC global lookup keyed by (ClassName, method) —
+        // covers `Comment::new(...)` called from inside any other
+        // class. `current_class_method_param_tys` is the last-resort
+        // fallback: it's keyed by method name only and ignores the
+        // Const path, so a same-named method in the current class
+        // (e.g. a view module's `new` action partial) would otherwise
+        // shadow the cross-class param list and pad with the wrong
+        // defaults. Trying global first inverts the precedence so the
+        // explicit class qualifier wins when both tables list `new`.
         let param_tys = external_class_method_param_tys(class, method)
-            .or_else(|| current_class_method_param_tys(method))
-            .or_else(|| super::global_class_method_param_tys(class, method));
+            .or_else(|| super::global_class_method_param_tys(class, method))
+            .or_else(|| current_class_method_param_tys(method));
         if let Some(param_tys) = param_tys {
             let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(args.len()));
             for (i, _) in param_tys.iter().enumerate() {
