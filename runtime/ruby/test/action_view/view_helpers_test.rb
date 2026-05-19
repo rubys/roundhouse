@@ -286,88 +286,11 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, %(signed-stream-name="ImFydGljbGVzIg==--unsigned")
   end
 
-  # ── form builder ───────────────────────────────────────────
-
-  def test_form_with_yields_builder_and_wraps_form
-    article = Article.new(0, "Hello", "")
-    out = ViewHelpers.form_with(
-      model: article,
-      model_name: "article",
-      action: "/articles",
-      method: :post,
-    ) { |f| f.text_field(:title) }
-    assert_includes out, %(action="/articles")
-    assert_includes out, %(method="post")
-    assert_includes out, %(name="article[title]")
-    assert_includes out, %(value="Hello")
-  end
-
-  def test_form_builder_label
-    article = Article.new(0, "x", "y")
-    builder = FormBuilder.new(article, "article", "/articles", :post)
-    out = builder.label(:title)
-    assert_includes out, %(for="article_title")
-    assert_includes out, ">Title</label>"
-  end
-
-  def test_form_builder_text_field_uses_model_value
-    article = Article.new(0, "Hello", "y")
-    builder = FormBuilder.new(article, "article", "/articles", :post)
-    out = builder.text_field(:title)
-    assert_includes out, %(value="Hello")
-  end
-
-  def test_form_builder_text_field_handles_nil_value
-    # Empty string instead of explicit nil — Article's typed-string
-    # initializer rejects nil under strict-typed targets. The
-    # text_field helper omits the `value` attribute for nil OR
-    # empty alike, so the assertion below still verifies the
-    # value-omission contract.
-    article = Article.new(0, "", "")
-    builder = FormBuilder.new(article, "article", "/articles", :post)
-    out = builder.text_field(:title)
-    # Rails omits the `value` attribute when the field is nil/empty
-    # rather than emitting `value=""`; spinel matches.
-    refute_includes out, %(value=)
-    assert_includes out, %(name="article[title]")
-  end
-
-  def test_form_builder_text_area
-    article = Article.new(0, "x", "Hello body")
-    builder = FormBuilder.new(article, "article", "/articles", :post)
-    out = builder.text_area(:body)
-    assert_includes out, %(name="article[body]")
-    assert_includes out, ">Hello body</textarea>"
-  end
-
-  def test_form_builder_submit_default_label_for_post
-    article = Article.new(0, "x", "y")
-    builder = FormBuilder.new(article, "article", "/articles", :post)
-    out = builder.submit
-    assert_includes out, %(value="Create Article")
-    assert_includes out, %(data-disable-with="Create Article")
-  end
-
-  def test_form_builder_submit_default_label_for_patch
-    article = Article.new(1, "x", "y")
-    builder = FormBuilder.new(article, "article", "/articles/1", :patch)
-    out = builder.submit
-    assert_includes out, %(value="Update Article")
-  end
-
-  def test_form_with_patch_method_emits_method_override
-    article = Article.new(1, "x", "long enough body.")
-    out = ViewHelpers.form_with(
-      model: article,
-      model_name: "article",
-      action: "/articles/1",
-      method: :patch,
-    ) { |_f| "" }
-    # Rails: `<form method="post">` (browsers don't support PATCH);
-    # the `_method` hidden input carries the real verb.
-    assert_includes out, %(method="post")
-    assert_includes out, %(<input type="hidden" name="_method" value="patch">)
-    assert_includes out, %(<input type="hidden" name="authenticity_token" value="">)
-    assert_includes out, %(accept-charset="UTF-8")
-  end
+  # FormBuilder + form_with tests retired alongside the runtime
+  # classes themselves — the lowerer macro-inlines form_with and
+  # form.label/text_field/text_area/submit at lower time (Stages 1a
+  # + 1b-i + 1b-ii). Equivalent compare-gate coverage is now
+  # exercised end-to-end via fixtures/real-blog's /articles/new and
+  # /articles/1/edit paths through the compare-ruby + compare-ts +
+  # compare-rust gates.
 end

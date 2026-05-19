@@ -1,7 +1,8 @@
 # View helpers — module functions invoked from Views::* render
 # methods. Surface tracks what real-blog actually uses (link_to,
-# button_to, form_with, dom_id, content_for slots, importmap tags,
-# turbo_stream_from, truncate, html_escape).
+# button_to, dom_id, content_for slots, importmap tags,
+# turbo_stream_from, truncate, html_escape). form_with + FormBuilder
+# are retired (lowerer macro-inlines them — see view_helpers.rb).
 #
 # `module_function` means each `def` is callable both as
 # `ViewHelpers.foo(...)` and as `foo(...)` from inside a module that
@@ -96,29 +97,7 @@ module ActionView
     def self.optional_value_attr: (String? value) -> String
     def self.escape_or_empty: (String? value) -> String
 
-    # ── form_with ───────────────────────────────────────────────────
-    # `model` is the record (Base subclass instance); `model_name` is
-    # the form-prefix string ("article", "comment"); `action` is the
-    # submit URL; `method` is :get / :post / :patch / :delete; `opts`
-    # is the form-attribute hash. Block yields a FormBuilder; block
-    # returns the form body String. Body-typer threads the block
-    # return through the form-wrapping concatenation.
-    #
-    # `model` typed `ActiveRecord::Base` — the param flows straight
-    # into `FormBuilder.new(model, ...)`, whose constructor declares
-    # Base; an `untyped` here forces strict-typed targets to bridge
-    # `Value → Base` at the call site (no real coercion exists).
-    # Real-blog callers always pass a Base subclass, so the tighter
-    # signature matches actual usage.
-    def self.form_with: (
-      model: ActiveRecord::Base,
-      model_name: String,
-      action: String,
-      ?method: Symbol,
-      ?opts: Hash[Symbol, untyped]
-    ) { (FormBuilder) -> String } -> String
-  
-    # ── attribute rendering (public for FormBuilder) ────────────────
+    # ── attribute rendering ────────────────────────────────────────
     # `attrs` is a Hash whose keys are Symbol or String and whose
     # values are String/Integer/nil/Hash (nested for data:/aria:).
     # In transpile, callers funnel through a merge helper (rust2's
@@ -127,36 +106,5 @@ module ActionView
     # this boundary; values stay `untyped` because the body branches
     # on `is_a?(Hash)` to handle nested data/aria maps.
     def self.render_attrs: (Hash[String, untyped] attrs) -> String
-  
-    # ── form builder (yielded by form_with) ─────────────────────────
-    class FormBuilder
-      # Constructor takes the four pieces of form state. `model` is
-      # any AR record (`ActiveRecord::Base` is the closed supertype
-      # every app model inherits transitively); use the abstract Base
-      # type so strict-typed targets can declare the field as
-      # `ActiveRecord::Base` and accept any subclass via covariant
-      # assignment. `@model[field]` dispatches via Base's abstract
-      # `[]` to the per-model implementation.
-      def initialize: (
-        ActiveRecord::Base model,
-        String model_name,
-        String action,
-        Symbol method
-      ) -> void
-
-      # `attr_reader` — getters only.
-      def model: () -> ActiveRecord::Base
-      def model_name: () -> String
-      def action: () -> String
-  
-      # Each emit method returns the rendered HTML String. `field` is
-      # the attribute name (Symbol). `opts` is the per-element attribute
-      # hash. `submit`'s `label` defaults to a method-aware string when
-      # omitted.
-      def label: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-      def text_field: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-      def text_area: (Symbol field, ?Hash[Symbol, untyped] opts) -> String
-      def submit: (?String? label, ?Hash[Symbol, untyped] opts) -> String
-    end
   end
 end

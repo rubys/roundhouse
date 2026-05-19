@@ -3,9 +3,13 @@
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/
 # app/views/**/*.html.erb): link_to, button_to, dom_id, the content_for
 # slot store, turbo_stream_from, truncate, pluralize (delegated to
-# Inflector). FormBuilder is a small class — enough for label /
-# text_field / text_area / submit, which is all real-blog's _form.html.erb
-# uses.
+# Inflector), plus four form_with macro-inline primitives
+# (csrf_token_hidden_input, method_override_input, optional_value_attr,
+# escape_or_empty). form_with itself + the FormBuilder class are
+# retired: the lowerer macro-expands `<%= form_with ... do |form| ... %>`
+# and `form.label`/`form.text_field`/`form.text_area`/`form.submit`
+# at lower time into direct HTML accumulation, so no runtime
+# FormBuilder dispatch survives in lowered output.
 #
 # Polymorphic dispatch (e.g., link_to "Edit", @article → article_path)
 # is the lowerer's job, not the runtime's. Call sites pass explicit
@@ -314,106 +318,6 @@ module ActionView
       end
     end
 
-    # ── form builder (used as `form_with` block-yielded value) ────────
-  
-    class FormBuilder
-      def initialize(model, model_name, action, method)
-        @model = model
-        @model_name = model_name
-        @action = action
-        @method = method
-      end
-  
-      attr_reader :model, :model_name, :action
-  
-      def label(field, opts = {})
-        attrs = ViewHelpers.render_attrs({ for: "#{@model_name}_#{field}" }.merge(opts.to_h))
-        "<label#{attrs}>#{ViewHelpers.html_escape(field.to_s.capitalize)}</label>"
-      end
-  
-      def text_field(field, opts = {})
-        value = @model[field]
-        # `.to_h` makes base a Hash (Ruby no-op; Crystal converts).
-        # Subsequent `base[:value] = ...` mutation requires Hash;
-        # NamedTuple is immutable.
-        base = {
-          type: "text",
-          name: "#{@model_name}[#{field}]",
-          id: "#{@model_name}_#{field}",
-        }.to_h
-        # Rails omits the `value` attribute entirely when the field is
-        # nil/empty; only render it when there's a non-empty value.
-        base[:value] = value.to_s unless value.nil? || value.to_s.empty?
-        attrs = ViewHelpers.render_attrs(base.merge(opts.to_h))
-        "<input#{attrs}>"
-      end
-  
-      def text_area(field, opts = {})
-        value = @model[field]
-        attrs = ViewHelpers.render_attrs(
-          {
-            name: "#{@model_name}[#{field}]",
-            id: "#{@model_name}_#{field}",
-          }.merge(opts.to_h)
-        )
-        # `@model[field]` is untyped per Base#[]; coerce to String at
-        # the boundary so html_escape sees its String-typed contract.
-        # Explicit nil-check rather than `value.to_s` — JS `String(null)`
-        # returns the literal `"null"` (4 chars) whereas Ruby's
-        # `nil.to_s` returns `""`. The Ruby-shape-on-every-target
-        # invariant demands the explicit guard at the source.
-        body_str = value.nil? ? "" : ViewHelpers.html_escape(value.to_s)
-        "<textarea#{attrs}>#{body_str}</textarea>"
-      end
-  
-      def submit(label = nil, opts = {})
-        text = label || (@method == :patch ? "Update #{@model_name.capitalize}" : "Create #{@model_name.capitalize}")
-        # Rails appends `data-disable-with="<value>"` to submit inputs so
-        # turbo prevents a double-submit while the request is in flight.
-        # Quoted-Symbol form preserves the `data-disable-with` hyphenation
-        # — Symbol-keyed bases keep merge type-compatible with Symbol-
-        # keyed `opts` while letting render_attrs see hyphenated names
-        # through `k.to_s`.
-        attrs = ViewHelpers.render_attrs(
-          {
-            type: "submit",
-            name: "commit",
-            value: text,
-            :"data-disable-with" => text,
-          }.merge(opts.to_h)
-        )
-        "<input#{attrs}>"
-      end
-    end
-  
-    # `form_with(model:, model_name:, action:, method:) { |f| ... }` —
-    # yields a FormBuilder whose body the block builds; wraps that body
-    # in a <form> element with the right action + method.
-    def self.form_with(model:, model_name:, action:, method: :post, opts: {})
-      builder = FormBuilder.new(model, model_name, action, method)
-      body = yield(builder)
-      method_str = method.to_s
-      method_input = if method_str != "get" && method_str != "post"
-                       %(<input type="hidden" name="_method" value="#{method_str}">)
-                     else
-                       ""
-                     end
-      # Rails' `form_with` injects a CSRF authenticity_token hidden
-      # input as the first child of the form (after `_method` for
-      # PATCH/DELETE forms). The compare harness blanks the value via
-      # an existing AttributeRule.
-      auth_token_input = %(<input type="hidden" name="authenticity_token" value="">)
-      form_method = method_str == "get" ? "get" : "post"
-      # Rails' default `accept-charset="UTF-8"` lands on every
-      # form_with output; mirror it so cross-target compare sees the
-      # same attribute set.
-      attrs = render_attrs(
-        { action: action, :"accept-charset" => "UTF-8", method: form_method }
-          .merge(opts.to_h)
-      )
-      "<form#{attrs}>#{method_input}#{auth_token_input}#{body}</form>"
-    end
-  
     # ── attribute rendering ──────────────────────────────────────────
     # Public so FormBuilder can call them; not the user-facing surface.
   

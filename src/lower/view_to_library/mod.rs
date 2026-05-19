@@ -338,11 +338,6 @@ pub(crate) fn insert_framework_stubs(
         }
     };
 
-    let form_builder_ty = Ty::Class {
-        id: ClassId(Symbol::from("ActionView::ViewHelpers::FormBuilder")),
-        args: vec![],
-    };
-
     // ViewHelpers — every output helper returns String; setters return Nil.
     let mut vh = crate::analyze::ClassInfo::default();
     let untyped = Ty::Untyped;
@@ -414,17 +409,13 @@ pub(crate) fn insert_framework_stubs(
             fn_sig(param_pairs, Ty::Str),
         );
     }
-    // form_with yields a FormBuilder to its block — register with
-    // `block: Some(FormBuilder)` so the typer's block_params_for
-    // binds `|form|` to FormBuilder when encountered.
-    vh.class_methods.insert(
-        Symbol::from("form_with"),
-        fn_sig_with_block(
-            vec![(Symbol::from("opts"), untyped.clone())],
-            Some(form_builder_ty.clone()),
-            Ty::Str,
-        ),
-    );
+    // form_with and FormBuilder stubs retired alongside the runtime
+    // classes themselves: the lowerer macro-inlines form_with +
+    // form.label/text_field/text_area/submit at lower time, so no
+    // call site ever names `ViewHelpers.form_with` or
+    // `FormBuilder.<method>` in the lowered output. The body-typer
+    // doesn't need to resolve symbols that can't appear.
+    //
     // Layout slot helpers — `content_for_get(:title)` / `get_slot(:title)`
     // return the previously-stored String; counterpart to content_for_set.
     for name in ["content_for_get", "get_slot"] {
@@ -675,69 +666,10 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut im);
     classes.insert(ClassId(Symbol::from("Importmap")), im);
 
-    // FormBuilder — instance methods called on the block param `form`
-    // inside `form_with do |form| ... end`. Each helper renders one
-    // input/label/button and returns a string.
-    //
-    // Signature shape: `(field, opts = {})` for label/text_field/etc.
-    // — last param is a positional Hash so the body-typer's
-    // normalize_trailing_kwargs flips a `class: "..."` kwargs hash to
-    // `kwargs: false`. Without that, Crystal sees `form.label(:x,
-    // class: "...")` as a real keyword arg and rejects it (the
-    // emitted Crystal signature is `(field, opts = {} of String =>
-    // String)` — positional only). `submit` shifts: `(label,
-    // opts)` — both positional, with the second a Hash.
-    let mut fb = crate::analyze::ClassInfo::default();
-    let fb_field_helpers = [
-        "label",
-        "text_field",
-        "text_area",
-        "select",
-        "hidden_field",
-        "checkbox",
-        "check_box",
-        "radio_button",
-        "number_field",
-        "email_field",
-        "password_field",
-        "date_field",
-        "datetime_field",
-        "file_field",
-        "url_field",
-        "color_field",
-        "range_field",
-        "phone_field",
-        "search_field",
-        "fields_for",
-    ];
-    for name in fb_field_helpers {
-        fb.instance_methods.insert(
-            Symbol::from(name),
-            fn_sig(
-                vec![
-                    (Symbol::from("field"), Ty::Sym),
-                    (Symbol::from("opts"), any_hash.clone()),
-                ],
-                Ty::Str,
-            ),
-        );
-    }
-    fb.instance_methods.insert(
-        Symbol::from("submit"),
-        fn_sig(
-            vec![
-                (Symbol::from("label"), Ty::Str),
-                (Symbol::from("opts"), any_hash.clone()),
-            ],
-            Ty::Str,
-        ),
-    );
-    fb.instance_methods.insert(
-        Symbol::from("object_name"),
-        fn_sig(vec![], Ty::Str),
-    );
-    tag_all_method(&mut fb);
-    classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers::FormBuilder")), fb);
+    // FormBuilder stub retired — see the `form_with` comment above
+    // (form.label/text_field/text_area/submit dispatch inline-
+    // expands at lower time, so the body-typer never resolves
+    // FormBuilder instance methods in a lowered view).
 
     // ErrorCollection — what `record.errors` returns. `each` yields
     // a String message (Spinel-shape: errors are stored as flat
