@@ -209,10 +209,30 @@ pub(super) fn emit_send(
         let param_tys = external_class_method_param_tys(class, method)
             .or_else(|| super::global_class_method_param_tys(class, method))
             .or_else(|| current_class_method_param_tys(method));
+        // Kwargs-unpack pre-pass: when the callee declares keyword
+        // params and the trailing arg is a kwargs Hash literal, expand
+        // the Hash entries into positional slots by name. Without this,
+        // `ViewHelpers::truncate(text, length: 100)` emits the Hash
+        // literal at the `length: Integer` slot, tripping E0308. Only
+        // fires when the rich-param lookup is available (global
+        // registry), so call sites unknown to the registry retain the
+        // existing positional fallback.
+        let rich_params = super::global_class_method_params(class, method);
+        let owned_args_storage: Vec<Expr>;
+        let effective_args: &[Expr] = if let Some(rp) = rich_params.as_ref() {
+            if let Some(unpacked) = unpack_trailing_kwargs(args, rp) {
+                owned_args_storage = unpacked;
+                &owned_args_storage
+            } else {
+                args
+            }
+        } else {
+            args
+        };
         if let Some(param_tys) = param_tys {
-            let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(args.len()));
+            let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(effective_args.len()));
             for (i, _) in param_tys.iter().enumerate() {
-                match (args.get(i), param_tys.get(i)) {
+                match (effective_args.get(i), param_tys.get(i)) {
                     // Caller-supplied arg: apply per-param coercion.
                     (Some(a), Some(pt)) => out.push(coerce_arg_for_param_ty(a, pt)),
                     // Missing trailing arg: synthesize a default for
@@ -230,7 +250,7 @@ pub(super) fn emit_send(
             }
             // If caller passed MORE args than callee declares (rare —
             // splat / overload patterns), append the extras un-coerced.
-            for a in args.iter().skip(param_tys.len()) {
+            for a in effective_args.iter().skip(param_tys.len()) {
                 out.push(emit_expr(a));
             }
             out
@@ -286,5 +306,82 @@ pub(super) fn emit_send(
     } else {
         format!("{recv_s}{dispatch}{rewritten_method}({})", final_args.join(", "))
     }
+}
+
+/// Rewrite a positional-Hash call shape into a positional-only shape
+/// when the callee declares Keyword params. Returns `None` if no
+/// rewrite is applicable (no trailing kwargs Hash, or callee has no
+/// keyword params), so the caller can keep its existing args list.
+///
+/// Triggers when:
+///   * the last arg is `ExprNode::Hash { kwargs: true, … }`, AND
+///   * the callee's param list (after the leading positionals already
+///     supplied by the caller) contains at least one Keyword param.
+///
+/// For each remaining param, look up the matching entry by name in
+/// the Hash; if found, push that value; if missing (kwargs Hash
+/// silently omits optional kwargs), emit nothing for that slot and
+/// let the existing trailing-default loop synthesize the default.
+fn unpack_trailing_kwargs(
+    args: &[Expr],
+    params: &[crate::ty::Param],
+) -> Option<Vec<Expr>> {
+    use crate::expr::{ExprNode, Literal};
+    use crate::ty::ParamKind;
+    let last = args.last()?;
+    let (entries, _) = match &*last.node {
+        ExprNode::Hash { entries, kwargs } if *kwargs => (entries, true),
+        _ => return None,
+    };
+    let positional_count = args.len() - 1;
+    // Need at least one Keyword param at-or-after the supplied
+    // positional count. Otherwise this is a regular trailing-Hash
+    // shape and the existing positional dispatch handles it.
+    let any_kw_after = params
+        .iter()
+        .skip(positional_count)
+        .any(|p| matches!(p.kind, ParamKind::Keyword { .. }));
+    if !any_kw_after {
+        return None;
+    }
+    // Index the Hash literal's entries by key-name. Accept both Symbol
+    // and String literal keys (Ruby kwargs surface either way through
+    // the parser depending on call shape).
+    let mut by_name: std::collections::HashMap<String, &Expr> =
+        std::collections::HashMap::new();
+    for (k, v) in entries.iter() {
+        let name = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => return None, // dynamic key — can't unpack at emit
+        };
+        by_name.insert(name, v);
+    }
+    let mut out: Vec<Expr> = args[..positional_count].to_vec();
+    for p in params.iter().skip(positional_count) {
+        match p.kind {
+            ParamKind::Keyword { .. } => {
+                if let Some(v) = by_name.get(p.name.as_str()) {
+                    out.push((*v).clone());
+                } else {
+                    // Missing kwarg: stop pushing so the caller's
+                    // trailing-default-synth loop fills in. Required
+                    // kwargs (`required: true`) would surface as a
+                    // missing-arg compile error in Rust, which is the
+                    // right outcome — the Ruby source is missing the
+                    // required keyword.
+                    break;
+                }
+            }
+            ParamKind::Required | ParamKind::Optional => {
+                // Positional param past the supplied count and before
+                // any Keyword params — the caller didn't supply it, so
+                // leave the slot for the trailing-default loop.
+                break;
+            }
+            _ => break,
+        }
+    }
+    Some(out)
 }
 

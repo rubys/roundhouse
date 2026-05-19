@@ -848,13 +848,14 @@ fn collect_global_class_methods(
     controller_lcs: &[crate::dialect::LibraryClass],
     fixture_lcs: &[crate::dialect::LibraryClass],
     runtime_lcs: &[crate::dialect::LibraryClass],
-) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>> {
-    use crate::dialect::{LibraryClass, MethodReceiver};
-    use crate::ty::{ParamKind, Ty};
+) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Param>>> {
+    use crate::dialect::LibraryClass;
+    use crate::ident::Symbol;
+    use crate::ty::{Param, ParamKind, Ty};
 
     fn collect_one(
         lc: &LibraryClass,
-        out: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<Ty>>>,
+        out: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<Param>>>,
     ) {
         let raw = lc.name.0.as_str();
         let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
@@ -867,13 +868,21 @@ fn collect_global_class_methods(
         // (emit_send Const-recv arm) picks the entry by method name;
         // it doesn't care about receiver kind.
         for m in &lc.methods {
-            let tys: Vec<Ty> = match m.signature.as_ref() {
+            let params: Vec<Param> = match m.signature.as_ref() {
                 Some(Ty::Fn { params, .. }) => params
                     .iter()
                     .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
-                    .map(|p| p.ty.clone())
+                    .cloned()
                     .collect(),
-                _ => m.params.iter().map(|_| Ty::Untyped).collect(),
+                _ => m
+                    .params
+                    .iter()
+                    .map(|p| Param {
+                        name: Symbol::from(p.as_str()),
+                        ty: Ty::Untyped,
+                        kind: ParamKind::Required,
+                    })
+                    .collect(),
             };
             // Alias `initialize` → `new` so `Article::new(args)`
             // dispatches against the constructor's param list (Ruby
@@ -881,15 +890,15 @@ fn collect_global_class_methods(
             // `new`). Mirrors the same alias in `collect_class_method
             // _param_tys` (library.rs) used for self-class lookups.
             if m.name.as_str() == "initialize" {
-                entry.insert("new".to_string(), tys.clone());
+                entry.insert("new".to_string(), params.clone());
             }
-            entry.insert(m.name.as_str().to_string(), tys);
+            entry.insert(m.name.as_str().to_string(), params);
         }
     }
 
     let mut out: std::collections::HashMap<
         String,
-        std::collections::HashMap<String, Vec<Ty>>,
+        std::collections::HashMap<String, Vec<Param>>,
     > = std::collections::HashMap::new();
     for lc in model_lcs {
         collect_one(lc, &mut out);

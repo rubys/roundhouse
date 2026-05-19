@@ -118,7 +118,7 @@ thread_local! {
         std::collections::HashMap<String, Vec<crate::ty::Ty>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
-    /// Cross-LC registry: `(ClassName, method) → Vec<Ty>` for every
+    /// Cross-LC registry: `(ClassName, method) → Vec<Param>` for every
     /// class method visible at app-emit time. Populated by `rust2.rs::emit`
     /// once all LCs (models, views, route_helpers) are lowered, then
     /// installed via `with_global_class_methods` around the per-file
@@ -128,9 +128,15 @@ thread_local! {
     /// article(self)` call into a view module finds the callee's full
     /// param-Ty list and pads missing trailing optionals with
     /// `synth_default_for_ty` defaults. Without this fallback,
-    /// cross-class arity mismatches surface as E0061.
+    /// cross-class arity mismatches surface as E0061. Stores full
+    /// `Param` (name + ty + kind) so the kwargs-unpack pre-pass can
+    /// map trailing-kwargs Hash entries onto Keyword-param positions
+    /// by name.
     static GLOBAL_CLASS_METHODS: std::cell::RefCell<
-        std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>>,
+        std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Vec<crate::ty::Param>>,
+        >,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
     /// Variable names read more than once in the current method body.
@@ -659,7 +665,10 @@ pub(super) fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::
 /// by `rust2.rs::emit` to wrap the per-file emit loop once the
 /// global map is built from every lowered LC.
 pub(crate) fn with_global_class_methods<F, R>(
-    map: std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Ty>>>,
+    map: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<crate::ty::Param>>,
+    >,
     f: F,
 ) -> R
 where
@@ -682,6 +691,22 @@ pub(super) fn global_class_method_param_tys(
     class: &str,
     method: &str,
 ) -> Option<Vec<crate::ty::Ty>> {
+    GLOBAL_CLASS_METHODS.with(|c| {
+        c.borrow()
+            .get(class)
+            .and_then(|methods| methods.get(method))
+            .map(|params| params.iter().map(|p| p.ty.clone()).collect())
+    })
+}
+
+/// Rich variant of `global_class_method_param_tys` returning the
+/// full `Param` list (name + ty + kind). The kwargs-unpack pre-pass
+/// in send-dispatch uses this to map a trailing-kwargs Hash literal
+/// onto Keyword-param positions by name.
+pub(super) fn global_class_method_params(
+    class: &str,
+    method: &str,
+) -> Option<Vec<crate::ty::Param>> {
     GLOBAL_CLASS_METHODS.with(|c| {
         c.borrow()
             .get(class)

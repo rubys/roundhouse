@@ -80,7 +80,14 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
     match ty {
         Ty::Hash { .. } => Some("std::collections::HashMap::new()".to_string()),
         Ty::Array { .. } => Some("vec![]".to_string()),
-        Ty::Str | Ty::Sym => Some("String::new()".to_string()),
+        // `Ty::Str` / `Ty::Sym` at param positions emits as `&str` in
+        // rust2 (see `method::rust_param_ty`), so the missing-arg
+        // default must be a `&'static str` literal — not the owned
+        // `String::new()`. Returning `""` keeps the arg-pad shape
+        // type-correct at every method call site. Ruby kwargs with
+        // non-empty source defaults (e.g. `omission: "..."`) lose that
+        // value at synth time — a separate gap from arity correctness.
+        Ty::Str | Ty::Sym => Some("\"\"".to_string()),
         Ty::Int => Some("0_i64".to_string()),
         Ty::Float => Some("0.0_f64".to_string()),
         Ty::Bool => Some("false".to_string()),
