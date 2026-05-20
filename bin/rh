@@ -1,0 +1,277 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# rh — Roundhouse workflow runner. Subcommand-shaped CLI in front of
+# the per-target dev loops. Lives outside the Rust crate so Ruby is
+# the only prerequisite for the no-Rust onboarding paths
+# (`doctor`, `fetch`, `fixture`); Rust-dependent subcommands
+# (added later) shell out to the `roundhouse` binary via `cargo run`.
+#
+# Why Ruby: the audience is Rails developers (Ruby guaranteed), and
+# stdlib has everything needed — OptionParser, open-uri, Zlib,
+# Gem::Package::TarReader. No gem dependencies. Cross-platform.
+
+require 'optparse'
+require 'fileutils'
+require 'open3'
+
+ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
+TARGETS = %w[spinel ruby crystal elixir go python rust typescript typescript-worker].freeze
+SITE_BASE = 'https://rubys.github.io/roundhouse'
+
+def main(argv)
+  cmd = argv.shift
+  case cmd
+  when 'doctor'  then cmd_doctor(argv)
+  when 'fetch'   then cmd_fetch(argv)
+  when 'fixture' then cmd_fixture(argv)
+  when '-h', '--help', nil
+    print_usage
+    0
+  when '-V', '--version'
+    puts "rh #{rh_version}"
+    0
+  else
+    warn "rh: unknown command '#{cmd}'"
+    warn ''
+    print_usage
+    1
+  end
+end
+
+def print_usage
+  puts <<~USAGE
+    Usage: bin/rh <command> [options]
+
+    Roundhouse workflow runner.
+
+    Commands:
+      doctor              Check installed prerequisites; show which subcommands work today.
+      fetch <target>      Download a pre-transpiled archive (no Rust required).
+      fixture [path]      Generate a Rails source fixture via `rails new`.
+
+    Pass `--help` to any subcommand for its options.
+
+    Targets: #{TARGETS.join(', ')}
+  USAGE
+end
+
+def rh_version
+  cargo = File.join(ROUNDHOUSE_ROOT, 'Cargo.toml')
+  return 'unknown' unless File.exist?(cargo)
+  File.foreach(cargo) do |line|
+    return Regexp.last_match(1) if line =~ /^version\s*=\s*"([^"]+)"/
+  end
+  'unknown'
+end
+
+# ---------------------------------------------------------------------
+# Tool probes — Open3 + version regex. Returns the parsed version
+# string, or nil if the command isn't on PATH or fails.
+
+def probe(*cmd)
+  out, err, status = Open3.capture3(*cmd)
+  status.success? ? "#{out}#{err}".strip : nil
+rescue Errno::ENOENT, Errno::EACCES
+  nil
+end
+
+def version_of(output, re = /(\d+\.\d+(?:\.\d+)?)/)
+  return nil unless output
+  m = re.match(output)
+  m ? m[1] : nil
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: doctor
+
+DOCTOR_CHECKS = [
+  { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: '3.4' },
+  { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare' },
+  { key: :node,   label: 'Node',      unlocks: 'typescript target' },
+  { key: :sqlite, label: 'SQLite',    unlocks: 'ruby/spinel/rust targets' },
+  { key: :rails,  label: 'Rails gem', unlocks: 'fixture' },
+].freeze
+
+def cmd_doctor(argv)
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh doctor'
+    o.separator ''
+    o.separator 'Check installed prerequisites; show which subcommands work today.'
+  end.parse!(argv)
+
+  versions = {
+    ruby:   RUBY_VERSION,
+    rust:   version_of(probe('cargo', '--version')),
+    node:   version_of(probe('node', '--version')),
+    sqlite: version_of(probe('sqlite3', '--version')),
+    rails:  version_of(probe('rails', '--version')),
+  }
+
+  puts 'Roundhouse environment check:'
+  puts ''
+  DOCTOR_CHECKS.each do |c|
+    v = versions[c[:key]]
+    mark = v ? "\u2713" : "\u2717"
+    val = v ? v.ljust(10) : 'not found'.ljust(10)
+    puts "  #{c[:label].ljust(10)} #{mark} #{val}  #{c[:unlocks]}"
+  end
+
+  puts ''
+  available = ['doctor', 'fetch <target>']
+  available << 'fixture' if versions[:rails]
+  puts 'Available now:'
+  available.each { |s| puts "  bin/rh #{s}" }
+
+  missing = DOCTOR_CHECKS.reject { |c| c[:key] == :ruby || versions[c[:key]] }
+  unless missing.empty?
+    puts ''
+    puts 'Install to unlock more:'
+    missing.each do |c|
+      hint = install_hint(c[:key])
+      puts "  #{c[:label].ljust(10)} \u2192 #{c[:unlocks]}#{hint ? "  (#{hint})" : ''}"
+    end
+  end
+
+  0
+end
+
+def install_hint(key)
+  case key
+  when :rust   then 'https://rustup.rs'
+  when :node   then 'https://nodejs.org or `brew install node`'
+  when :sqlite then 'macOS: preinstalled; Debian/Ubuntu: apt install libsqlite3-dev'
+  when :rails  then 'gem install rails'
+  end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: fetch
+#
+# Download a pre-transpiled archive from rubys.github.io/roundhouse/
+# and explode it into ./downloads/<target>/. Pure Ruby stdlib —
+# open-uri (follows redirects, handles HTTPS), Zlib::GzipReader,
+# Gem::Package::TarReader. No curl/wget/tar shell dep.
+
+def cmd_fetch(argv)
+  dest_root = File.join(ROUNDHOUSE_ROOT, 'downloads')
+  parser = OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh fetch <target> [--out DIR]'
+    o.separator ''
+    o.separator "Download #{SITE_BASE}/browse/<target>.tgz and extract it."
+    o.separator "Default output: ./downloads/<target>/"
+    o.separator ''
+    o.separator "Targets: #{TARGETS.join(', ')}"
+    o.on('--out DIR', 'Output root (target name is appended)') { |v| dest_root = v }
+  end
+  parser.parse!(argv)
+
+  target = argv.shift
+  unless target
+    warn 'rh fetch: missing <target>'
+    warn parser.help
+    return 1
+  end
+  unless TARGETS.include?(target)
+    warn "rh fetch: unknown target '#{target}'"
+    warn "  valid: #{TARGETS.join(', ')}"
+    return 1
+  end
+
+  url = "#{SITE_BASE}/browse/#{target}.tgz"
+  dest = File.join(dest_root, target)
+  if File.exist?(dest)
+    warn "rh fetch: #{dest} already exists; remove it or pass --out elsewhere"
+    return 1
+  end
+
+  warn "rh fetch: downloading #{url}"
+  require 'open-uri'
+  require 'zlib'
+  require 'rubygems/package'
+
+  count = 0
+  begin
+    URI.open(url) do |io|
+      Zlib::GzipReader.wrap(io) do |gz|
+        Gem::Package::TarReader.new(gz) do |tar|
+          tar.each do |entry|
+            rel = entry.full_name.sub(%r{\A#{Regexp.escape(target)}/}, '')
+            next if rel.empty?
+            path = File.join(dest, rel)
+            if entry.directory?
+              FileUtils.mkdir_p(path)
+            elsif entry.file?
+              FileUtils.mkdir_p(File.dirname(path))
+              File.binwrite(path, entry.read)
+              count += 1
+            end
+          end
+        end
+      end
+    end
+  rescue OpenURI::HTTPError => e
+    warn "rh fetch: HTTP error: #{e.message}"
+    warn "  (was the archive ever published? check #{SITE_BASE}/browse/)"
+    return 1
+  rescue SocketError, Errno::ECONNREFUSED => e
+    warn "rh fetch: network error: #{e.message}"
+    return 1
+  end
+
+  puts "rh fetch: wrote #{count} files to #{dest}"
+  readme = File.join(dest, 'README.md')
+  puts "  next: see #{readme}" if File.exist?(readme)
+  0
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: fixture
+#
+# Wrap scripts/create-blog — the bash script that runs `rails new` +
+# `rails generate scaffold` to produce a canonical Rails source app.
+# Required by transpile/site as the input application.
+
+def cmd_fixture(argv)
+  force = false
+  parser = OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh fixture [path]'
+    o.separator ''
+    o.separator 'Generate a Rails source fixture (wraps scripts/create-blog).'
+    o.separator 'Default path: fixtures/real-blog'
+    o.separator ''
+    o.on('-f', '--force', 'Remove path first if it exists') { force = true }
+  end
+  parser.parse!(argv)
+  path = argv.shift || 'fixtures/real-blog'
+
+  unless version_of(probe('rails', '--version'))
+    warn 'rh fixture: Rails gem not installed.'
+    warn '  Install: gem install rails'
+    warn '  (or run `bin/rh doctor` to see all prerequisites)'
+    return 1
+  end
+
+  if File.exist?(path)
+    if force
+      warn "rh fixture: removing existing #{path}"
+      FileUtils.rm_rf(path)
+    else
+      warn "rh fixture: #{path} already exists; pass -f to overwrite"
+      return 1
+    end
+  end
+
+  script = File.join(ROUNDHOUSE_ROOT, 'scripts', 'create-blog')
+  unless File.executable?(script)
+    warn "rh fixture: #{script} missing or not executable"
+    return 1
+  end
+
+  # `rails new <path>` creates parent dirs as needed, and create-blog
+  # does `cd "$APP_NAME"` so subsequent rails-generate steps run in
+  # the new app dir. Pass `path` straight through.
+  system(script, path) ? 0 : 1
+end
+
+exit main(ARGV) if $PROGRAM_NAME == __FILE__

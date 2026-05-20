@@ -2,6 +2,7 @@
 /tools/compare/target
 /_site
 /build
+/downloads
 *.swp
 
 # Local debug/repro binaries — produced ad-hoc during development
