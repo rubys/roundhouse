@@ -543,6 +543,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // flags (no-op without state — current shim is
                 // intentionally stateless); `exists` routes through
                 // the lowerer-emitted `_adapter_exists_by_id`.
+                // Class-method wrappers that delegate to the lowerer-
+                // emitted `_adapter_*` methods. AR::Base in Ruby
+                // provides `count`/`all`/`create`/etc. that are
+                // inherited; Rust has no inheritance, so the per-model
+                // struct needs explicit wrappers. The underlying
+                // `_adapter_count` / `_adapter_all` /
+                // `_adapter_insert` are emitted by the model
+                // lowerer's `adapter_emit` pass and live on the
+                // struct already; the shim just renames them to the
+                // Rails-API surface that app code + test bodies
+                // expect.
+                //
+                // `create(attrs)` mirrors Rails' `Model.create(attrs)`
+                // = `Model.new(attrs).save!`. Builds the struct,
+                // validates+inserts via save, returns it. Returned
+                // by value (not Result/Option) — Rails raises on
+                // validation failure, which we surface as panic via
+                // the validate path.
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
@@ -552,6 +570,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
                         pub fn persisted(&self) -> bool {{ self.id != 0 }}\n\
                         pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
+                        pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
+                        pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
+                        pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 )
