@@ -573,16 +573,15 @@ jobs:
   # publish *current emit* even when per-target toolchain/compare jobs
   # fail (broken emit is exactly what's interesting to investigate).
   #
-  # So build-site only gates on (a) the fixture being available, and
-  # (b) the lib's own non-ignored test suite (a sanity check that the
-  # build-site binary itself isn't catastrophically broken). It does
-  # not gate on toolchain-* or compare-* — a flaky elixir CI run or a
-  # known-broken target shouldn't stall the archive workflow.
+  # So build-site only gates on the fixture being available. It does
+  # not gate on unit / toolchain-* / compare-* — a flaky elixir CI run
+  # or a known-broken target shouldn't stall the archive workflow, and
+  # the archive itself is available via the workflow-run artifact even
+  # when unit fails. Pages publication (the `deploy` job below) does
+  # gate on unit, so a broken library can't push to the live site.
   # -------------------------------------------------------------------
   build-site:
-    needs:
-      - generate-fixture
-      - unit
+    needs: generate-fixture
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -602,7 +601,9 @@ jobs:
           path: _site
 
   deploy:
-    needs: build-site
+    needs:
+      - build-site
+      - unit
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
