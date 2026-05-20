@@ -956,14 +956,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     //   assert_select / assert_difference / assert_redirected_to
     //   classifier dispatch the controller-test bodies need (~500
     //   LOC at `src/emit/rust/spec.rs`); rather than duplicate it
-    //   here, expose it `pub(crate)` and call into it. When Phase 7
-    //   retires the legacy target this code moves to a shared
-    //   location.
+    //   here, expose it `pub(crate)` and call into it. Phase 7.2
+    //   relocates the legacy spec.rs into rust2 so the
+    //   `pub(crate) mod spec` hatch retires.
     //
-    // Env-gated overall (`ROUNDHOUSE_RUST_V2_EMIT_TESTS=1`) so the
-    // legacy code path stays the default until the controller-test
-    // surface stabilizes; flipping the env var emits both categories.
-    let emit_tests_enabled = std::env::var("ROUNDHOUSE_RUST_V2_EMIT_TESTS").is_ok();
+    // Phase 7.1 (2026-05-20): tests emit by default. The
+    // `ROUNDHOUSE_RUST_V2_EMIT_TESTS=0` env var keeps an opt-out
+    // for environments that don't want the test surface compiled
+    // in (e.g. release-only builds that elide axum-test). Previous
+    // opt-in semantics are retired now that the test surface is
+    // green.
+    let emit_tests_enabled =
+        std::env::var("ROUNDHOUSE_RUST_V2_EMIT_TESTS").as_deref() != Ok("0");
     let model_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
         app.test_modules
             .iter()

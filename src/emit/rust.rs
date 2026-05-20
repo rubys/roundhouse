@@ -446,13 +446,14 @@ fn rt_emit_string_interp(parts: &[InterpPart]) -> String {
 }
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
-    // Strangler-fig switch: route to the in-progress rust2 emitter
-    // when ROUNDHOUSE_RUST_V2=1 is set. Until Phase 7 (switchover),
-    // the legacy emitter below is the default for every caller; the
-    // env var lets the migration's per-phase A/B comparisons run
-    // against the same caller surface (CI gates, build-site, tests)
-    // without forking the public `pub fn emit` signature.
-    if std::env::var("ROUNDHOUSE_RUST_V2").is_ok() {
+    // Phase 7 switchover (2026-05-20): rust2 is the default. The
+    // `ROUNDHOUSE_RUST_V2_LEGACY=1` env var holds an escape hatch
+    // back to the legacy emitter for diff-bisection / fallback
+    // during the prune; once the legacy files are deleted (7.3)
+    // this gate goes away. The previous `ROUNDHOUSE_RUST_V2=1`
+    // opt-in flag is no longer consulted — every caller now lands
+    // at the rust2 path by default.
+    if std::env::var("ROUNDHOUSE_RUST_V2_LEGACY").is_err() {
         return super::rust2::emit(app);
     }
 
