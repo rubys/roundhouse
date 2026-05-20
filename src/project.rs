@@ -364,6 +364,12 @@ fn ruby_runtime_files(
         }
     }
 
+    // Tep is a spinel-only transport (FFI HTTP server). The CRuby
+    // target uses Puma + Rack via the ruby_overlay; nothing in its
+    // boot path requires Tep, and the unsubstituted @TEP_SPHTTP_O@
+    // placeholder in net.rb would confuse anyone exploring the tree.
+    files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
+
     walk_dir_into(
         Path::new("runtime/spinel/scaffold/ruby_overlay"),
         "",
@@ -425,6 +431,7 @@ fn spinel_files(app: &App) -> Result<Vec<(String, String)>, String> {
         "action_controller",
         "action_dispatch",
         "inflector",
+        "json_builder",
     ] {
         let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
         let content = fs::read_to_string(&rb)
