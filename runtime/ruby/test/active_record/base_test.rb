@@ -78,6 +78,13 @@ class BaseTest < Minitest::Test
     def _adapter_delete
       ActiveRecord.adapter.delete(Item.table_name, @id)
     end
+
+    def _adapter_reload
+      row = ActiveRecord.adapter.find(Item.table_name, @id)
+      return nil if row.nil?
+      assign_from_row(row)
+      self
+    end
   end
 
   def setup

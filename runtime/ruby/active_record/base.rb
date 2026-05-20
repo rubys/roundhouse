@@ -113,21 +113,13 @@ module ActiveRecord
 
     # Refresh self's persisted columns from the DB (by @id), writing
     # back into self rather than constructing a new instance. Returns
-    # self on success, nil when the row has been deleted. The lowerer-
-    # emitted per-model override goes straight to `Db.prepare` / per-
-    # column ivar writes; this default routes through the legacy
-    # adapter for hand-written subclasses (framework_ruby_unit's
-    # `Item`). Instance-method (not class-method) so call sites
-    # reach it via implicit-self dispatch — the class-method form
-    # trips an emit issue under the libsql async profile where the
-    # emitter mishandles `self.class.<async_method>` and lifts the
-    # await onto the receiver instead of the call.
-    def _adapter_reload
-      row = ActiveRecord.adapter.find(self.class.table_name, @id)
-      return nil if row.nil?
-      assign_from_row(row)
-      self
-    end
+    # self on success, nil when the row has been deleted. Empty Base
+    # body for the same reason as `_adapter_insert`/etc. above —
+    # spinel polymorphic dispatch needs the base method body empty so
+    # the class-id switch fires; the lowerer-emitted per-model override
+    # goes straight to `Db.prepare` / per-column ivar writes. Hand-
+    # written subclasses (`BaseTest::Item`) provide their own override.
+    def _adapter_reload; end
 
     # Subclasses override to return an attribute hash for adapter writes.
     def attributes
