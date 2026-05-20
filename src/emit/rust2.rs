@@ -769,23 +769,40 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             } else {
                 // AC::Base inheritance shim — appended `impl <Name>`
                 // block providing the request-lifecycle helpers that
-                // controller bodies invoke as `Send`s on self. The
-                // field-shape ivars (`flash`, `session`, `params`,
-                // ...) come from `walk_collect_ivars`'s read-only
-                // ivar surface and land on the struct naturally. The
-                // methods below stub the AC::Base contract for now —
-                // `render` echoes its arg, `request_format` returns
-                // "html", `redirect_to` / `head` are no-ops. Real
-                // plumbing (HTTP response state, content negotiation)
-                // is later runtime work; the goal here is compile-
-                // clean so the aggregate error count moves.
+                // controller bodies invoke as `Send`s on self.
+                //
+                // **Wedge 2c.1**: render/render_with/redirect_to/head
+                // route through `crate::http::response_*` thread-local
+                // state. Axum wrappers (emitted alongside, follow-on
+                // 2c.2) clear the state before calling the action and
+                // read it back to build the `Response`. Honors Rails'
+                // common opts keys: `content_type` on render_with /
+                // head, `status: :see_other` on redirect_to (defaults
+                // to 303 to match Rails post-mutation convention).
+                //
+                // The field-shape ivars (`flash`, `session`, `params`,
+                // ...) come from `walk_collect_ivars`'s read-only ivar
+                // surface and land on the struct naturally.
                 let ac_shim = format!(
                     "\nimpl {name} {{\n\
-                    \x20   pub fn render(&self, _content: String) {{ }}\n\
-                    \x20   pub fn render_with(&self, _content: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
+                    \x20   pub fn render(&self, content: String) {{\n\
+                    \x20       crate::http::response_set_body(content);\n\
+                    \x20   }}\n\
+                    \x20   pub fn render_with(&self, content: String, opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{\n\
+                    \x20       let content_type = opts.get(\"content_type\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
+                    \x20       let status = opts.get(\"status\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
+                    \x20       let status_code = status.as_deref().map(crate::http::status_name_to_code_pub);\n\
+                    \x20       crate::http::response_set_body_with(content, content_type, status_code);\n\
+                    \x20   }}\n\
                     \x20   pub fn request_format(&self) -> String {{ \"html\".to_string() }}\n\
-                    \x20   pub fn redirect_to(&self, _url: String, _opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{ }}\n\
-                    \x20   pub fn head(&self, _status: &str, _opts: std::collections::HashMap<String, serde_json::Value>) {{ }}\n\
+                    \x20   pub fn redirect_to(&self, url: String, opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{\n\
+                    \x20       let status = opts.get(\"status\").and_then(|v| v.as_str()).unwrap_or(\"see_other\");\n\
+                    \x20       crate::http::response_set_redirect(url, crate::http::status_name_to_code_pub(status));\n\
+                    \x20   }}\n\
+                    \x20   pub fn head(&self, status: &str, opts: std::collections::HashMap<String, serde_json::Value>) {{\n\
+                    \x20       let content_type = opts.get(\"content_type\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
+                    \x20       crate::http::response_set_head(status, content_type);\n\
+                    \x20   }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
                 );

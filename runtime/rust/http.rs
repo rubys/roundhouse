@@ -114,3 +114,179 @@ impl ViewCtx {
         Self { notice: Some(notice.into()) }
     }
 }
+
+// ── rust2 controller-action response state ──────────────────────
+//
+// Rails controllers thread response data through implicit state —
+// `render`, `redirect_to`, `head`, and `response.headers[…] = …`
+// each accumulate into the controller's response object, which the
+// framework serializes to the HTTP body after the action returns.
+// Rust2's emit shape carries the controller as `impl X { pub fn
+// show(&mut self) }` — `&mut self` methods returning `()`. That
+// signature isn't compatible with axum's free-fn-extractor-then-
+// IntoResponse contract.
+//
+// Bridge: emit per-action axum wrapper free fns that clear this
+// thread-local, build the controller, call the action, then
+// translate the accumulated `ControllerResponse` into an
+// `axum::response::Response`. The AC::Base shim's `render` /
+// `render_with` / `redirect_to` / `head` methods (today no-ops
+// emitted at `src/emit/rust2.rs:~782`) become thin writers to
+// this state.
+//
+// Per-thread because axum dispatches each request on a tokio task
+// that's pinned to one thread for the duration of an action body
+// (controller bodies are sync `&mut self` methods — no `.await`
+// inside, so thread affinity holds). A future migration to async
+// action bodies would need a per-task storage shape (extension
+// types, task_local!, etc.).
+
+#[derive(Debug, Clone)]
+pub struct ControllerResponse {
+    pub status: u16,
+    pub body: String,
+    pub content_type: String,
+    /// Set when `redirect_to` fires; the wrapper emits a 3xx with
+    /// this as the `Location` header instead of an HTML body.
+    pub location: Option<String>,
+}
+
+impl Default for ControllerResponse {
+    fn default() -> Self {
+        Self {
+            status: 200,
+            body: String::new(),
+            content_type: "text/html; charset=utf-8".to_string(),
+            location: None,
+        }
+    }
+}
+
+thread_local! {
+    static RESPONSE: std::cell::RefCell<ControllerResponse> =
+        std::cell::RefCell::new(ControllerResponse::default());
+}
+
+/// Reset the thread-local to defaults. Called at the top of each
+/// axum wrapper so a prior action's state doesn't leak into the
+/// current request.
+pub fn response_clear() {
+    RESPONSE.with(|r| *r.borrow_mut() = ControllerResponse::default());
+}
+
+/// `render(content)` — stash the body string. Defaults already
+/// have 200/text-html, so a bare render is fully wired.
+pub fn response_set_body(body: String) {
+    RESPONSE.with(|r| r.borrow_mut().body = body);
+}
+
+/// `render_with(content, opts)` — body + content_type, optionally
+/// status. Honors common `opts` keys (`content_type`, `status`).
+/// Unknown keys ignored; the AC::Base shim's call site already
+/// strips the Ruby-only knobs.
+pub fn response_set_body_with(body: String, content_type: Option<String>, status: Option<u16>) {
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        resp.body = body;
+        if let Some(ct) = content_type {
+            resp.content_type = ct;
+        }
+        if let Some(st) = status {
+            resp.status = st;
+        }
+    });
+}
+
+/// `redirect_to(path, opts)` — 303 See Other by default; the
+/// `status: :see_other` opt matches Rails' default convention for
+/// post-mutation redirects (avoids form re-submit on back/refresh).
+pub fn response_set_redirect(location: String, status: u16) {
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        resp.status = status;
+        resp.location = Some(location);
+        resp.body = String::new();
+    });
+}
+
+/// `head(name, opts)` — Rails-style status symbol → numeric code.
+/// Body stays empty. Symbol names mirror `Rack::Utils::SYMBOL_TO_STATUS_CODE`.
+pub fn response_set_head(status_name: &str, content_type: Option<String>) {
+    let code = status_name_to_code(status_name);
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        resp.status = code;
+        resp.body = String::new();
+        if let Some(ct) = content_type {
+            resp.content_type = ct;
+        }
+    });
+}
+
+/// Snapshot + reset — used by the per-action axum wrapper to read
+/// out the state immediately after the action returns. Returns
+/// owned value so the borrow on the thread-local is short.
+pub fn response_take() -> ControllerResponse {
+    RESPONSE.with(|r| std::mem::take(&mut *r.borrow_mut()))
+}
+
+/// Translate a thread-local response into an `axum::response::Response`.
+/// Redirect-shaped state produces a 3xx with `Location`; otherwise
+/// emits the body with the recorded content-type + status.
+pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+    if let Some(location) = resp.location {
+        let mut response = (status, ()).into_response();
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
+            response.headers_mut().insert(axum::http::header::LOCATION, hv);
+        }
+        return response;
+    }
+    let body = resp.body;
+    let content_type = resp.content_type;
+    let mut response = (status, body).into_response();
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&content_type) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::CONTENT_TYPE, hv);
+    }
+    response
+}
+
+/// Public alias for `status_name_to_code` — exposed for the AC::Base
+/// shim emitted in `src/emit/rust2.rs`, which reaches it from
+/// outside the crate-private `http` module. Same semantics; just
+/// a re-export that survives module privacy.
+pub fn status_name_to_code_pub(name: &str) -> u16 {
+    status_name_to_code(name)
+}
+
+/// Rails status-symbol → HTTP code. Subset matching the names the
+/// scaffold emit reaches (`:ok`, `:no_content`, `:not_found`,
+/// `:unprocessable_entity`, `:see_other`). Unknown names fall back
+/// to 200 OK — the controller path that emits an unknown symbol is
+/// generally a bug the caller will see via behavior, not a route
+/// the framework should silently 500 on.
+fn status_name_to_code(name: &str) -> u16 {
+    match name {
+        "ok" => 200,
+        "created" => 201,
+        "accepted" => 202,
+        "no_content" => 204,
+        "moved_permanently" => 301,
+        "found" => 302,
+        "see_other" => 303,
+        "not_modified" => 304,
+        "temporary_redirect" => 307,
+        "permanent_redirect" => 308,
+        "bad_request" => 400,
+        "unauthorized" => 401,
+        "forbidden" => 403,
+        "not_found" => 404,
+        "unprocessable_entity" => 422,
+        "internal_server_error" => 500,
+        _ => 200,
+    }
+}

@@ -147,10 +147,20 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // expect to hand out independent copies). Each ivar type must
     // itself be Clone — every type rust2 emits today (i64, String,
     // bool, Vec<T: Clone>, HashMap<String, serde_json::Value>,
-    // Option<T: Clone>, Class names → Clone'd) satisfies that. If a
-    // future non-Clone ivar lands, this derive will fail at compile
-    // time and we'll need a per-class override.
-    writeln!(out, "#[derive(Clone)]").unwrap();
+    // Option<T: Clone>, Class names → Clone'd) satisfies that.
+    //
+    // Also derive `Default` so axum-wrapper-emitted code can
+    // `<Controller>::default()`-construct a controller with empty
+    // params + flash + zeroed model ivars (wedge 2c). Every Rust
+    // primitive type (i64/bool/f64/String) is Default; container
+    // types (Vec/HashMap/Option) too; and the lowerer-emitted
+    // model classes — Article, Comment, Row holders, Params
+    // resources — are themselves marked `#[derive(Default)]` by
+    // this same path, so the derive cascades through cross-model
+    // ivar references. If a future non-Default ivar lands, this
+    // derive will fail at compile time and we'll need a per-class
+    // override.
+    writeln!(out, "#[derive(Clone, Default)]").unwrap();
     writeln!(out, "pub struct {name} {{").unwrap();
     for (fname, ty) in &ivars {
         writeln!(out, "    {fname}: {},", rust_ty(ty)).unwrap();
