@@ -231,13 +231,19 @@ module RequestDispatch
                  when :articles then ArticlesController.new
                  when :comments then CommentsController.new
                  end
-    merged = matched.path_params.dup
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
     # request-body parser would produce in production. The is_a?(Hash)
     # check is inline at the call site (not inside stringify_keys) so
     # the helper itself stays strictly typed as `(Hash) -> Hash`.
+    #
+    # `stringify_keys(matched.path_params)` (rather than `path_params
+    # .dup`) seeds `merged` as `Hash[String, untyped]` — needed so the
+    # nested-Hash branch of the ternary below has a slot wide enough
+    # to hold a Hash value. `path_params.dup` keeps the StrStrHash
+    # shape, which spinel then refuses to assign a Hash into.
+    merged = stringify_keys(matched.path_params)
     params.each { |k, v| merged[k.to_s] = v.is_a?(Hash) ? stringify_keys(v) : v }
     controller.params  = merged
     controller.session = @__session ||= ActionDispatch::Session.new
@@ -339,7 +345,14 @@ module RequestDispatch
   # rather than nested counts. Tighten if a fixture exposes a false
   # positive.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
+    # Explicit `is_a?(String)` narrow on body so spinel can unbox it
+    # to `const char *` at use sites — `@__response.body` returns
+    # `String` per RBS, but spinel types `iv_body` on ActionResponse as
+    # `sp_RbVal` (RBS attr_reader return type doesn't propagate to the
+    # underlying ivar slot type). The divergent `raise` keeps the
+    # narrow valid through the rest of the method body.
     body = @__response.body
+    raise "assert_select: expected String body, got #{body.inspect}" unless body.is_a?(String)
     if content_or_opts.is_a?(Hash)
       opts = content_or_opts
       content = nil
