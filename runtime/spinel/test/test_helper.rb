@@ -244,7 +244,13 @@ module RequestDispatch
     # to hold a Hash value. `path_params.dup` keeps the StrStrHash
     # shape, which spinel then refuses to assign a Hash into.
     merged = stringify_keys(matched.path_params)
-    params.each { |k, v| merged[k.to_s] = v.is_a?(Hash) ? stringify_keys(v) : v }
+    params.each do |k, v|
+      if v.is_a?(Hash)
+        merged[k.to_s] = stringify_keys(v)
+      else
+        merged[k.to_s] = v
+      end
+    end
     controller.params  = merged
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
@@ -275,7 +281,11 @@ module RequestDispatch
   def stringify_keys(hash)
     out = {}
     hash.each do |k, v|
-      out[k.to_s] = v.is_a?(Hash) ? stringify_keys(v) : v
+      if v.is_a?(Hash)
+        out[k.to_s] = stringify_keys(v)
+      else
+        out[k.to_s] = v
+      end
     end
     out
   end
