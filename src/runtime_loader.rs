@@ -557,9 +557,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         // Library mode parallel to inflector — emit `pub struct
         // JsonBuilder; impl JsonBuilder { pub fn encode_string ... }`
         // so the jbuilder view lowerer's `JsonBuilder::encode_string(...)`
-        // qualified-call resolves.
+        // qualified-call resolves. `RubyToS` covers `v.to_s` Sends on
+        // untyped JSON values — the trait method needs to be in scope.
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        imports: &[("RubyToS", "http")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -587,6 +588,14 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         imports: &[
             ("Base", "active_record_base"),
             ("merge_attrs", "hash_ext"),
+            // `RubyToS` trait — the `inner_v.to_s` / `v.to_s` sends
+            // in `render_attrs` lower to `(recv).ruby_to_s()` via
+            // the `Ty::Untyped` arm in
+            // `src/emit/rust2/expr/send/dispatch.rs`; the trait
+            // needs to be in scope for those method calls to
+            // resolve. Trait lives in `runtime/rust/http.rs` so it
+            // ships alongside the hand-written response shape.
+            ("RubyToS", "http"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

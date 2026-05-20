@@ -125,6 +125,8 @@ use crate::importmap::{self, Importmap};
 #[allow(unused_imports)]
 use crate::json_builder::{self, JsonBuilder};
 #[allow(unused_imports)]
+use crate::http::RubyToS;
+#[allow(unused_imports)]
 use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
@@ -149,6 +151,8 @@ use crate::db::Db;
 use crate::route_helpers::{self, RouteHelpers};
 #[allow(unused_imports)]
 use crate::view_helpers::{self, ViewHelpers};
+#[allow(unused_imports)]
+use crate::http::RubyToS;
 #[allow(unused_imports)]
 use crate::broadcasts::Broadcasts;
 #[allow(unused_imports)]

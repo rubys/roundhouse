@@ -284,7 +284,41 @@ pub(super) fn emit_string_interp(parts: &[InterpPart]) -> String {
             }
             InterpPart::Expr { expr } => {
                 fmt.push_str("{}");
-                args.push(emit_expr(expr));
+                // String interpolation in Ruby calls `to_s` on each
+                // interp value (`"#{x}"` == `x.to_s`). Rust's `"{}"`
+                // format spec uses `Display`, which for
+                // `serde_json::Value` is the JSON serialization —
+                // `Value::String("foo")` displays as `"\"foo\""`,
+                // not `foo`. Route Untyped/Record-typed exprs
+                // through `RubyToS::ruby_to_s` (defined in
+                // `runtime/rust/http.rs`) so the interpolation
+                // matches Ruby's identity-on-String semantics. The
+                // trait dispatches at compile time to the right
+                // impl for `&str`/`String`/`&Value`, so emitting
+                // `.ruby_to_s()` for Untyped exprs is safe even
+                // when the body-typer's annotation imprecisely
+                // marks an actually-`&String` closure param as
+                // Untyped.
+                let arg = emit_expr(expr);
+                // Fire on Untyped / Record (lowered IR's serde_json
+                // ::Value alias) and on missing-Ty Sends whose recv
+                // is itself Value-shaped — the body-typer doesn't
+                // always propagate the result Ty through nested
+                // `value[key]` index Sends, but emit-side
+                // inspection of the recv catches the same pattern.
+                // The trait dispatch picks the right impl at
+                // compile time, so a false positive on a `&str`
+                // expression still compiles (the impl for `str`
+                // returns `self.to_string()`).
+                let needs_ruby_to_s = matches!(
+                    expr.ty.as_ref(),
+                    Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+                ) || expr_recv_is_value(expr);
+                if needs_ruby_to_s {
+                    args.push(format!("({arg}).ruby_to_s()"));
+                } else {
+                    args.push(arg);
+                }
             }
         }
     }
@@ -295,6 +329,25 @@ pub(super) fn emit_string_interp(parts: &[InterpPart]) -> String {
     }
     fmt.push(')');
     fmt
+}
+
+/// Returns `true` when `expr` is an index/send into a recv whose
+/// body-typer Ty is `Untyped`/`Record` — i.e. the result is `&Value`
+/// at runtime even though the typing pass didn't propagate the
+/// inner result Ty. Currently only catches `recv[key]` and
+/// `recv.method()` shapes; deeper chains land here recursively
+/// through the index recv.
+fn expr_recv_is_value(expr: &Expr) -> bool {
+    use crate::expr::ExprNode;
+    let recv_opt: Option<&Expr> = match &*expr.node {
+        ExprNode::Send { recv: Some(r), .. } => Some(r),
+        _ => None,
+    };
+    let Some(recv) = recv_opt else { return false };
+    matches!(
+        recv.ty.as_ref(),
+        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+    )
 }
 
 /// Primitive literal → Rust literal. `nil` → `None` so Option-typed

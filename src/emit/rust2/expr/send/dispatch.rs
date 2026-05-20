@@ -250,6 +250,27 @@ pub(super) fn dispatch_method_by_recv_ty(
             }
             _ => None,
         },
+        // `Untyped` recv (rust2's alias for `serde_json::Value`) +
+        // `Record` (a sub-Hash through `.as_object().iter()`).
+        // `to_s` on these is the Ruby `Object#to_s` shape — for
+        // String variants the bare inner string, for everything
+        // else JSON-encode. Rust's `serde_json::Value::to_string()`
+        // unconditionally JSON-encodes, which breaks attribute
+        // emission (`data-turbo-track="reload"` becomes
+        // `data-turbo-track="\"reload\""`). Route through the
+        // `RubyToS` trait (defined in `runtime/rust/http.rs`):
+        // compile-time dispatch picks the right impl for `str` /
+        // `String` / `serde_json::Value`, so the same emit shape
+        // works whether the recv ends up being a closure param
+        // typed `&String` (Map iter keys) or a genuine
+        // `&serde_json::Value` (Map iter values). Avoids the
+        // false-positive E0599 from a Var-only narrowing rule.
+        Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
+            "to_s" if args.is_empty() => {
+                Some(format!("({recv_s}).ruby_to_s()"))
+            }
+            _ => None,
+        },
         Some(Ty::Hash { .. }) => match method {
             // `key?` / `has_key?` / `include?` all probe key presence.
             "key?" | "has_key?" | "include?" if args.len() == 1 => {

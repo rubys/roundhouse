@@ -263,6 +263,53 @@ pub fn status_name_to_code_pub(name: &str) -> u16 {
     status_name_to_code(name)
 }
 
+/// Ruby `Object#to_s` analog. Rails' `inner_v.to_s` in
+/// `ActionView::ViewHelpers#render_attrs` ships through any
+/// Hash[String, untyped]; on strict-typed targets the `untyped`
+/// alias resolves to `serde_json::Value`, whose `Display` /
+/// `to_string()` emits a JSON serialization (so
+/// `Value::String("reload").to_string()` becomes `"\"reload\""`,
+/// not `reload`). Ruby's `String#to_s` is identity — bare string.
+///
+/// `RubyToS` bridges: implementations cover the three recv types
+/// rust2 emit lowers `untyped`-receiver `.to_s` Sends to (`str` /
+/// `String` / `serde_json::Value`). Rust resolves the impl at
+/// compile time via auto-deref, so the rust2 dispatch can emit
+/// `(recv).ruby_to_s()` uniformly without distinguishing closure
+/// params (genuinely `&String` at runtime, body-typer marks
+/// `Untyped`) from value-typed locals (genuinely `&Value`).
+///
+/// Used at every call site in `runtime/ruby/action_view/view_helpers.rb`
+/// that produces an attribute / data-attribute / link tag value;
+/// the lowered IR's `.to_s` Sends on Untyped recvs route through
+/// this trait by the recv-Ty-aware bridge in
+/// `src/emit/rust2/expr/send/dispatch.rs`.
+pub trait RubyToS {
+    fn ruby_to_s(&self) -> String;
+}
+
+impl RubyToS for str {
+    fn ruby_to_s(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl RubyToS for String {
+    fn ruby_to_s(&self) -> String {
+        self.clone()
+    }
+}
+
+impl RubyToS for serde_json::Value {
+    fn ruby_to_s(&self) -> String {
+        match self {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    }
+}
+
 /// Translate a flat axum-`Form<HashMap<String, String>>` body into
 /// the nested params shape Rails controllers expect. Form names of
 /// the shape `article[title]=Foo` land at `params["article"]
