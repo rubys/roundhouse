@@ -36,7 +36,7 @@ jobs:
       - name: Install Rails
         run: gem install rails
       - name: Generate fixtures/real-blog
-        run: make real-blog
+        run: bin/rh fixture
       - name: Pack fixture
         run: |
           tar --exclude='./fixtures/real-blog/tmp' \

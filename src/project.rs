@@ -401,6 +401,11 @@ fn spinel_files(app: &App) -> Result<Vec<(String, String)>, String> {
 
     walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
 
+    // Vendored Tep transport (FFI HTTP server). Both .rb files and
+    // sphttp.c (precompiled to sphttp.o at transpile-post time).
+    // Recursive walk picks the whole subtree.
+    walk_dir_into(Path::new("runtime/spinel/tep"), "runtime/tep/", &mut files)?;
+
     for sub in [
         "active_record",
         "action_view",

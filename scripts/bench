@@ -103,7 +103,7 @@ TARGETS=("${NORMALIZED[@]}")
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
-RUBY_OUT="$REPO_ROOT/build/transpiled-blog"
+RUBY_OUT="$REPO_ROOT/build/transpiled-blog-ruby"
 # scripts/compare's typescript path — emit_preview always writes here,
 # so we reuse it to share the npm-install cache across compare runs.
 TS_OUT="/tmp/rh-ts-pass2"
@@ -246,15 +246,15 @@ build_target() {
             TARGET_GEMFILE=""  # uses fixture's own Gemfile
             if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
                 step "regenerating fixtures/real-blog"
-                (cd "$REPO_ROOT" && make real-blog >/dev/null)
+                (cd "$REPO_ROOT" && bin/rh fixture >/dev/null)
             fi
             ;;
         ruby|ruby-int)
             TARGET_BUILD_DIR="$RUBY_OUT"
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
-            if (( SKIP_EMIT == 0 )) || [[ ! -f "$RUBY_OUT/.stamp" ]]; then
-                step "regenerating ruby target (make ruby-transpile)"
-                (cd "$REPO_ROOT" && rm -rf "$RUBY_OUT" && make ruby-transpile >/dev/null)
+            if (( SKIP_EMIT == 0 )) || [[ ! -d "$RUBY_OUT" ]]; then
+                step "regenerating ruby target (bin/rh transpile ruby)"
+                (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null)
             fi
             # Assets — Tailwind compile + JS deps. Needed for full
             # response bytes; without it the index page is naked.

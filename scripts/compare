@@ -35,7 +35,7 @@
 #                         re-runs on the same target)
 #
 # Environment: Rails gems must be installed (handled by
-# `make real-blog`); Ruby/Node/Rust toolchains must be available
+# `bin/rh fixture`); Ruby/Node/Rust toolchains must be available
 # per target.
 
 set -euo pipefail
@@ -172,19 +172,19 @@ case "$TARGET" in
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     ruby)
-        # Ruby reuses the demo's transpile output (Makefile target
-        # `ruby-transpile`), which lives under build/transpiled-blog/.
-        # The dev server reads BLOG_DB; the staged DB lands at
+        # Ruby reuses the demo's transpile output (`bin/rh transpile
+        # ruby`), which lives under build/transpiled-blog-ruby/. The
+        # dev server reads BLOG_DB; the staged DB lands at
         # tmp/blog.sqlite3 inside that tree.
-        BUILD_DIR="$REPO_ROOT/build/transpiled-blog"
+        BUILD_DIR="$REPO_ROOT/build/transpiled-blog-ruby"
         DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
         ;;
     spinel)
-        # Spinel uses the Makefile target `spinel-transpile`, which
-        # mirrors ruby-transpile but additionally vendors the Tep
-        # transport (sphttp.c → .o + @TEP_SPHTTP_O@ substitution in
-        # net.rb). The AOT-compiled binary reads BLOG_DB and serves
-        # over Tep::Server on $PORT; same DB layout as the ruby target.
+        # Spinel uses `bin/rh transpile spinel`, which mirrors the
+        # ruby path but additionally vendors the Tep transport
+        # (sphttp.c → .o + @TEP_SPHTTP_O@ substitution in net.rb).
+        # The AOT-compiled binary reads BLOG_DB and serves over
+        # Tep::Server on $PORT; same DB layout as the ruby target.
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog-spinel"
         DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
         ;;
@@ -262,8 +262,8 @@ trap cleanup EXIT INT TERM
 # -------- 1. fixture --------
 
 if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
-    step "regenerating fixtures/real-blog (make real-blog)"
-    (cd "$REPO_ROOT" && make real-blog >/dev/null)
+    step "regenerating fixtures/real-blog (bin/rh fixture)"
+    (cd "$REPO_ROOT" && bin/rh fixture >/dev/null)
 fi
 ok "fixture ready ($FIXTURE)"
 
@@ -281,18 +281,18 @@ if (( SKIP_EMIT == 0 )); then
     step "regenerating target ($TARGET) → $BUILD_DIR"
     case "$TARGET" in
         ruby)
-            # Ruby uses the workspace Makefile's ruby-transpile rule
-            # (cargo build-site + scaffold overlay + DB seed), which is
-            # the same path the demo uses. Force a fresh stamp so changes
-            # to runtime/spinel/ pick up.
-            (cd "$REPO_ROOT" && rm -rf "$BUILD_DIR" && make ruby-transpile >/dev/null)
+            # Ruby uses `bin/rh transpile ruby` (roundhouse compiler +
+            # scaffold overlay + DB seed), which is the same path the
+            # demo uses. `transpile` always rebuilds from scratch — no
+            # stamp tracking needed.
+            (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null)
             ;;
         spinel)
-            # Spinel mirrors the ruby path but uses the spinel-transpile
-            # Makefile target, which additionally vendors Tep transport
+            # Spinel mirrors the ruby path but uses `bin/rh transpile
+            # spinel`, which additionally vendors Tep transport
             # (precompiles sphttp.o + sed-substitutes @TEP_SPHTTP_O@ in
             # net.rb so the FFI cflags resolve at AOT-compile time).
-            (cd "$REPO_ROOT" && rm -rf "$BUILD_DIR" && make spinel-transpile >/dev/null)
+            (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null)
             ;;
         *)
             (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)

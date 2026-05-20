@@ -22,9 +22,16 @@ SITE_BASE = 'https://rubys.github.io/roundhouse'
 def main(argv)
   cmd = argv.shift
   case cmd
-  when 'doctor'  then cmd_doctor(argv)
-  when 'fetch'   then cmd_fetch(argv)
-  when 'fixture' then cmd_fixture(argv)
+  when 'doctor'    then cmd_doctor(argv)
+  when 'fetch'     then cmd_fetch(argv)
+  when 'fixture'   then cmd_fixture(argv)
+  when 'transpile' then cmd_transpile(argv)
+  when 'dev'       then cmd_dev_test_run(argv, 'dev')
+  when 'test'      then cmd_dev_test_run(argv, 'test')
+  when 'run'       then cmd_dev_test_run(argv, 'run')
+  when 'clean'     then cmd_clean(argv)
+  when 'compare'   then cmd_compare(argv)
+  when 'site'      then cmd_site(argv)
   when '-h', '--help', nil
     print_usage
     0
@@ -45,15 +52,58 @@ def print_usage
 
     Roundhouse workflow runner.
 
-    Commands:
+    Onboarding (no Rust required):
       doctor              Check installed prerequisites; show which subcommands work today.
-      fetch <target>      Download a pre-transpiled archive (no Rust required).
+      fetch <target>      Download a pre-transpiled archive.
       fixture [path]      Generate a Rails source fixture via `rails new`.
+
+    Build (requires Rust):
+      transpile <target>  Build the source fixture into build/transpiled-blog-<target>/.
+      dev <target>        Transpile, then start dev server (ruby only for now).
+      test <target>       Transpile, then run target's native tests (ruby only for now).
+      run <target>        Transpile, then run main (ruby only for now).
+      compare [<target>]  End-to-end Rails-vs-target HTTP compare (wraps scripts/compare).
+      site                Build the full GitHub Pages site (all targets).
+
+    Cleanup:
+      clean <target>      rm -rf build/transpiled-blog-<target>/
+      clean fixture       rm -rf fixtures/real-blog/
 
     Pass `--help` to any subcommand for its options.
 
     Targets: #{TARGETS.join(', ')}
   USAGE
+end
+
+def build_dir(target)
+  File.join(ROUNDHOUSE_ROOT, 'build', "transpiled-blog-#{target}")
+end
+
+def fixture_path
+  File.join(ROUNDHOUSE_ROOT, 'fixtures', 'real-blog')
+end
+
+def need_cargo!
+  return if version_of(probe('cargo', '--version'))
+  warn 'rh: cargo not installed (required for transpile/site).'
+  warn '  Install: https://rustup.rs'
+  warn '  (or run `bin/rh doctor` to see all prerequisites)'
+  exit 1
+end
+
+def need_fixture!
+  return if File.directory?(fixture_path)
+  warn "rh: fixture not found at #{fixture_path}"
+  warn '  Generate: bin/rh fixture'
+  exit 1
+end
+
+def validate_target!(target, allow_blog: false)
+  valid = allow_blog ? TARGETS + ['blog'] : TARGETS
+  return if valid.include?(target)
+  warn "rh: unknown target '#{target.inspect}'"
+  warn "  valid: #{valid.join(', ')}"
+  exit 1
 end
 
 def rh_version
@@ -118,8 +168,16 @@ def cmd_doctor(argv)
   end
 
   puts ''
-  available = ['doctor', 'fetch <target>']
+  available = ['doctor', 'fetch <target>', 'clean <target | fixture>']
   available << 'fixture' if versions[:rails]
+  if versions[:rust]
+    available << 'transpile <target>'
+    available << 'site'
+  end
+  available << 'compare [<target>]' if versions[:rust] && versions[:rails]
+  if versions[:rust] && versions[:rails]
+    available << 'dev | test | run ruby'
+  end
   puts 'Available now:'
   available.each { |s| puts "  bin/rh #{s}" }
 
@@ -271,7 +329,213 @@ def cmd_fixture(argv)
   # `rails new <path>` creates parent dirs as needed, and create-blog
   # does `cd "$APP_NAME"` so subsequent rails-generate steps run in
   # the new app dir. Pass `path` straight through.
-  system(script, path) ? 0 : 1
+  ok = system(script, path)
+  return 1 unless ok
+
+  # Match the legacy `make real-blog` post-create steps: ensure gems
+  # are present, then migrate + seed the development DB so the
+  # transpiled-blog seed copy carries real content.
+  Dir.chdir(path) do
+    return 1 unless system('bundle', 'install', '--quiet')
+    return 1 unless system('bin/rails', 'db:prepare')
+  end
+  0
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: transpile
+#
+# `cargo run --release --bin roundhouse -- --target <t> -o <out>
+# <fixture>` produces a runnable tree for <t>. Two targets need a
+# post-build step:
+#   - ruby:    seed the demo SQLite DB from real-blog's Rails-populated
+#              storage/development.sqlite3 (binary; can't ride along
+#              with the text-only emit).
+#   - spinel:  compile sphttp.o (the FFI HTTP server's C extension)
+#              and substitute its path into runtime/tep/net.rb.
+
+def cmd_transpile(argv)
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh transpile <target>'
+    o.separator ''
+    o.separator "Transpile fixtures/real-blog → build/transpiled-blog-<target>/."
+    o.separator ''
+    o.separator "Targets: #{TARGETS.join(', ')}"
+  end.parse!(argv)
+
+  target = argv.shift
+  unless target
+    warn 'rh transpile: missing <target>'
+    return 1
+  end
+  validate_target!(target)
+  need_fixture!
+  need_cargo!
+
+  out = build_dir(target)
+  FileUtils.rm_rf(out)
+  FileUtils.mkdir_p(File.dirname(out))
+
+  ok = system(
+    'cargo', 'run', '--release', '--quiet', '--bin', 'roundhouse', '--',
+    '--target', target, '-o', out, fixture_path
+  )
+  return 1 unless ok
+
+  case target
+  when 'ruby'   then post_transpile_ruby(out)
+  when 'spinel' then post_transpile_spinel(out)
+  end
+  0
+end
+
+# Ruby target's post-build: seed the demo DB. main.rb's Schema.load!
+# is idempotent (CREATE TABLE IF NOT EXISTS), so the seed just gives
+# the app three articles + comments out of the box. `bin/rh clean
+# ruby` resets to seeded state.
+def post_transpile_ruby(out)
+  seed = File.join(fixture_path, 'storage', 'development.sqlite3')
+  return unless File.exist?(seed)
+  tmp = File.join(out, 'tmp')
+  FileUtils.mkdir_p(tmp)
+  FileUtils.cp(seed, File.join(tmp, 'blog.sqlite3'))
+end
+
+# Spinel target's post-build: compile the Tep FFI HTTP server's C
+# extension, then sed-substitute the resulting path into net.rb (which
+# ships with an @TEP_SPHTTP_O@ placeholder).
+def post_transpile_spinel(out)
+  tep_dir = File.join(out, 'runtime', 'tep')
+  c_src = File.join(tep_dir, 'sphttp.c')
+  o_out = File.join(tep_dir, 'sphttp.o')
+  net_rb = File.join(tep_dir, 'net.rb')
+  unless File.exist?(c_src)
+    warn "rh transpile spinel: #{c_src} missing — extend spinel_files in src/project.rs"
+    return
+  end
+  unless system('cc', '-O2', '-c', c_src, '-o', o_out)
+    warn 'rh transpile spinel: cc failed'
+    exit 1
+  end
+  if File.exist?(net_rb)
+    content = File.read(net_rb)
+    content.gsub!('@TEP_SPHTTP_O@', 'runtime/tep/sphttp.o')
+    File.write(net_rb, content)
+  end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: dev / test / run
+#
+# Transpile-and-act. The emitted tree's inner Makefile / Rakefile owns
+# the action — bin/rh just cds in. Currently wired for the ruby target
+# (rake-driven); other targets either don't have a dev/test action yet
+# (spinel-AOT is build, not dev) or use their native runner directly
+# (cd build/transpiled-blog-rust && cargo run).
+
+def cmd_dev_test_run(argv, action)
+  OptionParser.new do |o|
+    o.banner = "Usage: bin/rh #{action} <target>"
+    o.separator ''
+    o.separator "Transpile <target>, then run `#{action}` in the emitted tree."
+    o.separator 'Currently wired for ruby; other targets use their native runner.'
+  end.parse!(argv)
+
+  target = argv.shift
+  unless target
+    warn "rh #{action}: missing <target>"
+    return 1
+  end
+  validate_target!(target)
+
+  rc = cmd_transpile([target])
+  return rc if rc != 0
+
+  out = build_dir(target)
+  case target
+  when 'ruby'
+    Dir.chdir(out) { system('rake', action) ? 0 : 1 }
+  else
+    warn "rh #{action}: target '#{target}' has no #{action} action yet."
+    warn "  emitted dir: #{out}"
+    warn "  see #{out}/README.md for the native command"
+    1
+  end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: clean
+
+def cmd_clean(argv)
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh clean <target | fixture>'
+    o.separator ''
+    o.separator "Remove build/transpiled-blog-<target>/, or fixtures/real-blog/ for `fixture`."
+    o.separator ''
+    o.separator "Targets: #{TARGETS.join(', ')}, fixture"
+  end.parse!(argv)
+
+  what = argv.shift
+  unless what
+    warn 'rh clean: missing <target | fixture>'
+    return 1
+  end
+
+  case what
+  when 'fixture'
+    if File.exist?(fixture_path)
+      FileUtils.rm_rf(fixture_path)
+      puts "rh clean: removed #{fixture_path}"
+    else
+      puts 'rh clean: fixture already absent'
+    end
+    0
+  else
+    validate_target!(what)
+    dir = build_dir(what)
+    if File.exist?(dir)
+      FileUtils.rm_rf(dir)
+      puts "rh clean: removed #{dir}"
+    else
+      puts "rh clean: #{dir} already absent"
+    end
+    0
+  end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: compare — delegate to scripts/compare with passthrough.
+
+def cmd_compare(argv)
+  script = File.join(ROUNDHOUSE_ROOT, 'scripts', 'compare')
+  unless File.executable?(script)
+    warn "rh compare: #{script} missing or not executable"
+    return 1
+  end
+  # Default target is typescript (matching the legacy `make compare`
+  # rule). With any args (including `--help`), pass through verbatim
+  # — scripts/compare has its own argument parser.
+  args = argv.empty? ? ['typescript'] : argv
+  exec(script, *args)
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: site — build the multi-target Pages site.
+
+def cmd_site(argv)
+  out = File.join(ROUNDHOUSE_ROOT, '_site')
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh site [--out DIR]'
+    o.separator ''
+    o.separator 'Build the multi-target archive site (all targets + landing-page assets).'
+    o.on('--out DIR', 'Output directory (default: _site)') { |v| out = v }
+  end.parse!(argv)
+  need_fixture!
+  need_cargo!
+  system(
+    'cargo', 'run', '--release', '--quiet', '--bin', 'roundhouse', '--',
+    '--site', '-o', out, fixture_path
+  ) ? 0 : 1
 end
 
 exit main(ARGV) if $PROGRAM_NAME == __FILE__
