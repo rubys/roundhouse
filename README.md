@@ -85,14 +85,18 @@ output that runs as the demo below).
 
 **Run the demo.** A working transpiled blog — articles, comments,
 real-time Turbo Stream broadcasts over WebSocket, SQLite persistence,
-Tailwind styling, create + destroy flows — in two `make` commands:
+Tailwind styling, create + destroy flows — in two `bin/rh` commands:
 
 ```sh
 git clone https://github.com/rubys/roundhouse
 cd roundhouse
-make real-blog            # generate the Rails fixture (~60s)
-make ruby-dev             # transpile + assets + serve on :3000 (~3-5min cold)
+bin/rh fixture            # generate the Rails fixture (~60s)
+bin/rh dev ruby           # transpile + assets + serve on :3000 (~3-5min cold)
 ```
+
+Run `bin/rh doctor` first to see which prerequisites are installed and
+which subcommands are available without a Rust toolchain (`bin/rh
+fetch <target>` downloads pre-transpiled archives).
 
 Prerequisites and the architecture of what gets generated:
 [`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
@@ -119,7 +123,7 @@ cargo test --test real_blog             # the Phase-1 forcing functions
 cargo test --test rust_toolchain -- --ignored   # Rust end-to-end boot
 ```
 
-The `real-blog` fixture is generated on demand — `make real-blog` runs
+The `real-blog` fixture is generated on demand — `bin/rh fixture` runs
 `scripts/create-blog` and materializes it under `fixtures/real-blog/`.
 CI regenerates the fixture once per run and shares it across the unit
 job and each per-target toolchain job.

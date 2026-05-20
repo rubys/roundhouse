@@ -185,7 +185,7 @@ outputs.
 `.github/workflows/ci.yml` is structured around the same four
 layers:
 
-1. **`generate-fixture`** — runs `make real-blog` once and packs the
+1. **`generate-fixture`** — runs `bin/rh fixture` once and packs the
    result as an artifact.
 2. **`unit`** — downloads the artifact and runs `cargo test
    --all-targets` (round-trip identity + analyzer + ingest + emit

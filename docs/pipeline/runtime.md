@@ -113,7 +113,8 @@ is ingested with its RBS sidecar (`src/runtime_src.rs`), lowered, and
 emitted into the generated project as `src/active_record_base.ts`
 (etc.) by the same code path that compiles user controllers and
 models. There is no separate `bin/build-runtime` binary; emission
-runs inline as part of `cargo run --bin build-site`.
+runs inline as part of `cargo run --bin roundhouse -- --target <t>`
+(or `--site` for the full archive matrix).
 
 ## Why hand-write the primitives?
 

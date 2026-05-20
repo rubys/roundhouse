@@ -267,10 +267,10 @@ all four methods return `String`.
 - Use `fixtures/real-blog/`'s existing three Jbuilder templates
   (already render `index.json` and `show.json` against the articles
   controller — no new fixture dir needed).
-- Drive a roundhouse build through `make ruby-transpile`; verify
+- Drive a roundhouse build through `bin/rh transpile ruby`; verify
   byte output of `index.json` and `show.json` against a Rails
   reference rendering of the same data (Rails dev server one-shot).
-- Same for `make spinel-transpile` — AOT compile, run, snapshot.
+- Same for `bin/rh transpile spinel` — AOT compile, run, snapshot.
 - Add a `compare-json` mode to `tools/compare/` if not already
   present (the existing `compare` walks `_path` request URLs; the
   `.json` requests should drop in alongside).
@@ -423,7 +423,7 @@ JSON rendering primitives work; otherwise debugging is two-axis.
    the direct precedent the new lowerer mirrors.
 5. Survey `~/git/ruby-bench/benchmarks/railsbench/app/views/posts/*.jbuilder`
    (3 files, ~5 LOC total — the must-cover fixture set).
-6. Run `make ruby-transpile` + `make ruby-test` to confirm baseline
+6. Run `bin/rh transpile ruby` + `bin/rh test ruby` to confirm baseline
    green before starting. The compare-ruby CI gate is the post-phase
    checkpoint each verification phase aims for.
 7. Phase 0 starts with the fixture audit; Phase 1 is the smallest

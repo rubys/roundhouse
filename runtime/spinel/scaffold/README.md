@@ -59,7 +59,7 @@ managers:
 
 The end-to-end demo path additionally needs:
 
-- **Rails gem** — `gem install rails`. Used by `make real-blog` to
+- **Rails gem** — `gem install rails`. Used by `bin/rh fixture` to
   generate the Rails fixture via `rails new`.
 - **Rust + cargo** — install via [rustup](https://rustup.rs). Used
   to build the Roundhouse transpiler.
@@ -75,13 +75,13 @@ and serves the running app on `:3000`:
 rm -rf roundhouse
 git clone https://github.com/rubys/roundhouse
 cd roundhouse
-make real-blog                    # generate the Rails fixture (~60s)
-make ruby-dev                     # transpile + assets + Puma on :3000 (~3-5min cold; ~5s warm)
+bin/rh fixture                    # generate the Rails fixture (~60s)
+bin/rh dev ruby                   # transpile + assets + Puma on :3000 (~3-5min cold; ~5s warm)
 ```
 
-`make ruby-dev` runs `ruby-transpile` (Roundhouse emits the lowered
-Ruby app under `build/transpiled-blog/`) then delegates to the inner
-`make dev` → `bundle exec rake dev`. The first transpile compiles the
+`bin/rh dev ruby` runs `bin/rh transpile ruby` (Roundhouse emits the
+lowered Ruby app under `build/transpiled-blog-ruby/`) then delegates
+to the emitted tree's `rake dev`. The first transpile compiles the
 Roundhouse Rust crate (release mode) and fetches npm packages for
 Tailwind. Subsequent runs are seconds.
 
@@ -279,11 +279,11 @@ from this fixture:
   discarded between sessions. There's no backup, no migration system,
   no schema versioning.
 - **End-to-end demo seeds from `fixtures/real-blog`'s
-  Rails-populated SQLite.** `make ruby-transpile` copies real-blog's
+  Rails-populated SQLite.** `bin/rh transpile ruby` copies real-blog's
   `storage/development.sqlite3` (populated by `bin/rails db:prepare` →
   `db/seeds.rb`) into the demo's `tmp/blog.sqlite3`. Rails-generated
   schema (varchar/text/datetime affinities) reads + writes through
-  `SqliteAdapter` transparently. `make clean-ruby` resets the demo
+  `SqliteAdapter` transparently. `bin/rh clean ruby` resets the demo
   to its seeded state.
 - **`:memory:` SQLite loses everything on process exit.** Used by
   `make run` (single-shot CGI), tests, and the spinel-compiled binary
@@ -368,7 +368,7 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   every view file's structural fragments, full request-dispatch
   cycle through the CGI entry, cookie round-trips, broadcast log
   contents.
-- **End-to-end demo (`make ruby-dev` from the Roundhouse repo root)
+- **End-to-end demo (`bin/rh dev ruby` from the Roundhouse repo root)
   verified in a browser.** Tailwind classes render. Turbo Stream
   broadcasts mutate the DOM in real time (creating an article in one
   tab prepends it to another tab's index without a page refresh).
@@ -443,8 +443,8 @@ This fixture is a *contract*, not a deliverable. Progression:
    by hand. The forcing function is `tests/ruby_toolchain.rs` —
    overlays the emitted output on this fixture's runtime + tests,
    asserts they pass.
-4. **(Done)** End-to-end demo: `make ruby-dev` from the repo
-   root transpiles real-blog into `build/transpiled-blog/`,
+4. **(Done)** End-to-end demo: `bin/rh dev ruby` from the repo
+   root transpiles real-blog into `build/transpiled-blog-ruby/`,
    builds assets, and starts Puma on :3000. Verified in a
    browser.
 5. **(In progress)** Spinel ingests the emitted Ruby and

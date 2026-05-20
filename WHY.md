@@ -158,7 +158,7 @@ matures. A DOM-diff harness compares every emitted runtime against
 the original Rails app on every commit, so a template that renders
 differently in any target is a bug.
 
-The Ruby emitter drives a working demo today. `make ruby-dev` from
+The Ruby emitter drives a working demo today. `bin/rh dev ruby` from
 the repo root transpiles the Phase-1 Rails 8 MVC fixture, builds
 Tailwind + Turbo assets, and starts a dev server on `:3000`. The
 transpiled output runs end to end in a browser — create + destroy

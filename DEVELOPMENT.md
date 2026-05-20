@@ -47,8 +47,8 @@ blog. It is **not checked in**; it's derived on demand from
 generator, reproducible without an external git checkout).
 
 ```bash
-make real-blog          # regenerate into fixtures/real-blog/
-make clean-real-blog    # remove it
+bin/rh fixture          # regenerate into fixtures/real-blog/
+bin/rh clean fixture    # remove it
 ```
 
 CI regenerates the fixture once per run in the `generate-fixture` job

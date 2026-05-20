@@ -244,15 +244,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile>;
 ```
 
 Each `src/emit/<target>.rs` exposes `emit(app)` returning a flat list.
-Callers (`bin/roundhouse`, `bin/build-site`, the toolchain tests)
-write each `EmittedFile` to disk.
+Callers (`bin/roundhouse` — both `--target LANG` and `--site` modes —
+plus the toolchain tests) write each `EmittedFile` to disk.
 
 ## Public surface re-exported from `src/emit/<target>.rs`
 
 | Symbol | Role |
 |--------|------|
 | `emit(&App) -> Vec<EmittedFile>` | Main entry — full project emission |
-| `emit_method(&MethodDef) -> String` | Standalone typed-method renderer (used by `bin/build-site` and runtime extraction) |
+| `emit_method(&MethodDef) -> String` | Standalone typed-method renderer (used by `bin/roundhouse` and runtime extraction) |
 | `emit_library_class(&LibraryClass) -> Result<String>` | Class-shape renderer; public for tests + cross-target tooling |
 | `emit_library_function(&LibraryFunction) -> Result<String>` | Function-shape renderer; same role |
 | `<target>_ty(&Ty) -> String` | Type renderer — public for tests + cross-target tooling |
