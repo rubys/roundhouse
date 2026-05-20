@@ -41,6 +41,45 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
     } else {
         None
     };
+
+    // Heterogeneous primitive-value detection. When entries mix a
+    // string-typed value (Ty::Str / Sym) with a non-string primitive
+    // (Ty::Int / Bool / Float), `HashMap::from([(k, v), ...])` infers
+    // V from the first entry's type and rejects later entries — even
+    // when callers will wrap the result in `.into_iter().map(...)
+    // .collect()` to coerce K/V at the boundary, the inner array
+    // literal must already type-unify. Render values as
+    // `serde_json::Value::from(v)` and keys as `(k).to_string()` so
+    // V uniforms to `Value` at the literal level and the produced
+    // map is `HashMap<String, Value>` — the AR shape that
+    // `Model::new(attrs)` / `Model::create(attrs)` callees expect.
+    // Gated on all-string-typed keys (the typical Ruby hash literal
+    // shape) so non-string-key maps aren't accidentally coerced.
+    // Tail-position lit (return_hash_kv set) keeps its own coerce path.
+    let any_str_value = entries
+        .iter()
+        .any(|(_, v)| matches!(v.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)));
+    let any_nonstr_primitive = entries.iter().any(|(_, v)| {
+        matches!(
+            v.ty.as_ref(),
+            Some(crate::ty::Ty::Int | crate::ty::Ty::Bool | crate::ty::Ty::Float)
+        )
+    });
+    let all_str_keys = entries
+        .iter()
+        .all(|(k, _)| matches!(k.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)));
+    let is_heterogeneous = any_str_value && any_nonstr_primitive && all_str_keys;
+    if is_heterogeneous && return_hash_kv.is_none() {
+        let pairs: Vec<String> = entries
+            .iter()
+            .map(|(k, v)| {
+                let k_s = emit_expr(k);
+                let v_s = emit_expr(v);
+                format!("(({k_s}).to_string(), serde_json::Value::from({v_s}))")
+            })
+            .collect();
+        return format!("std::collections::HashMap::from([{}])", pairs.join(", "));
+    }
     let pairs: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
