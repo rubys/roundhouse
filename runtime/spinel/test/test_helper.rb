@@ -345,14 +345,7 @@ module RequestDispatch
   # rather than nested counts. Tighten if a fixture exposes a false
   # positive.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
-    # Explicit `is_a?(String)` narrow on body so spinel can unbox it
-    # to `const char *` at use sites — `@__response.body` returns
-    # `String` per RBS, but spinel types `iv_body` on ActionResponse as
-    # `sp_RbVal` (RBS attr_reader return type doesn't propagate to the
-    # underlying ivar slot type). The divergent `raise` keeps the
-    # narrow valid through the rest of the method body.
     body = @__response.body
-    raise "assert_select: expected String body, got #{body.inspect}" unless body.is_a?(String)
     if content_or_opts.is_a?(Hash)
       opts = content_or_opts
       content = nil
