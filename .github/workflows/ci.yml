@@ -356,20 +356,8 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      # Temporarily skipped pending the test-emit rewrite. The current
-      # path relies on spinel inferring Minitest::Test's reopened
-      # methods, where assertion calls emit as 0 (Minitest::Assertions
-      # absent under spinel) and the rest of the harness depends on
-      # whatever shape matz's analyzer currently infers for fixture
-      # rows / hash params. Recent matz changes (e.g. hash-param body-
-      # usage moved post-fixpoint) shift inference under us. The
-      # planned fix is to emit fully-resolved spinel-subset Ruby:
-      # lowerer rewrites `assert_equal a, b` → inline `raise unless a
-      # == b`, drops `require "minitest/autorun"`, and emits an
-      # explicit per-test run loop. Once that lands, this gate no
-      # longer depends on Minitest::Test machinery and can re-enable.
       - name: cargo test --test spinel_toolchain -- --ignored
-        run: echo "skipped pending assertion-emit rewrite (see workflow comment)"
+        run: cargo test --test spinel_toolchain -- --ignored --nocapture
 
   toolchain-python:
     needs: generate-fixture
