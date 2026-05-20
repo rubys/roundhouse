@@ -23,6 +23,8 @@ pub mod ingest;
 pub mod lower;
 pub mod naming;
 pub mod profile;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod project;
 pub mod query;
 pub mod rbs;
 pub mod runtime_loader;
