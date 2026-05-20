@@ -10,7 +10,7 @@ mod assign;
 mod control;
 mod literal;
 mod send;
-mod util;
+pub(crate) mod util;
 use assign::emit_assign;
 use control::{emit_bool_op, emit_case, emit_if, emit_return, emit_seq, emit_while};
 use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_string_interp};
@@ -136,6 +136,23 @@ thread_local! {
         std::collections::HashMap<
             String,
             std::collections::HashMap<String, Vec<crate::ty::Param>>,
+        >,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Parallel to `GLOBAL_CLASS_METHODS`: per-position pre-rendered
+    /// kwarg defaults. When a Const-recv call leaves a kwarg unsupplied,
+    /// the dispatch consults this BEFORE falling back to
+    /// `synth_default_for_ty` (which only knows the param's Ty and
+    /// emits `""` for any Str param — losing source-level non-empty
+    /// defaults like `omission: "..."`). Stored as `Option<String>`
+    /// per position: `Some(rendered)` for literals
+    /// (`render_param_default_literal`-supported shapes), `None` for
+    /// positional non-default params and complex defaults the dispatch
+    /// can't render statically.
+    static GLOBAL_CLASS_METHOD_DEFAULTS: std::cell::RefCell<
+        std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Vec<Option<String>>>,
         >,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
@@ -699,15 +716,41 @@ pub(crate) fn with_global_class_methods<F, R>(
         String,
         std::collections::HashMap<String, Vec<crate::ty::Param>>,
     >,
+    defaults: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<Option<String>>>,
+    >,
     f: F,
 ) -> R
 where
     F: FnOnce() -> R,
 {
     let prev = GLOBAL_CLASS_METHODS.with(|c| c.replace(map));
+    let prev_defaults = GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| c.replace(defaults));
     let r = f();
     GLOBAL_CLASS_METHODS.with(|c| *c.borrow_mut() = prev);
+    GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| *c.borrow_mut() = prev_defaults);
     r
+}
+
+/// Per-position kwarg-default lookup for a Const-recv callee. Returns
+/// the pre-rendered Rust literal for the param at `idx` when the
+/// source-level default was a shape `render_param_default_literal`
+/// recognized at collection time. None means either no default
+/// existed, the index is out of range, or the registry doesn't have
+/// this (class, method).
+pub(super) fn global_class_method_param_default(
+    class: &str,
+    method: &str,
+    idx: usize,
+) -> Option<String> {
+    GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| {
+        c.borrow()
+            .get(class)
+            .and_then(|methods| methods.get(method))
+            .and_then(|defaults| defaults.get(idx).cloned())
+            .flatten()
+    })
 }
 
 /// Cross-class lookup: `(ClassName, method) → Vec<Ty>` for a callee

@@ -75,6 +75,45 @@ pub(crate) fn value_narrowing_coercion(narrowed: &crate::ty::Ty) -> Option<&'sta
 /// position. Mirrors the Ruby default-arg semantics for the
 /// shapes the lowerer-synthesized constructors use (`attrs = {}`
 /// → `HashMap::new()`).
+/// Render a `dialect::Param.default` Expr as a Rust literal string,
+/// when the default is shaped simply enough to round-trip. Handles
+/// Ruby's common kwarg-default shapes (`length: 30`,
+/// `omission: "..."`, `confirm: true`, …). Returns `None` for
+/// non-literal defaults (function calls, conditional exprs); those
+/// callers fall back to `synth_default_for_ty`, which only knows the
+/// param's Ty and loses the source-level value.
+///
+/// Closes the gap the `synth_default_for_ty` comment calls out
+/// ("Ruby kwargs with non-empty source defaults lose that value at
+/// synth time"). The wedge-2c.6 forcing function is
+/// `truncate(body, length: 100)` — when only `length` is supplied
+/// and `omission` falls back to default, the rendered call needs
+/// `"..."` not `""`.
+pub(crate) fn render_param_default_literal(expr: &crate::expr::Expr) -> Option<String> {
+    use crate::expr::{ExprNode, Literal};
+    match &*expr.node {
+        ExprNode::Lit { value } => match value {
+            Literal::Nil => Some("None".to_string()),
+            Literal::Bool { value } => Some(value.to_string()),
+            Literal::Int { value } => Some(format!("{value}_i64")),
+            Literal::Float { value } => {
+                let s = value.to_string();
+                Some(if s.contains('.') { s } else { format!("{s}.0") })
+            }
+            Literal::Str { value } => Some(format!("{value:?}")),
+            Literal::Sym { value } => Some(format!("{:?}", value.as_str())),
+            _ => None,
+        },
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            Some("std::collections::HashMap::new()".to_string())
+        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            Some("vec![]".to_string())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
     use crate::ty::Ty;
     match ty {

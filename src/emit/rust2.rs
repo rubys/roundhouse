@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 
-mod expr;
+pub(crate) mod expr;
 pub(crate) mod library;
 mod method;
 mod shared;
@@ -528,7 +528,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec::new()
     };
 
-    let global_methods = collect_global_class_methods(
+    let (global_methods, global_method_defaults) = collect_global_class_methods(
         &model_lcs,
         route_helpers_lc.as_ref(),
         importmap_lc.as_ref(),
@@ -541,7 +541,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // any one of them is empty for the current fixture.
     let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);
 
-    crate::emit::rust2::expr::with_global_class_methods(global_methods, || {
+    crate::emit::rust2::expr::with_global_class_methods(global_methods, global_method_defaults, || {
     if !model_lcs.is_empty() {
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
@@ -1692,6 +1692,15 @@ fn emit_controllers_mod_rs(entries: &[(String, String)]) -> EmittedFile {
 /// from `MethodDef.signature` when present; methods without a typed
 /// signature get an empty Tys vec and the Const-recv arity-pad path
 /// no-ops (same behavior as no entry).
+type GlobalMethodsMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<String, Vec<crate::ty::Param>>,
+>;
+type GlobalDefaultsMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<String, Vec<Option<String>>>,
+>;
+
 fn collect_global_class_methods(
     model_lcs: &[crate::dialect::LibraryClass],
     route_helpers_lc: Option<&crate::dialect::LibraryClass>,
@@ -1700,18 +1709,20 @@ fn collect_global_class_methods(
     controller_lcs: &[crate::dialect::LibraryClass],
     fixture_lcs: &[crate::dialect::LibraryClass],
     runtime_lcs: &[crate::dialect::LibraryClass],
-) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Param>>> {
+) -> (GlobalMethodsMap, GlobalDefaultsMap) {
     use crate::dialect::LibraryClass;
     use crate::ident::Symbol;
     use crate::ty::{Param, ParamKind, Ty};
 
     fn collect_one(
         lc: &LibraryClass,
-        out: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<Param>>>,
+        out: &mut GlobalMethodsMap,
+        out_defaults: &mut GlobalDefaultsMap,
     ) {
         let raw = lc.name.0.as_str();
         let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
-        let entry = out.entry(class_name).or_default();
+        let entry = out.entry(class_name.clone()).or_default();
+        let defaults_entry = out_defaults.entry(class_name).or_default();
         // Collect ALL methods (Class + Instance), since constructor
         // candidates (`initialize`) live in instance methods but are
         // reached at call sites as `Article::new(...)`. The instance
@@ -1736,6 +1747,22 @@ fn collect_global_class_methods(
                     })
                     .collect(),
             };
+            // Defaults — pre-rendered Rust literal per position, in
+            // the same order as `m.params` (dialect side). Builds in
+            // parallel with the `params: Vec<ty::Param>` above so the
+            // Const-recv dispatch can consult by index. Skips Block /
+            // KeywordRest positions to stay aligned with the filter
+            // applied to the signature Fn::params above (1:1 by
+            // position).
+            let defaults: Vec<Option<String>> = m
+                .params
+                .iter()
+                .map(|p| {
+                    p.default
+                        .as_ref()
+                        .and_then(crate::emit::rust2::expr::util::render_param_default_literal)
+                })
+                .collect();
             // Alias `initialize` → `new` so `Article::new(args)`
             // dispatches against the constructor's param list (Ruby
             // syntactic difference; Rust always names the constructor
@@ -1743,32 +1770,32 @@ fn collect_global_class_methods(
             // _param_tys` (library.rs) used for self-class lookups.
             if m.name.as_str() == "initialize" {
                 entry.insert("new".to_string(), params.clone());
+                defaults_entry.insert("new".to_string(), defaults.clone());
             }
             entry.insert(m.name.as_str().to_string(), params);
+            defaults_entry.insert(m.name.as_str().to_string(), defaults);
         }
     }
 
-    let mut out: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, Vec<Param>>,
-    > = std::collections::HashMap::new();
+    let mut out: GlobalMethodsMap = std::collections::HashMap::new();
+    let mut out_defaults: GlobalDefaultsMap = std::collections::HashMap::new();
     for lc in model_lcs {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     if let Some(lc) = route_helpers_lc {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     if let Some(lc) = importmap_lc {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     for lc in view_lcs {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     for lc in controller_lcs {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     for lc in fixture_lcs {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
     // Framework runtime LCs (ViewHelpers, JsonBuilder, Inflector,
     // Router, ActiveRecord::Base, ActionController::Base) — parsed
@@ -1780,9 +1807,9 @@ fn collect_global_class_methods(
     // arity-only `Untyped` fallback) and the coerce_arg_for_param_ty
     // families fire.
     for lc in runtime_lcs {
-        collect_one(lc, &mut out);
+        collect_one(lc, &mut out, &mut out_defaults);
     }
-    out
+    (out, out_defaults)
 }
 
 /// Build a synthetic `LibraryClass` from a flat list of

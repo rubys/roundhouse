@@ -236,16 +236,26 @@ pub(super) fn emit_send(
                 match (effective_args.get(i), param_tys.get(i)) {
                     // Caller-supplied arg: apply per-param coercion.
                     (Some(a), Some(pt)) => out.push(coerce_arg_for_param_ty(a, pt)),
-                    // Missing trailing arg: synthesize a default for
-                    // shapes that have one (Hash → HashMap::new(),
-                    // etc.). Ruby `def initialize(attrs = {})`
-                    // accepts zero-arg `Article.new`; Rust needs the
-                    // explicit default. Without this `Class::new()`
-                    // sites trip E0061.
-                    (None, Some(pt)) => match synth_default_for_ty(pt) {
-                        Some(d) => out.push(d),
-                        None => break,
-                    },
+                    // Missing trailing arg: prefer the source-level
+                    // default (e.g. Ruby `omission: "..."`) when the
+                    // collected registry has one for this position;
+                    // otherwise fall back to the Ty-only default
+                    // (Hash → `HashMap::new()`, Str → `""`, etc.).
+                    // The source-level path is what gets Rails'
+                    // `truncate(text, length: 100)` to render
+                    // `...`-suffixed output instead of mid-word
+                    // truncation.
+                    (None, Some(pt)) => {
+                        if let Some(d) =
+                            super::global_class_method_param_default(class, method, i)
+                        {
+                            out.push(d);
+                        } else if let Some(d) = synth_default_for_ty(pt) {
+                            out.push(d);
+                        } else {
+                            break;
+                        }
+                    }
                     _ => break,
                 }
             }
