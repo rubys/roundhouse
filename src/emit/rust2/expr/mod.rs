@@ -8,7 +8,7 @@ use crate::expr::{Expr, ExprNode, InterpPart, LValue};
 
 mod assign;
 mod control;
-mod literal;
+pub(crate) mod literal;
 mod send;
 pub(crate) mod util;
 use assign::emit_assign;

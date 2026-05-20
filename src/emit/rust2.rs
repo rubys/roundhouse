@@ -23,6 +23,7 @@ use super::EmittedFile;
 use crate::App;
 
 pub(crate) mod expr;
+mod spec;
 pub(crate) mod library;
 mod method;
 mod shared;
@@ -1085,7 +1086,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !controller_test_modules.is_empty() {
         let mut ctrl_entries: Vec<(String, String)> = Vec::new();
         for tm in &controller_test_modules {
-            let file = crate::emit::rust::spec::emit_rust_test_module(tm, app);
+            let file = spec::emit_rust_test_module(tm, app);
             let class_name = tm.name.0.as_str().to_string();
             let stem = file
                 .path
