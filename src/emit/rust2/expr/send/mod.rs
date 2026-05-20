@@ -25,7 +25,7 @@ use ops::{
 
 use super::util::{rewrite_method_name, synth_default_for_ty};
 use super::{
-    current_class_method_param_tys, emit_expr, in_class_method, is_static_method,
+    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, is_static_method,
 };
 
 pub(super) fn emit_send(
@@ -292,7 +292,7 @@ pub(super) fn emit_send(
     } else {
         args_s
     };
-    let recv_s = emit_expr(r);
+    let recv_s = emit_send_recv(r);
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const
     // (class/module reference). The `.` form binds to a value

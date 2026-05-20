@@ -151,6 +151,17 @@ thread_local! {
     static CLONE_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
+    /// True while emitting an expression that's the *immediate* recv
+    /// of a method-call Send. At a recv position Rust's auto-ref
+    /// (`(&v).method(...)` / `(&mut v).method(...)`) handles borrowing,
+    /// so the `CLONE_VARS` `.clone()` append is unnecessary AND breaks
+    /// `&mut self` setters — `instance.clone().set_id(1)` mutates a
+    /// discarded copy. Set by `with_send_recv_var` (only at Var-shaped
+    /// recvs, so it doesn't leak into sub-expressions) and cleared
+    /// after the Var arm consults it.
+    static SUPPRESS_VAR_CLONE: std::cell::RefCell<bool> =
+        std::cell::RefCell::new(false);
+
     /// Ivar name → declared field type for the struct currently being
     /// emitted. Set by `library.rs` around each `impl` block so
     /// `emit_assign` can coerce mismatched RHS types (the canonical
@@ -438,6 +449,25 @@ where
     CLONE_VARS.with(|c| *c.borrow_mut() = prev_clone);
     BACK_PROPAGATED_HASH_LOCALS.with(|c| *c.borrow_mut() = prev_back_prop);
     r
+}
+
+/// Emit a Send's *immediate* recv. When the recv is a Var (or a Send
+/// shape that resolves to a bare param read — Ruby implicit-self), set
+/// `SUPPRESS_VAR_CLONE` for the duration so the Var arm skips its
+/// multi-read `.clone()` append. Auto-ref handles `&self`/`&mut self`
+/// at recv positions; the explicit clone was breaking `&mut self`
+/// setters (fixture loader `instance.set_id(...)`). Falls through to
+/// plain `emit_expr` for non-Var recvs — Consts and sub-Sends manage
+/// their own recv emission.
+pub(super) fn emit_send_recv(r: &Expr) -> String {
+    let is_bare_var = matches!(&*r.node, ExprNode::Var { .. });
+    if !is_bare_var {
+        return emit_expr(r);
+    }
+    let prev = SUPPRESS_VAR_CLONE.with(|c| c.replace(true));
+    let s = emit_expr(r);
+    SUPPRESS_VAR_CLONE.with(|c| *c.borrow_mut() = prev);
+    s
 }
 
 fn collect_var_send_receivers(
@@ -882,7 +912,8 @@ fn emit_expr_inner(e: &Expr) -> String {
             // one, fine until a final-use analysis lands.
             let needs_clone = CLONE_VARS.with(|c| c.borrow().contains(n));
             let is_non_copy = e.ty.as_ref().map(|t| !is_copy_ty(t)).unwrap_or(false);
-            if needs_clone && is_non_copy {
+            let at_send_recv = SUPPRESS_VAR_CLONE.with(|c| *c.borrow());
+            if needs_clone && is_non_copy && !at_send_recv {
                 return format!("{n}.clone()");
             }
             n.to_string()

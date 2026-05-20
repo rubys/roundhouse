@@ -51,3 +51,35 @@ pub fn raise<T>(kind: FrameworkError, _payload: T) -> ! {
 pub fn name() -> &'static str {
     "Base"
 }
+
+// Thread-local validation-error buffer the AR shim's `save` path
+// reads through. Every emitted model's `validate` body pushes
+// user-visible messages here — rust2 emit rewrites the lowered
+// `self.errors() << msg` shape to `validation_errors_push(msg)` so
+// the messages survive the `errors() returns owned Vec<String>` shim
+// that would otherwise drop them. `save` clears the buffer before
+// running validate and reads `validation_errors_is_empty()` to
+// decide whether to persist.
+//
+// Per-thread keeps tests independent (cargo test runs tests on
+// separate threads); a global Mutex would cross-contaminate.
+thread_local! {
+    static VALIDATION_ERRORS: std::cell::RefCell<Vec<String>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+pub fn validation_errors_clear() {
+    VALIDATION_ERRORS.with(|c| c.borrow_mut().clear());
+}
+
+pub fn validation_errors_push(msg: String) {
+    VALIDATION_ERRORS.with(|c| c.borrow_mut().push(msg));
+}
+
+pub fn validation_errors_is_empty() -> bool {
+    VALIDATION_ERRORS.with(|c| c.borrow().is_empty())
+}
+
+pub fn validation_errors_snapshot() -> Vec<String> {
+    VALIDATION_ERRORS.with(|c| c.borrow().clone())
+}

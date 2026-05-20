@@ -505,23 +505,34 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: false,
             },
         );
-        // ID-shaped columns get `|| 0` defaults; spinel-blog's
-        // article.rb defaults `id` and comment.rb defaults
-        // `article_id` the same way. The "0 means unset" sentinel
-        // matches the FK-resolution conventions used by belongs_to.
-        let value = if is_id_column(&col.name) {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::BoolOp {
-                    op: crate::expr::BoolOpKind::Or,
-                    surface: crate::expr::BoolOpSurface::Symbol,
-                    left: lookup,
-                    right: lit_int(0),
-                },
-            )
-        } else {
-            lookup
-        };
+        // Every column gets a `|| <type-default>` fallback. Ruby's
+        // `Hash#[]` returns nil for missing keys, and `self.<col> =
+        // nil` is fine in dynamic-typed targets — but strict-typed
+        // targets (Rust) can't assign nil to a non-nullable column. By
+        // surfacing the default at the IR level, all targets see the
+        // same shape: `attrs[:col] || ""` for strings, `|| 0` for
+        // ints/refs, etc. Ruby semantics survive unchanged
+        // (`attrs[:col]` evaluates to the user-supplied value when
+        // present and to the default otherwise — equivalent to the
+        // pre-default lowering for present keys); strict targets get
+        // the literal they need. The original id-specific path
+        // (`|| 0` for id / `article_id`) was the precursor; this
+        // generalizes the pattern to the whole column list.
+        let col_ty = ty_of_column(&col.col_type);
+        let default = default_literal_for_ty(&col_ty);
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left: lookup,
+                right: default,
+            },
+        );
+        // is_id_column reference retained as a feature flag for
+        // future per-column override hooks; today every column flows
+        // through the same default-lookup shape.
+        let _ = is_id_column(&col.name);
 
         stmts.push(Expr::new(
             Span::synthetic(),
@@ -735,6 +746,53 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+    }
+}
+
+/// Synth a type-appropriate default literal — used by
+/// `synth_initialize` to back `attrs[:col] || <default>`. The result
+/// is the value the column ivar receives when the constructor is
+/// called without that key (Ruby `Article.new`, no args). Matches the
+/// Rails ApplicationRecord convention (empty string for Str-shaped
+/// columns including Time/DateTime stored as ISO strings, 0 for
+/// Int/Float, false for Bool); Union-typed columns fall back to the
+/// first variant's default.
+fn default_literal_for_ty(ty: &Ty) -> Expr {
+    use crate::expr::Literal;
+    match ty {
+        Ty::Str | Ty::Sym => lit_str(String::new()),
+        Ty::Int => lit_int(0),
+        Ty::Float => with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Float { value: 0.0 } },
+            ),
+            Ty::Float,
+        ),
+        Ty::Bool => with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Bool { value: false } },
+            ),
+            Ty::Bool,
+        ),
+        Ty::Hash { .. } => with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Hash { entries: Vec::new(), kwargs: false }),
+            ty.clone(),
+        ),
+        Ty::Array { .. } => with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array {
+                    elements: Vec::new(),
+                    style: crate::expr::ArrayStyle::default(),
+                },
+            ),
+            ty.clone(),
+        ),
+        // Union / other: fall back to nil; strict targets handle the
+        // residual but no current column type lands here.
+        _ => nil_lit(),
     }
 }
 

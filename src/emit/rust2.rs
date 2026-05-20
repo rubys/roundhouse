@@ -531,6 +531,27 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 .methods
                 .iter()
                 .any(|m| m.name.as_str() == "_adapter_insert");
+            // Per-model lifecycle hooks emitted by the lowerer:
+            // `before_destroy` exists when the model declares
+            // `has_many :x, dependent: :destroy` (Article in real-blog
+            // does this), where the lowerer expands the dependent
+            // policy into a `before_destroy` body that iterates the
+            // association and destroys each row. The shim's `destroy`
+            // needs to fire the hook before `_adapter_delete`,
+            // otherwise the cascade never runs and the test
+            // `test_destroys_comments_when_article_is_destroyed`
+            // sees an unchanged Comment.count. Conditional because
+            // not every model has the hook; emitting a bare call to
+            // a missing method would E0599.
+            let has_before_destroy = lc
+                .methods
+                .iter()
+                .any(|m| m.name.as_str() == "before_destroy");
+            let destroy_body = if has_before_destroy {
+                "self.before_destroy(); self._adapter_delete();"
+            } else {
+                "self._adapter_delete();"
+            };
             let ar_shim = if needs_ar_shim {
                 // `destroy` and `exists` are paired in:
                 //   - Article#dependent_destroy: `c.destroy()` over the
@@ -561,12 +582,36 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // by value (not Result/Option) — Rails raises on
                 // validation failure, which we surface as panic via
                 // the validate path.
+                // Save shape: clear per-thread validation buffer,
+                // run validate (which `validation_errors_push`-es each
+                // failed rule via the rust2 emit post-process below),
+                // bail with `false` if any messages landed, otherwise
+                // insert (new record) or update (already persisted)
+                // through the lowerer-emitted `_adapter_*` methods.
+                // Persistence sentinel is `self.id != 0` — matches the
+                // legacy synth_initialize id-default of 0 + sqlite
+                // AUTOINCREMENT-on-insert semantics; the `find_by_id`
+                // existence probe handles the fixture-loader case of
+                // a pre-set id whose row isn't in the DB yet.
+                //
+                // `errors(&self)` returns a snapshot of the current
+                // thread-local buffer so app-side reads
+                // (`record.errors`) see the validation messages that
+                // accumulated during the most recent `save`.
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
-                        pub fn errors(&self) -> Vec<String> {{ Vec::new() }}\n\
-                        pub fn save(&mut self) -> bool {{ self.validate(); true }}\n\
-                        pub fn destroy(&mut self) {{ self._adapter_delete(); }}\n\
+                        pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
+                        pub fn save(&mut self) -> bool {{\n\
+                            crate::errors_ext::validation_errors_clear();\n\
+                            self.validate();\n\
+                            if !crate::errors_ext::validation_errors_is_empty() {{ return false; }}\n\
+                            if self.id == 0 {{ self.id = self._adapter_insert(); }}\n\
+                            else if Self::_adapter_exists_by_id(self.id) {{ self._adapter_update(); }}\n\
+                            else {{ let _ = self._adapter_insert(); }}\n\
+                            true\n\
+                        }}\n\
+                        pub fn destroy(&mut self) {{ {destroy_body} }}\n\
                         pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
                         pub fn persisted(&self) -> bool {{ self.id != 0 }}\n\
                         pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
@@ -574,12 +619,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
-                    name = lc.name.0.as_str()
+                    name = lc.name.0.as_str(),
+                    destroy_body = destroy_body,
                 )
             } else {
                 String::new()
             };
+            // Validate-body errors-rewrite: every `validates_*` rule
+            // the lowerer emits lands as `self.errors().push("msg"
+            // .to_string())` inside the `validate(&self)` body. The
+            // AR shim's `errors(&self)` returns a snapshot Vec, so a
+            // `.push` against that owned value drops the message —
+            // breaking every validation test. Route those pushes
+            // through the thread-local `validation_errors_push`
+            // helper instead so `save` sees the accumulated messages.
+            //
+            // Scoped to the literal pattern from validations emit; if
+            // future rewrites change the shape (e.g., qualify the
+            // `errors` send differently), this rewrite stops firing
+            // and the bare `errors().push` falls through harmlessly
+            // until updated.
             let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
+            let content = content.replace(
+                "self.errors().push(",
+                "crate::errors_ext::validation_errors_push(",
+            );
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,
@@ -823,11 +887,19 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
             // Prepend `#[test]` before each `pub fn test_*` — helpers
             // (anything not starting with `test_`) get no attribute.
+            //
+            // Also inject `crate::fixtures::setup();` as the first
+            // statement of every test body. Rust's `#[test]` has no
+            // Minitest-`setup`-style per-test hook; the harness entry
+            // point lives in `src/fixtures/mod.rs` and each test must
+            // call it before touching the DB. The legacy `src/emit/
+            // rust/spec.rs` does the same prepend at line 441; this
+            // mirrors that without a body-level synthesis pass.
             let with_attrs: String = body
                 .lines()
                 .map(|line| {
                     if line.starts_with("pub fn test_") {
-                        format!("#[test]\n{line}")
+                        format!("#[test]\n{line}\n        crate::fixtures::setup();")
                     } else {
                         line.to_string()
                     }
@@ -983,8 +1055,20 @@ fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     }
 }
 
-/// `src/fixtures/mod.rs` aggregator — same shape as the other
-/// per-directory aggregators.
+/// `src/fixtures/mod.rs` aggregator + test-harness entry point.
+///
+/// Declares each `<plural>` fixture module + a `pub fn setup()` that
+/// every emitted test calls before exercising the model. Rust has no
+/// equivalent of Minitest's `setup` hook between tests, so we lift it
+/// into the body itself (the test emit pipeline prepends
+/// `crate::fixtures::setup();` to each `#[test]` body).
+///
+/// `setup()` runs `db::setup_test_db(CREATE_TABLES)` to bring up a
+/// fresh `:memory:` SQLite + DDL, then calls each fixture LC's
+/// `_fixtures_load_bang()` to insert records in declaration order.
+/// Fixture IDs are deterministic (1-indexed per file by the lowerer),
+/// so cross-fixture FK refs and `<Plural>Fixtures::one()` lookups
+/// resolve without a runtime label→id map.
 fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
     let mut entries = entries.to_vec();
@@ -996,6 +1080,19 @@ fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     for (stem, name) in &entries {
         lines.push(format!("pub use {stem}::{name};"));
     }
+    lines.push(String::new());
+    lines.push("/// Per-test entry point. Brings up a fresh in-memory SQLite,".to_string());
+    lines.push("/// runs the schema DDL, and loads every fixture in declaration".to_string());
+    lines.push("/// order. Tests call this as their first line; repeat calls on".to_string());
+    lines.push("/// the same thread reset to a clean slate.".to_string());
+    lines.push("pub fn setup() {".to_string());
+    lines.push(
+        "    crate::db::setup_test_db(crate::schema_sql::CREATE_TABLES);".to_string(),
+    );
+    for (_, name) in &entries {
+        lines.push(format!("    {name}::_fixtures_load_bang();"));
+    }
+    lines.push("}".to_string());
     EmittedFile {
         path: PathBuf::from("src/fixtures/mod.rs"),
         content: lines.join("\n") + "\n",

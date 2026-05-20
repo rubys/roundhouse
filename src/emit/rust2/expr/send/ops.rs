@@ -188,7 +188,14 @@ pub(super) fn try_array_push(
         ) => format!("({}).to_string()", emit_expr(&args[0])),
         _ => emit_expr(&args[0]),
     };
-    Some(format!("{}.push({})", emit_expr(r), arg_rendered))
+    // Use `emit_send_recv` (not `emit_expr`) so the recv-Var clone
+    // suppression applies. `Vec::push` is `&mut self`; cloning the
+    // recv mutates the discarded copy and the original Vec stays
+    // empty (the canonical bug surface was the lowerer-emitted
+    // `comments()` body's `results << instance` loop — results
+    // stayed empty across iterations and the cascade-delete in
+    // `before_destroy` never reached the rows).
+    Some(format!("{}.push({})", super::super::emit_send_recv(r), arg_rendered))
 }
 
 /// String append: `io << s` Ruby idiom → `io.push_str(&s)` in Rust.
