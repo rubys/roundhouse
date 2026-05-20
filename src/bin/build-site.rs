@@ -37,13 +37,17 @@ use roundhouse::emit::{self, EmittedFile};
 use roundhouse::ingest::ingest_app;
 use zip::write::SimpleFileOptions;
 
-// `typescript-worker` is the SharedWorker browser deployment of the
-// TypeScript target — same emit pipeline, picked via
-// `DeploymentProfile::worker()`. Listed alongside the language
-// targets so it shows up in the browse archive matrix; the per-
-// target dispatch in `run()` calls `emit_with_profile` for it.
+// `blog` is the original Rails source fixture (verbatim app
+// directory walk). `ruby` is the emitted CRuby-runnable tree
+// (lowered emit + scaffold + ruby_overlay + static assets, with
+// db_cruby.rb swapped in as the per-target Db shim). `spinel` is
+// the FFI-shim variant of the same emit, targeting the future
+// spinel-AOT runner. `typescript-worker` is the SharedWorker
+// browser deployment of the TypeScript target — same emit pipeline,
+// picked via `DeploymentProfile::worker()`. Listed alongside the
+// language targets so it shows up in the browse archive matrix.
 const TARGETS: &[&str] = &[
-    "ruby", "spinel", "crystal", "elixir", "go", "python", "rust", "typescript",
+    "blog", "spinel", "ruby", "crystal", "elixir", "go", "python", "rust", "typescript",
     "typescript-worker",
 ];
 
@@ -83,8 +87,9 @@ fn run(fixture: &Path, out: &Path) -> Result<(), String> {
 
     for target in TARGETS {
         let files = match *target {
-            "ruby" => ruby_files(fixture)?,
+            "blog" => blog_files(fixture)?,
             "spinel" => spinel_files(&app)?,
+            "ruby" => ruby_runtime_files(&app, fixture)?,
             "crystal" => sort_files(emit::crystal::emit(&app)),
             "elixir" => sort_files(emit::elixir::emit(&app)),
             "go" => sort_files(emit::go::emit(&app)),
@@ -167,11 +172,72 @@ fn sort_files(files: Vec<EmittedFile>) -> Vec<(String, String)> {
     entries
 }
 
-fn ruby_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
+/// "blog" archive: the original Rails source fixture, walked
+/// verbatim. The archive structure mirrors the fixture directory
+/// — `tar -xzf blog.tgz` reproduces the input that Roundhouse
+/// transpiles, useful as a reference for "what does the input
+/// look like" and as a downloadable starting point.
+fn blog_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
     walk_ruby(fixture, fixture, &mut files)?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
+}
+
+/// "ruby" archive: the emitted CRuby-runnable tree. Starts from
+/// the spinel-target file set (scaffold + runtime + tests + lowered
+/// emit) and applies three CRuby-specific overlays — the same
+/// layering the outer Makefile's `ruby-transpile` rule does. Stays
+/// in lockstep with that rule; if you change one, change the other.
+///
+///   1. Db shim swap: drop the FFI variant (`runtime/db.rb`) and
+///      rename the gem-backed variant (`runtime/db_cruby.rb`) into
+///      its place. CRuby uses the gem; spinel-AOT uses the FFI.
+///   2. ruby_overlay: CGI-shaped main.rb, Rakefile, config.ru,
+///      config/puma.rb, cable.rb at root. Overrides the Tep-based
+///      scaffold defaults that the spinel target keeps.
+///   3. Source-app static assets: `app/javascript/` (importmap-
+///      served JS) and `public/` (icons, error pages, robots.txt)
+///      copied from the fixture verbatim. The lowered emit doesn't
+///      produce these; they're verbatim assets, not transpilable
+///      Ruby. Binary files (e.g. icon.png) are silently skipped
+///      by `walk_dir_into` since `EmittedFile.content: String`
+///      can't carry binary blobs — the archive is text-only.
+///
+/// The seeded `tmp/blog.sqlite3` that the Makefile copies in is
+/// NOT included here for the same binary-content reason; consumers
+/// of the archive get an empty DB on first boot. Schema.load! is
+/// idempotent and creates tables on startup, so the archive is
+/// still runnable.
+fn ruby_runtime_files(
+    app: &roundhouse::App,
+    fixture: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let mut files = spinel_files(app)?;
+
+    files.retain(|(p, _)| p != "runtime/db.rb");
+    for (path, _) in files.iter_mut() {
+        if path == "runtime/db_cruby.rb" {
+            *path = "runtime/db.rb".to_string();
+        }
+    }
+
+    walk_dir_into(
+        Path::new("runtime/spinel/scaffold/ruby_overlay"),
+        "",
+        &mut files,
+    )?;
+
+    let js = fixture.join("app/javascript");
+    if js.exists() {
+        walk_dir_into(&js, "app/javascript/", &mut files)?;
+    }
+    let public = fixture.join("public");
+    if public.exists() {
+        walk_dir_into(&public, "public/", &mut files)?;
+    }
+
+    Ok(dedupe_last_wins(files))
 }
 
 /// Spinel-target files: the lowered emit (app/, config/, test/{models,

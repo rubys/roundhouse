@@ -161,6 +161,7 @@ header h1 a {
   border-bottom-color: var(--accent);
 }
 
+.tab[data-lang="blog"].active { color: var(--accent-ruby); border-bottom-color: var(--accent-ruby); }
 .tab[data-lang="ruby"].active { color: var(--accent-ruby); border-bottom-color: var(--accent-ruby); }
 .tab[data-lang="crystal"].active { color: var(--accent-crystal); border-bottom-color: var(--accent-crystal); }
 .tab[data-lang="elixir"].active { color: var(--accent-elixir); border-bottom-color: var(--accent-elixir); }
