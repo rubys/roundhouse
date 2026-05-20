@@ -1127,7 +1127,24 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // under `src/`, so adding a new file is enough — no list to update.
     files.push(emit_lib_rs(&files));
 
-    files
+    // Dedupe by path — last write wins. Two emit sites can produce
+    // the same `src/<dir>/mod.rs` aggregator (`models/mod.rs` gets
+    // re-emitted when `<Resource>Params` synthesis adds entries,
+    // `tests/mod.rs` when controller-tests get appended onto a
+    // model-tests-already-emitted list). Earlier code commented this
+    // as "last write wins" assuming the consumer normalized — but
+    // build-site's zip writer rejects duplicate filenames, so we
+    // dedupe here instead. Iterate from the end so the most recent
+    // write survives.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut rev_kept: Vec<EmittedFile> = Vec::with_capacity(files.len());
+    for f in files.into_iter().rev() {
+        if seen.insert(f.path.clone()) {
+            rev_kept.push(f);
+        }
+    }
+    rev_kept.reverse();
+    rev_kept
 }
 
 /// Wedge 2c.2: emit `pub async fn _axum_<action>` free fns for
