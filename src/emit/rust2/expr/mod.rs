@@ -1189,6 +1189,17 @@ fn emit_expr_inner(e: &Expr) -> String {
                 coerced
             }
         }
+        // Ruby `raise "msg"` → Rust `panic!("{}", "msg")`. Cross-
+        // target shape matches the TS IIFE/`throw` and Crystal `raise`
+        // arms; `panic!` is a macro that diverges to `!`, so it
+        // works in any expression position without an IIFE wrap.
+        // Assertion failures (produced by the test_module lowerer's
+        // `inline_assertions` pass) reach here as
+        // `Raise { value: Lit::Str { ... } }`; emit them verbatim
+        // so test bodies actually fail when assertions don't hold.
+        ExprNode::Raise { value } => {
+            format!("panic!(\"{{}}\", {})", emit_expr(value))
+        }
         // Catch-all for IR shapes not yet implemented. Each new runtime
         // file in Phase 2 expands this until full coverage.
         other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),

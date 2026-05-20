@@ -730,6 +730,107 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         }
         files.push(emit_fixtures_mod_rs(&fixture_entries));
     }
+
+    // Phase 6 wedge 3a: model tests only. Controller / integration
+    // tests need axum-test + `router::router()` (not built yet);
+    // filter them out so the model-test surface compiles first.
+    //
+    // Env-gated for now (`ROUNDHOUSE_RUST_V2_EMIT_TESTS=1`) because
+    // the emitted bodies need per-model AR class methods (`count`,
+    // `create`, `all`, `where`, `find`) that today only exist on
+    // `Base`, plus heterogeneous-HashMap construction at
+    // `Model.new(attrs)` sites. Both are independent rust2 backlog
+    // items; landing the test-emit pipeline now means once those
+    // gaps close, flipping the env var emits cargo-clean tests.
+    let model_test_modules: Vec<crate::dialect::TestModule> = if std::env::var(
+        "ROUNDHOUSE_RUST_V2_EMIT_TESTS",
+    )
+    .is_ok()
+    {
+        app.test_modules
+            .iter()
+            .filter(|tm| {
+                let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
+                !parent.contains("IntegrationTest")
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if !model_test_modules.is_empty() {
+        let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+            model_registry.clone().into_iter().collect();
+        test_extras.extend(crate::lower::library_extras::extras_from_lcs(&fixture_lcs));
+        test_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
+
+        let test_lowered = crate::lower::lower_test_modules_with_inner(
+            &model_test_modules,
+            &app.fixtures,
+            &app.models,
+            test_extras,
+        );
+
+        let mut test_entries: Vec<(String, String)> = Vec::new();
+        for lowered in &test_lowered {
+            let mut lc = lowered.test_class.clone();
+            let class_name = lc.name.0.as_str().to_string();
+            let stem_raw = class_name.strip_suffix("Test").unwrap_or(&class_name);
+            let stem = crate::naming::snake_case(stem_raw);
+
+            // Rewrite Instance methods to Class so `emit_module`
+            // produces free `pub fn`s — Rust's `#[test]` discovery
+            // requires module-scope fns, not associated fns inside an
+            // `impl`. Helpers (non-test methods on the test class) ride
+            // along with the same flip; they become free fns reachable
+            // by tests in the same file.
+            for m in &mut lc.methods {
+                m.receiver = crate::dialect::MethodReceiver::Class;
+            }
+
+            let mut tmp_lcs = vec![lc];
+            let registry = crate::analyze::str_color::build_registry(&tmp_lcs, &[]);
+            crate::analyze::str_color::color_classes(&mut tmp_lcs, &registry);
+            crate::analyze::mutates_self::propagate(&mut tmp_lcs);
+            let lc = tmp_lcs.into_iter().next().unwrap();
+
+            let body = match library::emit_module(&lc.methods) {
+                Ok(s) => s,
+                Err(e) => panic!("rust2 test emit failed for {class_name}: {e}"),
+            };
+
+            // Prepend `#[test]` before each `pub fn test_*` — helpers
+            // (anything not starting with `test_`) get no attribute.
+            let with_attrs: String = body
+                .lines()
+                .map(|line| {
+                    if line.starts_with("pub fn test_") {
+                        format!("#[test]\n{line}")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let content = format!(
+                "{MODEL_IMPORTS}\n\
+                 #[allow(unused_imports)]\n\
+                 use crate::fixtures::*;\n\
+                 {with_attrs}\n"
+            );
+            files.push(EmittedFile {
+                path: PathBuf::from(format!("src/tests/{stem}.rs")),
+                content,
+            });
+            test_entries.push((stem, class_name));
+        }
+
+        if !test_entries.is_empty() {
+            files.push(emit_tests_mod_rs(&test_entries));
+        }
+    }
     }); // end with_global_class_methods
 
     // src/lib.rs — declares the modules emitted above (hand-written +
@@ -876,6 +977,23 @@ fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     }
     EmittedFile {
         path: PathBuf::from("src/fixtures/mod.rs"),
+        content: lines.join("\n") + "\n",
+    }
+}
+
+/// `src/tests/mod.rs` aggregator — declares each emitted test file
+/// as `pub mod <stem>;`. No `pub use` re-export (test files are
+/// reached only by the cfg(test) gate in lib.rs, not by name).
+fn emit_tests_mod_rs(entries: &[(String, String)]) -> EmittedFile {
+    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut entries = entries.to_vec();
+    entries.sort();
+    entries.dedup();
+    for (stem, _) in &entries {
+        lines.push(format!("pub mod {stem};"));
+    }
+    EmittedFile {
+        path: PathBuf::from("src/tests/mod.rs"),
         content: lines.join("\n") + "\n",
     }
 }
