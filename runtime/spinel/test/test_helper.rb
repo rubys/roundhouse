@@ -345,7 +345,7 @@ module RequestDispatch
   # rather than nested counts. Tighten if a fixture exposes a false
   # positive.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
-    body = @__response.body
+    body = @__response.body.to_s
     if content_or_opts.is_a?(Hash)
       opts = content_or_opts
       content = nil
