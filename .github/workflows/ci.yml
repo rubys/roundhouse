@@ -529,14 +529,12 @@ jobs:
       - name: scripts/compare python
         run: scripts/compare python
 
-  # compare-ruby: DOM-diff via per-request shell-out to main.rb under
-  # CRuby (CGI shape: ENV in, response on stdout). No live target
-  # server — the previous CRuby dev_server.rb was retired in the
-  # rubocop_spinel cleanup; main.rb produces the same HTTP response
-  # shape as a server would. Per-path Ruby startup (~1s × 5 paths)
-  # is the cost. A future compare-spinel job will run the same emit
-  # through the spinel-compiled binary when end-to-end runnable.
-  # See project_ruby_dev_server_retirement memory.
+  # compare-ruby: same shape as every other compare-* — Puma+Rack
+  # server bound to :3000 via ruby_overlay's config.ru, hit over
+  # HTTP. Two ruby setups: the fixture's Gemfile (Rails reference)
+  # and the scaffold's Gemfile (Puma + Rack target). Node is needed
+  # for tailwindcss asset compilation; no target compile step
+  # (Ruby is interpreted).
   compare-ruby:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -564,6 +562,54 @@ jobs:
           node-version: '20'
       - name: scripts/compare ruby
         run: scripts/compare ruby
+
+  # compare-spinel: DOM-diff against a live AOT-compiled binary served
+  # over Tep::Server (FFI HTTP/1.1). The spinel-transpile Makefile
+  # target vendors the Tep transport (precompiles sphttp.o + sed-
+  # substitutes @TEP_SPHTTP_O@ in net.rb) before AOT-compile; the
+  # scaffold's `make build` then drives `spinel main.rb -o build/blog`.
+  # Currently exploratory — emit divergences from Rails are expected
+  # (dom_id "0_" prefix, JSON encoding gaps); job is marked
+  # continue-on-error until those close.
+  compare-spinel:
+    needs: [generate-fixture, build-spinel]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spinel_parse \
+                   spinel-dist/spinel_analyze spinel-dist/spinel_codegen
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: scripts/compare spinel
+        run: scripts/compare spinel
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
