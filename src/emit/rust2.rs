@@ -27,7 +27,7 @@ mod spec;
 pub(crate) mod library;
 mod method;
 mod shared;
-mod ty;
+pub(crate) mod ty;
 
 /// Minimal Cargo.toml for the migration-target crate. Mirrors what
 /// the migration plan's "Cargo.toml shape" section described: rust
