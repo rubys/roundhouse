@@ -263,6 +263,41 @@ pub fn status_name_to_code_pub(name: &str) -> u16 {
     status_name_to_code(name)
 }
 
+/// Translate a flat axum-`Form<HashMap<String, String>>` body into
+/// the nested params shape Rails controllers expect. Form names of
+/// the shape `article[title]=Foo` land at `params["article"]
+/// ["title"] = "Foo"`; top-level names pass through unchanged.
+///
+/// One level of bracket-nesting only — scaffold blog forms don't
+/// reach deeper. The lowered `<Resource>Params::from_raw` factory
+/// always looks up a single nested scope (`params.get(resource)`)
+/// then individual fields under it, so the single-level shape
+/// covers every emitted call site today. Deep nesting
+/// (`comment[article_attributes][title]`) becomes a follow-on if
+/// `accepts_nested_attributes_for` lands.
+pub fn params_from_form(
+    form: HashMap<String, String>,
+) -> HashMap<String, serde_json::Value> {
+    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+    for (k, v) in form {
+        if let (Some(open), Some(close)) = (k.find('['), k.rfind(']')) {
+            if close > open {
+                let scope = &k[..open];
+                let inner = &k[open + 1..close];
+                let entry = out
+                    .entry(scope.to_string())
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                if let serde_json::Value::Object(map) = entry {
+                    map.insert(inner.to_string(), serde_json::Value::from(v));
+                    continue;
+                }
+            }
+        }
+        out.insert(k, serde_json::Value::from(v));
+    }
+    out
+}
+
 /// Rails status-symbol → HTTP code. Subset matching the names the
 /// scaffold emit reaches (`:ok`, `:no_content`, `:not_found`,
 /// `:unprocessable_entity`, `:see_other`). Unknown names fall back

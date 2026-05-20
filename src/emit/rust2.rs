@@ -327,15 +327,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // `.route(...)` entries and gate 2 (`scripts/compare rust`)
         // opens.
         if unit.out_path.ends_with("router.rs") {
-            content.push_str(
-                "\n// rust2 wedge 2b: concrete axum router stub.\n\
-                 // Empty until per-action handler wrappers land (wedge 2c).\n\
-                 // Re-exported as `router::router` from the transpiled module.\n\
+            // Wedge 2c.2: concrete `pub fn router() -> axum::Router`
+            // assembled from the FlatRoute table. Each route lands as
+            // a `.route(path, get/post/patch/delete(...))` entry
+            // dispatching to the per-controller `_axum_<action>` free
+            // fn that `render_axum_handler_wrappers` emits alongside
+            // each controller. Multi-verb endpoints chain through the
+            // MethodRouter builder (`.get(...).post(...)`).
+            let flat_routes = crate::lower::flatten_routes(app);
+            let router_body = render_axum_router_body(&flat_routes);
+            content.push_str(&format!(
+                "\n// rust2 wedge 2c.2: concrete axum router.\n\
                  #[allow(dead_code)]\n\
-                 pub fn router() -> axum::Router {\n    \
-                 axum::Router::new()\n\
-                 }\n",
-            );
+                 pub fn router() -> axum::Router {{\n{router_body}}}\n",
+            ));
         }
         files.push(EmittedFile {
             path: unit.out_path,
@@ -743,6 +748,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // classes (origin: Some) go to `src/models/<stem>.rs` since they
     // belong to the model layer conceptually. Mirrors Crystal's
     // routing.
+    // Wedge 2c.2: flatten the route table once so both the per-
+    // controller wrapper emit (next loop) and the `router::router()`
+    // body (router-file append a few sections earlier in this fn's
+    // post-`with_global_class_methods` work) read from a single
+    // source. Stashed so the per-controller emit picks the right
+    // subset by ClassId match.
+    let flat_routes_2c = crate::lower::flatten_routes(app);
+
     if !controller_lcs.is_empty() {
         let mut controller_entries: Vec<(String, String)> = Vec::new();
         let mut model_param_entries: Vec<(String, String)> = Vec::new();
@@ -806,7 +819,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     }}\n",
                     name = lc.name.0.as_str()
                 );
-                let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}");
+                let axum_wrappers = render_axum_handler_wrappers(
+                    lc.name.0.as_str(),
+                    &flat_routes_2c,
+                );
+                let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
                 files.push(EmittedFile {
                     path: PathBuf::from(format!("src/controllers/{stem}.rs")),
                     content,
@@ -991,6 +1008,213 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(emit_lib_rs(&files));
 
     files
+}
+
+/// Wedge 2c.2: emit `pub async fn _axum_<action>` free fns for
+/// each FlatRoute that targets `controller_name`. Each wrapper:
+///
+///   1. `crate::http::response_clear()` — reset the thread-local.
+///   2. Build a `params` HashMap from path-param extractors + form
+///      body (POST/PATCH/PUT only) via `crate::http::params_from_form`.
+///   3. `<Controller>::default()`-construct the controller with the
+///      populated `params`. Default-derive on every emitted struct
+///      (wedge 2c.1) gives every ivar a zero value; the action body
+///      mutates them as needed (e.g., `self.articles = Article::all()`).
+///   4. Call the action method by name. Rails' `new` action lands
+///      as `new_action` on the controller struct (Rust reserves
+///      `new` for `Self::new` constructors) — substituted here.
+///   5. Snapshot the response state and translate to axum.
+///
+/// Path extractors use the route's `path_params` order: `Path<i64>`
+/// for one param, `Path<(i64, i64, …)>` for multiple. Body extractor
+/// (POST/PATCH/PUT) is `Form<HashMap<String, String>>`; the
+/// `params_from_form` helper splits Rails-shape bracket keys
+/// (`article[title]`) into nested JSON.
+///
+/// Bodies on DELETE are uncommon and not generated — Rails scaffold
+/// `destroy` reads only `:id` from the path.
+fn render_axum_handler_wrappers(
+    controller_name: &str,
+    flat_routes: &[crate::lower::FlatRoute],
+) -> String {
+    use crate::dialect::HttpMethod;
+    // Dedup by action — Rails' `root "articles#index"` and
+    // `resources :articles` both target `ArticlesController#index`,
+    // and `resources :articles, only: [:index]` may even register
+    // the same action under multiple paths. The wrappers themselves
+    // don't depend on the path (path params come in via extractors),
+    // so one wrapper per (controller, action) suffices.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let routes: Vec<&crate::lower::FlatRoute> = flat_routes
+        .iter()
+        .filter(|r| r.controller.0.as_str() == controller_name)
+        .filter(|r| seen.insert(r.action.as_str().to_string()))
+        .collect();
+    if routes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n// ── rust2 wedge 2c.2: axum handler wrappers ──\n");
+    out.push_str(
+        "// Per-action free fns axum's Router can dispatch into. Build the\n\
+         // controller via Default, call the action, and translate the\n\
+         // thread-local response state into an `axum::response::Response`.\n",
+    );
+    for r in routes {
+        let action = r.action.as_str();
+        let method_name = if action == "new" { "new_action" } else { action };
+        let path_params = &r.path_params;
+        let has_body = matches!(
+            r.method,
+            HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put,
+        );
+        let path_extractor = match path_params.len() {
+            0 => String::new(),
+            1 => format!(
+                "axum::extract::Path({param}): axum::extract::Path<i64>",
+                param = path_params[0],
+            ),
+            n => {
+                let names: Vec<String> = path_params.iter().cloned().collect();
+                let tys = vec!["i64"; n].join(", ");
+                format!(
+                    "axum::extract::Path(({names})): axum::extract::Path<({tys})>",
+                    names = names.join(", "),
+                )
+            }
+        };
+        let mut args: Vec<String> = Vec::new();
+        if !path_extractor.is_empty() {
+            args.push(path_extractor);
+        }
+        if has_body {
+            // Body extractor MUST be last per axum's contract (each
+            // request body can only be consumed once; placing it
+            // after the `Path` extractors keeps the consumption
+            // ordering deterministic).
+            args.push(
+                "axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>"
+                    .to_string(),
+            );
+        }
+        let args_str = args.join(", ");
+
+        let mut body = String::new();
+        body.push_str("    crate::http::response_clear();\n");
+        if has_body {
+            body.push_str("    let mut params = crate::http::params_from_form(form);\n");
+        } else if !path_params.is_empty() {
+            body.push_str(
+                "    let mut params: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();\n",
+            );
+        }
+        // Path params land as serde_json::Value::from(i64) under
+        // their Rails-style string key (`"id"`, etc.). The lowered
+        // controller body's `self.params.get(\"id\")` reads them out.
+        for p in path_params {
+            body.push_str(&format!(
+                "    params.insert({p:?}.to_string(), serde_json::Value::from({p}));\n",
+            ));
+        }
+        if has_body || !path_params.is_empty() {
+            body.push_str(&format!(
+                "    let mut c = {controller_name} {{ params, ..Default::default() }};\n",
+            ));
+        } else {
+            body.push_str(&format!(
+                "    let mut c = {controller_name}::default();\n",
+            ));
+        }
+        body.push_str(&format!("    c.{method_name}();\n"));
+        body.push_str("    crate::http::response_into_axum(crate::http::response_take())\n");
+
+        out.push_str(&format!(
+            "pub async fn _axum_{action}({args_str}) -> axum::response::Response {{\n{body}}}\n",
+        ));
+    }
+    out
+}
+
+/// Wedge 2c.2: render the body of `pub fn router() -> axum::Router`
+/// from the FlatRoute table. Groups routes by the axum-shaped path
+/// so multi-verb endpoints (`GET /articles` + `POST /articles`)
+/// chain through `MethodRouter`'s builder (`.get(...).post(...)`).
+/// Hand-offs to per-controller `_axum_<action>` free fns emitted by
+/// `render_axum_handler_wrappers`.
+fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
+    use crate::dialect::HttpMethod;
+    use std::collections::BTreeMap;
+
+    if flat_routes.is_empty() {
+        return "    axum::Router::new()\n".to_string();
+    }
+
+    let mut by_path: BTreeMap<String, Vec<&crate::lower::FlatRoute>> = BTreeMap::new();
+    for r in flat_routes {
+        by_path.entry(to_axum_path(&r.path)).or_default().push(r);
+    }
+    let mut out = String::from("    axum::Router::new()\n");
+    for (path, routes) in &by_path {
+        // First verb on the chain prefixes with `axum::routing::`,
+        // subsequent verbs are methods on the returned MethodRouter
+        // (`MethodRouter::post(self, handler)` etc.). Joining with
+        // `.` is the legacy pattern; same as src/emit/rust/route.rs.
+        let mut verbs = String::new();
+        for (i, r) in routes.iter().enumerate() {
+            let verb = axum_verb_fn(&r.method);
+            let ctrl_mod = crate::naming::snake_case(r.controller.0.as_str());
+            let action = r.action.as_str();
+            if i == 0 {
+                verbs.push_str(&format!(
+                    "axum::routing::{verb}(crate::controllers::{ctrl_mod}::_axum_{action})",
+                ));
+            } else {
+                verbs.push_str(&format!(
+                    ".{verb}(crate::controllers::{ctrl_mod}::_axum_{action})",
+                ));
+            }
+        }
+        out.push_str(&format!("        .route({path:?}, {verbs})\n"));
+    }
+    let _ = HttpMethod::Get; // silence unused-import lint when no routes
+    out
+}
+
+/// Rails `/articles/:id` → axum `/articles/{id}` (axum 0.8 path
+/// syntax). Mirrors `src/emit/rust/route.rs::to_axum_path`.
+fn to_axum_path(rails_path: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rails_path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' {
+            let mut ident = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            out.push('{');
+            out.push_str(&ident);
+            out.push('}');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn axum_verb_fn(method: &crate::dialect::HttpMethod) -> &'static str {
+    use crate::dialect::HttpMethod;
+    match method {
+        HttpMethod::Get => "get",
+        HttpMethod::Post => "post",
+        HttpMethod::Put => "put",
+        HttpMethod::Patch => "patch",
+        HttpMethod::Delete => "delete",
+        _ => "get",
+    }
 }
 
 /// `src/schema_sql.rs` — wraps the target-neutral DDL produced by
