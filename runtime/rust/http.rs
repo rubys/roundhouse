@@ -320,7 +320,7 @@ fn status_name_to_code(name: &str) -> u16 {
         "unauthorized" => 401,
         "forbidden" => 403,
         "not_found" => 404,
-        "unprocessable_entity" => 422,
+        "unprocessable_entity" | "unprocessable_content" => 422,
         "internal_server_error" => 500,
         _ => 200,
     }

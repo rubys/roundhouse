@@ -664,6 +664,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
                         pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
+                        pub fn last() -> Option<{name}> {{ Self::_adapter_all().last().cloned() }}\n\
+                        pub fn reload(&mut self) {{ let _ = self._adapter_reload(); }}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
                     name = lc.name.0.as_str(),
@@ -704,9 +706,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             Ok(s) => s,
             Err(e) => panic!("rust2 route_helpers emit failed: {e}"),
         };
+        // Wedge 2c.3: bare-fn compat shim. Legacy-emit controller
+        // tests call `route_helpers::article_path(id)`; rust2 emits
+        // these as `RouteHelpers::article_path(id)` (`impl
+        // RouteHelpers`). Append per-method delegating wrappers so
+        // both call shapes resolve.
+        let bare_wrappers = render_route_helpers_bare_wrappers(lc);
         files.push(EmittedFile {
             path: PathBuf::from("src/route_helpers.rs"),
-            content: body,
+            content: format!("{body}{bare_wrappers}"),
         });
     }
 
@@ -881,8 +889,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     panic!("rust2 fixture emit failed for {}: {e}", lc.name.0.as_str());
                 }
             };
+            // Wedge 2c.3: bare-fn compat shim for per-fixture-module
+            // access (`fixtures::articles::one()`). Legacy-emit
+            // controller tests reach fixtures by-label this way;
+            // rust2's lowered shape exposes them as
+            // `ArticlesFixtures::one()`. Append delegating wrappers
+            // for each non-`_fixtures_load!` label method so both
+            // shapes resolve. Skips Class-receiver special methods
+            // (the `_fixtures_load_bang` synthesized seed) — those
+            // aren't getters and don't need bare wrappers.
+            let bare_wrappers = render_fixture_bare_wrappers(lc, &struct_name);
             // Fixtures reference models; reuse MODEL_IMPORTS.
-            let content = format!("{MODEL_IMPORTS}{body}");
+            let content = format!("{MODEL_IMPORTS}{body}{bare_wrappers}");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/fixtures/{stem}.rs")),
                 content,
@@ -892,27 +910,46 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_fixtures_mod_rs(&fixture_entries));
     }
 
-    // Phase 6 wedge 3a: model tests only. Controller / integration
-    // tests need axum-test + `router::router()` (not built yet);
-    // filter them out so the model-test surface compiles first.
+    // Phase 6 wedge 3a (model tests) + wedge 2c.3 (controller tests).
+    // The two test categories take different emit paths:
     //
-    // Env-gated for now (`ROUNDHOUSE_RUST_V2_EMIT_TESTS=1`) because
-    // the emitted bodies need per-model AR class methods (`count`,
-    // `create`, `all`, `where`, `find`) that today only exist on
-    // `Base`, plus heterogeneous-HashMap construction at
-    // `Model.new(attrs)` sites. Both are independent rust2 backlog
-    // items; landing the test-emit pipeline now means once those
-    // gaps close, flipping the env var emits cargo-clean tests.
-    let model_test_modules: Vec<crate::dialect::TestModule> = if std::env::var(
-        "ROUNDHOUSE_RUST_V2_EMIT_TESTS",
-    )
-    .is_ok()
-    {
+    // - Model tests go through `lower_test_modules_with_inner` +
+    //   `library::emit_module` (rust2's generic lowered-IR path).
+    //   These were unblocked by wedge 3d's fixture/save/validation
+    //   plumbing.
+    //
+    // - Controller (`ActionDispatch::IntegrationTest`) tests reuse
+    //   the legacy rust target's `emit_rust_test_module`. That code
+    //   already has the axum-test rendering + the assert_response /
+    //   assert_select / assert_difference / assert_redirected_to
+    //   classifier dispatch the controller-test bodies need (~500
+    //   LOC at `src/emit/rust/spec.rs`); rather than duplicate it
+    //   here, expose it `pub(crate)` and call into it. When Phase 7
+    //   retires the legacy target this code moves to a shared
+    //   location.
+    //
+    // Env-gated overall (`ROUNDHOUSE_RUST_V2_EMIT_TESTS=1`) so the
+    // legacy code path stays the default until the controller-test
+    // surface stabilizes; flipping the env var emits both categories.
+    let emit_tests_enabled = std::env::var("ROUNDHOUSE_RUST_V2_EMIT_TESTS").is_ok();
+    let model_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
         app.test_modules
             .iter()
             .filter(|tm| {
                 let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
                 !parent.contains("IntegrationTest")
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let controller_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
+        app.test_modules
+            .iter()
+            .filter(|tm| {
+                let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
+                parent.contains("IntegrationTest")
             })
             .cloned()
             .collect()
@@ -998,6 +1035,52 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
         if !test_entries.is_empty() {
             files.push(emit_tests_mod_rs(&test_entries));
+        }
+    }
+
+    // Wedge 2c.3: route IntegrationTest-parented modules through
+    // the legacy controller-test emit (`emit_rust_test_module`).
+    // Each module becomes one `src/tests/<snake>.rs` file with
+    // `#[tokio::test(flavor = "multi_thread")]` async fns; the
+    // emit walks each Ruby test body and renders to axum-test +
+    // `TestResponseExt` calls. Aggregator entries are appended to
+    // the same `test_entries` list so `src/tests/mod.rs` declares
+    // both categories.
+    if !controller_test_modules.is_empty() {
+        let mut ctrl_entries: Vec<(String, String)> = Vec::new();
+        for tm in &controller_test_modules {
+            let file = crate::emit::rust::spec::emit_rust_test_module(tm, app);
+            let class_name = tm.name.0.as_str().to_string();
+            let stem = file
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(file);
+            ctrl_entries.push((stem, class_name));
+        }
+        if !ctrl_entries.is_empty() {
+            // Append to whatever model-test entries already produced
+            // a `src/tests/mod.rs`. emit_tests_mod_rs sorts + dedups;
+            // a second call with the union supersedes (last-write-wins
+            // on the same `path` key).
+            let mut combined: Vec<(String, String)> = Vec::new();
+            for f in &files {
+                if f.path.to_string_lossy().starts_with("src/tests/")
+                    && f.path.extension().and_then(|s| s.to_str()) == Some("rs")
+                {
+                    if let Some(stem) = f.path.file_stem().and_then(|s| s.to_str()) {
+                        if stem != "mod" {
+                            combined.push((
+                                stem.to_string(),
+                                stem.to_string(), // class-name unused by the aggregator
+                            ));
+                        }
+                    }
+                }
+            }
+            files.push(emit_tests_mod_rs(&combined));
         }
     }
     }); // end with_global_class_methods
@@ -1215,6 +1298,105 @@ fn axum_verb_fn(method: &crate::dialect::HttpMethod) -> &'static str {
         HttpMethod::Delete => "delete",
         _ => "get",
     }
+}
+
+/// Wedge 2c.3: emit bare-fn delegates for the RouteHelpers impl so
+/// the legacy-emit controller tests' `route_helpers::article_path
+/// (id)` calls resolve. Mirrors the legacy `route_helpers.rs` shape
+/// (one `pub fn <as_name>_path(...) -> String` per route) so the
+/// per-target divergence stays surface-only.
+///
+/// Reads the method signatures off the `RouteHelpers` LC (already
+/// lowered with `i64` path params); each wrapper delegates to
+/// `RouteHelpers::<method>(args)`. Helpers with non-`i64` shapes
+/// would need richer translation; none in the scaffold blog hit
+/// that.
+fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> String {
+    let mut out = String::from(
+        "\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n",
+    );
+    for m in &lc.methods {
+        let name = m.name.as_str();
+        // Skip non-public / synthetic helpers.
+        if name.starts_with('_') {
+            continue;
+        }
+        let params: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| format!("{}: i64", p.name.as_str()))
+            .collect();
+        let arg_names: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| p.name.as_str().to_string())
+            .collect();
+        out.push_str(&format!(
+            "pub fn {name}({}) -> String {{ RouteHelpers::{name}({}) }}\n",
+            params.join(", "),
+            arg_names.join(", "),
+        ));
+    }
+    out
+}
+
+/// Wedge 2c.3: emit bare-fn delegates for per-fixture label getters
+/// (`articles::one()`, `articles::two()` style). Legacy controller-
+/// test emit reaches fixtures via `fixtures::<plural>::<label>()`;
+/// the rust2 lowered shape exposes them as
+/// `<Plural>Fixtures::<label>()`. The wrappers tie the two shapes
+/// together at the per-fixture-file level so both call sites
+/// resolve.
+///
+/// Skips `_fixtures_load_bang` (the synthesized seed used by
+/// `crate::fixtures::setup()` only; not a per-record getter) and
+/// any private-prefixed helpers.
+fn render_fixture_bare_wrappers(
+    lc: &crate::dialect::LibraryClass,
+    struct_name: &str,
+) -> String {
+    use crate::dialect::MethodReceiver;
+    let mut out = String::from(
+        "\n// Wedge 2c.3 bare-fn compat shims — delegate to the impl.\n",
+    );
+    for m in &lc.methods {
+        if !matches!(m.receiver, MethodReceiver::Class) {
+            continue;
+        }
+        let name = m.name.as_str();
+        if name.starts_with('_') || name == "_fixtures_load!" {
+            continue;
+        }
+        // Each label method returns the persisted record (typed as
+        // the fixture's owning class). Render-type inference via the
+        // method's signature would be richer; the scaffold path uses
+        // `<Class>` for every label, so reading it off the
+        // `enclosing_class` companion of the LC's first record-target
+        // would equally work. For now hard-code via the `lc.parent`
+        // or fall back to introspecting the body — the body shape
+        // produced by `lower::fixture_to_library` is always
+        // `<Class>.find(<id>)`, so we read the class off there.
+        let ret_class = match &*m.body.node {
+            crate::expr::ExprNode::Send {
+                recv: Some(recv),
+                method: find,
+                ..
+            } if find.as_str() == "find" => match &*recv.node {
+                crate::expr::ExprNode::Const { path } => {
+                    path.last().map(|s| s.to_string()).unwrap_or_default()
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        if ret_class.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "pub fn {name}() -> {ret_class} {{ {struct_name}::{name}() }}\n",
+        ));
+    }
+    out
 }
 
 /// `src/schema_sql.rs` — wraps the target-neutral DDL produced by

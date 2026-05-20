@@ -363,7 +363,7 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
     }
 }
 
-pub(super) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
+pub(crate) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
     let fixture_names: Vec<Symbol> =
         app.fixtures.iter().map(|f| f.name.clone()).collect();
     let known_models: Vec<Symbol> =

@@ -162,8 +162,15 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // override.
     writeln!(out, "#[derive(Clone, Default)]").unwrap();
     writeln!(out, "pub struct {name} {{").unwrap();
+    // Fields are `pub` so legacy-emit-style controller test bodies
+    // (`@article.title`, `Article.last.id`) — which use field
+    // access syntax rather than getter method calls — resolve
+    // against the same struct. The lowerer-emitted instance
+    // methods (`title(&self) -> String { self.title.clone() }`)
+    // still work alongside; Rust disambiguates field vs method
+    // by trailing parens at the call site.
     for (fname, ty) in &ivars {
-        writeln!(out, "    {fname}: {},", rust_ty(ty)).unwrap();
+        writeln!(out, "    pub {fname}: {},", rust_ty(ty)).unwrap();
     }
     out.push_str("}\n\n");
 

@@ -29,7 +29,12 @@ mod model;
 mod route;
 mod schema_sql;
 mod shared;
-mod spec;
+// `spec` exposed crate-wide so `rust2.rs` can reuse the controller-
+// test emit path (wedge 2c.3). Transitional: when Phase 7 retires
+// the legacy rust target the controller-test render will move
+// into a shared location (or into rust2 directly) and `spec` will
+// go back to module-private.
+pub(crate) mod spec;
 mod ty;
 mod view;
 
