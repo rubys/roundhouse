@@ -90,11 +90,10 @@ fn main() -> Result<()> {
         None => Config::default(),
     };
 
-    let client = reqwest::blocking::Client::builder()
+    let client = ureq::AgentBuilder::new()
         .user_agent("roundhouse-compare/0.1")
         .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("build http client")?;
+        .build();
 
     let mut pass = 0usize;
     let mut fail = 0usize;
@@ -139,7 +138,7 @@ fn main() -> Result<()> {
 }
 
 fn compare_one(
-    client: &reqwest::blocking::Client,
+    client: &ureq::Agent,
     reference: &str,
     target: &str,
     target_cmd: Option<&str>,

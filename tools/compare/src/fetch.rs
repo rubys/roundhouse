@@ -3,9 +3,10 @@
 //! Two transports for fetching a target response:
 //!   - `get`: blocking HTTP GET against a server URL. The standard
 //!     path — built once in main, passed through. Status + body
-//!     text only; headers/cookies/redirects use reqwest defaults
-//!     (follows redirects up to 10 hops, matching browser behavior
-//!     for the 303s roundhouse emits on create/update/destroy).
+//!     text only; headers/cookies/redirects use ureq defaults
+//!     (follows redirects, matching browser behavior for the 303s
+//!     roundhouse emits on create/update/destroy). The agent is
+//!     built without TLS — compare only ever talks to localhost.
 //!   - `shell`: spawn a CGI-shape command per request, parse the
 //!     `Status:`-prefixed CGI response from stdout. Used when the
 //!     target has no live HTTP server — e.g., the spinel target
@@ -23,14 +24,18 @@ pub struct Response {
     pub body: String,
 }
 
-pub fn get(client: &reqwest::blocking::Client, url: &str) -> Result<Response> {
-    let resp = client
-        .get(url)
-        .send()
-        .with_context(|| format!("GET {url}"))?;
-    let status = resp.status().as_u16();
+pub fn get(agent: &ureq::Agent, url: &str) -> Result<Response> {
+    // ureq returns Err for non-2xx; map back to a Response so the
+    // caller sees the status code and body uniformly. Network/IO
+    // errors stay as Err.
+    let resp = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return Err(e).with_context(|| format!("GET {url}")),
+    };
+    let status = resp.status();
     let body = resp
-        .text()
+        .into_string()
         .with_context(|| format!("read body from {url}"))?;
     Ok(Response { status, body })
 }
