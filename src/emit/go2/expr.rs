@@ -84,16 +84,23 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             .collect::<Vec<_>>()
             .join("; "),
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = emit_expr(ctx, cond);
+            // `if recv.is_a?(Class)` → Go's type-assert init form
+            // `if _, ok := recv.(GoTy); ok` when the class maps to
+            // a Go assertion type. Otherwise plain cond emit.
+            let (init, cond_s) = if let Some((init, ok)) = try_emit_is_a_init(ctx, cond) {
+                (init, ok.to_string())
+            } else {
+                (String::new(), emit_expr(ctx, cond))
+            };
             let then_s = emit_block_body(ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
             // emit without the else clause so the body parses as
             // valid Go (a bare `nil` statement is invalid).
             if is_nil_lit(else_branch) {
-                format!("if {cond_s} {{\n{then_s}\n}}")
+                format!("if {init}{cond_s} {{\n{then_s}\n}}")
             } else {
                 let else_s = emit_block_body(ctx, else_branch);
-                format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+                format!("if {init}{cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
             }
         }
         ExprNode::Hash { entries, .. } => {
@@ -204,6 +211,29 @@ pub(super) fn emit_send(
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
             return format!("len({})", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `recv.is_a?(SingletonClass)` for the three singleton
+    // boolean-/nil-classes maps to direct equality, which is a plain
+    // bool expression that fits anywhere `is_a?` appears (not just
+    // at `if`-cond position). The mappable-class cases (Integer,
+    // Float, String, ...) require Go's `_, ok := v.(T)` form, which
+    // is statement-level and gets handled by the per-If/per-return
+    // walker (`emit_expr::If` + `emit_return_at::If`).
+    if method == "is_a?" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*args[0].node {
+                if let Some(class) = path.last() {
+                    let recv_s = emit_expr(ctx, r);
+                    match class.as_str() {
+                        "TrueClass" => return format!("{recv_s} == true"),
+                        "FalseClass" => return format!("{recv_s} == false"),
+                        "NilClass" => return format!("{recv_s} == nil"),
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -334,6 +364,51 @@ fn is_nil_lit(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
+/// Recognize `recv.is_a?(Const)` and return `(recv, last-segment of
+/// Const path)` so the caller can splice in Go's type-assert
+/// if-init form. Returns `None` for any other shape, including
+/// `is_a?(SomeRuntimeValue)` (rare; emit falls back to the generic
+/// `IsAP` send and the gap stays visible).
+fn is_a_predicate<'a>(e: &'a Expr) -> Option<(&'a Expr, &'a str)> {
+    let ExprNode::Send { recv, method, args, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "is_a?" || args.len() != 1 {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    let ExprNode::Const { path } = &*args[0].node else {
+        return None;
+    };
+    Some((r, path.last()?.as_str()))
+}
+
+/// Map a Ruby class name to the Go type used by `v.(T)` assertion.
+/// Returns `None` for classes whose Go counterpart needs more
+/// context (Hash → `map[K]V`, Array → `[]E`, user-defined classes)
+/// — those fall through to the bare-call emit so the gap stays
+/// visible.
+fn ruby_class_to_go_assert_ty(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "Integer" => "int64",
+        "Float" => "float64",
+        "String" => "string",
+        "Symbol" => "string",
+        _ => return None,
+    })
+}
+
+/// Build `_, ok := recv.(GoTy)` init + `ok` cond pair for an
+/// `is_a?` predicate that has a mapped Go assertion type. Returns
+/// `None` if either the shape or the class isn't supported, so
+/// callers can fall through to the unchanged path.
+fn try_emit_is_a_init(ctx: &EmitCtx, cond: &Expr) -> Option<(String, &'static str)> {
+    let (recv, class) = is_a_predicate(cond)?;
+    let go_ty = ruby_class_to_go_assert_ty(class)?;
+    let recv_s = emit_expr(ctx, recv);
+    Some((format!("_, ok := {recv_s}.({go_ty}); "), "ok"))
+}
+
 /// Emit a Ruby `x = value` as a Go assignment. Uses `:=` for the
 /// common case (fresh local binding) and falls back to `=` when the
 /// lvalue isn't a plain local. Targets covered:
@@ -449,9 +524,13 @@ fn indent(out: &mut String, depth: usize) {
 fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
     match &*e.node {
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = emit_expr(ctx, cond);
+            let (init, cond_s) = if let Some((init, ok)) = try_emit_is_a_init(ctx, cond) {
+                (init, ok.to_string())
+            } else {
+                (String::new(), emit_expr(ctx, cond))
+            };
             indent(out, depth);
-            out.push_str(&format!("if {cond_s} {{\n"));
+            out.push_str(&format!("if {init}{cond_s} {{\n"));
             emit_return_at(ctx, then_branch, out, depth + 1);
             // Skip the else clause when it's an implicit nil — the
             // `return X if cond` shape doesn't want a `nil` else.
