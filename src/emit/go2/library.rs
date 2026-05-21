@@ -94,9 +94,15 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     // Mode::Module — no enclosing class; module-level methods emit
     // as bare functions. `SelfRef` inside them has no class context,
     // so the walker surfaces a TODO marker if it appears.
-    let ctx = EmitCtx::none();
     let mut out = String::new();
     for m in methods {
+        // Fresh ctx per method so `declared` doesn't leak between
+        // methods. Seed with param names so param re-assignment
+        // emits as `=`.
+        let ctx = EmitCtx::none();
+        for p in &m.params {
+            ctx.declare_param(p.name.as_str());
+        }
         let params = render_params(m);
         let ret = render_return(m);
         let name = sanitize_method_name(m.name.as_str());
@@ -130,11 +136,17 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
     };
     // Build per-method context so the body walker can resolve
     // `SelfRef` against the right enclosing class + method receiver.
+    // Seed `declared` with the method's parameter names so any
+    // assignment to a param emits as `=`, not `:=`.
     let ctx = EmitCtx {
         class_name: Some(class_name.to_string()),
         in_class_method: matches!(m.receiver, MethodReceiver::Class),
         var_renames: std::collections::HashMap::new(),
+        declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
     };
+    for p in &m.params {
+        ctx.declare_param(p.name.as_str());
+    }
     let body = render_body(&ctx, m);
     format!("func {receiver}{class_method_name}({params}){ret} {{\n{body}}}\n")
 }

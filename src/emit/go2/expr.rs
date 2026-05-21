@@ -7,7 +7,9 @@
 //! coverage, transpiled-runtime call shapes) without dragging
 //! legacy go regressions.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ty::Ty;
@@ -43,6 +45,16 @@ pub(super) struct EmitCtx {
     /// nested call sites consume. Scoped to the child ctx; never
     /// applied to the else branch or the outer scope.
     pub var_renames: HashMap<String, String>,
+    /// Names already declared in the enclosing method body —
+    /// function params at entry, plus any `Var` lvalues assigned
+    /// previously in source order. `emit_assign` picks `:=` on the
+    /// first assignment to a name and `=` on subsequent ones,
+    /// matching Ruby's flat-method-scope semantics (an inner Ruby
+    /// `x = 1` reassigns the outer `x`; Go's `:=` would shadow,
+    /// silently losing the write). Shared across child ctxs via
+    /// `Rc<RefCell>` so the scope flattens — `with_rename` clones
+    /// the Rc, not the contents.
+    pub declared: Rc<RefCell<HashSet<String>>>,
 }
 
 impl EmitCtx {
@@ -51,12 +63,19 @@ impl EmitCtx {
             class_name: None,
             in_class_method: false,
             var_renames: HashMap::new(),
+            declared: Rc::new(RefCell::new(HashSet::new())),
         }
+    }
+
+    /// Seed the declared-names set with method parameter names so
+    /// `Assign` to a param emits as `=` not `:=`. Idempotent.
+    pub fn declare_param(&self, name: &str) {
+        self.declared.borrow_mut().insert(name.to_string());
     }
 
     /// Build a child ctx with one extra Var rename pushed in. Used
     /// by the `If` handlers to expose the asserted typed value to
-    /// the then_branch.
+    /// the then_branch. Shares the declared-names set via Rc clone.
     pub fn with_rename(&self, from: String, to: String) -> Self {
         let mut child = self.clone();
         child.var_renames.insert(from, to);
@@ -568,7 +587,21 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
     use crate::expr::LValue;
     let v = emit_expr(ctx, value);
     match target {
-        LValue::Var { name, .. } => format!("{name} := {v}"),
+        LValue::Var { name, .. } => {
+            // First assignment to this name → declare (`:=`).
+            // Subsequent assignments → reassign (`=`). Matches Ruby's
+            // flat function scope: Ruby `x = 1` inside an if-block
+            // reassigns the outer `x` rather than shadowing it, which
+            // is what we want emitted in Go (otherwise the write is
+            // silently lost when the inner scope exits).
+            let name_s = name.as_str().to_string();
+            let first = ctx.declared.borrow_mut().insert(name_s.clone());
+            if first {
+                format!("{name_s} := {v}")
+            } else {
+                format!("{name_s} = {v}")
+            }
+        }
         LValue::Ivar { name } => format!("self.{name} = {v}"),
         _ => format!("/* TODO: emit Assign target shape */ _ = {v}"),
     }
@@ -731,6 +764,9 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                             recv = n.recv_name,
                             go_ty = n.go_ty,
                         ));
+                        // Track the newly-declared name so a later
+                        // Assign to it emits `=`, not `:=`.
+                        ctx.declared.borrow_mut().insert(n.narrowed_ident.clone());
                         tail_ctx_cell = Some(
                             ctx.with_rename(n.recv_name.clone(), n.narrowed_ident.clone()),
                         );
