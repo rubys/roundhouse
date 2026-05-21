@@ -182,6 +182,8 @@ fn build_and_run(test_file: &Path, tag: &str) {
         .output()
         .expect("spawn ruby");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "framework test failed: {} (emitted to {})\n\
@@ -189,9 +191,56 @@ fn build_and_run(test_file: &Path, tag: &str) {
          === stderr ===\n{}",
         test_file.display(),
         emitted_test.path().display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        stdout,
+        stderr,
     );
+
+    assert_tests_ran(&stdout, test_file, &emitted_test.path());
+}
+
+/// Defense against issue #4: `output.status.success()` alone counts
+/// "0 tests passed" as green. When emit-routing drops the `*Test`
+/// class on the floor (e.g. when the source file also defines a
+/// `< AR::Base` helper class that gets picked up first), the emit
+/// produces no test methods and the spinel autorun shim renders
+/// `puts "X: 0 tests passed"` — the process exits 0 and the harness
+/// counted that as a pass before this check.
+///
+/// The emit rewrites `< Minitest::Test` to `< TestBase` (see
+/// `runtime/ruby/test/test_helper.rb`), so Minitest's own `N runs`
+/// line is always `0 runs` and not the right signal here. The
+/// authoritative count is the autorun shim's own summary.
+fn assert_tests_ran(stdout: &str, test_file: &Path, emitted: &Path) {
+    let count = stdout
+        .lines()
+        .find_map(parse_autorun_tests_passed)
+        .unwrap_or_else(|| {
+            panic!(
+                "framework test for {} produced no autorun summary line — \
+                 cannot verify tests actually ran (see issue #4).\n\
+                 emitted: {}\n=== stdout ===\n{}",
+                test_file.display(),
+                emitted.display(),
+                stdout,
+            )
+        });
+    assert!(
+        count >= 1,
+        "framework test for {} reported 0 tests passed — \
+         emit-routing likely dropped the test class (see issue #4).\n\
+         emitted: {}\n=== stdout ===\n{}",
+        test_file.display(),
+        emitted.display(),
+        stdout,
+    );
+}
+
+/// Match `<ClassName>: <N> tests passed` (see
+/// `src/emit/ruby.rs::render_autorun_shim`).
+fn parse_autorun_tests_passed(line: &str) -> Option<usize> {
+    let line = line.trim();
+    let idx = line.find(" tests passed")?;
+    line[..idx].split_whitespace().last()?.parse::<usize>().ok()
 }
 
 #[test]

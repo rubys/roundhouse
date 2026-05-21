@@ -11,23 +11,13 @@
 //!
 //!     PATH=$HOME/git/spinel:$PATH cargo test --test framework_tests_spinel -- --ignored --nocapture
 //!
-//! Status (2026-05-20): 3/6 tests pass under spinel; the CI job is
-//! `continue-on-error: true` while the other three close.
-//!   ✓ inflector  ✓ router  ✓ ac_base
-//!   ✗ ar_base       — references FrameworkTestAdapter (Hash[Symbol|
-//!                     String, untyped] doesn't survive spinel
-//!                     monomorphization; minimal helper here omits it
-//!                     so the missing-constant cascade is visible)
-//!   ✗ errors        — `assert_operator <class>, :<, <class>` uses
-//!                     Class-as-value via .send(op, ...); known cross-
-//!                     target non-translatable per the comment in
-//!                     runtime/ruby/test/test_helper.rb
-//!   ⚠ view_helpers  — source defines `class Article < AR::Base` +
-//!                     `class ViewHelpersTest`; emit_spinel routes
-//!                     Article to test/models/ and drops the actual
-//!                     test class. Harness reports false-positive
-//!                     "0 tests passed" — roundhouse emit bug, not
-//!                     spinel.
+//! Status: CI job is `continue-on-error: true` while spinel-side
+//! gaps close. The `view_helpers` false-positive previously listed
+//! here (Article+ViewHelpersTest dual-class shape silently dropped
+//! the test class) is closed by issue #4 — `ingest_test_file` now
+//! picks the `*Test` class regardless of source order and routes
+//! top-level helpers through `inner_classes`. The N≥1 autorun-shim
+//! check below catches any future regression of the same class.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -246,6 +236,8 @@ end
         .output()
         .expect("spawn test binary");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "framework test failed: {} (binary {})\n\
@@ -253,9 +245,47 @@ end
          === stderr ===\n{}",
         test_file.display(),
         bin_path,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        stdout,
+        stderr,
     );
+
+    assert_tests_ran(&stdout, test_file, &emitted_test.path());
+}
+
+/// Defense against issue #4: the spinel autorun shim prints
+/// `<ClassName>: <N> tests passed` after running every `test_*`
+/// method. When emit-routing drops the `*Test` class (e.g. when the
+/// source file also defines a `< AR::Base` helper class that gets
+/// picked up first), N is 0 and the binary still exits clean. Parse
+/// the shim's summary line and require at least one test ran.
+fn assert_tests_ran(stdout: &str, test_file: &Path, emitted: &Path) {
+    let count = stdout.lines().find_map(parse_spinel_tests_passed).unwrap_or_else(|| {
+        panic!(
+            "framework test for {} produced no spinel autorun summary \
+             line — cannot verify tests actually ran (see issue #4).\n\
+             emitted: {}\n=== stdout ===\n{}",
+            test_file.display(),
+            emitted.display(),
+            stdout,
+        )
+    });
+    assert!(
+        count >= 1,
+        "framework test for {} reported 0 tests passed — \
+         emit-routing likely dropped the test class (see issue #4).\n\
+         emitted: {}\n=== stdout ===\n{}",
+        test_file.display(),
+        emitted.display(),
+        stdout,
+    );
+}
+
+/// Match `<ClassName>: <N> tests passed`. The shim emits this exactly,
+/// so look for the suffix and parse the digits immediately before.
+fn parse_spinel_tests_passed(line: &str) -> Option<usize> {
+    let line = line.trim();
+    let idx = line.find(" tests passed")?;
+    line[..idx].split_whitespace().last()?.parse::<usize>().ok()
 }
 
 #[test]

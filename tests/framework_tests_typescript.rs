@@ -122,6 +122,8 @@ fn build_and_run(test_file: &Path, tag: &str) {
         .output()
         .expect("run tsx --test");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "tsx --test failed for {} at {}:\n\
@@ -129,8 +131,32 @@ fn build_and_run(test_file: &Path, tag: &str) {
          === stderr ===\n{}",
         test_file.display(),
         scratch.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        stdout,
+        stderr,
+    );
+
+    assert_tests_ran(&stdout, test_file, &scratch);
+}
+
+/// Defense against issue #4: `node:test` exits 0 when zero tests
+/// are registered, and its `ℹ tests <N>` summary line counts the
+/// test FILE itself as 1 when no `test(...)` calls happened inside —
+/// so a parse of that line would falsely report N=1 for an empty
+/// emit. Count the spec-reporter's per-test lines instead: each
+/// registered `test(...)` block produces a `✔ <ClassName>#test_<name>`
+/// (or `✖ …`) line. `discover_tests` (in the TS framework runtime)
+/// names every block `${className}#${methodName}`, so the `#test_`
+/// substring is the reliable per-test marker.
+fn assert_tests_ran(stdout: &str, test_file: &Path, scratch: &Path) {
+    let count = stdout.lines().filter(|l| l.contains("#test_")).count();
+    assert!(
+        count >= 1,
+        "framework test for {} ran 0 tests — \
+         emit-routing likely dropped the test class (see issue #4).\n\
+         scratch: {}\n=== stdout ===\n{}",
+        test_file.display(),
+        scratch.display(),
+        stdout,
     );
 }
 

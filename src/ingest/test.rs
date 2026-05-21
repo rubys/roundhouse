@@ -14,7 +14,7 @@ use crate::{ClassId, Symbol};
 use super::expr::ingest_expr;
 use super::library_class::{ingest_library_method, library_class_from_node};
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_first_class, flatten_statements,
+    class_name_path, constant_id_str, constant_path_of, flatten_statements,
 };
 use super::{IngestError, IngestResult};
 
@@ -22,12 +22,33 @@ use super::{IngestError, IngestResult};
 /// helper or empty file). Unrecognized top-level constructs inside the
 /// class are silently skipped — same posture as `ingest_controller`'s
 /// `Unknown` fallback but without the surrounding body-item model.
+///
+/// When the file declares multiple top-level classes — typically a
+/// helper model paired with a `*Test` class (see
+/// `runtime/ruby/test/action_view/view_helpers_test.rb`'s `Article` +
+/// `ViewHelpersTest` pair) — pick the `*Test` class as the test
+/// module and ingest the rest as helpers on the returned module's
+/// `inner_classes`. This keeps the emit path generic: every per-target
+/// emitter already hoists `inner_classes` above the test body, so a
+/// top-level helper class lands alongside the test file without
+/// per-target plumbing changes.
 pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestModule>> {
     let result = parse(source);
     let root = result.node();
-    let Some(class) = find_first_class(&root) else {
+    let mut top_classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
+    collect_top_level_classes(&root, &mut top_classes);
+    if top_classes.is_empty() {
         return Ok(None);
-    };
+    }
+    // Pick the test class by heuristic; everything else is a helper.
+    // Fall back to first class if no candidate matches (preserves the
+    // historical single-class shape).
+    let test_idx = top_classes
+        .iter()
+        .position(is_test_class_node)
+        .unwrap_or(0);
+    let class = top_classes.remove(test_idx);
+    let top_level_helper_nodes = top_classes;
 
     let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
@@ -136,6 +157,33 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         }
     }
 
+    // Top-level helper classes (e.g. `class Article < ActiveRecord::
+    // Base` declared next to `ViewHelpersTest` in the same file) ingest
+    // as LibraryClass and flow through the same `inner_classes` channel
+    // as body-internal helpers. The per-target emit paths already hoist
+    // `inner_classes` to file scope above the test body — same routing,
+    // no further per-target changes needed.
+    //
+    // Additional `*Test`-shaped classes (a single file with multiple
+    // `< Minitest::Test` classes, as in
+    // `runtime/ruby/test/active_record/errors_test.rb` declaring
+    // `RecordNotFoundTest` + `RecordInvalidTest`) are NOT added as
+    // helpers — inner_classes don't get the `< Minitest::Test → <
+    // TestBase` parent rewrite the main test class does, so emitting
+    // them inline would have Minitest find them as Test subclasses
+    // under CRuby and run them against the wrong assertion surface.
+    // The right fix is to emit each as its own test file; that
+    // requires plumbing a `Vec<TestModule>` return from this function
+    // and is tracked separately. For now they fall through and stay
+    // silently dropped (same behavior as before this commit).
+    for helper_node in &top_level_helper_nodes {
+        if is_test_class_node(helper_node) {
+            continue;
+        }
+        let lc = library_class_from_node(helper_node, file)?;
+        inner_classes.push(lc);
+    }
+
     Ok(Some(TestModule {
         name,
         parent,
@@ -147,6 +195,55 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
         constants,
         includes,
     }))
+}
+
+/// Collect every direct top-level class declaration. Does NOT recurse
+/// into modules — Rails test files declare their `*Test` class at the
+/// file's top scope; helper models live alongside at the same scope.
+/// Nested module declarations are not a shape we encounter for tests.
+fn collect_top_level_classes<'pr>(
+    node: &Node<'pr>,
+    out: &mut Vec<ruby_prism::ClassNode<'pr>>,
+) {
+    if let Some(c) = node.as_class_node() {
+        out.push(c);
+        return;
+    }
+    if let Some(p) = node.as_program_node() {
+        collect_top_level_classes(&p.statements().as_node(), out);
+        return;
+    }
+    if let Some(s) = node.as_statements_node() {
+        for stmt in s.body().iter() {
+            collect_top_level_classes(&stmt, out);
+        }
+    }
+}
+
+/// Heuristic: a class is "the test class" when its name ends with
+/// `Test` (e.g. `ViewHelpersTest`, `InflectorTest`) OR when its parent
+/// path's leaf segment is a known test base (`Test`, `TestCase`,
+/// `IntegrationTest`). The two conditions together cover both the
+/// framework's own `< Minitest::Test` shape and Rails app tests'
+/// `< ActiveSupport::TestCase` / `< ActionDispatch::IntegrationTest`.
+fn is_test_class_node(c: &ruby_prism::ClassNode<'_>) -> bool {
+    if let Some(name_path) = class_name_path(c) {
+        if let Some(last) = name_path.last() {
+            if last.ends_with("Test") {
+                return true;
+            }
+        }
+    }
+    if let Some(parent_node) = c.superclass() {
+        if let Some(parent_path) = constant_path_of(&parent_node) {
+            if let Some(last) = parent_path.last() {
+                if matches!(last.as_str(), "Test" | "TestCase" | "IntegrationTest") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Recognize `setup do ... end` (Call with method=setup, block body)

@@ -109,6 +109,8 @@ fn build_and_run(test_file: &Path, tag: &str) {
         .output()
         .expect("run crystal spec");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "crystal spec failed for {} at {}:\n\
@@ -116,9 +118,47 @@ fn build_and_run(test_file: &Path, tag: &str) {
          === stderr ===\n{}",
         test_file.display(),
         scratch.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        stdout,
+        stderr,
     );
+
+    assert_tests_ran(&stdout, test_file, &scratch);
+}
+
+/// Defense against issue #4: `crystal spec` exits 0 when the
+/// emitted spec file registers no `it`/`describe` blocks. When
+/// emit-routing drops the `*Test` class (e.g. the source file also
+/// defines a `< AR::Base` helper class that gets picked up first),
+/// the resulting `.cr` carries the helper but no test definitions
+/// and Crystal reports `0 examples` while passing. Parse the spec
+/// summary line and require at least one example ran.
+fn assert_tests_ran(stdout: &str, test_file: &Path, scratch: &Path) {
+    let count = stdout.lines().find_map(parse_crystal_examples).unwrap_or_else(|| {
+        panic!(
+            "framework test for {} produced no crystal spec summary line — \
+             cannot verify tests actually ran (see issue #4).\n\
+             scratch: {}\n=== stdout ===\n{}",
+            test_file.display(),
+            scratch.display(),
+            stdout,
+        )
+    });
+    assert!(
+        count >= 1,
+        "framework test for {} reported 0 examples ran — \
+         emit-routing likely dropped the test class (see issue #4).\n\
+         scratch: {}\n=== stdout ===\n{}",
+        test_file.display(),
+        scratch.display(),
+        stdout,
+    );
+}
+
+/// Crystal spec summary: `5 examples, 0 failures, 0 errors, 0 pending`.
+fn parse_crystal_examples(line: &str) -> Option<usize> {
+    let line = line.trim();
+    let idx = line.find(" examples, ")?;
+    line[..idx].split_whitespace().last()?.parse::<usize>().ok()
 }
 
 #[test]
