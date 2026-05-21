@@ -824,6 +824,72 @@ fn class_reflection_rewrites() {
     );
 }
 
+/// Bare `new(args)` inside a class method (`def self.create;
+/// new(attrs); end`) — Ruby's implicit receiver resolves to the
+/// enclosing class, so emit must route through the synthesized
+/// `New<ClassName>` constructor, not the undefined bare identifier
+/// `New`. Mirrors the `Const(X).new(args)` rewrite that fires when
+/// the receiver is explicit.
+#[test]
+fn bare_new_in_class_method_resolves_to_constructor() {
+    // `def self.create(attrs); new(attrs); end`
+    let create = MethodDef {
+        name: Symbol::from("create"),
+        receiver: MethodReceiver::Class,
+        params: vec![DialectParam::positional(Symbol::from("attrs"))],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("new"),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var { id: VarId(0), name: Symbol::from("attrs") },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("attrs"),
+                ty: Ty::Untyped,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Class { id: ClassId(Symbol::from("Widget")), args: vec![] }),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Widget")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Widget")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![create],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit widget class");
+
+    // The bare `new(attrs)` must rewrite to the typed constructor.
+    assert!(
+        emitted.contains("NewWidget(attrs)"),
+        "bare new(attrs) in class method missing constructor rewrite:\n{emitted}",
+    );
+    // Must not leave the bare identifier — Go would fail with
+    // "undefined: New" at build time.
+    assert!(
+        !emitted.contains("return New(attrs)") && !emitted.contains(" New(attrs)\n"),
+        "bare new leaked as undefined identifier `New`:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an

@@ -783,6 +783,16 @@ pub(super) fn emit_send(
                 return format!("New{class_name}({})", args_s.join(", "));
             }
         }
+        // Bare `new(args)` inside a class method (`def self.create;
+        // new(attrs); end`) — Ruby resolves the implicit receiver to
+        // the enclosing class. Route to the synthesized constructor
+        // for that class so emit produces `New<ClassName>(args)`,
+        // not an undefined-identifier `New(args)`.
+        if recv.is_none() && ctx.in_class_method {
+            if let Some(class) = ctx.class_name.as_deref() {
+                return format!("New{class}({})", args_s.join(", "));
+            }
+        }
     }
 
     // Receiver-Ty-aware dispatch for methods whose name is ambiguous
