@@ -10,12 +10,14 @@
 #
 # Usage:  scripts/bench [options] [TARGET ...]
 #
-#   TARGET ∈ { rails | ruby | ruby-int | typescript | crystal | go |
-#              rust | python | elixir }  (default: rails ruby)
+#   TARGET ∈ { rails | rails-int | ruby | ruby-int | typescript |
+#              crystal | go | rust | python | elixir }
+#              (default: rails ruby)
 #
-#   `rails` = Rails reference (Puma + YJIT, production env)
-#   `ruby`  = Roundhouse-emit Ruby (Puma + YJIT)
-#   `ruby-int` = Roundhouse-emit Ruby (Puma, YJIT disabled, baseline)
+#   `rails`     = Rails reference (Puma + YJIT, production env)
+#   `rails-int` = Rails reference (Puma, YJIT disabled, baseline)
+#   `ruby`      = Roundhouse-emit Ruby (Puma + YJIT)
+#   `ruby-int`  = Roundhouse-emit Ruby (Puma, YJIT disabled, baseline)
 #
 # Options:
 #   --workers N         Puma WEB_CONCURRENCY for Ruby targets (default 1)
@@ -90,12 +92,12 @@ done
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|ruby|ruby-int|typescript|crystal|rust) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|typescript|crystal|rust) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails ruby ruby-int typescript crystal rust" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int typescript crystal rust" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -244,7 +246,7 @@ trap cleanup EXIT INT TERM
 build_target() {
     local target="$1"
     case "$target" in
-        rails)
+        rails|rails-int)
             TARGET_BUILD_DIR="$FIXTURE"
             TARGET_GEMFILE=""  # uses fixture's own Gemfile
             if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
@@ -311,7 +313,7 @@ build_target() {
 stage_db() {
     local target="$1"
     case "$target" in
-        rails)
+        rails|rails-int)
             # Production Rails reads storage/production.sqlite3 — clone
             # the seeded dev DB into place so the fixture serves real
             # rows. SQLite3's `.backup` produces a clean copy without
@@ -368,6 +370,20 @@ start_target() {
                 RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
                 SECRET_KEY_BASE=bench-secret-key \
                 RUBYOPT=--yjit \
+                bin/rails server -p "$port" -e production \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        rails-int)
+            # Same as `rails` minus RUBYOPT=--yjit — isolates the
+            # YJIT-attributable share of the rails baseline.
+            (cd "$FIXTURE" && \
+                RAILS_ENV=production \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY="$workers" \
+                RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
+                SECRET_KEY_BASE=bench-secret-key \
                 bin/rails server -p "$port" -e production \
                 >"$log" 2>&1) &
             TARGET_PID=$!
@@ -520,7 +536,7 @@ for target in "${TARGETS[@]}"; do
         # Ruby targets honor WEB_CONCURRENCY; other targets ignore it
         # (and we record the field as 1 for those).
         case "$target" in
-            rails|ruby|ruby-int) effective_workers="$workers" ;;
+            rails|rails-int|ruby|ruby-int) effective_workers="$workers" ;;
             *)                    effective_workers=1 ;;
         esac
 
