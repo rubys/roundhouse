@@ -214,10 +214,15 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_javascript_importmap_tags_with_explicit_pins
-    # `.to_h` on each pin: Ruby no-op, Crystal converts the NamedTuple
-    # literal to Hash so the array element type matches the helper's
-    # `Array(Hash(Symbol, String))` parameter signature.
-    pins = [{ name: "app", path: "/assets/app.js" }.to_h]
+    # Pin literal is a record-shaped `{name:, path:}` (RBS:
+    # `Array[{ name: String, path: String }]`). Ruby reads it as a
+    # Hash and `p[:name]`/`p[:path]` resolve via Symbol keys; Crystal
+    # parses the literal as `NamedTuple(name: String, path: String)`
+    # and matches the lowered signature directly. Don't `.to_h` here —
+    # that converts the NamedTuple to `Hash(Symbol, String)` under
+    # Crystal and conflicts with the helper's NamedTuple-typed `pins`
+    # parameter.
+    pins = [{ name: "app", path: "/assets/app.js" }]
     out = ViewHelpers.javascript_importmap_tags(pins, "app")
     assert_includes out, %("app": "/assets/app.js")
     assert_includes out, %(<link rel="modulepreload" href="/assets/app.js">)
