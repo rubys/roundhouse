@@ -364,15 +364,9 @@ jobs:
   # Requires libsqlite3-dev at link time (the binaries `-lsqlite3`).
   # ubuntu-latest ships libsqlite3-0 (runtime) but not the dev linker
   # symlink, so we install it explicitly.
-  # Currently red on gcc-strict via matz/spinel#631 (is_a?(Hash)-
-  # narrowed value not unboxed at typed-Hash call site). macOS clang
-  # treats the same site as a warning, so local cargo test passes
-  # but Linux gcc rejects. Allowed to fail until #631 lands upstream;
-  # drop `continue-on-error` then.
   toolchain-spinel:
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -610,9 +604,11 @@ jobs:
   # target vendors the Tep transport (precompiles sphttp.o + sed-
   # substitutes @TEP_SPHTTP_O@ in net.rb) before AOT-compile; the
   # scaffold's `make build` then drives `spinel main.rb -o build/blog`.
-  # Currently exploratory — emit divergences from Rails are expected
-  # (dom_id "0_" prefix, JSON encoding gaps); job is marked
-  # continue-on-error until those close.
+  # 3/7 paths match today; remaining 4 are all driven by matz/spinel
+  # #634 (nil-default widened to non-nullable type when other call
+  # sites pass a typed value) — surfaces as `id="<sym>_<model>_<n>"`
+  # on dom_id calls without explicit suffix, and `value="0"` on
+  # empty form inputs. Drop continue-on-error when #634 lands.
   compare-spinel:
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
