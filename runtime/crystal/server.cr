@@ -18,6 +18,7 @@
 # from the transpiled runtime.
 
 require "http/server"
+require "mime"
 require "uri"
 require "./db"
 require "./cable"
@@ -77,6 +78,23 @@ module Roundhouse
       if path == "/cable"
         Roundhouse::Cable.handle(context)
         return
+      end
+
+      # Static assets: serve `static/<path>` for any `/assets/*` request.
+      # Mirrors Rails' Propshaft URL shape — the importmap pins and
+      # `stylesheet_link_tag("tailwind")` both point at /assets/<name>.
+      # `bin/rh transpile crystal` writes the actual files into
+      # `static/assets/` (Tailwind compile output, turbo.min.js copy).
+      # Returns 404 fall-through if the file isn't present, so route
+      # matching never sees an /assets/ path that's served from disk.
+      if path.starts_with?("/assets/")
+        file = File.join("static", path)
+        if File.file?(file)
+          context.response.headers["Content-Type"] =
+            MIME.from_filename?(file) || "application/octet-stream"
+          File.open(file) { |io| IO.copy(io, context.response.output) }
+          return
+        end
       end
 
       # Per-request format inference. Strip a `.json` suffix from the

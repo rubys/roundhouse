@@ -14,6 +14,7 @@
 require 'optparse'
 require 'fileutils'
 require 'open3'
+require 'shellwords'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
 TARGETS = %w[spinel ruby crystal elixir go python rust typescript typescript-worker].freeze
@@ -383,8 +384,9 @@ def cmd_transpile(argv)
   return 1 unless ok
 
   case target
-  when 'ruby'   then post_transpile_ruby(out)
-  when 'spinel' then post_transpile_spinel(out)
+  when 'ruby'    then post_transpile_ruby(out)
+  when 'spinel'  then post_transpile_spinel(out)
+  when 'crystal' then post_transpile_crystal(out)
   end
   0
 end
@@ -422,6 +424,86 @@ def post_transpile_spinel(out)
     content.gsub!('@TEP_SPHTTP_O@', 'runtime/tep/sphttp.o')
     File.write(net_rb, content)
   end
+end
+
+# Crystal target's post-build: build Tailwind CSS and stage turbo.min.js
+# into static/assets/, mirroring what the Ruby target's Rakefile does
+# (compile via `npx @tailwindcss/cli`, copy turbo.min.js from the
+# turbo-rails gem dir). The Crystal runtime's HTTP server serves
+# `/assets/*` from `static/assets/` — see runtime/crystal/server.cr.
+#
+# Content glob for Tailwind is the transpiled `.cr` tree under
+# build/transpiled-blog-crystal/src/ — the same place HTML strings get
+# built into. `app/assets/tailwind.css` is a one-line `@import
+# "tailwindcss";` (same shape as the ruby scaffold's).
+def post_transpile_crystal(out)
+  build_assets(
+    out,
+    label: 'crystal',
+    content_globs: ['src/**/*.cr'],
+  )
+end
+
+# Shared asset-build helper. Emits app/assets/tailwind.css, compiles
+# Tailwind via npx, and copies turbo.min.js from the turbo-rails gem.
+# Warn-but-don't-fail on missing prereqs (npx, turbo-rails) so a
+# user without the asset toolchain still gets a transpiled tree —
+# they'll see unstyled pages instead of a broken transpile.
+def build_assets(out, label:, content_globs:)
+  static_assets = File.join(out, 'static', 'assets')
+  FileUtils.mkdir_p(static_assets)
+  app_assets = File.join(out, 'app', 'assets')
+  FileUtils.mkdir_p(app_assets)
+
+  tailwind_input = File.join(app_assets, 'tailwind.css')
+  File.write(tailwind_input, "@import \"tailwindcss\";\n")
+
+  # Tailwind v4 resolves `tailwindcss` from node_modules/ of the cwd,
+  # so install it locally (--no-save: don't add to a package.json).
+  # `.installed` stamp file means a re-transpile skips this step.
+  stamp = File.join(out, 'node_modules', '.installed')
+  unless File.exist?(stamp)
+    warn "rh transpile #{label}: installing tailwindcss (one-time, ~5s)"
+    unless system('npm', 'install', '--silent', '--no-save',
+                  'tailwindcss', '@tailwindcss/cli',
+                  chdir: out, out: File::NULL)
+      warn "rh transpile #{label}: npm install failed (Node/npm required); skipping assets"
+      return
+    end
+    FileUtils.mkdir_p(File.dirname(stamp))
+    FileUtils.touch(stamp)
+  end
+
+  tailwind_output = File.join(static_assets, 'tailwind.css')
+  npx_args = ['npx', '@tailwindcss/cli',
+              '--input', tailwind_input,
+              '--output', tailwind_output,
+              '--minify']
+  content_globs.each do |g|
+    npx_args << '--content' << File.join(out, g)
+  end
+
+  warn "rh transpile #{label}: building tailwind.css"
+  unless system(*npx_args, chdir: out, out: File::NULL)
+    warn "rh transpile #{label}: tailwind build failed; skipping assets"
+    return
+  end
+
+  # turbo.min.js — same resolution as the Ruby scaffold's Rakefile:
+  # ask Bundler-managed Ruby for the turbo-rails gem's dir, then copy
+  # the bundled minified file. Requires the fixture to have been
+  # bundled (bin/rh fixture does `bundle install`).
+  gem_dir = `cd #{fixture_path.shellescape} && bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(turbo-rails)).gem_dir' 2>/dev/null`.strip
+  if gem_dir.empty? || !File.directory?(gem_dir)
+    warn "rh transpile #{label}: turbo-rails gem not found; skipping turbo.min.js (cable client will fail to load in browser)"
+    return
+  end
+  turbo_src = File.join(gem_dir, 'app', 'assets', 'javascripts', 'turbo.min.js')
+  unless File.file?(turbo_src)
+    warn "rh transpile #{label}: #{turbo_src} missing; skipping turbo.min.js"
+    return
+  end
+  FileUtils.cp(turbo_src, File.join(static_assets, 'turbo.min.js'))
 end
 
 # ---------------------------------------------------------------------
