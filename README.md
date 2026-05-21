@@ -101,6 +101,32 @@ fetch <target>` downloads pre-transpiled archives).
 Prerequisites and the architecture of what gets generated:
 [`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
 
+## Workflow runner (`bin/rh`)
+
+`bin/rh` is the single entry point for every workflow below. Ruby is
+the only prerequisite for the onboarding subcommands; the build
+subcommands shell out to `cargo`. Run `bin/rh --help` for the full
+surface and `bin/rh <command> --help` for per-command options.
+
+Onboarding (no Rust required):
+
+- `bin/rh doctor` — check prerequisites; list which subcommands work today.
+- `bin/rh fetch <target>` — download a pre-transpiled archive into `downloads/<target>/`.
+- `bin/rh fixture` — generate the Rails source fixture via `rails new` + scaffold.
+
+Build (requires Rust):
+
+- `bin/rh transpile <target>` — build `fixtures/real-blog` into `build/transpiled-blog-<target>/`.
+- `bin/rh dev | test | run <target>` — transpile, then run the emitted tree's dev/test/run action (ruby today).
+- `bin/rh compare [<target>]` — fetch the same URL from Rails and the target, diff canonicalized DOM.
+- `bin/rh bench [<target>...]` — HTTP throughput + RSS benchmark across targets.
+- `bin/rh site` — build the full multi-target Pages site (the one linked above).
+
+Cleanup: `bin/rh clean <target | fixture>`.
+
+Targets: `spinel`, `ruby`, `crystal`, `elixir`, `go`, `python`, `rust`,
+`typescript`, `typescript-worker`.
+
 ## Supporting pieces worth knowing
 
 - **Method catalog** (`src/catalog/`) — one IDL-shaped table declaring
