@@ -25,7 +25,7 @@ use roundhouse::dialect::{
 };
 use roundhouse::effect::EffectSet;
 use roundhouse::emit::{go, go2};
-use roundhouse::expr::{Expr, ExprNode, LValue};
+use roundhouse::expr::{Expr, ExprNode, LValue, Literal};
 use roundhouse::ident::{ClassId, Symbol, VarId};
 use roundhouse::ingest::ingest_app;
 use roundhouse::span::Span;
@@ -1260,6 +1260,89 @@ fn map_array_block_shape() {
     assert!(
         !emitted.contains("arr.Map"),
         "map leaked as bare field-read on receiver:\n{emitted}",
+    );
+}
+
+/// `def _adapter_insert; end` — Ruby's empty body returns nil. If the
+/// method's return type is non-void (e.g. `int64` for the overridable
+/// adapter stub), the Go emit needs a synthesized zero-value return
+/// or `go vet` rejects the function as "missing return".
+///
+/// This covers two shapes:
+/// 1. Body is a bare `Lit::Nil` (the Symbol body that `def m; end`
+///    parses to today).
+/// 2. Body is `Seq { exprs: [Lit::Nil] }` — single-statement Seq with
+///    just nil. Belt-and-suspenders since the lowerer wraps some
+///    bodies and the gap is the resulting Go is the same shape.
+#[test]
+fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
+    let make_method = |name: &str, body: Expr, ret: Ty| MethodDef {
+        name: Symbol::from(name),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body,
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(ret),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Stub")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+
+    // Bare Lit::Nil body + int64 return.
+    let m1 = make_method(
+        "insert_id",
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        Ty::Int,
+    );
+    // Seq-wrapped Lit::Nil body + string return.
+    let m2 = make_method(
+        "table_name",
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Nil },
+                )],
+            },
+        ),
+        Ty::Str,
+    );
+
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Stub")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![m1, m2],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit empty-body class");
+
+    // m1: int64 return → `return 0`. Method name preserves snake_case
+    // (go2 keeps Ruby-source naming for instance methods).
+    assert!(
+        emitted.contains("insert_id() int64 {\n\treturn 0\n}"),
+        "Lit::Nil + int64 return missing zero-value synth:\n{emitted}",
+    );
+    // m2: string return → `return ""` (NOT `return nil` — empty Seq
+    // bodies must collapse to the typed zero value).
+    assert!(
+        emitted.contains("table_name() string {\n\treturn \"\"\n}"),
+        "Seq[Nil] + string return missing zero-value synth:\n{emitted}",
+    );
+    // Regression guard: must not emit `return nil` against a typed
+    // return — Go rejects it.
+    assert!(
+        !emitted.contains("table_name() string {\n\treturn nil\n}"),
+        "Seq[Nil] body emitted `return nil` instead of zero value:\n{emitted}",
     );
 }
 

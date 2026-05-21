@@ -482,16 +482,25 @@ fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
 /// back if we ever need them, but for the strangler-fig widening
 /// the loud failure is the inventory.
 ///
-/// Special case: when the body is a bare `Lit::Nil` (Ruby `def foo;
-/// end` with no expressions — used by AR::Base's `_adapter_insert`
-/// etc. as overridable stubs) AND the method's return type is
-/// non-Nil, emit `return <zero value>`. Without this, Go rejects
-/// `return nil` against e.g. `int64` returns.
+/// Special case: when the body is effectively nil (a bare `Lit::Nil`
+/// OR an empty `Seq` OR a `Seq` whose only expr is `Lit::Nil` — Ruby
+/// `def foo; end` ingests as the empty-Seq form, used by AR::Base's
+/// `_adapter_insert` etc. as overridable stubs) AND the method's
+/// return type is non-Nil, emit `return <zero value>`. Without this,
+/// Go rejects `return nil` against e.g. `int64` returns or "missing
+/// return" for the bare empty-body shape.
 fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
     use crate::expr::{ExprNode, Literal};
-    if !ctx.void_method
-        && matches!(&*m.body.node, ExprNode::Lit { value: Literal::Nil })
-    {
+    let body_is_effectively_nil = match &*m.body.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Seq { exprs } => {
+            exprs.is_empty()
+                || (exprs.len() == 1
+                    && matches!(&*exprs[0].node, ExprNode::Lit { value: Literal::Nil }))
+        }
+        _ => false,
+    };
+    if !ctx.void_method && body_is_effectively_nil {
         if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
             return format!("\treturn {}\n", go_zero_value(ret));
         }
