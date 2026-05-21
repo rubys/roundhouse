@@ -228,15 +228,20 @@ async fn layout_wrap(req: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(wrapped))
 }
 
-/// The document shell. Tailwind Play CDN + plain `@hotwired/turbo`
-/// (not `@hotwired/turbo-rails` — that variant auto-wires Action
-/// Cable on import and we don't run `/cable`, so its transitive
-/// `@rails/actioncable/src` lookup fails in the browser). Inline
-/// data-URI favicon suppresses the no-icon 404 on each page load.
-/// Matches the emitted scaffold layout file structurally even
-/// though that file's ERB helpers still stub as TODOs — we
-/// synthesize the working shell here until view-helper emission
-/// catches up.
+/// The document shell. Asset paths point at `/assets/tailwind.css`
+/// + `/assets/turbo.min.js`, served by `tower-http`'s `ServeDir`
+/// mounted on `/assets` (see `start`). `bin/rh transpile rust` is
+/// expected to have populated `static/assets/` with the Tailwind
+/// compile output + a copy of turbo.min.js; without that step the
+/// page is unstyled but functional. Plain `@hotwired/turbo` (not
+/// `@hotwired/turbo-rails`) avoids the latter's transitive
+/// `@rails/actioncable/src` lookup, which would 404 in the browser
+/// — our cable handler at `/cable` matches turbo's default URL.
+/// Inline data-URI favicon suppresses the no-icon 404 on each
+/// page load. Used only as a fallback when no emitter layout is
+/// supplied via `StartOptions::layout`; the emitted Layouts
+/// module overrides this for apps that have `app/views/layouts/
+/// application.{erb,rb}`.
 fn render_layout(body: &str) -> String {
     format!(
         r##"<!DOCTYPE html>
@@ -246,11 +251,11 @@ fn render_layout(body: &str) -> String {
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="icon" href="data:,">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/assets/tailwind.css">
     <script type="importmap">
     {{
       "imports": {{
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+        "@hotwired/turbo": "/assets/turbo.min.js"
       }}
     }}
     </script>

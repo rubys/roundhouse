@@ -334,16 +334,15 @@ let layoutRenderer: ((body: string) => string) | null = null;
  *  a layout reach this file's `renderLayouts_application` instead
  *  via the emitter-supplied `opts.layout` callback.
  *
- *   - Tailwind Play CDN (`cdn.tailwindcss.com`): compiles utility
- *     classes in the browser. Fine for dev; production swaps in
- *     a real tailwind-cli build.
- *   - `@hotwired/turbo` via importmap: provides Turbo's form
- *     submission + Stream subscription. Matches the Rust
- *     runtime's fallback shape — no `action-cable-url` meta
- *     (the `@rails/actioncable` default `/cable` is what our
- *     cable handler listens on) and plain turbo (not
- *     turbo-rails) since we don't need the Rails-specific
- *     helpers here.
+ *  Asset paths point at `/assets/tailwind.css` + `/assets/
+ *  turbo.min.js` — served by `tryServeAsset` above from
+ *  `static/assets/`. `bin/rh transpile typescript` is expected to
+ *  have populated that dir with the Tailwind compile output and
+ *  a copy of turbo.min.js; without that step the page is unstyled
+ *  but functional. Plain `@hotwired/turbo` (not `@hotwired/
+ *  turbo-rails`) avoids the latter's transitive `@rails/
+ *  actioncable/src` lookup — our cable handler at `/cable`
+ *  matches turbo's default URL.
  */
 function renderLayout(body: string): string {
   return `<!DOCTYPE html>
@@ -353,11 +352,11 @@ function renderLayout(body: string): string {
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="icon" href="data:,">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/assets/tailwind.css">
     <script type="importmap">
     {
       "imports": {
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+        "@hotwired/turbo": "/assets/turbo.min.js"
       }
     }
     </script>

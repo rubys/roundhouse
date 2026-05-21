@@ -263,6 +263,9 @@ let layoutRenderer: ((body: string) => string) | null = null;
 
 // ── Layout wrapping ────────────────────────────────────────────
 
+// Same shape as server.ts's renderLayout — see that file's
+// docstring. Asset paths point at `/assets/tailwind.css` +
+// `/assets/turbo.min.js`, served by tryServeAsset above.
 function renderLayout(body: string): string {
   return `<!DOCTYPE html>
 <html>
@@ -271,11 +274,11 @@ function renderLayout(body: string): string {
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="icon" href="data:,">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/assets/tailwind.css">
     <script type="importmap">
     {
       "imports": {
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+        "@hotwired/turbo": "/assets/turbo.min.js"
       }
     }
     </script>

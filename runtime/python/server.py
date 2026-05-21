@@ -183,7 +183,11 @@ def _fallback_layout(body: str) -> str:
     `render_layout` — Tailwind Play CDN + plain `@hotwired/turbo`
     via importmap. Never emits `<meta name="action-cable-url">`; the
     `@rails/actioncable` default `/cable` is what `cable_handler`
-    listens on."""
+    listens on. Asset paths point at `/assets/tailwind.css` +
+    `/assets/turbo.min.js` — `bin/rh transpile python` (or the
+    target's local build step) is expected to have populated
+    `static/assets/`. If the build didn't run, the page is unstyled
+    but functional."""
     return f"""<!DOCTYPE html>
 <html>
   <head>
@@ -191,11 +195,11 @@ def _fallback_layout(body: str) -> str:
     <title>Roundhouse App</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="icon" href="data:,">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/assets/tailwind.css">
     <script type="importmap">
     {{
       "imports": {{
-        "@hotwired/turbo": "https://ga.jspm.io/npm:@hotwired/turbo@8.0.0/dist/turbo.es2017-esm.js"
+        "@hotwired/turbo": "/assets/turbo.min.js"
       }}
     }}
     </script>
