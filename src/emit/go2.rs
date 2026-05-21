@@ -32,6 +32,17 @@ mod expr;
 mod library;
 mod ty;
 
+/// Phase 3 hand-written primitive runtime. Verbatim copy into the
+/// v2/ overlay — these files declare `package v2` already so no
+/// rewriting needed. They land alongside the transpiled framework
+/// runtime so cross-file references (the transpiled `ActiveRecord`
+/// module-singleton's `*AdapterInterface` slot type) resolve at
+/// `go vet` / `go build` time.
+const RT_V2_ADAPTER_INTERFACE: &str =
+    include_str!("../../runtime/go/v2/adapter_interface.go");
+const RT_V2_FRAMEWORK_TEST_ADAPTER: &str =
+    include_str!("../../runtime/go/v2/framework_test_adapter.go");
+
 /// Append go2 transpiled runtime files to `files` when
 /// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
 /// (legacy go) ships unchanged.
@@ -48,6 +59,20 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 /// emission order.
 pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
+
+    // Hand-written runtime — copied verbatim under `app/v2/`.
+    // Emitted FIRST so the transpiled framework runtime files can
+    // assume their types resolve at parse time.
+    for (name, src) in [
+        ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
+        ("framework_test_adapter.go", RT_V2_FRAMEWORK_TEST_ADAPTER),
+    ] {
+        out.push(EmittedFile {
+            path: PathBuf::from(format!("app/v2/{name}")),
+            content: src.to_string(),
+        });
+    }
+
     let units = match crate::runtime_loader::go_units(|_, c| c) {
         Ok(u) => u,
         Err(e) => {
