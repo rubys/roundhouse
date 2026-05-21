@@ -874,6 +874,17 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "app/json_builder.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

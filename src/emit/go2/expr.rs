@@ -156,11 +156,25 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             }
         }
         ExprNode::Hash { entries, .. } => {
+            // Infer concrete element types when every key/value is a
+            // string literal (`{ "k" => "v", ... }`) — emits
+            // `map[string]string` instead of `map[string]interface{}`.
+            // Matters for `gsub(regex, hash)` lookups whose return
+            // must satisfy a `string` return type.
+            let all_str_kv = entries.iter().all(|(k, v)| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } })
+                    && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } })
+            });
+            let (k_ty, v_ty) = if all_str_kv {
+                ("string", "string")
+            } else {
+                ("string", "interface{}")
+            };
             let parts: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| format!("{}: {}", emit_expr(ctx, k), emit_expr(ctx, v)))
                 .collect();
-            format!("map[string]interface{{}}{{{}}}", parts.join(", "))
+            format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "))
         }
         ExprNode::Array { elements, .. } => {
             let parts: Vec<String> = elements.iter().map(|e| emit_expr(ctx, e)).collect();
@@ -196,9 +210,9 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 }
             }
             if args.is_empty() {
-                format!("{fmt:?}")
+                go_str_literal(&fmt)
             } else {
-                format!("fmt.Sprintf({fmt:?}, {})", args.join(", "))
+                format!("fmt.Sprintf({}, {})", go_str_literal(&fmt), args.join(", "))
             }
         }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
@@ -263,6 +277,45 @@ pub(super) fn emit_send(
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
             return format!("len({})", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `.freeze` — no Go equivalent; const declarations are
+    // immutable by construction (or use of `var` for runtime
+    // initializers). Drop the call and emit just the receiver.
+    if method == "freeze" && args.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(ctx, r);
+        }
+    }
+
+    // Ruby `recv.gsub(pattern_regex, hash_or_string)` →
+    // `pattern.ReplaceAll{String,StringFunc}(recv, ...)` against
+    // Go's regexp package. Hash replacement uses
+    // `ReplaceAllStringFunc` with a closure that looks up each
+    // match in the hash; string replacement uses `ReplaceAllString`.
+    // Heuristic: if arg[1]'s emit references a map-shape identifier
+    // we can't tell from here — pick by `Expr` shape (Const →
+    // hash lookup, StringInterp / Lit::Str → string replacement).
+    // For json_builder's `s.gsub(ESCAPE_PATTERN, ESCAPES)` both
+    // args are Const, so we land on the hash-lookup form.
+    if method == "gsub" && args.len() == 2 {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let pattern = emit_expr(ctx, &args[0]);
+            let replacement = emit_expr(ctx, &args[1]);
+            let is_string_repl = matches!(
+                &*args[1].node,
+                ExprNode::Lit { value: Literal::Str { .. } }
+                    | ExprNode::StringInterp { .. }
+            );
+            if is_string_repl {
+                return format!("{pattern}.ReplaceAllString({recv_s}, {replacement})");
+            }
+            return format!(
+                "{pattern}.ReplaceAllStringFunc({recv_s}, func(m string) string {{ \
+                 return {replacement}[m] }})"
+            );
         }
     }
 
@@ -675,12 +728,100 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
             let s = value.to_string();
             if s.contains('.') { s } else { format!("{s}.0") }
         }
-        Literal::Str { value } => format!("{value:?}"),
-        Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Str { value } => go_str_literal(value),
+        Literal::Sym { value } => go_str_literal(value.as_str()),
         Literal::Regex { pattern, flags } => {
-            format!("regexp.MustCompile({:?})", format!("(?{flags}){pattern}"))
+            // Empty flags → bare pattern (Go's `(?)` is a parse
+            // error; the `(?<flags>)` group requires at least one
+            // flag char). With flags, prepend the standard prefix.
+            let go_pattern = ruby_regex_to_go(pattern);
+            let full = if flags.is_empty() {
+                go_pattern
+            } else {
+                format!("(?{flags}){go_pattern}")
+            };
+            format!("regexp.MustCompile({})", go_str_literal(&full))
         }
     }
+}
+
+/// Translate Ruby regex source to a Go-acceptable pattern. The two
+/// regression points hit so far:
+///
+/// - `\b` / `\f` inside a character class — Ruby treats these as
+///   backspace / form-feed (control chars); Go's regexp rejects them
+///   as "invalid escape sequence" inside `[]` (interprets `\b` only
+///   as word boundary, valid only outside `[]`). Rewrite both to
+///   the explicit hex form (`\x08` / `\x0c`) when seen inside `[]`.
+///
+/// Other Ruby regex extensions (named captures, lookbehind, etc.)
+/// pass through unchanged for now; surface when they show up.
+fn ruby_regex_to_go(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    let mut in_class = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(&next) = chars.peek() {
+                    if in_class && next == 'b' {
+                        out.push_str("\\x08");
+                        chars.next();
+                        continue;
+                    }
+                    if in_class && next == 'f' {
+                        out.push_str("\\x0c");
+                        chars.next();
+                        continue;
+                    }
+                    out.push('\\');
+                    out.push(next);
+                    chars.next();
+                } else {
+                    out.push('\\');
+                }
+            }
+            '[' => {
+                in_class = true;
+                out.push('[');
+            }
+            ']' => {
+                in_class = false;
+                out.push(']');
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Emit a Go-syntactic double-quoted string literal. Rust's `{:?}`
+/// produces `\u{8}` / `\u{c}` for backspace / form-feed which Go
+/// rejects (`U+007B '{' illegal in escape sequence`); Go uses `\b`
+/// `\f` plus the fixed-width `\xHH` / `\uHHHH` / `\UHHHHHHHH`
+/// forms. Covers all controls + the standard escapable chars.
+fn go_str_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{0b}' => out.push_str("\\v"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if (c as u32) < 0x7F => out.push(c),
+            c if (c as u32) < 0x10000 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push_str(&format!("\\U{:08x}", c as u32)),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Emit `expr` at body (return) position — Ruby's last-expression

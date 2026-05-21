@@ -112,11 +112,19 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     Ok(out)
 }
 
-pub fn format_constant(name: &str, _value: &Expr) -> String {
-    // Phase 1: emit a `var` placeholder. Real const emit needs a Go
-    // literal renderer over `Expr`, which is part of the per-target
-    // expression walker landing in subsequent sessions.
-    format!("var {name} interface{{}} = nil")
+pub fn format_constant(name: &str, value: &Expr) -> String {
+    // Module-level constants in Go are `var NAME = expr` (not
+    // `const`) because the values are typically composite literals
+    // (Hash → map literal, Regex → regexp.MustCompile) — neither
+    // is a Go compile-time constant.
+    //
+    // The walker's body emit already handles every shape we need
+    // (Hash → map literal, StringInterp → fmt.Sprintf, Regex →
+    // regexp.MustCompile via emit_literal). `freeze` peeled by
+    // emit_send.
+    let ctx = super::expr::EmitCtx::none();
+    let rendered = super::expr::emit_expr(&ctx, value);
+    format!("var {name} = {rendered}")
 }
 
 fn emit_method(class_name: &str, m: &MethodDef) -> String {

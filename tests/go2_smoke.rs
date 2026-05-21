@@ -39,6 +39,58 @@ fn find_file<'a>(
 }
 
 #[test]
+fn json_builder_v2_shape() {
+    let app = ingest_with_analyzer();
+    let files = go2::emit_overlay_files(&app);
+    let json_builder = find_file(&files, "app/v2/json_builder.go")
+        .expect("v2/json_builder.go missing from overlay output");
+    let text = &json_builder.content;
+
+    // Module-level const initializers — Hash literal and regex —
+    // emit as real values, not `var X interface{} = nil` placeholders.
+    assert!(
+        text.contains("var ESCAPES = map[string]string{"),
+        "ESCAPES missing typed-map initializer:\n{text}",
+    );
+    assert!(
+        text.contains("var ESCAPE_PATTERN = regexp.MustCompile("),
+        "ESCAPE_PATTERN missing regexp.MustCompile initializer:\n{text}",
+    );
+
+    // Regex inside-class escape rewrite — `\b`/`\f` translate to
+    // `\x08`/`\x0c` since Go's regexp rejects them inside `[]`.
+    assert!(
+        text.contains("\\\\x08") && text.contains("\\\\x0c"),
+        "ESCAPE_PATTERN missing \\b/\\f → \\x08/\\x0c rewrite:\n{text}",
+    );
+
+    // gsub peephole — `s.gsub(REGEX, HASH)` → `REGEX.ReplaceAllStringFunc(s, func ...)`.
+    assert!(
+        text.contains("ESCAPE_PATTERN.ReplaceAllStringFunc(s, func(m string) string"),
+        "encode_string missing gsub → ReplaceAllStringFunc translation:\n{text}",
+    );
+
+    // is_a? branches — singletons collapse to equality, mapped Tys
+    // use type-assert if-init with branch-scoped ident substitution.
+    assert!(text.contains("if v == true"), "TrueClass branch missing:\n{text}");
+    assert!(
+        text.contains("if i, ok := v.(int64); ok"),
+        "Integer branch missing typed init:\n{text}",
+    );
+    assert!(
+        text.contains("if s, ok := v.(string); ok"),
+        "String branch missing typed init:\n{text}",
+    );
+
+    // Union{Nil,T} narrowing — `if s == nil` early return then
+    // `s_str := s.(string)`.
+    assert!(
+        text.contains("s_str := s.(string)"),
+        "encode_datetime missing nil-narrow assertion:\n{text}",
+    );
+}
+
+#[test]
 fn inflector_v2_shape() {
     let app = ingest_with_analyzer();
     let files = go2::emit_overlay_files(&app);
@@ -164,8 +216,43 @@ fn inflector_v2_compiles_and_runs() {
         String::from_utf8_lossy(&vet.stderr),
     );
 
-    // `go test ./app/v2` — runs the smoke test against the emitted
-    // Inflector_pluralize.
+    // JsonBuilder smoke — encode_string, encode_value, encode_datetime
+    // behavior pinned against the emitted bodies.
+    let json_smoke = "package v2\n\
+                      \n\
+                      import \"testing\"\n\
+                      \n\
+                      func TestJsonBuilder_EncodeValue_Smoke(t *testing.T) {\n\
+                      \tcases := []struct{ in interface{}; want string }{\n\
+                      \t\t{nil, \"null\"},\n\
+                      \t\t{true, \"true\"},\n\
+                      \t\t{false, \"false\"},\n\
+                      \t\t{int64(42), \"42\"},\n\
+                      \t\t{\"hi\", `\"hi\"`},\n\
+                      \t}\n\
+                      \tfor _, c := range cases {\n\
+                      \t\tif got := JsonBuilder_encode_value(c.in); got != c.want {\n\
+                      \t\t\tt.Errorf(\"encode_value(%v) = %q, want %q\", c.in, got, c.want)\n\
+                      \t\t}\n\
+                      \t}\n\
+                      }\n\
+                      \n\
+                      func TestJsonBuilder_EncodeString_Smoke(t *testing.T) {\n\
+                      \tif got := JsonBuilder_encode_string(`a\"b`); got != `a\\\"b` {\n\
+                      \t\tt.Errorf(`encode_string(a\"b) = %q, want a\\\"b`, got)\n\
+                      \t}\n\
+                      \tif got := JsonBuilder_encode_string(\"a\\nb\"); got != `a\\nb` {\n\
+                      \t\tt.Errorf(\"encode_string(a\\\\nb) = %q, want a\\\\nb\", got)\n\
+                      \t}\n\
+                      }\n";
+    std::fs::write(
+        scratch.join("app/v2/json_builder_smoke_test.go"),
+        json_smoke,
+    )
+    .expect("write json_builder smoke");
+
+    // `go test ./app/v2` — runs the smoke tests against the emitted
+    // Inflector_pluralize and JsonBuilder_*.
     let test = Command::new("go")
         .arg("test")
         .arg("./app/v2")
