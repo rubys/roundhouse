@@ -28,6 +28,7 @@ use crate::dialect::{LibraryClass, MethodDef};
 use crate::expr::Expr;
 use crate::runtime_src::{
     parse_library_with_rbs, parse_methods_with_rbs, parse_module_constant_exprs,
+    parse_module_ivar_exprs,
 };
 use std::path::PathBuf;
 
@@ -50,6 +51,14 @@ pub struct TargetEmit {
     /// target decide internally instead of pattern-matching a
     /// pre-rendered string.
     pub format_constant: fn(name: &str, value: &Expr) -> String,
+    /// Format a module-level `@ivar = value` assignment as a target
+    /// declaration. `None` skips ivar emission (TS/Crystal/Rust all
+    /// model module state through other means and don't surface
+    /// module-level ivars in transpiled output today). `Some(fn)`
+    /// opts the target in — Go emits these as package-level `var`s
+    /// so module-singleton state (e.g. ViewHelpers' `@slots`)
+    /// resolves at use sites.
+    pub format_module_ivar: Option<fn(name: &str, value: &Expr) -> String>,
     /// Wrap a body in the target's namespace syntax. TS resolves
     /// namespaces through imports + qualified-name registration in
     /// treeshake, so this is a no-op (`namespace` arg ignored). Crystal
@@ -63,6 +72,7 @@ const TS_TARGET: TargetEmit = TargetEmit {
     emit_library_class: crate::emit::typescript::emit_library_class,
     format_import: ts_format_import,
     format_constant: ts_format_constant,
+    format_module_ivar: None,
     wrap_namespace: ts_wrap_namespace,
 };
 
@@ -88,6 +98,7 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
     emit_library_class: crate::emit::crystal::emit_library_class,
     format_import: crystal_format_import,
     format_constant: crystal_format_constant,
+    format_module_ivar: None,
     wrap_namespace: crystal_wrap_namespace,
 };
 
@@ -152,6 +163,7 @@ const RUST_TARGET: TargetEmit = TargetEmit {
     emit_library_class: crate::emit::rust2::library::emit_library_class,
     format_import: rust_format_import,
     format_constant: crate::emit::rust2::library::format_constant,
+    format_module_ivar: None,
     wrap_namespace: rust_wrap_namespace,
 };
 
@@ -765,6 +777,21 @@ where
             if !constants.is_empty() {
                 body.push('\n');
             }
+            // Module-level `@ivar = value` declarations (e.g.
+            // `ViewHelpers @slots = {}`). Targets that don't model
+            // module state at the source level leave
+            // `format_module_ivar` as `None`; Go emits them as
+            // package vars so class methods can reference them.
+            if let Some(format_ivar) = target.format_module_ivar {
+                let ivars = parse_module_ivar_exprs(entry.rb_src)
+                    .unwrap_or_default();
+                for (name, value) in &ivars {
+                    body.push_str(&format!("{}\n", format_ivar(name.as_str(), value)));
+                }
+                if !ivars.is_empty() {
+                    body.push('\n');
+                }
+            }
             for (i, c) in classes.iter().enumerate() {
                 if i > 0 {
                     body.push('\n');
@@ -823,6 +850,7 @@ const GO_TARGET: TargetEmit = TargetEmit {
     emit_library_class: crate::emit::go2::emit_library_class,
     format_import: go_format_import,
     format_constant: go_format_constant_thunk,
+    format_module_ivar: Some(go_format_module_ivar_thunk),
     wrap_namespace: go_wrap_namespace,
 };
 
@@ -837,6 +865,14 @@ fn go_format_import(_name: &str, source: &str) -> String {
 /// interface{} = nil` placeholders.
 fn go_format_constant_thunk(name: &str, value: &Expr) -> String {
     crate::emit::go2::format_constant(name, value)
+}
+
+/// Module-level `@ivar = value` → Go `var <ivar> = <value>`. The
+/// name stays lowercase (package-private), matching the Ruby
+/// instance-variable convention; uppercase package vars are for
+/// real CONSTANTS handled by `go_format_constant_thunk` above.
+fn go_format_module_ivar_thunk(name: &str, value: &Expr) -> String {
+    crate::emit::go2::format_module_ivar(name, value)
 }
 
 /// Go's package-per-directory model means namespaces collapse into

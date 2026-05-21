@@ -66,6 +66,77 @@ pub fn parse_module_constant_exprs(
     Ok(out)
 }
 
+/// Parallel to `parse_module_constant_exprs` but captures top-level
+/// `@ivar = value` assignments (instance variables at module/class
+/// scope, NOT inside a method body). Used by transpile targets that
+/// need to emit module-state as package-level variables — e.g.
+/// `ActionView::ViewHelpers`' `@slots` becomes a Go package var.
+///
+/// Returns `(ivar_name_without_at, value_expr)` pairs in source
+/// order. `.freeze` is peeled the same way constants do; nested
+/// modules/classes recurse.
+pub fn parse_module_ivar_exprs(
+    source: &str,
+) -> Result<Vec<(Symbol, Expr)>, String> {
+    let result = parse(source.as_bytes());
+    let mut out: Vec<(Symbol, Expr)> = Vec::new();
+    if result.errors().count() > 0 {
+        return Ok(out);
+    }
+    let root = result.node();
+    walk_ivar_exprs(&root, &mut out);
+    Ok(out)
+}
+
+fn walk_ivar_exprs(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+    if let Some(program) = node.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            collect_ivar_expr_from_stmt(&stmt, out);
+        }
+    } else if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_ivar_expr_from_stmt(&stmt, out);
+        }
+    }
+}
+
+fn collect_ivar_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+    if let Some(module) = node.as_module_node() {
+        if let Some(body) = module.body() {
+            walk_ivar_exprs(&body, out);
+        }
+        return;
+    }
+    if let Some(class) = node.as_class_node() {
+        if let Some(body) = class.body() {
+            walk_ivar_exprs(&body, out);
+        }
+        return;
+    }
+    // Module-scope `@ivar = value` — skip writes inside method
+    // defs (those are body locals, handled by the body walker).
+    if let Some(write) = node.as_instance_variable_write_node() {
+        let name_bytes = write.name().as_slice();
+        let Ok(raw) = std::str::from_utf8(name_bytes) else { return };
+        let name = raw.strip_prefix('@').unwrap_or(raw);
+        let value = write.value();
+        let inner = match value.as_call_node() {
+            Some(call)
+                if std::str::from_utf8(call.name().as_slice()).ok() == Some("freeze") =>
+            {
+                match call.receiver() {
+                    Some(r) => r,
+                    None => value,
+                }
+            }
+            _ => value,
+        };
+        if let Ok(expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+            out.push((Symbol::new(name), expr));
+        }
+    }
+}
+
 fn walk_constant_exprs(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {

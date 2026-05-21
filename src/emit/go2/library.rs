@@ -291,6 +291,16 @@ pub fn format_constant(name: &str, value: &Expr) -> String {
     format!("var {name} = {rendered}")
 }
 
+/// Format a module-level `@ivar = value` as a Go package-level
+/// `var <ivar> = <rendered>`. Name stays lowercase (Ruby ivar
+/// convention maps to Go package-private). Same renderer as
+/// `format_constant` — only the casing convention differs.
+pub fn format_module_ivar(name: &str, value: &Expr) -> String {
+    let ctx = super::expr::EmitCtx::none();
+    let rendered = super::expr::emit_expr(&ctx, value);
+    format!("var {name} = {rendered}")
+}
+
 fn emit_method(class_name: &str, m: &MethodDef) -> String {
     let params = render_params(m);
     let ret = render_return(m);

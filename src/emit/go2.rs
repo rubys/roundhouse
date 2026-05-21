@@ -154,4 +154,4 @@ fn emit_imports(out: &mut String, imports: &[&str]) {
 }
 
 // Re-export the library emit functions used by `runtime_loader::GO_TARGET`.
-pub(crate) use library::{emit_library_class, emit_module, format_constant};
+pub(crate) use library::{emit_library_class, emit_module, format_constant, format_module_ivar};
