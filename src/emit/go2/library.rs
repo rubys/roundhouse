@@ -80,6 +80,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         out.push('\n');
     }
 
+    // Build the self-method registry: Ruby names of real (non-attr)
+    // instance methods on this class. Consumed by `emit_send` (via
+    // `EmitCtx.self_methods`) to decide whether `self.foo` emits as
+    // a method call (`self.Foo()`) or a field read (`self.Foo`).
+    // attr_reader/writer-backed slots are NOT in the set — those
+    // are struct fields and the parenless read is the right shape.
+    // Class methods aren't included either; implicit-self calls to
+    // them inside other class methods route through the existing
+    // SelfRef-in-class-method bare-fn path (`ClassName_method()`).
+    let self_methods = collect_self_methods(&class.methods);
+
     for m in &class.methods {
         // Skip attr_reader / attr_writer (now fields) and the
         // initialize method (now NewClass).
@@ -92,10 +103,31 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         if matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize" {
             continue;
         }
-        out.push_str(&emit_method(&name, m));
+        out.push_str(&emit_method(&name, m, &self_methods));
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Collect the names of real (non-attr) instance methods on a
+/// class. Class methods are excluded because implicit-self calls to
+/// them inside another method body route through the bare-fn path
+/// (`ClassName_method()`), not through receiver-shaped dispatch.
+fn collect_self_methods(methods: &[crate::dialect::MethodDef]) -> std::rc::Rc<std::collections::HashSet<String>> {
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in methods {
+        if !matches!(m.receiver, MethodReceiver::Instance) {
+            continue;
+        }
+        if matches!(
+            m.kind,
+            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+        ) {
+            continue;
+        }
+        set.insert(m.name.as_str().to_string());
+    }
+    std::rc::Rc::new(set)
 }
 
 /// One Go struct field derived from a Ruby `attr_reader` / `attr_writer`.
@@ -368,7 +400,11 @@ pub fn format_module_ivar(name: &str, value: &Expr) -> String {
     format!("var {name} = {rendered}")
 }
 
-fn emit_method(class_name: &str, m: &MethodDef) -> String {
+fn emit_method(
+    class_name: &str,
+    m: &MethodDef,
+    self_methods: &std::rc::Rc<std::collections::HashSet<String>>,
+) -> String {
     let params = render_params(m);
     let ret = render_return(m);
     let receiver = match m.receiver {
@@ -400,6 +436,7 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         void_method: returns_void,
         in_module_singleton: false,
+        self_methods: Some(std::rc::Rc::clone(self_methods)),
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
@@ -625,6 +662,9 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         void_method: returns_void,
         in_module_singleton: true,
+        // Module-singleton has no instance methods; nothing to put
+        // in the self-method registry.
+        self_methods: None,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());

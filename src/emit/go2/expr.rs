@@ -71,6 +71,18 @@ pub(super) struct EmitCtx {
     /// hit `self.Field` (no instance exists) or a bare `<ivar>` that
     /// collides across modules.
     pub in_module_singleton: bool,
+    /// Names of real (non-attr) instance methods on the enclosing
+    /// class. Used to decide whether `self.foo` (0-arg implicit-self
+    /// Send to a non-stdlib method) emits as a field read
+    /// (`self.Foo`, no parens — the right shape for an attr_reader/
+    /// writer-backed struct field) or a method call (`self.Foo()` —
+    /// the right shape for a real method like `before_validation`).
+    /// Stores raw Ruby names (`new_record?`, `valid?`, `before_save`)
+    /// so the call-site lookup keys off the same string the IR
+    /// carries. `None` outside a class body (module-mode bag of
+    /// bare functions); the existing `is_known_go_method` stdlib
+    /// whitelist still kicks in.
+    pub self_methods: Option<Rc<HashSet<String>>>,
 }
 
 impl EmitCtx {
@@ -82,6 +94,7 @@ impl EmitCtx {
             declared: Rc::new(RefCell::new(HashSet::new())),
             void_method: false,
             in_module_singleton: false,
+            self_methods: None,
         }
     }
 
@@ -715,7 +728,27 @@ pub(super) fn emit_send(
             // Struct field access vs method call: 0-arg Sends on a
             // non-Class receiver whose method isn't a known AR/stdlib
             // call render without parens (`p.Title`, not `p.Title()`).
+            //
+            // Exception: implicit-self calls to a method DEFINED on
+            // the enclosing class (`before_validation` inside
+            // `save`'s body lowers to `Send { recv: SelfRef,
+            // method: before_validation }`) must emit with parens so
+            // the dispatch fires. Detection routes via
+            // `ctx.self_methods` (populated by library::emit_method);
+            // attr_reader/writer-backed struct fields are NOT in
+            // that set, so `self.id` (an attr_accessor) still emits
+            // bare as `self.ID`.
             if args_s.is_empty() && !is_known_go_method(method) {
+                let is_self_call = matches!(&*r.node, ExprNode::SelfRef);
+                let in_self_methods = is_self_call
+                    && ctx
+                        .self_methods
+                        .as_ref()
+                        .map(|set| set.contains(method))
+                        .unwrap_or(false);
+                if in_self_methods {
+                    return format!("{recv_s}.{go_m}()");
+                }
                 return format!("{recv_s}.{go_m}");
             }
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))

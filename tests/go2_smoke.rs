@@ -291,6 +291,144 @@ fn module_singleton_does_not_fire_on_plain_class() {
     );
 }
 
+/// Implicit-self method-call resolution: a 0-arg implicit-self
+/// Send to a method DEFINED on the enclosing class must emit as
+/// `self.Method()` (call). A 0-arg implicit-self Send to an
+/// attr_reader-backed field must STAY `self.Field` (read). The
+/// class method registry (built by `library::collect_self_methods`)
+/// is what distinguishes the two; without it both would emit the
+/// same (the old bug).
+///
+/// Synthesizes a class with one attr_accessor (`status`) and two
+/// real methods (`tick` — the caller; `notify` — a no-op real
+/// method called via implicit self). Tick's body reads `self.status`
+/// (must stay parenless) AND calls `notify` (must gain parens).
+#[test]
+fn implicit_self_method_call_resolution() {
+    let status_reader = MethodDef {
+        name: Symbol::from("status"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar { name: Symbol::from("status") },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Worker")),
+        kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+    };
+    // `def notify; end` — no-op real method. Becomes
+    // `func (self *Worker) notify() {}` in emit.
+    let notify = MethodDef {
+        name: Symbol::from("notify"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: Expr::new(Span::synthetic(), ExprNode::Lit { value: roundhouse::Literal::Nil }),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Worker")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    // `def tick; s = self.status; self.notify; s; end` — Seq of:
+    //   Assign(s, self.status)       — must stay self.Status (field)
+    //   Send(self, notify)           — must emit self.Notify() (call)
+    //   Var(s)                       — tail return
+    let s_assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("s") },
+            value: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: Symbol::from("status"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+        },
+    );
+    let notify_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: Symbol::from("notify"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let s_return = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from("s") },
+    );
+    let tick = MethodDef {
+        name: Symbol::from("tick"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq { exprs: vec![s_assign, notify_call, s_return] },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Worker")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Worker")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![status_reader, notify, tick],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit worker class");
+
+    // Attr-reader stays a struct field — `self.Status` (no parens).
+    // The Assign body is `s := self.Status` (PascalCase via
+    // go_field_name on the ivar name).
+    assert!(
+        emitted.contains("s := self.Status"),
+        "attr_reader-backed field accidentally promoted to method call:\n{emitted}",
+    );
+    // Real method gets parens — `self.Notify()` (call).
+    assert!(
+        emitted.contains("self.Notify()"),
+        "implicit-self method call missing parens:\n{emitted}",
+    );
+    // Regression guard: `self.Notify` (without parens) would be a
+    // field-read of a method, which Go doesn't allow.
+    assert!(
+        !emitted.contains("self.Notify\n"),
+        "implicit-self method emitted as bare field-read:\n{emitted}",
+    );
+}
+
 /// `arr.each { |x| body }` lowers to a Go `for _, x := range arr`
 /// loop wrapped in an `func() interface{} { ...; return arr }()`
 /// IIFE — the wrap makes the statement-shaped loop fit anywhere an
