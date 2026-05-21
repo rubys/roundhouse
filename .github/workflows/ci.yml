@@ -364,9 +364,17 @@ jobs:
   # Requires libsqlite3-dev at link time (the binaries `-lsqlite3`).
   # ubuntu-latest ships libsqlite3-0 (runtime) but not the dev linker
   # symlink, so we install it explicitly.
+  # Briefly went green after matz/spinel#631 closed (bffabac); then
+  # matz/spinel c66d00a landed the shape-A fix for #634 and surfaced
+  # a follow-on over-widening: @location ivar (nil-default + typed
+  # writers) now reads as sp_RbVal, breaking sp_StrStrHash_set's
+  # const char* slot in the Location-header path. Comment on #634
+  # (issuecomment-4503927146) tracks the consumer-side narrow.
+  # Drop continue-on-error when matz lands the body-driven post-pass.
   toolchain-spinel:
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
