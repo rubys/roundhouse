@@ -32,6 +32,7 @@ def main(argv)
   when 'run'       then cmd_dev_test_run(argv, 'run')
   when 'clean'     then cmd_clean(argv)
   when 'compare'   then cmd_compare(argv)
+  when 'bench'     then cmd_bench(argv)
   when 'site'      then cmd_site(argv)
   when '-h', '--help', nil
     print_usage
@@ -64,6 +65,7 @@ def print_usage
       test <target>       Transpile, then run target's native tests (ruby only for now).
       run <target>        Transpile, then run main (ruby only for now).
       compare [<target>]  End-to-end Rails-vs-target HTTP compare (wraps scripts/compare).
+      bench [<target>...] HTTP throughput + RSS benchmark (wraps scripts/bench).
       site                Build the full GitHub Pages site (all targets).
 
     Cleanup:
@@ -120,9 +122,10 @@ end
 # Tool probes — Open3 + version regex. Returns the parsed version
 # string, or nil if the command isn't on PATH or fails.
 
-def probe(*cmd)
+def probe(*cmd, allow_fail: false)
   out, err, status = Open3.capture3(*cmd)
-  status.success? ? "#{out}#{err}".strip : nil
+  return "#{out}#{err}".strip if status.success? || allow_fail
+  nil
 rescue Errno::ENOENT, Errno::EACCES
   nil
 end
@@ -142,6 +145,7 @@ DOCTOR_CHECKS = [
   { key: :node,   label: 'Node',      unlocks: 'typescript target' },
   { key: :sqlite, label: 'SQLite',    unlocks: 'ruby/spinel/rust targets' },
   { key: :rails,  label: 'Rails gem', unlocks: 'fixture' },
+  { key: :wrk,    label: 'wrk',       unlocks: 'bench' },
 ].freeze
 
 def cmd_doctor(argv)
@@ -157,6 +161,7 @@ def cmd_doctor(argv)
     node:   version_of(probe('node', '--version')),
     sqlite: version_of(probe('sqlite3', '--version')),
     rails:  version_of(probe('rails', '--version')),
+    wrk:    version_of(probe('wrk', '--version', allow_fail: true), /wrk\s+(\d+\.\d+(?:\.\d+)?)/),
   }
 
   puts 'Roundhouse environment check:'
@@ -176,6 +181,7 @@ def cmd_doctor(argv)
     available << 'site'
   end
   available << 'compare [<target>]' if versions[:rust] && versions[:rails]
+  available << 'bench [<target>...]' if versions[:rust] && versions[:rails] && versions[:wrk]
   if versions[:rust] && versions[:rails]
     available << 'dev | test | run ruby'
   end
@@ -201,6 +207,7 @@ def install_hint(key)
   when :node   then 'https://nodejs.org or `brew install node`'
   when :sqlite then 'macOS: preinstalled; Debian/Ubuntu: apt install libsqlite3-dev'
   when :rails  then 'gem install rails'
+  when :wrk    then 'macOS: brew install wrk; Debian/Ubuntu: apt install wrk'
   end
 end
 
@@ -626,6 +633,18 @@ def cmd_compare(argv)
   # — scripts/compare has its own argument parser.
   args = argv.empty? ? ['typescript'] : argv
   exec(script, *args)
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: bench — delegate to scripts/bench with passthrough.
+
+def cmd_bench(argv)
+  script = File.join(ROUNDHOUSE_ROOT, 'scripts', 'bench')
+  unless File.executable?(script)
+    warn "rh bench: #{script} missing or not executable"
+    return 1
+  end
+  exec(script, *argv)
 end
 
 # ---------------------------------------------------------------------

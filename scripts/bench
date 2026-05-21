@@ -90,11 +90,12 @@ done
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|ruby|ruby-int|typescript|crystal) NORMALIZED+=("$t") ;;
+        rails|ruby|ruby-int|typescript|crystal|rust) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
+        rs) NORMALIZED+=(rust) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails ruby ruby-int typescript crystal" >&2; exit 2 ;;
+           echo "supported: rails ruby ruby-int typescript crystal rust" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -109,6 +110,8 @@ RUBY_OUT="$REPO_ROOT/build/transpiled-blog-ruby"
 TS_OUT="/tmp/rh-ts-pass2"
 # Crystal target — same scratch-dir convention as scripts/compare.
 CR_OUT="/tmp/rh-cr-pass2"
+# Rust target — same scratch-dir convention as scripts/compare.
+RS_OUT="/tmp/rh-rs-pass2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -287,6 +290,18 @@ build_target() {
                 (cd "$CR_OUT" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server)
             fi
             ;;
+        rust)
+            TARGET_BUILD_DIR="$RS_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$RS_OUT/Cargo.toml" ]]; then
+                step "regenerating rust target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target rust "$FIXTURE" >/dev/null 2>&1)
+            fi
+            if [[ ! -x "$RS_OUT/target/release/app" ]]; then
+                step "building rust target (release)"
+                (cd "$RS_OUT" && cargo build --release --quiet)
+            fi
+            ;;
     esac
 }
 
@@ -320,6 +335,12 @@ stage_db() {
             ;;
         crystal)
             local db="$CR_OUT/db/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        rust)
+            local db="$RS_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -394,6 +415,15 @@ start_target() {
             (cd "$CR_OUT" && \
                 PORT="$port" \
                 ./.bin/server \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        rust)
+            # AOT-compiled binary — single-process, no workers concept.
+            (cd "$RS_OUT" && \
+                PORT="$port" \
+                ./target/release/app \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
