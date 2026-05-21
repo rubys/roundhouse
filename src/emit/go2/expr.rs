@@ -155,7 +155,38 @@ pub(super) fn emit_send(
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
 
     if method == "[]" && recv.is_some() {
-        return format!("{}[{}]", emit_expr(ctx, recv.unwrap()), args_s.join(", "));
+        let recv_s = emit_expr(ctx, recv.unwrap());
+        // `str[start..end]` / `str[start..]` — Ruby Range becomes Go
+        // slice syntax `str[start:end]`. Inclusive ranges add `+1` to
+        // the end bound; exclusive ranges pass it through; open-ended
+        // (no begin / no end) maps to Go's empty-side slice form.
+        if args.len() == 1 {
+            if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                let begin_s = begin
+                    .as_ref()
+                    .map(|e| emit_expr(ctx, e))
+                    .unwrap_or_default();
+                let end_s = match (end.as_ref(), *exclusive) {
+                    (Some(e), true) => emit_expr(ctx, e),
+                    (Some(e), false) => format!("{}+1", emit_expr(ctx, e)),
+                    (None, _) => String::new(),
+                };
+                return format!("{recv_s}[{begin_s}:{end_s}]");
+            }
+        }
+        // `str[start, length]` — Ruby's two-arg substring form. Map
+        // to Go's `recv[start : start+length]`. Note: `start` is
+        // emitted twice; safe for simple values (literal, var) but
+        // re-evaluates side effects. Lowered runtime bodies don't
+        // hit this pattern with side-effecting starts today; if
+        // they do later, introduce a temp binding (needs statement
+        // context, deferred).
+        if args.len() == 2 {
+            let start = &args_s[0];
+            let length = &args_s[1];
+            return format!("{recv_s}[{start}:{start}+{length}]");
+        }
+        return format!("{recv_s}[{}]", args_s.join(", "));
     }
 
     // Binary operators: Ruby parses `a == b`, `a + b`, etc. as
