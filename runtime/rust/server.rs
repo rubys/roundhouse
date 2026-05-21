@@ -31,6 +31,7 @@ use axum::{
     routing::get,
     Router,
 };
+use tower_http::services::ServeDir;
 
 use crate::cable;
 use crate::db;
@@ -81,7 +82,15 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
 
     db::open_production_db(&db_path, opts.schema_sql);
 
+    // Static assets: serve `static/assets/<name>` for `/assets/*`
+    // requests via tower-http's ServeDir. Mirrors Rails' Propshaft URL
+    // shape — the importmap pins and `stylesheet_link_tag("tailwind")`
+    // both point at /assets/<name>. `bin/rh transpile rust` writes the
+    // actual files (Tailwind compile output, turbo.min.js copy) into
+    // `static/assets/`. ServeDir returns 404 on miss without consuming
+    // the request, so other routes still resolve normally.
     let app = router
+        .nest_service("/assets", ServeDir::new("static/assets"))
         .route("/cable", get(cable::cable_handler))
         .layer(middleware::from_fn(layout_wrap))
         .layer(middleware::from_fn(method_override));

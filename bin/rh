@@ -387,6 +387,7 @@ def cmd_transpile(argv)
   when 'ruby'    then post_transpile_ruby(out)
   when 'spinel'  then post_transpile_spinel(out)
   when 'crystal' then post_transpile_crystal(out)
+  when 'rust'    then post_transpile_rust(out)
   end
   0
 end
@@ -441,6 +442,18 @@ def post_transpile_crystal(out)
     out,
     label: 'crystal',
     content_globs: ['src/**/*.cr'],
+  )
+end
+
+# Rust target's post-build: same shape as crystal — emit Tailwind input,
+# compile via npx, copy turbo.min.js. The rust runtime serves
+# `static/assets/` via tower-http's ServeDir mounted on /assets/ in
+# runtime/rust/server.rs.
+def post_transpile_rust(out)
+  build_assets(
+    out,
+    label: 'rust',
+    content_globs: ['src/**/*.rs'],
   )
 end
 

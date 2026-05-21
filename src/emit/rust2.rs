@@ -53,6 +53,7 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tower-http = { version = "0.6", features = ["fs"] }
 futures-util = "0.3"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
