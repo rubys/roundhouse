@@ -11,7 +11,7 @@ pub(super) fn pascalize_word(word: &str) -> String {
     }
 }
 
-pub(super) fn go_field_name(ruby_name: &str) -> String {
+pub(crate) fn go_field_name(ruby_name: &str) -> String {
     // Convert snake_case to PascalCase, special-casing common initialisms.
     ruby_name
         .split('_')

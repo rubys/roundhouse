@@ -21,9 +21,11 @@
 //! primitives. Per-param Tys come from the method's `signature:
 //! Option<Ty::Fn>` when present.
 
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ty::{ParamKind, Ty};
+
+use crate::emit::go::shared::go_field_name;
 
 use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
@@ -31,12 +33,168 @@ use super::ty::go_ty_stub;
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     let name = sanitize_type_name(class.name.0.as_str());
     let mut out = String::new();
-    out.push_str(&format!("type {name} struct{{}}\n\n"));
+
+    // Discover the struct's field layout. `attr_reader` / `attr_writer`
+    // methods synthesize MethodDefs whose signature carries the field
+    // type — those become the exported struct fields. Initialize-only
+    // ivars (assigned but no reader/writer) aren't reflected as Go
+    // fields yet; they'd surface as missing-symbol errors at use,
+    // which is fine inventory.
+    let fields = collect_fields(&class.methods);
+    if fields.is_empty() {
+        out.push_str(&format!("type {name} struct{{}}\n\n"));
+    } else {
+        out.push_str(&format!("type {name} struct {{\n"));
+        for f in &fields {
+            out.push_str(&format!("\t{} {}\n", f.pascal_name, f.go_ty));
+        }
+        out.push_str("}\n\n");
+    }
+
+    // Constructor synthesis. When an `initialize` method is present,
+    // emit `New<Name>(...)` returning a pointer to the struct,
+    // populated via field-by-field assignment. The original
+    // `initialize` method is NOT emitted as a method on the type;
+    // its body becomes the constructor body.
+    if let Some(init) = class.methods.iter().find(|m| {
+        matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
+    }) {
+        out.push_str(&emit_constructor(&name, init));
+        out.push('\n');
+    }
+
     for m in &class.methods {
+        // Skip attr_reader / attr_writer (now fields) and the
+        // initialize method (now NewClass).
+        if matches!(
+            m.kind,
+            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+        ) {
+            continue;
+        }
+        if matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize" {
+            continue;
+        }
         out.push_str(&emit_method(&name, m));
         out.push('\n');
     }
     Ok(out)
+}
+
+/// One Go struct field derived from a Ruby `attr_reader` / `attr_writer`.
+struct Field {
+    /// PascalCase, Go-style field name (`Verb`, `PathParams`, `ID`).
+    pascal_name: String,
+    /// Original Ruby ivar name without `@` (`verb`, `path_params`) —
+    /// used to look up Ivar references at emit time.
+    ruby_name: String,
+    go_ty: String,
+}
+
+/// Walk methods and gather one Field per attr_reader / attr_writer.
+/// The signature's return type (reader) or single param type (writer)
+/// provides the Go type. If both forms exist for the same name, the
+/// reader wins; deduplication is by Ruby name.
+fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
+    let mut out: Vec<Field> = Vec::new();
+    for m in methods {
+        let name = m.name.as_str().trim_end_matches('=').to_string();
+        let go_ty = match m.kind {
+            AccessorKind::AttributeReader => {
+                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                    go_ty_stub(Some(ret))
+                } else {
+                    "interface{}".to_string()
+                }
+            }
+            AccessorKind::AttributeWriter => {
+                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                    params
+                        .first()
+                        .map(|p| go_ty_stub(Some(&p.ty)))
+                        .unwrap_or_else(|| "interface{}".to_string())
+                } else {
+                    "interface{}".to_string()
+                }
+            }
+            _ => continue,
+        };
+        if out.iter().any(|f| f.ruby_name == name) {
+            continue;
+        }
+        out.push(Field {
+            pascal_name: go_field_name(&name),
+            ruby_name: name,
+            go_ty,
+        });
+    }
+    out
+}
+
+/// Emit `func New<Name>(params...) *<Name> { return &<Name>{...} }`
+/// from an `initialize` MethodDef. Handles the simple shape where
+/// each body Assign is `@<name> = <var>` — fields populate directly
+/// from the matching positional param. Falls back to a build-then-
+/// assign form when the body shape is more complex.
+fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
+    let params = render_params(init);
+    let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
+
+    // Try the simple-shape detection: every body expr is
+    // `Assign { target: Ivar(name), value: Var(name) }`, and the Var
+    // name matches the Ivar name. If so, emit `return &Class{Name: name, ...}`.
+    if let Some(literal) = try_field_init_literal(class_name, &init.body) {
+        out.push_str(&format!("\treturn {literal}\n"));
+    } else {
+        // Fallback: declare a fresh receiver, walk the body with
+        // ctx.in_class_method=false so `self.X = …` writes resolve,
+        // then return it. Currently runtime/ruby/ initializers are
+        // all simple shape; this path is dead weight today but
+        // keeps the emit shape total.
+        out.push_str(&format!("\tself := &{class_name}{{}}\n"));
+        let ctx = EmitCtx::none();
+        for p in &init.params {
+            ctx.declare_param(p.name.as_str());
+        }
+        let body = emit_return_body(&ctx, &init.body);
+        out.push_str(&body);
+        out.push_str("\treturn self\n");
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Pattern-match the simple-shape constructor body (`Seq` of
+/// `@ivar = var` assigns where `var` matches the ivar's Pascal field).
+/// Returns the struct literal text on success.
+fn try_field_init_literal(class_name: &str, body: &Expr) -> Option<String> {
+    use crate::expr::{ExprNode, LValue};
+    let exprs = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.as_slice(),
+        _ => std::slice::from_ref(body),
+    };
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for e in exprs {
+        let ExprNode::Assign { target, value } = &*e.node else {
+            return None;
+        };
+        let LValue::Ivar { name } = target else {
+            return None;
+        };
+        let ExprNode::Var { name: var_name, .. } = &*value.node else {
+            return None;
+        };
+        bindings.push((go_field_name(name.as_str()), var_name.as_str().to_string()));
+    }
+    if bindings.is_empty() {
+        return None;
+    }
+    let parts = bindings
+        .iter()
+        .map(|(f, v)| format!("{f}: {v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("&{class_name}{{{parts}}}"))
 }
 
 /// `ActionController::Base` → `ActionControllerBase`. Go identifiers

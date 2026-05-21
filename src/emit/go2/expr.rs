@@ -15,7 +15,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ty::Ty;
 
 // Reused verbatim from legacy go until go2 needs its own dispatch.
-use crate::emit::go::shared::go_method_name;
+use crate::emit::go::shared::{go_field_name, go_method_name};
 
 /// Context threaded through the walker. Carries everything that's
 /// context-sensitive — i.e. whose Go emit depends on the enclosing
@@ -98,7 +98,20 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 .cloned()
                 .unwrap_or_else(|| name.to_string())
         }
-        ExprNode::Ivar { name } => name.to_string(),
+        // `@field` in instance method bodies maps to `self.Field`
+        // (the Go struct field synthesized by attr_reader/writer in
+        // library.rs). Class methods don't have a `self` receiver
+        // and ivars there are unusual; emit the bare PascalCase
+        // name as a stand-in (caller of the class method would
+        // need to inject context).
+        ExprNode::Ivar { name } => {
+            let pascal = go_field_name(name.as_str());
+            if ctx.in_class_method {
+                pascal
+            } else {
+                format!("self.{pascal}")
+            }
+        }
         ExprNode::Send { recv, method, args, .. } => {
             emit_send(ctx, recv.as_ref(), method.as_str(), args)
         }
@@ -400,6 +413,23 @@ pub(super) fn emit_send(
         }
     }
 
+    // `<Const>.new(args)` → `New<Const>(args)`. The constructor is
+    // synthesized by `library::emit_constructor` for any class with
+    // an `initialize` method; this rewrite makes the Ruby `.new`
+    // call site target it.
+    if method == "new" {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                let class_name = path
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                return format!("New{class_name}({})", args_s.join(", "));
+            }
+        }
+    }
+
     // Ruby→Go method-name mapping for string operations that have no
     // 1:1 in Go's stdlib (`strip` is `strings.TrimSpace(…)`, not
     // `.Strip()`). Only kicks in for instance dispatch on Str-typed
@@ -655,7 +685,11 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 format!("{name_s} = {v}")
             }
         }
-        LValue::Ivar { name } => format!("self.{name} = {v}"),
+        LValue::Ivar { name } => {
+            // Same Pascal mapping as Ivar reads.
+            let pascal = go_field_name(name.as_str());
+            format!("self.{pascal} = {v}")
+        }
         _ => format!("/* TODO: emit Assign target shape */ _ = {v}"),
     }
 }
