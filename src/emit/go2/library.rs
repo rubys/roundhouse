@@ -133,6 +133,7 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
     let ctx = EmitCtx {
         class_name: Some(class_name.to_string()),
         in_class_method: matches!(m.receiver, MethodReceiver::Class),
+        var_renames: std::collections::HashMap::new(),
     };
     let body = render_body(&ctx, m);
     format!("func {receiver}{class_method_name}({params}){ret} {{\n{body}}}\n")

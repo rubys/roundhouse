@@ -7,6 +7,8 @@
 //! coverage, transpiled-runtime call shapes) without dragging
 //! legacy go regressions.
 
+use std::collections::HashMap;
+
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ty::Ty;
 
@@ -34,6 +36,13 @@ pub(super) struct EmitCtx {
     /// `SelfRef` inside them refers to the class itself, NOT to a
     /// receiver parameter. Instance methods set this `false`.
     pub in_class_method: bool,
+    /// Var name → replacement identifier. Used by the
+    /// `is_a?(Class)` if-init rewrite: when `if _, ok := v.(string)`
+    /// is rewritten to `if s, ok := v.(string)`, the then_branch
+    /// emits with `v` → `s` so the asserted typed value is what
+    /// nested call sites consume. Scoped to the child ctx; never
+    /// applied to the else branch or the outer scope.
+    pub var_renames: HashMap<String, String>,
 }
 
 impl EmitCtx {
@@ -41,7 +50,17 @@ impl EmitCtx {
         Self {
             class_name: None,
             in_class_method: false,
+            var_renames: HashMap::new(),
         }
+    }
+
+    /// Build a child ctx with one extra Var rename pushed in. Used
+    /// by the `If` handlers to expose the asserted typed value to
+    /// the then_branch.
+    pub fn with_rename(&self, from: String, to: String) -> Self {
+        let mut child = self.clone();
+        child.var_renames.insert(from, to);
+        child
     }
 }
 
@@ -51,7 +70,15 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
-        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Var { name, .. } => {
+            // Substitute via ctx.var_renames if present — used by
+            // the `is_a?` if-init rewrite to expose the asserted
+            // typed value inside the then_branch.
+            ctx.var_renames
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        }
         ExprNode::Ivar { name } => name.to_string(),
         ExprNode::Send { recv, method, args, .. } => {
             emit_send(ctx, recv.as_ref(), method.as_str(), args)
@@ -85,14 +112,20 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             .join("; "),
         ExprNode::If { cond, then_branch, else_branch } => {
             // `if recv.is_a?(Class)` → Go's type-assert init form
-            // `if _, ok := recv.(GoTy); ok` when the class maps to
-            // a Go assertion type. Otherwise plain cond emit.
-            let (init, cond_s) = if let Some((init, ok)) = try_emit_is_a_init(ctx, cond) {
-                (init, ok.to_string())
-            } else {
-                (String::new(), emit_expr(ctx, cond))
+            // `if asserted, ok := recv.(GoTy); ok`. The then_branch
+            // gets a child ctx that renames the recv's Var to the
+            // asserted ident, so nested uses see the typed value.
+            let (init, cond_s, then_ctx) = match try_emit_is_a_init(ctx, cond) {
+                Some(IsAInit { init, cond, recv_name, asserted_ident }) => {
+                    let child = match recv_name {
+                        Some(n) => ctx.with_rename(n, asserted_ident.to_string()),
+                        None => ctx.clone(),
+                    };
+                    (init, cond.to_string(), child)
+                }
+                None => (String::new(), emit_expr(ctx, cond), ctx.clone()),
             };
-            let then_s = emit_block_body(ctx, then_branch);
+            let then_s = emit_block_body(&then_ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
             // emit without the else clause so the body parses as
             // valid Go (a bare `nil` statement is invalid).
@@ -398,15 +431,59 @@ fn ruby_class_to_go_assert_ty(class: &str) -> Option<&'static str> {
     })
 }
 
-/// Build `_, ok := recv.(GoTy)` init + `ok` cond pair for an
-/// `is_a?` predicate that has a mapped Go assertion type. Returns
-/// `None` if either the shape or the class isn't supported, so
-/// callers can fall through to the unchanged path.
-fn try_emit_is_a_init(ctx: &EmitCtx, cond: &Expr) -> Option<(String, &'static str)> {
+/// Result of recognizing an `if recv.is_a?(Class)` shape and
+/// mapping it to Go's type-assert if-init form. Carries everything
+/// the per-If handler needs to splice in the init clause AND
+/// substitute uses of the original receiver inside the then_branch.
+pub(super) struct IsAInit {
+    /// `s, ok := v.(string); ` — pre-cond text dropped into the
+    /// `if`'s init slot. Ends with `; ` so the caller can concat
+    /// straight onto the cond.
+    pub init: String,
+    /// Cond text — always `"ok"` today (the assertion's bool).
+    pub cond: &'static str,
+    /// Original receiver's Var name, if the receiver was a bare
+    /// Var. The then_branch's child ctx adds this → asserted_ident
+    /// to its rename map. `None` for non-Var receivers (`foo().is_a?`)
+    /// — those emit the init but skip the rewrite.
+    pub recv_name: Option<String>,
+    /// Asserted identifier (`s`/`i`/`f`/...) — the new name bound
+    /// in the if's scope.
+    pub asserted_ident: &'static str,
+}
+
+/// Build the `IsAInit` for an `is_a?` predicate that has a mapped
+/// Go assertion type. Returns `None` if either the shape or the
+/// class isn't supported, so callers can fall through to the
+/// unchanged path.
+fn try_emit_is_a_init(ctx: &EmitCtx, cond: &Expr) -> Option<IsAInit> {
     let (recv, class) = is_a_predicate(cond)?;
     let go_ty = ruby_class_to_go_assert_ty(class)?;
     let recv_s = emit_expr(ctx, recv);
-    Some((format!("_, ok := {recv_s}.({go_ty}); "), "ok"))
+    let asserted_ident = assert_ident_for(go_ty);
+    let recv_name = match &*recv.node {
+        ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    Some(IsAInit {
+        init: format!("{asserted_ident}, ok := {recv_s}.({go_ty}); "),
+        cond: "ok",
+        recv_name,
+        asserted_ident,
+    })
+}
+
+/// Pick a short, idiomatic Go identifier for the asserted typed
+/// value. Single-letter conventions: `s` for strings, `i` for
+/// ints, `f` for floats. Falls back to `narrowed` for anything
+/// else (won't currently hit, but keeps the surface total).
+fn assert_ident_for(go_ty: &str) -> &'static str {
+    match go_ty {
+        "string" => "s",
+        "int64" => "i",
+        "float64" => "f",
+        _ => "narrowed",
+    }
 }
 
 /// Emit a Ruby `x = value` as a Go assignment. Uses `:=` for the
@@ -524,14 +601,19 @@ fn indent(out: &mut String, depth: usize) {
 fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
     match &*e.node {
         ExprNode::If { cond, then_branch, else_branch } => {
-            let (init, cond_s) = if let Some((init, ok)) = try_emit_is_a_init(ctx, cond) {
-                (init, ok.to_string())
-            } else {
-                (String::new(), emit_expr(ctx, cond))
+            let (init, cond_s, then_ctx) = match try_emit_is_a_init(ctx, cond) {
+                Some(IsAInit { init, cond, recv_name, asserted_ident }) => {
+                    let child = match recv_name {
+                        Some(n) => ctx.with_rename(n, asserted_ident.to_string()),
+                        None => ctx.clone(),
+                    };
+                    (init, cond.to_string(), child)
+                }
+                None => (String::new(), emit_expr(ctx, cond), ctx.clone()),
             };
             indent(out, depth);
             out.push_str(&format!("if {init}{cond_s} {{\n"));
-            emit_return_at(ctx, then_branch, out, depth + 1);
+            emit_return_at(&then_ctx, then_branch, out, depth + 1);
             // Skip the else clause when it's an implicit nil — the
             // `return X if cond` shape doesn't want a `nil` else.
             if !is_nil_lit(else_branch) {
