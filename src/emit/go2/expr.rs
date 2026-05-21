@@ -13,7 +13,39 @@ use crate::ty::Ty;
 // Reused verbatim from legacy go until go2 needs its own dispatch.
 use crate::emit::go::shared::go_method_name;
 
-pub(super) fn emit_expr(e: &Expr) -> String {
+/// Context threaded through the walker. Carries everything that's
+/// context-sensitive — i.e. whose Go emit depends on the enclosing
+/// class/method shape, not just the local Expr subtree.
+///
+/// `SelfRef` is the first variant that needs it: in a class method
+/// (`def self.foo`), `self.bar(x)` emits as the bare-fn call
+/// `ClassName_bar(x)`; in an instance method it emits as `self.Bar(x)`
+/// against the Go `(self *ClassName)` receiver. Without ctx, the
+/// walker has no way to know which to pick.
+#[derive(Debug, Clone)]
+pub(super) struct EmitCtx {
+    /// Enclosing class name, already sanitized to a Go identifier
+    /// (e.g. `JsonBuilder`, `ActiveRecordBase`, not the raw
+    /// `ActiveRecord::Base`). `None` when emitting a module-mode
+    /// bag of bare functions or outside any class.
+    pub class_name: Option<String>,
+    /// True when emitting inside a class method (`def self.foo`).
+    /// Class methods in Go are bare functions named `Class_method`;
+    /// `SelfRef` inside them refers to the class itself, NOT to a
+    /// receiver parameter. Instance methods set this `false`.
+    pub in_class_method: bool,
+}
+
+impl EmitCtx {
+    pub fn none() -> Self {
+        Self {
+            class_name: None,
+            in_class_method: false,
+        }
+    }
+}
+
+pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {
@@ -21,15 +53,22 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => name.to_string(),
-        ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
+        ExprNode::Send { recv, method, args, .. } => {
+            emit_send(ctx, recv.as_ref(), method.as_str(), args)
+        }
+        // `self` reference. In an instance method, the Go body has
+        // `(self *Class)` and `self` is a valid identifier — emit
+        // verbatim. In a class method, there's no `self` parameter;
+        // bare `SelfRef` would compile to a dangling identifier.
+        // Emit the sanitized class name as a stand-in (it parses as
+        // a Go reference to the type itself, surfacing the gap if
+        // the surrounding context expects an instance). Without a
+        // class name in ctx (module-mode), emit a TODO marker.
+        ExprNode::SelfRef => self_ref_expr(ctx),
         // Ruby `x = value` — legacy go drops the lvalue and emits
         // only the rhs, which loses the binding. go2 needs the real
         // assignment so subsequent statements can refer to `x`.
-        // Use `:=` (declare + assign) since the lowered body
-        // typically introduces fresh locals in source order; if a
-        // later widening surfaces re-assigns to existing bindings,
-        // distinguish via a local-name scope check.
-        ExprNode::Assign { target, value } => emit_assign(target, value),
+        ExprNode::Assign { target, value } => emit_assign(ctx, target, value),
         // Ruby `return X` — emits as a Go return statement. In Ruby
         // this is technically an Expr (type `Never`), so it can
         // appear in value position; the body-position walker
@@ -38,32 +77,34 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         // else: Nil }` inside a `Seq`; legacy `emit_expr` for If
         // walks branches via `emit_block_body`, so the Return ends
         // up emitted as a statement inside a Go block — valid.
-        ExprNode::Return { value } => format!("return {}", emit_expr(value)),
-        ExprNode::Seq { exprs } => {
-            exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
-        }
+        ExprNode::Return { value } => format!("return {}", emit_expr(ctx, value)),
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .map(|sub| emit_expr(ctx, sub))
+            .collect::<Vec<_>>()
+            .join("; "),
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = emit_expr(cond);
-            let then_s = emit_block_body(then_branch);
+            let cond_s = emit_expr(ctx, cond);
+            let then_s = emit_block_body(ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
             // emit without the else clause so the body parses as
             // valid Go (a bare `nil` statement is invalid).
             if is_nil_lit(else_branch) {
                 format!("if {cond_s} {{\n{then_s}\n}}")
             } else {
-                let else_s = emit_block_body(else_branch);
+                let else_s = emit_block_body(ctx, else_branch);
                 format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
             }
         }
         ExprNode::Hash { entries, .. } => {
             let parts: Vec<String> = entries
                 .iter()
-                .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
+                .map(|(k, v)| format!("{}: {}", emit_expr(ctx, k), emit_expr(ctx, v)))
                 .collect();
             format!("map[string]interface{{}}{{{}}}", parts.join(", "))
         }
         ExprNode::Array { elements, .. } => {
-            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            let parts: Vec<String> = elements.iter().map(|e| emit_expr(ctx, e)).collect();
             format!("[]interface{{}}{{{}}}", parts.join(", "))
         }
         ExprNode::BoolOp { op, left, right, .. } => {
@@ -72,7 +113,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
             };
-            format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+            format!("{} {} {}", emit_expr(ctx, left), op_s, emit_expr(ctx, right))
         }
         ExprNode::StringInterp { parts } => {
             use crate::expr::InterpPart;
@@ -91,7 +132,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                     }
                     InterpPart::Expr { expr } => {
                         fmt.push_str("%v");
-                        args.push(emit_expr(expr));
+                        args.push(emit_expr(ctx, expr));
                     }
                 }
             }
@@ -105,18 +146,36 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     }
 }
 
-pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+pub(super) fn emit_send(
+    ctx: &EmitCtx,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> String {
+    let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
 
     if method == "[]" && recv.is_some() {
-        return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
+        return format!("{}[{}]", emit_expr(ctx, recv.unwrap()), args_s.join(", "));
     }
 
     // Binary operators: Ruby parses `a == b`, `a + b`, etc. as
     // `Send { recv: a, method: "==", args: [b] }`. Emit them infix.
     if let (Some(r), Some(op)) = (recv, binary_op(method)) {
         if args.len() == 1 {
-            return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+            return format!("{} {} {}", emit_expr(ctx, r), op, args_s[0]);
+        }
+    }
+
+    // SelfRef receiver in a class method context — rewrite to the
+    // bare-fn call `ClassName_method(args)` because class methods
+    // emit as bare functions, not as methods on a struct. Use the
+    // bare-fn name shape (lowercase + `?`/`!`/`=` sanitized, no
+    // pascalize) to match the function-definition shape in
+    // `library::emit_method`.
+    if let (Some(r), Some(class_name)) = (recv, ctx.class_name.as_deref()) {
+        if ctx.in_class_method && matches!(&*r.node, ExprNode::SelfRef) {
+            let m = super::library::sanitize_method_name(method);
+            return format!("{class_name}_{m}({})", args_s.join(", "));
         }
     }
 
@@ -126,7 +185,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     // receivers; class calls and unknown types pass through.
     if let Some(r) = recv {
         if args.is_empty() && matches!(r.ty, Some(Ty::Str)) {
-            if let Some(wrapped) = map_go_str_method(method, &emit_expr(r)) {
+            if let Some(wrapped) = map_go_str_method(method, &emit_expr(ctx, r)) {
                 return wrapped;
             }
         }
@@ -142,7 +201,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
         }
         Some(r) => {
-            let recv_s = emit_expr(r);
+            let recv_s = emit_expr(ctx, r);
             // Struct field access vs method call: 0-arg Sends on a
             // non-Class receiver whose method isn't a known AR/stdlib
             // call render without parens (`p.Title`, not `p.Title()`).
@@ -152,6 +211,24 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))
         }
+    }
+}
+
+/// `SelfRef` in value position (not as a Send receiver). Class
+/// methods don't have a `self` binding in Go, so emit the class
+/// name itself as the most useful identifier-shape stand-in. Code
+/// downstream of this fallback might still produce nonsense, but at
+/// least the file parses and the gap is locally visible.
+fn self_ref_expr(ctx: &EmitCtx) -> String {
+    if ctx.in_class_method {
+        match ctx.class_name.as_deref() {
+            Some(n) => n.to_string(),
+            None => "/* TODO: SelfRef without class context */".to_string(),
+        }
+    } else {
+        // Instance method — the emitted Go has `(self *Class)` and
+        // `self` is the receiver param name.
+        "self".to_string()
     }
 }
 
@@ -179,9 +256,9 @@ fn is_nil_lit(e: &Expr) -> bool {
 /// - `LValue::Ivar` → `self.name = value` (instance receiver)
 /// - other → emit just the value with a `/* TODO */` marker so the
 ///   gap is loudly visible in the v2/ output
-fn emit_assign(target: &crate::expr::LValue, value: &Expr) -> String {
+fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> String {
     use crate::expr::LValue;
-    let v = emit_expr(value);
+    let v = emit_expr(ctx, value);
     match target {
         LValue::Var { name, .. } => format!("{name} := {v}"),
         LValue::Ivar { name } => format!("self.{name} = {v}"),
@@ -236,14 +313,14 @@ fn map_go_str_method(method: &str, recv_text: &str) -> Option<String> {
     }
 }
 
-pub(super) fn emit_block_body(e: &Expr) -> String {
+pub(super) fn emit_block_body(ctx: &EmitCtx, e: &Expr) -> String {
     let raw = match &*e.node {
         ExprNode::Seq { exprs } => exprs
             .iter()
-            .map(emit_expr)
+            .map(|sub| emit_expr(ctx, sub))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => emit_expr(e),
+        _ => emit_expr(ctx, e),
     };
     raw.lines().map(|l| format!("\t{l}")).collect::<Vec<_>>().join("\n")
 }
@@ -271,9 +348,9 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 /// other variants emit as `return <value_expression>`.
 ///
 /// Output is indented one tab in (caller wraps in `func ... { ... }`).
-pub(super) fn emit_return_body(e: &Expr) -> String {
+pub(super) fn emit_return_body(ctx: &EmitCtx, e: &Expr) -> String {
     let mut out = String::new();
-    emit_return_at(e, &mut out, 1);
+    emit_return_at(ctx, e, &mut out, 1);
     out
 }
 
@@ -283,19 +360,19 @@ fn indent(out: &mut String, depth: usize) {
     }
 }
 
-fn emit_return_at(e: &Expr, out: &mut String, depth: usize) {
+fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
     match &*e.node {
         ExprNode::If { cond, then_branch, else_branch } => {
-            let cond_s = emit_expr(cond);
+            let cond_s = emit_expr(ctx, cond);
             indent(out, depth);
             out.push_str(&format!("if {cond_s} {{\n"));
-            emit_return_at(then_branch, out, depth + 1);
+            emit_return_at(ctx, then_branch, out, depth + 1);
             // Skip the else clause when it's an implicit nil — the
             // `return X if cond` shape doesn't want a `nil` else.
             if !is_nil_lit(else_branch) {
                 indent(out, depth);
                 out.push_str("} else {\n");
-                emit_return_at(else_branch, out, depth + 1);
+                emit_return_at(ctx, else_branch, out, depth + 1);
             }
             indent(out, depth);
             out.push_str("}\n");
@@ -305,22 +382,22 @@ fn emit_return_at(e: &Expr, out: &mut String, depth: usize) {
             // the return-position expression.
             for (i, sub) in exprs.iter().enumerate() {
                 if i + 1 == exprs.len() {
-                    emit_return_at(sub, out, depth);
+                    emit_return_at(ctx, sub, out, depth);
                 } else {
                     indent(out, depth);
-                    out.push_str(&emit_expr(sub));
+                    out.push_str(&emit_expr(ctx, sub));
                     out.push('\n');
                 }
             }
         }
         ExprNode::Return { value } => {
             // Already a return; don't double up to `return return X`.
-            let v = emit_expr(value);
+            let v = emit_expr(ctx, value);
             indent(out, depth);
             out.push_str(&format!("return {v}\n"));
         }
         _ => {
-            let v = emit_expr(e);
+            let v = emit_expr(ctx, e);
             indent(out, depth);
             out.push_str(&format!("return {v}\n"));
         }

@@ -25,7 +25,7 @@ use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ty::{ParamKind, Ty};
 
-use super::expr::emit_return_body;
+use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
 
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
@@ -48,7 +48,10 @@ fn sanitize_type_name(name: &str) -> String {
 
 /// Ruby method names allow `?`, `!`, `=` suffixes; Go identifiers
 /// don't. Map to Go-friendly suffixes so emitted shapes file-parse.
-fn sanitize_method_name(name: &str) -> String {
+/// Used for BARE-FN names (e.g. `Inflector_pluralize`) — does NOT
+/// pascalize. Method-call sites that need PascalCase form use
+/// `go2_method_ident` in expr.rs instead.
+pub(super) fn sanitize_method_name(name: &str) -> String {
     // Operator-shape method names (`[]`, `[]=`, `<=>`, `==`, `+`,
     // `-`, ...) need to map to Go identifiers. Handle the common
     // ones explicitly; fall back to a `op_<hex>` form for anything
@@ -88,12 +91,16 @@ fn sanitize_method_name(name: &str) -> String {
 }
 
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    // Mode::Module — no enclosing class; module-level methods emit
+    // as bare functions. `SelfRef` inside them has no class context,
+    // so the walker surfaces a TODO marker if it appears.
+    let ctx = EmitCtx::none();
     let mut out = String::new();
     for m in methods {
         let params = render_params(m);
         let ret = render_return(m);
         let name = sanitize_method_name(m.name.as_str());
-        let body = render_body(m, &format!("(module).{}", m.name));
+        let body = render_body(&ctx, m);
         out.push_str(&format!("func {name}({params}){ret} {{\n{body}}}\n\n"));
     }
     Ok(out)
@@ -121,7 +128,13 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
         // call sites would reference `Foo_bar(...)`.
         MethodReceiver::Class => format!("{class_name}_{method}"),
     };
-    let body = render_body(m, &format!("{class_name}.{method}"));
+    // Build per-method context so the body walker can resolve
+    // `SelfRef` against the right enclosing class + method receiver.
+    let ctx = EmitCtx {
+        class_name: Some(class_name.to_string()),
+        in_class_method: matches!(m.receiver, MethodReceiver::Class),
+    };
+    let body = render_body(&ctx, m);
     format!("func {receiver}{class_method_name}({params}){ret} {{\n{body}}}\n")
 }
 
@@ -161,8 +174,8 @@ fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
 /// gap behind a `panic("stub")`). Per-method panic fallbacks come
 /// back if we ever need them, but for the strangler-fig widening
 /// the loud failure is the inventory.
-fn render_body(m: &MethodDef, _label: &str) -> String {
-    emit_return_body(&m.body)
+fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
+    emit_return_body(ctx, &m.body)
 }
 
 /// Avoid emitting Go reserved words as parameter names. Adds a `_`
