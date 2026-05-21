@@ -429,6 +429,23 @@ pub(super) fn emit_send(
 
     if method == "[]" && recv.is_some() {
         let recv_s = emit_expr(ctx, recv.unwrap());
+        // Ruby negative index (`recv[-1]`, `recv[-2]`, …) — Go has no
+        // negative indexing on slices or strings; rewrite to
+        // `recv[len(recv)-N]`. Gated on a literal `Int { value: < 0 }`
+        // arg so non-literal negatives (`recv[i]` where i happens to
+        // be negative at runtime) still emit the bare form and panic
+        // at index time — matching the Go convention. recv_s is
+        // emitted twice; safe for the Var/SelfRef/Const receivers the
+        // runtime/ruby/ surface uses; side-effecting receivers would
+        // re-evaluate (no current call site hits that).
+        if args.len() == 1 {
+            if let ExprNode::Lit { value: Literal::Int { value } } = &*args[0].node {
+                if *value < 0 {
+                    let offset = -*value;
+                    return format!("{recv_s}[len({recv_s})-{offset}]");
+                }
+            }
+        }
         // `str[start..end]` / `str[start..]` — Ruby Range becomes Go
         // slice syntax `str[start:end]`. Inclusive ranges add `+1` to
         // the end bound; exclusive ranges pass it through; open-ended

@@ -575,6 +575,78 @@ fn include_array_recv_routes_to_slices_contains() {
     );
 }
 
+/// `recv[-1]` / `recv[-2]` — Ruby's negative-index Array/String access
+/// has no Go analog; rewrite to `recv[len(recv)-N]`. Used by
+/// `ActiveRecord::Base.last` (`records.empty? ? nil : records[-1]`).
+/// Gated on a literal negative `Int` arg so dynamically-negative
+/// runtime values still emit the bare form and panic at index time
+/// — matching Go's convention.
+#[test]
+fn negative_index_rewrites_to_len_minus_n() {
+    // Body: `records[-1]` — Send {recv: Var(records), method: "[]",
+    // args: [Lit::Int(-1)]}.
+    let neg_one = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: Symbol::from("records") },
+            )),
+            method: Symbol::from("[]"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: roundhouse::Literal::Int { value: -1 } },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let last_method = MethodDef {
+        name: Symbol::from("tail"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(Symbol::from("records"))],
+        body: neg_one,
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("records"),
+                ty: Ty::Array { elem: Box::new(Ty::Str) },
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Tailer")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Tailer")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![last_method],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit tailer class");
+
+    // `records[-1]` → `records[len(records)-1]`.
+    assert!(
+        emitted.contains("records[len(records)-1]"),
+        "negative-index missing len-minus-N rewrite:\n{emitted}",
+    );
+    // Regression guard: the bare `records[-1]` form must NOT survive
+    // — Go rejects negative slice indices at compile time for
+    // constants and at runtime for non-constants.
+    assert!(
+        !emitted.contains("records[-1]"),
+        "raw negative index leaked into emit:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an
