@@ -27,11 +27,28 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             )
         }
         Some(Ty::Array { elem }) => format!("[]{}", go_ty_stub(Some(elem))),
-        // Union types stay `interface{}` — collapsing `Union{T, Nil}`
-        // to `T` would break `s == nil` checks for value types
-        // (Go strings/ints/floats can't be nil). The narrowing
-        // walker in emit_return_at::Seq handles the runtime
-        // assertion when an early-nil-return shape appears.
+        // `Union { Nil, T }` collapses to `T`'s Go type IFF `T` maps
+        // to a Go reference type (map, slice, pointer-to-struct) —
+        // those carry nil at the type level. Value types (string,
+        // int, float, bool) can't be nil in Go, so the Union stays
+        // `interface{}` and gets narrowed at runtime via the
+        // emit_return_at::Seq early-nil-return walker.
+        Some(Ty::Union { variants }) => {
+            let non_nil: Vec<&Ty> = variants
+                .iter()
+                .filter(|t| !matches!(t, Ty::Nil))
+                .collect();
+            if non_nil.len() == 1 {
+                match non_nil[0] {
+                    Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. } => {
+                        go_ty_stub(Some(non_nil[0]))
+                    }
+                    _ => "interface{}".to_string(),
+                }
+            } else {
+                "interface{}".to_string()
+            }
+        }
         Some(Ty::Class { id, .. }) => {
             // Promote to a Go pointer-to-struct using the same
             // `::` → identifier sanitization as `emit_library_class`.

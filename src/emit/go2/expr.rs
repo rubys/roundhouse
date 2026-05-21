@@ -142,7 +142,33 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             .map(|sub| emit_expr(ctx, sub))
             .collect::<Vec<_>>()
             .join("; "),
+        ExprNode::While { cond, body, until_form } => {
+            // Ruby `while cond ... end` → Go `for cond { ... }`.
+            // `until cond` (the `until_form` flag) negates the cond:
+            // `for !(cond) { ... }`. Ruby `while` evaluates to nil;
+            // Go's `for` is a statement. emit_return_at's `_ =>`
+            // fallback wraps the while value as `return …`, which
+            // is invalid — body-position while loops will need a
+            // dedicated emit_return_at::While arm (deferred until
+            // a body actually puts a while at tail position).
+            let cond_s = emit_expr(ctx, cond);
+            let cond_text = if *until_form {
+                format!("!({cond_s})")
+            } else {
+                cond_s
+            };
+            let body_s = emit_block_body(ctx, body);
+            format!("for {cond_text} {{\n{body_s}\n}}")
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
+            // `unless cond ... end` lowers to `If { then: Lit::Nil,
+            // else: ... }`. Invert before emit so we don't produce
+            // an invalid bare-nil then-block.
+            if is_nil_lit(then_branch) && !is_nil_lit(else_branch) {
+                let cond_s = emit_expr(ctx, cond);
+                let else_s = emit_block_body(ctx, else_branch);
+                return format!("if !({cond_s}) {{\n{else_s}\n}}");
+            }
             // `if recv.is_a?(Class)` → Go's type-assert init form
             // `if asserted, ok := recv.(GoTy); ok`. The then_branch
             // gets a child ctx that renames the recv's Var to the
@@ -239,6 +265,17 @@ pub(super) fn emit_send(
     args: &[Expr],
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+
+    // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.
+    // Emit as a Go index-assign statement. Note: in Go this is a
+    // statement, not an expression — emitting at expression position
+    // (e.g. inside `return ...`) produces invalid Go. In practice
+    // these Sends only appear at statement position in lowered
+    // bodies, so the emit is safe today.
+    if method == "[]=" && args.len() == 2 && recv.is_some() {
+        let recv_s = emit_expr(ctx, recv.unwrap());
+        return format!("{recv_s}[{}] = {}", args_s[0], args_s[1]);
+    }
 
     if method == "[]" && recv.is_some() {
         let recv_s = emit_expr(ctx, recv.unwrap());
@@ -432,11 +469,23 @@ pub(super) fn emit_send(
 
     // Ruby→Go method-name mapping for string operations that have no
     // 1:1 in Go's stdlib (`strip` is `strings.TrimSpace(…)`, not
-    // `.Strip()`). Only kicks in for instance dispatch on Str-typed
-    // receivers; class calls and unknown types pass through.
+    // `.Strip()`). Applied whenever the method name matches the
+    // known str-specific set — we don't gate on receiver Ty because
+    // many lowered Var receivers come through with `Ty::Untyped`
+    // (signature said `untyped`) or with no analyzer-set Ty at all.
+    // A wrong hit (e.g. an Array's `include?` rendering as
+    // `strings.Contains`) emits invalid Go and surfaces the gap;
+    // silently emitting `.Include(...)` would produce an undefined-
+    // method error that's harder to debug.
     if let Some(r) = recv {
-        if args.is_empty() && matches!(r.ty, Some(Ty::Str)) {
-            if let Some(wrapped) = map_go_str_method(method, &emit_expr(ctx, r)) {
+        let recv_s = emit_expr(ctx, r);
+        if args.is_empty() {
+            if let Some(wrapped) = map_go_str_method(method, &recv_s) {
+                return wrapped;
+            }
+        }
+        if args.len() == 1 {
+            if let Some(wrapped) = map_go_str_method_1arg(method, &recv_s, &args_s[0]) {
                 return wrapped;
             }
         }
@@ -741,6 +790,18 @@ fn map_go_str_method(method: &str, recv_text: &str) -> Option<String> {
     }
 }
 
+/// Single-argument Ruby string methods → Go stdlib. Receiver must be
+/// `Ty::Str` for these to apply (caller-side gate).
+fn map_go_str_method_1arg(method: &str, recv: &str, arg: &str) -> Option<String> {
+    match method {
+        "split" => Some(format!("strings.Split({recv}, {arg})")),
+        "start_with?" => Some(format!("strings.HasPrefix({recv}, {arg})")),
+        "end_with?" => Some(format!("strings.HasSuffix({recv}, {arg})")),
+        "include?" => Some(format!("strings.Contains({recv}, {arg})")),
+        _ => None,
+    }
+}
+
 pub(super) fn emit_block_body(ctx: &EmitCtx, e: &Expr) -> String {
     let raw = match &*e.node {
         ExprNode::Seq { exprs } => exprs
@@ -954,6 +1015,19 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             let v = emit_expr(ctx, value);
             indent(out, depth);
             out.push_str(&format!("return {v}\n"));
+        }
+        ExprNode::While { .. } => {
+            // While at body position emits as a statement, not
+            // wrapped in `return`. Ruby's `while` evaluates to nil
+            // so the loop's value is discarded; subsequent
+            // statements (or an implicit nil tail) supply the
+            // function's return.
+            let s = emit_expr(ctx, e);
+            for line in s.lines() {
+                indent(out, depth);
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         _ => {
             let v = emit_expr(ctx, e);

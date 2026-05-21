@@ -91,6 +91,69 @@ fn json_builder_v2_shape() {
 }
 
 #[test]
+fn router_v2_shape() {
+    let app = ingest_with_analyzer();
+    let files = go2::emit_overlay_files(&app);
+    let router = find_file(&files, "app/v2/router.go")
+        .expect("v2/router.go missing from overlay output");
+    let text = &router.content;
+
+    // Class shape — attr_reader → struct fields, constructors.
+    assert!(
+        text.contains("type ActionDispatchRouterRoute struct {")
+            && text.contains("Verb string")
+            && text.contains("Pattern string"),
+        "Route struct missing typed fields:\n{text}",
+    );
+    assert!(
+        text.contains("func NewActionDispatchRouterRoute("),
+        "Route constructor missing:\n{text}",
+    );
+    assert!(
+        text.contains("PathParams map[string]string"),
+        "MatchResult missing map[string]string field for path_params:\n{text}",
+    );
+
+    // Class methods — receive table as `[]*Route`, return `*MatchResult`.
+    assert!(
+        text.contains("table []*ActionDispatchRouterRoute"),
+        "match() param missing typed slice:\n{text}",
+    );
+    assert!(
+        text.contains(") *ActionDispatchRouterMatchResult {"),
+        "match() return type not collapsed from nilable T:\n{text}",
+    );
+
+    // String method translations.
+    assert!(
+        text.contains("strings.ToUpper("),
+        "method.to_s.upcase missing strings.ToUpper:\n{text}",
+    );
+    assert!(
+        text.contains("strings.Split("),
+        "split missing strings.Split:\n{text}",
+    );
+    assert!(
+        text.contains("strings.HasPrefix("),
+        "start_with? missing strings.HasPrefix:\n{text}",
+    );
+
+    // While loop + i++ + []= index assign.
+    assert!(text.contains("for i < len("), "while loop missing for-emit:\n{text}");
+    assert!(text.contains("i = i + 1"), "i += 1 missing reassign emit:\n{text}");
+    assert!(
+        text.contains("params[pp[1:]] = ap"),
+        "[]= missing index-assign emit:\n{text}",
+    );
+
+    // `unless` → inverted if (no bare-nil then-branch).
+    assert!(
+        text.contains("if !(params == nil)"),
+        "unless missing inverted-if emit:\n{text}",
+    );
+}
+
+#[test]
 fn inflector_v2_shape() {
     let app = ingest_with_analyzer();
     let files = go2::emit_overlay_files(&app);
@@ -250,6 +313,34 @@ fn inflector_v2_compiles_and_runs() {
         json_smoke,
     )
     .expect("write json_builder smoke");
+
+    // Router smoke — pattern matching + table dispatch.
+    let router_smoke = "package v2\n\
+                        \n\
+                        import \"testing\"\n\
+                        \n\
+                        func TestRouter_MatchPattern_Smoke(t *testing.T) {\n\
+                        \tgot := ActionDispatchRouter_match_pattern(\"/articles/:id\", \"/articles/42\")\n\
+                        \tif got == nil || got[\"id\"] != \"42\" {\n\
+                        \t\tt.Fatalf(\"match_pattern result wrong: %#v\", got)\n\
+                        \t}\n\
+                        }\n\
+                        \n\
+                        func TestRouter_Match_Smoke(t *testing.T) {\n\
+                        \ttable := []*ActionDispatchRouterRoute{\n\
+                        \t\tNewActionDispatchRouterRoute(\"GET\", \"/articles\", \"articles\", \"index\"),\n\
+                        \t\tNewActionDispatchRouterRoute(\"GET\", \"/articles/:id\", \"articles\", \"show\"),\n\
+                        \t}\n\
+                        \tres := ActionDispatchRouter_match(\"GET\", \"/articles/7\", table)\n\
+                        \tif res == nil || res.Action != \"show\" || res.PathParams[\"id\"] != \"7\" {\n\
+                        \t\tt.Fatalf(\"match result wrong: %#v\", res)\n\
+                        \t}\n\
+                        \tif ActionDispatchRouter_match(\"POST\", \"/articles/7\", table) != nil {\n\
+                        \t\tt.Error(\"expected nil for unmatched method\")\n\
+                        \t}\n\
+                        }\n";
+    std::fs::write(scratch.join("app/v2/router_smoke_test.go"), router_smoke)
+        .expect("write router smoke");
 
     // `go test ./app/v2` — runs the smoke tests against the emitted
     // Inflector_pluralize and JsonBuilder_*.
