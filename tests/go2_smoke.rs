@@ -1173,6 +1173,96 @@ fn each_hash_block_shape() {
     );
 }
 
+/// `recv.map { |x| body }` — accumulates each block-body value into a
+/// new slice. Mirrors `each` shape but with `append` instead of side-
+/// effect-only iteration. Result-elem Ty isn't inferred yet, so the
+/// fallback emit is `[]interface{}`.
+#[test]
+fn map_array_block_shape() {
+    let arr_param = Symbol::from("arr");
+    // Body: `arr.map { |x| x }` — identity map, enough to assert the
+    // IIFE shape, range vars, and the append-tail wiring.
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![Symbol::from("x")],
+            block_param: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: Symbol::from("x") },
+            ),
+            block_style: Default::default(),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: arr_param.clone() },
+            )),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    let method = MethodDef {
+        name: Symbol::from("doubled"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(arr_param)],
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Mapper")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Mapper")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![method],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit map-block class");
+
+    // IIFE wrap with concrete `[]interface{}` return — distinguishes
+    // map from each (which uses `interface{}`).
+    assert!(
+        emitted.contains("func() []interface{} {"),
+        "map IIFE missing []interface{{}} return:\n{emitted}",
+    );
+    // The accumulator slot.
+    assert!(
+        emitted.contains("out := []interface{}{}"),
+        "map IIFE missing accumulator init:\n{emitted}",
+    );
+    // Range over the receiver, append tail expr.
+    assert!(
+        emitted.contains("for _, x := range arr {"),
+        "map block missing for-range shape:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("out = append(out, x)"),
+        "map block missing append-of-body-tail:\n{emitted}",
+    );
+    // Tail returns the accumulated slice.
+    assert!(
+        emitted.contains("return out"),
+        "map IIFE missing slice return:\n{emitted}",
+    );
+    // Regression guard: the broken legacy shape was a bare field-read
+    // `.Map` on the receiver.
+    assert!(
+        !emitted.contains("arr.Map"),
+        "map leaked as bare field-read on receiver:\n{emitted}",
+    );
+}
+
 #[test]
 fn json_builder_v2_shape() {
     let app = ingest_with_analyzer();

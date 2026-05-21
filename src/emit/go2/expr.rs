@@ -422,6 +422,52 @@ pub(super) fn emit_send(
         }
     }
 
+    // `recv.map { |x| body }` (1-param) → Go IIFE that builds a new
+    // `[]interface{}` by iterating the receiver and appending each
+    // body's tail value. Mirrors `each` shape but accumulates instead
+    // of discarding. Result type is `interface{}`-element since we
+    // don't have body-result Ty propagation yet; callers that need a
+    // concrete elem type can refine downstream.
+    if method == "map" && args.is_empty() {
+        if let (Some(recv_e), Some(block_e)) = (recv, block) {
+            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+                let recv_s = emit_expr(ctx, recv_e);
+                let body_ctx = ctx.clone();
+                let range_vars = match params.len() {
+                    0 => "_, _".to_string(),
+                    1 => {
+                        let name = params[0].as_str();
+                        body_ctx.declare_param(name);
+                        format!("_, {name}")
+                    }
+                    2 => {
+                        let k = params[0].as_str();
+                        let v = params[1].as_str();
+                        body_ctx.declare_param(k);
+                        body_ctx.declare_param(v);
+                        format!("{k}, {v}")
+                    }
+                    _ => {
+                        return format!(
+                            "/* TODO: map block with {} params */",
+                            params.len(),
+                        );
+                    }
+                };
+                let body_s = emit_map_block_body(&body_ctx, body);
+                return format!(
+                    "func() []interface{{}} {{\n\
+                     \tout := []interface{{}}{{}}\n\
+                     \tfor {range_vars} := range {recv_s} {{\n\
+                     {body_s}\n\
+                     \t}}\n\
+                     \treturn out\n\
+                     }}()",
+                );
+            }
+        }
+    }
+
     // `Time.now.utc.iso8601` → `time.Now().UTC().Format(time.RFC3339)`.
     // The chain has no element-wise Go analog (no `Time` class method,
     // no chained `.utc` on the result, no `.iso8601` formatter). Match
@@ -1266,6 +1312,31 @@ pub(super) fn emit_block_body(ctx: &EmitCtx, e: &Expr) -> String {
         _ => emit_expr(ctx, e),
     };
     raw.lines().map(|l| format!("\t{l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Render a `.map { |x| body }` block body: leading exprs in a Seq
+/// emit as statements, the tail expr feeds `out = append(out, …)`.
+/// A single non-Seq body is the tail. Two tabs of indent — one for
+/// the IIFE, one for the `for` loop.
+pub(super) fn emit_map_block_body(ctx: &EmitCtx, e: &Expr) -> String {
+    let (stmts, tail) = match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let last = exprs.len() - 1;
+            let stmts: Vec<String> = exprs[..last]
+                .iter()
+                .map(|sub| emit_expr(ctx, sub))
+                .collect();
+            (stmts, emit_expr(ctx, &exprs[last]))
+        }
+        _ => (Vec::new(), emit_expr(ctx, e)),
+    };
+    let mut lines: Vec<String> = stmts;
+    lines.push(format!("out = append(out, {tail})"));
+    lines
+        .iter()
+        .flat_map(|s| s.lines().map(|l| format!("\t\t{l}")).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn emit_literal(lit: &Literal) -> String {
