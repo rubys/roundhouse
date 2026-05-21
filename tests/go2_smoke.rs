@@ -20,8 +20,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
+use roundhouse::dialect::{
+    AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param as DialectParam,
+};
+use roundhouse::effect::EffectSet;
 use roundhouse::emit::{go, go2};
+use roundhouse::expr::{Expr, ExprNode, LValue};
+use roundhouse::ident::{ClassId, Symbol, VarId};
 use roundhouse::ingest::ingest_app;
+use roundhouse::span::Span;
+use roundhouse::ty::{Param as TyParam, ParamKind, Ty};
 
 const FIXTURE: &str = "fixtures/real-blog";
 
@@ -36,6 +44,189 @@ fn find_file<'a>(
     needle: &str,
 ) -> Option<&'a roundhouse::emit::EmittedFile> {
     files.iter().find(|f| f.path.to_string_lossy() == needle)
+}
+
+/// Synthesize the module-singleton LibraryClass shape — `module
+/// ActiveRecord; class << self; attr_accessor :adapter; end; end`
+/// — and assert the emitted Go matches the module-slot architecture
+/// contract: unit struct + per-slot package var + reader/writer
+/// accessor functions, with `@adapter` reads/writes routing to the
+/// namespaced slot (not `self.Adapter`).
+///
+/// Built from a synthesized `LibraryClass` rather than driven through
+/// `GO_RUNTIME` because `active_record/base.rb` has many remaining
+/// emit gaps (each-blocks, `.class` reflection, `Time` chain, etc.);
+/// dropping it in whole would break `go vet` on the v2/ overlay. The
+/// synthetic approach lets the module-singleton contract land
+/// independently of the broader AR::Base widening.
+#[test]
+fn module_singleton_shape() {
+    // `def self.adapter; @adapter; end` — synthesized from
+    // `attr_accessor :adapter` inside `class << self`. Body is a
+    // bare Ivar read; signature carries the slot's Ty so the
+    // emitted `var ActiveRecord_adapter_slot <Ty>` declares the
+    // right type. AdapterInterface stands in for what the RBS
+    // gives in real ingest.
+    let adapter_ty = Ty::Class {
+        id: ClassId(Symbol::from("AdapterInterface")),
+        args: vec![],
+    };
+    let reader = MethodDef {
+        name: Symbol::from("adapter"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar { name: Symbol::from("adapter") },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(adapter_ty.clone()),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("ActiveRecord")),
+        kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+    };
+    // `def self.adapter=(value); @adapter = value; end`.
+    let writer = MethodDef {
+        name: Symbol::from("adapter="),
+        receiver: MethodReceiver::Class,
+        params: vec![DialectParam::positional(Symbol::from("value"))],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: Symbol::from("adapter") },
+                value: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var {
+                        id: VarId(0),
+                        name: Symbol::from("value"),
+                    },
+                ),
+            },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("value"),
+                ty: adapter_ty.clone(),
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(adapter_ty.clone()),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("ActiveRecord")),
+        kind: AccessorKind::AttributeWriter,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("ActiveRecord")),
+        is_module: true,
+        parent: None,
+        includes: vec![],
+        methods: vec![reader, writer],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit module singleton");
+
+    // Unit struct — the type name is preserved so `var x
+    // *ActiveRecord` parses if anyone references it.
+    assert!(
+        emitted.contains("type ActiveRecord struct{}"),
+        "missing unit-struct decl:\n{emitted}",
+    );
+    // Per-slot package var, namespaced by class name to avoid
+    // cross-module collision.
+    assert!(
+        emitted.contains("var ActiveRecord_adapter_slot *AdapterInterface"),
+        "missing slot var:\n{emitted}",
+    );
+    // Reader function — return slot, no receiver param.
+    assert!(
+        emitted.contains("func ActiveRecord_adapter() *AdapterInterface {"),
+        "missing reader fn signature:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("return ActiveRecord_adapter_slot"),
+        "reader body missing slot read:\n{emitted}",
+    );
+    // Writer function — sanitize maps `adapter=` to `adapter_eq`.
+    // Writes target the slot; the value param is the single
+    // positional arg.
+    assert!(
+        emitted.contains(
+            "func ActiveRecord_adapter_eq(value *AdapterInterface)"
+        ),
+        "missing writer fn signature:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("ActiveRecord_adapter_slot = value"),
+        "writer body missing slot assign:\n{emitted}",
+    );
+}
+
+/// Pair to `module_singleton_shape` — assert that a plain class
+/// (`is_module=false`) with the same attr_accessor still emits as a
+/// struct field, NOT a module-singleton slot. Regression guard: the
+/// module-singleton detection predicate must not fire on regular
+/// classes; otherwise per-instance state would silently lift to
+/// package vars.
+#[test]
+fn module_singleton_does_not_fire_on_plain_class() {
+    let attr_ty = Ty::Class {
+        id: ClassId(Symbol::from("AdapterInterface")),
+        args: vec![],
+    };
+    let reader = MethodDef {
+        name: Symbol::from("adapter"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar { name: Symbol::from("adapter") },
+        ),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(attr_ty.clone()),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Configurable")),
+        kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Configurable")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![reader],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit plain class");
+
+    // Plain class → struct with a field; NOT a module-singleton
+    // slot. Adapter shows up as a struct field rendered from the
+    // attr_reader's signature.
+    assert!(
+        emitted.contains("type Configurable struct {")
+            && emitted.contains("Adapter *AdapterInterface"),
+        "plain class should emit struct field, not slot:\n{emitted}",
+    );
+    assert!(
+        !emitted.contains("_slot"),
+        "plain class accidentally hit module-singleton path:\n{emitted}",
+    );
 }
 
 #[test]

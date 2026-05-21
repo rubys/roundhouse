@@ -31,6 +31,23 @@ use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
 
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    // Module-singleton shape: a Ruby `module X` whose body is just
+    // `class << self; attr_accessor :slot; end` (and/or `def self.foo`
+    // methods). All methods are Class receivers; no instances exist.
+    // Go analog is a unit struct + per-slot package var + bare
+    // accessor functions — distinct enough from the per-instance
+    // struct shape that it gets its own emit path. Detection matches
+    // rust2's `is_module_singleton` predicate.
+    let is_module_singleton = class.is_module
+        && !class.methods.is_empty()
+        && class
+            .methods
+            .iter()
+            .all(|m| matches!(m.receiver, MethodReceiver::Class));
+    if is_module_singleton {
+        return emit_module_singleton(class);
+    }
+
     let name = sanitize_type_name(class.name.0.as_str());
     let mut out = String::new();
 
@@ -100,6 +117,15 @@ struct Field {
 fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
     let mut out: Vec<Field> = Vec::new();
     for m in methods {
+        // Class-receiver attrs are module-singleton slots, not
+        // per-instance fields. The module-singleton emit path
+        // handles them separately; here we keep struct fields
+        // strictly per-instance so a class with mixed receivers
+        // doesn't accidentally lift a class-level slot into the
+        // struct shape.
+        if matches!(m.receiver, MethodReceiver::Class) {
+            continue;
+        }
         let name = m.name.as_str().trim_end_matches('=').to_string();
         let go_ty = match m.kind {
             AccessorKind::AttributeReader => {
@@ -373,6 +399,7 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         void_method: returns_void,
+        in_module_singleton: false,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
@@ -493,4 +520,115 @@ fn render_return(m: &MethodDef) -> String {
         return format!(" {}", go_ty_stub(Some(ret)));
     }
     " interface{}".to_string()
+}
+
+/// Emit a Ruby module-singleton class — `module X; class << self;
+/// attr_accessor :slot; end; end` — as a unit struct + per-slot
+/// package var + bare accessor/method functions.
+///
+/// Output shape:
+///
+/// ```text
+/// type ActiveRecord struct{}
+///
+/// var ActiveRecord_adapter_slot *AdapterInterface
+///
+/// func ActiveRecord_adapter() *AdapterInterface { return ActiveRecord_adapter_slot }
+/// func ActiveRecord_adapter_eq(value *AdapterInterface) { ActiveRecord_adapter_slot = value }
+/// ```
+///
+/// Callers reach the slot via `ActiveRecord.adapter` /
+/// `ActiveRecord.adapter = v` on the Ruby side; the expr walker's
+/// `Const(X).method(args)` → `X_method(args)` rewrite + `adapter=`'s
+/// sanitize-to-`adapter_eq` mapping route those calls to the bare-fn
+/// pair this emits.
+fn emit_module_singleton(class: &LibraryClass) -> Result<String, String> {
+    let name = sanitize_type_name(class.name.0.as_str());
+    let mut out = String::new();
+
+    // Unit struct keeps `<Name>` a valid type so e.g. `var x *<Name>`
+    // parses if anyone references the module-as-type. Methods live
+    // as bare `<Name>_<method>` funcs alongside.
+    out.push_str(&format!("type {name} struct{{}}\n\n"));
+
+    // Per-slot package vars. Each unique ivar across the
+    // attr_reader/attr_writer pairs becomes one `var`. The `_slot`
+    // suffix avoids collision with the accessor func of the same
+    // base name (`ActiveRecord_adapter` is the reader fn;
+    // `ActiveRecord_adapter_slot` is the backing storage).
+    let slots = collect_module_singleton_slots(&class.methods);
+    for (slot, ty) in &slots {
+        out.push_str(&format!(
+            "var {name}_{slot}_slot {}\n",
+            go_ty_stub(Some(ty)),
+        ));
+    }
+    if !slots.is_empty() {
+        out.push('\n');
+    }
+
+    // Methods — every entry is Class-receiver by detection
+    // (`all-class-receivers` predicate). Same shape as
+    // `emit_method`'s Class-receiver branch, but EmitCtx flips
+    // `in_module_singleton=true` so `@ivar` reads/writes resolve
+    // to the namespaced slot rather than `self.Field`.
+    for m in &class.methods {
+        out.push_str(&emit_module_singleton_method(&name, m));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Pair `attr_reader`/`attr_writer` MethodDefs by ivar name and
+/// return one (name, Ty) per unique slot. Signature carries the
+/// type — reader's return Ty, writer's first-param Ty. Falls back
+/// to `Ty::Untyped` (which `go_ty_stub` maps to `interface{}`)
+/// when no signature is set.
+fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
+    let mut out: Vec<(String, Ty)> = Vec::new();
+    for m in methods {
+        let raw_name = m.name.as_str().trim_end_matches('=').to_string();
+        let ty = match m.kind {
+            AccessorKind::AttributeReader => match m.signature.as_ref() {
+                Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                _ => Ty::Untyped,
+            },
+            AccessorKind::AttributeWriter => match m.signature.as_ref() {
+                Some(Ty::Fn { params, .. }) => params
+                    .first()
+                    .map(|p| p.ty.clone())
+                    .unwrap_or(Ty::Untyped),
+                _ => Ty::Untyped,
+            },
+            _ => continue,
+        };
+        if out.iter().any(|(n, _)| *n == raw_name) {
+            continue;
+        }
+        out.push((raw_name, ty));
+    }
+    out
+}
+
+fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
+    let params = render_params(m);
+    let ret = render_return(m);
+    let method = sanitize_method_name(m.name.as_str());
+    let returns_void = matches!(
+        m.signature.as_ref(),
+        Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+    );
+    let ctx = EmitCtx {
+        class_name: Some(class_name.to_string()),
+        in_class_method: true,
+        var_renames: std::collections::HashMap::new(),
+        declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        void_method: returns_void,
+        in_module_singleton: true,
+    };
+    for p in &m.params {
+        ctx.declare_param(p.name.as_str());
+    }
+    let body = render_body(&ctx, m);
+    format!("func {class_name}_{method}({params}){ret} {{\n{body}}}\n")
 }

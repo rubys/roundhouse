@@ -155,4 +155,10 @@ fn emit_imports(out: &mut String, imports: &[&str]) {
 }
 
 // Re-export the library emit functions used by `runtime_loader::GO_TARGET`.
-pub(crate) use library::{emit_library_class, emit_module, format_constant, format_module_ivar};
+// `emit_library_class` is `pub` (not `pub(crate)`) so integration
+// tests in `tests/` can synthesize a `LibraryClass` and assert the
+// emitted shape without going through the GO_RUNTIME wiring — that
+// keeps shape coverage decoupled from "is this file currently in
+// the v2/ overlay" gating.
+pub use library::emit_library_class;
+pub(crate) use library::{emit_module, format_constant, format_module_ivar};
