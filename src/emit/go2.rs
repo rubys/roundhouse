@@ -35,31 +35,39 @@ mod ty;
 /// Append go2 transpiled runtime files to `files` when
 /// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
 /// (legacy go) ships unchanged.
-pub fn overlay_v2(files: &mut Vec<EmittedFile>, _app: &App) {
+pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
     if std::env::var("ROUNDHOUSE_GO_V2").as_deref() != Ok("1") {
         return;
     }
+    files.extend(emit_overlay_files(app));
+}
 
+/// Produce the v2 overlay files unconditionally — for tests and
+/// other callers that want the overlay output without setting an env
+/// var. Returns the same files `overlay_v2` would append, in
+/// emission order.
+pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
+    let mut out = Vec::new();
     let units = match crate::runtime_loader::go_units(|_, c| c) {
         Ok(u) => u,
         Err(e) => {
-            // Phase 1: a transpile failure is informative, not fatal.
-            // Emit a single sentinel file so the failure shows up in
-            // the output directory and ordinary go build picks it up.
-            files.push(EmittedFile {
+            // Transpile failure surfaces as a sentinel file rather
+            // than panicking — `go build` picks it up and the cargo
+            // test that exercises overlay sees a non-empty result.
+            out.push(EmittedFile {
                 path: PathBuf::from("app/v2/transpile_error.txt"),
                 content: format!("go2 transpile failed: {e}\n"),
             });
-            return;
+            return out;
         }
     };
 
     for unit in units {
-        // The runtime_loader produces paths shaped like
-        // `app/X.go` from GO_RUNTIME; relocate everything under
-        // `app/v2/` and re-anchor the package to `v2` so this overlay
-        // can never collide with legacy runtime types of the same
-        // name (Inflector, JsonBuilder, Router, ...).
+        // The runtime_loader produces paths shaped like `app/X.go`
+        // from GO_RUNTIME; relocate everything under `app/v2/` and
+        // re-anchor the package to `v2` so this overlay can never
+        // collide with legacy runtime types of the same name
+        // (Inflector, JsonBuilder, Router, ...).
         let file_name = unit
             .out_path
             .file_name()
@@ -67,11 +75,12 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, _app: &App) {
             .unwrap_or_else(|| "unit.go".to_string());
         let out_path = PathBuf::from(format!("app/v2/{file_name}"));
         let content = rewrite_package_to_v2(&unit.content);
-        files.push(EmittedFile {
+        out.push(EmittedFile {
             path: out_path,
             content,
         });
     }
+    out
 }
 
 /// Replace the leading `package app` declaration with `package v2`
