@@ -42,7 +42,7 @@ mod main;
 mod model;
 mod route;
 mod schema_sql;
-mod shared;
+pub(crate) mod shared;
 mod spec;
 mod ty;
 mod view;

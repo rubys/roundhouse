@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 
+mod expr;
 mod library;
 mod ty;
 
@@ -73,29 +74,74 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, _app: &App) {
     }
 }
 
-/// Replace the leading `package app` declaration emitted by
-/// `GO_RUNTIME` table entries with `package v2`. Idempotent for
-/// content that already declares `package v2`.
+/// Replace the leading `package app` declaration with `package v2`
+/// and inject `import` declarations for stdlib packages the body
+/// references (`fmt`, `strings`, `regexp`). Go is strict about
+/// unused imports so detection is by substring presence, not
+/// always-on.
 fn rewrite_package_to_v2(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 16);
+    let imports = needed_imports(content);
+    let mut out = String::with_capacity(content.len() + 64);
     let mut saw_pkg = false;
+    let mut imports_emitted = false;
     for line in content.lines() {
         if !saw_pkg && line.starts_with("package ") {
             out.push_str("package v2\n");
             saw_pkg = true;
         } else {
+            // First non-package, non-comment line is where the imports
+            // go. Pre-pending here keeps them above transpiled headers.
+            if saw_pkg && !imports_emitted && !imports.is_empty()
+                && !line.starts_with("//")
+                && !line.trim().is_empty()
+            {
+                emit_imports(&mut out, &imports);
+                imports_emitted = true;
+            }
             out.push_str(line);
             out.push('\n');
         }
     }
+    // Fallthrough: file had only comments + package line. Still emit
+    // imports if needed (the body might be empty, but that's harmless).
+    if saw_pkg && !imports_emitted && !imports.is_empty() {
+        emit_imports(&mut out, &imports);
+    }
     if !saw_pkg {
-        // No `package` line in the unit body — prepend one so the
-        // file at least file-level parses under `go build`.
         let mut prefixed = String::from("package v2\n\n");
+        if !imports.is_empty() {
+            emit_imports(&mut prefixed, &imports);
+        }
         prefixed.push_str(&out);
         return prefixed;
     }
     out
+}
+
+fn needed_imports(content: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (probe, name) in [
+        ("fmt.", "fmt"),
+        ("strings.", "strings"),
+        ("regexp.", "regexp"),
+    ] {
+        if content.contains(probe) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn emit_imports(out: &mut String, imports: &[&str]) {
+    if imports.len() == 1 {
+        out.push_str(&format!("import {:?}\n\n", imports[0]));
+    } else {
+        out.push_str("import (\n");
+        for name in imports {
+            out.push_str(&format!("\t{name:?}\n"));
+        }
+        out.push_str(")\n\n");
+    }
 }
 
 // Re-export the library emit functions used by `runtime_loader::GO_TARGET`.

@@ -1,30 +1,31 @@
-//! Generic LibraryClass → Go emit (Phase 1 stub).
+//! Generic LibraryClass → Go emit.
 //!
-//! Mirrors `src/emit/rust2/library.rs` but emits Go.
-//!
-//! Phase 1 scope: produce SYNTACTICALLY valid Go for every method
-//! shape — empty body returning the zero value of the declared return
-//! type. The goal is to let `runtime_loader::go_units` drive end-to-end
-//! and surface compile errors against real method calls, NOT to emit
-//! correct semantics. Subsequent sessions land real body emit
-//! (expression walker, str_color analog, ownership/copy rules, etc.).
+//! Mirrors `src/emit/rust2/library.rs` but emits Go. Couples the
+//! function-decl shape (`render_params` + `render_return`) with the
+//! body walker in `super::expr` to produce real method bodies for
+//! variants the walker covers. Unhandled `ExprNode` variants surface
+//! as `/* TODO: emit ... */` comments inside the body — visible to
+//! `go build` against the v2/ overlay, which is the inventory loop
+//! for widening walker coverage one variant at a time.
 //!
 //! Output shape:
 //! - Each LibraryClass becomes `type <Name> struct {}` plus one
-//!   `func (*<Name>) <method>(args) ret { panic("go2 stub") }` per
-//!   method.
-//! - Modules (Mode::Module) become a bag of `func <name>(args) ret { panic("go2 stub") }`.
-//! - Constants emit as `var <NAME> interface{} = nil` placeholders.
+//!   `func (*<Name>) <method>(args) ret { <body> }` per method.
+//! - Modules (Mode::Module) become a bag of `func <name>(args) ret { <body> }`.
+//! - Constants emit as `var <NAME> interface{} = nil` placeholders
+//!   (Phase 2+: real const renderer over `Expr`).
 //!
-//! Param + return types render via `super::ty::go_ty_stub` — a fully
-//! permissive variant that always returns `interface{}` for unknown
-//! shapes. The real `go_ty` lives in `src/emit/go/ty.rs` and works
-//! from Rails-domain context; the go2 walk doesn't have that context
-//! yet.
+//! Param + return types render via `super::ty::go_ty_stub` — a
+//! permissive variant that returns `interface{}` for unknown shapes
+//! and concrete Go types (`int64`, `string`, ...) for known
+//! primitives. Per-param Tys come from the method's `signature:
+//! Option<Ty::Fn>` when present.
 
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
+use crate::ty::{ParamKind, Ty};
 
+use super::expr::emit_return_body;
 use super::ty::go_ty_stub;
 
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
@@ -92,9 +93,8 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         let params = render_params(m);
         let ret = render_return(m);
         let name = sanitize_method_name(m.name.as_str());
-        out.push_str(&format!(
-            "func {name}({params}){ret} {{\n\tpanic(\"go2 stub: {name}\")\n}}\n\n",
-        ));
+        let body = render_body(m, &format!("(module).{}", m.name));
+        out.push_str(&format!("func {name}({params}){ret} {{\n{body}}}\n\n"));
     }
     Ok(out)
 }
@@ -121,20 +121,48 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
         // call sites would reference `Foo_bar(...)`.
         MethodReceiver::Class => format!("{class_name}_{method}"),
     };
-    format!(
-        "func {receiver}{class_method_name}({params}){ret} {{\n\tpanic(\"go2 stub: {class_name}.{method}\")\n}}\n",
-    )
+    let body = render_body(m, &format!("{class_name}.{method}"));
+    format!("func {receiver}{class_method_name}({params}){ret} {{\n{body}}}\n")
 }
 
 fn render_params(m: &MethodDef) -> String {
-    // Param doesn't carry a per-param Ty (the function-level
-    // `signature: Option<Ty>` does, when present, but Phase 1 doesn't
-    // yet decompose it). Emit `interface{}` for every param.
+    // Take per-param Tys from `signature: Option<Ty::Fn { params }>`
+    // when present; fall back to `interface{}` if absent (no RBS or
+    // not decomposable).
+    let sig_tys = signature_param_tys(m);
     m.params
         .iter()
-        .map(|p| format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(None)))
+        .enumerate()
+        .map(|(i, p)| {
+            let ty = sig_tys.as_ref().and_then(|tys| tys.get(i));
+            format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty))
+        })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
+    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+        return None;
+    };
+    Some(
+        params
+            .iter()
+            .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
+            .map(|p| p.ty.clone())
+            .collect(),
+    )
+}
+
+/// Emit the walked body. Unhandled `ExprNode` variants surface as
+/// `/* TODO: emit ... */` comments inside the body — that's
+/// intentional, since it lets the v2/ overlay's `go build` surface
+/// exactly what walker coverage is missing (rather than hiding the
+/// gap behind a `panic("stub")`). Per-method panic fallbacks come
+/// back if we ever need them, but for the strangler-fig widening
+/// the loud failure is the inventory.
+fn render_body(m: &MethodDef, _label: &str) -> String {
+    emit_return_body(&m.body)
 }
 
 /// Avoid emitting Go reserved words as parameter names. Adds a `_`
@@ -154,15 +182,12 @@ fn sanitize(name: &str) -> String {
 }
 
 fn render_return(m: &MethodDef) -> String {
-    // Method-level signature in MethodDef.signature is the function
-    // type when present; for Phase 1 we conservatively emit
-    // `interface{}` so every body's `panic(...)` is type-compatible.
-    // A void return needs an empty string (no `func F() {}` trailing
-    // space). Use the simple heuristic: signature absent → return
-    // `interface{}`; signature present → also `interface{}` (we
-    // don't decompose function Tys yet).
-    match &m.signature {
-        Some(_) => " interface{}".to_string(),
-        None => " interface{}".to_string(),
+    if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        // Ty::Nil → Go void (no return type).
+        if matches!(ret.as_ref(), Ty::Nil) {
+            return String::new();
+        }
+        return format!(" {}", go_ty_stub(Some(ret)));
     }
+    " interface{}".to_string()
 }

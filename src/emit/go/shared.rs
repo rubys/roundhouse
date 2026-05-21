@@ -53,7 +53,7 @@ pub(super) fn go_param_name(ruby: &str) -> String {
     out
 }
 
-pub(super) fn go_method_name(ruby_name: &str) -> String {
+pub(crate) fn go_method_name(ruby_name: &str) -> String {
     ruby_name
         .split('_')
         .map(|part| match part {

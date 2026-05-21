@@ -856,67 +856,19 @@ fn go_wrap_namespace(_namespace: &str, body: &str) -> String {
 const GO_PRELUDE: &str = "package app\n\n";
 
 const GO_RUNTIME: &[RuntimeEntry] = &[
+    // Smallest runtime file (1 method, no cross-class deps) — drives
+    // the per-variant walker widening cycle. Additional entries
+    // (json_builder, router, view_helpers, active_record/base,
+    // action_controller/base) land as `super::expr` grows coverage
+    // for the variants their bodies hit. The list stays narrow on
+    // purpose so the v2/ overlay keeps go-build clean — the inventory
+    // signal we want is whether the CURRENT scope still passes.
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
         rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
         rb_path: "runtime/ruby/inflector.rb",
         namespace: "",
         out_path: "app/inflector.go",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
-        namespace: "",
-        out_path: "app/json_builder.go",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
-        namespace: "",
-        out_path: "app/router.go",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
-        namespace: "ActionView",
-        out_path: "app/view_helpers.go",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
-        namespace: "ActiveRecord",
-        out_path: "app/active_record_base.go",
-        mode: Mode::Library,
-        imports: NO_IMPORTS,
-        prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
-    },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
-        namespace: "ActionController",
-        out_path: "app/action_controller_base.go",
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: GO_PRELUDE,
