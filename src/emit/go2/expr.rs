@@ -140,8 +140,8 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 format!("self.{}", go_field_name(name.as_str()))
             }
         }
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_send(ctx, recv.as_ref(), method.as_str(), args)
+        ExprNode::Send { recv, method, args, block, .. } => {
+            emit_send(ctx, recv.as_ref(), method.as_str(), args, block.as_ref())
         }
         // `self` reference. In an instance method, the Go body has
         // `(self *Class)` and `self` is a valid identifier — emit
@@ -309,8 +309,62 @@ pub(super) fn emit_send(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+
+    // `recv.each { |x| body }` (1-param) and `recv.each { |k, v| body }`
+    // (2-param) → Go `for ... range` loop wrapped in an IIFE that
+    // returns the receiver (Ruby `each` semantics). The IIFE wrap
+    // makes the statement-shaped loop fit anywhere an expression
+    // goes — assignment value, Seq middle, method tail. Return type
+    // `interface{}` keeps the wrap total without needing receiver-
+    // type inference at this emit site; callers that discard the
+    // value (`Seq` middle, `each` in void-method tail) silently
+    // drop it, matching Go's "discarded return is fine" semantics.
+    if method == "each" && args.is_empty() {
+        if let (Some(recv_e), Some(block_e)) = (recv, block) {
+            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+                let recv_s = emit_expr(ctx, recv_e);
+                // Loop vars: 1 param → array iter (drop the index
+                // with `_`); 2 params → hash iter (key + value);
+                // 0 params (rare — `arr.each { puts "hi" }`) → both
+                // sides bound to `_`. >2 params is unmappable; emit
+                // a TODO so the gap is loudly visible.
+                let body_ctx = ctx.clone();
+                let range_vars = match params.len() {
+                    0 => "_, _".to_string(),
+                    1 => {
+                        let name = params[0].as_str();
+                        body_ctx.declare_param(name);
+                        format!("_, {name}")
+                    }
+                    2 => {
+                        let k = params[0].as_str();
+                        let v = params[1].as_str();
+                        body_ctx.declare_param(k);
+                        body_ctx.declare_param(v);
+                        format!("{k}, {v}")
+                    }
+                    _ => {
+                        return format!(
+                            "/* TODO: each block with {} params */",
+                            params.len(),
+                        );
+                    }
+                };
+                let body_s = emit_block_body(&body_ctx, body);
+                return format!(
+                    "func() interface{{}} {{\n\
+                     \tfor {range_vars} := range {recv_s} {{\n\
+                     {body_s}\n\
+                     \t}}\n\
+                     \treturn {recv_s}\n\
+                     }}()",
+                );
+            }
+        }
+    }
 
     // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.
     // Emit as a Go index-assign statement. Note: in Go this is a

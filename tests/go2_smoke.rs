@@ -291,6 +291,151 @@ fn module_singleton_does_not_fire_on_plain_class() {
     );
 }
 
+/// `arr.each { |x| body }` lowers to a Go `for _, x := range arr`
+/// loop wrapped in an `func() interface{} { ...; return arr }()`
+/// IIFE — the wrap makes the statement-shaped loop fit anywhere an
+/// expression goes (assignment value, Seq middle, method tail), and
+/// the receiver-returning shape matches Ruby `each` semantics so
+/// callers in non-void tail position get a typed return value.
+///
+/// Synthesizes a one-method class so the per-method param-name
+/// declaration path runs (the block param `x` must be visible in
+/// the body's emit ctx so any inner assignment to `x` emits as `=`
+/// — but a bare-Var body suffices for this shape check).
+#[test]
+fn each_array_block_shape() {
+    let arr_param = Symbol::from("arr");
+    // Body: `arr.each { |x| x }` — one-param block iterating
+    // a Var receiver. Single-Var body is enough for the shape
+    // assertion; the param-name declaration plumbing surfaces
+    // in a richer body (covered by the toolchain test once a
+    // real call site lands in GO_RUNTIME).
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![Symbol::from("x")],
+            block_param: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: Symbol::from("x") },
+            ),
+            block_style: Default::default(),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: arr_param.clone() },
+            )),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    let method = MethodDef {
+        name: Symbol::from("traverse"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(arr_param)],
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Loop")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Loop")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![method],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit each-block class");
+
+    // Range over the receiver with the block param bound; underscore
+    // discards the index since 1-param blocks ignore the position.
+    assert!(
+        emitted.contains("for _, x := range arr {"),
+        "each block missing for-range shape:\n{emitted}",
+    );
+    // IIFE wrap with interface{} return — keeps the each-Send a
+    // total expression that's valid in every position.
+    assert!(
+        emitted.contains("func() interface{} {"),
+        "IIFE wrap missing:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("return arr"),
+        "IIFE missing receiver return for Ruby each semantics:\n{emitted}",
+    );
+}
+
+/// Hash variant: `h.each { |k, v| body }` → `for k, v := range h`
+/// — the 2-param shape that drives Hash iteration. Same IIFE
+/// wrap as the array case.
+#[test]
+fn each_hash_block_shape() {
+    let h_param = Symbol::from("h");
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![Symbol::from("k"), Symbol::from("v")],
+            block_param: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: Symbol::from("v") },
+            ),
+            block_style: Default::default(),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: h_param.clone() },
+            )),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    let method = MethodDef {
+        name: Symbol::from("traverse"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(h_param)],
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("HashLoop")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("HashLoop")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![method],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit each hash-block class");
+
+    assert!(
+        emitted.contains("for k, v := range h {"),
+        "hash each missing for-range shape:\n{emitted}",
+    );
+}
+
 #[test]
 fn json_builder_v2_shape() {
     let app = ingest_with_analyzer();
