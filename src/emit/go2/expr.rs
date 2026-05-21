@@ -227,6 +227,24 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
+            // Ruby `||` returns the first truthy operand; Go's `||`
+            // requires bool operands. For non-bool operand types
+            // (Ty::Str typically — `slots[k] || ""` / `form_class ||
+            // "button_to"`), use `cmp.Or` (Go 1.22+) which returns
+            // the first non-zero value. Detect by either side being
+            // known-string. And-on-strings is rare; leave the
+            // legacy `&&` for now.
+            if matches!(op, BoolOpKind::Or) {
+                let stringy =
+                    matches!(left.ty, Some(Ty::Str)) || matches!(right.ty, Some(Ty::Str));
+                if stringy {
+                    return format!(
+                        "cmp.Or({}, {})",
+                        emit_expr(ctx, left),
+                        emit_expr(ctx, right)
+                    );
+                }
+            }
             let op_s = match op {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
@@ -357,12 +375,80 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `.freeze` — no Go equivalent; const declarations are
-    // immutable by construction (or use of `var` for runtime
-    // initializers). Drop the call and emit just the receiver.
-    if method == "freeze" && args.is_empty() {
+    // Ruby `.freeze` / `.to_h` — both pass through the receiver
+    // unchanged in Go (no immutability marker; `.to_h` is a no-op
+    // on Ruby Hash and would convert NamedTuple → Hash under
+    // Crystal, neither of which Go needs).
+    if (method == "freeze" || method == "to_h") && args.is_empty() {
         if let Some(r) = recv {
             return emit_expr(ctx, r);
+        }
+    }
+
+    // Ruby `!x` parses as `Send { recv: x, method: "!", args: [] }`.
+    // Emit as Go's unary not. Parenthesize the operand for safety
+    // against operator-precedence surprises.
+    if method == "!" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("!({})", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `h.delete(k)` → Go's `delete(h, k)` builtin. Statement
+    // form. For non-Hash receivers (Array#delete-by-value, etc.)
+    // this emit is wrong; the runtime/ruby/ surface only uses the
+    // Hash form today.
+    if method == "delete" && args.len() == 1 {
+        if let Some(r) = recv {
+            return format!("delete({}, {})", emit_expr(ctx, r), args_s[0]);
+        }
+    }
+
+    // Ruby `h.fetch(k, default)` → Go `cmp.Or(h[k], default)`.
+    // Subtle semantic gap: Ruby fetch returns default ONLY if the
+    // key is missing; cmp.Or returns default when h[k] is the zero
+    // value (which is "" / 0 / nil for missing keys but also for
+    // explicitly-stored zero values). Acceptable for the
+    // runtime/ruby/ surface today; revisit if call sites
+    // distinguish missing vs zero.
+    if method == "fetch" && args.len() == 2 {
+        if let Some(r) = recv {
+            return format!(
+                "cmp.Or({}[{}], {})",
+                emit_expr(ctx, r),
+                args_s[0],
+                args_s[1]
+            );
+        }
+    }
+
+    // Ruby `s.tr(from, to)` (1-char from/to) → Go's
+    // `strings.ReplaceAll(s, from, to)`. Multi-char tr (`tr("ab",
+    // "12")` mapping a→1, b→2) needs per-char translation —
+    // approximate with ReplaceAll for now; gap surfaces only on
+    // multi-char tr which the runtime doesn't use.
+    if method == "tr" && args.len() == 2 {
+        if let Some(r) = recv {
+            return format!(
+                "strings.ReplaceAll({}, {}, {})",
+                emit_expr(ctx, r),
+                args_s[0],
+                args_s[1]
+            );
+        }
+    }
+
+    // Ruby `arr.join(sep)` → Go `strings.Join(arr, sep)`. Requires
+    // arr to be `[]string`; `[]interface{}` arr would compile error
+    // surfacing the type-inference gap (Array literals currently
+    // default to `[]interface{}` regardless of element types).
+    if method == "join" && args.len() == 1 {
+        if let Some(r) = recv {
+            return format!(
+                "strings.Join({}, {})",
+                emit_expr(ctx, r),
+                args_s[0]
+            );
         }
     }
 
@@ -744,7 +830,23 @@ fn try_nil_narrow_head(first: &Expr) -> Option<NilNarrow> {
 ///   gap is loudly visible in the v2/ output
 fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> String {
     use crate::expr::LValue;
-    let v = emit_expr(ctx, value);
+    // Ruby's `if`/`case` are expressions; Go's are statements. When
+    // an Assign's value is one of those expression-bearing
+    // statement-shapes, wrap in an immediately-invoked closure so
+    // the result lands in the bound variable. `interface{}` keeps
+    // the return type total — caller-side uses see `interface{}`
+    // and downstream emits (Sprintf %v) already accept that.
+    let v = if matches!(&*value.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
+        let body = emit_return_body(ctx, value);
+        let indented = body
+            .lines()
+            .map(|l| format!("\t{l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("func() interface{{}} {{\n{indented}\n}}()")
+    } else {
+        emit_expr(ctx, value)
+    };
     match target {
         LValue::Var { name, .. } => {
             // First assignment to this name → declare (`:=`).

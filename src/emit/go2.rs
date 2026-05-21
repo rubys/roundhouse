@@ -130,9 +130,10 @@ fn rewrite_package_to_v2(content: &str) -> String {
 fn needed_imports(content: &str) -> Vec<&'static str> {
     let mut out = Vec::new();
     for (probe, name) in [
+        ("cmp.", "cmp"),
         ("fmt.", "fmt"),
-        ("strings.", "strings"),
         ("regexp.", "regexp"),
+        ("strings.", "strings"),
     ] {
         if content.contains(probe) {
             out.push(name);
