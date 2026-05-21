@@ -400,6 +400,22 @@ pub(super) fn emit_send(
         }
     }
 
+    // `Time.now.utc.iso8601` → `time.Now().UTC().Format(time.RFC3339)`.
+    // The chain has no element-wise Go analog (no `Time` class method,
+    // no chained `.utc` on the result, no `.iso8601` formatter). Match
+    // the full three-step chain at the outermost Send and emit the Go
+    // equivalent in one shot. Partial chains (`Time.now` alone,
+    // `Time.now.utc`) aren't hit by the runtime/ruby/ surface today;
+    // those would still fall through to the generic Const-recv
+    // class-method fallback and emit `Time_now()` (undefined) so the
+    // gap stays loud. The literal `time.RFC3339` triggers the `time`
+    // import via `super::needed_imports`.
+    if method == "iso8601" && args.is_empty() {
+        if is_time_now_utc_chain(recv) {
+            return "time.Now().UTC().Format(time.RFC3339)".to_string();
+        }
+    }
+
     // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.
     // Emit as a Go index-assign statement. Note: in Go this is a
     // statement, not an expression — emitting at expression position
@@ -809,6 +825,45 @@ fn go2_method_ident(ruby_name: &str) -> String {
 
 fn is_nil_lit(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// True iff `recv` is exactly the chain `Time.now.utc` — paired with
+/// an outer `.iso8601()` Send to produce
+/// `time.Now().UTC().Format(time.RFC3339)`. Walks two nested Sends
+/// (`.utc` outer, `.now` inner) then verifies the receiver is the
+/// top-level `Time` constant.
+fn is_time_now_utc_chain(recv: Option<&Expr>) -> bool {
+    let Some(utc_expr) = recv else { return false };
+    let ExprNode::Send {
+        recv: now_recv,
+        method: utc_method,
+        args: utc_args,
+        ..
+    } = &*utc_expr.node
+    else {
+        return false;
+    };
+    if utc_method.as_str() != "utc" || !utc_args.is_empty() {
+        return false;
+    }
+    let Some(now_expr) = now_recv else { return false };
+    let ExprNode::Send {
+        recv: time_recv,
+        method: now_method,
+        args: now_args,
+        ..
+    } = &*now_expr.node
+    else {
+        return false;
+    };
+    if now_method.as_str() != "now" || !now_args.is_empty() {
+        return false;
+    }
+    let Some(const_expr) = time_recv else { return false };
+    let ExprNode::Const { path } = &*const_expr.node else {
+        return false;
+    };
+    path.last().map(|s| s.as_str()) == Some("Time")
 }
 
 /// Recognize `recv.is_a?(Const)` and return `(recv, last-segment of

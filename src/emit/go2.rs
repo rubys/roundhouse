@@ -110,9 +110,9 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
 
 /// Replace the leading `package app` declaration with `package v2`
 /// and inject `import` declarations for stdlib packages the body
-/// references (`fmt`, `strings`, `regexp`). Go is strict about
-/// unused imports so detection is by substring presence, not
-/// always-on.
+/// references (`cmp`, `fmt`, `regexp`, `strings`, `time`). Go is
+/// strict about unused imports so detection is by substring presence,
+/// not always-on.
 fn rewrite_package_to_v2(content: &str) -> String {
     let imports = needed_imports(content);
     let mut out = String::with_capacity(content.len() + 64);
@@ -154,14 +154,24 @@ fn rewrite_package_to_v2(content: &str) -> String {
 
 fn needed_imports(content: &str) -> Vec<&'static str> {
     let mut out = Vec::new();
-    for (probe, name) in [
-        ("cmp.", "cmp"),
-        ("fmt.", "fmt"),
-        ("regexp.", "regexp"),
-        ("strings.", "strings"),
-    ] {
-        if content.contains(probe) {
-            out.push(name);
+    // Each entry is `(probes[], package)`. A package gets imported
+    // when ANY of its probes is present in `content`. Most stdlib
+    // packages have a unique-enough top-level prefix (`fmt.`,
+    // `strings.`, …) that the bare-period probe is safe; `time.` is
+    // an exception because the file header comment "at app emit time."
+    // false-matches, so its probes specifically target the call sites
+    // the peepholes emit (`time.Now(`, `time.RFC3339`). Add probes
+    // here when a new `time.X` emit lands.
+    let entries: &[(&[&str], &str)] = &[
+        (&["cmp."], "cmp"),
+        (&["fmt."], "fmt"),
+        (&["regexp."], "regexp"),
+        (&["strings."], "strings"),
+        (&["time.Now(", "time.RFC3339"], "time"),
+    ];
+    for (probes, name) in entries {
+        if probes.iter().any(|p| content.contains(p)) {
+            out.push(*name);
         }
     }
     out

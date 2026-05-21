@@ -414,6 +414,91 @@ fn raise_panic_peephole() {
     );
 }
 
+/// `Time.now.utc.iso8601` chain — used by `ActiveRecord::Base#fill_timestamps`
+/// to stamp `created_at` / `updated_at` with a UTC ISO-8601 string. Ruby
+/// chains three Sends; Go's stdlib provides no element-wise analog
+/// (`time.Time` has no `.utc` method, formatting goes through
+/// `Format(layout)`), so the outermost-Send peephole rewrites the whole
+/// chain to `time.Now().UTC().Format(time.RFC3339)` in one shot. The
+/// `time.RFC3339` literal triggers `time` import injection via
+/// `needed_imports`.
+#[test]
+fn time_now_utc_iso8601_peephole() {
+    // Body: `Time.now.utc.iso8601` — outermost Send is `.iso8601`
+    // on `.utc` on `.now` on `Const(Time)`.
+    let chain = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Const { path: vec![Symbol::from("Time")] },
+                            )),
+                            method: Symbol::from("now"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )),
+                    method: Symbol::from("utc"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("iso8601"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let stamp = MethodDef {
+        name: Symbol::from("stamp"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: chain,
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Clock")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Clock")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![stamp],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit clock class");
+
+    // Full Go chain lands in one shot; the substring check pins the
+    // exact rewrite so a partial-chain change in the future is loud.
+    assert!(
+        emitted.contains("time.Now().UTC().Format(time.RFC3339)"),
+        "Time.now.utc.iso8601 chain missing Go rewrite:\n{emitted}",
+    );
+    // Regression guard: the generic Const-recv class-method fallback
+    // would otherwise emit `Time_now()` (an undefined bare function).
+    assert!(
+        !emitted.contains("Time_now("),
+        "iso8601 chain leaked through to Const-class-method dispatch:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an
