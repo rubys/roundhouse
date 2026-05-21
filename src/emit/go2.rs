@@ -110,9 +110,9 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
 
 /// Replace the leading `package app` declaration with `package v2`
 /// and inject `import` declarations for stdlib packages the body
-/// references (`cmp`, `fmt`, `regexp`, `strings`, `time`). Go is
-/// strict about unused imports so detection is by substring presence,
-/// not always-on.
+/// references (`cmp`, `fmt`, `regexp`, `slices`, `strings`, `time`).
+/// Go is strict about unused imports so detection is by substring
+/// presence, not always-on.
 fn rewrite_package_to_v2(content: &str) -> String {
     let imports = needed_imports(content);
     let mut out = String::with_capacity(content.len() + 64);
@@ -166,6 +166,7 @@ fn needed_imports(content: &str) -> Vec<&'static str> {
         (&["cmp."], "cmp"),
         (&["fmt."], "fmt"),
         (&["regexp."], "regexp"),
+        (&["slices."], "slices"),
         (&["strings."], "strings"),
         (&["time.Now(", "time.RFC3339"], "time"),
     ];

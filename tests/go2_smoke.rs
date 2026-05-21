@@ -499,6 +499,82 @@ fn time_now_utc_iso8601_peephole() {
     );
 }
 
+/// `arr.include?(x)` with an Array-typed receiver must route to
+/// `slices.Contains(arr, x)`, NOT the default `strings.Contains` path
+/// that the receiver-Ty-agnostic str_method fallback would take. Used
+/// by `ActiveRecord::Base#fill_timestamps` (`cols.include?(:updated_at)`
+/// where `cols` is `Array[Symbol]` from `self.class.schema_columns`).
+/// Sym literal arg lowers to a Go string literal — `slices.Contains`
+/// type-checks with `[]string` recv + `string` arg.
+#[test]
+fn include_array_recv_routes_to_slices_contains() {
+    // Body: `cols.include?(:updated_at)` with `cols: Array[Symbol]`.
+    // The Var carries the Ty explicitly so the receiver-Ty branch
+    // fires without needing the analyzer to propagate from a real
+    // class shape.
+    let mut cols_var = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: Symbol::from("cols") },
+    );
+    cols_var.ty = Some(Ty::Array { elem: Box::new(Ty::Sym) });
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(cols_var),
+            method: Symbol::from("include?"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: roundhouse::Literal::Sym { value: Symbol::from("updated_at") } },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let probe = MethodDef {
+        name: Symbol::from("has_col?"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(Symbol::from("cols"))],
+        body,
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("cols"),
+                ty: Ty::Array { elem: Box::new(Ty::Sym) },
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Bool),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("ColCheck")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("ColCheck")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![probe],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit colcheck class");
+
+    // Array receiver → slices.Contains.
+    assert!(
+        emitted.contains("slices.Contains(cols, \"updated_at\")"),
+        "Array recv include? missing slices.Contains rewrite:\n{emitted}",
+    );
+    // Regression guard: the str_method fallback would route to
+    // strings.Contains, which fails to compile against `[]string`.
+    assert!(
+        !emitted.contains("strings.Contains(cols"),
+        "Array recv include? leaked through to strings.Contains:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an

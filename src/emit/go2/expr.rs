@@ -706,6 +706,22 @@ pub(super) fn emit_send(
         }
     }
 
+    // Receiver-Ty-aware dispatch for methods whose name is ambiguous
+    // between String and Array receivers (`include?` is both
+    // `strings.Contains` and `slices.Contains`). When `recv.ty` carries
+    // an `Array { .. }`, route to the slice form and skip the unguarded
+    // string-method fallback below. Sym/Str arrays both collapse to
+    // `[]string` via `go_ty_stub`, so the slice-elem comparison works
+    // unchanged.
+    if method == "include?" && args.len() == 1 {
+        if let Some(r) = recv {
+            if matches!(r.ty.as_ref(), Some(Ty::Array { .. })) {
+                let recv_s = emit_expr(ctx, r);
+                return format!("slices.Contains({recv_s}, {})", args_s[0]);
+            }
+        }
+    }
+
     // Ruby→Go method-name mapping for string operations that have no
     // 1:1 in Go's stdlib (`strip` is `strings.TrimSpace(…)`, not
     // `.Strip()`). Applied whenever the method name matches the
@@ -715,7 +731,8 @@ pub(super) fn emit_send(
     // A wrong hit (e.g. an Array's `include?` rendering as
     // `strings.Contains`) emits invalid Go and surfaces the gap;
     // silently emitting `.Include(...)` would produce an undefined-
-    // method error that's harder to debug.
+    // method error that's harder to debug. Array `include?` is
+    // intercepted above when the receiver Ty is known.
     if let Some(r) = recv {
         let recv_s = emit_expr(ctx, r);
         if args.is_empty() {
