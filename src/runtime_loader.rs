@@ -806,3 +806,134 @@ where
         extra_roots: entry.extra_roots,
     })
 }
+
+// -------- Go target (Phase 1: scaffolded, stubs only) --------
+//
+// Mirrors the Rust target wiring above. The `GO_TARGET` callbacks
+// dispatch into `src/emit/go2/library.rs`, which emits
+// SYNTACTICALLY-valid Go for every method shape but populates
+// bodies with `panic("go2 stub")`. The point of Phase 1 is to make
+// end-to-end emit run, not to produce correct Go semantics —
+// `go build ./...` will surface a real error inventory we can drive
+// subsequent sessions against. See `src/emit/go2.rs` for the
+// overlay strategy.
+
+const GO_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::go2::emit_module,
+    emit_library_class: crate::emit::go2::emit_library_class,
+    format_import: go_format_import,
+    format_constant: go_format_constant_thunk,
+    wrap_namespace: go_wrap_namespace,
+};
+
+/// Go uses path-based imports. `name` is informational (Go can't
+/// import individual symbols), `source` is the import path.
+fn go_format_import(_name: &str, source: &str) -> String {
+    format!("import {source:?}\n")
+}
+
+/// Forwards to the go2 stub. Crystal/Rust have a dedicated emit-side
+/// constant renderer; go2 doesn't yet, so the stub emits `var NAME
+/// interface{} = nil` placeholders.
+fn go_format_constant_thunk(name: &str, value: &Expr) -> String {
+    crate::emit::go2::format_constant(name, value)
+}
+
+/// Go's package-per-directory model means namespaces collapse into
+/// the file's `package` declaration. The overlay rewrites this to
+/// `package v2` at file-emit time; here we just return the body
+/// unchanged (the per-unit content gets a `package app` prelude
+/// prepended by the GO_RUNTIME entries — see `prelude`).
+fn go_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+/// Go runtime transpile table. Mirrors `RUST_RUNTIME` 1:1 by source
+/// file. Out paths flatten under `app/` (the go2 overlay then
+/// relocates each to `app/v2/<name>.go`). The `prelude` line emits
+/// `package app\n` so the file file-parses before the overlay
+/// rewrites the package to `v2`.
+const GO_PRELUDE: &str = "package app\n\n";
+
+const GO_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "app/inflector.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "app/json_builder.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "app/router.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "ActionView",
+        out_path: "app/view_helpers.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "ActiveRecord",
+        out_path: "app/active_record_base.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
+        rb_path: "runtime/ruby/action_controller/base.rb",
+        namespace: "ActionController",
+        out_path: "app/action_controller_base.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+/// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape
+/// is stubbed (see `src/emit/go2/library.rs`).
+pub fn go_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(GO_RUNTIME.len());
+    for entry in GO_RUNTIME {
+        let unit = transpile_entry(entry, &GO_TARGET, "//", &mut transform)?;
+        out.push(unit);
+    }
+    Ok(out)
+}

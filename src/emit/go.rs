@@ -549,5 +549,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             files.push(spec::emit_go_tests(tm, app));
         }
     }
+    // Phase 1 strangler-fig hook: when `ROUNDHOUSE_GO_V2=1`, append
+    // transpiled `runtime/ruby/` units under `app/v2/`. No-op
+    // otherwise, so default emit is byte-identical.
+    super::go2::overlay_v2(&mut files, app);
     files
 }
