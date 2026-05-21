@@ -236,11 +236,34 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             }
         }
         ExprNode::Hash { entries, .. } => {
-            // Infer concrete element types when every key/value is a
-            // string literal (`{ "k" => "v", ... }`) — emits
-            // `map[string]string` instead of `map[string]interface{}`.
-            // Matters for `gsub(regex, hash)` lookups whose return
-            // must satisfy a `string` return type.
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", emit_expr(ctx, k), emit_expr(ctx, v)))
+                .collect();
+            // Prefer the analyzer-set Ty on this Expr when both
+            // key/value types are concrete enough to map to a real
+            // Go type. Handles the back-prop case: `def errors; []
+            // ; end` against a `Hash[String, String]` return — the
+            // literal's `.ty` pins both sides, so emit
+            // `map[string]string{}` rather than the local heuristic.
+            // We skip when EITHER side maps to `interface{}` (the
+            // catch-all fallback in `go_ty_stub` for Untyped/Var/
+            // Bottom/Record/Tuple) because those answers tell us
+            // less than the literal-inspecting fallback below, which
+            // for empty entries picks `string,string` (matching the
+            // `Hash[String, String]` shape every other emitter uses).
+            if let Some(Ty::Hash { key, value }) = e.ty.as_ref() {
+                let k_ty = super::ty::go_ty_stub(Some(key));
+                let v_ty = super::ty::go_ty_stub(Some(value));
+                if k_ty != "interface{}" && v_ty != "interface{}" {
+                    return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
+                }
+            }
+            // Fallback: infer concrete element types when every
+            // key/value is a string literal (`{ "k" => "v", ... }`)
+            // — emits `map[string]string`. Matters for `gsub(regex,
+            // hash)` lookups whose return must satisfy a `string`
+            // return type.
             let all_str_kv = entries.iter().all(|(k, v)| {
                 matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } })
                     && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } })
@@ -250,14 +273,22 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             } else {
                 ("string", "interface{}")
             };
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}: {}", emit_expr(ctx, k), emit_expr(ctx, v)))
-                .collect();
             format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "))
         }
         ExprNode::Array { elements, .. } => {
             let parts: Vec<String> = elements.iter().map(|e| emit_expr(ctx, e)).collect();
+            // Prefer the analyzer's Ty when it maps to a concrete Go
+            // elem (not the catch-all `interface{}` for Untyped/Var/
+            // etc.). Empty `[]` literals against a typed-field
+            // destination (`@errors: Array[String]`) pin the elem
+            // here; literals with no surrounding type info land at
+            // `Array[Untyped]` and fall through to the bare default.
+            if let Some(Ty::Array { elem }) = e.ty.as_ref() {
+                let elem_ty = super::ty::go_ty_stub(Some(elem));
+                if elem_ty != "interface{}" {
+                    return format!("[]{elem_ty}{{{}}}", parts.join(", "));
+                }
+            }
             format!("[]interface{{}}{{{}}}", parts.join(", "))
         }
         ExprNode::BoolOp { op, left, right, .. } => {

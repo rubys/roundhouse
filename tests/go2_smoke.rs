@@ -1346,6 +1346,105 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
     );
 }
 
+/// Empty Array literal whose Expr Ty is set by the analyzer must
+/// emit with the concrete element type, not the `[]interface{}`
+/// fallback. The base case: `@errors = []` against an `Array[String]`
+/// field needs `[]string{}` so it matches the destination slot.
+///
+/// Same family for Hash: a Hash literal in return position against a
+/// `map[string]string` return type needs the typed map literal.
+#[test]
+fn typed_empty_literals_back_propagate() {
+    // Helper: build a typed-empty Array Expr.
+    let typed_array_lit = |elem: Ty| {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements: vec![], style: Default::default() },
+        );
+        e.ty = Some(Ty::Array { elem: Box::new(elem) });
+        e
+    };
+    // Helper: build a typed-empty Hash Expr.
+    let typed_hash_lit = |k: Ty, v: Ty| {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries: vec![], kwargs: false },
+        );
+        e.ty = Some(Ty::Hash { key: Box::new(k), value: Box::new(v) });
+        e
+    };
+
+    // `def errors; []; end` — body is a typed-empty Array literal,
+    // signature returns `Array[String]`. The literal's `.ty` carries
+    // the elem; emit must produce `[]string{}` (not `[]interface{}{}`).
+    let errors = MethodDef {
+        name: Symbol::from("errors"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: typed_array_lit(Ty::Str),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Array { elem: Box::new(Ty::Str) }),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Schema")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    // `def lookup; {}; end` — same shape for Hash, against return
+    // `Hash[String, String]`. Emit must produce `map[string]string{}`.
+    let lookup = MethodDef {
+        name: Symbol::from("lookup"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: typed_hash_lit(Ty::Str, Ty::Str),
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Schema")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Schema")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![errors, lookup],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit typed-literal class");
+
+    assert!(
+        emitted.contains("return []string{}"),
+        "typed empty Array literal missing typed elem:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("return map[string]string{}"),
+        "typed empty Hash literal missing typed kv:\n{emitted}",
+    );
+    // Regression guards: the untyped fallbacks must NOT fire when
+    // `.ty` is set.
+    assert!(
+        !emitted.contains("return []interface{}{}"),
+        "typed Array literal fell through to []interface{{}} fallback:\n{emitted}",
+    );
+    assert!(
+        !emitted.contains("return map[string]interface{}{}"),
+        "typed Hash literal fell through to []interface{{}} fallback:\n{emitted}",
+    );
+}
+
 #[test]
 fn json_builder_v2_shape() {
     let app = ingest_with_analyzer();
