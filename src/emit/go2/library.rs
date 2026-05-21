@@ -91,10 +91,12 @@ struct Field {
     go_ty: String,
 }
 
-/// Walk methods and gather one Field per attr_reader / attr_writer.
-/// The signature's return type (reader) or single param type (writer)
-/// provides the Go type. If both forms exist for the same name, the
-/// reader wins; deduplication is by Ruby name.
+/// Walk methods and gather one Field per attr_reader / attr_writer,
+/// plus any ivars that `initialize` writes but no accessor exposes
+/// (state fields like AR::Base's `@persisted`, `@destroyed`,
+/// `@errors`). The signature's return type (reader) or single param
+/// type (writer) provides the Go type for accessor-backed fields;
+/// initialize-only ivars infer from the assigned value's Ty.
 fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
     let mut out: Vec<Field> = Vec::new();
     for m in methods {
@@ -128,7 +130,42 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
             go_ty,
         });
     }
+    // Second pass: walk `initialize`'s body for `@ivar = expr`
+    // assignments to fields we haven't seen yet. Type comes from the
+    // assigned value's `Expr.ty` when present; falls back to
+    // `interface{}` so we never block on unknown.
+    if let Some(init) = methods.iter().find(|m| {
+        matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
+    }) {
+        collect_ivar_writes(&init.body, &mut out);
+    }
     out
+}
+
+/// Walk an Expr tree collecting top-level `@ivar = value` writes and
+/// adding them to `fields` if not already present.
+fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>) {
+    use crate::expr::{ExprNode, LValue};
+    match &*body.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_ivar_writes(e, fields);
+            }
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            let ruby_name = name.as_str().to_string();
+            if fields.iter().any(|f| f.ruby_name == ruby_name) {
+                return;
+            }
+            let go_ty = go_ty_stub(value.ty.as_ref());
+            fields.push(Field {
+                pascal_name: go_field_name(&ruby_name),
+                ruby_name,
+                go_ty,
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Emit `func New<Name>(params...) *<Name> { return &<Name>{...} }`
@@ -146,16 +183,20 @@ fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
     if let Some(literal) = try_field_init_literal(class_name, &init.body) {
         out.push_str(&format!("\treturn {literal}\n"));
     } else {
-        // Fallback: declare a fresh receiver, walk the body with
-        // ctx.in_class_method=false so `self.X = …` writes resolve,
-        // then return it. Currently runtime/ruby/ initializers are
-        // all simple shape; this path is dead weight today but
-        // keeps the emit shape total.
+        // Fallback: declare a fresh receiver, walk the body as
+        // statements (NOT return-wrapped — `self.X = Y` is a Go
+        // statement, not an expression), then return `self`.
+        // `void_method=true` on the ctx makes the body walker emit
+        // each tail as a statement instead of `return X`.
         out.push_str(&format!("\tself := &{class_name}{{}}\n"));
-        let ctx = EmitCtx::none();
+        let mut ctx = EmitCtx::none();
+        ctx.void_method = true;
         for p in &init.params {
             ctx.declare_param(p.name.as_str());
         }
+        // Constructor body executes against `self` directly, just
+        // like an instance method would. Keep `in_class_method=false`
+        // so `@ivar = …` writes resolve to `self.Field`.
         let body = emit_return_body(&ctx, &init.body);
         out.push_str(&body);
         out.push_str("\treturn self\n");
@@ -376,8 +417,55 @@ fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
 /// gap behind a `panic("stub")`). Per-method panic fallbacks come
 /// back if we ever need them, but for the strangler-fig widening
 /// the loud failure is the inventory.
+///
+/// Special case: when the body is a bare `Lit::Nil` (Ruby `def foo;
+/// end` with no expressions — used by AR::Base's `_adapter_insert`
+/// etc. as overridable stubs) AND the method's return type is
+/// non-Nil, emit `return <zero value>`. Without this, Go rejects
+/// `return nil` against e.g. `int64` returns.
 fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
+    use crate::expr::{ExprNode, Literal};
+    if !ctx.void_method
+        && matches!(&*m.body.node, ExprNode::Lit { value: Literal::Nil })
+    {
+        if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+            return format!("\treturn {}\n", go_zero_value(ret));
+        }
+    }
     emit_return_body(ctx, &m.body)
+}
+
+/// Go zero-value literal for a Ty. Used as the default body when an
+/// overridable method has an empty source body but a non-void return.
+fn go_zero_value(ty: &Ty) -> String {
+    match ty {
+        Ty::Str | Ty::Sym => "\"\"".to_string(),
+        Ty::Int => "0".to_string(),
+        Ty::Float => "0.0".to_string(),
+        Ty::Bool => "false".to_string(),
+        Ty::Nil => "nil".to_string(),
+        Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. } => "nil".to_string(),
+        Ty::Union { variants } => {
+            let non_nil: Vec<&Ty> = variants
+                .iter()
+                .filter(|t| !matches!(t, Ty::Nil))
+                .collect();
+            // Union with Nil collapses to nil-zero of the typed
+            // variant when reference-shaped; otherwise interface{}'s
+            // zero is nil too.
+            if non_nil.len() == 1 {
+                match non_nil[0] {
+                    Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. } => {
+                        "nil".to_string()
+                    }
+                    _ => "nil".to_string(),
+                }
+            } else {
+                "nil".to_string()
+            }
+        }
+        _ => "nil".to_string(),
+    }
 }
 
 /// Avoid emitting Go reserved words as parameter names. Adds a `_`
