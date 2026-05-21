@@ -1493,6 +1493,41 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             out.push_str(&s);
             out.push('\n');
         }
+        // `@ivar = value` (or `x = value`) at non-void tail position.
+        // Ruby's assignment evaluates to the rhs, but Go disallows
+        // assign-as-expression — `return slot = value` is a syntax
+        // error. Emit the assign as a statement, then `return` by
+        // re-reading the target. Read-back is safe for Ivar/Var and
+        // avoids double-evaluating any side-effectful rhs.
+        ExprNode::Assign { target, value } if !ctx.void_method => {
+            use crate::expr::LValue;
+            let assign_s = emit_assign(ctx, target, value);
+            indent(out, depth);
+            out.push_str(&assign_s);
+            out.push('\n');
+            let ret = match target {
+                LValue::Ivar { name } => {
+                    if ctx.in_module_singleton {
+                        if let Some(class) = ctx.class_name.as_deref() {
+                            format!("{class}_{}_slot", name.as_str())
+                        } else {
+                            name.as_str().to_string()
+                        }
+                    } else if ctx.in_class_method {
+                        name.as_str().to_string()
+                    } else {
+                        format!("self.{}", go_field_name(name.as_str()))
+                    }
+                }
+                LValue::Var { name, .. } => name.as_str().to_string(),
+                // Attr/Index — fall back to re-emitting rhs. Rare at
+                // tail position and the double-eval risk is bounded
+                // by the same caveat as Ruby's own block-tail return.
+                _ => emit_expr(ctx, value),
+            };
+            indent(out, depth);
+            out.push_str(&format!("return {ret}\n"));
+        }
         _ => {
             // Void method tails: emit the expression as a statement
             // (when it has side effects) or skip entirely for a bare

@@ -170,6 +170,17 @@ fn module_singleton_shape() {
         emitted.contains("ActiveRecord_adapter_slot = value"),
         "writer body missing slot assign:\n{emitted}",
     );
+    // Setter body must not emit `return slot = value` (assign-as-
+    // expression is illegal in Go). Emit the assign as a statement
+    // and then `return` by reading the slot back.
+    assert!(
+        !emitted.contains("return ActiveRecord_adapter_slot = value"),
+        "writer body emits assign-in-return (invalid Go):\n{emitted}",
+    );
+    assert!(
+        emitted.contains("ActiveRecord_adapter_slot = value\n\treturn ActiveRecord_adapter_slot"),
+        "writer body missing tail read-back return:\n{emitted}",
+    );
 }
 
 /// Hand-written runtime — `app/v2/adapter_interface.go` and
