@@ -207,6 +207,33 @@ pub(super) fn emit_send(
         }
     }
 
+    // Ruby `.nil?` predicate → Go nil comparison. The receiver's
+    // Ty (when known) drives the result:
+    //
+    //   non-nilable primitives (Str, Sym, Int, Float, Bool) — Ruby
+    //     `nil?` is statically false; emit `false`. Avoids invalid
+    //     Go like `string == nil`.
+    //   Ty::Nil — statically true.
+    //   anything else (Untyped, Union, Class, unknown) — emit
+    //     `recv == nil`, which works against interface{}, pointer,
+    //     map, slice, and channel receivers.
+    //
+    // Without analyzer-filled `Expr.ty` the receiver appears
+    // typeless and falls to `== nil`, which is the safe default for
+    // the `interface{}` shape go2 emits for unknown types.
+    if method == "nil?" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return match r.ty.as_ref() {
+                Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool) => {
+                    "false".to_string()
+                }
+                Some(Ty::Nil) => "true".to_string(),
+                _ => format!("{recv_s} == nil"),
+            };
+        }
+    }
+
     // Ruby `.to_s` → Go string conversion. String-typed receiver is
     // a no-op; numeric receivers use the matching Sprintf verb;
     // everything else (including untyped `interface{}`) falls back
