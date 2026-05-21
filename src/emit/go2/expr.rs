@@ -22,15 +22,38 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => name.to_string(),
         ExprNode::Send { recv, method, args, .. } => emit_send(recv.as_ref(), method.as_str(), args),
-        ExprNode::Assign { target: _, value } => emit_expr(value),
+        // Ruby `x = value` — legacy go drops the lvalue and emits
+        // only the rhs, which loses the binding. go2 needs the real
+        // assignment so subsequent statements can refer to `x`.
+        // Use `:=` (declare + assign) since the lowered body
+        // typically introduces fresh locals in source order; if a
+        // later widening surfaces re-assigns to existing bindings,
+        // distinguish via a local-name scope check.
+        ExprNode::Assign { target, value } => emit_assign(target, value),
+        // Ruby `return X` — emits as a Go return statement. In Ruby
+        // this is technically an Expr (type `Never`), so it can
+        // appear in value position; the body-position walker
+        // (`emit_return_body`) intercepts most uses. The remaining
+        // path is `return X if cond` lowered to `If { then: Return,
+        // else: Nil }` inside a `Seq`; legacy `emit_expr` for If
+        // walks branches via `emit_block_body`, so the Return ends
+        // up emitted as a statement inside a Go block — valid.
+        ExprNode::Return { value } => format!("return {}", emit_expr(value)),
         ExprNode::Seq { exprs } => {
             exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             let cond_s = emit_expr(cond);
             let then_s = emit_block_body(then_branch);
-            let else_s = emit_block_body(else_branch);
-            format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+            // `return X if cond` lowers to If { else: Lit::Nil } —
+            // emit without the else clause so the body parses as
+            // valid Go (a bare `nil` statement is invalid).
+            if is_nil_lit(else_branch) {
+                format!("if {cond_s} {{\n{then_s}\n}}")
+            } else {
+                let else_s = emit_block_body(else_branch);
+                format!("if {cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
+            }
         }
         ExprNode::Hash { entries, .. } => {
             let parts: Vec<String> = entries
@@ -109,7 +132,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         }
     }
 
-    let go_m = go_method_name(method);
+    let go_m = go2_method_ident(method);
     match recv {
         None => {
             if args_s.is_empty() {
@@ -129,6 +152,40 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))
         }
+    }
+}
+
+/// Ruby method names with `?` / `!` suffixes don't translate to Go
+/// identifiers. Rewrite to `_p` / `_bang` form before passing
+/// through the standard pascalize path: `nil?` → `nil_p` → `NilP`,
+/// `save!` → `save_bang` → `SaveBang`. Semantic translation
+/// (`nil?` → `== nil`, `is_a?(C)` → type assertion) is a separate
+/// widening; this only handles the identifier-shape side so emit
+/// produces parseable Go.
+fn go2_method_ident(ruby_name: &str) -> String {
+    let normalized = ruby_name.replace('?', "_p").replace('!', "_bang");
+    go_method_name(&normalized)
+}
+
+fn is_nil_lit(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// Emit a Ruby `x = value` as a Go assignment. Uses `:=` for the
+/// common case (fresh local binding) and falls back to `=` when the
+/// lvalue isn't a plain local. Targets covered:
+///
+/// - `LValue::Var` → `name := value`
+/// - `LValue::Ivar` → `self.name = value` (instance receiver)
+/// - other → emit just the value with a `/* TODO */` marker so the
+///   gap is loudly visible in the v2/ output
+fn emit_assign(target: &crate::expr::LValue, value: &Expr) -> String {
+    use crate::expr::LValue;
+    let v = emit_expr(value);
+    match target {
+        LValue::Var { name, .. } => format!("{name} := {v}"),
+        LValue::Ivar { name } => format!("self.{name} = {v}"),
+        _ => format!("/* TODO: emit Assign target shape */ _ = {v}"),
     }
 }
 
@@ -233,9 +290,13 @@ fn emit_return_at(e: &Expr, out: &mut String, depth: usize) {
             indent(out, depth);
             out.push_str(&format!("if {cond_s} {{\n"));
             emit_return_at(then_branch, out, depth + 1);
-            indent(out, depth);
-            out.push_str("} else {\n");
-            emit_return_at(else_branch, out, depth + 1);
+            // Skip the else clause when it's an implicit nil — the
+            // `return X if cond` shape doesn't want a `nil` else.
+            if !is_nil_lit(else_branch) {
+                indent(out, depth);
+                out.push_str("} else {\n");
+                emit_return_at(else_branch, out, depth + 1);
+            }
             indent(out, depth);
             out.push_str("}\n");
         }
@@ -251,6 +312,12 @@ fn emit_return_at(e: &Expr, out: &mut String, depth: usize) {
                     out.push('\n');
                 }
             }
+        }
+        ExprNode::Return { value } => {
+            // Already a return; don't double up to `return return X`.
+            let v = emit_expr(value);
+            indent(out, depth);
+            out.push_str(&format!("return {v}\n"));
         }
         _ => {
             let v = emit_expr(e);
