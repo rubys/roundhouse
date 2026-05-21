@@ -347,6 +347,28 @@ pub(super) fn emit_send(
         return format!("panic({msg})");
     }
 
+    // Bare `name` inside a class method — Ruby's "self.name" when
+    // self is a class returns the class's string name. In
+    // `def self.schema_columns; raise NotImplementedError,
+    //  "#{name}.schema_columns must be overridden"; end` the
+    // interpolated `name` is exactly this. Go has no class object;
+    // resolve at emit time to a string literal of the enclosing
+    // class name. Subclass overrides won't reroute this lookup
+    // (it's frozen to the defining class), but the Base body that
+    // uses it is the NotImplementedError raise — a diagnostic
+    // string, not a dispatch path. Restricted to bare implicit-self
+    // (`recv.is_none()`) so user-defined `.name` methods on
+    // instances still route through normal dispatch.
+    if recv.is_none()
+        && method == "name"
+        && args.is_empty()
+        && ctx.in_class_method
+    {
+        if let Some(class_name) = ctx.class_name.as_deref() {
+            return format!("{class_name:?}");
+        }
+    }
+
     // `recv.each { |x| body }` (1-param) and `recv.each { |k, v| body }`
     // (2-param) → Go `for ... range` loop wrapped in an IIFE that
     // returns the receiver (Ruby `each` semantics). The IIFE wrap
@@ -690,6 +712,46 @@ pub(super) fn emit_send(
                 Some(Ty::Float) => format!("fmt.Sprintf(\"%g\", {recv_s})"),
                 _ => format!("fmt.Sprintf(\"%v\", {recv_s})"),
             };
+        }
+    }
+
+    // `self.class.X(args)` — Ruby idiom for "dispatch X on the class
+    // of self" (`self.class.schema_columns` in
+    // `ActiveRecord::Base#fill_timestamps`). The chained Send lowers
+    // to `Send { recv: Send { recv: SelfRef, method: "class" },
+    // method: X }`. Go has no inheritance / Self resolution; rewrite
+    // to the enclosing-class bare-fn call `<ClassName>_X(args)`,
+    // matching the rust2 `Self::X(args)` strategy. Subclass overrides
+    // aren't routed by this rewrite — they'll need interface dispatch
+    // or a per-instance vtable later; for the runtime walker today
+    // it's enough to emit a syntactically valid call into the
+    // enclosing-class slot (Base's body panics with NotImplementedError,
+    // which surfaces the override gap as a runtime error not a
+    // compile error). Only fires when the inner recv is SelfRef and
+    // we have a known enclosing class name; other `.class` chains
+    // (`record.class.foo`) fall through and surface as proper Go
+    // build errors upstream.
+    if let (Some(r), Some(class_name)) = (recv, ctx.class_name.as_deref()) {
+        if let ExprNode::Send {
+            recv: Some(inner_recv),
+            method: inner_method,
+            args: inner_args,
+            ..
+        } = &*r.node
+        {
+            if inner_method.as_str() == "class"
+                && inner_args.is_empty()
+                && matches!(&*inner_recv.node, ExprNode::SelfRef)
+            {
+                // `self.class.name` resolves to a string literal of
+                // the enclosing class name (same shape as the bare-
+                // `name`-in-class-method peephole above).
+                if method == "name" && args.is_empty() {
+                    return format!("{class_name:?}");
+                }
+                let m = super::library::sanitize_method_name(method);
+                return format!("{class_name}_{m}({})", args_s.join(", "));
+            }
         }
     }
 

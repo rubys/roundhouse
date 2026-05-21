@@ -647,6 +647,172 @@ fn negative_index_rewrites_to_len_minus_n() {
     );
 }
 
+/// `.class.X` reflection — Ruby idioms that have no Go analog:
+///
+/// 1. `self.class.X(args)` (instance-method chain) → enclosing-class
+///    class-method bare-fn call (`<ClassName>_X(args)`). Mirrors
+///    rust2's `Self::X(args)` strategy. Subclass overrides don't
+///    reroute through this rewrite — they need an interface dispatch
+///    later — but emitting a syntactically valid call to the
+///    enclosing-class slot is enough to make the walker pass.
+///
+/// 2. `self.class.name` (instance-method chain) → string literal of
+///    the enclosing class name. Resolves to a string at emit time so
+///    interpolation into raise messages renders sensibly.
+///
+/// 3. Bare `name` in class-method context → same string-literal of
+///    the enclosing class. Covers the `def self.X; raise ...,
+///    "#{name}.X must be overridden"; end` shape that surfaces in
+///    `ActiveRecord::Base#schema_columns`.
+#[test]
+fn class_reflection_rewrites() {
+    // ---- Case 1: self.class.schema_columns (instance method)
+    //
+    // Body: `self.class.schema_columns`. The Send chain is
+    //   Send { recv: Send { recv: SelfRef, method: "class", args:[] },
+    //          method: "schema_columns", args:[] }.
+    let class_chain = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: Symbol::from("class"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("schema_columns"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let lookup_cols = MethodDef {
+        name: Symbol::from("lookup_cols"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: class_chain,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Reflect")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+
+    // ---- Case 2: self.class.name (instance method)
+    let class_name_chain = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: Symbol::from("class"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("name"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let lookup_name = MethodDef {
+        name: Symbol::from("lookup_name"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: class_name_chain,
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Reflect")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+
+    // ---- Case 3: bare `name` in class method context.
+    //
+    // Body: `name` (a 0-arg implicit-self Send). The enclosing
+    // class method is `def self.diag` so EmitCtx.in_class_method = true.
+    let bare_name = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("name"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let diag = MethodDef {
+        name: Symbol::from("diag"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body: bare_name,
+        signature: Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Reflect")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Reflect")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![lookup_cols, lookup_name, diag],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit reflect class");
+
+    // Case 1 — `self.class.schema_columns` → `Reflect_schema_columns()`.
+    assert!(
+        emitted.contains("Reflect_schema_columns()"),
+        "self.class.schema_columns missing class-method bare-fn rewrite:\n{emitted}",
+    );
+    // Case 2 — `self.class.name` → string literal.
+    assert!(
+        emitted.contains("\"Reflect\""),
+        "self.class.name / bare name missing class-name string literal:\n{emitted}",
+    );
+    // Case 3 — bare `name` in class method context. Same `"Reflect"`
+    // literal lands. The substring count covers both Case 2 and Case 3.
+    assert!(
+        emitted.matches("\"Reflect\"").count() >= 2,
+        "bare-name-in-class-method missing class-name literal:\n{emitted}",
+    );
+    // Regression guards — the broken legacy emits.
+    assert!(
+        !emitted.contains("self.Class"),
+        "self.class chain leaked into emit as self.Class field:\n{emitted}",
+    );
+    // Bare `name` would previously emit as the undefined identifier
+    // `name` at statement position. The diag class method body must
+    // not bottom out at that shape.
+    assert!(
+        !emitted.contains("return name\n") && !emitted.contains("return name }"),
+        "bare name leaked as undefined identifier:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an
