@@ -29,10 +29,51 @@
 // agnostic and identical to `server.ts`.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, existsSync, createReadStream, statSync } from "node:fs";
+import { dirname, extname, join, normalize, sep } from "node:path";
 import { URL } from "node:url";
 import { createClient, type Client } from "@libsql/client";
+
+// Same static-asset shape as server.ts — see that file for the
+// extended docstring on tryServeAsset + ASSET_CONTENT_TYPES.
+const ASSET_CONTENT_TYPES: Record<string, string> = {
+  ".css":  "text/css; charset=utf-8",
+  ".js":   "text/javascript; charset=utf-8",
+  ".mjs":  "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".png":  "image/png",
+  ".ico":  "image/x-icon",
+  ".map":  "application/json; charset=utf-8",
+};
+
+function tryServeAsset(url: URL, res: ServerResponse): boolean {
+  if (!url.pathname.startsWith("/assets/")) return false;
+  const root = normalize("static/assets") + sep;
+  const requested = normalize(join("static", url.pathname));
+  if (!requested.startsWith(root)) {
+    res.statusCode = 404;
+    res.end();
+    return true;
+  }
+  try {
+    const stat = statSync(requested);
+    if (!stat.isFile()) {
+      res.statusCode = 404;
+      res.end();
+      return true;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type",
+      ASSET_CONTENT_TYPES[extname(requested)] ?? "application/octet-stream");
+    res.setHeader("Content-Length", stat.size);
+    createReadStream(requested).pipe(res);
+  } catch {
+    res.statusCode = 404;
+    res.end();
+  }
+  return true;
+}
 
 import { Router } from "./router.js";
 import { Flash } from "./flash.js";
@@ -120,6 +161,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   let method = (req.method ?? "GET").toUpperCase();
+
+  if (method === "GET" && tryServeAsset(url, res)) return;
 
   let params: Record<string, unknown> = {};
   if (method !== "GET" && method !== "HEAD") {

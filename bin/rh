@@ -384,10 +384,11 @@ def cmd_transpile(argv)
   return 1 unless ok
 
   case target
-  when 'ruby'    then post_transpile_ruby(out)
-  when 'spinel'  then post_transpile_spinel(out)
-  when 'crystal' then post_transpile_crystal(out)
-  when 'rust'    then post_transpile_rust(out)
+  when 'ruby'       then post_transpile_ruby(out)
+  when 'spinel'     then post_transpile_spinel(out)
+  when 'crystal'    then post_transpile_crystal(out)
+  when 'rust'       then post_transpile_rust(out)
+  when 'typescript' then post_transpile_typescript(out)
   end
   0
 end
@@ -454,6 +455,19 @@ def post_transpile_rust(out)
     out,
     label: 'rust',
     content_globs: ['src/**/*.rs'],
+  )
+end
+
+# TypeScript target's post-build: same shape as crystal/rust. The TS
+# runtime serves `static/assets/` via an inline static-file handler
+# at the top of handleRequest (runtime/typescript/server.ts +
+# server-libsql.ts). Content glob scans the emitted `app/**/*.ts`
+# tree where view-rendering HTML strings live.
+def post_transpile_typescript(out)
+  build_assets(
+    out,
+    label: 'typescript',
+    content_globs: ['app/**/*.ts'],
   )
 end
 

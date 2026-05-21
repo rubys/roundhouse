@@ -18,10 +18,65 @@
 // emitted Router / ActionContext / ActionResponse shapes.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, existsSync, createReadStream, statSync } from "node:fs";
+import { dirname, extname, join, normalize, sep } from "node:path";
 import { URL } from "node:url";
 import Database from "better-sqlite3";
+
+// MIME types for `/assets/*` static responses. Small inline table —
+// only the extensions roundhouse emits (Tailwind output, turbo.min.js,
+// importmap-pinned controllers, the occasional svg/png) need entries.
+// Falls back to application/octet-stream for unknown types.
+const ASSET_CONTENT_TYPES: Record<string, string> = {
+  ".css":  "text/css; charset=utf-8",
+  ".js":   "text/javascript; charset=utf-8",
+  ".mjs":  "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".png":  "image/png",
+  ".ico":  "image/x-icon",
+  ".map":  "application/json; charset=utf-8",
+};
+
+/** Serve `static/assets/<name>` for any `/assets/*` request. Mirrors
+ *  Rails' Propshaft URL shape — `bin/rh transpile typescript` writes
+ *  the Tailwind compile output and turbo.min.js into static/assets/,
+ *  and `stylesheet_link_tag("tailwind")` / importmap pins point here.
+ *  Returns `true` if the response was sent (file served OR 404 for a
+ *  missing asset); `false` for non-/assets/ paths so handleRequest
+ *  proceeds to route matching.
+ *
+ *  Path normalization prevents directory traversal: any `..` segment
+ *  in the requested path is collapsed before joining with the static
+ *  root; if the resolved path escapes `static/assets/`, the request
+ *  gets a 404. */
+function tryServeAsset(url: URL, res: ServerResponse): boolean {
+  if (!url.pathname.startsWith("/assets/")) return false;
+  const root = normalize("static/assets") + sep;
+  const requested = normalize(join("static", url.pathname));
+  if (!requested.startsWith(root)) {
+    res.statusCode = 404;
+    res.end();
+    return true;
+  }
+  try {
+    const stat = statSync(requested);
+    if (!stat.isFile()) {
+      res.statusCode = 404;
+      res.end();
+      return true;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type",
+      ASSET_CONTENT_TYPES[extname(requested)] ?? "application/octet-stream");
+    res.setHeader("Content-Length", stat.size);
+    createReadStream(requested).pipe(res);
+  } catch {
+    res.statusCode = 404;
+    res.end();
+  }
+  return true;
+}
 
 import { Router } from "./router.js";
 import { Flash } from "./flash.js";
@@ -125,6 +180,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   let method = (req.method ?? "GET").toUpperCase();
+
+  if (method === "GET" && tryServeAsset(url, res)) return;
 
   // Collect form body for non-GET requests.
   let params: Record<string, unknown> = {};
