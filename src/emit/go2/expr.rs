@@ -326,6 +326,27 @@ pub(super) fn emit_send(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
 
+    // Ruby `raise X, "msg"` / `raise "msg"` / `raise X` — parses as
+    // an implicit-self Send with method `raise`. Maps to Go
+    // `panic(<msg>)`. Drops the exception class (Go has no class-
+    // typed panic; the message usually carries enough context, and
+    // call sites that depend on rescue-class matching aren't
+    // representable in Go anyway). 0-arg bare `raise` (Ruby
+    // re-raise) emits a placeholder panic since Go has no
+    // current-exception slot. The tail-position return wrap is
+    // suppressed in `emit_return_at` so `return panic(...)` (a
+    // syntax error) never lands.
+    if recv.is_none() && method == "raise" {
+        let msg = match args_s.len() {
+            0 => "\"raise\"".to_string(),
+            1 => args_s[0].clone(),
+            // `raise X, "msg"` — the message arg is what's worth
+            // preserving; the leading class arg has no Go analog.
+            _ => args_s[args_s.len() - 1].clone(),
+        };
+        return format!("panic({msg})");
+    }
+
     // `recv.each { |x| body }` (1-param) and `recv.each { |k, v| body }`
     // (2-param) → Go `for ... range` loop wrapped in an IIFE that
     // returns the receiver (Ruby `each` semantics). The IIFE wrap
@@ -1306,6 +1327,20 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 out.push_str(line);
                 out.push('\n');
             }
+        }
+        // `raise X, "msg"` at body position — emit as `panic(...)`
+        // statement without a `return` wrap. Ruby `raise` diverges
+        // (Never type), so the method exits without a return value;
+        // Go's `panic()` returns nothing, making `return panic(...)`
+        // a syntax error. The Send arm in emit_expr handles the
+        // expression-position case (rare — raise in value position).
+        ExprNode::Send { recv: None, method, .. }
+            if method.as_str() == "raise" =>
+        {
+            let s = emit_expr(ctx, e);
+            indent(out, depth);
+            out.push_str(&s);
+            out.push('\n');
         }
         _ => {
             // Void method tails: emit the expression as a statement

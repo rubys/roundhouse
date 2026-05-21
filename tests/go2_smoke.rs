@@ -291,6 +291,129 @@ fn module_singleton_does_not_fire_on_plain_class() {
     );
 }
 
+/// `raise X, "msg"` → `panic("msg")` peephole. The class arg is
+/// dropped (Go has no class-typed panic; the message usually
+/// carries enough context for callers). 1-arg `raise "msg"` or
+/// `raise X` panics with the lone arg.
+///
+/// Critical: tail-position `raise` must NOT be wrapped in `return`
+/// (Go rejects `return panic(...)` — panic returns nothing). The
+/// emit_return_at Send-raise arm handles that.
+#[test]
+fn raise_panic_peephole() {
+    // `def fail!(msg); raise NotImplementedError, msg; end` — the
+    // 2-arg form. Body: Send {recv:None, method:"raise",
+    // args:[Const(NotImplementedError), Var(msg)]}.
+    let raise_2arg = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("NotImplementedError")] },
+                ),
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var { id: VarId(0), name: Symbol::from("msg") },
+                ),
+            ],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let fail_method = MethodDef {
+        name: Symbol::from("fail!"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(Symbol::from("msg"))],
+        body: raise_2arg,
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("msg"),
+                ty: Ty::Str,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Crasher")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    // `def abort_with(msg); raise msg; end` — 1-arg form. Body
+    // is a Send with one arg (the message itself).
+    let raise_1arg = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: Symbol::from("msg") },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let abort_method = MethodDef {
+        name: Symbol::from("abort_with"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(Symbol::from("msg"))],
+        body: raise_1arg,
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::from("msg"),
+                ty: Ty::Str,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: EffectSet::default(),
+        }),
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("Crasher")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("Crasher")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![fail_method, abort_method],
+        origin: None,
+    };
+
+    let emitted = go2::emit_library_class(&class).expect("emit crasher class");
+
+    // 2-arg form drops the class, panics with the message.
+    assert!(
+        emitted.contains("panic(msg)"),
+        "raise X, msg should panic(msg):\n{emitted}",
+    );
+    // 1-arg form panics with the lone arg.
+    assert!(
+        emitted.matches("panic(msg)").count() >= 2,
+        "1-arg raise should also produce panic(msg):\n{emitted}",
+    );
+    // Tail-position raise must NOT be wrapped in `return` — Go
+    // rejects `return panic(...)` (panic returns nothing).
+    assert!(
+        !emitted.contains("return panic("),
+        "tail-position raise must not be return-wrapped:\n{emitted}",
+    );
+    // And the legacy broken shape (`Raise(...)`) must be gone.
+    assert!(
+        !emitted.contains("Raise("),
+        "raise must not pascalize to undefined `Raise(...)`:\n{emitted}",
+    );
+}
+
 /// Implicit-self method-call resolution: a 0-arg implicit-self
 /// Send to a method DEFINED on the enclosing class must emit as
 /// `self.Method()` (call). A 0-arg implicit-self Send to an
