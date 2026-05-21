@@ -55,6 +55,12 @@ pub(super) struct EmitCtx {
     /// `Rc<RefCell>` so the scope flattens — `with_rename` clones
     /// the Rc, not the contents.
     pub declared: Rc<RefCell<HashSet<String>>>,
+    /// True when the enclosing method's signature returns `void`
+    /// (RBS `() -> void` lowers to `Ty::Fn { ret: Ty::Nil, ... }`).
+    /// emit_return_at suppresses the implicit `return X` wrap when
+    /// set — Ruby methods have an implicit Lit::Nil tail that
+    /// shouldn't emit as `return nil` against a Go void return type.
+    pub void_method: bool,
 }
 
 impl EmitCtx {
@@ -64,6 +70,7 @@ impl EmitCtx {
             in_class_method: false,
             var_renames: HashMap::new(),
             declared: Rc::new(RefCell::new(HashSet::new())),
+            void_method: false,
         }
     }
 
@@ -327,6 +334,27 @@ pub(super) fn emit_send(
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
             return format!("len({})", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `.empty?` predicate on String/Array/Hash → Go
+    // `len(recv) == 0`. Same scope as `length` — collection-shaped.
+    if method == "empty?" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("len({}) == 0", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `arr << x` (Array push) parses as a Send `<<` with one
+    // arg. Go: `arr = append(arr, x)`. Statement, not expression —
+    // the lowered bodies use this at statement position. For Hash
+    // shovel (`hash << pair`) the semantics differ; if a non-Array
+    // recv hits this, the resulting Go `append(map, ...)` errors
+    // at compile, surfacing the gap.
+    if method == "<<" && args.len() == 1 {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return format!("{recv_s} = append({recv_s}, {})", args_s[0]);
         }
     }
 
@@ -1012,9 +1040,15 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
         }
         ExprNode::Return { value } => {
             // Already a return; don't double up to `return return X`.
-            let v = emit_expr(ctx, value);
-            indent(out, depth);
-            out.push_str(&format!("return {v}\n"));
+            // Void methods elide the value entirely.
+            if ctx.void_method {
+                indent(out, depth);
+                out.push_str("return\n");
+            } else {
+                let v = emit_expr(ctx, value);
+                indent(out, depth);
+                out.push_str(&format!("return {v}\n"));
+            }
         }
         ExprNode::While { .. } => {
             // While at body position emits as a statement, not
@@ -1030,9 +1064,24 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             }
         }
         _ => {
-            let v = emit_expr(ctx, e);
-            indent(out, depth);
-            out.push_str(&format!("return {v}\n"));
+            // Void method tails: emit the expression as a statement
+            // (when it has side effects) or skip entirely for a bare
+            // `nil`. Ruby's implicit-nil tail must not turn into
+            // `return nil` against a Go void function.
+            if ctx.void_method {
+                if is_nil_lit(e) {
+                    // No-op trailing nil.
+                    return;
+                }
+                let v = emit_expr(ctx, e);
+                indent(out, depth);
+                out.push_str(&v);
+                out.push('\n');
+            } else {
+                let v = emit_expr(ctx, e);
+                indent(out, depth);
+                out.push_str(&format!("return {v}\n"));
+            }
         }
     }
 }

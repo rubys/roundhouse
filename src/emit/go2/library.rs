@@ -256,8 +256,14 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     for m in methods {
         // Fresh ctx per method so `declared` doesn't leak between
         // methods. Seed with param names so param re-assignment
-        // emits as `=`.
-        let ctx = EmitCtx::none();
+        // emits as `=`. void_method mirrors what render_return uses
+        // for the func decl's return type.
+        let returns_void = matches!(
+            m.signature.as_ref(),
+            Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+        );
+        let mut ctx = EmitCtx::none();
+        ctx.void_method = returns_void;
         for p in &m.params {
             ctx.declare_param(p.name.as_str());
         }
@@ -303,12 +309,19 @@ fn emit_method(class_name: &str, m: &MethodDef) -> String {
     // Build per-method context so the body walker can resolve
     // `SelfRef` against the right enclosing class + method receiver.
     // Seed `declared` with the method's parameter names so any
-    // assignment to a param emits as `=`, not `:=`.
+    // assignment to a param emits as `=`, not `:=`. `void_method`
+    // mirrors the Ty::Nil-return detection in render_return so the
+    // body walker can suppress the implicit `return X` wrap.
+    let returns_void = matches!(
+        m.signature.as_ref(),
+        Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+    );
     let ctx = EmitCtx {
         class_name: Some(class_name.to_string()),
         in_class_method: matches!(m.receiver, MethodReceiver::Class),
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        void_method: returns_void,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
