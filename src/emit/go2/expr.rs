@@ -486,6 +486,76 @@ fn assert_ident_for(go_ty: &str) -> &'static str {
     }
 }
 
+/// Result of recognizing the `return X if var.nil?` head of a
+/// method body whose `var` has a `Union { Nil, T }` type — the rest
+/// of the body sees `var` narrowed to `T`. Drives a runtime type
+/// assertion + rename so subsequent uses see the typed value.
+struct NilNarrow {
+    /// Original Var name (`s` in `return … if s.nil?`).
+    recv_name: String,
+    /// Non-Nil Go assertion type the union collapsed to (`string`,
+    /// `int64`, ...).
+    go_ty: &'static str,
+    /// New identifier bound to the asserted value (`s_str` for
+    /// String-narrowed `s`).
+    narrowed_ident: String,
+}
+
+/// Recognize `If { cond: var.nil?, then: Return, else: Nil }` at
+/// the head of a `Seq` body and, when `var`'s Ty is a Union with
+/// exactly one non-Nil variant we can map to Go, return the
+/// narrowing plan. None when the shape doesn't match — caller
+/// emits the head expr normally and the rest unchanged.
+fn try_nil_narrow_head(first: &Expr) -> Option<NilNarrow> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*first.node else {
+        return None;
+    };
+    if !is_nil_lit(else_branch) {
+        return None;
+    }
+    // then_branch must be a Return (the early-out shape we're after).
+    if !matches!(&*then_branch.node, ExprNode::Return { .. }) {
+        return None;
+    }
+    let ExprNode::Send { recv, method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let r = recv.as_ref()?;
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    let Some(Ty::Union { variants }) = r.ty.as_ref() else {
+        return None;
+    };
+    let non_nil: Vec<&Ty> = variants
+        .iter()
+        .filter(|t| !matches!(t, Ty::Nil))
+        .collect();
+    if non_nil.len() != 1 {
+        return None;
+    }
+    let go_ty = match non_nil[0] {
+        Ty::Str | Ty::Sym => "string",
+        Ty::Int => "int64",
+        Ty::Float => "float64",
+        Ty::Bool => "bool",
+        _ => return None,
+    };
+    let short = match go_ty {
+        "string" => "str",
+        "int64" => "int",
+        "float64" => "f64",
+        "bool" => "b",
+        _ => "v",
+    };
+    let recv_name = name.as_str().to_string();
+    let narrowed_ident = format!("{recv_name}_{short}");
+    Some(NilNarrow { recv_name, go_ty, narrowed_ident })
+}
+
 /// Emit a Ruby `x = value` as a Go assignment. Uses `:=` for the
 /// common case (fresh local binding) and falls back to `=` when the
 /// lvalue isn't a plain local. Targets covered:
@@ -626,14 +696,45 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
         }
         ExprNode::Seq { exprs } => {
             // All but the last are statements (effects-only); last is
-            // the return-position expression.
+            // the return-position expression. Special-case: when the
+            // first expr is `return X if var.nil?` and `var`'s Ty is
+            // `Union { Nil, T }`, narrow `var` to `T` for the rest
+            // of the Seq via runtime type assertion + rename.
+            let narrow = exprs.first().and_then(try_nil_narrow_head);
+            let mut tail_ctx_cell: Option<EmitCtx> = None;
             for (i, sub) in exprs.iter().enumerate() {
-                if i + 1 == exprs.len() {
-                    emit_return_at(ctx, sub, out, depth);
+                let is_last = i + 1 == exprs.len();
+                // Switch to the narrowed child ctx for everything
+                // after the early-return head, once we've emitted it.
+                let active_ctx = if i == 0 || tail_ctx_cell.is_none() {
+                    ctx
+                } else {
+                    tail_ctx_cell.as_ref().unwrap()
+                };
+                if is_last {
+                    emit_return_at(active_ctx, sub, out, depth);
                 } else {
                     indent(out, depth);
-                    out.push_str(&emit_expr(ctx, sub));
+                    out.push_str(&emit_expr(active_ctx, sub));
                     out.push('\n');
+                }
+                // After emitting the first expr, if it matched the
+                // nil-narrow shape, inject the assertion + build the
+                // child ctx that swaps `var` for the narrowed ident
+                // in subsequent walks.
+                if i == 0 {
+                    if let Some(n) = &narrow {
+                        indent(out, depth);
+                        out.push_str(&format!(
+                            "{narrowed} := {recv}.({go_ty})\n",
+                            narrowed = n.narrowed_ident,
+                            recv = n.recv_name,
+                            go_ty = n.go_ty,
+                        ));
+                        tail_ctx_cell = Some(
+                            ctx.with_rename(n.recv_name.clone(), n.narrowed_ident.clone()),
+                        );
+                    }
                 }
             }
         }
