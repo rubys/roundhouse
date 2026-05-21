@@ -197,6 +197,34 @@ pub(super) fn emit_send(
         }
     }
 
+    // Ruby `.length` and `.size` on collection-like receivers → Go's
+    // `len()` builtin. Maps identically across String, Array, Hash;
+    // user-defined `length` methods on custom classes are rare in
+    // the runtime/ruby/ source and not yet observed in practice.
+    if (method == "length" || method == "size") && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("len({})", emit_expr(ctx, r));
+        }
+    }
+
+    // Ruby `.to_s` → Go string conversion. String-typed receiver is
+    // a no-op; numeric receivers use the matching Sprintf verb;
+    // everything else (including untyped `interface{}`) falls back
+    // to `%v` — which delegates to `fmt.Stringer` if implemented
+    // and is a reasonable default otherwise. Without analyzer-filled
+    // `Expr.ty` the receiver appears typeless and we land on `%v`.
+    if method == "to_s" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return match r.ty.as_ref() {
+                Some(Ty::Str | Ty::Sym) => recv_s,
+                Some(Ty::Int) => format!("fmt.Sprintf(\"%d\", {recv_s})"),
+                Some(Ty::Float) => format!("fmt.Sprintf(\"%g\", {recv_s})"),
+                _ => format!("fmt.Sprintf(\"%v\", {recv_s})"),
+            };
+        }
+    }
+
     // SelfRef receiver in a class method context — rewrite to the
     // bare-fn call `ClassName_method(args)` because class methods
     // emit as bare functions, not as methods on a struct. Use the
