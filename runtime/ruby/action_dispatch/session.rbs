@@ -7,7 +7,7 @@ module ActionDispatch
   class Session
     @data: Hash[String, untyped]
 
-    def initialize: (?Hash[untyped, untyped]? other) -> void
+    def initialize: (?Hash[String, untyped]? other) -> void
 
     def []: (untyped key) -> untyped
     def []=: (untyped key, untyped value) -> untyped

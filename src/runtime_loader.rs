@@ -943,18 +943,28 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // action_dispatch/{session,flash}.rb still queued. This session
-    // landed Hash#{keys,values,length,size,empty?,key?,has_key?,
-    // include?,delete} peepholes + Yield→panic shim. Session gets
-    // through most methods but Session#merge surfaces a deeper
-    // RBS-vs-Go-emit gap: `Hash[untyped, untyped]` declares as
-    // `map[interface{}]interface{}` while a concrete return like
-    // `def to_h; @data: Hash[String, untyped]; end` produces
-    // `map[string]interface{}` — same Ruby Hash, different Go types.
-    // Resolution path: tighten `Hash[untyped, untyped]` rendering
-    // (e.g., always use string keys for Ruby hashes) or insert
-    // conversions at Send sites where the arg Ty differs from
-    // param Ty.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "",
+        out_path: "app/session.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "",
+        out_path: "app/flash.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

@@ -29,6 +29,6 @@ module ActionDispatch
     def values: () -> Array[String]
     def each: () { (String, String?) -> void } -> Flash
     def to_h: () -> Hash[String, String]
-    def merge: (untyped other) -> Flash
+    def merge: (Hash[String, String] other) -> Flash
   end
 end
