@@ -28,11 +28,16 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
         }
         Some(Ty::Array { elem }) => format!("[]{}", go_ty_stub(Some(elem))),
         // `Union { Nil, T }` collapses to `T`'s Go type IFF `T` maps
-        // to a Go reference type (map, slice, pointer-to-struct) —
-        // those carry nil at the type level. Value types (string,
-        // int, float, bool) can't be nil in Go, so the Union stays
-        // `interface{}` and gets narrowed at runtime via the
-        // emit_return_at::Seq early-nil-return walker.
+        // to a Go reference type (map, slice, pointer-to-struct) OR
+        // is a string (where "" stands in for nil, the Go-idiomatic
+        // empty-as-nil convention used by Flash's `@notice: String?`
+        // shape). Integer/Float/Bool Unions stay `interface{}`
+        // because their zero values (0, 0.0, false) are meaningful
+        // — `0 == nil` would conflate "absent" with the actual
+        // value zero. Strings get the convention because empty-as-
+        // missing is so common in Ruby's framework code that the
+        // alternative (per-field `*string`) is more invasive than
+        // it's worth.
         Some(Ty::Union { variants }) => {
             let non_nil: Vec<&Ty> = variants
                 .iter()
@@ -40,9 +45,8 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
                 .collect();
             if non_nil.len() == 1 {
                 match non_nil[0] {
-                    Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. } => {
-                        go_ty_stub(Some(non_nil[0]))
-                    }
+                    Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. }
+                    | Ty::Str | Ty::Sym => go_ty_stub(Some(non_nil[0])),
                     _ => "interface{}".to_string(),
                 }
             } else {

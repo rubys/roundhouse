@@ -48,7 +48,8 @@ use crate::dialect::LibraryClass;
 /// hook — every transpiled framework class flows through this
 /// pipeline before go2/emit sees it.
 pub fn lower_for_go(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
-    nil_check_to_comma_ok::apply(classes)
+    let classes = nil_check_to_comma_ok::apply(classes);
+    nil_to_zero_for_string_fields::apply(classes)
 }
 
 /// Pattern: `v = m[k]; if !v.nil? { body using v }`.
@@ -291,4 +292,177 @@ pub mod nil_check_to_comma_ok {
         }
         matches!(&*v_expr.node, ExprNode::Var { name, .. } if name.as_str() == var_name)
     }
+}
+
+/// Pattern: `@field = nil` where the field's declared Ty is
+/// `Union[Str, Nil]` (RBS `String?`).
+///
+/// With `go_ty_stub` now mapping `Union[Str, Nil]` to Go `string`
+/// (the empty-as-nil convention), an emitted `self.Field = nil`
+/// fails to typecheck — `string` doesn't accept nil. Rewrite the
+/// assignment value to the empty-string literal so the Go shape
+/// stays valid. Reads of the field aren't touched: a bare `@field`
+/// already emits as `self.Field` (a string read), and `.nil?`
+/// against the value is handled by the emit-time peephole (which
+/// checks the recv's Union[Str, Nil] Ty and emits `recv == ""`).
+///
+/// Only the LValue::Ivar { name } and `LValue::Attr { recv: Self,
+/// name }` shapes match — Var (local) assigns to nil aren't field
+/// writes; their target type is whatever the local was declared
+/// with, not the class's field Ty.
+pub mod nil_to_zero_for_string_fields {
+    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+    use crate::expr::{Expr, ExprNode, LValue, Literal};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+    use crate::ty::Ty;
+    use std::collections::HashMap;
+
+    pub fn apply(mut classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
+        for class in classes.iter_mut() {
+            let fields = collect_string_nullable_fields(&class.methods);
+            if fields.is_empty() {
+                continue;
+            }
+            for method in class.methods.iter_mut() {
+                method.body = transform(&method.body, &fields);
+            }
+        }
+        classes
+    }
+
+    /// Collect ivar names whose declared Ty is `Union[Str, Nil]`
+    /// (or `Union[Sym, Nil]`), derived from attr_reader/writer
+    /// signatures. These are exactly the fields that go_ty_stub now
+    /// emits as Go `string` — and where `self.Field = nil` would
+    /// fail to typecheck.
+    fn collect_string_nullable_fields(methods: &[MethodDef]) -> HashMap<String, ()> {
+        let mut out = HashMap::new();
+        for m in methods {
+            if !matches!(m.receiver, MethodReceiver::Instance) {
+                continue;
+            }
+            let ty = match m.kind {
+                AccessorKind::AttributeReader => match m.signature.as_ref() {
+                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    _ => continue,
+                },
+                AccessorKind::AttributeWriter => match m.signature.as_ref() {
+                    Some(Ty::Fn { params, .. }) => match params.first() {
+                        Some(p) => p.ty.clone(),
+                        None => continue,
+                    },
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if is_nullable_string(&ty) {
+                let name = m.name.as_str().trim_end_matches('=').to_string();
+                out.insert(name, ());
+            }
+        }
+        out
+    }
+
+    fn is_nullable_string(ty: &Ty) -> bool {
+        let Ty::Union { variants } = ty else { return false };
+        let non_nil: Vec<&Ty> = variants
+            .iter()
+            .filter(|t| !matches!(t, Ty::Nil))
+            .collect();
+        matches!(non_nil.as_slice(), [Ty::Str] | [Ty::Sym])
+    }
+
+    fn transform(e: &Expr, fields: &HashMap<String, ()>) -> Expr {
+        match &*e.node {
+            ExprNode::Assign { target, value }
+                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
+                    && is_string_field_target(target, fields) =>
+            {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Assign {
+                    target: target.clone(),
+                    value: empty_string_expr(),
+                });
+                new_e
+            }
+            ExprNode::Seq { exprs } => {
+                let new_exprs: Vec<Expr> = exprs.iter().map(|s| transform(s, fields)).collect();
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Seq { exprs: new_exprs });
+                new_e
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::If {
+                    cond: transform(cond, fields),
+                    then_branch: transform(then_branch, fields),
+                    else_branch: transform(else_branch, fields),
+                });
+                new_e
+            }
+            ExprNode::Lambda { params, block_param, body, block_style } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Lambda {
+                    params: params.clone(),
+                    block_param: block_param.clone(),
+                    body: transform(body, fields),
+                    block_style: *block_style,
+                });
+                new_e
+            }
+            ExprNode::Send { recv, method, args, block, parenthesized } => {
+                let new_recv = recv.as_ref().map(|r| transform(r, fields));
+                let new_args: Vec<Expr> = args.iter().map(|a| transform(a, fields)).collect();
+                let new_block = block.as_ref().map(|b| transform(b, fields));
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Send {
+                    recv: new_recv,
+                    method: method.clone(),
+                    args: new_args,
+                    block: new_block,
+                    parenthesized: *parenthesized,
+                });
+                new_e
+            }
+            ExprNode::Assign { target, value } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Assign {
+                    target: target.clone(),
+                    value: transform(value, fields),
+                });
+                new_e
+            }
+            ExprNode::Return { value } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Return {
+                    value: transform(value, fields),
+                });
+                new_e
+            }
+            _ => e.clone(),
+        }
+    }
+
+    fn is_string_field_target(target: &LValue, fields: &HashMap<String, ()>) -> bool {
+        match target {
+            LValue::Ivar { name } => fields.contains_key(name.as_str()),
+            LValue::Attr { recv, name } => {
+                matches!(&*recv.node, ExprNode::SelfRef) && fields.contains_key(name.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    fn empty_string_expr() -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Str { value: String::new() },
+            },
+        )
+    }
+
+    // Re-exported by parent for tests / pipeline.
+    pub(super) const _: fn(&Symbol) = |_| ();
 }

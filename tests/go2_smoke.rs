@@ -1097,8 +1097,11 @@ fn each_array_block_shape() {
 
     // Range over the receiver with the block param bound; underscore
     // discards the index since 1-param blocks ignore the position.
+    // arr is param-typed `interface{}` (no RBS), so the each peephole
+    // injects a `.([]any)` type assertion — Go can't range over
+    // interface{} directly.
     assert!(
-        emitted.contains("for _, x := range arr {"),
+        emitted.contains("for _, x := range arr.([]any) {"),
         "each block missing for-range shape:\n{emitted}",
     );
     // IIFE wrap with interface{} return — keeps the each-Send a
@@ -1167,8 +1170,10 @@ fn each_hash_block_shape() {
 
     let emitted = go2::emit_library_class(&class).expect("emit each hash-block class");
 
+    // h is param-typed `interface{}` (no RBS), 2-param block ⇒ Hash;
+    // each peephole injects a `.(map[string]any)` type assertion.
     assert!(
-        emitted.contains("for k, v := range h {"),
+        emitted.contains("for k, v := range h.(map[string]any) {"),
         "hash each missing for-range shape:\n{emitted}",
     );
 }
@@ -1490,11 +1495,15 @@ fn json_builder_v2_shape() {
         "String branch missing typed init:\n{text}",
     );
 
-    // Union{Nil,T} narrowing — `if s == nil` early return then
-    // `s_str := s.(string)`.
+    // Union[Str, Nil] now renders as Go `string` directly (empty-
+    // as-nil convention in go_ty_stub), so the nil-narrow no
+    // longer needs a `s.(string)` assertion — `s` is ALREADY a
+    // string. The early-return shape collapses to `if s == ""`.
+    // (The encode_value `is_a?` branches still emit `.(string)`
+    // because their `v` is typed Untyped, not Union[Str, Nil].)
     assert!(
-        text.contains("s_str := s.(string)"),
-        "encode_datetime missing nil-narrow assertion:\n{text}",
+        text.contains("if s == \"\""),
+        "encode_datetime missing empty-as-nil early return:\n{text}",
     );
 }
 

@@ -495,7 +495,23 @@ pub(super) fn emit_send(
     if method == "each" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
             if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
-                let recv_s = emit_expr(ctx, recv_e);
+                let raw_recv_s = emit_expr(ctx, recv_e);
+                // If recv resolves to `interface{}` (Untyped/Var/
+                // Bottom from go_ty_stub), Go can't range over it
+                // directly. The block's arity tells us the shape:
+                // 2 params ⇒ Hash, so assert to `map[string]any`;
+                // 0/1 params ⇒ Array, assert to `[]any`. The
+                // assertion runtime-panics if recv is actually the
+                // wrong shape, which mirrors Ruby's NoMethodError
+                // on `.each` against a non-enumerable.
+                let recv_s = if recv_ty_renders_as_interface(recv_e) {
+                    match params.len() {
+                        2 => format!("{raw_recv_s}.(map[string]any)"),
+                        _ => format!("{raw_recv_s}.([]any)"),
+                    }
+                } else {
+                    raw_recv_s
+                };
                 // Loop vars: 1 param → array iter (drop the index
                 // with `_`); 2 params → hash iter (key + value);
                 // 0 params (rare — `arr.each { puts "hi" }`) → both
@@ -878,6 +894,21 @@ pub(super) fn emit_send(
                     "false".to_string()
                 }
                 Some(Ty::Nil) => "true".to_string(),
+                Some(ty @ Ty::Union { .. }) => {
+                    // Empty-as-nil for `Union[Str/Sym, Nil]` matches
+                    // the go_ty_stub convention. `Union[Hash/Array/
+                    // Class, Nil]` still maps to Go reference types
+                    // where `== nil` is valid (slice/map/pointer);
+                    // the catchall preserves that path. Nested
+                    // Unions (`Union[Union[Str, Nil], Nil]`, seen
+                    // when the analyzer wraps a nullable field's
+                    // Ty in another nullable layer) flatten through
+                    // `union_non_nil_core`.
+                    match union_non_nil_core(ty) {
+                        Some(Ty::Str | Ty::Sym) => format!("{recv_s} == \"\""),
+                        _ => format!("{recv_s} == nil"),
+                    }
+                }
                 _ => format!("{recv_s} == nil"),
             };
         }
@@ -1227,6 +1258,15 @@ pub(super) struct IsAInit {
 fn try_emit_is_a_init(ctx: &EmitCtx, cond: &Expr) -> Option<IsAInit> {
     let (recv, class) = is_a_predicate(cond)?;
     let go_ty = ruby_class_to_go_assert_ty(class)?;
+    // Skip when the receiver's Go-emit shape ALREADY matches the
+    // assertion target. Empty-as-nil maps `Union[Str, Nil]` to
+    // `string`, so an `if s.is_a?(String)` against an already-
+    // string `s` would emit `s.(string)` — Go rejects "type
+    // assertion on non-interface". Returning None makes the
+    // caller fall back to plain bool-cond emit.
+    if super::ty::go_ty_stub(recv.ty.as_ref()) == go_ty {
+        return None;
+    }
     let recv_s = emit_expr(ctx, recv);
     let asserted_ident = assert_ident_for(go_ty);
     let recv_name = match &*recv.node {
@@ -1295,7 +1335,7 @@ fn try_nil_narrow_head(first: &Expr) -> Option<NilNarrow> {
     let ExprNode::Var { name, .. } = &*r.node else {
         return None;
     };
-    let Some(Ty::Union { variants }) = r.ty.as_ref() else {
+    let Some(union_ty @ Ty::Union { variants }) = r.ty.as_ref() else {
         return None;
     };
     let non_nil: Vec<&Ty> = variants
@@ -1312,6 +1352,16 @@ fn try_nil_narrow_head(first: &Expr) -> Option<NilNarrow> {
         Ty::Bool => "bool",
         _ => return None,
     };
+    // Skip when the union's Go-emit shape ALREADY matches the
+    // narrow target: `Union[Str, Nil]` now renders as `string`
+    // (empty-as-nil convention in go_ty_stub), so `s.(string)`
+    // would be a no-op assertion on an already-string value —
+    // Go rejects "type assertion on non-interface". The bare-
+    // value narrow path (no init, no rename) is what's right
+    // when the underlying var is already typed.
+    if super::ty::go_ty_stub(Some(union_ty)) == go_ty {
+        return None;
+    }
     let short = match go_ty {
         "string" => "str",
         "int64" => "int",
@@ -1610,19 +1660,64 @@ fn indent(out: &mut String, depth: usize) {
     }
 }
 
-/// Wrap the emitted return-value string in a Go conversion when
-/// the function's declared return type doesn't match what Go would
-/// infer from the value expression. Today only Ty::Int needs this:
-/// Ruby `n = 0; ...; return n` lowers to `n := 0` (Go infers
-/// `int`), and bare `return n` against an `int64` signature is a
-/// compile error. Wrapping in `int64(...)` is a no-op when the
-/// value is already int64, harmless when it's an untyped constant.
-/// Skip the wrap for bare `nil` (Ty::Int's zero-value path doesn't
-/// route through here, but the `nil` case is invalid Go regardless
-/// of the wrap so we leave the diagnostic intact).
+/// Wrap or replace the emitted return-value string when the
+/// function's declared return type doesn't match what Go would
+/// infer from the value expression.
+///
+/// Cases handled:
+/// - Ty::Int return + non-nil value → `int64(v)`. Ruby `n = 0;
+///   ...; return n` lowers to `n := 0` (Go infers `int`); bare
+///   `return n` against an `int64` signature is a compile error.
+///   The wrap is a no-op for already-int64 values.
+/// - `Union[Str, Nil]` return (renders as Go `string`) + bare
+///   `nil` value → `""`. Ruby `return nil` against `String?` is
+///   valid; under the empty-as-nil convention Go needs `""`.
+/// Flatten nested `Union[Union[T, Nil], Nil]` (and similar)
+/// down to its non-Nil core. Returns None when the union has
+/// multiple non-Nil variants (genuine sum type, not a nullable
+/// wrapper). The analyzer sometimes double-wraps nullable Tys
+/// when a field's declared `String?` is re-narrowed in flow;
+/// the emit needs the structural answer, not the literal Union
+/// shape.
+/// True when the receiver's analyzer-set Ty renders to `interface{}`
+/// via `go_ty_stub` (Untyped / Var / Bottom / multi-variant Union /
+/// no Ty set). Used by the `.each` peephole to decide whether to
+/// inject a type assertion (`recv.(map[string]any)` / `.([]any)`)
+/// before the range — Go can't range over `interface{}` directly.
+fn recv_ty_renders_as_interface(recv: &Expr) -> bool {
+    super::ty::go_ty_stub(recv.ty.as_ref()) == "interface{}"
+}
+
+fn union_non_nil_core(ty: &Ty) -> Option<&Ty> {
+    match ty {
+        Ty::Union { variants } => {
+            let non_nil: Vec<&Ty> = variants
+                .iter()
+                .filter(|t| !matches!(t, Ty::Nil))
+                .collect();
+            if non_nil.len() == 1 {
+                union_non_nil_core(non_nil[0])
+            } else {
+                None
+            }
+        }
+        other => Some(other),
+    }
+}
+
 fn coerce_return_value(ctx: &EmitCtx, v: String) -> String {
     match ctx.return_ty.as_ref() {
         Some(Ty::Int) if v != "nil" => format!("int64({v})"),
+        Some(Ty::Union { variants }) if v == "nil" => {
+            let non_nil: Vec<&Ty> = variants
+                .iter()
+                .filter(|t| !matches!(t, Ty::Nil))
+                .collect();
+            match non_nil.as_slice() {
+                [Ty::Str] | [Ty::Sym] => "\"\"".to_string(),
+                _ => v,
+            }
+        }
         _ => v,
     }
 }

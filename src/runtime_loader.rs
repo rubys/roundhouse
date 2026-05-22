@@ -943,17 +943,18 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // action_dispatch/{session,flash}.rb and action_controller/base.rb
-    // still queued. This session landed the scope-tracking fix
-    // (per-Go-block declared sets), `int64(...)` return-coerce,
-    // Array#push → append peephole, and Var-tail Array-literal Ty
-    // back-prop — together they take Flash from "first error at
-    // line 23" to "first error at line 136" (about 90% through the
-    // emit). The next blocker is `Union[Str, Nil]` fields landing
-    // as `interface{}` instead of an optional-string shape (`*string`
-    // or empty-as-nil), causing `append([]string, interface{})`
-    // type mismatches. Likely a new go2/lower pass or a go_ty_stub
-    // extension.
+    // action_dispatch/{session,flash}.rb still queued. This session
+    // landed the nullable-string wedge (empty-as-nil convention for
+    // `Union[Str/Sym, Nil]` fields) + .each-on-`interface{}` runtime
+    // assertion. Together they unblock most Flash methods (notice/
+    // alert nil checks, push→append, etc.), but two surfaces still
+    // need work:
+    //   - Flash#merge: `v` iterated as `any` flowing into OpSet's
+    //     typed `string` param — needs "interface{} → typed-param"
+    //     type-assertion injection at Send call sites.
+    //   - Session: `other.keys` Ruby idiom → no Go analog on maps;
+    //     `for k := range m { ... }` is the Go-idiomatic shape.
+    //     Needs a `.keys` / `.values` peephole.
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape
