@@ -944,16 +944,16 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         extra_roots: NO_EXTRA_ROOTS,
     },
     // action_dispatch/{session,flash}.rb and action_controller/base.rb
-    // queued for the next wedge session. The `nil_check_to_comma_ok`
-    // lowerer (src/emit/go2/lower.rs) now handles the `v = m[k]; if
-    // !v.nil? { body }` pattern that originally blocked Flash, but
-    // Flash also hits a SEPARATE pre-existing go2 bug: `EmitCtx.declared`
-    // tracks declared-vars globally instead of per-Go-block, so
-    // sibling if-blocks that both declare `v` emit one as `:=` and
-    // the other as `=` (referencing the first's now-out-of-scope
-    // binding). That's a scoping fix in expr.rs/emit_assign, not a
-    // lowerer fix. Next session: land block-scoped declared tracking,
-    // then re-enable Session+Flash here.
+    // still queued. This session landed the scope-tracking fix
+    // (per-Go-block declared sets), `int64(...)` return-coerce,
+    // Array#push → append peephole, and Var-tail Array-literal Ty
+    // back-prop — together they take Flash from "first error at
+    // line 23" to "first error at line 136" (about 90% through the
+    // emit). The next blocker is `Union[Str, Nil]` fields landing
+    // as `interface{}` instead of an optional-string shape (`*string`
+    // or empty-as-nil), causing `append([]string, interface{})`
+    // type mismatches. Likely a new go2/lower pass or a go_ty_stub
+    // extension.
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

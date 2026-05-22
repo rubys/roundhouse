@@ -579,6 +579,10 @@ fn emit_method(
         m.signature.as_ref(),
         Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
     );
+    let return_ty = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
     let ctx = EmitCtx {
         class_name: Some(class_name.to_string()),
         in_class_method: matches!(m.receiver, MethodReceiver::Class),
@@ -587,6 +591,7 @@ fn emit_method(
         void_method: returns_void,
         in_module_singleton: false,
         self_methods: Some(std::rc::Rc::clone(self_methods)),
+        return_ty,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
@@ -675,7 +680,7 @@ fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
 /// (i.e., Var/Var or Untyped). Returns a new Expr; non-matching tails
 /// pass through unmodified.
 fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
-    use crate::expr::ExprNode;
+    use crate::expr::{ExprNode, LValue};
     if !matches!(target_ty, Ty::Hash { .. } | Ty::Array { .. }) {
         return body.clone();
     }
@@ -699,9 +704,50 @@ fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
             tail
         }
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            // Recurse into the literal tail first.
             let mut new_exprs: Vec<Expr> = exprs[..exprs.len() - 1].to_vec();
             let last = exprs.last().unwrap();
             new_exprs.push(backprop_return_ty_to_tail(last, target_ty));
+            // Additional case: tail is `Var(name)`. Walk backwards
+            // to find the first `Assign { Var(name), <empty literal> }`
+            // and back-prop the target_ty there. Catches Ruby idiom:
+            //     result = []
+            //     result.push(x)
+            //     ...
+            //     result          # tail
+            // With `result: Array[String]` return, the `result = []`
+            // assignment needs to land as `[]string{}` (not the
+            // default `[]interface{}{}`).
+            if let ExprNode::Var { name, .. } = &*last.node {
+                let var_name = name.as_str().to_string();
+                for e in new_exprs.iter_mut() {
+                    if let ExprNode::Assign {
+                        target: LValue::Var { name: assign_name, .. },
+                        value,
+                    } = &*e.node
+                    {
+                        if assign_name.as_str() == var_name {
+                            let new_value = backprop_return_ty_to_tail(value, target_ty);
+                            let mut new_assign = e.clone();
+                            new_assign.node = Box::new(ExprNode::Assign {
+                                target: LValue::Var {
+                                    id: match &e.node.as_ref() {
+                                        ExprNode::Assign { target: LValue::Var { id, .. }, .. } => *id,
+                                        _ => unreachable!(),
+                                    },
+                                    name: assign_name.clone(),
+                                },
+                                value: new_value,
+                            });
+                            *e = new_assign;
+                            // Only the FIRST assignment carries the
+                            // declaration; subsequent reassigns don't
+                            // affect the var's Go type. Stop here.
+                            break;
+                        }
+                    }
+                }
+            }
             let mut new_body = (*body).clone();
             new_body.node = Box::new(ExprNode::Seq { exprs: new_exprs });
             new_body
@@ -885,6 +931,10 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         m.signature.as_ref(),
         Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
     );
+    let return_ty = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
     let ctx = EmitCtx {
         class_name: Some(class_name.to_string()),
         in_class_method: true,
@@ -895,6 +945,7 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         // Module-singleton has no instance methods; nothing to put
         // in the self-method registry.
         self_methods: None,
+        return_ty,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());

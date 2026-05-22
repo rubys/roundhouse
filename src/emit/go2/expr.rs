@@ -71,6 +71,17 @@ pub(super) struct EmitCtx {
     /// hit `self.Field` (no instance exists) or a bare `<ivar>` that
     /// collides across modules.
     pub in_module_singleton: bool,
+    /// The enclosing method's declared return Ty. `emit_return_at`
+    /// reads this to insert a Go conversion at `return X` when the
+    /// inferred Go type of `X` doesn't match the function's declared
+    /// return type. Specifically: Ty::Int returns wrap their value
+    /// in `int64(...)` because Ruby `n = 0; ...; return n` lowers
+    /// to `n := 0` (Go infers `int`, not `int64`) and bare `return n`
+    /// against an `int64` signature fails. The redundant
+    /// `int64(literal)` wrap is harmless for cases where it's not
+    /// needed. `None` when no signature is set or the method is
+    /// void.
+    pub return_ty: Option<Ty>,
     /// Names of real (non-attr) instance methods on the enclosing
     /// class. Used to decide whether `self.foo` (0-arg implicit-self
     /// Send to a non-stdlib method) emits as a field read
@@ -95,6 +106,7 @@ impl EmitCtx {
             void_method: false,
             in_module_singleton: false,
             self_methods: None,
+            return_ty: None,
         }
     }
 
@@ -110,6 +122,23 @@ impl EmitCtx {
     pub fn with_rename(&self, from: String, to: String) -> Self {
         let mut child = self.clone();
         child.var_renames.insert(from, to);
+        child
+    }
+
+    /// Enter a nested Go block scope (if-then, if-else, for-body,
+    /// IIFE body). Snapshots the current `declared` names into a
+    /// fresh `Rc<RefCell<HashSet>>` so that mutations inside the
+    /// child scope don't leak back to the parent. Outer-scope vars
+    /// stay visible (the snapshot starts with them populated), so
+    /// inner reassigns of outer vars still correctly emit `=`. But
+    /// inner FIRST-declarations of new vars (`v := ...`) only
+    /// register in the child's set — sibling blocks each see a
+    /// fresh scope and correctly emit `:=` for their own first
+    /// declarations. Mirrors Go's lexical block scoping.
+    pub fn enter_scope(&self) -> Self {
+        let snapshot: HashSet<String> = self.declared.borrow().clone();
+        let mut child = self.clone();
+        child.declared = Rc::new(RefCell::new(snapshot));
         child
     }
 }
@@ -201,7 +230,9 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             } else {
                 cond_s
             };
-            let body_s = emit_block_body(ctx, body);
+            // Loop body is a Go block — fresh declared scope so
+            // `v := ...` inside the loop doesn't bleed to siblings.
+            let body_s = emit_block_body(&ctx.enter_scope(), body);
             format!("for {cond_text} {{\n{body_s}\n}}")
         }
         ExprNode::If { cond, then_branch, else_branch } => {
@@ -210,22 +241,24 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // an invalid bare-nil then-block.
             if is_nil_lit(then_branch) && !is_nil_lit(else_branch) {
                 let cond_s = emit_expr(ctx, cond);
-                let else_s = emit_block_body(ctx, else_branch);
+                let else_s = emit_block_body(&ctx.enter_scope(), else_branch);
                 return format!("if !({cond_s}) {{\n{else_s}\n}}");
             }
             // `if recv.is_a?(Class)` → Go's type-assert init form
             // `if asserted, ok := recv.(GoTy); ok`. The then_branch
             // gets a child ctx that renames the recv's Var to the
             // asserted ident, so nested uses see the typed value.
+            // Both branches enter fresh scopes — sibling-block `:=`
+            // declarations stay isolated.
             let (init, cond_s, then_ctx) = match try_emit_is_a_init(ctx, cond) {
                 Some(IsAInit { init, cond, recv_name, asserted_ident }) => {
                     let child = match recv_name {
-                        Some(n) => ctx.with_rename(n, asserted_ident.to_string()),
-                        None => ctx.clone(),
+                        Some(n) => ctx.enter_scope().with_rename(n, asserted_ident.to_string()),
+                        None => ctx.enter_scope(),
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.clone()),
+                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
             };
             let then_s = emit_block_body(&then_ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
@@ -234,7 +267,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             if is_nil_lit(else_branch) {
                 format!("if {init}{cond_s} {{\n{then_s}\n}}")
             } else {
-                let else_s = emit_block_body(ctx, else_branch);
+                let else_s = emit_block_body(&ctx.enter_scope(), else_branch);
                 format!("if {init}{cond_s} {{\n{then_s}\n}} else {{\n{else_s}\n}}")
             }
         }
@@ -433,7 +466,8 @@ pub(super) fn emit_send(
                     let recv_s = emit_expr(ctx, recv.unwrap());
                     let key_s = &args_s[0];
                     let var_name = super::library::sanitize(params[0].as_str());
-                    let body_ctx = ctx.clone();
+                    // IIFE introduces a fresh Go scope — clone declared.
+                    let body_ctx = ctx.enter_scope();
                     body_ctx.declare_param(params[0].as_str());
                     let body_s = emit_block_body(&body_ctx, body);
                     return format!(
@@ -467,7 +501,8 @@ pub(super) fn emit_send(
                 // 0 params (rare — `arr.each { puts "hi" }`) → both
                 // sides bound to `_`. >2 params is unmappable; emit
                 // a TODO so the gap is loudly visible.
-                let body_ctx = ctx.clone();
+                // IIFE introduces fresh Go scope.
+                let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
                     0 => "_, _".to_string(),
                     1 => {
@@ -514,7 +549,8 @@ pub(super) fn emit_send(
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
             if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
                 let recv_s = emit_expr(ctx, recv_e);
-                let body_ctx = ctx.clone();
+                // IIFE introduces fresh Go scope.
+                let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
                     0 => "_, _".to_string(),
                     1 => {
@@ -681,8 +717,9 @@ pub(super) fn emit_send(
     // the lowered bodies use this at statement position. For Hash
     // shovel (`hash << pair`) the semantics differ; if a non-Array
     // recv hits this, the resulting Go `append(map, ...)` errors
-    // at compile, surfacing the gap.
-    if method == "<<" && args.len() == 1 {
+    // at compile, surfacing the gap. `arr.push(x)` is the explicit-
+    // method form of the same operation and gets the same rewrite.
+    if (method == "<<" || method == "push") && args.len() == 1 {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
             return format!("{recv_s} = append({recv_s}, {})", args_s[0]);
@@ -1573,18 +1610,39 @@ fn indent(out: &mut String, depth: usize) {
     }
 }
 
+/// Wrap the emitted return-value string in a Go conversion when
+/// the function's declared return type doesn't match what Go would
+/// infer from the value expression. Today only Ty::Int needs this:
+/// Ruby `n = 0; ...; return n` lowers to `n := 0` (Go infers
+/// `int`), and bare `return n` against an `int64` signature is a
+/// compile error. Wrapping in `int64(...)` is a no-op when the
+/// value is already int64, harmless when it's an untyped constant.
+/// Skip the wrap for bare `nil` (Ty::Int's zero-value path doesn't
+/// route through here, but the `nil` case is invalid Go regardless
+/// of the wrap so we leave the diagnostic intact).
+fn coerce_return_value(ctx: &EmitCtx, v: String) -> String {
+    match ctx.return_ty.as_ref() {
+        Some(Ty::Int) if v != "nil" => format!("int64({v})"),
+        _ => v,
+    }
+}
+
 fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
     match &*e.node {
         ExprNode::If { cond, then_branch, else_branch } => {
+            // Both branches enter fresh declared scopes. Without
+            // this, sibling if-blocks each declaring the same var
+            // would emit one as `:=` and the rest as `=` against
+            // out-of-scope bindings (Flash#delete shape).
             let (init, cond_s, then_ctx) = match try_emit_is_a_init(ctx, cond) {
                 Some(IsAInit { init, cond, recv_name, asserted_ident }) => {
                     let child = match recv_name {
-                        Some(n) => ctx.with_rename(n, asserted_ident.to_string()),
-                        None => ctx.clone(),
+                        Some(n) => ctx.enter_scope().with_rename(n, asserted_ident.to_string()),
+                        None => ctx.enter_scope(),
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.clone()),
+                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
             };
             indent(out, depth);
             out.push_str(&format!("if {init}{cond_s} {{\n"));
@@ -1594,7 +1652,8 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             if !is_nil_lit(else_branch) {
                 indent(out, depth);
                 out.push_str("} else {\n");
-                emit_return_at(ctx, else_branch, out, depth + 1);
+                let else_ctx = ctx.enter_scope();
+                emit_return_at(&else_ctx, else_branch, out, depth + 1);
             }
             indent(out, depth);
             out.push_str("}\n");
@@ -1654,6 +1713,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 out.push_str("return\n");
             } else {
                 let v = emit_expr(ctx, value);
+                let v = coerce_return_value(ctx, v);
                 indent(out, depth);
                 out.push_str(&format!("return {v}\n"));
             }
@@ -1717,6 +1777,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 // by the same caveat as Ruby's own block-tail return.
                 _ => emit_expr(ctx, value),
             };
+            let ret = coerce_return_value(ctx, ret);
             indent(out, depth);
             out.push_str(&format!("return {ret}\n"));
         }
@@ -1736,6 +1797,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 out.push('\n');
             } else {
                 let v = emit_expr(ctx, e);
+                let v = coerce_return_value(ctx, v);
                 indent(out, depth);
                 out.push_str(&format!("return {v}\n"));
             }
