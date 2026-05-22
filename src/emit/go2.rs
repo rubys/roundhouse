@@ -30,6 +30,7 @@ use crate::App;
 
 mod expr;
 mod library;
+mod lower;
 mod ty;
 
 /// Phase 3 hand-written primitive runtime. Verbatim copy into the
@@ -76,7 +77,9 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    let units = match crate::runtime_loader::go_units(|_, c| c) {
+    let units = match crate::runtime_loader::go_units(|_ns, classes| {
+        lower::lower_for_go(classes)
+    }) {
         Ok(u) => u,
         Err(e) => {
             // Transpile failure surfaces as a sentinel file rather
