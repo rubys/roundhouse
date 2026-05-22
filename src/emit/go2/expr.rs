@@ -123,11 +123,14 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         ExprNode::Var { name, .. } => {
             // Substitute via ctx.var_renames if present — used by
             // the `is_a?` if-init rewrite to expose the asserted
-            // typed value inside the then_branch.
+            // typed value inside the then_branch. Otherwise sanitize
+            // through the Go-keyword filter (`default` → `default_`)
+            // so reads line up with the param-emit shape in
+            // `library::render_params`.
             ctx.var_renames
                 .get(name.as_str())
                 .cloned()
-                .unwrap_or_else(|| name.to_string())
+                .unwrap_or_else(|| super::library::sanitize(name.as_str()))
         }
         // `@field` in instance method bodies maps to `self.Field`
         // (the Go struct field synthesized by attr_reader/writer in
@@ -1286,8 +1289,9 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
             // flat function scope: Ruby `x = 1` inside an if-block
             // reassigns the outer `x` rather than shadowing it, which
             // is what we want emitted in Go (otherwise the write is
-            // silently lost when the inner scope exits).
-            let name_s = name.as_str().to_string();
+            // silently lost when the inner scope exits). Sanitized
+            // through the Go-keyword filter to match Var-read emit.
+            let name_s = super::library::sanitize(name.as_str());
             let first = ctx.declared.borrow_mut().insert(name_s.clone());
             if first {
                 format!("{name_s} := {v}")
@@ -1675,7 +1679,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                         format!("self.{}", go_field_name(name.as_str()))
                     }
                 }
-                LValue::Var { name, .. } => name.as_str().to_string(),
+                LValue::Var { name, .. } => super::library::sanitize(name.as_str()),
                 // Attr/Index — fall back to re-emitting rhs. Rare at
                 // tail position and the double-eval risk is bounded
                 // by the same caveat as Ruby's own block-tail return.

@@ -74,5 +74,14 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
 /// types reference these as bare names — `var x Foo` not `var x *Foo`
 /// — because pointer-to-interface has an empty method set in Go.
 fn is_go_interface_class(id: &str) -> bool {
-    matches!(id, "ActiveRecord::AdapterInterface")
+    matches!(
+        id,
+        "ActiveRecord::AdapterInterface"
+        // `Roundhouse::ParamValue` is a hand-written `type
+        // RoundhouseParamValue = any` alias (recursive sum type
+        // can't be expressed as a Go struct). Like `AdapterInterface`,
+        // it must emit bare — `*any` is pointer-to-interface with an
+        // empty method set.
+        | "Roundhouse::ParamValue"
+    )
 }

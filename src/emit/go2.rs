@@ -42,6 +42,8 @@ const RT_V2_ADAPTER_INTERFACE: &str =
     include_str!("../../runtime/go/v2/adapter_interface.go");
 const RT_V2_FRAMEWORK_TEST_ADAPTER: &str =
     include_str!("../../runtime/go/v2/framework_test_adapter.go");
+const RT_V2_PARAM_VALUE: &str =
+    include_str!("../../runtime/go/v2/param_value.go");
 
 /// Append go2 transpiled runtime files to `files` when
 /// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
@@ -66,6 +68,7 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("framework_test_adapter.go", RT_V2_FRAMEWORK_TEST_ADAPTER),
+        ("param_value.go", RT_V2_PARAM_VALUE),
     ] {
         out.push(EmittedFile {
             path: PathBuf::from(format!("app/v2/{name}")),

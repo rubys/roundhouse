@@ -943,6 +943,22 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // action_dispatch/{session,flash}.rb and action_controller/base.rb
+    // queued for the next wedge session. The initial AC::Base attempt
+    // surfaced an analyzer-side gap that didn't show up under AR::Base:
+    //   v = other["notice"]  # Ruby
+    //   v := other["notice"]  # Go — v's Go type is the map's value
+    //                         #      type (string for map[string]string)
+    //   if !v.nil? { ... }   # Ruby
+    //   if !(v == nil) { ... } # Go vet error — v is string, not nilable
+    // The analyzer gives v.ty = Untyped (didn't propagate the map's
+    // value Ty across indexing inside a post-`if other.nil?` narrow);
+    // the nil? peephole has no signal to emit `v == ""` vs `v == nil`.
+    // The peephole-only fixes that did land in this session
+    // (param_value plumbing, `default` Go-keyword sanitization on Var
+    // reads/writes, variadic emit for trailing-optional-default params,
+    // Roundhouse::ParamValue → interface-not-pointer Ty) are forward
+    // leverage for when this gap is resolved.
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

@@ -283,13 +283,14 @@ fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>) {
 /// from the matching positional param. Falls back to a build-then-
 /// assign form when the body shape is more complex.
 fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
-    let params = render_params(init);
+    let (params, optional_unpack) = render_constructor_params(init);
     let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
 
     // Try the simple-shape detection: every body expr is
     // `Assign { target: Ivar(name), value: Var(name) }`, and the Var
     // name matches the Ivar name. If so, emit `return &Class{Name: name, ...}`.
     if let Some(literal) = try_field_init_literal(class_name, &init.body) {
+        out.push_str(&optional_unpack);
         out.push_str(&format!("\treturn {literal}\n"));
     } else {
         // Fallback: declare a fresh receiver, walk the body as
@@ -298,6 +299,7 @@ fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
         // `void_method=true` on the ctx makes the body walker emit
         // each tail as a statement instead of `return X`.
         out.push_str(&format!("\tself := &{class_name}{{}}\n"));
+        out.push_str(&optional_unpack);
         let mut ctx = EmitCtx::none();
         ctx.void_method = true;
         for p in &init.params {
@@ -312,6 +314,72 @@ fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+/// Render a constructor's param list. Trailing params with default
+/// values fold into a single variadic catch-all (`opts ...T`); the
+/// caller (`emit_constructor`) injects per-param unpack at the top
+/// of the body. Returns `(param_list, unpack_block)`.
+///
+/// Ruby `def initialize(other = nil)` → Go `func NewX(opts ...map)`
+/// + body `var other map; if len(opts) > 0 { other = opts[0] }`.
+/// This is the Go idiom for optional positional args; the caller's
+/// `NewX()` (no args) and `NewX(theOther)` both resolve.
+///
+/// Constraints: Go only allows ONE variadic, and it must be the
+/// last param. So only TRAILING defaulted params fold. A
+/// required-then-optional-then-required shape can't be expressed in
+/// Go and falls back to non-variadic emit (caller must always pass).
+fn render_constructor_params(m: &MethodDef) -> (String, String) {
+    let sig_tys = signature_param_tys(m);
+    let split = trailing_optional_split(&m.params);
+    let mut params_out: Vec<String> = Vec::new();
+    let mut unpack = String::new();
+    for (i, p) in m.params.iter().enumerate() {
+        let ty = sig_tys.as_ref().and_then(|tys| tys.get(i));
+        if i < split {
+            params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
+        } else if i == split {
+            let go_ty = go_ty_stub(ty);
+            params_out.push(format!("_opts ...{go_ty}"));
+            // Per-param unpack — first variadic slot = the original
+            // param's name, subsequent params (also defaulted) pull
+            // from successive slots.
+            for (j, opt) in m.params[split..].iter().enumerate() {
+                // Ruby's `_X` convention signals an intentionally
+                // unused parameter. Go allows unused PARAMS (not
+                // unused LOCALS), and our variadic emit lowers
+                // optional params to locals. Skip the unpack for
+                // `_`-prefixed names so vet doesn't error on the
+                // unused declaration — the body never references
+                // them anyway.
+                if opt.name.as_str().starts_with('_') {
+                    continue;
+                }
+                let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
+                let opt_go_ty = go_ty_stub(opt_ty);
+                let opt_name = sanitize(opt.name.as_str());
+                unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
+                unpack.push_str(&format!("\tif len(_opts) > {j} {{ {opt_name} = _opts[{j}] }}\n"));
+            }
+            break;
+        }
+    }
+    (params_out.join(", "), unpack)
+}
+
+/// Index of the first trailing-defaulted param. Returns
+/// `m.params.len()` when there are no trailing-defaulted params.
+fn trailing_optional_split(params: &[crate::dialect::Param]) -> usize {
+    let mut split = params.len();
+    for (i, p) in params.iter().enumerate().rev() {
+        if p.default.is_some() {
+            split = i;
+        } else {
+            break;
+        }
+    }
+    split
 }
 
 /// Pattern-match the simple-shape constructor body (`Seq` of
@@ -696,7 +764,7 @@ fn go_zero_value(ty: &Ty) -> String {
 
 /// Avoid emitting Go reserved words as parameter names. Adds a `_`
 /// suffix to any clash; preserves all others unchanged.
-fn sanitize(name: &str) -> String {
+pub(super) fn sanitize(name: &str) -> String {
     const RESERVED: &[&str] = &[
         "break", "case", "chan", "const", "continue", "default",
         "defer", "else", "fallthrough", "for", "func", "go", "goto",
