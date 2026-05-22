@@ -535,13 +535,22 @@ pub fn format_constant(name: &str, value: &Expr) -> String {
 }
 
 /// Format a module-level `@ivar = value` as a Go package-level
-/// `var <ivar> = <rendered>`. Name stays lowercase (Ruby ivar
-/// convention maps to Go package-private). Same renderer as
-/// `format_constant` — only the casing convention differs.
-pub fn format_module_ivar(name: &str, value: &Expr) -> String {
+/// `var <Owner>_<ivar>_slot = <rendered>`. The qualified `owner`
+/// (e.g. `"ActionView::ViewHelpers"`) is collapsed by stripping
+/// `::` and that string is woven into the var name so reads (which
+/// also synthesize `<Owner>_<ivar>_slot` — see
+/// `ExprNode::Ivar` in expr.rs) resolve to the same identifier.
+/// Empty owner (program-root ivar) skips the prefix and falls back
+/// to a bare `<ivar>_slot` so the var still exists at package scope.
+pub fn format_module_ivar(owner: &str, name: &str, value: &Expr) -> String {
     let ctx = super::expr::EmitCtx::none();
     let rendered = super::expr::emit_expr(&ctx, value);
-    format!("var {name} = {rendered}")
+    let var_name = if owner.is_empty() {
+        format!("{name}_slot")
+    } else {
+        format!("{}_{name}_slot", sanitize_type_name(owner))
+    };
+    format!("var {var_name} = {rendered}")
 }
 
 fn emit_method(

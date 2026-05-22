@@ -735,16 +735,6 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `.length` and `.size` on collection-like receivers → Go's
-    // `len()` builtin. Maps identically across String, Array, Hash;
-    // user-defined `length` methods on custom classes are rare in
-    // the runtime/ruby/ source and not yet observed in practice.
-    if (method == "length" || method == "size") && args.is_empty() {
-        if let Some(r) = recv {
-            return format!("len({})", emit_expr(ctx, r));
-        }
-    }
-
     // Ruby `.empty?` predicate on String/Array/Hash → Go
     // `len(recv) == 0`. Same scope as `length` — collection-shaped.
     if method == "empty?" && args.is_empty() {
@@ -888,6 +878,51 @@ pub(super) fn emit_send(
         }
     }
 
+    // Ruby `h.dup` → IIFE returning a shallow copy. Map shape:
+    // allocate a fresh map of the same K/V Tys and range-copy. For
+    // non-Hash receivers (Array#dup, String#dup) the emit would
+    // need different shapes; runtime/ruby/ only uses Hash#dup
+    // today.
+    if method == "dup" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let (k_ty, v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            return format!(
+                "func() map[{k_ty}]{v_ty} {{\n\
+                 \t_out := map[{k_ty}]{v_ty}{{}}\n\
+                 \tfor _k, _v := range {recv_s} {{ _out[_k] = _v }}\n\
+                 \treturn _out\n\
+                 }}()",
+            );
+        }
+    }
+
+    // Ruby `h.merge(other)` on a Hash receiver → IIFE that copies
+    // both maps into a fresh `map[string]any`. Ruby Hash#merge is
+    // heterogeneous (string-valued + symbol-keyed entries flow
+    // together with any-valued + arbitrary-keyed entries), so the
+    // result type widens to `map[string]any`. The IIFE coerces each
+    // source value through `any` to bridge any narrower input
+    // (`map[string]string` → values lifted to interface{}). Symbol
+    // keys flow through Ruby Hash literals' Symbol→String rendering
+    // already; if either side somehow carries non-string keys, the
+    // existing `fmt.Sprintf("%v", k)` shape covers that, but the
+    // narrow-key path is what real-blog hits.
+    if method == "merge" && args.len() == 1 {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let arg_s = &args_s[0];
+            return format!(
+                "func() map[string]any {{\n\
+                 \t_out := map[string]any{{}}\n\
+                 \tfor _k, _v := range {recv_s} {{ _out[_k] = _v }}\n\
+                 \tfor _k, _v := range {arg_s} {{ _out[_k] = _v }}\n\
+                 \treturn _out\n\
+                 }}()",
+            );
+        }
+    }
+
     // Ruby `h.delete(k)` → Go IIFE returning the deleted value (or
     // `nil` if absent) and then calling Go's `delete()` builtin.
     // Ruby's Hash#delete returns the value, so emit-only `delete(h,
@@ -921,13 +956,35 @@ pub(super) fn emit_send(
     // explicitly-stored zero values). Acceptable for the
     // runtime/ruby/ surface today; revisit if call sites
     // distinguish missing vs zero.
+    //
+    // When the default is Ruby `nil` and the receiver's value type
+    // is a non-nilable Go scalar (string/int64/float64/bool),
+    // substitute the Go zero value — `cmp.Or` is generic over
+    // `comparable`, so both args must share a concrete type. Ruby
+    // `nil` is the canonical empty signal; mapping it to "" / 0 /
+    // false preserves the Ruby semantics (`hash[k]` reads "" for a
+    // missing string-valued key in Go anyway, so the fallback is
+    // redundant in the missing-key case but still right in the
+    // explicit-default case).
     if method == "fetch" && args.len() == 2 {
         if let Some(r) = recv {
+            let (_k_ty, v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            let default_s = if matches!(*args[1].node, ExprNode::Lit { value: Literal::Nil }) {
+                match v_ty.as_str() {
+                    "string" => "\"\"".to_string(),
+                    "int64" => "int64(0)".to_string(),
+                    "float64" => "0.0".to_string(),
+                    "bool" => "false".to_string(),
+                    _ => args_s[1].clone(),
+                }
+            } else {
+                args_s[1].clone()
+            };
             return format!(
                 "cmp.Or({}[{}], {})",
                 emit_expr(ctx, r),
                 args_s[0],
-                args_s[1]
+                default_s
             );
         }
     }
@@ -1553,10 +1610,21 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
             // is what we want emitted in Go (otherwise the write is
             // silently lost when the inner scope exits). Sanitized
             // through the Go-keyword filter to match Var-read emit.
+            //
+            // Int-typed first declarations pin the var as `int64`:
+            // Go's untyped-int-literal default is `int`, but Ruby
+            // Integer maps to int64 in go_ty_stub. Without the pin,
+            // patterns like `i = 0; while i < arr.length` (which
+            // emits `int64(len(arr))`) hit a type mismatch between
+            // `int` and `int64`.
             let name_s = super::library::sanitize(name.as_str());
             let first = ctx.declared.borrow_mut().insert(name_s.clone());
             if first {
-                format!("{name_s} := {v}")
+                if matches!(value.ty, Some(Ty::Int)) {
+                    format!("var {name_s} int64 = {v}")
+                } else {
+                    format!("{name_s} := {v}")
+                }
             } else {
                 format!("{name_s} = {v}")
             }

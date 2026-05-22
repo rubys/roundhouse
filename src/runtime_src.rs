@@ -72,44 +72,61 @@ pub fn parse_module_constant_exprs(
 /// need to emit module-state as package-level variables — e.g.
 /// `ActionView::ViewHelpers`' `@slots` becomes a Go package var.
 ///
-/// Returns `(ivar_name_without_at, value_expr)` pairs in source
-/// order. `.freeze` is peeled the same way constants do; nested
-/// modules/classes recurse.
+/// Returns `(qualified_owner, ivar_name_without_at, value_expr)`
+/// triples in source order. `qualified_owner` is the `::`-joined
+/// module/class path the ivar was declared inside (e.g.
+/// `"ActionView::ViewHelpers"`) — empty when the ivar is at the
+/// program root. `.freeze` is peeled the same way constants do;
+/// nested modules/classes recurse.
 pub fn parse_module_ivar_exprs(
     source: &str,
-) -> Result<Vec<(Symbol, Expr)>, String> {
+) -> Result<Vec<(String, Symbol, Expr)>, String> {
     let result = parse(source.as_bytes());
-    let mut out: Vec<(Symbol, Expr)> = Vec::new();
+    let mut out: Vec<(String, Symbol, Expr)> = Vec::new();
     if result.errors().count() > 0 {
         return Ok(out);
     }
     let root = result.node();
-    walk_ivar_exprs(&root, &mut out);
+    walk_ivar_exprs(&root, "", &mut out);
     Ok(out)
 }
 
-fn walk_ivar_exprs(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+fn walk_ivar_exprs(node: &Node<'_>, owner: &str, out: &mut Vec<(String, Symbol, Expr)>) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_ivar_expr_from_stmt(&stmt, out);
+            collect_ivar_expr_from_stmt(&stmt, owner, out);
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_ivar_expr_from_stmt(&stmt, out);
+            collect_ivar_expr_from_stmt(&stmt, owner, out);
         }
     }
 }
 
-fn collect_ivar_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
+fn join_owner(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}::{child}")
+    }
+}
+
+fn collect_ivar_expr_from_stmt(node: &Node<'_>, owner: &str, out: &mut Vec<(String, Symbol, Expr)>) {
     if let Some(module) = node.as_module_node() {
+        let name_bytes = module.name().as_slice();
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
+        let nested = join_owner(owner, name_str);
         if let Some(body) = module.body() {
-            walk_ivar_exprs(&body, out);
+            walk_ivar_exprs(&body, &nested, out);
         }
         return;
     }
     if let Some(class) = node.as_class_node() {
+        let name_bytes = class.name().as_slice();
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else { return };
+        let nested = join_owner(owner, name_str);
         if let Some(body) = class.body() {
-            walk_ivar_exprs(&body, out);
+            walk_ivar_exprs(&body, &nested, out);
         }
         return;
     }
@@ -132,7 +149,7 @@ fn collect_ivar_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)>) {
             _ => value,
         };
         if let Ok(expr) = ingest_expr(&inner, VIRTUAL_FILE) {
-            out.push((Symbol::new(name), expr));
+            out.push((owner.to_string(), Symbol::new(name), expr));
         }
     }
 }

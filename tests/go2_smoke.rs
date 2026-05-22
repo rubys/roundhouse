@@ -1556,7 +1556,7 @@ fn router_v2_shape() {
     );
 
     // While loop + i++ + []= index assign.
-    assert!(text.contains("for i < len("), "while loop missing for-emit:\n{text}");
+    assert!(text.contains("for i < int64(len("), "while loop missing for-emit:\n{text}");
     assert!(text.contains("i = i + 1"), "i += 1 missing reassign emit:\n{text}");
     assert!(
         text.contains("params[pp[1:]] = ap"),

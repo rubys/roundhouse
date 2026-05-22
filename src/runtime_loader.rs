@@ -58,7 +58,7 @@ pub struct TargetEmit {
     /// opts the target in — Go emits these as package-level `var`s
     /// so module-singleton state (e.g. ViewHelpers' `@slots`)
     /// resolves at use sites.
-    pub format_module_ivar: Option<fn(name: &str, value: &Expr) -> String>,
+    pub format_module_ivar: Option<fn(owner: &str, name: &str, value: &Expr) -> String>,
     /// Wrap a body in the target's namespace syntax. TS resolves
     /// namespaces through imports + qualified-name registration in
     /// treeshake, so this is a no-op (`namespace` arg ignored). Crystal
@@ -785,8 +785,11 @@ where
             if let Some(format_ivar) = target.format_module_ivar {
                 let ivars = parse_module_ivar_exprs(entry.rb_src)
                     .unwrap_or_default();
-                for (name, value) in &ivars {
-                    body.push_str(&format!("{}\n", format_ivar(name.as_str(), value)));
+                for (owner, name, value) in &ivars {
+                    body.push_str(&format!(
+                        "{}\n",
+                        format_ivar(owner.as_str(), name.as_str(), value)
+                    ));
                 }
                 if !ivars.is_empty() {
                     body.push('\n');
@@ -867,12 +870,15 @@ fn go_format_constant_thunk(name: &str, value: &Expr) -> String {
     crate::emit::go2::format_constant(name, value)
 }
 
-/// Module-level `@ivar = value` → Go `var <ivar> = <value>`. The
-/// name stays lowercase (package-private), matching the Ruby
-/// instance-variable convention; uppercase package vars are for
-/// real CONSTANTS handled by `go_format_constant_thunk` above.
-fn go_format_module_ivar_thunk(name: &str, value: &Expr) -> String {
-    crate::emit::go2::format_module_ivar(name, value)
+/// Module-level `@ivar = value` → Go `var <Owner>_<ivar>_slot = <value>`.
+/// `owner` is the qualified Ruby module/class path the ivar was
+/// declared inside (e.g. `"ActionView::ViewHelpers"`); the formatter
+/// strips `::` to produce the Go-legal identifier. The `_slot` suffix
+/// and the namespacing rule mirror the read-side emit in
+/// `src/emit/go2/expr.rs::ExprNode::Ivar`, so `@slots` writes here
+/// and `@slots` reads there resolve to the same package var.
+fn go_format_module_ivar_thunk(owner: &str, name: &str, value: &Expr) -> String {
+    crate::emit::go2::format_module_ivar(owner, name, value)
 }
 
 /// Go's package-per-directory model means namespaces collapse into
@@ -965,6 +971,12 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // action_view/view_helpers.rb queued. Reconnaissance pass landed
+    // 6 supporting wedges (format_module_ivar namespacing, fetch
+    // nil→zero coerce, .length/.size int64-wrap consolidation, Var
+    // Int → int64 declaration, .merge / .dup peepholes); next
+    // blocker is map[K, V]→map[K, any] coercion at Send sites
+    // (button_to's `form_attrs` flowing into render_attrs).
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape
