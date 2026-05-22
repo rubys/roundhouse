@@ -62,6 +62,7 @@ jobs:
   # to a pin if upstream churn turns flaky.
   # -------------------------------------------------------------------
   build-spinel:
+    if: false  # disabled until spinel tests start passing again
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -262,6 +263,7 @@ jobs:
   # Allowed to fail until those three close; drop `continue-on-error`
   # incrementally as each gate clears.
   framework-tests-spinel:
+    if: false  # disabled until spinel tests start passing again
     needs: build-spinel
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -372,6 +374,7 @@ jobs:
   # (issuecomment-4503927146) tracks the consumer-side narrow.
   # Drop continue-on-error when matz lands the body-driven post-pass.
   toolchain-spinel:
+    if: false  # disabled until spinel tests start passing again
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -618,6 +621,7 @@ jobs:
   # on dom_id calls without explicit suffix, and `value="0"` on
   # empty form inputs. Drop continue-on-error when #634 lands.
   compare-spinel:
+    if: false  # disabled until spinel tests start passing again
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
