@@ -30,7 +30,7 @@ use crate::App;
 
 mod expr;
 mod library;
-mod lower;
+pub mod lower;
 mod ty;
 
 /// Phase 3 hand-written primitive runtime. Verbatim copy into the

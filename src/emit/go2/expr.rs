@@ -417,6 +417,38 @@ pub(super) fn emit_send(
         }
     }
 
+    // `recv._go_try_fetch(k) { |v| body }` — synthesized by
+    // `lower::nil_check_to_comma_ok`, NOT a real Ruby method. Emit
+    // as the Go comma-ok idiom inside an IIFE so the local `v` + `ok`
+    // bindings don't leak into the surrounding scope. The IIFE
+    // returns nothing — the body is statement-shaped (assignments,
+    // calls), not expression-shaped.
+    if method == super::lower::nil_check_to_comma_ok::SENTINEL_METHOD
+        && args.len() == 1
+        && recv.is_some()
+    {
+        if let Some(block_e) = block {
+            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+                if params.len() == 1 {
+                    let recv_s = emit_expr(ctx, recv.unwrap());
+                    let key_s = &args_s[0];
+                    let var_name = super::library::sanitize(params[0].as_str());
+                    let body_ctx = ctx.clone();
+                    body_ctx.declare_param(params[0].as_str());
+                    let body_s = emit_block_body(&body_ctx, body);
+                    return format!(
+                        "func() {{\n\
+                         \tif {var_name}, ok := {recv_s}[{key_s}]; ok {{\n\
+                         \t\t_ = {var_name}; _ = ok\n\
+                         {body_s}\n\
+                         \t}}\n\
+                         }}()",
+                    );
+                }
+            }
+        }
+    }
+
     // `recv.each { |x| body }` (1-param) and `recv.each { |k, v| body }`
     // (2-param) → Go `for ... range` loop wrapped in an IIFE that
     // returns the receiver (Ruby `each` semantics). The IIFE wrap

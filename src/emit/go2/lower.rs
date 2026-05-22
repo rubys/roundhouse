@@ -21,8 +21,7 @@
 //! up emit walk), each Go-incompatible Ruby idiom gets a dedicated
 //! IR→IR lowerer here. Each pass is a pure function: `Vec<LibraryClass>`
 //! in, `Vec<LibraryClass>` out. Composes cleanly with the others;
-//! testable in isolation via `dump_ir`-style assertions on the
-//! transformed IR.
+//! testable in isolation via assertions on the transformed IR.
 //!
 //! ## Pass order
 //!
@@ -49,39 +48,247 @@ use crate::dialect::LibraryClass;
 /// hook — every transpiled framework class flows through this
 /// pipeline before go2/emit sees it.
 pub fn lower_for_go(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
-    // First (and currently only) pass: rewrite the
-    // `v = m[k]; if !v.nil? { body }` pattern into a Go-friendly
-    // form that go2/emit can lower to `v, ok := m[k]; if ok { ... }`.
-    // Stub today — implementation lands in the follow-on session
-    // once the IR-shape contract between this pass and go2/emit is
-    // pinned. Identity behavior keeps the toolchain test green
-    // while the scaffold is in place.
     nil_check_to_comma_ok::apply(classes)
 }
 
 /// Pattern: `v = m[k]; if !v.nil? { body using v }`.
 ///
-/// Ruby's `Hash#[]` returns nil for missing keys, then the
-/// subsequent `.nil?` guard filters. In Go, `m[k]` on `map[K]V`
-/// returns the zero value of `V` for missing keys; the nilness
-/// information is erased. The comma-ok form `v, ok := m[k]; if ok`
-/// is Go's native equivalent of Ruby's nil check, but the rewrite
-/// has to span the assignment and the conditional — too coarse for
-/// the per-Send emit_expr walk.
+/// Ruby's `Hash#[]` returns nil for missing keys, then the subsequent
+/// `.nil?` guard filters. In Go, `m[k]` on `map[K]V` returns the
+/// zero value of `V` for missing keys; the nilness information is
+/// erased. The comma-ok form `v, ok := m[k]; if ok` is Go's native
+/// equivalent of Ruby's nil check, but the rewrite has to span the
+/// assignment and the conditional — too coarse for the per-Send
+/// emit_expr walk.
 ///
 /// This pass walks each method body's `Seq` looking for the
-/// two-statement pattern and rewrites to a synthesized form that
-/// go2/emit recognizes (final IR shape TBD — see the follow-on
-/// session note in the parent module doc).
+/// two-statement pattern and rewrites to a synthesized Send with
+/// method name `_go_try_fetch` and the original then-branch as a
+/// block. The emit side (`expr::emit_send`) recognizes the magic
+/// method name and produces:
+///
+/// ```text
+/// func() {
+///     if v, ok := m[k]; ok {
+///         <body>
+///     }
+/// }()
+/// ```
+///
+/// The IIFE isolates the comma-ok scope so subsequent uses of `v`
+/// (if any) reference the OUTER scope, not the inner.
 pub mod nil_check_to_comma_ok {
     use crate::dialect::LibraryClass;
+    use crate::expr::{Expr, ExprNode, LValue, Literal};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+    use crate::ty::Ty;
 
-    /// Identity pass for now. The real transformation walks each
-    /// `MethodDef.body`, pattern-matches the
-    /// `Seq[Assign{Var(v), Send(m, "[]", [k])}, If{!Send(Var(v), "nil?"), then, _}]`
-    /// shape, and rewrites to a comma-ok-ready form. Implementation
-    /// in the follow-on session.
-    pub fn apply(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
+    /// Magic method name on the synthesized Send. Emit recognizes
+    /// this and produces comma-ok Go.
+    pub const SENTINEL_METHOD: &str = "_go_try_fetch";
+
+    pub fn apply(mut classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
+        for class in classes.iter_mut() {
+            for method in class.methods.iter_mut() {
+                method.body = transform(&method.body);
+            }
+        }
         classes
+    }
+
+    /// Bottom-up traversal: children first, then look for the pair
+    /// pattern at the current level (only meaningful inside Seq).
+    fn transform(e: &Expr) -> Expr {
+        match &*e.node {
+            ExprNode::Seq { exprs } => {
+                let transformed: Vec<Expr> = exprs.iter().map(transform).collect();
+                let rewritten = scan_pairs(&transformed);
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Seq { exprs: rewritten });
+                new_e
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::If {
+                    cond: transform(cond),
+                    then_branch: transform(then_branch),
+                    else_branch: transform(else_branch),
+                });
+                new_e
+            }
+            ExprNode::Lambda { params, block_param, body, block_style } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Lambda {
+                    params: params.clone(),
+                    block_param: block_param.clone(),
+                    body: transform(body),
+                    block_style: *block_style,
+                });
+                new_e
+            }
+            ExprNode::Send { recv, method, args, block, parenthesized } => {
+                let new_recv = recv.as_ref().map(transform);
+                let new_args: Vec<Expr> = args.iter().map(transform).collect();
+                let new_block = block.as_ref().map(transform);
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Send {
+                    recv: new_recv,
+                    method: method.clone(),
+                    args: new_args,
+                    block: new_block,
+                    parenthesized: *parenthesized,
+                });
+                new_e
+            }
+            ExprNode::Assign { target, value } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Assign {
+                    target: target.clone(),
+                    value: transform(value),
+                });
+                new_e
+            }
+            ExprNode::Return { value } => {
+                let mut new_e = e.clone();
+                new_e.node = Box::new(ExprNode::Return {
+                    value: transform(value),
+                });
+                new_e
+            }
+            _ => e.clone(),
+        }
+    }
+
+    /// Walk Seq pairwise, replacing matched `Assign+If` pairs with
+    /// the synthesized Send. Single passes (no recursive re-scan)
+    /// — the pattern doesn't nest in itself.
+    fn scan_pairs(exprs: &[Expr]) -> Vec<Expr> {
+        let mut out = Vec::with_capacity(exprs.len());
+        let mut i = 0;
+        while i < exprs.len() {
+            if i + 1 < exprs.len() {
+                if let Some(synth) = try_rewrite_pair(&exprs[i], &exprs[i + 1]) {
+                    out.push(synth);
+                    i += 2;
+                    continue;
+                }
+            }
+            out.push(exprs[i].clone());
+            i += 1;
+        }
+        out
+    }
+
+    /// Match `Assign { Var(v), Send(m, "[]", [k]) } + If { !Var(v).nil?, then, Nil }`.
+    fn try_rewrite_pair(a: &Expr, b: &Expr) -> Option<Expr> {
+        let (var_name, map_expr, key_expr) = match &*a.node {
+            ExprNode::Assign {
+                target: LValue::Var { name, .. },
+                value,
+            } => match &*value.node {
+                ExprNode::Send {
+                    recv: Some(map),
+                    method,
+                    args,
+                    block: None,
+                    ..
+                } if method.as_str() == "[]"
+                    && args.len() == 1
+                    && receiver_is_hash(map) =>
+                {
+                    (name.clone(), map.clone(), args[0].clone())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        let (cond, then_branch) = match &*b.node {
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } if is_nil_lit(else_branch) => (cond, then_branch.clone()),
+            _ => return None,
+        };
+
+        if !is_not_nil_check_on_var(cond, var_name.as_str()) {
+            return None;
+        }
+
+        let lambda = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![var_name.clone()],
+                block_param: None,
+                body: then_branch,
+                block_style: Default::default(),
+            },
+        );
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(map_expr),
+                method: Symbol::from(SENTINEL_METHOD),
+                args: vec![key_expr],
+                block: Some(lambda),
+                parenthesized: true,
+            },
+        ))
+    }
+
+    fn is_nil_lit(e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+    }
+
+    /// True when the analyzer-set Ty on the receiver indicates a
+    /// Hash (possibly nullable). Restricts the rewrite to actual map
+    /// values; without this, `self[k]` on a `*ActionDispatchFlash`
+    /// (where `[]` is a method call on the struct, not a map index)
+    /// would falsely match. Class-typed receivers route their `[]`
+    /// through go2/emit's existing OpGet dispatch instead.
+    fn receiver_is_hash(recv: &Expr) -> bool {
+        match recv.ty.as_ref() {
+            Some(Ty::Hash { .. }) => true,
+            Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Hash { .. })),
+            _ => false,
+        }
+    }
+
+    /// True if `cond` matches `!Var(var_name).nil?`. Handles the two
+    /// IR shapes documented in `src/analyze/body/narrowing.rs`:
+    /// `Send { recv: Some(Send{Var(v), "nil?"}), method: "!" }` (the
+    /// dominant shape) and `Send { recv: None, method: "!",
+    /// args: [Send{Var(v), "nil?"}] }`.
+    fn is_not_nil_check_on_var(cond: &Expr, var_name: &str) -> bool {
+        let inner = match &*cond.node {
+            ExprNode::Send {
+                recv: Some(r),
+                method,
+                args,
+                ..
+            } if method.as_str() == "!" && args.is_empty() => r,
+            ExprNode::Send {
+                recv: None,
+                method,
+                args,
+                ..
+            } if method.as_str() == "!" && args.len() == 1 => &args[0],
+            _ => return false,
+        };
+        let ExprNode::Send {
+            recv: Some(v_expr),
+            method: nil_method,
+            args: nil_args,
+            ..
+        } = &*inner.node
+        else {
+            return false;
+        };
+        if nil_method.as_str() != "nil?" || !nil_args.is_empty() {
+            return false;
+        }
+        matches!(&*v_expr.node, ExprNode::Var { name, .. } if name.as_str() == var_name)
     }
 }

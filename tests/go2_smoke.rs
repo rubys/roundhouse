@@ -1608,6 +1608,188 @@ fn inflector_v2_shape() {
     );
 }
 
+/// The `nil_check_to_comma_ok` lowerer rewrites the
+/// `v = m[k]; if !v.nil? { body }` shape into a synthesized Send
+/// with method `_go_try_fetch`. None of the current GO_RUNTIME
+/// entries (inflector, json_builder, router, active_record/base)
+/// hit this shape, so the end-to-end smoke tests exercise only the
+/// identity path. This synthesizes the pattern directly to verify
+/// the rewrite fires and produces the expected IR shape.
+#[test]
+fn nil_check_to_comma_ok_rewrites_pair() {
+    use roundhouse::emit::go2::lower::{lower_for_go, nil_check_to_comma_ok};
+
+    // Build IR for:
+    //   def f(other)
+    //     v = other["k"]
+    //     @field = v if !v.nil?
+    //   end
+    // with `other` typed `Hash[String, String]` so the receiver-Ty
+    // gate fires.
+    let span = Span::synthetic();
+    let other_ty = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(Ty::Str),
+    };
+    let mut other_var = Expr::new(span, ExprNode::Var {
+        id: VarId(0),
+        name: Symbol::from("other"),
+    });
+    other_var.ty = Some(other_ty.clone());
+
+    let index_send = Expr::new(span, ExprNode::Send {
+        recv: Some(other_var),
+        method: Symbol::from("[]"),
+        args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "k".into() } })],
+        block: None,
+        parenthesized: true,
+    });
+    let assign = Expr::new(span, ExprNode::Assign {
+        target: LValue::Var { id: VarId(1), name: Symbol::from("v") },
+        value: index_send,
+    });
+
+    let v_var = Expr::new(span, ExprNode::Var { id: VarId(1), name: Symbol::from("v") });
+    let nil_check = Expr::new(span, ExprNode::Send {
+        recv: Some(v_var),
+        method: Symbol::from("nil?"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    let not_nil = Expr::new(span, ExprNode::Send {
+        recv: Some(nil_check),
+        method: Symbol::from("!"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    let body = Expr::new(span, ExprNode::Assign {
+        target: LValue::Ivar { name: Symbol::from("field") },
+        value: Expr::new(span, ExprNode::Var { id: VarId(1), name: Symbol::from("v") }),
+    });
+    let if_expr = Expr::new(span, ExprNode::If {
+        cond: not_nil,
+        then_branch: body,
+        else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+    });
+
+    let body_seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, if_expr] });
+
+    let method = MethodDef {
+        name: Symbol::from("f"),
+        receiver: MethodReceiver::Instance,
+        params: vec![DialectParam::positional(Symbol::from("other"))],
+        body: body_seq,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("StubFlash")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("StubFlash")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![method],
+        origin: None,
+    };
+
+    let out = lower_for_go(vec![class]);
+    let method = &out[0].methods[0];
+    let exprs = match &*method.body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => panic!("expected Seq body, got {:?}", method.body.node),
+    };
+    assert_eq!(exprs.len(), 1, "pair should collapse to one synthesized Send");
+
+    let synth = &exprs[0];
+    let (method_name, has_block) = match &*synth.node {
+        ExprNode::Send { method, block, .. } => (method.as_str(), block.is_some()),
+        _ => panic!("expected Send, got {:?}", synth.node),
+    };
+    assert_eq!(method_name, nil_check_to_comma_ok::SENTINEL_METHOD);
+    assert!(has_block, "synthesized Send should carry a Lambda block");
+}
+
+/// Receiver-Ty gate: when the receiver isn't a Hash (e.g., a class
+/// instance), the lowerer must NOT rewrite — `self[k]` on a struct
+/// is a method call, not a map index, and the comma-ok emit would
+/// produce invalid Go.
+#[test]
+fn nil_check_to_comma_ok_skips_non_hash_receiver() {
+    use roundhouse::emit::go2::lower::lower_for_go;
+
+    let span = Span::synthetic();
+    // Receiver typed as a Class — should NOT match.
+    let mut self_ref = Expr::new(span, ExprNode::SelfRef);
+    self_ref.ty = Some(Ty::Class { id: ClassId(Symbol::from("StubFlash")), args: vec![] });
+
+    let index_send = Expr::new(span, ExprNode::Send {
+        recv: Some(self_ref),
+        method: Symbol::from("[]"),
+        args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "k".into() } })],
+        block: None,
+        parenthesized: true,
+    });
+    let assign = Expr::new(span, ExprNode::Assign {
+        target: LValue::Var { id: VarId(0), name: Symbol::from("v") },
+        value: index_send,
+    });
+
+    let v_var = Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("v") });
+    let not_nil = Expr::new(span, ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Send {
+            recv: Some(v_var),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })),
+        method: Symbol::from("!"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    let if_expr = Expr::new(span, ExprNode::If {
+        cond: not_nil,
+        then_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+    });
+    let body_seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, if_expr] });
+
+    let method = MethodDef {
+        name: Symbol::from("f"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: body_seq,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(Symbol::from("StubFlash")),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+    };
+    let class = LibraryClass {
+        name: ClassId(Symbol::from("StubFlash")),
+        is_module: false,
+        parent: None,
+        includes: vec![],
+        methods: vec![method],
+        origin: None,
+    };
+
+    let out = lower_for_go(vec![class]);
+    let exprs = match &*out[0].methods[0].body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => panic!("expected Seq body"),
+    };
+    // Must stay TWO statements — no rewrite.
+    assert_eq!(exprs.len(), 2, "non-Hash receiver must not trigger rewrite");
+}
+
 fn emit_to_scratch() -> PathBuf {
     let scratch = std::env::temp_dir().join("roundhouse-go2-smoke");
     if scratch.exists() {
