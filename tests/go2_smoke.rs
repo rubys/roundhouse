@@ -197,7 +197,7 @@ fn hand_written_runtime_present() {
     let adapter = find_file(&files, "app/v2/adapter_interface.go")
         .expect("v2/adapter_interface.go missing");
     assert!(
-        adapter.content.contains("type ActiveRecordAdapter interface {"),
+        adapter.content.contains("type ActiveRecordAdapterInterface interface {"),
         "adapter interface decl missing:\n{}",
         adapter.content,
     );
@@ -228,7 +228,7 @@ fn hand_written_runtime_present() {
         "constructor missing:\n{}",
         test_adapter.content,
     );
-    // Every method of ActiveRecordAdapter must be implemented —
+    // Every method of ActiveRecordAdapterInterface must be implemented —
     // spot-check the ones AR::Base's CRUD path hits.
     for needle in [
         "func (a *FrameworkTestAdapter) Find(",
@@ -1326,22 +1326,23 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
 
     let emitted = go2::emit_library_class(&class).expect("emit empty-body class");
 
-    // m1: int64 return → `return 0`. Method name preserves snake_case
-    // (go2 keeps Ruby-source naming for instance methods).
+    // m1: int64 return → `return 0`. Instance methods emit PascalCase
+    // to match the call-site shape (`r.InsertID()` from
+    // `go2_method_ident`).
     assert!(
-        emitted.contains("insert_id() int64 {\n\treturn 0\n}"),
+        emitted.contains("InsertID() int64 {\n\treturn 0\n}"),
         "Lit::Nil + int64 return missing zero-value synth:\n{emitted}",
     );
     // m2: string return → `return ""` (NOT `return nil` — empty Seq
     // bodies must collapse to the typed zero value).
     assert!(
-        emitted.contains("table_name() string {\n\treturn \"\"\n}"),
+        emitted.contains("TableName() string {\n\treturn \"\"\n}"),
         "Seq[Nil] + string return missing zero-value synth:\n{emitted}",
     );
     // Regression guard: must not emit `return nil` against a typed
     // return — Go rejects it.
     assert!(
-        !emitted.contains("table_name() string {\n\treturn nil\n}"),
+        !emitted.contains("TableName() string {\n\treturn nil\n}"),
         "Seq[Nil] body emitted `return nil` instead of zero value:\n{emitted}",
     );
 }
@@ -1752,14 +1753,14 @@ fn inflector_v2_compiles_and_runs() {
     // FrameworkTestAdapter smoke — CRUD round-trip + interface
     // satisfaction. Validates the hand-written runtime files
     // behave end-to-end (not just type-check), and pins
-    // FrameworkTestAdapter as a valid ActiveRecordAdapter
-    // implementation through the `var _ ActiveRecordAdapter =
+    // FrameworkTestAdapter as a valid ActiveRecordAdapterInterface
+    // implementation through the `var _ ActiveRecordAdapterInterface =
     // (*FrameworkTestAdapter)(nil)` compile-time assertion.
     let adapter_smoke = "package v2\n\
                          \n\
                          import \"testing\"\n\
                          \n\
-                         var _ ActiveRecordAdapter = (*FrameworkTestAdapter)(nil)\n\
+                         var _ ActiveRecordAdapterInterface = (*FrameworkTestAdapter)(nil)\n\
                          \n\
                          func TestFrameworkTestAdapter_CRUD_Smoke(t *testing.T) {\n\
                          \ta := NewFrameworkTestAdapter()\n\

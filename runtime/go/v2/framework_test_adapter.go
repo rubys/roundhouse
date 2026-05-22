@@ -64,7 +64,7 @@ func (a *FrameworkTestAdapter) DropTable(name string) {
 	delete(a.schemas, name)
 }
 
-// ActiveRecordAdapter implementation -------------------------------
+// ActiveRecordAdapterInterface implementation ---------------------
 
 func (a *FrameworkTestAdapter) All(tableName string) []Row {
 	a.mu.Lock()

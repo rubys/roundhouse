@@ -52,9 +52,27 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
         Some(Ty::Class { id, .. }) => {
             // Promote to a Go pointer-to-struct using the same
             // `::` → identifier sanitization as `emit_library_class`.
+            // Exception: known-interface classes (hand-written Go
+            // interfaces in `runtime/go/v2/`, mirroring RBS-declared
+            // phantom classes) emit as the bare type. Pointer-to-
+            // interface has an empty method set in Go, so method
+            // calls through the slot would fail to resolve; the
+            // interface value itself already has reference semantics.
             let name = id.0.as_str().replace("::", "");
-            format!("*{name}")
+            if is_go_interface_class(id.0.as_str()) {
+                name
+            } else {
+                format!("*{name}")
+            }
         }
         _ => "interface{}".to_string(),
     }
+}
+
+/// Class IDs whose Go counterpart is an `interface` declaration
+/// (hand-written in `runtime/go/v2/`) rather than a struct. Slot
+/// types reference these as bare names — `var x Foo` not `var x *Foo`
+/// — because pointer-to-interface has an empty method set in Go.
+fn is_go_interface_class(id: &str) -> bool {
+    matches!(id, "ActiveRecord::AdapterInterface")
 }

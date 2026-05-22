@@ -154,7 +154,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             }
         }
         ExprNode::Send { recv, method, args, block, .. } => {
-            emit_send(ctx, recv.as_ref(), method.as_str(), args, block.as_ref())
+            emit_send(ctx, recv.as_ref(), method.as_str(), args, block.as_ref(), e.ty.as_ref())
         }
         // `self` reference. In an instance method, the Go body has
         // `(self *Class)` and `self` is a valid identifier — emit
@@ -240,22 +240,31 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 .iter()
                 .map(|(k, v)| format!("{}: {}", emit_expr(ctx, k), emit_expr(ctx, v)))
                 .collect();
-            // Prefer the analyzer-set Ty on this Expr when both
-            // key/value types are concrete enough to map to a real
-            // Go type. Handles the back-prop case: `def errors; []
-            // ; end` against a `Hash[String, String]` return — the
-            // literal's `.ty` pins both sides, so emit
-            // `map[string]string{}` rather than the local heuristic.
-            // We skip when EITHER side maps to `interface{}` (the
-            // catch-all fallback in `go_ty_stub` for Untyped/Var/
-            // Bottom/Record/Tuple) because those answers tell us
-            // less than the literal-inspecting fallback below, which
-            // for empty entries picks `string,string` (matching the
-            // `Hash[String, String]` shape every other emitter uses).
+            // Prefer the analyzer-set Ty on this Expr when present —
+            // it represents the declared/inferred type at this
+            // position and outranks the literal-inspecting heuristic
+            // below (which has no access to the surrounding context).
+            // Either side mapping to `interface{}` (Untyped/Var/
+            // Bottom/Record/Tuple via `go_ty_stub`) still carries
+            // signal — `Hash[Symbol, Untyped]` declares the value
+            // type as untyped, and emitting `map[string]interface{}`
+            // matches that declaration. The heuristic stays as the
+            // no-Ty fallback for emit shapes outside method-return
+            // position (e.g. inline literal expressions whose Ty
+            // wasn't propagated by the analyzer).
             if let Some(Ty::Hash { key, value }) = e.ty.as_ref() {
                 let k_ty = super::ty::go_ty_stub(Some(key));
                 let v_ty = super::ty::go_ty_stub(Some(value));
-                if k_ty != "interface{}" && v_ty != "interface{}" {
+                // Fire when at least one side maps to a concrete Go
+                // type. `Hash[Var, Var]` (unresolved by analyzer) and
+                // `Hash[Untyped, Untyped]` (declared catchall) both
+                // resolve to interface{}/interface{} — those carry
+                // less signal than the heuristic below, which assumes
+                // string keys (the dominant Ruby Hash shape). Fire
+                // when EITHER side is concrete so `Hash[Sym, Untyped]`
+                // pins the key and lets the heuristic-equivalent
+                // value default kick in.
+                if k_ty != "interface{}" || v_ty != "interface{}" {
                     return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
                 }
             }
@@ -263,7 +272,11 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // key/value is a string literal (`{ "k" => "v", ... }`)
             // — emits `map[string]string`. Matters for `gsub(regex,
             // hash)` lookups whose return must satisfy a `string`
-            // return type.
+            // return type. Empty `{}` defaults to
+            // `map[string]string{}` (the legacy heuristic) — wrong
+            // for `Hash[Symbol, untyped]` returns but the return-Ty
+            // pre-pass in `library::render_body` retypes those before
+            // we get here.
             let all_str_kv = entries.iter().all(|(k, v)| {
                 matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } })
                     && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } })
@@ -354,6 +367,7 @@ pub(super) fn emit_send(
     method: &str,
     args: &[Expr],
     block: Option<&Expr>,
+    result_ty: Option<&Ty>,
 ) -> String {
     let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
 
@@ -454,11 +468,13 @@ pub(super) fn emit_send(
     }
 
     // `recv.map { |x| body }` (1-param) → Go IIFE that builds a new
-    // `[]interface{}` by iterating the receiver and appending each
-    // body's tail value. Mirrors `each` shape but accumulates instead
-    // of discarding. Result type is `interface{}`-element since we
-    // don't have body-result Ty propagation yet; callers that need a
-    // concrete elem type can refine downstream.
+    // slice by iterating the receiver and appending each body's tail
+    // value. Mirrors `each` shape but accumulates instead of
+    // discarding. The accumulator's element type comes from the
+    // analyzer-set `result_ty` (`Array[Base]` → `[]*ActiveRecordBase`)
+    // when it pins to a concrete Go elem; otherwise falls back to
+    // `[]interface{}`. Mirrors the literal Ty back-prop landed in
+    // 8d9f06d but for the IIFE result instead of an Array literal.
     if method == "map" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
             if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
@@ -486,9 +502,20 @@ pub(super) fn emit_send(
                     }
                 };
                 let body_s = emit_map_block_body(&body_ctx, body);
+                let elem_ty = match result_ty {
+                    Some(Ty::Array { elem }) => {
+                        let rendered = super::ty::go_ty_stub(Some(elem));
+                        if rendered == "interface{}" {
+                            "interface{}".to_string()
+                        } else {
+                            rendered
+                        }
+                    }
+                    _ => "interface{}".to_string(),
+                };
                 return format!(
-                    "func() []interface{{}} {{\n\
-                     \tout := []interface{{}}{{}}\n\
+                    "func() []{elem_ty} {{\n\
+                     \tout := []{elem_ty}{{}}\n\
                      \tfor {range_vars} := range {recv_s} {{\n\
                      {body_s}\n\
                      \t}}\n\
@@ -516,18 +543,28 @@ pub(super) fn emit_send(
     }
 
     // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.
-    // Emit as a Go index-assign statement. Note: in Go this is a
-    // statement, not an expression — emitting at expression position
-    // (e.g. inside `return ...`) produces invalid Go. In practice
-    // these Sends only appear at statement position in lowered
-    // bodies, so the emit is safe today.
+    // For map/array receivers (Hash/Array/Untyped — the Ty-default
+    // shape go2 emits as map/slice/interface{}), emit Go index-
+    // assign. For Class-typed receivers (`self[:updated_at] = now`
+    // inside an AR::Base method body), emit a method call to the
+    // hand-defined `op_set` instead — Go structs aren't indexable,
+    // so the index syntax would fail `go vet`.
     if method == "[]=" && args.len() == 2 && recv.is_some() {
-        let recv_s = emit_expr(ctx, recv.unwrap());
+        let recv_e = recv.unwrap();
+        let recv_s = emit_expr(ctx, recv_e);
+        if matches!(recv_e.ty.as_ref(), Some(Ty::Class { .. })) {
+            return format!("{recv_s}.OpSet({}, {})", args_s[0], args_s[1]);
+        }
         return format!("{recv_s}[{}] = {}", args_s[0], args_s[1]);
     }
 
     if method == "[]" && recv.is_some() {
-        let recv_s = emit_expr(ctx, recv.unwrap());
+        let recv_e = recv.unwrap();
+        if matches!(recv_e.ty.as_ref(), Some(Ty::Class { .. })) {
+            let recv_s = emit_expr(ctx, recv_e);
+            return format!("{recv_s}.OpGet({})", args_s.join(", "));
+        }
+        let recv_s = emit_expr(ctx, recv_e);
         // Ruby negative index (`recv[-1]`, `recv[-2]`, …) — Go has no
         // negative indexing on slices or strings; rewrite to
         // `recv[len(recv)-N]`. Gated on a literal `Int { value: < 0 }`
@@ -1002,7 +1039,14 @@ fn self_ref_expr(ctx: &EmitCtx) -> String {
 /// widening; this only handles the identifier-shape side so emit
 /// produces parseable Go.
 fn go2_method_ident(ruby_name: &str) -> String {
-    let normalized = ruby_name.replace('?', "_p").replace('!', "_bang");
+    // Mirror rust2's `sanitize_ident` (src/emit/rust2/expr/util.rs):
+    // `?` predicate suffix strips entirely (Go convention — bool-
+    // returning methods don't decorate the name); `!` maps to
+    // `_bang`. Aligning suffix behavior so hand-written adapter
+    // method names (`Exists`, `Insert`, `Truncate`) match the
+    // emitted call sites without per-method shims.
+    let stripped = ruby_name.strip_suffix('?').unwrap_or(ruby_name);
+    let normalized = stripped.replace('!', "_bang");
     go_method_name(&normalized)
 }
 

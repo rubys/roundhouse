@@ -25,11 +25,14 @@ package v2
 // `row.nil?` analog.
 type Row = map[string]any
 
-// ActiveRecordAdapter — the 9-method contract every concrete
-// adapter satisfies. Method signatures mirror the Rust trait;
-// production sqlite + in-memory FrameworkTestAdapter both
-// implement it.
-type ActiveRecordAdapter interface {
+// ActiveRecordAdapterInterface — the 9-method contract every
+// concrete adapter satisfies. Name mirrors the RBS-declared
+// `ActiveRecord::AdapterInterface` phantom class so transpiled
+// `ActiveRecord.adapter` slot signatures (`go_ty_stub` of
+// `Ty::Class { id: "ActiveRecord::AdapterInterface" }`) line up.
+// Method signatures mirror the Rust trait; production sqlite +
+// in-memory FrameworkTestAdapter both implement it.
+type ActiveRecordAdapterInterface interface {
 	All(tableName string) []Row
 	Find(tableName string, id int64) Row
 	Where(tableName string, conditions map[string]any) []Row

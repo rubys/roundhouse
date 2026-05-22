@@ -89,7 +89,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // Class methods aren't included either; implicit-self calls to
     // them inside other class methods route through the existing
     // SelfRef-in-class-method bare-fn path (`ClassName_method()`).
-    let self_methods = collect_self_methods(&class.methods);
+    let self_methods = collect_self_methods(&class.methods, &fields);
 
     for m in &class.methods {
         // Skip attr_reader / attr_writer (now fields) and the
@@ -103,6 +103,19 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         if matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize" {
             continue;
         }
+        // Skip trivial-reader instance methods (`def errors; @errors;
+        // end`) when their name collides with a struct field. The
+        // field already serves as the Go reader — defining a same-
+        // named method would produce a `field and method with the
+        // same name` vet error. Non-trivial bodies (anything other
+        // than a single matching Ivar read) keep emitting so behavior
+        // isn't silently dropped.
+        if matches!(m.receiver, MethodReceiver::Instance) && is_trivial_ivar_reader(m) {
+            let stem = m.name.as_str().trim_end_matches(['?', '!', '=']);
+            if fields.iter().any(|f| f.ruby_name == stem) {
+                continue;
+            }
+        }
         out.push_str(&emit_method(&name, m, &self_methods));
         out.push('\n');
     }
@@ -113,7 +126,10 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 /// class. Class methods are excluded because implicit-self calls to
 /// them inside another method body route through the bare-fn path
 /// (`ClassName_method()`), not through receiver-shaped dispatch.
-fn collect_self_methods(methods: &[crate::dialect::MethodDef]) -> std::rc::Rc<std::collections::HashSet<String>> {
+fn collect_self_methods(
+    methods: &[crate::dialect::MethodDef],
+    fields: &[Field],
+) -> std::rc::Rc<std::collections::HashSet<String>> {
     let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in methods {
         if !matches!(m.receiver, MethodReceiver::Instance) {
@@ -124,6 +140,17 @@ fn collect_self_methods(methods: &[crate::dialect::MethodDef]) -> std::rc::Rc<st
             AccessorKind::AttributeReader | AccessorKind::AttributeWriter
         ) {
             continue;
+        }
+        // Trivial-reader instance methods whose name matches a struct
+        // field aren't emitted (the field IS the reader). Exclude
+        // them from self_methods too so `self.foo` call sites emit as
+        // a field read (`self.Foo`), not a method call (`self.Foo()`).
+        // The predicate-suffix strip mirrors `is_trivial_ivar_reader`.
+        if is_trivial_ivar_reader(m) {
+            let stem = m.name.as_str().trim_end_matches(['?', '!', '=']);
+            if fields.iter().any(|f| f.ruby_name == stem) {
+                continue;
+            }
         }
         set.insert(m.name.as_str().to_string());
     }
@@ -198,6 +225,30 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
         collect_ivar_writes(&init.body, &mut out);
     }
     out
+}
+
+/// `def foo; @foo; end` — body is exactly a single Ivar read whose
+/// name matches the method. The field synthesized from initialize's
+/// `@foo = ...` write already serves as the Go reader, so emitting
+/// the method on top of it would collide. Detect this de-facto
+/// attr_reader shape and let the field stand alone.
+fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
+    use crate::expr::ExprNode;
+    // Predicate-suffixed reader: `def persisted?; @persisted; end`.
+    // Ivar names never carry `?`/`!`/`=` — strip suffixes from the
+    // method name before comparing.
+    let raw = m.name.as_str();
+    let name = raw.trim_end_matches(['?', '!', '=']);
+    let body = &m.body;
+    let single = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        ExprNode::Seq { .. } => return false,
+        _ => body,
+    };
+    match &*single.node {
+        ExprNode::Ivar { name: ivar_name } => ivar_name.as_str() == name,
+        _ => false,
+    }
 }
 
 /// Walk an Expr tree collecting top-level `@ivar = value` writes and
@@ -347,6 +398,31 @@ pub(super) fn sanitize_method_name(name: &str) -> String {
     }
 }
 
+/// PascalCase variant for instance-method DEFINITIONS, mirroring
+/// `go2_method_ident` in expr.rs so call sites and method defs line
+/// up: `destroyed?` → `Destroyed`, `save!` → `SaveBang`, plain
+/// `destroy` → `Destroy`. Operator-shape names route through
+/// `sanitize_method_name` (`[]` → `op_get`, lowercase) — the index/
+/// operator peepholes in expr.rs invoke these via Go index syntax,
+/// not method-call, so the casing doesn't have to match.
+fn pascalize_instance_method_name(name: &str) -> String {
+    // Operator-shape names route through sanitize_method_name (`[]`
+    // → `op_get`, `[]=` → `op_set`, ...) then pascalize via
+    // `go_method_name` (`op_get` → `OpGet`). The call-site emit for
+    // `recv[k]` / `recv[k]=v` against a Class-typed receiver emits
+    // `recv.OpGet(...)` / `recv.OpSet(...)` (PascalCase, matches
+    // here).
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=') {
+        return crate::emit::go::shared::go_method_name(&sanitize_method_name(name));
+    }
+    // Mirror go2_method_ident: strip `?`, `!` → `_bang`, then
+    // pascalize via go_method_name (`_`-split, per-segment Pascal,
+    // `id` → `ID`).
+    let stripped = name.strip_suffix('?').unwrap_or(name);
+    let normalized = stripped.replace('!', "_bang");
+    crate::emit::go::shared::go_method_name(&normalized)
+}
+
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     // Mode::Module — no enclosing class; module-level methods emit
     // as bare functions. `SelfRef` inside them has no class context,
@@ -411,13 +487,19 @@ fn emit_method(
         MethodReceiver::Instance => format!("(self *{class_name}) "),
         MethodReceiver::Class => String::new(),
     };
-    let method = sanitize_method_name(m.name.as_str());
     let class_method_name = match m.receiver {
-        MethodReceiver::Instance => method.clone(),
+        // Instance methods emit PascalCase to match the
+        // `go2_method_ident` call-site shape (expr.rs). `destroyed?`
+        // → `Destroyed`, `save!` → `SaveBang`, `[]` → `op_get`
+        // (operators stay lowercase — they're invoked via the
+        // index-syntax peepholes in expr.rs, not by Go method-call).
+        MethodReceiver::Instance => pascalize_instance_method_name(m.name.as_str()),
         // Class methods emit as bare functions prefixed with the
         // class name (Go has no class-method dispatch). Concrete
-        // call sites would reference `Foo_bar(...)`.
-        MethodReceiver::Class => format!("{class_name}_{method}"),
+        // call sites reference `Foo_bar(...)` via the `self.class.X`
+        // and `SelfRef-in-class-method` peepholes — both use the
+        // bare-fn (lowercase) name from `sanitize_method_name`.
+        MethodReceiver::Class => format!("{class_name}_{}", sanitize_method_name(m.name.as_str())),
     };
     // Build per-method context so the body walker can resolve
     // `SelfRef` against the right enclosing class + method receiver.
@@ -505,7 +587,78 @@ fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
             return format!("\treturn {}\n", go_zero_value(ret));
         }
     }
-    emit_return_body(ctx, &m.body)
+    // Return-Ty back-prop: when the method's declared return is
+    // `Hash[K, V]` or `Array[E]` and the body's tail is a bare empty
+    // literal (analyzer didn't pin e.ty — typically Var/Var), rewrite
+    // the body with the literal's e.ty set to the declared return.
+    // Without this, AR::Base's `def attributes; {}; end` (declared
+    // `Hash[Symbol, untyped]`) would emit `map[string]string{}` via
+    // the all-empty heuristic and clash with the declared return.
+    let body = if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        backprop_return_ty_to_tail(&m.body, ret)
+    } else {
+        m.body.clone()
+    };
+    emit_return_body(ctx, &body)
+}
+
+/// Pin the tail expression's `e.ty` to `target_ty` when it's an empty
+/// `{}` / `[]` literal whose analyzer-set Ty resolves to `interface{}`
+/// (i.e., Var/Var or Untyped). Returns a new Expr; non-matching tails
+/// pass through unmodified.
+fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
+    use crate::expr::ExprNode;
+    if !matches!(target_ty, Ty::Hash { .. } | Ty::Array { .. }) {
+        return body.clone();
+    }
+    match &*body.node {
+        ExprNode::Hash { entries, kwargs } if entries.is_empty() && literal_ty_uninformative(body) => {
+            let mut tail = (*body).clone();
+            tail.ty = Some(target_ty.clone());
+            tail.node = Box::new(ExprNode::Hash {
+                entries: entries.clone(),
+                kwargs: *kwargs,
+            });
+            tail
+        }
+        ExprNode::Array { elements, style } if elements.is_empty() && literal_ty_uninformative(body) => {
+            let mut tail = (*body).clone();
+            tail.ty = Some(target_ty.clone());
+            tail.node = Box::new(ExprNode::Array {
+                elements: elements.clone(),
+                style: style.clone(),
+            });
+            tail
+        }
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let mut new_exprs: Vec<Expr> = exprs[..exprs.len() - 1].to_vec();
+            let last = exprs.last().unwrap();
+            new_exprs.push(backprop_return_ty_to_tail(last, target_ty));
+            let mut new_body = (*body).clone();
+            new_body.node = Box::new(ExprNode::Seq { exprs: new_exprs });
+            new_body
+        }
+        _ => body.clone(),
+    }
+}
+
+/// True when the analyzer's Ty on an empty literal carries no signal
+/// for the emit (Var/Var or Untyped). Concrete-Ty literals already
+/// flow through the back-prop branch in emit_expr.
+fn literal_ty_uninformative(e: &Expr) -> bool {
+    match e.ty.as_ref() {
+        None => true,
+        Some(Ty::Untyped) => true,
+        Some(Ty::Var { .. }) => true,
+        Some(Ty::Hash { key, value }) => {
+            matches!(key.as_ref(), Ty::Var { .. } | Ty::Untyped)
+                && matches!(value.as_ref(), Ty::Var { .. } | Ty::Untyped)
+        }
+        Some(Ty::Array { elem }) => {
+            matches!(elem.as_ref(), Ty::Var { .. } | Ty::Untyped)
+        }
+        _ => false,
+    }
 }
 
 /// Go zero-value literal for a Ty. Used as the default body when an

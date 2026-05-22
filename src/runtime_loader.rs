@@ -932,6 +932,17 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "",
+        out_path: "app/active_record_base.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape
