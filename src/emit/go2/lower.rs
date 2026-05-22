@@ -49,7 +49,13 @@ use crate::dialect::LibraryClass;
 /// pipeline before go2/emit sees it.
 pub fn lower_for_go(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
     let classes = nil_check_to_comma_ok::apply(classes);
-    nil_to_zero_for_string_fields::apply(classes)
+    let mut classes = nil_to_zero_for_string_fields::apply(classes);
+    // Stage 1 of the Ty-coerce-insertion lowerer: scaffolding pass.
+    // No Cast nodes inserted yet (function body is empty); later stages
+    // populate it with the Hash-widening / Option-Some-wrap families
+    // that replace per-emitter back-propagation.
+    crate::lower::insert_ty_coercions(&mut classes);
+    classes
 }
 
 /// Pattern: `v = m[k]; if !v.nil? { body using v }`.

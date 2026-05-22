@@ -38,6 +38,7 @@ pub mod routes_to_library;
 pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
+pub mod ty_coerce_insertion;
 pub mod typing;
 pub mod validations;
 pub mod view;
@@ -70,6 +71,7 @@ pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
     lower_test_modules_with_inner, LoweredTestModule,
 };
+pub use ty_coerce_insertion::insert_ty_coercions;
 pub use view_to_library::{
     flatten_lcs_to_functions, lower_view_to_library_class, lower_views_to_library_classes,
     lower_views_to_library_functions,

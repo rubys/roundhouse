@@ -539,6 +539,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &fixture_lcs,
         &runtime_lcs,
     );
+    // Stage 1 of the Ty-coerce-insertion lowerer: scaffolding pass.
+    // No Cast nodes inserted yet (function body is empty); later stages
+    // populate it with the Hash-widening / Option-Some-wrap families
+    // that replace per-emitter back-propagation.
+    crate::lower::insert_ty_coercions(&mut model_lcs);
+    crate::lower::insert_ty_coercions(&mut view_lcs);
+    crate::lower::insert_ty_coercions(&mut controller_lcs);
+    crate::lower::insert_ty_coercions(&mut fixture_lcs);
     // Avoid unused-mut warnings on the lowered LC accumulators when
     // any one of them is empty for the current fixture.
     let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);

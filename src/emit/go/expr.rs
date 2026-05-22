@@ -72,6 +72,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 format!("fmt.Sprintf({fmt:?}, {})", args.join(", "))
             }
         }
+        ExprNode::Cast { value, .. } => emit_expr(value),
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

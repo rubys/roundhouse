@@ -110,6 +110,7 @@ fn rt_emit_expr(e: &Expr) -> String {
         }
         ExprNode::StringInterp { parts } => rt_emit_string_interp(parts),
         ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0]),
+        ExprNode::Cast { value, .. } => rt_emit_expr(value),
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }

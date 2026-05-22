@@ -167,6 +167,7 @@ pub(super) fn emit_expr(e: &Expr, receiver_arg: Option<&str>) -> String {
             // this into a block-passing convention.
             format!("send(self(), {{:yield, {}}})", parts.join(", "))
         }
+        ExprNode::Cast { value, .. } => emit_expr(value, receiver_arg),
         other => format!("# TODO: emit {:?}", std::mem::discriminant(other)),
     }
 }

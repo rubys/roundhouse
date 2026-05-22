@@ -418,6 +418,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                  }}()",
             )
         }
+        ExprNode::Cast { value, .. } => emit_expr(ctx, value),
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }
