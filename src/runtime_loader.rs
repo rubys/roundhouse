@@ -944,17 +944,17 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         extra_roots: NO_EXTRA_ROOTS,
     },
     // action_dispatch/{session,flash}.rb still queued. This session
-    // landed the nullable-string wedge (empty-as-nil convention for
-    // `Union[Str/Sym, Nil]` fields) + .each-on-`interface{}` runtime
-    // assertion. Together they unblock most Flash methods (notice/
-    // alert nil checks, push→append, etc.), but two surfaces still
-    // need work:
-    //   - Flash#merge: `v` iterated as `any` flowing into OpSet's
-    //     typed `string` param — needs "interface{} → typed-param"
-    //     type-assertion injection at Send call sites.
-    //   - Session: `other.keys` Ruby idiom → no Go analog on maps;
-    //     `for k := range m { ... }` is the Go-idiomatic shape.
-    //     Needs a `.keys` / `.values` peephole.
+    // landed Hash#{keys,values,length,size,empty?,key?,has_key?,
+    // include?,delete} peepholes + Yield→panic shim. Session gets
+    // through most methods but Session#merge surfaces a deeper
+    // RBS-vs-Go-emit gap: `Hash[untyped, untyped]` declares as
+    // `map[interface{}]interface{}` while a concrete return like
+    // `def to_h; @data: Hash[String, untyped]; end` produces
+    // `map[string]interface{}` — same Ruby Hash, different Go types.
+    // Resolution path: tighten `Hash[untyped, untyped]` rendering
+    // (e.g., always use string keys for Ruby hashes) or insert
+    // conversions at Send sites where the arg Ty differs from
+    // param Ty.
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

@@ -393,6 +393,31 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 format!("fmt.Sprintf({}, {})", go_str_literal(&fmt), args.join(", "))
             }
         }
+        // Ruby `yield args` — invokes the caller-provided block.
+        // Go has no native block-yield; the idiomatic Go shape is a
+        // closure parameter the caller passes. Until that shape lands
+        // (which would change every yielding method's signature),
+        // emit as a panic so the file parses and the gap surfaces
+        // loudly at runtime. The args get `_ = ...` references so
+        // surrounding `v := self.Data[k]; yield k, v` doesn't leave
+        // `v` as an unused-local vet error.
+        ExprNode::Yield { args } => {
+            let arg_uses: Vec<String> = args
+                .iter()
+                .map(|a| format!("\t_ = {}", emit_expr(ctx, a)))
+                .collect();
+            let body = if arg_uses.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", arg_uses.join("\n"))
+            };
+            format!(
+                "func() interface{{}} {{\n\
+                 {body}\
+                 \tpanic(\"yield not implemented in go2 emit\")\n\
+                 }}()",
+            )
+        }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }
@@ -745,10 +770,112 @@ pub(super) fn emit_send(
     // Ruby `.freeze` / `.to_h` — both pass through the receiver
     // unchanged in Go (no immutability marker; `.to_h` is a no-op
     // on Ruby Hash and would convert NamedTuple → Hash under
-    // Crystal, neither of which Go needs).
+    // Crystal, neither of which Go needs). Class-typed receivers
+    // (`session.to_h` where Session defines `def to_h; @data; end`)
+    // route through their explicit method instead — the peephole
+    // shortcut would emit `session` which has the wrong type.
     if (method == "freeze" || method == "to_h") && args.is_empty() {
         if let Some(r) = recv {
-            return emit_expr(ctx, r);
+            let core = r.ty.as_ref().and_then(union_non_nil_core);
+            if !matches!(core, Some(Ty::Class { .. })) {
+                return emit_expr(ctx, r);
+            }
+        }
+    }
+
+    // Ruby `recv.length` / `.size` → Go's `int64(len(recv))`. Works
+    // on strings, slices, and maps — Go's `len()` is polymorphic
+    // over those. The `int64(...)` wrap matches Ruby Integer's
+    // mapping (int64 in go_ty_stub); without it, comparisons like
+    // `i < keys.length` against an int64-typed `i` would fail. For
+    // map receivers Go's `len()` returns int regardless of key/
+    // value type, so no Ty plumbing needed at this site.
+    if (method == "length" || method == "size") && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return format!("int64(len({recv_s}))");
+        }
+    }
+
+    // Ruby `recv.empty?` → Go's `len(recv) == 0`. Same receiver
+    // polymorphism as `.length`. For strings the Go `s == ""` form
+    // is also valid and slightly cheaper, but `len(s) == 0` works
+    // uniformly across the receiver Tys we see.
+    if method == "empty?" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return format!("len({recv_s}) == 0");
+        }
+    }
+
+    // Ruby `h.keys` → Go IIFE collecting all map keys. Go has no
+    // builtin Hash#keys; the idiom is `for k := range m { ... }`
+    // for direct iteration. When the Ruby code wants the materialized
+    // slice (`keys = m.keys; while i < keys.length; k = keys[i]`),
+    // we synthesize it. NOTE: Go map iteration order is undefined
+    // per-run; Ruby Hash is insertion-ordered. For runtime-Ruby
+    // surfaces like Session/Flash where order isn't load-bearing
+    // this is fine; flag if app-level code depends on Ruby-style
+    // ordering.
+    if method == "keys" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let (k_ty, _v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            return format!(
+                "func() []{k_ty} {{\n\
+                 \t_ks := make([]{k_ty}, 0, len({recv_s}))\n\
+                 \tfor _k := range {recv_s} {{\n\
+                 \t\t_ks = append(_ks, _k)\n\
+                 \t}}\n\
+                 \treturn _ks\n\
+                 }}()",
+            );
+        }
+    }
+
+    // Ruby `h.values` → Go IIFE collecting all map values. Symmetric
+    // with `.keys`. Order caveat identical.
+    if method == "values" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let (_k_ty, v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            return format!(
+                "func() []{v_ty} {{\n\
+                 \t_vs := make([]{v_ty}, 0, len({recv_s}))\n\
+                 \tfor _, _v := range {recv_s} {{\n\
+                 \t\t_vs = append(_vs, _v)\n\
+                 \t}}\n\
+                 \treturn _vs\n\
+                 }}()",
+            );
+        }
+    }
+
+    // Ruby `h.key?(k)` / `h.has_key?(k)` / `h.include?(k)` → Go's
+    // comma-ok membership form. IIFE wrap keeps it expression-shaped
+    // (Ruby uses `.key?` as a condition; Go's `_, ok := m[k]; ok`
+    // is statement-shaped at top level). The `include?` variant
+    // overlaps with Array#include? (membership scan) — for non-Hash
+    // receivers (Array, Range) this emit is wrong; the runtime/ruby
+    // surface only uses the Hash form today, so the gap stays loud.
+    if (method == "key?" || method == "has_key?" || method == "include?")
+        && args.len() == 1
+    {
+        if let Some(r) = recv {
+            // Only fire when recv looks like a Hash. Otherwise (Array
+            // recv for `include?`) defer to the existing slices.Contains
+            // path further down. Nested Unions (`Union[Hash, Nil]` for
+            // nullable maps) flatten through `union_non_nil_core`.
+            let core = r.ty.as_ref().and_then(union_non_nil_core);
+            if matches!(core, Some(Ty::Hash { .. }))
+                || (method != "include?" && r.ty.is_none())
+            {
+                let recv_s = emit_expr(ctx, r);
+                let key_s = &args_s[0];
+                return format!(
+                    "func() bool {{ _, ok := {recv_s}[{key_s}]; return ok }}()",
+                );
+            }
         }
     }
 
@@ -761,13 +888,29 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `h.delete(k)` → Go's `delete(h, k)` builtin. Statement
-    // form. For non-Hash receivers (Array#delete-by-value, etc.)
+    // Ruby `h.delete(k)` → Go IIFE returning the deleted value (or
+    // `nil` if absent) and then calling Go's `delete()` builtin.
+    // Ruby's Hash#delete returns the value, so emit-only `delete(h,
+    // k)` (void) breaks any return-position use. The IIFE shape
+    // works in both statement and return positions; statement use
+    // discards the value, matching Go's "discarded return is fine"
+    // semantics. For non-Hash receivers (Array#delete-by-value)
     // this emit is wrong; the runtime/ruby/ surface only uses the
     // Hash form today.
     if method == "delete" && args.len() == 1 {
         if let Some(r) = recv {
-            return format!("delete({}, {})", emit_expr(ctx, r), args_s[0]);
+            let recv_s = emit_expr(ctx, r);
+            let key_s = &args_s[0];
+            let (_k_ty, v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            return format!(
+                "func() {v_ty} {{\n\
+                 \t_v, _ok := {recv_s}[{key_s}]\n\
+                 \tdelete({recv_s}, {key_s})\n\
+                 \tif _ok {{ return _v }}\n\
+                 \tvar _zero {v_ty}\n\
+                 \treturn _zero\n\
+                 }}()",
+            );
         }
     }
 
@@ -1672,6 +1815,27 @@ fn indent(out: &mut String, depth: usize) {
 /// - `Union[Str, Nil]` return (renders as Go `string`) + bare
 ///   `nil` value → `""`. Ruby `return nil` against `String?` is
 ///   valid; under the empty-as-nil convention Go needs `""`.
+/// Recover (key_go_ty, value_go_ty) for a receiver Ty that should
+/// be a Hash. Falls back to `("string", "any")` when the analyzer
+/// gave no useful info — that's the dominant Ruby Hash shape
+/// (string keys, untyped values) and matches what Go's `map[string]
+/// any` would be if the analyzer had set the Ty. Nested Unions are
+/// flattened via `union_non_nil_core` so `Union[Hash, Nil]` (a
+/// nullable map) carries through.
+fn hash_kv_go_tys(ty: Option<&Ty>) -> (String, String) {
+    let core = match ty {
+        Some(t) => union_non_nil_core(t).unwrap_or(t),
+        None => return ("string".to_string(), "any".to_string()),
+    };
+    match core {
+        Ty::Hash { key, value } => (
+            super::ty::go_ty_stub(Some(key)),
+            super::ty::go_ty_stub(Some(value)),
+        ),
+        _ => ("string".to_string(), "any".to_string()),
+    }
+}
+
 /// Flatten nested `Union[Union[T, Nil], Nil]` (and similar)
 /// down to its non-Nil core. Returns None when the union has
 /// multiple non-Nil variants (genuine sum type, not a nullable
