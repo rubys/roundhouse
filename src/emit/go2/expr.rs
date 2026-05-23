@@ -791,7 +791,28 @@ pub(super) fn emit_send(
         let recv_s = emit_expr(ctx, r);
         let field_ruby = &method[..method.len() - 1];
         let field_go = go_field_name(field_ruby);
-        return format!("{recv_s}.{field_go} = {}", args_s[0]);
+        // If/Case-shaped RHS needs IIFE wrap — Go's `if`/`switch` are
+        // statements, not expressions, so `instance.X = if cond { … }`
+        // is a syntax error. Mirrors emit_assign's Var-branch wrap;
+        // factored into the value-side emit so writer-suffix dispatch
+        // (Send `title=`) and direct Var/Ivar assign produce the same
+        // shape. `args_s[0]` is the already-emitted statement-shape
+        // form when value is If/Case — re-emit through emit_return_body
+        // wrapped in `func() interface{} { ... }()` so it lands as
+        // an expression.
+        let value = &args[0];
+        let v = if matches!(&*value.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
+            let body = emit_return_body(ctx, value);
+            let indented = body
+                .lines()
+                .map(|l| format!("\t{l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("func() interface{{}} {{\n{indented}\n}}()")
+        } else {
+            args_s[0].clone()
+        };
+        return format!("{recv_s}.{field_go} = {v}");
     }
 
     // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.

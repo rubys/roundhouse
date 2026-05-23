@@ -196,8 +196,8 @@ func main() {\n\
             &app.schema,
             vec![],
         );
-        let lowered = lower::lower_for_go(model_lcs);
-        for lc in &lowered {
+        let lowered_models = lower::lower_for_go(model_lcs);
+        for lc in &lowered_models {
             let class_text = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
@@ -209,6 +209,42 @@ func main() {\n\
             );
             let content = rewrite_package_to_v2(&raw);
             let stem = crate::naming::snake_case(lc.name.0.as_str());
+            out.push(EmittedFile {
+                path: PathBuf::from(format!("app/v2/{stem}.go")),
+                content,
+            });
+        }
+
+        // Phase 4 wedge 2 — controllers through go2 emit. Mirrors
+        // the rust2/typescript pattern: lower controllers with model
+        // + view extras so action bodies' `Article.find(...)` and
+        // `Views::Articles.index(...)` calls type through the same
+        // registry the model lowerer used. Inventory-mode for now —
+        // emit each controller LC through `library::emit_library_class`
+        // and let unhandled walker variants surface as TODO markers
+        // (rust2's Phase 5 inventory-cycle pattern).
+        let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+            lowered_models
+                .iter()
+                .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
+                .collect();
+        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
+            &app.controllers,
+            model_extras,
+            Some(&app.schema),
+            &app.views,
+        );
+        let lowered_controllers = lower::lower_for_go(controller_lcs);
+        for lc in &lowered_controllers {
+            let class_text = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => format!("// emit error: {e}\n"),
+            };
+            let stem = crate::naming::snake_case(lc.name.0.as_str());
+            let raw = format!(
+                "// Generated from app/controllers/{stem}.rb at app emit time.\n// Do not edit by hand — edit the source `.rb` and re-run emit.\n\npackage app\n\n{class_text}",
+            );
+            let content = rewrite_package_to_v2(&raw);
             out.push(EmittedFile {
                 path: PathBuf::from(format!("app/v2/{stem}.go")),
                 content,
