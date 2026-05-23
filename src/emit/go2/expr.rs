@@ -342,15 +342,19 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             use crate::expr::BoolOpKind;
             // Ruby `||` returns the first truthy operand; Go's `||`
             // requires bool operands. For non-bool operand types
-            // (Ty::Str typically — `slots[k] || ""` / `form_class ||
-            // "button_to"`), use `cmp.Or` (Go 1.22+) which returns
-            // the first non-zero value. Detect by either side being
-            // known-string. And-on-strings is rare; leave the
-            // legacy `&&` for now.
+            // (`slots[k] || ""`, `attrs["id"] || 0`, …), use `cmp.Or`
+            // (Go 1.22+) which returns the first non-zero value.
+            // Trigger when EITHER side is a known primitive (Str, Sym,
+            // Int, Float). Both-Bool falls through to Go's bool `||`.
+            // Both-Untyped also falls through (no signal that either
+            // is meant numerically); the catch-all `||` emit there
+            // still produces invalid Go for now but the case isn't
+            // observed in framework Ruby today.
             if matches!(op, BoolOpKind::Or) {
-                let stringy =
-                    matches!(left.ty, Some(Ty::Str)) || matches!(right.ty, Some(Ty::Str));
-                if stringy {
+                let primitive_kind = |t: &Option<Ty>| {
+                    matches!(t, Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float))
+                };
+                if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",
                         emit_expr(ctx, left),
@@ -1445,6 +1449,25 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     // already-typed args reach here.
     if matches!(target_ty, Ty::Str | Ty::Sym) {
         return format!("fmt.Sprintf(\"%v\", {inner})");
+    }
+    // Value → primitive narrowing (Int/Float/Bool). The lowerer wraps
+    // interface{}-yielding expressions in Cast(_, primitive) at Send-
+    // arg positions. Go can't auto-convert interface{} to a typed
+    // scalar — emit a type-asserting IIFE that returns the Go zero
+    // value when the assertion fails, mirroring Ruby's `nil`/missing-
+    // key fallback to numeric zero. `v, _ := <inner>.(T)` keeps the
+    // ok flag discarded since the caller's site already has its own
+    // default-handling (via the BoolOp::Or → cmp.Or peephole).
+    let primitive_go_ty = match target_ty {
+        Ty::Int => Some("int64"),
+        Ty::Float => Some("float64"),
+        Ty::Bool => Some("bool"),
+        _ => None,
+    };
+    if let Some(go_ty) = primitive_go_ty {
+        return format!(
+            "func() {go_ty} {{ _v, _ := ({inner}).({go_ty}); return _v }}()",
+        );
     }
     inner
 }
