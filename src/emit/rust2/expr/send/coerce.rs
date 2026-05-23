@@ -109,9 +109,23 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
 
     if let Ty::Hash { value: pv, .. } = param_ty {
         if matches!(pv.as_ref(), Ty::Untyped) {
+            // Peek through Cast wrappers to find the underlying arg
+            // shape. The `lower::ty_coerce_insertion` lowerer wraps
+            // call-site args in `Cast(inner, Hash<_, Untyped>)` to
+            // record the widening target explicitly; the borrow/owned
+            // checks elsewhere in this fn already peek-through, and
+            // Family 1 mirrors that pattern. `raw` is `emit_expr(arg)`
+            // which is `emit_expr(Cast)` = inner emit (Cast arm's
+            // field-ty coerce is a no-op for non-primitive target_ty),
+            // so the wrap below operates on the right text.
+            let probe_arg = if let ExprNode::Cast { value, .. } = &*arg.node {
+                value
+            } else {
+                arg
+            };
             // Var arg with a local Hash type that doesn't match —
             // wrap with the K/V-coercing conversion.
-            if let Some((_lk, _lv)) = arg_hash_var_local_ty(arg) {
+            if let Some((_lk, _lv)) = arg_hash_var_local_ty(probe_arg) {
                 return format!(
                     "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
                 );
@@ -120,7 +134,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             // `HashMap<&str, T>` from the first entry, which won't
             // unify with the callee's `HashMap<String, Value>`. Apply
             // the same transform unconditionally.
-            if matches!(&*arg.node, ExprNode::Hash { .. }) {
+            if matches!(&*probe_arg.node, ExprNode::Hash { .. }) {
                 return format!(
                     "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
                 );
