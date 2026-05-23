@@ -796,19 +796,24 @@ pub(super) fn emit_send(
         // is a syntax error. Mirrors emit_assign's Var-branch wrap;
         // factored into the value-side emit so writer-suffix dispatch
         // (Send `title=`) and direct Var/Ivar assign produce the same
-        // shape. `args_s[0]` is the already-emitted statement-shape
-        // form when value is If/Case — re-emit through emit_return_body
-        // wrapped in `func() interface{} { ... }()` so it lands as
-        // an expression.
+        // shape. IIFE return type comes from the value's analyzer-Ty
+        // when it resolves to a concrete Go primitive (`string` for
+        // type-assert-then-default patterns where both branches are
+        // strings); falls back to `interface{}` when the analyzer
+        // didn't pin a narrow type. The narrowed return type matters
+        // because `instance.Title = func() interface{} {...}()` won't
+        // fit a `string`-typed field; using the field's narrow type
+        // lets the assignment typecheck.
         let value = &args[0];
         let v = if matches!(&*value.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
+            let ret_ty = super::ty::go_ty_stub(value.ty.as_ref());
             let body = emit_return_body(ctx, value);
             let indented = body
                 .lines()
                 .map(|l| format!("\t{l}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("func() interface{{}} {{\n{indented}\n}}()")
+            format!("func() {ret_ty} {{\n{indented}\n}}()")
         } else {
             args_s[0].clone()
         };
@@ -1911,13 +1916,19 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
     // the return type total — caller-side uses see `interface{}`
     // and downstream emits (Sprintf %v) already accept that.
     let v = if matches!(&*value.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
+        // IIFE return type matches the value's analyzer-inferred Ty
+        // (narrow primitives when both branches agree, `interface{}`
+        // otherwise). Same rationale as the writer-suffix peephole
+        // above — using the narrow type lets the resulting assignment
+        // typecheck against typed slots without callsite assertion.
+        let ret_ty = super::ty::go_ty_stub(value.ty.as_ref());
         let body = emit_return_body(ctx, value);
         let indented = body
             .lines()
             .map(|l| format!("\t{l}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("func() interface{{}} {{\n{indented}\n}}()")
+        format!("func() {ret_ty} {{\n{indented}\n}}()")
     } else {
         emit_expr(ctx, value)
     };
