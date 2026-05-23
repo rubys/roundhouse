@@ -60,7 +60,7 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 /// other callers that want the overlay output without setting an env
 /// var. Returns the same files `overlay_v2` would append, in
 /// emission order.
-pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
+pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
 
     // Hand-written runtime — copied verbatim under `app/v2/`.
@@ -111,6 +111,41 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
             content,
         });
     }
+
+    // Phase 3: app models → `app/v2/<snake>.go`. Inventory-mode for
+    // now — env-gated so the toolchain test (which runs `go vet` over
+    // the whole v2/ overlay) stays clean while the model-emit gaps
+    // close one at a time. `ROUNDHOUSE_GO_V2_MODELS=1` opts in; the
+    // default emit (and the existing inflector_v2_compiles_and_runs
+    // smoke test) ships unchanged. Mirrors rust2's Phase 5 pattern.
+    if std::env::var("ROUNDHOUSE_GO_V2_MODELS").as_deref() == Ok("1")
+        && !app.models.is_empty()
+    {
+        let model_lcs = crate::lower::model_to_library::lower_models_to_library_classes(
+            &app.models,
+            &app.schema,
+            vec![],
+        );
+        let lowered = lower::lower_for_go(model_lcs);
+        for lc in &lowered {
+            let class_text = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => format!("// emit error: {e}\n"),
+            };
+            // Wrap with `package app` so rewrite_package_to_v2 swaps
+            // to `package v2` and injects per-file stdlib imports.
+            let raw = format!("// Generated from app/models/{stem}.rb at app emit time.\n// Do not edit by hand — edit the source `.rb` and re-run emit.\n\npackage app\n\n{class_text}",
+                stem = crate::naming::snake_case(lc.name.0.as_str()),
+            );
+            let content = rewrite_package_to_v2(&raw);
+            let stem = crate::naming::snake_case(lc.name.0.as_str());
+            out.push(EmittedFile {
+                path: PathBuf::from(format!("app/v2/{stem}.go")),
+                content,
+            });
+        }
+    }
+
     out
 }
 

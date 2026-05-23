@@ -653,6 +653,23 @@ pub(super) fn emit_send(
         }
     }
 
+    // Ruby `recv.field = v` lowers in the IR as `Send { recv, method:
+    // "field=", args: [v] }`. Emit as Go field assignment
+    // `recv.Field = v` rather than method-call shape `recv.Field=(v)`
+    // (which Go parses as a method named `Field` with `=(v)` operand
+    // — invalid). Special-case the `[]=` operator method below routes
+    // through OpSet; ordinary writers land here. The `=` suffix is
+    // peeled before `go_field_name` so the "id" → "ID" special case
+    // fires (without the peel, "id=" pascalizes to "Id=" and breaks
+    // the Go field lookup).
+    if is_writer_method_name(method) && args.len() == 1 && recv.is_some() {
+        let r = recv.unwrap();
+        let recv_s = emit_expr(ctx, r);
+        let field_ruby = &method[..method.len() - 1];
+        let field_go = go_field_name(field_ruby);
+        return format!("{recv_s}.{field_go} = {}", args_s[0]);
+    }
+
     // Ruby `recv[k] = v` is sugar for `recv.[]=(k, v)` in the IR.
     // For map/array receivers (Hash/Array/Untyped — the Ty-default
     // shape go2 emits as map/slice/interface{}), emit Go index-
@@ -1798,6 +1815,21 @@ fn binary_op(method: &str) -> Option<&'static str> {
 /// AR/stdlib method names that should emit with parens on a model
 /// struct receiver. Everything else on a non-Class receiver with no
 /// args is treated as a field read. Grows alongside the runtime.
+/// Identify Ruby attr-writer method names (`x=`, `name=`) so the
+/// Send peephole rewrites them to Go field assignment. Excludes
+/// comparison operators (`==`, `!=`, `<=`, `>=`, `<=>`) and the
+/// indexed-setter operator (`[]=`, handled separately via OpSet)
+/// — those end with `=` but are NOT attr writers. A real writer's
+/// last-before-`=` character must be an identifier char (letter,
+/// digit, or `_`).
+fn is_writer_method_name(name: &str) -> bool {
+    if !name.ends_with('=') || name.len() < 2 {
+        return false;
+    }
+    let prev = name.as_bytes()[name.len() - 2] as char;
+    prev.is_ascii_alphanumeric() || prev == '_'
+}
+
 fn is_known_go_method(name: &str) -> bool {
     matches!(
         name,
