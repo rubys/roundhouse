@@ -342,14 +342,21 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
             go_ty,
         });
     }
-    // Second pass: walk `initialize`'s body for `@ivar = expr`
-    // assignments to fields we haven't seen yet. Type comes from the
-    // assigned value's `Expr.ty` when present; falls back to
-    // `interface{}` so we never block on unknown.
-    if let Some(init) = methods.iter().find(|m| {
-        matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
-    }) {
-        collect_ivar_writes(&init.body, &mut out);
+    // Second pass: walk EVERY instance method's body for `@ivar =
+    // expr` assignments to fields we haven't seen yet. Type comes
+    // from the assigned value's `Expr.ty` when present; falls back
+    // to `interface{}` so we never block on unknown. Controllers
+    // synthesize ivars across action methods (`@articles = Article.all`
+    // in Index, `@article = Article.find(...)` in Show) — without
+    // walking each body, these references vet-fail as undefined
+    // struct fields. The first-write-wins semantics mean later
+    // ivar writes with a wider Ty don't override (consistent with
+    // initialize-only ivars taking their first-assigned value).
+    for m in methods {
+        if !matches!(m.receiver, MethodReceiver::Instance) {
+            continue;
+        }
+        collect_ivar_writes(&m.body, &mut out);
     }
     out
 }
