@@ -304,23 +304,21 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
                 }
             }
-            // Fallback: infer concrete element types when every
-            // key/value is a string literal (`{ "k" => "v", ... }`)
-            // — emits `map[string]string`. Matters for `gsub(regex,
-            // hash)` lookups whose return must satisfy a `string`
-            // return type. Empty `{}` defaults to
-            // `map[string]string{}` (the legacy heuristic) — wrong
-            // for `Hash[Symbol, untyped]` returns but the return-Ty
-            // pre-pass in `library::render_body` retypes those before
-            // we get here.
-            let all_str_kv = entries.iter().all(|(k, v)| {
-                matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } })
-                    && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } })
-            });
-            let (k_ty, v_ty) = if all_str_kv {
-                ("string", "string")
-            } else {
-                ("string", "interface{}")
+            // Fallback: infer concrete element types from the
+            // literal shape. Constants (`STATUS_CODES = { ok: 200,
+            // ... }`) parse outside the body-typer's reach, so
+            // their Hash node lands here with e.ty == None and the
+            // value type has to be derived from the literals
+            // themselves. When EVERY value is the same primitive
+            // literal kind (Str/Int/Float/Bool), pin that as the
+            // value type — `map[string]int64` for STATUS_CODES,
+            // `map[string]string` for HTML_ESCAPES. Mixed-kind
+            // and empty fall back to `map[string]interface{}`.
+            let key_kind = literal_kind_str("string");
+            let val_kind = uniform_value_literal_kind(entries);
+            let (k_ty, v_ty) = match (key_kind, val_kind) {
+                (k, Some(v)) => (k, v),
+                _ => ("string", "interface{}"),
             };
             format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "))
         }
@@ -659,13 +657,15 @@ pub(super) fn emit_send(
     // For map/array receivers (Hash/Array/Untyped — the Ty-default
     // shape go2 emits as map/slice/interface{}), emit Go index-
     // assign. For Class-typed receivers (`self[:updated_at] = now`
-    // inside an AR::Base method body), emit a method call to the
+    // inside an AR::Base method body, `@flash[:notice] = notice`
+    // in an AC::Base method body), emit a method call to the
     // hand-defined `op_set` instead — Go structs aren't indexable,
-    // so the index syntax would fail `go vet`.
+    // so the index syntax would fail `go vet`. Union<Class, Nil>
+    // peeled via union_non_nil_core so `Flash?` ivars still route.
     if method == "[]=" && args.len() == 2 && recv.is_some() {
         let recv_e = recv.unwrap();
         let recv_s = emit_expr(ctx, recv_e);
-        if matches!(recv_e.ty.as_ref(), Some(Ty::Class { .. })) {
+        if recv_ty_is_class(recv_e.ty.as_ref()) {
             return format!("{recv_s}.OpSet({}, {})", args_s[0], args_s[1]);
         }
         return format!("{recv_s}[{}] = {}", args_s[0], args_s[1]);
@@ -673,7 +673,7 @@ pub(super) fn emit_send(
 
     if method == "[]" && recv.is_some() {
         let recv_e = recv.unwrap();
-        if matches!(recv_e.ty.as_ref(), Some(Ty::Class { .. })) {
+        if recv_ty_is_class(recv_e.ty.as_ref()) {
             let recv_s = emit_expr(ctx, recv_e);
             return format!("{recv_s}.OpGet({})", args_s.join(", "));
         }
@@ -2056,6 +2056,65 @@ fn hash_kv_go_tys(ty: Option<&Ty>) -> (String, String) {
 /// before the range — Go can't range over `interface{}` directly.
 fn recv_ty_renders_as_interface(recv: &Expr) -> bool {
     super::ty::go_ty_stub(recv.ty.as_ref()) == "interface{}"
+}
+
+/// Identity helper so `literal_kind_str("string")` reads in the
+/// same shape as `uniform_value_literal_kind` below — both feed
+/// into the `(k_ty, v_ty)` tuple build in the Hash literal fallback.
+fn literal_kind_str(s: &'static str) -> &'static str {
+    s
+}
+
+/// Walk a Hash literal's entry list. When every value is the same
+/// primitive literal kind, return the Go type for that kind so the
+/// fallback Hash emit pins it (`map[string]int64` for STATUS_CODES,
+/// `map[string]string` for HTML_ESCAPES). Returns `None` for mixed
+/// kinds, empty entries, or any non-primitive value shape (nested
+/// Hash, Array, Send-result, ...) — those land on the
+/// `map[string]interface{}` fallback.
+fn uniform_value_literal_kind(entries: &[(Expr, Expr)]) -> Option<&'static str> {
+    // Empty Hash `{}` keeps the legacy `map[string]string` default
+    // (router.go's `params = {}` then string-keyed `params[k] = v`
+    // accumulation rides on this — the empty-as-string heuristic
+    // covers the no-context case better than `interface{}` would).
+    if entries.is_empty() {
+        return Some("string");
+    }
+    let mut iter = entries.iter();
+    let first = iter.next()?;
+    let go_ty = literal_to_go_ty(&first.1)?;
+    for (_, v) in iter {
+        if literal_to_go_ty(v) != Some(go_ty) {
+            return None;
+        }
+    }
+    Some(go_ty)
+}
+
+/// Map a single literal Expr to the Go type its value uses. Returns
+/// `None` for non-literal Exprs or literal kinds without a clean Go
+/// type mapping (Nil, Regex, ...).
+fn literal_to_go_ty(e: &Expr) -> Option<&'static str> {
+    let ExprNode::Lit { value } = &*e.node else { return None };
+    Some(match value {
+        Literal::Str { .. } | Literal::Sym { .. } => "string",
+        Literal::Int { .. } => "int64",
+        Literal::Float { .. } => "float64",
+        Literal::Bool { .. } => "bool",
+        _ => return None,
+    })
+}
+
+/// True when the receiver's analyzer-set Ty is a `Class { .. }` —
+/// either directly or wrapped in `Union<Class, Nil>` (a nullable
+/// class field). Drives the `[]` / `[]=` peephole's decision to
+/// dispatch through `.OpGet` / `.OpSet` instead of Go index syntax
+/// (structs aren't indexable). `Hash`/`Array`/`Untyped` receivers
+/// fall through to the bare-index emit, matching their Go shape.
+fn recv_ty_is_class(ty: Option<&Ty>) -> bool {
+    let Some(t) = ty else { return false };
+    let core = union_non_nil_core(t).unwrap_or(t);
+    matches!(core, Ty::Class { .. })
 }
 
 fn union_non_nil_core(ty: &Ty) -> Option<&Ty> {
