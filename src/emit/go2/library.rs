@@ -138,7 +138,87 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         out.push_str(&emit_method(&name, m, &self_methods));
         out.push('\n');
     }
+
+    // Per-model class-method wrappers for the public AR::Base class
+    // API (`<Model>.find`, `<Model>.exists?`, `<Model>.all`, etc.).
+    // Go embedding promotes INSTANCE methods only — bare-fn class
+    // methods on Base (`ActiveRecordBase_find` etc.) don't appear
+    // under the subclass's `<Model>_<method>` prefix. The lowerer
+    // already emits the per-model `_adapter_*` primitives; these
+    // wrappers delegate to them so call sites like
+    // `Article.exists?(id)` → `Article_exists_p(id)` resolve.
+    // Mirrors rust2's per-model `pub fn exists/find/count/all/...`
+    // shim block (see fixtures/real-blog transpiled rust output).
+    // Only fires when the class inherits from AR::Base (transitively)
+    // AND has the lowerer-emitted per-model adapter primitives
+    // (`_adapter_find_by_id`, etc.). Concrete models (Article, Comment)
+    // have them; abstract intermediates (ApplicationRecord) don't, and
+    // emitting wrappers there would reference undefined symbols.
+    if embedded_parent.is_some() && has_adapter_primitives(class) {
+        out.push_str(&emit_ar_class_method_wrappers(&name));
+    }
     Ok(out)
+}
+
+/// True when the lowerer synthesized per-model `_adapter_*` class
+/// methods (the marker for concrete schema-backed models). Detection
+/// keys on `_adapter_find_by_id` — every concrete model gets it via
+/// `adapter_emit::push_adapter_methods`; abstract intermediates and
+/// non-AR LibraryClasses don't.
+fn has_adapter_primitives(class: &LibraryClass) -> bool {
+    class.methods.iter().any(|m| {
+        matches!(m.receiver, MethodReceiver::Class)
+            && m.name.as_str() == "_adapter_find_by_id"
+    })
+}
+
+/// Emit per-model wrappers for the public AR::Base class API. Each
+/// wrapper delegates to the lowerer-synthesized `<Model>__adapter_*`
+/// primitive that already exists on the model. Naming matches
+/// `sanitize_method_name` so call sites that target
+/// `<Model>.<ruby_method_name>` route here cleanly:
+///
+/// - `Model.exists?(id)` → `Model_exists_p(id)`
+/// - `Model.find(id)` → `Model_find(id)` (panic on nil)
+/// - `Model.all` → `Model_all()`
+/// - `Model.count` → `Model_count()`
+/// - `Model.last` → `Model_last()`
+/// - `Model.destroy_all` → `Model_destroy_all()`
+/// - `Model.create(attrs)` / `Model.create!(attrs)` → `New<Model>(attrs).save()`
+///
+/// `Model.where(conditions)` is intentionally omitted — uses the
+/// global `ActiveRecord.adapter.Where` path which isn't per-model
+/// adapter-emit-friendly. Add when a forcing call site appears.
+fn emit_ar_class_method_wrappers(name: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("// AR::Base class API delegates — Go embedding doesn't promote\n"));
+    out.push_str(&format!("// bare-fn class methods, so wrap the per-model _adapter_*\n"));
+    out.push_str(&format!("// primitives the lowerer already emitted.\n"));
+    out.push_str(&format!(
+        "func {name}_exists_p(id int64) bool {{ return {name}__adapter_exists_by_id_p(id) }}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_find(id int64) *{name} {{\n\tresult := {name}__adapter_find_by_id(id)\n\tif result == nil {{ panic(\"Couldn't find {name} with id=\") }}\n\treturn result\n}}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_all() []*{name} {{ return {name}__adapter_all() }}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_count() int64 {{ return {name}__adapter_count() }}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_last() *{name} {{\n\trecords := {name}__adapter_all()\n\tif len(records) == 0 {{ return nil }}\n\treturn records[len(records)-1]\n}}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_destroy_all() []*{name} {{\n\trecords := {name}__adapter_all()\n\tfor _, r := range records {{ r.Destroy() }}\n\treturn records\n}}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_create(attrs map[string]interface{{}}) *{name} {{\n\tinstance := New{name}(attrs)\n\tinstance.Save()\n\treturn instance\n}}\n"
+    ));
+    out.push_str(&format!(
+        "func {name}_create_bang(attrs map[string]interface{{}}) *{name} {{\n\tinstance := New{name}(attrs)\n\tif !instance.Save() {{ panic(\"RecordInvalid\") }}\n\treturn instance\n}}\n"
+    ));
+    out
 }
 
 /// Collect the names of real (non-attr) instance methods on a
