@@ -209,12 +209,24 @@ func main() {\n\
             .map(|(r, s)| (r.clone(), s.fields.clone()))
             .collect();
 
-        let model_lcs = crate::lower::model_to_library::lower_models_to_library_classes_with_params(
-            &app.models,
-            &app.schema,
-            vec![],
-            &params_specs_simple,
-        );
+        // `lower_models_with_registry_and_params` returns both the
+        // lowered model LCs and the FULL class registry — the registry
+        // carries the AR baseline class methods (`find`, `all`, `new`,
+        // `count`, etc.) that the model lowerer adds via `insert_default`
+        // but never lifts into `lc.methods`. Without those entries the
+        // controller body-typer sees `Article.find(...)` as TyVar and
+        // the `@article = Article.find(...)` Assign's value.ty stays
+        // None, so `collect_fields` lowers the struct field to
+        // `interface{}` instead of `*Article`. Mirrors the rust2 wiring
+        // (src/emit/rust2.rs:402) — the previous `class_info_from_library_class`
+        // shape only carried synthesized table methods and was lossy.
+        let (model_lcs, model_registry) =
+            crate::lower::model_to_library::lower_models_with_registry_and_params(
+                &app.models,
+                &app.schema,
+                vec![],
+                &params_specs_simple,
+            );
         let lowered_models = lower::lower_for_go(model_lcs);
 
         // Controllers are lowered next so we can build the variadic-
@@ -223,10 +235,7 @@ func main() {\n\
         // embedded-parent ctors need to match the parent's ctor
         // variadicity — see library::emit_default_embedded_constructor.
         let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
-            lowered_models
-                .iter()
-                .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
-                .collect();
+            model_registry.into_iter().collect();
         let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
             &app.controllers,
             model_extras,
