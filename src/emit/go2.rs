@@ -191,10 +191,29 @@ func main() {\n\
 }\n".to_string(),
         });
 
-        let model_lcs = crate::lower::model_to_library::lower_models_to_library_classes(
+        // Controllers' permit(...) calls feed the params-spec map; models
+        // use it to synthesize a typed `from_params(p: <Resource>Params)`
+        // factory whose body assigns each permitted field through the
+        // column setter. Controller `Model.new(<resource>_params)` call
+        // sites are rewritten to `Model.from_params(...)` by the
+        // controller lowerer's `rewrite_model_new_to_from_params`; without
+        // the factory those calls would land on an undefined symbol.
+        // Mirrors rust2.rs / typescript.rs / crystal.rs.
+        let params_specs_full =
+            crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+        let params_specs_simple: std::collections::BTreeMap<
+            crate::ident::Symbol,
+            Vec<crate::ident::Symbol>,
+        > = params_specs_full
+            .iter()
+            .map(|(r, s)| (r.clone(), s.fields.clone()))
+            .collect();
+
+        let model_lcs = crate::lower::model_to_library::lower_models_to_library_classes_with_params(
             &app.models,
             &app.schema,
             vec![],
+            &params_specs_simple,
         );
         let lowered_models = lower::lower_for_go(model_lcs);
 
