@@ -306,19 +306,29 @@ func main() {\n\
         // resource dir; missing-dir → no stub (and the model emit's
         // broadcasts_to expansion presumably wouldn't reference it).
         // Mirrors the rust2 "view-module stubs from lowerer" pass.
+        let html_view_lcs = crate::lower::view_to_library::lower_views_to_library_classes(
+            &app.views, app, vec![],
+        );
+        let jbuilder_view_lcs = crate::lower::lower_jbuilder_to_library_classes(
+            &app.views, app, vec![],
+        );
+        // Stubs are variadic `func X(_args ...interface{}) string` so
+        // they accept the multiple call-site arities a single partial
+        // sees (broadcasts callback passes just record; controller
+        // render passes record + extras). Real view emit replaces
+        // them in a later wedge with concrete typed bodies.
         let referenced: std::collections::BTreeSet<(String, String)> =
-            crate::lower::view_to_library::lower_views_to_library_classes(
-                &app.views, app, vec![],
-            )
-            .into_iter()
-            .flat_map(|lc| {
-                let mod_name = sanitize_module_name(lc.name.0.as_str());
-                lc.methods
-                    .into_iter()
-                    .filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Class))
-                    .map(move |m| (mod_name.clone(), m.name.as_str().to_string()))
-            })
-            .collect();
+            html_view_lcs
+                .into_iter()
+                .chain(jbuilder_view_lcs.into_iter())
+                .flat_map(|lc| {
+                    let mod_name = sanitize_module_name(lc.name.0.as_str());
+                    lc.methods
+                        .into_iter()
+                        .filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Class))
+                        .map(move |m| (mod_name.clone(), m.name.as_str().to_string()))
+                })
+                .collect();
         if !referenced.is_empty() {
             let mut by_module: std::collections::BTreeMap<String, Vec<String>> =
                 std::collections::BTreeMap::new();
@@ -332,13 +342,17 @@ func main() {\n\
                 body.push_str("// the action while the html fragment shape isn't yet wired.\n\n");
                 body.push_str("package app\n\n");
                 for method in methods {
-                    // Module-singleton emit shape from go2/library.rs:
-                    // `func <ClassName>_<ruby_method_name>(...)`. Match
-                    // it exactly so the model's `Views::X.partial(self)`
-                    // calls resolve. Ruby method name is unmodified
-                    // (no pascalization for the bare-fn suffix).
+                    // Variadic param list — different call sites pass
+                    // different arities (broadcasts callback in a model
+                    // sends just the record; controller render passes
+                    // record + extras like flash). Variadic interface{}
+                    // accepts both shapes without per-callsite-aware
+                    // overload selection. The lowerer-emitted MethodDef
+                    // has a fixed arity, but the call-site IR is what
+                    // matters for vet — stubs need to be more permissive
+                    // than the eventual real emit.
                     body.push_str(&format!(
-                        "func {module_name}_{method}(_record interface{{}}) string {{\n\treturn \"\"\n}}\n\n",
+                        "func {module_name}_{method}(_args ...interface{{}}) string {{\n\treturn \"\"\n}}\n\n",
                     ));
                 }
                 let content = rewrite_package_to_v2(&body);
