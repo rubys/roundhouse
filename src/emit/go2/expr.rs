@@ -209,7 +209,22 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         // else: Nil }` inside a `Seq`; legacy `emit_expr` for If
         // walks branches via `emit_block_body`, so the Return ends
         // up emitted as a statement inside a Go block — valid.
-        ExprNode::Return { value } => format!("return {}", emit_expr(ctx, value)),
+        ExprNode::Return { value } => {
+            // Ruby `return if cond` lowers to `Return { Lit::Nil }`.
+            // In a truly void Go function (return_ty == Ty::Nil),
+            // `return nil` is invalid ("too many return values");
+            // emit bare `return`. Use `ctx.return_ty` rather than
+            // `ctx.void_method` — the latter is also flipped by
+            // emit_constructor for statement-shape body emit, but
+            // the constructor's actual return type is `*Class` and
+            // `return nil` against a nilable pointer remains correct.
+            let truly_void = matches!(ctx.return_ty.as_ref(), Some(Ty::Nil));
+            if truly_void && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                "return".to_string()
+            } else {
+                format!("return {}", emit_expr(ctx, value))
+            }
+        }
         ExprNode::Seq { exprs } => exprs
             .iter()
             .map(|sub| emit_expr(ctx, sub))
@@ -508,7 +523,37 @@ pub(super) fn emit_send(
     block: Option<&Expr>,
     result_ty: Option<&Ty>,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+    // Hash-widening peephole for module-singleton class methods whose
+    // hand-written shim takes `map[string]interface{}` but whose call
+    // site passes a uniform-string Hash literal (analyzer pins as
+    // `Hash[Str, Str]`, emit lands as `map[string]string`). The
+    // ty_coerce_insertion lowerer doesn't fire because (a) hand-written
+    // shims (Broadcasts) aren't in its LibraryClass registry and
+    // (b) the seeded sig uses `KeywordRest` which the lowerer filters.
+    //
+    // Widen here by retyping the arg Hash node before emit — set
+    // `ty = Hash[Str, Untyped]` so the analyzer-Ty branch in
+    // `ExprNode::Hash` emit produces `map[string]interface{}{…}`.
+    // Restricted to a small allow-list of known kwargs-shim callees so
+    // the rewrite doesn't accidentally widen genuine narrow-Hash
+    // dispatches.
+    let widen_hash_args = is_broadcasts_call(recv, method);
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| {
+            if widen_hash_args {
+                if let ExprNode::Hash { .. } = &*a.node {
+                    let mut widened = a.clone();
+                    widened.ty = Some(Ty::Hash {
+                        key: Box::new(Ty::Str),
+                        value: Box::new(Ty::Untyped),
+                    });
+                    return emit_expr(ctx, &widened);
+                }
+            }
+            emit_expr(ctx, a)
+        })
+        .collect();
 
     // Ruby `raise X, "msg"` / `raise "msg"` / `raise X` — parses as
     // an implicit-self Send with method `raise`. Maps to Go
@@ -1874,6 +1919,28 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
             let name_s = super::library::sanitize(name.as_str());
             let first = ctx.declared.borrow_mut().insert(name_s.clone());
             if first {
+                // Nil-init accumulator pattern: `result = nil` ahead
+                // of a conditional `result = instance` and a tail
+                // `return result`. Go's `:=` can't type-infer from
+                // bare nil, and the analyzer's e.ty on Lit::Nil is
+                // just Ty::Nil — which alone doesn't tell us the
+                // accumulator's effective type. Use ctx.return_ty as
+                // the heuristic: the lowerer's adapter_emit produces
+                // these exclusively as return-value accumulators in
+                // nilable-pointer-returning methods (_adapter_find_by_id,
+                // _adapter_reload, belongs_to lookups). Falls back to
+                // `interface{}` when no return type is available (the
+                // var becomes untyped nil, downstream assigns may still
+                // mismatch — kept as visible failure rather than
+                // silent corruption).
+                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                    let ty_str = ctx
+                        .return_ty
+                        .as_ref()
+                        .map(|t| super::ty::go_ty_stub(Some(t)))
+                        .unwrap_or_else(|| "interface{}".to_string());
+                    return format!("var {name_s} {ty_str} = nil");
+                }
                 if matches!(value.ty, Some(Ty::Int)) {
                     format!("var {name_s} int64 = {v}")
                 } else {
@@ -1945,12 +2012,36 @@ fn is_writer_method_name(name: &str) -> bool {
     prev.is_ascii_alphanumeric() || prev == '_'
 }
 
+/// `Broadcasts.{append,prepend,replace,remove}` call detection — the
+/// hand-written `runtime/go/v2/broadcasts.go` shims take
+/// `map[string]interface{}` for the kwargs bag. Used by the Hash-
+/// widening peephole at args_s emit so the call site widens
+/// uniform-string Hash literals to interface-valued maps before
+/// `Broadcasts_X(...)` argument typecheck.
+fn is_broadcasts_call(recv: Option<&Expr>, method: &str) -> bool {
+    if !matches!(method, "append" | "prepend" | "replace" | "remove") {
+        return false;
+    }
+    let Some(r) = recv else { return false };
+    let ExprNode::Const { path } = &*r.node else {
+        return false;
+    };
+    path.last().map(|s| s.as_str()) == Some("Broadcasts")
+}
+
 fn is_known_go_method(name: &str) -> bool {
     matches!(
         name,
         "save" | "save!" | "destroy" | "destroy!" | "update" | "update!"
             | "delete" | "touch" | "reload"
-            | "validate" | "attributes" | "errors"
+            | "validate" | "attributes"
+        // `errors` was here but is now a Base struct field
+        // (`*ActiveRecordBase.Errors []string`) reached via Go method
+        // promotion through embedding (Q1 wedge). It collapses out
+        // of method emit via the trivial-ivar-reader collision check;
+        // call sites should emit as `self.Errors` (field read), not
+        // `self.Errors()` — keeping it in the force-parens list
+        // produced invalid Go: `self.Errors() = append(self.Errors(), X)`.
     )
 }
 
