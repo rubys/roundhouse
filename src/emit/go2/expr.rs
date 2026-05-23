@@ -421,7 +421,82 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             )
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
+        ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
+    }
+}
+
+/// Emit `case scrutinee; when Pat then body; …; end` as an IIFE
+/// wrapping a Go `switch`. The lowerer's per-column dispatch in
+/// model `[]/[]=` (Article#OpGet / Article#OpSet) is the primary
+/// trigger — `case name when :id then @id when :body then @body end`.
+/// IIFE shape rather than bare switch so the result can flow into
+/// any expression position (return tail, RHS of assign, arg slot);
+/// emit_return_body's surrounding `return X` wrap composes with the
+/// IIFE's own returns.
+///
+/// Pattern coverage:
+/// - `Pattern::Lit { value }` → `case <go_literal>:` (Sym/Str both
+///   compare against Go strings; Int → numeric switch case)
+/// - `Pattern::Wildcard` → `default:`
+/// - `Pattern::Bind { name }` (Ruby `else` with a binding) → `default:`,
+///   the bind isn't surfaced into Go since the scrutinee is in scope
+///   already and Ruby's bind name is rarely referenced.
+/// - Array/Record patterns fall through to a TODO marker; the lowerer
+///   doesn't currently emit these for model dispatch.
+///
+/// Trailing `return <zero>` after the switch keeps Go's flow analysis
+/// happy — even with a `default` arm, Go doesn't infer switch
+/// exhaustiveness across all literal values.
+fn emit_case(
+    ctx: &EmitCtx,
+    scrutinee: &Expr,
+    arms: &[crate::expr::Arm],
+    result_ty: Option<&Ty>,
+) -> String {
+    let scrutinee_s = emit_expr(ctx, scrutinee);
+    let go_ret = super::ty::go_ty_stub(result_ty);
+    let mut out = format!("func() {go_ret} {{\n\tswitch {scrutinee_s} {{\n");
+    // Use the tail-aware return emitter for each arm body so Assign
+    // tails (Article#OpSet's `case :id then @id = value` shape) emit
+    // as `self.ID = converted; return self.ID` rather than the
+    // invalid `return self.ID = converted` (Go doesn't allow assign
+    // as an expression). Each arm gets a fresh ctx scope so sibling
+    // `:=` declarations don't leak across cases.
+    for arm in arms {
+        let arm_ctx = ctx.enter_scope();
+        let body_s = emit_return_body(&arm_ctx, &arm.body);
+        match &arm.pattern {
+            crate::expr::Pattern::Lit { value } => {
+                let pat_s = emit_literal(value);
+                out.push_str(&format!("\tcase {pat_s}:\n{body_s}"));
+            }
+            crate::expr::Pattern::Wildcard | crate::expr::Pattern::Bind { .. } => {
+                out.push_str(&format!("\tdefault:\n{body_s}"));
+            }
+            _ => {
+                out.push_str(&format!(
+                    "\t/* TODO: case pattern {:?} */\n",
+                    std::mem::discriminant(&arm.pattern)
+                ));
+            }
+        }
+    }
+    out.push_str("\t}\n");
+    out.push_str(&format!("\treturn {}\n}}()", go_case_zero(result_ty)));
+    out
+}
+
+/// Trailing-return fallback for `emit_case`'s IIFE — Go's flow
+/// analysis requires a return after the switch even when every arm
+/// returns. `interface{}` slot → `nil`; primitives → typed zero.
+fn go_case_zero(ty: Option<&Ty>) -> &'static str {
+    match ty {
+        Some(Ty::Int) => "0",
+        Some(Ty::Float) => "0.0",
+        Some(Ty::Bool) => "false",
+        Some(Ty::Str) | Some(Ty::Sym) => "\"\"",
+        _ => "nil",
     }
 }
 
@@ -1443,11 +1518,25 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
             }
         }
     }
+    // Source/target Go-type identity check shared by the primitive
+    // arms below. The Cast IIFE is wasteful (and invalid) when the
+    // inner already has the target Go type — `row.ID` typed `int64`
+    // flowing into an `int64` slot doesn't need a type assertion;
+    // `(row.ID).(int64)` is a vet error since `row.ID` isn't an
+    // interface. Identity-emit when source Ty's go_ty_stub already
+    // matches the target's. Mirrors the Hash-widening arm above.
+    let tgt = super::ty::go_ty_stub(Some(target_ty));
+    let src = super::ty::go_ty_stub(value.ty.as_ref());
+    let already_typed = src == tgt;
+
     // Value → primitive narrowing (Str/Sym). The lowerer's
     // `needs_value_to_primitive` gate ensures we only see this when
     // the source Ty actually contains Untyped — no widening-only or
     // already-typed args reach here.
     if matches!(target_ty, Ty::Str | Ty::Sym) {
+        if already_typed {
+            return inner;
+        }
         return format!("fmt.Sprintf(\"%v\", {inner})");
     }
     // Value → primitive narrowing (Int/Float/Bool). The lowerer wraps
@@ -1465,6 +1554,9 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         _ => None,
     };
     if let Some(go_ty) = primitive_go_ty {
+        if already_typed {
+            return inner;
+        }
         return format!(
             "func() {go_ty} {{ _v, _ := ({inner}).({go_ty}); return _v }}()",
         );

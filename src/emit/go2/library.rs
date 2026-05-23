@@ -768,7 +768,10 @@ fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
         return body.clone();
     }
     match &*body.node {
-        ExprNode::Hash { entries, kwargs } if entries.is_empty() && literal_ty_uninformative(body) => {
+        ExprNode::Hash { entries, kwargs }
+            if literal_ty_uninformative(body)
+                || (!entries.is_empty() && target_value_is_widening(target_ty)) =>
+        {
             let mut tail = (*body).clone();
             tail.ty = Some(target_ty.clone());
             tail.node = Box::new(ExprNode::Hash {
@@ -837,6 +840,22 @@ fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
         }
         _ => body.clone(),
     }
+}
+
+/// True when the declared return type's value side widens to
+/// `interface{}` — `Hash[K, Untyped]` (and the `Hash[K, Var]` shape
+/// analyzer leaves unresolved). Force a non-empty Hash tail literal
+/// to adopt this declared type so the emit produces the widened
+/// `map[K]interface{}{...}` (boxing each typed value), rather than
+/// the analyzer-inferred narrow `map[string]string` that vet rejects
+/// against the declared return. Mirrors how Rust's call-site Cast
+/// handles heterogeneous-Hash widening — Go just does it at the
+/// literal directly since map element types are by-construction.
+fn target_value_is_widening(target_ty: &Ty) -> bool {
+    matches!(
+        target_ty,
+        Ty::Hash { value, .. } if matches!(value.as_ref(), Ty::Untyped | Ty::Var { .. })
+    )
 }
 
 /// True when the analyzer's Ty on an empty literal carries no signal
