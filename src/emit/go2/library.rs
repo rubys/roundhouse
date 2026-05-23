@@ -51,6 +51,16 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     let name = sanitize_type_name(class.name.0.as_str());
     let mut out = String::new();
 
+    // Q1 — inheritance via embedding. When the class has a parent
+    // (Article < ApplicationRecord, ApplicationRecord < ActiveRecord::Base),
+    // emit the parent as an anonymous `*Parent` field so Go's method
+    // promotion delivers Base's instance methods (`MarkPersistedBang`,
+    // `Save`, `Destroy`, …) on the subclass automatically. The chain
+    // composes — ApplicationRecord embeds *ActiveRecordBase, Article
+    // embeds *ApplicationRecord, and `article.MarkPersistedBang()`
+    // resolves through both promotions.
+    let embedded_parent = embedded_parent_type(class);
+
     // Discover the struct's field layout. `attr_reader` / `attr_writer`
     // methods synthesize MethodDefs whose signature carries the field
     // type — those become the exported struct fields. Initialize-only
@@ -58,10 +68,13 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // fields yet; they'd surface as missing-symbol errors at use,
     // which is fine inventory.
     let fields = collect_fields(&class.methods);
-    if fields.is_empty() {
+    if embedded_parent.is_none() && fields.is_empty() {
         out.push_str(&format!("type {name} struct{{}}\n\n"));
     } else {
         out.push_str(&format!("type {name} struct {{\n"));
+        if let Some(ref parent_ty) = embedded_parent {
+            out.push_str(&format!("\t*{parent_ty}\n"));
+        }
         for f in &fields {
             out.push_str(&format!("\t{} {}\n", f.pascal_name, f.go_ty));
         }
@@ -72,11 +85,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // emit `New<Name>(...)` returning a pointer to the struct,
     // populated via field-by-field assignment. The original
     // `initialize` method is NOT emitted as a method on the type;
-    // its body becomes the constructor body.
+    // its body becomes the constructor body. When the class is a
+    // parent-embedding shape with NO `initialize` of its own
+    // (ApplicationRecord), synthesize a pass-through constructor so
+    // subclasses can build the embedded slot via `NewParent(_opts...)`.
     if let Some(init) = class.methods.iter().find(|m| {
         matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
     }) {
-        out.push_str(&emit_constructor(&name, init));
+        out.push_str(&emit_constructor(&name, init, embedded_parent.as_deref()));
+        out.push('\n');
+    } else if let Some(ref parent_ty) = embedded_parent {
+        out.push_str(&emit_default_embedded_constructor(&name, parent_ty));
         out.push('\n');
     }
 
@@ -282,14 +301,31 @@ fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>) {
 /// each body Assign is `@<name> = <var>` — fields populate directly
 /// from the matching positional param. Falls back to a build-then-
 /// assign form when the body shape is more complex.
-fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
+fn emit_constructor(
+    class_name: &str,
+    init: &MethodDef,
+    embedded_parent: Option<&str>,
+) -> String {
     let (params, optional_unpack) = render_constructor_params(init);
     let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
+
+    // Inject the embedded-parent constructor call when present —
+    // `&Article{ApplicationRecord: NewApplicationRecord(_opts...)}`
+    // initializes the embedded slot so promoted methods see a non-nil
+    // receiver. The `_opts...` forwarding mirrors the variadic shape
+    // both constructors use for the optional-attrs param; when the
+    // current constructor doesn't declare `_opts`, the spread is
+    // omitted (no caller-side mismatch since `NewParent()` is also
+    // variadic and accepts zero args).
+    let parent_slot = embedded_parent.map(|p| {
+        let forward = if params.contains("_opts ...") { "_opts..." } else { "" };
+        format!("{p}: New{p}({forward})")
+    });
 
     // Try the simple-shape detection: every body expr is
     // `Assign { target: Ivar(name), value: Var(name) }`, and the Var
     // name matches the Ivar name. If so, emit `return &Class{Name: name, ...}`.
-    if let Some(literal) = try_field_init_literal(class_name, &init.body) {
+    if let Some(literal) = try_field_init_literal(class_name, &init.body, parent_slot.as_deref()) {
         out.push_str(&optional_unpack);
         out.push_str(&format!("\treturn {literal}\n"));
     } else {
@@ -298,7 +334,11 @@ fn emit_constructor(class_name: &str, init: &MethodDef) -> String {
         // statement, not an expression), then return `self`.
         // `void_method=true` on the ctx makes the body walker emit
         // each tail as a statement instead of `return X`.
-        out.push_str(&format!("\tself := &{class_name}{{}}\n"));
+        let parent_init = parent_slot
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        out.push_str(&format!("\tself := &{class_name}{{{parent_init}}}\n"));
         out.push_str(&optional_unpack);
         let mut ctx = EmitCtx::none();
         ctx.void_method = true;
@@ -384,8 +424,15 @@ fn trailing_optional_split(params: &[crate::dialect::Param]) -> usize {
 
 /// Pattern-match the simple-shape constructor body (`Seq` of
 /// `@ivar = var` assigns where `var` matches the ivar's Pascal field).
-/// Returns the struct literal text on success.
-fn try_field_init_literal(class_name: &str, body: &Expr) -> Option<String> {
+/// Returns the struct literal text on success. `parent_slot`, when
+/// provided, prepends the embedded-parent initializer
+/// (`ApplicationRecord: NewApplicationRecord(_opts...)`) ahead of the
+/// per-ivar bindings.
+fn try_field_init_literal(
+    class_name: &str,
+    body: &Expr,
+    parent_slot: Option<&str>,
+) -> Option<String> {
     use crate::expr::{ExprNode, LValue};
     let exprs = match &*body.node {
         ExprNode::Seq { exprs } => exprs.as_slice(),
@@ -407,12 +454,12 @@ fn try_field_init_literal(class_name: &str, body: &Expr) -> Option<String> {
     if bindings.is_empty() {
         return None;
     }
-    let parts = bindings
-        .iter()
-        .map(|(f, v)| format!("{f}: {v}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("&{class_name}{{{parts}}}"))
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(slot) = parent_slot {
+        parts.push(slot.to_string());
+    }
+    parts.extend(bindings.iter().map(|(f, v)| format!("{f}: {v}")));
+    Some(format!("&{class_name}{{{}}}", parts.join(", ")))
 }
 
 /// `ActionController::Base` → `ActionControllerBase`. Go identifiers
@@ -420,6 +467,33 @@ fn try_field_init_literal(class_name: &str, body: &Expr) -> Option<String> {
 /// emitted type at least file-parses.
 fn sanitize_type_name(name: &str) -> String {
     name.replace("::", "")
+}
+
+/// Resolve the parent class as the type name to embed (`*Parent`) on
+/// the subclass struct. Returns `None` when the class has no parent
+/// or the parent is a Ruby/system root we don't emit a Go struct for
+/// (e.g. `Object`, `BasicObject`). The chain composes: ApplicationRecord
+/// → `*ActiveRecordBase`, Article → `*ApplicationRecord`. Method
+/// promotion delivers Base's instance methods through both hops.
+fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
+    let parent = class.parent.as_ref()?;
+    let raw = parent.0.as_str();
+    if matches!(raw, "Object" | "BasicObject") {
+        return None;
+    }
+    Some(sanitize_type_name(raw))
+}
+
+/// Synthesize a no-body constructor for classes that embed a parent
+/// but have no Ruby `initialize` of their own (ApplicationRecord, …).
+/// Wires the embedded slot through `New<Parent>(_opts...)` so the
+/// promotion chain has a non-nil receiver. Variadic to mirror the
+/// AR::Base constructor shape — caller's `_opts` flow through when
+/// present, omitting them is also valid.
+fn emit_default_embedded_constructor(class_name: &str, parent_ty: &str) -> String {
+    format!(
+        "func New{class_name}(_opts ...map[string]interface{{}}) *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}(_opts...)}}\n}}\n"
+    )
 }
 
 /// Ruby method names allow `?`, `!`, `=` suffixes; Go identifiers

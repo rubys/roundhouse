@@ -1875,6 +1875,12 @@ fn is_known_class_method(name: &str) -> bool {
         // ActiveRecord::Base lowerer-synthesized panic-overridden
         // per-model method — view_helpers' dom_id relies on parens.
         "dom_prefix"
+        // AR::Base instance method that subclasses inherit via Go
+        // embedding (`Article` embeds `*ApplicationRecord` →
+        // `*ActiveRecordBase`). The 0-arg call site
+        // `instance.mark_persisted!` defaults to bare-field-read
+        // shape; force parens so Go method-call promotion fires.
+        | "mark_persisted!"
     )
 }
 
