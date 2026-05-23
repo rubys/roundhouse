@@ -523,6 +523,21 @@ pub(super) fn emit_send(
     block: Option<&Expr>,
     result_ty: Option<&Ty>,
 ) -> String {
+    // Render kwarg expansion peephole. Ruby `render body,
+    // content_type: "json"` lowers to a Send with args
+    // `[body, Hash{content_type: ...}]`. The promoted
+    // `(*ActionControllerBase).Render(body, status, content_type,
+    // location string)` ctor takes 4 positional strings — without
+    // kwarg expansion the call vet-errors as arity mismatch. Pad here:
+    // - body comes from args[0]
+    // - status/content_type/location come from the trailing-Hash's
+    //   matching key (if present) or the empty-string default
+    // - status defaults to "ok" to match the Ruby `status: :ok` source
+    // The result re-routes through the standard `{}.{}({})` emit
+    // below with the padded args list.
+    let render_padded = try_expand_render_kwargs(ctx, recv, method, args)
+        .or_else(|| try_expand_redirect_to_kwargs(ctx, recv, method, args));
+
     // Hash-widening peephole for module-singleton class methods whose
     // hand-written shim takes `map[string]interface{}` but whose call
     // site passes a uniform-string Hash literal (analyzer pins as
@@ -538,22 +553,26 @@ pub(super) fn emit_send(
     // the rewrite doesn't accidentally widen genuine narrow-Hash
     // dispatches.
     let widen_hash_args = is_broadcasts_call(recv, method);
-    let args_s: Vec<String> = args
-        .iter()
-        .map(|a| {
-            if widen_hash_args {
-                if let ExprNode::Hash { .. } = &*a.node {
-                    let mut widened = a.clone();
-                    widened.ty = Some(Ty::Hash {
-                        key: Box::new(Ty::Str),
-                        value: Box::new(Ty::Untyped),
-                    });
-                    return emit_expr(ctx, &widened);
+    let args_s: Vec<String> = if let Some(padded) = render_padded {
+        padded
+    } else {
+        args
+            .iter()
+            .map(|a| {
+                if widen_hash_args {
+                    if let ExprNode::Hash { .. } = &*a.node {
+                        let mut widened = a.clone();
+                        widened.ty = Some(Ty::Hash {
+                            key: Box::new(Ty::Str),
+                            value: Box::new(Ty::Untyped),
+                        });
+                        return emit_expr(ctx, &widened);
+                    }
                 }
-            }
-            emit_expr(ctx, a)
-        })
-        .collect();
+                emit_expr(ctx, a)
+            })
+            .collect()
+    };
 
     // Ruby `raise X, "msg"` / `raise "msg"` / `raise X` — parses as
     // an implicit-self Send with method `raise`. Maps to Go
@@ -2042,6 +2061,112 @@ fn is_writer_method_name(name: &str) -> bool {
     }
     let prev = name.as_bytes()[name.len() - 2] as char;
     prev.is_ascii_alphanumeric() || prev == '_'
+}
+
+/// Detect a `self.render(...)` call where the lowerer left kwargs as
+/// a trailing Hash literal, and return the padded args list matching
+/// the Go-side `(*ActionControllerBase).Render(body, status,
+/// content_type, location string)` 4-positional signature. Returns
+/// None when the call shape doesn't match (different recv, wrong
+/// method, no trailing Hash AND arg-count already matches the 4).
+///
+/// Default: status `"ok"` (per Ruby `status: :ok`), content_type and
+/// location both `""`. Matches the Ruby source semantics —
+/// `runtime/ruby/action_controller/base.rb`'s `def render(body,
+/// status: :ok, content_type: nil, location: nil)`. The rust2 target
+/// has a generalized `GLOBAL_CLASS_METHOD_DEFAULTS` registry; go2 uses
+/// this hardcoded peephole until a forcing third case appears.
+fn try_expand_render_kwargs(
+    ctx: &EmitCtx,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<Vec<String>> {
+    if method != "render" {
+        return None;
+    }
+    // `self.render(...)` only — Const-recv would route through a
+    // different bare-fn path and isn't the pattern controllers hit.
+    let Some(r) = recv else { return None };
+    if !matches!(&*r.node, ExprNode::SelfRef) {
+        return None;
+    }
+    // Pull body + kwargs from args.
+    let body_s = match args.first() {
+        Some(a) => emit_expr(ctx, a),
+        None => return None,
+    };
+    let mut status_s = "\"ok\"".to_string();
+    let mut content_type_s = "\"\"".to_string();
+    let mut location_s = "\"\"".to_string();
+    if args.len() >= 2 {
+        // Look for a trailing Hash literal carrying status/content_type/
+        // location kwargs. Hash literal entries are (key_expr, value_expr);
+        // match keys by Lit::Str / Lit::Sym contents.
+        if let ExprNode::Hash { entries, .. } = &*args[1].node {
+            for (k, v) in entries {
+                let key_text = match &*k.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    _ => None,
+                };
+                let v_s = emit_expr(ctx, v);
+                match key_text.as_deref() {
+                    Some("status") => status_s = v_s,
+                    Some("content_type") => content_type_s = v_s,
+                    Some("location") => location_s = v_s,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(vec![body_s, status_s, content_type_s, location_s])
+}
+
+/// Sibling of `try_expand_render_kwargs` for `self.redirect_to(...)`.
+/// Ruby `redirect_to(path, notice: ..., alert: ..., status: ...)` →
+/// Go `(*ActionControllerBase).RedirectTo(path, notice, alert, status
+/// string)`. Same hardcoded peephole rationale as render — pending
+/// the GLOBAL_CLASS_METHOD_DEFAULTS-equivalent registry build-out.
+fn try_expand_redirect_to_kwargs(
+    ctx: &EmitCtx,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<Vec<String>> {
+    if method != "redirect_to" {
+        return None;
+    }
+    let Some(r) = recv else { return None };
+    if !matches!(&*r.node, ExprNode::SelfRef) {
+        return None;
+    }
+    let path_s = match args.first() {
+        Some(a) => emit_expr(ctx, a),
+        None => return None,
+    };
+    let mut notice_s = "\"\"".to_string();
+    let mut alert_s = "\"\"".to_string();
+    let mut status_s = "\"\"".to_string();
+    if args.len() >= 2 {
+        if let ExprNode::Hash { entries, .. } = &*args[1].node {
+            for (k, v) in entries {
+                let key_text = match &*k.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    _ => None,
+                };
+                let v_s = emit_expr(ctx, v);
+                match key_text.as_deref() {
+                    Some("notice") => notice_s = v_s,
+                    Some("alert") => alert_s = v_s,
+                    Some("status") => status_s = v_s,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(vec![path_s, notice_s, alert_s, status_s])
 }
 
 /// `Broadcasts.{append,prepend,replace,remove}` call detection — the
