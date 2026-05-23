@@ -14,21 +14,22 @@
 //! every emitter. Landing the typing intent once in the IR means each
 //! emitter just consumes a uniform construct.
 //!
-//! Stage 2: Hash-widening family. When a callee's positional param is
-//! declared `Hash[_, untyped]` (`Ty::Hash { value: Untyped, .. }`) and
-//! the arg's inferred `Ty` is a different concrete Hash shape (or the
-//! arg is an inline Hash literal), wrap the arg in `Cast`. Other
+//! Stage 2/3: Hash-widening family. When a callee's positional param
+//! is declared `Hash[_, untyped]` (`Ty::Hash { value: Untyped, .. }`)
+//! and the arg's inferred `Ty` is a different concrete Hash shape (or
+//! the arg is an inline Hash literal), wrap the arg in `Cast`. Other
 //! coercion families (`T → Option<T>` Some-wrap, `Sym → Str` key
 //! rewrites) land in subsequent stages.
+//!
+//! Callee resolution covers three recv shapes:
+//!   - `Const { path }` — class method dispatch (`ViewHelpers::render_attrs`)
+//!   - `SelfRef` — sibling method in the current class
+//!   - `None` (implicit self) — same as SelfRef
 
 use crate::dialect::LibraryClass;
-use crate::expr::{Expr, ExprNode};
-use crate::ident::Symbol;
-use crate::span::Span;
+use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, RescueClause};
 use crate::ty::{ParamKind, Ty};
 use std::collections::HashMap;
-
-use crate::lower::controller_to_library::util::map_expr;
 
 /// (ClassName, method_name) → param_tys. ClassName is the last segment
 /// of the LC's name (e.g. `ViewHelpers` for `ActionView::ViewHelpers`)
@@ -41,8 +42,10 @@ type CalleeRegistry = HashMap<String, HashMap<String, Vec<Ty>>>;
 pub fn insert_ty_coercions(lcs: &mut [LibraryClass]) {
     let registry = build_registry(lcs);
     for lc in lcs.iter_mut() {
+        let raw = lc.name.0.as_str();
+        let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
         for method in &mut lc.methods {
-            method.body = rewrite_expr(&method.body, &registry);
+            method.body = rewrite_expr(&method.body, &registry, &class_name);
         }
     }
 }
@@ -70,62 +73,224 @@ fn build_registry(lcs: &[LibraryClass]) -> CalleeRegistry {
     out
 }
 
-fn rewrite_expr(body: &Expr, registry: &CalleeRegistry) -> Expr {
-    map_expr(body, &|e: &Expr| -> Option<Expr> {
-        let ExprNode::Send { recv, method, args, block, parenthesized } = &*e.node else {
-            return None;
-        };
-        // Only handle Const-recv class method calls for now — that's the
-        // canonical `ViewHelpers::render_attrs(form_attrs)` shape. Sibling
-        // SelfRef/implicit-self resolution would require per-class context;
-        // deferred until the Const case validates the mechanism end-to-end.
-        let class_name = match recv.as_ref().map(|r| &*r.node) {
-            Some(ExprNode::Const { path }) => {
-                path.last().map(|s| s.as_str().to_string())?
-            }
-            _ => return None,
-        };
-        let param_tys = registry.get(&class_name)?.get(method.as_str())?;
-        let mut new_args = Vec::with_capacity(args.len());
-        let mut changed = false;
-        for (idx, arg) in args.iter().enumerate() {
-            let Some(param_ty) = param_tys.get(idx) else {
-                new_args.push(arg.clone());
-                continue;
+/// Recursive Expr rewriter that threads the enclosing class name
+/// through so SelfRef / implicit-self Sends resolve. Mirrors the shape
+/// of `controller_to_library::util::map_expr` but with an extra
+/// `class_name` argument that lets us look up sibling-method param Tys.
+fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Expr {
+    let new_node = match &*expr.node {
+        ExprNode::Send { recv, method, args, block, parenthesized } => {
+            let new_recv = recv.as_ref().map(|r| rewrite_expr(r, registry, class_name));
+            let new_args: Vec<Expr> = args
+                .iter()
+                .map(|a| rewrite_expr(a, registry, class_name))
+                .collect();
+            let new_block = block.as_ref().map(|b| rewrite_expr(b, registry, class_name));
+            // Resolve the callee's class_name for this Send.
+            let callee_class: Option<String> = match new_recv.as_ref().map(|r| &*r.node) {
+                Some(ExprNode::Const { path }) => {
+                    path.last().map(|s| s.as_str().to_string())
+                }
+                // SelfRef and implicit-self (recv=None) both resolve to
+                // the enclosing LC.
+                Some(ExprNode::SelfRef) | None => Some(class_name.to_string()),
+                _ => None,
             };
-            if needs_hash_widening(param_ty, arg) {
-                new_args.push(wrap_in_cast(arg, param_ty));
-                changed = true;
-            } else {
-                new_args.push(arg.clone());
+            let final_args: Vec<Expr> = match callee_class
+                .as_ref()
+                .and_then(|c| registry.get(c))
+                .and_then(|m| m.get(method.as_str()))
+            {
+                Some(param_tys) => new_args
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, arg)| {
+                        let Some(param_ty) = param_tys.get(idx) else {
+                            return arg;
+                        };
+                        if needs_hash_widening(param_ty, &arg) {
+                            wrap_in_cast(&arg, param_ty)
+                        } else {
+                            arg
+                        }
+                    })
+                    .collect(),
+                None => new_args,
+            };
+            ExprNode::Send {
+                recv: new_recv,
+                method: method.clone(),
+                args: final_args,
+                block: new_block,
+                parenthesized: *parenthesized,
             }
         }
-        if !changed {
-            return None;
+        // Recurse through every other variant that holds child Exprs.
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(|e| rewrite_expr(e, registry, class_name)).collect(),
+        },
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite_expr(cond, registry, class_name),
+            then_branch: rewrite_expr(then_branch, registry, class_name),
+            else_branch: rewrite_expr(else_branch, registry, class_name),
+        },
+        ExprNode::Case { scrutinee, arms } => ExprNode::Case {
+            scrutinee: rewrite_expr(scrutinee, registry, class_name),
+            arms: arms
+                .iter()
+                .map(|a| Arm {
+                    pattern: a.pattern.clone(),
+                    guard: a.guard.as_ref().map(|g| rewrite_expr(g, registry, class_name)),
+                    body: rewrite_expr(&a.body, registry, class_name),
+                })
+                .collect(),
+        },
+        ExprNode::Apply { fun, args, block } => ExprNode::Apply {
+            fun: rewrite_expr(fun, registry, class_name),
+            args: args.iter().map(|a| rewrite_expr(a, registry, class_name)).collect(),
+            block: block.as_ref().map(|b| rewrite_expr(b, registry, class_name)),
+        },
+        ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
+            op: *op,
+            surface: *surface,
+            left: rewrite_expr(left, registry, class_name),
+            right: rewrite_expr(right, registry, class_name),
+        },
+        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite_expr(body, registry, class_name),
+            block_style: *block_style,
+        },
+        ExprNode::Assign { target, value } => {
+            let new_target = match target {
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: rewrite_expr(recv, registry, class_name),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: rewrite_expr(recv, registry, class_name),
+                    index: rewrite_expr(index, registry, class_name),
+                },
+                other => other.clone(),
+            };
+            ExprNode::Assign {
+                target: new_target,
+                value: rewrite_expr(value, registry, class_name),
+            }
         }
-        Some(Expr {
-            span: e.span,
-            node: Box::new(ExprNode::Send {
-                recv: recv.clone(),
-                method: method.clone(),
-                args: new_args,
-                block: block.clone(),
-                parenthesized: *parenthesized,
-            }),
-            ty: e.ty.clone(),
-            effects: e.effects.clone(),
-            leading_blank_line: e.leading_blank_line,
-            diagnostic: e.diagnostic.clone(),
-            str_coercion: e.str_coercion,
-        })
-    })
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements
+                .iter()
+                .map(|e| rewrite_expr(e, registry, class_name))
+                .collect(),
+            style: *style,
+        },
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rewrite_expr(k, registry, class_name),
+                        rewrite_expr(v, registry, class_name),
+                    )
+                })
+                .collect(),
+            kwargs: *kwargs,
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Expr { expr } => InterpPart::Expr {
+                        expr: rewrite_expr(expr, registry, class_name),
+                    },
+                    other => other.clone(),
+                })
+                .collect(),
+        },
+        ExprNode::Yield { args } => ExprNode::Yield {
+            args: args.iter().map(|a| rewrite_expr(a, registry, class_name)).collect(),
+        },
+        ExprNode::Raise { value } => ExprNode::Raise {
+            value: rewrite_expr(value, registry, class_name),
+        },
+        ExprNode::RescueModifier { expr, fallback } => ExprNode::RescueModifier {
+            expr: rewrite_expr(expr, registry, class_name),
+            fallback: rewrite_expr(fallback, registry, class_name),
+        },
+        ExprNode::Return { value } => ExprNode::Return {
+            value: rewrite_expr(value, registry, class_name),
+        },
+        ExprNode::Super { args: Some(args) } => ExprNode::Super {
+            args: Some(args.iter().map(|a| rewrite_expr(a, registry, class_name)).collect()),
+        },
+        ExprNode::Next { value: Some(v) } => ExprNode::Next {
+            value: Some(rewrite_expr(v, registry, class_name)),
+        },
+        ExprNode::Let { name, id, value, body } => ExprNode::Let {
+            name: name.clone(),
+            id: *id,
+            value: rewrite_expr(value, registry, class_name),
+            body: rewrite_expr(body, registry, class_name),
+        },
+        ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
+            targets: targets.clone(),
+            value: rewrite_expr(value, registry, class_name),
+        },
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: rewrite_expr(cond, registry, class_name),
+            body: rewrite_expr(body, registry, class_name),
+            until_form: *until_form,
+        },
+        ExprNode::Range { begin, end, exclusive } => ExprNode::Range {
+            begin: begin.as_ref().map(|b| rewrite_expr(b, registry, class_name)),
+            end: end.as_ref().map(|e| rewrite_expr(e, registry, class_name)),
+            exclusive: *exclusive,
+        },
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, implicit } => {
+            ExprNode::BeginRescue {
+                body: rewrite_expr(body, registry, class_name),
+                rescues: rescues
+                    .iter()
+                    .map(|r| RescueClause {
+                        classes: r
+                            .classes
+                            .iter()
+                            .map(|c| rewrite_expr(c, registry, class_name))
+                            .collect(),
+                        binding: r.binding.clone(),
+                        body: rewrite_expr(&r.body, registry, class_name),
+                    })
+                    .collect(),
+                else_branch: else_branch
+                    .as_ref()
+                    .map(|e| rewrite_expr(e, registry, class_name)),
+                ensure: ensure.as_ref().map(|e| rewrite_expr(e, registry, class_name)),
+                implicit: *implicit,
+            }
+        }
+        ExprNode::Cast { value, target_ty } => ExprNode::Cast {
+            value: rewrite_expr(value, registry, class_name),
+            target_ty: target_ty.clone(),
+        },
+        // Leaves carry no children to rewrite.
+        other => other.clone(),
+    };
+    Expr {
+        span: expr.span,
+        node: Box::new(new_node),
+        ty: expr.ty.clone(),
+        effects: expr.effects.clone(),
+        leading_blank_line: expr.leading_blank_line,
+        diagnostic: expr.diagnostic.clone(),
+        str_coercion: expr.str_coercion,
+    }
 }
 
 /// Hash-widening trigger: param is `Hash[_, untyped]` AND arg is either
 /// a Hash literal OR a value whose inferred Ty is a different Hash
-/// shape (concrete value-ty, not also Untyped). The "different shape"
-/// check avoids wrapping `Hash[String, untyped]` flowing into
-/// `Hash[String, untyped]` (a no-op widen).
+/// shape (concrete value-ty, not also Untyped).
 fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
     let Ty::Hash { value: pv, .. } = param_ty else {
         return false;
@@ -161,12 +326,4 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         diagnostic: None,
         str_coercion: None,
     }
-}
-
-// Suppress unused-import warnings for symbols reserved for future
-// stages (kwarg-key Cast nodes will need Span::synthetic + Symbol).
-#[allow(dead_code)]
-fn _reserved_use() {
-    let _ = Span::synthetic;
-    let _: Option<Symbol> = None;
 }

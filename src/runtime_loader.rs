@@ -974,9 +974,12 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
     // action_view/view_helpers.rb queued. Reconnaissance pass landed
     // 6 supporting wedges (format_module_ivar namespacing, fetch
     // nil→zero coerce, .length/.size int64-wrap consolidation, Var
-    // Int → int64 declaration, .merge / .dup peepholes); next
-    // blocker is map[K, V]→map[K, any] coercion at Send sites
-    // (button_to's `form_attrs` flowing into render_attrs).
+    // Int → int64 declaration, .merge / .dup peepholes); the
+    // map[K, V]→map[K, any] Send-arg coercion that was the next
+    // blocker (button_to's `form_attrs` flowing into render_attrs)
+    // is closed by `lower::ty_coerce_insertion`, but other walker
+    // gaps remain — landing view_helpers in GO_RUNTIME will surface
+    // them one at a time in their own sessions.
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

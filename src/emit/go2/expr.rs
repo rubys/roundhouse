@@ -418,7 +418,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                  }}()",
             )
         }
-        ExprNode::Cast { value, .. } => emit_expr(ctx, value),
+        ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
 }
@@ -1315,6 +1315,38 @@ pub(super) fn emit_send(
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))
         }
     }
+}
+
+/// Emit an `ExprNode::Cast` — the IR's explicit "treat the inner
+/// value as this Ty at the use site" marker. The
+/// `lower::ty_coerce_insertion` lowerer inserts these at call-site
+/// arg positions where the callee's declared param Ty widens the arg.
+///
+/// Hash-widening family: when the target Ty is `Hash<_, untyped>`
+/// (rendering as `map[string]interface{}` in Go) and the inner value
+/// has a different concrete map shape (e.g. `map[string]string` from
+/// a `Hash<Sym, Str>` Var), emit an IIFE that ranges over the source
+/// and assigns into a new `map[string]interface{}`. Go doesn't
+/// auto-widen map element types, so the explicit per-entry copy is
+/// the only generic shape that survives `go vet`.
+///
+/// Non-Hash-widening Cast (column-typed adapter rows, future families)
+/// falls back to identity — emit the inner value. Each subsequent
+/// coercion family adds an arm here.
+fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
+    let inner = emit_expr(ctx, value);
+    if let Ty::Hash { value: tv, .. } = target_ty {
+        if matches!(tv.as_ref(), Ty::Untyped) {
+            let tgt = super::ty::go_ty_stub(Some(target_ty));
+            let src = super::ty::go_ty_stub(value.ty.as_ref());
+            if src != tgt {
+                return format!(
+                    "func() {tgt} {{ _src := {inner}; _out := make({tgt}, len(_src)); for k, v := range _src {{ _out[k] = v }}; return _out }}()"
+                );
+            }
+        }
+    }
+    inner
 }
 
 /// `SelfRef` in value position (not as a Send receiver). Class
