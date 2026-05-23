@@ -1392,15 +1392,30 @@ pub(super) fn emit_send(
     // synthesized by `library::emit_constructor` for any class with
     // an `initialize` method; this rewrite makes the Ruby `.new`
     // call site target it.
+    //
+    // Exception: `Views::<X>.new(args)` is a view module function
+    // call (the `new` action template), not a constructor — the
+    // view_to_library lowerer emits `Views::Articles`, `Views::
+    // Comments`, etc. as modules of bare functions, not classes
+    // with `initialize`. Falling through here lets the generic
+    // `Const(X).method(args)` → `X_method(args)` dispatch below
+    // produce `ViewsArticles_new(args)`, which matches the stub
+    // signature emitted by `views_articles_stubs.go`.
     if method == "new" {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                let class_name = path
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("");
-                return format!("New{class_name}({})", args_s.join(", "));
+                let is_view_module = path
+                    .first()
+                    .map(|s| s.as_str() == "Views")
+                    .unwrap_or(false);
+                if !is_view_module {
+                    let class_name = path
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    return format!("New{class_name}({})", args_s.join(", "));
+                }
             }
         }
         // Bare `new(args)` inside a class method (`def self.create;
