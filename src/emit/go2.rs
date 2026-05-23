@@ -436,6 +436,7 @@ fn needed_imports(content: &str) -> Vec<&'static str> {
         (&["json."], "encoding/json"),
         (&["regexp."], "regexp"),
         (&["slices."], "slices"),
+        (&["strconv."], "strconv"),
         (&["strings."], "strings"),
         (&["time.Now(", "time.RFC3339"], "time"),
     ];

@@ -2109,6 +2109,17 @@ fn map_go_str_method(method: &str, recv_text: &str) -> Option<String> {
         "strip" => Some(format!("strings.TrimSpace({recv_text})")),
         "upcase" => Some(format!("strings.ToUpper({recv_text})")),
         "downcase" => Some(format!("strings.ToLower({recv_text})")),
+        // Ruby `s.to_i` ignores leading whitespace and trailing
+        // non-numeric, returns 0 on parse failure. Mirror that
+        // shape with strconv.Atoi + zero fallback via IIFE. Used
+        // heavily by controllers extracting `params[:id]` into a
+        // numeric for `Article.find`.
+        "to_i" => Some(format!(
+            "func() int64 {{ n, _ := strconv.ParseInt(strings.TrimSpace({recv_text}), 10, 64); return n }}()"
+        )),
+        "to_f" => Some(format!(
+            "func() float64 {{ n, _ := strconv.ParseFloat(strings.TrimSpace({recv_text}), 64); return n }}()"
+        )),
         _ => None,
     }
 }
