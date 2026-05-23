@@ -190,10 +190,48 @@ fn emit_node(n: &ExprNode) -> String {
             }
             s
         }
-        // Ruby is dynamic — no cast operator needed. The Cast IR
-        // node is a hint to typed targets; in Ruby we just emit the
-        // inner value verbatim.
-        ExprNode::Cast { value, .. } => emit_expr(value),
+        // Cast: explicit IR coercion marker. Ruby is dynamic so we
+        // don't need a runtime cast operator — but a downstream Ruby
+        // consumer might be a type-narrowing compiler (spinel AOT)
+        // that benefits from explicit per-use-site coercion calls.
+        // When the target_ty is a primitive and value's body-typer ty
+        // is poly (Untyped or a Union), emit an explicit Ruby
+        // coercion call (`(value).to_s`, etc.). For a String value
+        // this is identity; for a poly value flowing into a typed
+        // slot the call narrows the result and lets spinel infer the
+        // unboxed primitive at the use site without per-ivar RBS
+        // annotations (spinel #651 was the canonical surfacing case).
+        ExprNode::Cast { value, target_ty } => emit_cast(value, target_ty),
+    }
+}
+
+/// Translate an `ExprNode::Cast` to a Ruby expression.
+///
+/// Default: identity — Ruby is dynamic and doesn't need a runtime cast
+/// operator at most positions. Specialization: when the target is a
+/// primitive (`Str`/`Sym`/`Int`/`Float`) and the inner value's
+/// body-typer ty is poly (`Untyped` or a `Union` over several variants),
+/// emit an explicit Ruby coercion call (`(value).to_s` and friends).
+/// This is a no-op semantically for already-narrow values (String#to_s
+/// returns self, Integer#to_i returns self) but it surfaces the
+/// narrowing intent in the emitted source — load-bearing for downstream
+/// Ruby compilers (spinel AOT) that do per-use-site type narrowing.
+fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
+    use crate::ty::Ty;
+    let inner = emit_expr(value);
+    let value_is_poly = matches!(
+        value.ty.as_ref(),
+        Some(Ty::Untyped) | Some(Ty::Union { .. })
+    );
+    if !value_is_poly {
+        return inner;
+    }
+    match target_ty {
+        Ty::Str => format!("({inner}).to_s"),
+        Ty::Sym => format!("({inner}).to_sym"),
+        Ty::Int => format!("({inner}).to_i"),
+        Ty::Float => format!("({inner}).to_f"),
+        _ => inner,
     }
 }
 
