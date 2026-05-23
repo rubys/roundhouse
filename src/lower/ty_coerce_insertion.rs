@@ -110,6 +110,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                         };
                         if needs_hash_widening(param_ty, &arg)
                             || needs_some_wrap(param_ty, &arg)
+                            || needs_value_to_primitive(param_ty, &arg)
                         {
                             wrap_in_cast(&arg, param_ty)
                         } else {
@@ -352,6 +353,52 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
         return true;
     }
     false
+}
+
+/// Value-to-primitive narrowing trigger: param is a primitive
+/// (`Str`/`Sym`/`Int`/`Float`/`Bool`) AND arg's body-typer ty contains
+/// `Untyped` (directly or inside a Union). This is the "wide runtime
+/// value flowing into a typed slot" pattern — boxed value gets unboxed
+/// at the use site.
+///
+/// Cross-target value: every strict-typed target has this shape
+///   - Rust: serde_json::Value → String / i64
+///   - Go: interface{} → string / int64
+///   - Spinel: sp_RbVal → const char * / int
+///   - Ruby (for spinel typer benefit): poly value → narrowed type via to_s/to_i
+///
+/// rust2 consumes via its existing Cast arm (`coerce_arg_for_field_ty`
+/// has the Value→primitive narrowing); ruby consumes via Stage 5's
+/// emit_cast; go2 consumes via emit_cast's primitive arm.
+fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
+    if matches!(&*arg.node, ExprNode::Cast { .. }) {
+        return false;
+    }
+    if !matches!(
+        param_ty,
+        Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
+    ) {
+        return false;
+    }
+    let Some(arg_ty) = arg.ty.as_ref() else {
+        return false;
+    };
+    // If arg is already the same primitive type, no narrowing needed.
+    if arg_ty == param_ty {
+        return false;
+    }
+    ty_contains_untyped(arg_ty)
+}
+
+/// True when `ty` contains a `Ty::Untyped` anywhere — directly or
+/// inside a `Union` variant. Duplicates `emit::rust2::expr::util::
+/// ty_contains_untyped` because the lowerer is target-neutral.
+fn ty_contains_untyped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped => true,
+        Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
+        _ => false,
+    }
 }
 
 /// Peel `Option<T>` (`Union { Nil, T }`) to its inner `T`. Returns

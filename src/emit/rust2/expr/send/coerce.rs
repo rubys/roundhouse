@@ -53,6 +53,27 @@ pub(super) fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) 
 ///    String-producing source (Var/Send/Ivar) → `&(raw)`.
 pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
+    // Value → primitive narrowing at Send arg position: when arg is
+    // `Cast(inner, primitive_ty)` from the `lower::ty_coerce_insertion`
+    // Family 2, and inner's body-typer Ty contains Untyped, use the
+    // arg-position coercion (`(raw).as_str().unwrap()`) — NOT
+    // emit_expr's Cast arm (which goes through `coerce_arg_for_field_ty`
+    // producing the owned-String shape `as_str().unwrap().to_string()`
+    // appropriate for field assigns but wasteful at `&str` arg
+    // positions). Pre-Stage-6 unwrapped args hit this same path via
+    // Family 2 below — peek-through here keeps the emit identical.
+    if let ExprNode::Cast { value, target_ty } = &*arg.node {
+        if matches!(
+            target_ty,
+            Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
+        ) && value.ty.as_ref().map(ty_contains_untyped).unwrap_or(false)
+        {
+            if let Some(coerce) = super::super::util::value_narrowing_coercion(target_ty) {
+                let inner_raw = emit_expr(value);
+                return format!("({inner_raw}).{coerce}");
+            }
+        }
+    }
     let raw = emit_expr(arg);
     let arg_ty_peeled = arg.ty.as_ref().map(peel_nil);
 

@@ -1322,17 +1322,26 @@ pub(super) fn emit_send(
 /// `lower::ty_coerce_insertion` lowerer inserts these at call-site
 /// arg positions where the callee's declared param Ty widens the arg.
 ///
-/// Hash-widening family: when the target Ty is `Hash<_, untyped>`
-/// (rendering as `map[string]interface{}` in Go) and the inner value
-/// has a different concrete map shape (e.g. `map[string]string` from
-/// a `Hash<Sym, Str>` Var), emit an IIFE that ranges over the source
-/// and assigns into a new `map[string]interface{}`. Go doesn't
-/// auto-widen map element types, so the explicit per-entry copy is
-/// the only generic shape that survives `go vet`.
+/// Two families consumed here:
 ///
-/// Non-Hash-widening Cast (column-typed adapter rows, future families)
-/// falls back to identity — emit the inner value. Each subsequent
-/// coercion family adds an arm here.
+/// - **Hash widening**: target `Hash<_, untyped>`
+///   (`map[string]interface{}`) with a narrower source map. Emit IIFE
+///   that ranges over the source and copies into a new
+///   `map[string]interface{}`. Go doesn't auto-widen map element
+///   types; the per-entry copy is the only generic shape that
+///   survives `go vet`.
+///
+/// - **Value → primitive narrowing**: target `Str`/`Sym` with a
+///   source whose Ty contains `Untyped` (boxed value flowing into a
+///   typed slot). Emit `fmt.Sprintf("%v", inner)` — robust against
+///   any source type, identity for strings under the `%v` verb's
+///   String-call semantics. Int/Float/Bool narrowing intentionally
+///   deferred: Go's `interface{}` → numeric type-assert path is
+///   per-arity (int / int32 / int64 / float64) and needs receiver-
+///   Ty knowledge that's better handled when a concrete site demands it.
+///
+/// Other Cast targets fall back to identity — each subsequent family
+/// adds an arm here.
 fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     let inner = emit_expr(ctx, value);
     if let Ty::Hash { value: tv, .. } = target_ty {
@@ -1345,6 +1354,13 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
                 );
             }
         }
+    }
+    // Value → primitive narrowing (Str/Sym). The lowerer's
+    // `needs_value_to_primitive` gate ensures we only see this when
+    // the source Ty actually contains Untyped — no widening-only or
+    // already-typed args reach here.
+    if matches!(target_ty, Ty::Str | Ty::Sym) {
+        return format!("fmt.Sprintf(\"%v\", {inner})");
     }
     inner
 }
