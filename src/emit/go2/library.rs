@@ -31,6 +31,21 @@ use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
 
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    emit_library_class_with_registry(class, &std::collections::HashSet::new())
+}
+
+/// Variant that takes a `variadic_ctors` set so synthesized embedded-
+/// parent constructor calls match the parent's actual ctor shape.
+/// Without this, `NewApplicationController(_opts...)` forwards into
+/// `NewActionControllerBase(_opts...)` even though the latter is
+/// non-variadic (Ruby `def initialize` with no params → Go no-arg
+/// ctor). Build the set in `go2.rs::emit_overlay_files` by walking
+/// every LC (runtime + models + controllers) and checking whether
+/// its `initialize` MethodDef has a trailing-optional param.
+pub fn emit_library_class_with_registry(
+    class: &LibraryClass,
+    variadic_ctors: &std::collections::HashSet<String>,
+) -> Result<String, String> {
     // Module-singleton shape: a Ruby `module X` whose body is just
     // `class << self; attr_accessor :slot; end` (and/or `def self.foo`
     // methods). All methods are Class receivers; no instances exist.
@@ -89,13 +104,26 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // parent-embedding shape with NO `initialize` of its own
     // (ApplicationRecord), synthesize a pass-through constructor so
     // subclasses can build the embedded slot via `NewParent(_opts...)`.
+    let parent_is_variadic = embedded_parent
+        .as_deref()
+        .map(|p| variadic_ctors.contains(p))
+        .unwrap_or(false);
     if let Some(init) = class.methods.iter().find(|m| {
         matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
     }) {
-        out.push_str(&emit_constructor(&name, init, embedded_parent.as_deref()));
+        out.push_str(&emit_constructor(
+            &name,
+            init,
+            embedded_parent.as_deref(),
+            parent_is_variadic,
+        ));
         out.push('\n');
     } else if let Some(ref parent_ty) = embedded_parent {
-        out.push_str(&emit_default_embedded_constructor(&name, parent_ty));
+        out.push_str(&emit_default_embedded_constructor(
+            &name,
+            parent_ty,
+            parent_is_variadic,
+        ));
         out.push('\n');
     }
 
@@ -385,6 +413,7 @@ fn emit_constructor(
     class_name: &str,
     init: &MethodDef,
     embedded_parent: Option<&str>,
+    parent_is_variadic: bool,
 ) -> String {
     let (params, optional_unpack) = render_constructor_params(init);
     let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
@@ -392,13 +421,16 @@ fn emit_constructor(
     // Inject the embedded-parent constructor call when present —
     // `&Article{ApplicationRecord: NewApplicationRecord(_opts...)}`
     // initializes the embedded slot so promoted methods see a non-nil
-    // receiver. The `_opts...` forwarding mirrors the variadic shape
-    // both constructors use for the optional-attrs param; when the
-    // current constructor doesn't declare `_opts`, the spread is
-    // omitted (no caller-side mismatch since `NewParent()` is also
-    // variadic and accepts zero args).
+    // receiver. Only forward `_opts...` when BOTH the current ctor is
+    // variadic AND the parent ctor is variadic. Forwarding into a
+    // non-variadic parent is a vet error; calling a variadic parent
+    // with no args is fine (zero variadic slots).
     let parent_slot = embedded_parent.map(|p| {
-        let forward = if params.contains("_opts ...") { "_opts..." } else { "" };
+        let forward = if params.contains("_opts ...") && parent_is_variadic {
+            "_opts..."
+        } else {
+            ""
+        };
         format!("{p}: New{p}({forward})")
     });
 
@@ -565,15 +597,28 @@ fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
 }
 
 /// Synthesize a no-body constructor for classes that embed a parent
-/// but have no Ruby `initialize` of their own (ApplicationRecord, …).
-/// Wires the embedded slot through `New<Parent>(_opts...)` so the
-/// promotion chain has a non-nil receiver. Variadic to mirror the
-/// AR::Base constructor shape — caller's `_opts` flow through when
-/// present, omitting them is also valid.
-fn emit_default_embedded_constructor(class_name: &str, parent_ty: &str) -> String {
-    format!(
-        "func New{class_name}(_opts ...map[string]interface{{}}) *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}(_opts...)}}\n}}\n"
-    )
+/// but have no Ruby `initialize` of their own (ApplicationRecord,
+/// ApplicationController, …). Match the parent's ctor shape — variadic
+/// for AR::Base-rooted chains (Article ← ApplicationRecord ←
+/// ActiveRecordBase, all take optional `_attrs = {}`), non-variadic
+/// for AC::Base-rooted chains (ArticlesController ← ApplicationController
+/// ← ActionControllerBase, plain `def initialize`). `parent_is_variadic`
+/// comes from a pre-pass over every LC's `initialize` MethodDef in
+/// `go2.rs::emit_overlay_files`.
+fn emit_default_embedded_constructor(
+    class_name: &str,
+    parent_ty: &str,
+    parent_is_variadic: bool,
+) -> String {
+    if parent_is_variadic {
+        format!(
+            "func New{class_name}(_opts ...map[string]interface{{}}) *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}(_opts...)}}\n}}\n"
+        )
+    } else {
+        format!(
+            "func New{class_name}() *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}()}}\n}}\n"
+        )
+    }
 }
 
 /// Ruby method names allow `?`, `!`, `=` suffixes; Go identifiers

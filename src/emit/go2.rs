@@ -106,7 +106,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         }
     };
 
-    for unit in units {
+    for unit in &units {
         // The runtime_loader produces paths shaped like `app/X.go`
         // from GO_RUNTIME; relocate everything under `app/v2/` and
         // re-anchor the package to `v2` so this overlay can never
@@ -197,8 +197,71 @@ func main() {\n\
             vec![],
         );
         let lowered_models = lower::lower_for_go(model_lcs);
+
+        // Controllers are lowered next so we can build the variadic-
+        // ctor registry across the full set (runtime + models +
+        // controllers) before any LC's emit fires. Synthesized
+        // embedded-parent ctors need to match the parent's ctor
+        // variadicity — see library::emit_default_embedded_constructor.
+        let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+            lowered_models
+                .iter()
+                .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
+                .collect();
+        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
+            &app.controllers,
+            model_extras,
+            Some(&app.schema),
+            &app.views,
+        );
+        let lowered_controllers = lower::lower_for_go(controller_lcs);
+
+        // Build variadic-ctor registry. Transitive closure: a class is
+        // variadic if its `initialize` has trailing-optional/variadic
+        // params, OR (no own initialize) its parent is variadic.
+        let mut variadic_ctors: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        loop {
+            let before = variadic_ctors.len();
+            for lc in units.iter().flat_map(|u| u.classes.iter())
+                .chain(lowered_models.iter())
+                .chain(lowered_controllers.iter())
+            {
+                let sanitized = lc.name.0.as_str().replace("::", "");
+                if variadic_ctors.contains(&sanitized) {
+                    continue;
+                }
+                let has_init = lc.methods.iter().any(|m| {
+                    matches!(m.receiver, crate::dialect::MethodReceiver::Instance)
+                        && m.name.as_str() == "initialize"
+                });
+                let init_is_variadic = lc.methods.iter().find(|m| {
+                    matches!(m.receiver, crate::dialect::MethodReceiver::Instance)
+                        && m.name.as_str() == "initialize"
+                }).map(|m| {
+                    // render_constructor_params lifts trailing-defaulted
+                    // params into a Go variadic — match the same predicate
+                    // so the registry stays consistent.
+                    m.params.iter().any(|p| p.default.is_some())
+                }).unwrap_or(false);
+                if has_init {
+                    if init_is_variadic {
+                        variadic_ctors.insert(sanitized);
+                    }
+                } else if let Some(parent) = lc.parent.as_ref() {
+                    let parent_san = parent.0.as_str().replace("::", "");
+                    if variadic_ctors.contains(&parent_san) {
+                        variadic_ctors.insert(sanitized);
+                    }
+                }
+            }
+            if variadic_ctors.len() == before {
+                break;
+            }
+        }
+
         for lc in &lowered_models {
-            let class_text = match library::emit_library_class(lc) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -215,28 +278,8 @@ func main() {\n\
             });
         }
 
-        // Phase 4 wedge 2 — controllers through go2 emit. Mirrors
-        // the rust2/typescript pattern: lower controllers with model
-        // + view extras so action bodies' `Article.find(...)` and
-        // `Views::Articles.index(...)` calls type through the same
-        // registry the model lowerer used. Inventory-mode for now —
-        // emit each controller LC through `library::emit_library_class`
-        // and let unhandled walker variants surface as TODO markers
-        // (rust2's Phase 5 inventory-cycle pattern).
-        let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
-            lowered_models
-                .iter()
-                .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
-                .collect();
-        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
-            &app.controllers,
-            model_extras,
-            Some(&app.schema),
-            &app.views,
-        );
-        let lowered_controllers = lower::lower_for_go(controller_lcs);
         for lc in &lowered_controllers {
-            let class_text = match library::emit_library_class(lc) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -408,5 +451,5 @@ fn emit_imports(out: &mut String, imports: &[&str]) {
 // emitted shape without going through the GO_RUNTIME wiring — that
 // keeps shape coverage decoupled from "is this file currently in
 // the v2/ overlay" gating.
-pub use library::emit_library_class;
+pub use library::{emit_library_class, emit_library_class_with_registry};
 pub(crate) use library::{emit_module, format_constant, format_module_ivar};
