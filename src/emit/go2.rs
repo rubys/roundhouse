@@ -45,6 +45,10 @@ const RT_V2_FRAMEWORK_TEST_ADAPTER: &str =
     include_str!("../../runtime/go/v2/framework_test_adapter.go");
 const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
+const RT_V2_DB: &str =
+    include_str!("../../runtime/go/v2/db.go");
+const RT_V2_BROADCASTS: &str =
+    include_str!("../../runtime/go/v2/broadcasts.go");
 
 /// Append go2 transpiled runtime files to `files` when
 /// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
@@ -66,6 +70,11 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // Hand-written runtime — copied verbatim under `app/v2/`.
     // Emitted FIRST so the transpiled framework runtime files can
     // assume their types resolve at parse time.
+    // Always-on overlay shims — stdlib-only imports, ship unconditionally
+    // with `ROUNDHOUSE_GO_V2=1`. Model-only shims (db, broadcasts) ship
+    // below behind the models env var so the default toolchain test
+    // (which doesn't tidy go.mod for app-only sqlite dependencies)
+    // stays clean.
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("framework_test_adapter.go", RT_V2_FRAMEWORK_TEST_ADAPTER),
@@ -121,6 +130,25 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     if std::env::var("ROUNDHOUSE_GO_V2_MODELS").as_deref() == Ok("1")
         && !app.models.is_empty()
     {
+        // Model-only runtime shims. Db_* bridges database/sql for the
+        // per-model adapter_emit lowerer's `Db.prepare(sql)` /
+        // `Db.step?(stmt)` / `Db.column_*` calls; Broadcasts_* captures
+        // the broadcasts_to-emitted `Broadcasts.prepend(...)` log.
+        // Both have no useful Ruby implementation to transpile —
+        // mirrors `runtime/rust/db.rs` + `runtime/rust/broadcasts.rs`
+        // hand-written rationale. Gated here (not at the always-on
+        // overlay above) because db.go pulls modernc.org/sqlite into
+        // go.mod and the default toolchain test won't tidy.
+        for (name, src) in [
+            ("db.go", RT_V2_DB),
+            ("broadcasts.go", RT_V2_BROADCASTS),
+        ] {
+            out.push(EmittedFile {
+                path: PathBuf::from(format!("app/v2/{name}")),
+                content: src.to_string(),
+            });
+        }
+
         let model_lcs = crate::lower::model_to_library::lower_models_to_library_classes(
             &app.models,
             &app.schema,
@@ -144,6 +172,62 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 content,
             });
         }
+
+        // Per-view stubs for the broadcasts_to-referenced partials.
+        // The model lowerer's `broadcasts_to` expansion synthesizes
+        // calls like `Views::Articles.article(self)` inside
+        // `after_create_commit`. Without a concrete `Views::X` module
+        // those references vet-fail (`undefined: ViewsArticles_article`).
+        // Emit minimal stubs that produce an empty-string fragment —
+        // sufficient for the live broadcast log to capture the action,
+        // pending real view emit. Each stub is gated by
+        // `app.views` containing a partial under the matching
+        // resource dir; missing-dir → no stub (and the model emit's
+        // broadcasts_to expansion presumably wouldn't reference it).
+        // Mirrors the rust2 "view-module stubs from lowerer" pass.
+        let referenced: std::collections::BTreeSet<(String, String)> =
+            crate::lower::view_to_library::lower_views_to_library_classes(
+                &app.views, app, vec![],
+            )
+            .into_iter()
+            .flat_map(|lc| {
+                let mod_name = sanitize_module_name(lc.name.0.as_str());
+                lc.methods
+                    .into_iter()
+                    .filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Class))
+                    .map(move |m| (mod_name.clone(), m.name.as_str().to_string()))
+            })
+            .collect();
+        if !referenced.is_empty() {
+            let mut by_module: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (m, name) in referenced {
+                by_module.entry(m).or_default().push(name);
+            }
+            for (module_name, methods) in by_module {
+                let mut body = String::new();
+                body.push_str("// View module stub. Real view emit lands in a later phase;\n");
+                body.push_str("// the empty-string fallback keeps the broadcast log capturing\n");
+                body.push_str("// the action while the html fragment shape isn't yet wired.\n\n");
+                body.push_str("package app\n\n");
+                for method in methods {
+                    // Module-singleton emit shape from go2/library.rs:
+                    // `func <ClassName>_<ruby_method_name>(...)`. Match
+                    // it exactly so the model's `Views::X.partial(self)`
+                    // calls resolve. Ruby method name is unmodified
+                    // (no pascalization for the bare-fn suffix).
+                    body.push_str(&format!(
+                        "func {module_name}_{method}(_record interface{{}}) string {{\n\treturn \"\"\n}}\n\n",
+                    ));
+                }
+                let content = rewrite_package_to_v2(&body);
+                let stem = crate::naming::snake_case(&module_name);
+                out.push(EmittedFile {
+                    path: PathBuf::from(format!("app/v2/{stem}_stubs.go")),
+                    content,
+                });
+            }
+        }
     }
 
     out
@@ -154,6 +238,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
 /// references (`cmp`, `fmt`, `regexp`, `slices`, `strings`, `time`).
 /// Go is strict about unused imports so detection is by substring
 /// presence, not always-on.
+/// `Views::Articles` → `ViewsArticles`. Same logic as
+/// `library.rs::sanitize_type_name`, repeated here so the stub-emit
+/// path doesn't need to reach into library internals for a one-liner.
+fn sanitize_module_name(name: &str) -> String {
+    name.replace("::", "")
+}
+
 fn rewrite_package_to_v2(content: &str) -> String {
     let imports = needed_imports(content);
     let mut out = String::with_capacity(content.len() + 64);
