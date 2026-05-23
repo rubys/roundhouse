@@ -169,8 +169,10 @@ fn needed_imports(content: &str) -> Vec<&'static str> {
     // the peepholes emit (`time.Now(`, `time.RFC3339`). Add probes
     // here when a new `time.X` emit lands.
     let entries: &[(&[&str], &str)] = &[
+        (&["base64."], "encoding/base64"),
         (&["cmp."], "cmp"),
         (&["fmt."], "fmt"),
+        (&["json."], "encoding/json"),
         (&["regexp."], "regexp"),
         (&["slices."], "slices"),
         (&["strings."], "strings"),

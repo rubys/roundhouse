@@ -1006,16 +1006,32 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `arr.join(sep)` → Go `strings.Join(arr, sep)`. Requires
-    // arr to be `[]string`; `[]interface{}` arr would compile error
-    // surfacing the type-inference gap (Array literals currently
-    // default to `[]interface{}` regardless of element types).
-    if method == "join" && args.len() == 1 {
+    // Ruby `arr.join(sep)` → Go `strings.Join(arr, sep)` when the
+    // receiver renders to `[]string`. Bare `arr.join` (no arg)
+    // matches Ruby's default of an empty separator. For wider
+    // element types (`[]interface{}`, `[]any`, etc. — usually a
+    // `parts = []` Var whose elem Ty wasn't back-propagated from
+    // later `<<`/`push` sites) wrap with a range-to-string-slice
+    // IIFE so each element gets the `%v` stringify before
+    // `strings.Join` runs.
+    if method == "join" && args.len() <= 1 {
         if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            let recv_go_ty = super::ty::go_ty_stub(r.ty.as_ref());
+            let sep = if args.is_empty() {
+                "\"\"".to_string()
+            } else {
+                args_s[0].clone()
+            };
+            if recv_go_ty == "[]string" {
+                return format!("strings.Join({recv_s}, {sep})");
+            }
             return format!(
-                "strings.Join({}, {})",
-                emit_expr(ctx, r),
-                args_s[0]
+                "strings.Join(func() []string {{\n\
+                 \t_out := make([]string, 0, len({recv_s}))\n\
+                 \tfor _, _v := range {recv_s} {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}\n\
+                 \treturn _out\n\
+                 }}(), {sep})",
             );
         }
     }
@@ -1213,6 +1229,33 @@ pub(super) fn emit_send(
         }
     }
 
+    // Stdlib-module call rewrites where the Ruby receiver is a
+    // `Const` referencing a module name with a Go equivalent.
+    // Base64.strict_encode64(s) → base64.StdEncoding.EncodeToString
+    // ([]byte(s)). JSON.generate(x) → IIFE around json.Marshal that
+    // discards the error (mirrors Ruby's "raises on bad encode" by
+    // letting Go's encoder produce an empty string for the unhappy
+    // path; runtime/ruby/ inputs are well-formed today). Both require
+    // imports — `needed_imports` probes for `base64.`/`json.` to pull
+    // them in.
+    if let Some(r) = recv {
+        if let ExprNode::Const { path } = &*r.node {
+            let module = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+            if module == "Base64" && method == "strict_encode64" && args.len() == 1 {
+                return format!(
+                    "base64.StdEncoding.EncodeToString([]byte({}))",
+                    args_s[0]
+                );
+            }
+            if module == "JSON" && method == "generate" && args.len() == 1 {
+                return format!(
+                    "func() string {{ _b, _ := json.Marshal({}); return string(_b) }}()",
+                    args_s[0]
+                );
+            }
+        }
+    }
+
     // Receiver-Ty-aware dispatch for methods whose name is ambiguous
     // between String and Array receivers (`include?` is both
     // `strings.Contains` and `slices.Contains`). When `recv.ty` carries
@@ -1308,6 +1351,30 @@ pub(super) fn emit_send(
                         .map(|set| set.contains(method))
                         .unwrap_or(false);
                 if in_self_methods {
+                    return format!("{recv_s}.{go_m}()");
+                }
+                // Force call-form for known non-field methods on
+                // typed receivers. The 0-arg-Send-as-field-read
+                // heuristic above defaults to bare property access
+                // (the right shape for AR struct fields like
+                // `record.id` / `record.title`), but real methods
+                // such as `dom_prefix` (lowerer-synthesized per-
+                // model + panic-overridden on Base) MUST emit with
+                // parens — bare `record.DomPrefix` is a func-value
+                // reference, which `go vet` flags.
+                //
+                // TODO: replace with the eventual IR-level
+                // `Send.parenthesized` flag (TS already consumes it
+                // — see src/emit/typescript/expr.rs:2555). The
+                // syntactic `record.dom_prefix()` parens the author
+                // wrote should survive ingest into the IR so
+                // emitters that distinguish method-call vs field-
+                // read can honor it without per-target heuristic
+                // lists. Complementary piece: per-class
+                // AccessorKind registry threaded through ctx so
+                // call sites that omit parens still resolve
+                // definitionally.
+                if is_known_class_method(method) {
                     return format!("{recv_s}.{go_m}()");
                 }
                 return format!("{recv_s}.{go_m}");
@@ -1465,16 +1532,20 @@ fn is_a_predicate<'a>(e: &'a Expr) -> Option<(&'a Expr, &'a str)> {
 }
 
 /// Map a Ruby class name to the Go type used by `v.(T)` assertion.
-/// Returns `None` for classes whose Go counterpart needs more
-/// context (Hash → `map[K]V`, Array → `[]E`, user-defined classes)
-/// — those fall through to the bare-call emit so the gap stays
-/// visible.
+/// Returns `None` for user-defined classes — those fall through to
+/// the bare-call emit so the gap stays visible. Hash / Array map to
+/// their permissive `map[string]any` / `[]any` shapes because the
+/// is_a? branch typically treats the asserted value generically (use
+/// sites that need a tighter element Ty re-narrow at the use, not
+/// here).
 fn ruby_class_to_go_assert_ty(class: &str) -> Option<&'static str> {
     Some(match class {
         "Integer" => "int64",
         "Float" => "float64",
         "String" => "string",
         "Symbol" => "string",
+        "Hash" => "map[string]any",
+        "Array" => "[]any",
         _ => return None,
     })
 }
@@ -1539,6 +1610,8 @@ fn assert_ident_for(go_ty: &str) -> &'static str {
         "string" => "s",
         "int64" => "i",
         "float64" => "f",
+        "map[string]any" => "h",
+        "[]any" => "a",
         _ => "narrowed",
     }
 }
@@ -1731,6 +1804,22 @@ fn is_known_go_method(name: &str) -> bool {
         "save" | "save!" | "destroy" | "destroy!" | "update" | "update!"
             | "delete" | "touch" | "reload"
             | "validate" | "attributes" | "errors"
+    )
+}
+
+/// Methods that emit as a Go method call (`.X()`) rather than the
+/// default attr-reader-shaped bare field read (`.X`) when called
+/// 0-arg on a Class-typed receiver. Real methods (not attr_reader-
+/// backed struct fields) — without parens, `go vet` flags the emit
+/// as a method-value reference. Replace with a per-class method
+/// registry once go2 grows one; this list is the minimum needed
+/// to keep `runtime/ruby/` emit clean today.
+fn is_known_class_method(name: &str) -> bool {
+    matches!(
+        name,
+        // ActiveRecord::Base lowerer-synthesized panic-overridden
+        // per-model method — view_helpers' dom_id relies on parens.
+        "dom_prefix"
     )
 }
 

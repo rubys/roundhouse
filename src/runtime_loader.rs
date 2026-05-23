@@ -971,15 +971,17 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // action_view/view_helpers.rb queued. Reconnaissance pass landed
-    // 6 supporting wedges (format_module_ivar namespacing, fetch
-    // nil→zero coerce, .length/.size int64-wrap consolidation, Var
-    // Int → int64 declaration, .merge / .dup peepholes); the
-    // map[K, V]→map[K, any] Send-arg coercion that was the next
-    // blocker (button_to's `form_attrs` flowing into render_attrs)
-    // is closed by `lower::ty_coerce_insertion`, but other walker
-    // gaps remain — landing view_helpers in GO_RUNTIME will surface
-    // them one at a time in their own sessions.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "",
+        out_path: "app/view_helpers.go",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: GO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape

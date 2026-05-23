@@ -27,6 +27,23 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             )
         }
         Some(Ty::Array { elem }) => format!("[]{}", go_ty_stub(Some(elem))),
+        // Anonymous record types — RBS `{ name: String, path: String }`.
+        // Go has no NamedTuple analog, so collapse to a `map[string]T`.
+        // When every field shares the same Ty (the common case: an
+        // importmap-pin record with all-String fields), use that Ty
+        // as the value type so use-site `p["name"]` indexes cleanly.
+        // Heterogeneous records widen to `map[string]any` — callers
+        // type-assert per field at the use site, matching Go's idiom
+        // for dynamic-key maps.
+        Some(Ty::Record { row }) => {
+            let mut field_tys = row.fields.values();
+            match field_tys.next() {
+                Some(first) if field_tys.clone().all(|t| t == first) => {
+                    format!("map[string]{}", go_ty_stub(Some(first)))
+                }
+                _ => "map[string]any".to_string(),
+            }
+        }
         // `Union { Nil, T }` collapses to `T`'s Go type IFF `T` maps
         // to a Go reference type (map, slice, pointer-to-struct) OR
         // is a string (where "" stands in for nil, the Go-idiomatic
