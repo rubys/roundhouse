@@ -81,12 +81,23 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    this wedge.
     if is_option_ty(param_ty) {
         let inner = peel_nil(param_ty);
+        // Peek through Cast wrappers — `lower::ty_coerce_insertion`
+        // inserts `Cast(arg, Option<T>)` at Send arg positions whose
+        // callee param is Option<T>. Family 6's owned-producing and
+        // literal-Str checks below need to see the inner arg shape
+        // (Var/Send/Ivar/Literal), not the Cast wrapper. Same pattern
+        // Family 1 (Hash widening) uses below.
+        let probe: &Expr = if let ExprNode::Cast { value, .. } = &*arg.node {
+            value
+        } else {
+            arg
+        };
         let owned_producing = matches!(
-            &*arg.node,
+            &*probe.node,
             ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
         );
         if owned_producing
-            && arg.ty.as_ref() == Some(inner)
+            && probe.ty.as_ref() == Some(inner)
             && !matches!(inner, Ty::Untyped)
         {
             return format!("Some({raw})");
@@ -98,10 +109,10 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // the suffix slot is declared `Option<String>` but the source
         // passes a bare string literal.
         if matches!(
-            &*arg.node,
+            &*probe.node,
             ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
         ) && matches!(inner, Ty::Str | Ty::Sym)
-            && arg.str_coercion.is_none()
+            && probe.str_coercion.is_none()
         {
             return format!("Some({raw}.to_string())");
         }

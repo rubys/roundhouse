@@ -27,7 +27,7 @@
 //!   - `None` (implicit self) — same as SelfRef
 
 use crate::dialect::LibraryClass;
-use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, RescueClause};
+use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, RescueClause};
 use crate::ty::{ParamKind, Ty};
 use std::collections::HashMap;
 
@@ -108,7 +108,9 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                         let Some(param_ty) = param_tys.get(idx) else {
                             return arg;
                         };
-                        if needs_hash_widening(param_ty, &arg) {
+                        if needs_hash_widening(param_ty, &arg)
+                            || needs_some_wrap(param_ty, &arg)
+                        {
                             wrap_in_cast(&arg, param_ty)
                         } else {
                             arg
@@ -311,6 +313,63 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
         }
     }
     false
+}
+
+/// Some-wrap trigger: param is `Option<U>` (`Union { Nil, U }`) and
+/// arg's body-typer ty is exactly `U` (not nilable). Mirrors rust2's
+/// Family 6 gates so wrapping behavior matches what Family 6 produces
+/// when no Cast is present.
+///
+/// Two branches:
+///   - Owned-producing arg (`Var`/`Send`/`Ivar`) whose `arg.ty == U`
+///   - Literal `Str`/`Sym` arg with inner `U` being `Str`/`Sym`
+///     (rust2 emits `Some(literal.to_string())` to widen `&'static str`
+///     → owned `String`; other emitters can choose their own shape)
+fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
+    if matches!(&*arg.node, ExprNode::Cast { .. }) {
+        return false;
+    }
+    let Some(inner) = peel_option(param_ty) else {
+        return false;
+    };
+    if matches!(inner, Ty::Untyped) {
+        return false;
+    }
+    // Owned-producing branch.
+    let owned_producing = matches!(
+        &*arg.node,
+        ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
+    );
+    if owned_producing && arg.ty.as_ref() == Some(inner) {
+        return true;
+    }
+    // Literal Str/Sym branch.
+    if matches!(
+        &*arg.node,
+        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+    ) && matches!(inner, Ty::Str | Ty::Sym)
+    {
+        return true;
+    }
+    false
+}
+
+/// Peel `Option<T>` (`Union { Nil, T }`) to its inner `T`. Returns
+/// `None` when the param isn't a 2-variant Union with one Nil arm.
+/// Mirrors rust2's `is_option_ty` + `peel_nil` shape but as a single
+/// idiomatic helper for this lowerer.
+fn peel_option(ty: &Ty) -> Option<&Ty> {
+    let Ty::Union { variants } = ty else {
+        return None;
+    };
+    if variants.len() != 2 {
+        return None;
+    }
+    let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+    if !has_nil {
+        return None;
+    }
+    variants.iter().find(|v| !matches!(v, Ty::Nil))
 }
 
 fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
