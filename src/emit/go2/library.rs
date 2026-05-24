@@ -828,7 +828,7 @@ fn emit_method(
     m: &MethodDef,
     self_methods: &std::rc::Rc<std::collections::HashSet<String>>,
 ) -> String {
-    let params = render_params(m);
+    let (params, optional_unpack) = render_params_with_unpack(m);
     let ret = render_return(m);
     let receiver = match m.receiver {
         MethodReceiver::Instance => format!("(self *{class_name}) "),
@@ -876,7 +876,7 @@ fn emit_method(
         ctx.declare_param(p.name.as_str());
     }
     let body = render_body(&ctx, m);
-    format!("func {receiver}{class_method_name}({params}){ret} {{\n{body}}}\n")
+    format!("func {receiver}{class_method_name}({params}){ret} {{\n{optional_unpack}{body}}}\n")
 }
 
 fn render_params(m: &MethodDef) -> String {
@@ -893,6 +893,85 @@ fn render_params(m: &MethodDef) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Like `render_params`, but also folds trailing-defaulted params
+/// into a single variadic catch-all (`_opts ...T`) — same idiom
+/// `render_constructor_params` uses for ctors. Required for view
+/// methods whose `notice` / `alert` trailing params are passed by
+/// the controller (3 args) but omitted by the `broadcasts_to` model
+/// callback (1 arg). Returns `(params_str, unpack_block)`; the unpack
+/// block is injected at the top of the method body so optional
+/// params are still bound as locals.
+///
+/// Mixed-type defaulted trailing params (e.g. `notice` is `String?`
+/// and `alert` is `String?` — both nullable strings) fold cleanly to
+/// `_opts ...string`. If the trailing types diverge, fall back to
+/// `interface{}` and lose the per-param type — but the call still
+/// resolves. Required-then-optional shapes (e.g. `(a, b=nil, c)`)
+/// are non-foldable in Go and return as-is (no variadic).
+fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
+    let sig_tys = signature_param_tys(m);
+    let split = trailing_optional_split(&m.params);
+    if split == m.params.len() {
+        return (render_params(m), String::new());
+    }
+    let mut params_out: Vec<String> = Vec::new();
+    let mut unpack = String::new();
+    for (i, p) in m.params.iter().enumerate() {
+        let ty = sig_tys.as_ref().and_then(|tys| tys.get(i));
+        if i < split {
+            params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
+        } else if i == split {
+            // Pick the trailing-slot variadic type. If every trailing
+            // defaulted param has the same Ty stub, use it; otherwise
+            // fall back to `interface{}` (the safe widening).
+            let trailing_tys: Vec<String> = m.params[split..]
+                .iter()
+                .enumerate()
+                .map(|(j, _)| {
+                    let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
+                    go_ty_stub(opt_ty)
+                })
+                .collect();
+            let go_ty = if trailing_tys.iter().all(|t| t == &trailing_tys[0]) {
+                trailing_tys[0].clone()
+            } else {
+                "interface{}".to_string()
+            };
+            params_out.push(format!("_opts ...{go_ty}"));
+            for (j, opt) in m.params[split..].iter().enumerate() {
+                if opt.name.as_str().starts_with('_') {
+                    continue;
+                }
+                let opt_name = sanitize(opt.name.as_str());
+                let opt_go_ty = if go_ty == "interface{}" {
+                    let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
+                    go_ty_stub(opt_ty)
+                } else {
+                    go_ty.clone()
+                };
+                unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
+                let read = if opt_go_ty == "interface{}" || go_ty == opt_go_ty {
+                    format!("_opts[{j}]")
+                } else {
+                    format!("_opts[{j}].({opt_go_ty})")
+                };
+                unpack.push_str(&format!(
+                    "\tif len(_opts) > {j} {{ {opt_name} = {read} }}\n"
+                ));
+                // Suppress Go's "declared and not used" error for
+                // optional params the body doesn't reference. Many
+                // view methods accept `notice`/`alert` from the
+                // controller but don't render them when no flash is
+                // set; the variadic-unpack still declares the
+                // locals.
+                unpack.push_str(&format!("\t_ = {opt_name}\n"));
+            }
+            break;
+        }
+    }
+    (params_out.join(", "), unpack)
 }
 
 fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
@@ -1222,7 +1301,7 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
 }
 
 fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
-    let params = render_params(m);
+    let (params, optional_unpack) = render_params_with_unpack(m);
     let ret = render_return(m);
     let method = sanitize_method_name(m.name.as_str());
     let returns_void = matches!(
@@ -1249,5 +1328,5 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         ctx.declare_param(p.name.as_str());
     }
     let body = render_body(&ctx, m);
-    format!("func {class_name}_{method}({params}){ret} {{\n{body}}}\n")
+    format!("func {class_name}_{method}({params}){ret} {{\n{optional_unpack}{body}}}\n")
 }

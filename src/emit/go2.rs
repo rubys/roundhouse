@@ -235,7 +235,7 @@ func main() {\n\
             model_registry.into_iter().collect();
         let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
             &app.controllers,
-            model_extras,
+            model_extras.clone(),
             Some(&app.schema),
             &app.views,
         );
@@ -258,6 +258,74 @@ func main() {\n\
                 )])
             };
 
+        // Importmap module — lowered just like RouteHelpers. Layout
+        // views call `Importmap.pins()` and `Importmap.entry()` to
+        // emit `<script type="importmap">` / `<script>` tags.
+        let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+        let lowered_importmap: Vec<crate::dialect::LibraryClass> =
+            if importmap_funcs.is_empty() {
+                Vec::new()
+            } else {
+                lower::lower_for_go(vec![module_funcs_to_library_class(
+                    "Importmap",
+                    &importmap_funcs,
+                )])
+            };
+
+        // Views — real emit (Phase 4 wedge 16). Mirrors rust2 pattern
+        // (src/emit/rust2.rs:435-487): lower HTML + JBuilder variants
+        // against the model_registry + route_helpers extras, merge
+        // both formats under a single `Views::<Resource>` LibraryClass
+        // (HTML produces `index`/`show`/`article`; JBuilder produces
+        // `index_json`/`show_json`/`article_json` — controllers
+        // dispatch by request_format and call into the same module).
+        let view_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = {
+            let mut ex = model_extras.clone();
+            ex.extend(crate::lower::library_extras::extras_from_funcs(
+                &route_helper_funcs,
+            ));
+            ex
+        };
+        let lowered_views: Vec<crate::dialect::LibraryClass> = if !app.views.is_empty() {
+            let mut raw_lcs = crate::lower::view_to_library::lower_views_to_library_classes(
+                &app.views,
+                app,
+                view_extras.clone(),
+            );
+            raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
+                &app.views,
+                app,
+                view_extras,
+            ));
+            // Merge HTML + JSON variants by struct name (rust2:462-479).
+            let mut merged: std::collections::BTreeMap<
+                String,
+                crate::dialect::LibraryClass,
+            > = std::collections::BTreeMap::new();
+            for lc in raw_lcs {
+                let raw = lc.name.0.as_str();
+                let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                merged
+                    .entry(struct_name)
+                    .and_modify(|acc: &mut crate::dialect::LibraryClass| {
+                        let seen: std::collections::BTreeSet<String> = acc
+                            .methods
+                            .iter()
+                            .map(|m| m.name.as_str().to_string())
+                            .collect();
+                        for m in lc.methods.clone() {
+                            if !seen.contains(m.name.as_str()) {
+                                acc.methods.push(m);
+                            }
+                        }
+                    })
+                    .or_insert(lc);
+            }
+            lower::lower_for_go(merged.into_values().collect())
+        } else {
+            Vec::new()
+        };
+
         // Build variadic-ctor registry. Transitive closure: a class is
         // variadic if its `initialize` has trailing-optional/variadic
         // params, OR (no own initialize) its parent is variadic.
@@ -269,6 +337,8 @@ func main() {\n\
                 .chain(lowered_models.iter())
                 .chain(lowered_controllers.iter())
                 .chain(lowered_route_helpers.iter())
+                .chain(lowered_importmap.iter())
+                .chain(lowered_views.iter())
             {
                 let sanitized = lc.name.0.as_str().replace("::", "");
                 if variadic_ctors.contains(&sanitized) {
@@ -352,74 +422,42 @@ func main() {\n\
             });
         }
 
-        // Per-view stubs for the broadcasts_to-referenced partials.
-        // The model lowerer's `broadcasts_to` expansion synthesizes
-        // calls like `Views::Articles.article(self)` inside
-        // `after_create_commit`. Without a concrete `Views::X` module
-        // those references vet-fail (`undefined: ViewsArticles_article`).
-        // Emit minimal stubs that produce an empty-string fragment —
-        // sufficient for the live broadcast log to capture the action,
-        // pending real view emit. Each stub is gated by
-        // `app.views` containing a partial under the matching
-        // resource dir; missing-dir → no stub (and the model emit's
-        // broadcasts_to expansion presumably wouldn't reference it).
-        // Mirrors the rust2 "view-module stubs from lowerer" pass.
-        let html_view_lcs = crate::lower::view_to_library::lower_views_to_library_classes(
-            &app.views, app, vec![],
-        );
-        let jbuilder_view_lcs = crate::lower::lower_jbuilder_to_library_classes(
-            &app.views, app, vec![],
-        );
-        // Stubs are variadic `func X(_args ...interface{}) string` so
-        // they accept the multiple call-site arities a single partial
-        // sees (broadcasts callback passes just record; controller
-        // render passes record + extras). Real view emit replaces
-        // them in a later wedge with concrete typed bodies.
-        let referenced: std::collections::BTreeSet<(String, String)> =
-            html_view_lcs
-                .into_iter()
-                .chain(jbuilder_view_lcs.into_iter())
-                .flat_map(|lc| {
-                    let mod_name = sanitize_module_name(lc.name.0.as_str());
-                    lc.methods
-                        .into_iter()
-                        .filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Class))
-                        .map(move |m| (mod_name.clone(), m.name.as_str().to_string()))
-                })
-                .collect();
-        if !referenced.is_empty() {
-            let mut by_module: std::collections::BTreeMap<String, Vec<String>> =
-                std::collections::BTreeMap::new();
-            for (m, name) in referenced {
-                by_module.entry(m).or_default().push(name);
-            }
-            for (module_name, methods) in by_module {
-                let mut body = String::new();
-                body.push_str("// View module stub. Real view emit lands in a later phase;\n");
-                body.push_str("// the empty-string fallback keeps the broadcast log capturing\n");
-                body.push_str("// the action while the html fragment shape isn't yet wired.\n\n");
-                body.push_str("package app\n\n");
-                for method in methods {
-                    // Variadic param list — different call sites pass
-                    // different arities (broadcasts callback in a model
-                    // sends just the record; controller render passes
-                    // record + extras like flash). Variadic interface{}
-                    // accepts both shapes without per-callsite-aware
-                    // overload selection. The lowerer-emitted MethodDef
-                    // has a fixed arity, but the call-site IR is what
-                    // matters for vet — stubs need to be more permissive
-                    // than the eventual real emit.
-                    body.push_str(&format!(
-                        "func {module_name}_{method}(_args ...interface{{}}) string {{\n\treturn \"\"\n}}\n\n",
-                    ));
-                }
-                let content = rewrite_package_to_v2(&body);
-                let stem = crate::naming::snake_case(&module_name);
-                out.push(EmittedFile {
-                    path: PathBuf::from(format!("app/v2/{stem}_stubs.go")),
-                    content,
-                });
-            }
+        for lc in &lowered_importmap {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+                Ok(s) => s,
+                Err(e) => format!("// emit error: {e}\n"),
+            };
+            let raw = format!(
+                "// Generated by Roundhouse from config/importmap.rb.\n// Do not edit by hand — edit the source `importmap.rb` and re-run emit.\n\npackage app\n\n{class_text}",
+            );
+            let content = rewrite_package_to_v2(&raw);
+            out.push(EmittedFile {
+                path: PathBuf::from("app/v2/importmap.go".to_string()),
+                content,
+            });
+        }
+
+        // Phase 4 wedge 16 — real view emit. Replaces the variadic
+        // `_args ...interface{}) string` stubs with concrete typed
+        // bodies emitted from the merged HTML+JBuilder LibraryClasses
+        // (lowered above). Mirrors rust2's view-emit pattern
+        // (src/emit/rust2.rs:743-).
+        for lc in &lowered_views {
+            let raw_name = lc.name.0.as_str();
+            let struct_name = raw_name.rsplit("::").next().unwrap_or(raw_name).to_string();
+            let stem = crate::naming::snake_case(&struct_name);
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+                Ok(s) => s,
+                Err(e) => format!("// emit error: {e}\n"),
+            };
+            let raw = format!(
+                "// Generated from app/views/{stem}/ at app emit time.\n// Do not edit by hand — edit the source view templates and re-run emit.\n\npackage app\n\n{class_text}",
+            );
+            let content = rewrite_package_to_v2(&raw);
+            out.push(EmittedFile {
+                path: PathBuf::from(format!("app/v2/views_{stem}.go")),
+                content,
+            });
         }
 
         // Phase 4 wedge 15 — route table + dispatcher. Together with

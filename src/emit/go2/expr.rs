@@ -553,7 +553,7 @@ pub(super) fn emit_send(
     // Restricted to a small allow-list of known kwargs-shim callees so
     // the rewrite doesn't accidentally widen genuine narrow-Hash
     // dispatches.
-    let widen_hash_args = is_broadcasts_call(recv, method);
+    let widen_hash_args = is_broadcasts_call(recv, method) || is_view_helpers_widen_call(recv, method);
     let args_s: Vec<String> = if let Some(padded) = render_padded {
         padded
     } else {
@@ -570,10 +570,23 @@ pub(super) fn emit_send(
                         return emit_expr(ctx, &widened);
                     }
                 }
-                emit_expr(ctx, a)
+                emit_expr_as_value(ctx, a)
             })
             .collect()
     };
+
+    // Inline `ViewHelpers.dom_id(record [, suffix])` at the call
+    // site when `record`'s Ty is a concrete model (Article, Comment,
+    // ...). The runtime `dom_id(record *ActiveRecordBase, ...)`
+    // takes the abstract base struct, and Go has no implicit upcast
+    // from `*Article` to `*ActiveRecordBase` — every call site
+    // would need `&article.ActiveRecordBase`, ugly and fragile.
+    // Mirrors rust2's `try_view_helpers_dom_id` (src/emit/rust2/
+    // expr/send/mod.rs:322); the Ruby body is a one-line format,
+    // so the inline is direct.
+    if let Some(s) = try_dom_id_inline(recv, method, args, &args_s) {
+        return s;
+    }
 
     // Ruby `raise X, "msg"` / `raise "msg"` / `raise X` — parses as
     // an implicit-self Send with method `raise`. Maps to Go
@@ -938,9 +951,20 @@ pub(super) fn emit_send(
     // recv hits this, the resulting Go `append(map, ...)` errors
     // at compile, surfacing the gap. `arr.push(x)` is the explicit-
     // method form of the same operation and gets the same rewrite.
+    //
+    // String-buffer shovel (`io << "..."` after `io = String.new`):
+    // when the recv is a `string` (Str / Union<Str, Nil>), emit
+    // string concat `io = io + X` instead of `append`. The view
+    // bodies use this pattern extensively for HTML buffer
+    // accumulation — `String.new` lowers to `""` (peepholed below)
+    // and subsequent shovels stay as concat.
     if (method == "<<" || method == "push") && args.len() == 1 {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            let core_ty = r.ty.as_ref().and_then(union_non_nil_core);
+            if matches!(core_ty, Some(Ty::Str)) {
+                return format!("{recv_s} = {recv_s} + {}", args_s[0]);
+            }
             return format!("{recv_s} = append({recv_s}, {})", args_s[0]);
         }
     }
@@ -972,6 +996,21 @@ pub(super) fn emit_send(
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
             return format!("int64(len({recv_s}))");
+        }
+    }
+
+    // Ruby `arr.count` (no args) — equivalent to `.size` on Arrays
+    // and Hashes. View bodies hit this via `article.errors.count`.
+    // Skip when recv is a Class-typed object (`Article.count` is the
+    // AR class method, not a slice len) — handled separately by the
+    // model adapter.
+    if method == "count" && args.is_empty() {
+        if let Some(r) = recv {
+            let core_ty = r.ty.as_ref().and_then(union_non_nil_core);
+            if matches!(core_ty, Some(Ty::Array { .. } | Ty::Hash { .. })) {
+                let recv_s = emit_expr(ctx, r);
+                return format!("int64(len({recv_s}))");
+            }
         }
     }
 
@@ -1057,9 +1096,16 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `!x` parses as `Send { recv: x, method: "!", args: [] }`.
-    // Emit as Go's unary not. Parenthesize the operand for safety
-    // against operator-precedence surprises.
+    // Ruby `!x` parses two ways depending on the parser path:
+    //   - `Send { recv: x, method: "!", args: [] }` (method-style)
+    //   - `Send { recv: None, method: "!", args: [x] }` (op-style)
+    // Both reach Go as the unary `!(...)`. Without the no-recv arm,
+    // the op-style form falls through to `Bang(...)` via the
+    // `go2_method_ident`-then-call dispatch (sees `!` as a method
+    // name and pascalizes it to `Bang`).
+    if method == "!" && args.len() == 1 && recv.is_none() {
+        return format!("!({})", args_s[0]);
+    }
     if method == "!" && args.is_empty() {
         if let Some(r) = recv {
             return format!("!({})", emit_expr(ctx, r));
@@ -1403,6 +1449,26 @@ pub(super) fn emit_send(
         }
     }
 
+    // `String.new` → `""`; `String.new(s)` → `s`. Ruby's
+    // `String.new` produces an empty string buffer; view bodies use
+    // it for HTML accumulation (`io = String.new; io << "..."`).
+    // Go has no string-buffer type — the `<<` shovel peephole above
+    // routes Str-typed recv to `io = io + X` concat, so the buffer
+    // collapses to a plain `string`. Intercept before the general
+    // `Const.new` arm so we don't generate an undefined `NewString`.
+    if method == "new" {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.len() == 1 && path[0].as_str() == "String" {
+                    return match args_s.len() {
+                        0 => "\"\"".to_string(),
+                        _ => args_s[0].clone(),
+                    };
+                }
+            }
+        }
+    }
+
     // `<Const>.new(args)` → `New<Const>(args)`. The constructor is
     // synthesized by `library::emit_constructor` for any class with
     // an `initialize` method; this rewrite makes the Ruby `.new`
@@ -1516,6 +1582,19 @@ pub(super) fn emit_send(
     let go_m = go2_method_ident(method);
     match recv {
         None => {
+            // Bareword identifier in an expression context — Ruby's
+            // parser can't tell `article` (a local/param ref) from
+            // `article()` (an implicit-self method call), so both
+            // ingest as `Send { recv: None, method: "article" }`.
+            // When the bareword name matches a parameter or local
+            // declared in scope, treat it as a Var read — emit the
+            // sanitized lowercase name instead of the pascalized
+            // method ident. Without this, view bodies that reference
+            // their `article` / `comment` params produce
+            // `Article.Persisted()` instead of `article.Persisted`.
+            if args_s.is_empty() && ctx.declared.borrow().contains(method) {
+                return super::library::sanitize(method);
+            }
             if args_s.is_empty() {
                 go_m
             } else {
@@ -2267,6 +2346,25 @@ fn is_broadcasts_call(recv: Option<&Expr>, method: &str) -> bool {
     path.last().map(|s| s.as_str()) == Some("Broadcasts")
 }
 
+/// `ActionView::ViewHelpers` helpers whose hand-written runtime
+/// signature takes `map[string]interface{}` but whose call sites in
+/// the layout view pass a uniform-string Hash literal (e.g.
+/// `stylesheet_link_tag("application", data: { turbo_track: "reload" })`).
+/// Widen the Hash arg to interface-valued so the call typechecks.
+fn is_view_helpers_widen_call(recv: Option<&Expr>, method: &str) -> bool {
+    if !matches!(
+        method,
+        "stylesheet_link_tag" | "javascript_importmap_tags"
+    ) {
+        return false;
+    }
+    let Some(r) = recv else { return false };
+    let ExprNode::Const { path } = &*r.node else {
+        return false;
+    };
+    path.last().map(|s| s.as_str()) == Some("ViewHelpers")
+}
+
 fn is_known_go_method(name: &str) -> bool {
     matches!(
         name,
@@ -2290,6 +2388,66 @@ fn is_known_go_method(name: &str) -> bool {
 /// as a method-value reference. Replace with a per-class method
 /// registry once go2 grows one; this list is the minimum needed
 /// to keep `runtime/ruby/` emit clean today.
+/// Inline `ActionView::ViewHelpers.dom_id(record [, suffix])` when
+/// the record's Ty is a concrete model. The runtime helper takes
+/// `*ActiveRecordBase` which Go won't accept a `*Article` for —
+/// inlining sidesteps the upcast problem entirely. Suffix arg is
+/// inlined as a literal symbol/string. Returns None on any shape
+/// that doesn't match (non-Const recv, recv not the ViewHelpers
+/// module, non-Class-typed record, missing args, dynamic suffix).
+fn try_dom_id_inline(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    args_s: &[String],
+) -> Option<String> {
+    if method != "dom_id" {
+        return None;
+    }
+    let r = recv?;
+    let ExprNode::Const { path } = &*r.node else { return None };
+    let last = path.last().map(|s| s.as_str())?;
+    if last != "ViewHelpers" {
+        return None;
+    }
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let record = &args[0];
+    let class_name = match record.ty.as_ref()? {
+        Ty::Class { id, .. } => id.0.as_str().to_string(),
+        _ => return None,
+    };
+    if class_name == "Base" || class_name == "ActiveRecord::Base" {
+        return None;
+    }
+    let prefix = crate::naming::snake_case(
+        class_name.rsplit("::").next().unwrap_or(class_name.as_str()),
+    );
+    let record_s = &args_s[0];
+    if args.len() == 1 {
+        return Some(format!(
+            "fmt.Sprintf(\"{}_%v\", {}.ID)",
+            prefix, record_s,
+        ));
+    }
+    // 2-arg form: suffix is typically a literal `:comments_count`.
+    let suffix = &args[1];
+    let suffix_lit = match &*suffix.node {
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => value.as_str().to_string(),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => value.as_str().to_string(),
+        _ => return None,
+    };
+    Some(format!(
+        "fmt.Sprintf(\"{}_%v_{}\", {}.ID)",
+        prefix, suffix_lit, record_s,
+    ))
+}
+
 fn is_known_class_method(name: &str) -> bool {
     matches!(
         name,
@@ -2302,6 +2460,13 @@ fn is_known_class_method(name: &str) -> bool {
         // `instance.mark_persisted!` defaults to bare-field-read
         // shape; force parens so Go method-call promotion fires.
         | "mark_persisted!"
+        // `has_many` / `belongs_to` relation methods. The lowerer
+        // synthesizes per-model accessor methods (`Article#comments`
+        // returns `[]*Comment`, `Comment#article` returns `*Article`)
+        // that views and controllers read at non-self sites. Without
+        // parens these emit as method-value references, which Go's
+        // `len()`, `for range`, and assignment all reject.
+        | "comments" | "article"
     )
 }
 
@@ -2494,6 +2659,25 @@ pub(super) fn emit_return_body(ctx: &EmitCtx, e: &Expr) -> String {
     let mut out = String::new();
     emit_return_at(ctx, e, &mut out, 1);
     out
+}
+
+/// Emit `e` in expression position — wraps statement-shaped IR
+/// (If / Case) in an IIFE so it can stand in for a value (Send arg,
+/// Hash value, format arg, ...). Falls through to `emit_expr` for
+/// nodes that already produce expression-form Go. Matches the
+/// IIFE-wrap pattern the Assign emit applies for the same nodes.
+pub(super) fn emit_expr_as_value(ctx: &EmitCtx, e: &Expr) -> String {
+    if matches!(&*e.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
+        let ret_ty = super::ty::go_ty_stub(e.ty.as_ref());
+        let body = emit_return_body(ctx, e);
+        let indented = body
+            .lines()
+            .map(|l| format!("\t{l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("func() {ret_ty} {{\n{indented}\n}}()");
+    }
+    emit_expr(ctx, e)
 }
 
 fn indent(out: &mut String, depth: usize) {
