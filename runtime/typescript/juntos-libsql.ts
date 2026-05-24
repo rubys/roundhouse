@@ -4,10 +4,10 @@
 // async-native fork of SQLite) instead of better-sqlite3. The two
 // files share the public surface — `installDb`, `setupTestDb`,
 // `setBroadcaster`, `Row`, `Conditions`, `AdapterSchema`,
-// `ForeignKey`, `ActiveRecordAdapter`, `InMemoryActiveRecordAdapter`,
-// the controller/router types, and `ActionResponse` — so the
-// transpiled framework code (Base.find/all/where/...) doesn't care
-// which one the emit pipeline picked.
+// `ForeignKey`, `ActiveRecordAdapter`, the controller/router types,
+// and `ActionResponse` — so the transpiled framework code
+// (Base.find/all/where/...) doesn't care which one the emit pipeline
+// picked.
 //
 // The single semantic difference: every adapter method here returns
 // a Promise. The transpiled framework Ruby is async-colored under
@@ -235,79 +235,10 @@ export class LibsqlActiveRecordAdapter implements ActiveRecordAdapter {
   }
 }
 
-// ── In-memory adapter (test mock) ──
-//
-// Same shape as the in-memory adapter in `juntos.ts` — kept in
-// sync between the two files. Tests under the libsql profile that
-// don't want to spin up a real libsql client can fall back to this.
-// Methods are sync (no I/O), but the interface is async-tolerant so
-// callers `await` and get the value back unchanged.
-
-export class InMemoryActiveRecordAdapter implements ActiveRecordAdapter {
-  private tables: Map<string, Map<number, Row>> = new Map();
-  private schemas: Map<string, AdapterSchema> = new Map();
-  private nextId: Map<string, number> = new Map();
-
-  create_table(name: string, columns: string[], foreign_keys: ForeignKey[] = []): void {
-    if (!this.tables.has(name)) this.tables.set(name, new Map());
-    this.schemas.set(name, { columns, foreign_keys });
-    if (!this.nextId.has(name)) this.nextId.set(name, 0);
-  }
-
-  drop_table(name: string): void {
-    this.tables.delete(name);
-    this.schemas.delete(name);
-    this.nextId.delete(name);
-  }
-
-  schema(table: string): AdapterSchema | null {
-    return this.schemas.get(table) ?? null;
-  }
-
-  insert(table: string, row: Row): number {
-    const t = this.tables.get(table);
-    if (!t) throw new Error(`unknown table: ${table}`);
-    const id = (this.nextId.get(table) ?? 0) + 1;
-    this.nextId.set(table, id);
-    t.set(id, { ...row, id });
-    return id;
-  }
-
-  update(table: string, id: number, row: Row): boolean {
-    const t = this.tables.get(table);
-    if (!t || !t.has(id)) return false;
-    t.set(id, { ...t.get(id)!, ...row, id });
-    return true;
-  }
-
-  delete(table: string, id: number): boolean {
-    const t = this.tables.get(table);
-    return t?.delete(id) ?? false;
-  }
-
-  find(table: string, id: number): Row | null {
-    return this.tables.get(table)?.get(id) ?? null;
-  }
-
-  all(table: string): Row[] {
-    const t = this.tables.get(table);
-    return t ? Array.from(t.values()) : [];
-  }
-
-  where(table: string, conditions: Conditions): Row[] {
-    return this.all(table).filter((row) =>
-      Object.entries(conditions).every(([k, v]) => row[k] === v),
-    );
-  }
-
-  count(table: string): number {
-    return this.tables.get(table)?.size ?? 0;
-  }
-
-  is_exists(table: string, id: number): boolean {
-    return this.tables.get(table)?.has(id) ?? false;
-  }
-}
+// Historical note: an InMemoryActiveRecordAdapter mirror previously
+// lived here as the libsql-profile fallback for base_test. Removed in
+// tandem with the per-target adapter cleanup; a follow-on session will
+// re-enable base_test wired against a real libsql connection.
 
 // ── Controller/router surface ──
 //

@@ -307,7 +307,7 @@ impl Analyzer {
         // `ActiveRecord.adapter.X`. Each per-target runtime ships its
         // own concrete impl (Rust trait + impls in `runtime/rust/`,
         // Crystal abstract class + SqliteAdapter, TS interface +
-        // SqliteActiveRecordAdapter / FrameworkTestAdapter). On the
+        // SqliteActiveRecordAdapter). On the
         // Ruby side there's no class declaration — the RBS for
         // `ActiveRecord.adapter` previously returned `untyped`, which
         // let TS get away with `any` but left rust2 emit producing

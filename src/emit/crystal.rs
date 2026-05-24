@@ -71,12 +71,6 @@ const CR_BROADCASTS_SOURCE: &str = include_str!("../../runtime/crystal/broadcast
 // Minitest-shaped Crystal Test base class (`RoundhouseTest`). Emitted
 // as `src/test_helper.cr` whenever the App carries test_modules.
 const CR_TEST_HELPER_SOURCE: &str = include_str!("../../runtime/crystal/test_helper.cr");
-// In-memory adapter mirroring `runtime/ruby/test/test_helper.rb`'s
-// `FrameworkTestAdapter` — emitted as `src/framework_test_adapter.cr`
-// whenever test_modules are present, and required from app.cr after
-// db.cr (depends on `Roundhouse::ActiveRecordAdapter`).
-const CR_FRAMEWORK_TEST_ADAPTER_SOURCE: &str =
-    include_str!("../../runtime/crystal/framework_test_adapter.cr");
 
 /// Emit a full Crystal project for `app`. Composes the lowered-IR
 /// emit pipeline (mirrors Spinel's `emit_spinel`).
@@ -386,14 +380,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("src/test_helper.cr"),
             content: CR_TEST_HELPER_SOURCE.to_string(),
-        });
-        // In-memory adapter for framework-level tests. Loaded via
-        // app.cr's alphabetical sweep (`framework_test_adapter`
-        // comes after `db` alphabetically, so the abstract base it
-        // inherits from is already defined when this file parses).
-        files.push(EmittedFile {
-            path: PathBuf::from("src/framework_test_adapter.cr"),
-            content: CR_FRAMEWORK_TEST_ADAPTER_SOURCE.to_string(),
         });
         // `<Plural>Fixtures` classes — one per fixture file. Each
         // exposes per-label class methods (`ArticlesFixtures.one`)

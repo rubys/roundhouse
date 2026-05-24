@@ -241,8 +241,8 @@ module Roundhouse
   #
   # Test-helper methods (`create_table`, `drop_table`, `reset_all!`,
   # `schema`) are NOT in the abstract — they're called directly on
-  # `FrameworkTestAdapter` (which has them as concrete methods),
-  # never via the `ActiveRecord.adapter` slot.
+  # test-only adapter mocks (when present), never via the
+  # `ActiveRecord.adapter` slot.
   abstract class ActiveRecordAdapter
     abstract def all(table_name : String)
     abstract def find(table_name : String, id)

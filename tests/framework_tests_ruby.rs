@@ -136,7 +136,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
         // Skip the spinel-emitted test_helper.rb — we already wrote
         // the framework-Ruby version above. The spinel one expects
         // sqlite + schema + fixtures (real-blog-shaped); framework
-        // tests need only the FrameworkTestAdapter shim.
+        // tests only need TestBase and the framework runtime modules.
         if file.path == PathBuf::from("test/test_helper.rb") {
             continue;
         }
@@ -243,14 +243,11 @@ fn parse_autorun_tests_passed(line: &str) -> Option<usize> {
     line[..idx].split_whitespace().last()?.parse::<usize>().ok()
 }
 
-#[test]
-#[ignore]
-fn ar_base_test_passes_under_cruby() {
-    build_and_run(
-        Path::new("runtime/ruby/test/active_record/base_test.rb"),
-        "ar_base",
-    );
-}
+// ar_base_test_passes_under_cruby — disabled. base_test.rb depends on
+// FrameworkTestAdapter (now removed). Follow-on session will rewrite
+// the test to wire each target against its real sqlite adapter
+// (CRuby: sqlite3 gem; spinel: libsqlite3 FFI; etc.) and re-add this
+// runner.
 
 #[test]
 #[ignore]

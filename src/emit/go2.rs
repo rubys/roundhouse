@@ -41,8 +41,6 @@ mod ty;
 /// `go vet` / `go build` time.
 const RT_V2_ADAPTER_INTERFACE: &str =
     include_str!("../../runtime/go/v2/adapter_interface.go");
-const RT_V2_FRAMEWORK_TEST_ADAPTER: &str =
-    include_str!("../../runtime/go/v2/framework_test_adapter.go");
 const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
 const RT_V2_DB: &str =
@@ -81,7 +79,6 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // stays clean.
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
-        ("framework_test_adapter.go", RT_V2_FRAMEWORK_TEST_ADAPTER),
         ("param_value.go", RT_V2_PARAM_VALUE),
     ] {
         out.push(EmittedFile {

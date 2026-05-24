@@ -1,9 +1,6 @@
 # Framework-level test bootstrap. Loads the framework Ruby (under
-# `runtime/ruby/`) and provides a tiny in-memory adapter so tests
-# can exercise behavior that touches `ActiveRecord.adapter` without
-# pulling in a target's storage stack (sqlite gem, better-sqlite3,
-# …). Runs under stock CRuby — no spinel, no transpile, no app
-# fixture. Tests check framework-source correctness; transpile-
+# `runtime/ruby/`). Runs under stock CRuby — no spinel, no transpile,
+# no app fixture. Tests check framework-source correctness; transpile-
 # correctness is a separate concern handled by per-target tests.
 #
 # Usage:
@@ -11,9 +8,19 @@
 # Or via the Rakefile under runtime/ruby/.
 #
 # Each test file requires this helper, then defines test classes
-# that subclass Minitest::Test. Per-test isolation comes from the
-# adapter's reset between tests; tests that exercise CRUD reset_db
-# in their setup.
+# that subclass Minitest::Test.
+#
+# Historical note: prior to <session date> this helper also defined a
+# `FrameworkTestAdapter` module — a polymorphic Hash-backed in-memory
+# adapter exercised by `runtime/ruby/test/active_record/base_test.rb`.
+# That mock has been removed because its `Hash[String, untyped]` shape
+# didn't survive spinel monomorphization, and the per-target mirror
+# files (`runtime/{crystal,rust,go/v2}/framework_test_adapter.*`) plus
+# the TS singleton in `runtime/typescript/juntos.ts` were proliferating
+# adapter scaffolding for a single test. A follow-on session will
+# re-enable base_test wired against each target's real sqlite adapter
+# (CRuby: sqlite3 gem; spinel: libsqlite3 FFI; Crystal: DB::SQLite3;
+# TS: better-sqlite3 / libsql; Rust: rusqlite; Go: modernc.org/sqlite).
 
 require "minitest/autorun"
 
@@ -32,99 +39,6 @@ require "action_view/view_helpers"
 require "action_dispatch/router"
 require "action_controller/base"
 require "inflector"
-
-# Tiny in-memory adapter satisfying the 12-method
-# `ActiveRecord::Base` contract. Mirrors the semantics of
-# `runtime/crystal/framework_test_adapter.cr`; reproduced here as a
-# minimal reference implementation so the framework tests don't
-# depend on a target-specific runtime tree.
-#
-# Storage shape: `tables[name] = { id_int => row_hash }`. Rows are
-# String-keyed hashes — matches the production sqlite adapters
-# across targets (Crystal SqliteAdapter returns `Hash(String, DB::Any)`,
-# TS adapters return `{[k: string]: V}`), so test fixtures can
-# `row["id"]` against rows from either adapter.
-module FrameworkTestAdapter
-  module_function
-
-  @tables = {}
-  @next_ids = {}
-  @schemas = {}
-
-  def reset_all!
-    @tables = {}
-    @next_ids = {}
-    @schemas = {}
-  end
-
-  def create_table(name, columns:, foreign_keys: [])
-    @tables[name] = {}
-    @next_ids[name] = 0
-    @schemas[name] = { columns: columns, foreign_keys: foreign_keys }
-  end
-
-  def drop_table(name)
-    @tables.delete(name)
-    @next_ids.delete(name)
-    @schemas.delete(name)
-  end
-
-  def schema(table)
-    @schemas[table]
-  end
-
-  def truncate(name)
-    @tables[name] = {}
-    @next_ids[name] = 0
-  end
-
-  def find(table, id)
-    @tables.fetch(table, {})[id]
-  end
-
-  def all(table)
-    (@tables[table] || {}).values
-  end
-
-  # Conditions come in Symbol-keyed (the Hash<Symbol, _> contract
-  # ActiveRecord::Base#where passes through); rows are String-keyed.
-  # Compare via stringified keys.
-  def where(table, conditions)
-    all(table).select do |row|
-      conditions.all? { |k, v| row[k.to_s] == v }
-    end
-  end
-
-  def count(table)
-    (@tables[table] || {}).size
-  end
-
-  def exists?(table, id)
-    !find(table, id).nil?
-  end
-
-  def insert(table, attrs)
-    raise "table #{table} not created" unless @tables.key?(table)
-    id = (attrs[:id] && attrs[:id] != 0) ? attrs[:id] : (@next_ids[table] += 1)
-    @next_ids[table] = [@next_ids[table], id].max
-    row = attrs.transform_keys(&:to_s).merge("id" => id)
-    @tables[table][id] = row
-    id
-  end
-
-  def update(table, id, attrs)
-    return false unless @tables[table]&.key?(id)
-    row = @tables[table][id].merge(attrs.transform_keys(&:to_s)).merge("id" => id)
-    @tables[table][id] = row
-    true
-  end
-
-  def delete(table, id)
-    return false unless @tables[table]&.key?(id)
-    @tables[table].delete(id)
-    true
-  end
-end
 
 # Reopen Minitest::Test with the AS-flavor assertions framework
 # tests need. Keeps the tests' assertion vocabulary consistent

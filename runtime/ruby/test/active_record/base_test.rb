@@ -1,13 +1,29 @@
 require_relative "../test_helper"
 
-# Direct unit tests for `runtime/ruby/active_record/base.rb`. Each
-# CRUD method (find/all/where/count/exists?/save/destroy/reload/
-# create/create!/last) gets exercised against `FrameworkTestAdapter`
-# (the in-memory adapter shipped with test_helper.rb). A subclass
+# DISABLED — runner functions removed from
+# tests/framework_tests_{ruby,typescript,crystal,spinel}.rs. File kept
+# as the starting point for a follow-on session that will rewire each
+# target's runner against its real sqlite adapter (CRuby: sqlite3 gem;
+# spinel: libsqlite3 FFI; Crystal: DB::SQLite3; TS: better-sqlite3 /
+# libsql; Rust: rusqlite; Go: modernc.org/sqlite). The prior
+# `FrameworkTestAdapter` polymorphic-Hash mock (~150 LOC in
+# test_helper.rb + 5 per-target mirror files) has been removed.
+#
+# Current file shape: setup expects `Db` and `SqliteAdapter` constants
+# from `runtime/spinel/{db_cruby,sqlite_adapter}.rb` — those aren't
+# require'd by `test_helper.rb` anymore (removed to avoid forcing the
+# sqlite3 gem onto unrelated framework tests), so direct invocation
+# fails with `uninitialized constant Db`. The follow-on session will
+# either re-add the requires here OR rewire to per-target Db.
+#
+# Original intent (still valid): direct unit tests for
+# `runtime/ruby/active_record/base.rb`. Each CRUD method
+# (find/all/where/count/exists?/save/destroy/reload/create/create!/last)
+# gets exercised against an in-memory SQLite database. A subclass
 # defines the per-model overrides Base requires (`table_name`,
 # `schema_columns`, `instantiate`, `attributes`, `assign_from_row`)
-# so the framework dispatch + lifecycle is what's under test, not
-# the synthesized model code.
+# so the framework dispatch + lifecycle is what's under test, not the
+# synthesized model code.
 class BaseTest < Minitest::Test
   # Minimal user-facing model — just enough to satisfy Base's
   # contract markers. Stores a small (id, title) row shape;
@@ -88,9 +104,13 @@ class BaseTest < Minitest::Test
   end
 
   def setup
-    ActiveRecord.adapter = FrameworkTestAdapter
-    FrameworkTestAdapter.reset_all!()
-    FrameworkTestAdapter.create_table("items", columns: [:id, :title])
+    Db.configure(":memory:")
+    Db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)")
+    ActiveRecord.adapter = SqliteAdapter
+  end
+
+  def teardown
+    Db.close
   end
 
   # ── persistence-state predicates ────────────────────────────
@@ -350,7 +370,7 @@ class BaseTest < Minitest::Test
   end
 
   def test_save_sets_created_at_and_updated_at_on_insert
-    FrameworkTestAdapter.create_table("stamped", columns: [:id, :title, :created_at, :updated_at])
+    Db.exec("CREATE TABLE stamped (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created_at TEXT, updated_at TEXT)")
     t = Timestamped.new
     t.title = "T"
     t.save()
@@ -359,7 +379,7 @@ class BaseTest < Minitest::Test
   end
 
   def test_save_only_updates_updated_at_on_update
-    FrameworkTestAdapter.create_table("stamped", columns: [:id, :title, :created_at, :updated_at])
+    Db.exec("CREATE TABLE stamped (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created_at TEXT, updated_at TEXT)")
     t = Timestamped.new
     t.title = "T"
     t.save()

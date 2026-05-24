@@ -183,12 +183,11 @@ fn module_singleton_shape() {
     );
 }
 
-/// Hand-written runtime — `app/v2/adapter_interface.go` and
-/// `app/v2/framework_test_adapter.go` must ship in the overlay so
-/// the transpiled `ActiveRecord` module-singleton's slot type
-/// (`*AdapterInterface`) and the FrameworkTestAdapter both
-/// resolve at `go vet` / `go build` time. Catches accidental
-/// renames or removals from the `RT_V2_*` table.
+/// Hand-written runtime — `app/v2/adapter_interface.go` must ship in
+/// the overlay so the transpiled `ActiveRecord` module-singleton's
+/// slot type (`*AdapterInterface`) resolves at `go vet` / `go build`
+/// time. Catches accidental renames or removals from the `RT_V2_*`
+/// table.
 #[test]
 fn hand_written_runtime_present() {
     let app = ingest_with_analyzer();
@@ -211,38 +210,6 @@ fn hand_written_runtime_present() {
         "Row alias missing:\n{}",
         adapter.content,
     );
-
-    let test_adapter = find_file(&files, "app/v2/framework_test_adapter.go")
-        .expect("v2/framework_test_adapter.go missing");
-    assert!(
-        test_adapter
-            .content
-            .contains("type FrameworkTestAdapter struct {"),
-        "FrameworkTestAdapter struct decl missing:\n{}",
-        test_adapter.content,
-    );
-    assert!(
-        test_adapter
-            .content
-            .contains("func NewFrameworkTestAdapter() *FrameworkTestAdapter {"),
-        "constructor missing:\n{}",
-        test_adapter.content,
-    );
-    // Every method of ActiveRecordAdapterInterface must be implemented —
-    // spot-check the ones AR::Base's CRUD path hits.
-    for needle in [
-        "func (a *FrameworkTestAdapter) Find(",
-        "func (a *FrameworkTestAdapter) Insert(",
-        "func (a *FrameworkTestAdapter) Where(",
-        "func (a *FrameworkTestAdapter) Count(",
-        "func (a *FrameworkTestAdapter) Truncate(",
-    ] {
-        assert!(
-            test_adapter.content.contains(needle),
-            "FrameworkTestAdapter missing {needle}:\n{}",
-            test_adapter.content,
-        );
-    }
 }
 
 /// Pair to `module_singleton_shape` — assert that a plain class
@@ -1941,65 +1908,13 @@ fn inflector_v2_compiles_and_runs() {
     std::fs::write(scratch.join("app/v2/router_smoke_test.go"), router_smoke)
         .expect("write router smoke");
 
-    // FrameworkTestAdapter smoke — CRUD round-trip + interface
-    // satisfaction. Validates the hand-written runtime files
-    // behave end-to-end (not just type-check), and pins
-    // FrameworkTestAdapter as a valid ActiveRecordAdapterInterface
-    // implementation through the `var _ ActiveRecordAdapterInterface =
-    // (*FrameworkTestAdapter)(nil)` compile-time assertion.
-    let adapter_smoke = "package v2\n\
-                         \n\
-                         import \"testing\"\n\
-                         \n\
-                         var _ ActiveRecordAdapterInterface = (*FrameworkTestAdapter)(nil)\n\
-                         \n\
-                         func TestFrameworkTestAdapter_CRUD_Smoke(t *testing.T) {\n\
-                         \ta := NewFrameworkTestAdapter()\n\
-                         \ta.CreateTable(\"articles\", []string{\"id\", \"title\"}, nil)\n\
-                         \tid := a.Insert(\"articles\", map[string]any{\"title\": \"Hello\"})\n\
-                         \tif id != 1 {\n\
-                         \t\tt.Fatalf(\"expected first Insert to return id=1, got %d\", id)\n\
-                         \t}\n\
-                         \tif a.Count(\"articles\") != 1 {\n\
-                         \t\tt.Fatalf(\"Count after Insert: %d\", a.Count(\"articles\"))\n\
-                         \t}\n\
-                         \trow := a.Find(\"articles\", 1)\n\
-                         \tif row == nil || row[\"title\"] != \"Hello\" {\n\
-                         \t\tt.Fatalf(\"Find returned wrong row: %#v\", row)\n\
-                         \t}\n\
-                         \ta.Update(\"articles\", 1, map[string]any{\"title\": \"Updated\"})\n\
-                         \tif a.Find(\"articles\", 1)[\"title\"] != \"Updated\" {\n\
-                         \t\tt.Fatalf(\"Update didn't take\")\n\
-                         \t}\n\
-                         \tif !a.Exists(\"articles\", 1) {\n\
-                         \t\tt.Fatalf(\"Exists returned false after Update\")\n\
-                         \t}\n\
-                         \ta.Delete(\"articles\", 1)\n\
-                         \tif a.Exists(\"articles\", 1) {\n\
-                         \t\tt.Fatalf(\"Exists returned true after Delete\")\n\
-                         \t}\n\
-                         \tif a.Count(\"articles\") != 0 {\n\
-                         \t\tt.Fatalf(\"Count after Delete: %d\", a.Count(\"articles\"))\n\
-                         \t}\n\
-                         \t// Explicit-id Insert + reset_all sanity.\n\
-                         \tid7 := a.Insert(\"articles\", map[string]any{\"id\": int64(7), \"title\": \"X\"})\n\
-                         \tif id7 != 7 {\n\
-                         \t\tt.Fatalf(\"explicit-id Insert returned %d, want 7\", id7)\n\
-                         \t}\n\
-                         \ta.ResetAll()\n\
-                         \tif a.Count(\"articles\") != 0 {\n\
-                         \t\tt.Fatalf(\"ResetAll left rows behind\")\n\
-                         \t}\n\
-                         }\n";
-    std::fs::write(
-        scratch.join("app/v2/framework_test_adapter_smoke_test.go"),
-        adapter_smoke,
-    )
-    .expect("write adapter smoke");
+    // FrameworkTestAdapter CRUD smoke removed in tandem with the
+    // per-target adapter cleanup. A follow-on session will restore an
+    // adapter smoke once base_test is wired against each target's
+    // real sqlite stack.
 
     // `go test ./app/v2` — runs the smoke tests against the emitted
-    // Inflector_pluralize, JsonBuilder_*, Router, and the
-    // hand-written FrameworkTestAdapter.
+    // Inflector_pluralize, JsonBuilder_*, and Router.
     let test = Command::new("go")
         .arg("test")
         .arg("./app/v2")

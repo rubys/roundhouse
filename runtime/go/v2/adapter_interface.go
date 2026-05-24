@@ -30,8 +30,7 @@ type Row = map[string]any
 // `ActiveRecord::AdapterInterface` phantom class so transpiled
 // `ActiveRecord.adapter` slot signatures (`go_ty_stub` of
 // `Ty::Class { id: "ActiveRecord::AdapterInterface" }`) line up.
-// Method signatures mirror the Rust trait; production sqlite +
-// in-memory FrameworkTestAdapter both implement it.
+// Method signatures mirror the Rust trait.
 type ActiveRecordAdapterInterface interface {
 	All(tableName string) []Row
 	Find(tableName string, id int64) Row

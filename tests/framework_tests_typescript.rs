@@ -160,14 +160,10 @@ fn assert_tests_ran(stdout: &str, test_file: &Path, scratch: &Path) {
     );
 }
 
-#[test]
-#[ignore]
-fn ar_base_test_passes_under_tsx() {
-    build_and_run(
-        Path::new("runtime/ruby/test/active_record/base_test.rb"),
-        "ar_base",
-    );
-}
+// ar_base_test_passes_under_tsx — disabled. base_test.rb depends on
+// FrameworkTestAdapter (now removed). Follow-on session will rewrite
+// the test to wire each target against its real sqlite adapter and
+// re-add this runner.
 
 #[test]
 #[ignore]

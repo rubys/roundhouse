@@ -170,14 +170,10 @@ fn inflector_test_passes_under_crystal() {
     );
 }
 
-#[test]
-#[ignore]
-fn ar_base_test_passes_under_crystal() {
-    build_and_run(
-        Path::new("runtime/ruby/test/active_record/base_test.rb"),
-        "ar_base",
-    );
-}
+// ar_base_test_passes_under_crystal — disabled. base_test.rb depends
+// on FrameworkTestAdapter (now removed). Follow-on session will rewrite
+// the test to wire each target against its real sqlite adapter and
+// re-add this runner.
 
 #[test]
 #[ignore]
