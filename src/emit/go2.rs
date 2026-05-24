@@ -617,7 +617,15 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         s.push_str("\t\tc.RequestPath = r.URL.Path\n");
         s.push_str("\t\tc.RequestFormat = requestFormat\n");
         s.push_str("\t\tc.ProcessAction(action)\n");
-        s.push_str("\t\treturn c.Body, c.Status, c.ContentType, c.Location\n");
+        // Layout wrap — only for text/html responses with non-empty
+        // body. Redirects (empty body, 3xx) and JSON responses skip.
+        // Hardcoded to Layouts::application; multi-layout apps would
+        // need per-controller layout selection (Rails `layout :foo`).
+        s.push_str("\t\tfinalBody := c.Body\n");
+        s.push_str("\t\tif strings.HasPrefix(c.ContentType, \"text/html\") && c.Body != \"\" {\n");
+        s.push_str("\t\t\tfinalBody = ViewsLayouts_application(c.Body, c.Flash.OpGet(\"notice\"), c.Flash.OpGet(\"alert\"))\n");
+        s.push_str("\t\t}\n");
+        s.push_str("\t\treturn finalBody, c.Status, c.ContentType, c.Location\n");
     }
     s.push_str("\t}\n");
     s.push_str("\treturn \"\", 404, \"\", \"\"\n");

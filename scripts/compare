@@ -295,6 +295,11 @@ if (( SKIP_EMIT == 0 )); then
             (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null)
             ;;
         *)
+            # ROUNDHOUSE_GO_V2=1 / ROUNDHOUSE_GO_V2_MODELS=1 — opt-in
+            # path that emits the go2 strangler-fig overlay alongside
+            # legacy go. Both sets of files land in /tmp/rh-go-pass2;
+            # the build step below picks the v2 binary (cmd/v2/) when
+            # ROUNDHOUSE_GO_V2=1 is set. No-op for other targets.
             (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
             ;;
     esac
@@ -325,8 +330,13 @@ case "$TARGET" in
         (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes")
         ;;
     go)
-        step "building go target"
-        (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server .)
+        if [[ "${ROUNDHOUSE_GO_V2:-}" == "1" ]]; then
+            step "building go target (v2 — cmd/v2/)"
+            (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/)
+        else
+            step "building go target"
+            (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server .)
+        fi
         ;;
     crystal)
         step "building crystal target (release)"

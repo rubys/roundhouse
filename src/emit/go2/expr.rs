@@ -2470,18 +2470,20 @@ fn try_expand_truncate_kwargs(
             }
         }
     }
+    // Pad missing kwargs with the Ruby-source defaults (length 30,
+    // omission "..."). The emitted function body's `_opts[0].(int64)` /
+    // `_opts[1].(string)` assertions would zero out (0 / "") when an
+    // arg is missing — which divergence from Rails' truncate manifests
+    // as a 1-3 char text-diff on every truncated paragraph (the
+    // omission length isn't subtracted from the cutoff, so the visible
+    // text runs over by `len("...")` chars). Pad here so the function
+    // body sees the right defaults via the typed assertions.
     let mut out = vec![s_arg];
     match (length_s, omission_s) {
         (Some(l), Some(o)) => { out.push(l); out.push(o); }
-        (Some(l), None) => { out.push(l); }
-        (None, Some(o)) => {
-            // Caller gave only omission. Pad length to int64(30) (the
-            // Ruby-source default) so the function's `_opts[0].(int64)`
-            // assertion still gets a typed value.
-            out.push("int64(30)".to_string());
-            out.push(o);
-        }
-        (None, None) => {}
+        (Some(l), None) => { out.push(l); out.push("\"...\"".to_string()); }
+        (None, Some(o)) => { out.push("int64(30)".to_string()); out.push(o); }
+        (None, None) => { out.push("int64(30)".to_string()); out.push("\"...\"".to_string()); }
     }
     Some(out)
 }
@@ -2633,9 +2635,14 @@ fn try_dom_id_inline(
         } => value.as_str().to_string(),
         _ => return None,
     };
+    // Ruby `"#{suffix}_#{record.dom_prefix()}_#{record.id}"` —
+    // suffix BEFORE prefix in the resulting id. Rails convention:
+    // `dom_id(article, :comments_count)` → "comments_count_article_3"
+    // (not "article_3_comments_count"). See runtime/ruby/action_view/
+    // view_helpers.rb#dom_id.
     Some(format!(
-        "fmt.Sprintf(\"{}_%v_{}\", {}.ID)",
-        prefix, suffix_lit, record_s,
+        "fmt.Sprintf(\"{}_{}_%v\", {}.ID)",
+        suffix_lit, prefix, record_s,
     ))
 }
 
