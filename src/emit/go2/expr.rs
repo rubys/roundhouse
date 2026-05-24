@@ -546,7 +546,8 @@ pub(super) fn emit_send(
     // below with the padded args list.
     let render_padded = try_expand_render_kwargs(ctx, recv, method, args)
         .or_else(|| try_expand_redirect_to_kwargs(ctx, recv, method, args))
-        .or_else(|| try_expand_head_kwargs(ctx, recv, method, args));
+        .or_else(|| try_expand_head_kwargs(ctx, recv, method, args))
+        .or_else(|| try_expand_truncate_kwargs(ctx, recv, method, args));
 
     // Hash-widening peephole for module-singleton class methods whose
     // hand-written shim takes `map[string]interface{}` but whose call
@@ -2389,6 +2390,72 @@ fn try_expand_head_kwargs(
         }
     }
     Some(vec![status_s, content_type_s])
+}
+
+/// Sibling for `ActionView::ViewHelpers.truncate(s, length:, omission:)`.
+/// Ruby `truncate(article.body, length: 100)` is a Const-recv call (not
+/// `self.X` like render/head/redirect_to). The Go emit signature is
+/// `truncate(s string, _opts ...interface{})` which type-asserts
+/// `_opts[0].(int64)` then `_opts[1].(string)` — so the call site must
+/// pass typed positionals, not a Hash. Without this peephole the call
+/// emitted `truncate(s, map[string]int64{"length": 100})` which panicked
+/// at runtime on the int64 type assertion.
+///
+/// Emits only as many positional opts as the Hash literal actually
+/// carries (length only → 1 positional; both → 2). The Ruby-source
+/// defaults (30 / "...") are intentionally NOT filled in here — the
+/// emit body's `if len(_opts) > N` guard preserves the call-arity
+/// semantic that "omitted = use the runtime body's fallback".
+fn try_expand_truncate_kwargs(
+    _ctx: &EmitCtx,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<Vec<String>> {
+    if method != "truncate" {
+        return None;
+    }
+    let r = recv?;
+    let ExprNode::Const { path } = &*r.node else {
+        return None;
+    };
+    if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
+        return None;
+    }
+    let s_arg = emit_expr(_ctx, args.first()?);
+    let mut length_s: Option<String> = None;
+    let mut omission_s: Option<String> = None;
+    if let Some(arg2) = args.get(1) {
+        if let ExprNode::Hash { entries, .. } = &*arg2.node {
+            for (k, v) in entries {
+                let key_text = match &*k.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    _ => None,
+                };
+                let v_s = emit_expr(_ctx, v);
+                match key_text.as_deref() {
+                    Some("length") => length_s = Some(format!("int64({})", v_s)),
+                    Some("omission") => omission_s = Some(v_s),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut out = vec![s_arg];
+    match (length_s, omission_s) {
+        (Some(l), Some(o)) => { out.push(l); out.push(o); }
+        (Some(l), None) => { out.push(l); }
+        (None, Some(o)) => {
+            // Caller gave only omission. Pad length to int64(30) (the
+            // Ruby-source default) so the function's `_opts[0].(int64)`
+            // assertion still gets a typed value.
+            out.push("int64(30)".to_string());
+            out.push(o);
+        }
+        (None, None) => {}
+    }
+    Some(out)
 }
 
 /// `Broadcasts.{append,prepend,replace,remove}` call detection — the
