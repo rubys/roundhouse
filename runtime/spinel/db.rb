@@ -25,10 +25,17 @@
 #   Db.escape_int(n)           — render an integer for SQL inlining
 #
 # Stmt handles are opaque pointers (`:ptr`) returned by sqlite3_prepare_v2
-# via the SQL.stmt_out out-buffer. The FFI shim can't construct
-# SQLITE_TRANSIENT for `bind_text`, so the contract is "inline values
+# via the SQL.stmt_out out-buffer. The contract today is "inline values
 # into SQL"; lowerer-emitted code goes through `escape_string` /
-# `escape_int` (both shimmed below) before composition.
+# `escape_int` (both shimmed below) before composition. `bind_text` is
+# unblocked at the FFI layer (spinel #576 + matz/spinel#686 doc fix) —
+# placeholder-bind emit is a planned follow-on.
+#
+# Module-level state is a single `@pool` (ActiveRecord ConnectionPool of N
+# opaque dbh ptrs). `Db.current_dbh` reads Fiber.storage[:db_handle] when
+# set (request-scoped checkout) and falls back to the pool's first free
+# handle otherwise (single-fiber test/dev mode). Existing call sites don't
+# care which path they're on; they just call Db.X.
 #
 # Pattern mirrors `examples/ffi/sqlite/blog.rb` in the spinel repo —
 # the same `ffi_func` declarations, the same out-buffer plumbing.
@@ -64,33 +71,48 @@ module SQL
 end
 
 module Db
-  @db = nil
+  @pool = nil
 
-  def self.configure(path)
-    rc = SQL.sqlite3_open(path, SQL.db_out)
-    if rc != SQL::OK
-      # Best-effort error surface — sqlite3_errmsg requires a valid
-      # db handle, which we don't have on open failure. The numeric
-      # rc + path are the only signals we can raise pre-handle.
-      raise "Db.configure: sqlite3_open(" + path + ") failed (" + rc.to_s + ")"
+  def self.configure(path, pool_size: 1)
+    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(pool_size) do
+      rc = SQL.sqlite3_open(path, SQL.db_out)
+      if rc != SQL::OK
+        # Best-effort error surface — sqlite3_errmsg requires a valid
+        # db handle, which we don't have on open failure. The numeric
+        # rc + path are the only signals we can raise pre-handle.
+        raise "Db.configure: sqlite3_open(" + path + ") failed (" + rc.to_s + ")"
+      end
+      SQL.read_ptr(SQL.db_out)
     end
-    @db = SQL.read_ptr(SQL.db_out)
+  end
+
+  # The handle this fiber should read/write through. Set by
+  # `with_connection` (request scope) when wired; falls back to the
+  # pool's first free handle for single-fiber test/dev modes.
+  # `Fiber[:k]` is spinel's per-fiber storage indexer (#577/#578).
+  def self.current_dbh
+    h = Fiber[:db_handle]
+    return h if !h.nil?
+    @pool.free[0]
   end
 
   def self.close
-    if !@db.nil?
-      SQL.sqlite3_close(@db)
-      @db = nil
+    return if @pool.nil?
+    i = 0
+    while i < @pool.free.length
+      SQL.sqlite3_close(@pool.free[i])
+      i += 1
     end
+    @pool = nil
   end
 
   # DDL + INSERT/UPDATE/DELETE. `sqlite3_exec` doesn't return rows;
   # callers that want last_insert_rowid / changes consult those
   # accessors immediately after.
   def self.exec(sql)
-    rc = SQL.sqlite3_exec(@db, sql, nil, nil, nil)
+    rc = SQL.sqlite3_exec(current_dbh, sql, nil, nil, nil)
     if rc != SQL::OK
-      raise "Db.exec failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@db) + " — sql: " + sql
+      raise "Db.exec failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
     end
   end
 
@@ -99,9 +121,9 @@ module Db
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
-    rc = SQL.sqlite3_prepare_v2(@db, sql, -1, SQL.stmt_out, nil)
+    rc = SQL.sqlite3_prepare_v2(current_dbh, sql, -1, SQL.stmt_out, nil)
     if rc != SQL::OK
-      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@db) + " — sql: " + sql
+      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
     end
     SQL.read_ptr(SQL.stmt_out)
   end
@@ -148,11 +170,11 @@ module Db
   end
 
   def self.last_insert_rowid
-    SQL.sqlite3_last_insert_rowid(@db)
+    SQL.sqlite3_last_insert_rowid(current_dbh)
   end
 
   def self.changes
-    SQL.sqlite3_changes(@db)
+    SQL.sqlite3_changes(current_dbh)
   end
 
   # Same SQL-value escaping shape as the gem-backed sibling. Single-

@@ -10,7 +10,7 @@
 # treats it as Integer here — sufficient for the lowered IR; per-target
 # narrowing happens at emit time.
 module Db
-  def self.configure: (String) -> void
+  def self.configure: (String, ?pool_size: Integer) -> void
   def self.close: () -> void
   def self.exec: (String) -> void
   def self.prepare: (String) -> Integer

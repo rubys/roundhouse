@@ -38,27 +38,45 @@
 require "sqlite3"
 
 module Db
-  @db      = nil
+  @pool    = nil
   @rows    = {}
   @next_id = 0
 
-  def self.configure(path)
-    @db = SQLite3::Database.new(path)
-    @db.results_as_hash = false
+  def self.configure(path, pool_size: 1)
+    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(pool_size) do
+      db = SQLite3::Database.new(path)
+      db.results_as_hash = false
+      db
+    end
+  end
+
+  # The SQLite3::Database this fiber should read/write through. Set by
+  # `with_connection` (request scope) when wired; falls back to the
+  # pool's first free handle for single-fiber test/dev modes.
+  # `Fiber[:k]` is spinel's per-fiber storage indexer (#577/#578).
+  def self.current_dbh
+    h = Fiber[:db_handle]
+    return h if !h.nil?
+    @pool.free[0]
   end
 
   def self.close
-    @db.close if !@db.nil?
-    @db = nil
+    return if @pool.nil?
+    i = 0
+    while i < @pool.free.length
+      @pool.free[i].close
+      i += 1
+    end
+    @pool = nil
   end
 
   def self.exec(sql)
-    @db.execute(sql)
+    current_dbh.execute(sql)
   end
 
   def self.prepare(sql)
     @next_id += 1
-    @rows[@next_id] = { stmt: @db.prepare(sql), row: nil }
+    @rows[@next_id] = { stmt: current_dbh.prepare(sql), row: nil }
     @next_id
   end
 
@@ -92,11 +110,11 @@ module Db
   end
 
   def self.last_insert_rowid
-    @db.last_insert_row_id
+    current_dbh.last_insert_row_id
   end
 
   def self.changes
-    @db.changes
+    current_dbh.changes
   end
 
   # SQL-value escaping primitives — lowerer-emitted code uses these
