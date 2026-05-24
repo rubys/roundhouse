@@ -30,15 +30,18 @@ module ActiveRecord
     class ConnectionPool
       attr_accessor :size, :free
 
-      # Eagerly open `size` handles via the factory block. If the
-      # factory raises mid-loop, partially-opened handles leak —
-      # the caller is responsible for top-level rescue + retry.
-      def initialize(size, &factory)
+      # Eagerly open `size` handles via the yielded block. If the
+      # block raises mid-loop, partially-opened handles leak — the
+      # caller is responsible for top-level rescue + retry. Uses
+      # bare `yield` (not `&block` Proc binding) to match the
+      # codebase convention in flash.rb / session.rb and avoid the
+      # body-typer treating `&block` as a positional param.
+      def initialize(size)
         @size = size
         @free = []
         i = 0
         while i < size
-          @free.push(factory.call)
+          @free.push(yield)
           i += 1
         end
       end

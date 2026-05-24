@@ -1,0 +1,27 @@
+# Typing contract for ConnectionPool. Handles are opaque pointers in
+# the lowered IR; we treat them as Integer here, matching the
+# db.rbs convention ("under the cruby shim it's an Integer id; under
+# the FFI shim it's a :ptr; body-typer treats as Integer — per-target
+# narrowing happens at emit time").
+
+module ActiveRecord
+  module ConnectionAdapters
+    class ConnectionPool
+      # attr_accessor :size, :free — lowers to getter/setter pairs.
+      def size: () -> Integer
+      def size=: (Integer) -> Integer
+      def free: () -> Array[Integer]
+      def free=: (Array[Integer]) -> Array[Integer]
+
+      # Factory block returns an opaque handle (Integer in body-typer
+      # convention). Block-arg shape matches PG::Pool / Rails AR.
+      def initialize: (Integer size) { () -> Integer } -> void
+
+      def checkout: () -> Integer
+      def checkin: (Integer handle) -> void
+      def wait_for_handle: () -> Integer
+      def available_count: () -> Integer
+      def in_use_count: () -> Integer
+    end
+  end
+end
