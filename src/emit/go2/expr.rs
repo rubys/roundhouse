@@ -1168,6 +1168,20 @@ pub(super) fn emit_send(
             } else {
                 args_s[1].clone()
             };
+            // `cmp.Or[T]` requires both args share the receiver's
+            // value type T. When T is the `any`-alias `RoundhouseParamValue`
+            // (the recursive param tree) but the default literal renders
+            // as a concrete map/array/scalar, Go's generic inference
+            // settles on the concrete shape and rejects `params[k]`
+            // (typed `any`). Lift the default into T explicitly — for
+            // alias-to-`any` types Go accepts any RHS via the conversion
+            // syntax, so `RoundhouseParamValue(map[string]…{})` and
+            // `any(…)` both unify the args under T=any.
+            let default_s = if default_needs_v_ty_cast(&v_ty, &default_s) {
+                format!("{v_ty}({default_s})")
+            } else {
+                default_s
+            };
             return format!(
                 "cmp.Or({}[{}], {})",
                 emit_expr(ctx, r),
@@ -2507,6 +2521,24 @@ fn indent(out: &mut String, depth: usize) {
 /// any` would be if the analyzer had set the Ty. Nested Unions are
 /// flattened via `union_non_nil_core` so `Union[Hash, Nil]` (a
 /// nullable map) carries through.
+/// Predicate for the fetch peephole's default-arg cast. Returns true
+/// when the receiver's value type is the `any`-alias `RoundhouseParamValue`
+/// (or bare `any` / `interface{}`) AND the default's emitted shape isn't
+/// already that type. The cast widens concrete defaults (`map[…]…{}`,
+/// `[]…{}`, `""`, `int64(0)`) into the receiver's value-type slot so
+/// `cmp.Or`'s generic inference unifies both args under T=any.
+fn default_needs_v_ty_cast(v_ty: &str, default_s: &str) -> bool {
+    if !matches!(v_ty, "RoundhouseParamValue" | "any" | "interface{}") {
+        return false;
+    }
+    // The default already names the v_ty (`any(...)` / `interface{}(...)`
+    // / `RoundhouseParamValue(...)`) — leave it alone.
+    let trimmed = default_s.trim_start();
+    !(trimmed.starts_with(&format!("{v_ty}("))
+        || trimmed.starts_with("any(")
+        || trimmed.starts_with("interface{}("))
+}
+
 fn hash_kv_go_tys(ty: Option<&Ty>) -> (String, String) {
     let core = match ty {
         Some(t) => union_non_nil_core(t).unwrap_or(t),
