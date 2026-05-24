@@ -94,6 +94,14 @@ pub(super) struct EmitCtx {
     /// bare functions); the existing `is_known_go_method` stdlib
     /// whitelist still kicks in.
     pub self_methods: Option<Rc<HashSet<String>>>,
+    /// True when the enclosing class is in the AR chain
+    /// (transitively descends from `ActiveRecord::Base`). Drives the
+    /// Q1 polymorphic-dispatch peepholes — `self.class.X` inside an
+    /// AR-method body emits as `self.Self.X()` (interface dispatch
+    /// through the back-pointer) rather than `<ClassName>_X()`
+    /// (static class-method form), so subclass overrides land
+    /// correctly. Same flag governs `self.OpSet/OpGet` routing.
+    pub is_ar_class: bool,
 }
 
 impl EmitCtx {
@@ -107,6 +115,7 @@ impl EmitCtx {
             in_module_singleton: false,
             self_methods: None,
             return_ty: None,
+            is_ar_class: false,
         }
     }
 
@@ -884,6 +893,17 @@ pub(super) fn emit_send(
     if method == "[]=" && args.len() == 2 && recv.is_some() {
         let recv_e = recv.unwrap();
         let recv_s = emit_expr(ctx, recv_e);
+        // Q1 — `self[k] = v` inside an AR-class instance method
+        // routes through the Modeler back-pointer so subclass OpSet
+        // overrides fire. `self.OpSet(...)` would bind statically to
+        // *ActiveRecordBase.OpSet (the panic stub) when called from
+        // a Base method.
+        if ctx.is_ar_class
+            && !ctx.in_class_method
+            && matches!(&*recv_e.node, ExprNode::SelfRef)
+        {
+            return format!("self.Self.OpSet({}, {})", args_s[0], args_s[1]);
+        }
         if recv_ty_is_class(recv_e.ty.as_ref()) {
             return format!("{recv_s}.OpSet({}, {})", args_s[0], args_s[1]);
         }
@@ -892,6 +912,14 @@ pub(super) fn emit_send(
 
     if method == "[]" && recv.is_some() {
         let recv_e = recv.unwrap();
+        // Q1 — `self[k]` inside an AR-class instance method routes
+        // through the Modeler back-pointer (mirrors `[]=` above).
+        if ctx.is_ar_class
+            && !ctx.in_class_method
+            && matches!(&*recv_e.node, ExprNode::SelfRef)
+        {
+            return format!("self.Self.OpGet({})", args_s.join(", "));
+        }
         if recv_ty_is_class(recv_e.ty.as_ref()) {
             let recv_s = emit_expr(ctx, recv_e);
             return format!("{recv_s}.OpGet({})", args_s.join(", "));
@@ -1448,6 +1476,21 @@ pub(super) fn emit_send(
                 // `name`-in-class-method peephole above).
                 if method == "name" && args.is_empty() {
                     return format!("{class_name:?}");
+                }
+                // Q1 — inside an AR-chain class's instance method,
+                // route `self.class.X` through the Modeler interface
+                // back-pointer (`self.Self.X()`) so subclass overrides
+                // fire at runtime. The Self field is on the embedded
+                // *ActiveRecordBase; constructor wiring of the outer
+                // subclass made it point at the outer instance, so
+                // the interface dispatch resolves to the outer's
+                // method. Limited to the Modeler interface members
+                // (currently schema_columns, op_get, op_set); other
+                // class methods stay on the static `<Class>_X()` form
+                // since they're not in the Modeler surface.
+                if ctx.is_ar_class && !ctx.in_class_method && is_modeler_member(method) {
+                    let pascal = go_method_name(&super::library::sanitize_method_name(method));
+                    return format!("self.Self.{pascal}({})", args_s.join(", "));
                 }
                 let m = super::library::sanitize_method_name(method);
                 return format!("{class_name}_{m}({})", args_s.join(", "));
@@ -2382,6 +2425,18 @@ fn is_view_helpers_widen_call(recv: Option<&Expr>, method: &str) -> bool {
         return false;
     };
     path.last().map(|s| s.as_str()) == Some("ViewHelpers")
+}
+
+/// Ruby names of the methods listed in the Modeler interface
+/// (`runtime/go/v2/modeler.go`). When a Base method body calls
+/// `self.class.X` or `self.X` against one of these, the emit must
+/// route through `self.Self.X()` for polymorphic dispatch — otherwise
+/// the static-bound `*ActiveRecordBase` method (panic stub) fires
+/// instead of the subclass override. Keep in sync with the Modeler
+/// interface declaration; adding a member here requires also adding
+/// a method shim per AR subclass.
+fn is_modeler_member(name: &str) -> bool {
+    matches!(name, "schema_columns" | "op_get" | "op_set" | "[]" | "[]=")
 }
 
 fn is_known_go_method(name: &str) -> bool {

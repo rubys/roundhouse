@@ -104,5 +104,10 @@ fn is_go_interface_class(id: &str) -> bool {
         // it must emit bare — `*any` is pointer-to-interface with an
         // empty method set.
         | "Roundhouse::ParamValue"
+        // `Roundhouse::Modeler` is the Q1 back-pointer interface
+        // declared in `runtime/go/v2/modeler.go`. Carried on
+        // `ActiveRecordBase.Self` for polymorphic dispatch into the
+        // outer subclass.
+        | "Roundhouse::Modeler"
     )
 }

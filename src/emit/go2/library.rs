@@ -31,7 +31,18 @@ use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
 
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
-    emit_library_class_with_registry(class, &std::collections::HashSet::new())
+    // Seed `ar_chain` with the AR::Base sanitized name so the
+    // GO_RUNTIME emit path (which doesn't compute a per-class
+    // registry) still triggers Q1 wiring on AR::Base itself.
+    // Subclasses come through `emit_library_class_with_registry` from
+    // `emit_overlay_files` with the transitive-closure set.
+    let mut ar_chain = std::collections::HashSet::new();
+    ar_chain.insert("ActiveRecordBase".to_string());
+    emit_library_class_with_registry(
+        class,
+        &std::collections::HashSet::new(),
+        &ar_chain,
+    )
 }
 
 /// Variant that takes a `variadic_ctors` set so synthesized embedded-
@@ -45,6 +56,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 pub fn emit_library_class_with_registry(
     class: &LibraryClass,
     variadic_ctors: &std::collections::HashSet<String>,
+    ar_chain: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
     // Module-singleton shape: a Ruby `module X` whose body is just
     // `class << self; attr_accessor :slot; end` (and/or `def self.foo`
@@ -83,7 +95,16 @@ pub fn emit_library_class_with_registry(
     // fields yet; they'd surface as missing-symbol errors at use,
     // which is fine inventory.
     let fields = collect_fields(&class.methods);
-    if embedded_parent.is_none() && fields.is_empty() {
+    // Q1 — when emitting `ActiveRecordBase` itself, inject a
+    // back-pointer `Self Modeler` field for polymorphic dispatch.
+    // Subclasses inherit the field through embedding, so writes via
+    // `instance.Self = instance` in their outer constructors travel
+    // through to the deep `*ActiveRecordBase.Self` slot. Inside Base
+    // methods, the `self.class.X()` and `self.OpSet(...)` peepholes
+    // emit as `self.Self.X()` interface dispatch, landing on the
+    // outer subclass's implementation.
+    let is_ar_base = class.name.0.as_str() == "ActiveRecord::Base";
+    if embedded_parent.is_none() && fields.is_empty() && !is_ar_base {
         out.push_str(&format!("type {name} struct{{}}\n\n"));
     } else {
         out.push_str(&format!("type {name} struct {{\n"));
@@ -92,6 +113,9 @@ pub fn emit_library_class_with_registry(
         }
         for f in &fields {
             out.push_str(&format!("\t{} {}\n", f.pascal_name, f.go_ty));
+        }
+        if is_ar_base {
+            out.push_str("\tSelf Modeler\n");
         }
         out.push_str("}\n\n");
     }
@@ -108,6 +132,14 @@ pub fn emit_library_class_with_registry(
         .as_deref()
         .map(|p| variadic_ctors.contains(p))
         .unwrap_or(false);
+    // Q1 — wire `self.Self = self` when this class is in the AR
+    // chain (transitively descends from ActiveRecord::Base).
+    // Includes AR::Base itself so its own constructor seeds Self
+    // even when used standalone (e.g. test_helper instantiates Base
+    // directly). Subclass constructors overwrite via the outermost-
+    // wins property: NewArticle → NewApplicationRecord →
+    // NewActiveRecordBase each set Self; the outer call wins.
+    let wire_self = ar_chain.contains(&name);
     if let Some(init) = class.methods.iter().find(|m| {
         matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
     }) {
@@ -116,6 +148,7 @@ pub fn emit_library_class_with_registry(
             init,
             embedded_parent.as_deref(),
             parent_is_variadic,
+            wire_self,
         ));
         out.push('\n');
     } else if let Some(ref parent_ty) = embedded_parent {
@@ -123,6 +156,7 @@ pub fn emit_library_class_with_registry(
             &name,
             parent_ty,
             parent_is_variadic,
+            wire_self,
         ));
         out.push('\n');
     }
@@ -163,7 +197,7 @@ pub fn emit_library_class_with_registry(
                 continue;
             }
         }
-        out.push_str(&emit_method(&name, m, &self_methods));
+        out.push_str(&emit_method(&name, m, &self_methods, wire_self));
         out.push('\n');
     }
 
@@ -184,6 +218,27 @@ pub fn emit_library_class_with_registry(
     // emitting wrappers there would reference undefined symbols.
     if embedded_parent.is_some() && has_adapter_primitives(class) {
         out.push_str(&emit_ar_class_method_wrappers(&name));
+        // Q1 — Modeler interface method shim for the class-method
+        // SchemaColumns. Each AR subclass has its own
+        // `<Model>_schema_columns()` bare-fn (synthesized by the
+        // model lowerer); the shim turns it into an instance method
+        // so *<Model> satisfies the Modeler interface and the
+        // Base.FillTimestamps polymorphic dispatch lands here.
+        out.push_str(&format!(
+            "func (self *{name}) SchemaColumns() []string {{ return {name}_schema_columns() }}\n"
+        ));
+    }
+    // Q1 — emit a panic-stub SchemaColumns method on AR::Base itself
+    // so *ActiveRecordBase also satisfies Modeler (needed for the
+    // Self field's interface-value assignment to compile against
+    // intermediate classes like ApplicationRecord that don't
+    // override anything yet — promotion through embedding picks up
+    // Base's stub). Concrete subclasses override via the shim
+    // emitted above.
+    if is_ar_base {
+        out.push_str(&format!(
+            "func (self *{name}) SchemaColumns() []string {{ return {name}_schema_columns() }}\n"
+        ));
     }
     Ok(out)
 }
@@ -421,6 +476,7 @@ fn emit_constructor(
     init: &MethodDef,
     embedded_parent: Option<&str>,
     parent_is_variadic: bool,
+    wire_self_back_pointer: bool,
 ) -> String {
     let (params, optional_unpack) = render_constructor_params(init);
     let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
@@ -446,7 +502,19 @@ fn emit_constructor(
     // name matches the Ivar name. If so, emit `return &Class{Name: name, ...}`.
     if let Some(literal) = try_field_init_literal(class_name, &init.body, parent_slot.as_deref()) {
         out.push_str(&optional_unpack);
-        out.push_str(&format!("\treturn {literal}\n"));
+        // Q1 — when the class is in the AR chain, the literal-return
+        // shape can't carry the `self.Self = self` wiring directly
+        // (no named local to assign to). Restructure to `self :=
+        // <literal>; self.Self = self; return self`. Outside the AR
+        // chain, keep the bare `return <literal>` since no Self
+        // field exists.
+        if wire_self_back_pointer {
+            out.push_str(&format!("\tself := {literal}\n"));
+            out.push_str("\tself.Self = self\n");
+            out.push_str("\treturn self\n");
+        } else {
+            out.push_str(&format!("\treturn {literal}\n"));
+        }
     } else {
         // Fallback: declare a fresh receiver, walk the body as
         // statements (NOT return-wrapped — `self.X = Y` is a Go
@@ -490,6 +558,14 @@ fn emit_constructor(
             out.push_str("\t}()\n");
         } else {
             out.push_str(&body);
+        }
+        // Q1 — wire the back-pointer after the body so an early
+        // return inside the IIFE doesn't skip the assignment. Outer
+        // subclass overrides inner: NewArticle → NewApplicationRecord
+        // → NewActiveRecordBase all set self.Self; last one wins
+        // because Self is a single slot promoted up through embedding.
+        if wire_self_back_pointer {
+            out.push_str("\tself.Self = self\n");
         }
         out.push_str("\treturn self\n");
     }
@@ -680,14 +756,30 @@ fn emit_default_embedded_constructor(
     class_name: &str,
     parent_ty: &str,
     parent_is_variadic: bool,
+    wire_self_back_pointer: bool,
 ) -> String {
-    if parent_is_variadic {
+    let params = if parent_is_variadic {
+        "_opts ...map[string]interface{}"
+    } else {
+        ""
+    };
+    let parent_call = if parent_is_variadic {
+        format!("New{parent_ty}(_opts...)")
+    } else {
+        format!("New{parent_ty}()")
+    };
+    if wire_self_back_pointer {
+        // Q1 — wire the back-pointer after constructing the
+        // embedded slot. Restructured from the one-liner
+        // `return &Class{...}` into the three-line `self := ...;
+        // self.Self = self; return self` shape since the
+        // assignment needs a named local.
         format!(
-            "func New{class_name}(_opts ...map[string]interface{{}}) *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}(_opts...)}}\n}}\n"
+            "func New{class_name}({params}) *{class_name} {{\n\tself := &{class_name}{{{parent_ty}: {parent_call}}}\n\tself.Self = self\n\treturn self\n}}\n"
         )
     } else {
         format!(
-            "func New{class_name}() *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: New{parent_ty}()}}\n}}\n"
+            "func New{class_name}({params}) *{class_name} {{\n\treturn &{class_name}{{{parent_ty}: {parent_call}}}\n}}\n"
         )
     }
 }
@@ -827,6 +919,7 @@ fn emit_method(
     class_name: &str,
     m: &MethodDef,
     self_methods: &std::rc::Rc<std::collections::HashSet<String>>,
+    is_ar_class: bool,
 ) -> String {
     let (params, optional_unpack) = render_params_with_unpack(m);
     let ret = render_return(m);
@@ -871,6 +964,7 @@ fn emit_method(
         in_module_singleton: false,
         self_methods: Some(std::rc::Rc::clone(self_methods)),
         return_ty,
+        is_ar_class,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
@@ -1323,6 +1417,9 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         // in the self-method registry.
         self_methods: None,
         return_ty,
+        // Module-singletons (ActiveRecord, ApplicationCable, …) are
+        // not AR-instance classes — Q1 dispatch peepholes don't fire.
+        is_ar_class: false,
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());

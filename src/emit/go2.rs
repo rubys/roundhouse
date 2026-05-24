@@ -45,6 +45,8 @@ const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
 const RT_V2_ERRORS: &str =
     include_str!("../../runtime/go/v2/errors.go");
+const RT_V2_MODELER: &str =
+    include_str!("../../runtime/go/v2/modeler.go");
 const RT_V2_DB: &str =
     include_str!("../../runtime/go/v2/db.go");
 const RT_V2_BROADCASTS: &str =
@@ -83,6 +85,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("param_value.go", RT_V2_PARAM_VALUE),
         ("errors.go", RT_V2_ERRORS),
+        ("modeler.go", RT_V2_MODELER),
     ] {
         out.push(EmittedFile {
             path: PathBuf::from(format!("app/v2/{name}")),
@@ -376,8 +379,46 @@ func main() {\n\
             }
         }
 
+        // Q1 — build the ar_chain registry: every class whose
+        // embedding chain reaches `ActiveRecord::Base`. Constructor
+        // synthesis wires `self.Self = self` for these so polymorphic
+        // dispatch (Base method calls `b.Self.SchemaColumns()`)
+        // lands on the outer subclass. Computed via the same
+        // transitive-closure shape as variadic_ctors: start with the
+        // root ("ActiveRecord::Base" itself, stored under its
+        // sanitized form "ActiveRecordBase"), then walk every LC
+        // adding classes whose parent is already in the set. Fixed
+        // point.
+        let mut ar_chain: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        ar_chain.insert("ActiveRecordBase".to_string());
+        loop {
+            let before = ar_chain.len();
+            for lc in units.iter().flat_map(|u| u.classes.iter())
+                .chain(lowered_models.iter())
+                .chain(lowered_controllers.iter())
+                .chain(lowered_route_helpers.iter())
+                .chain(lowered_importmap.iter())
+                .chain(lowered_views.iter())
+            {
+                let sanitized = lc.name.0.as_str().replace("::", "");
+                if ar_chain.contains(&sanitized) {
+                    continue;
+                }
+                if let Some(parent) = lc.parent.as_ref() {
+                    let parent_san = parent.0.as_str().replace("::", "");
+                    if ar_chain.contains(&parent_san) {
+                        ar_chain.insert(sanitized);
+                    }
+                }
+            }
+            if ar_chain.len() == before {
+                break;
+            }
+        }
+
         for lc in &lowered_models {
-            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors, &ar_chain) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -395,7 +436,7 @@ func main() {\n\
         }
 
         for lc in &lowered_controllers {
-            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors, &ar_chain) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -411,7 +452,7 @@ func main() {\n\
         }
 
         for lc in &lowered_route_helpers {
-            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors, &ar_chain) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -426,7 +467,7 @@ func main() {\n\
         }
 
         for lc in &lowered_importmap {
-            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors, &ar_chain) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
@@ -449,7 +490,7 @@ func main() {\n\
             let raw_name = lc.name.0.as_str();
             let struct_name = raw_name.rsplit("::").next().unwrap_or(raw_name).to_string();
             let stem = crate::naming::snake_case(&struct_name);
-            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors) {
+            let class_text = match library::emit_library_class_with_registry(lc, &variadic_ctors, &ar_chain) {
                 Ok(s) => s,
                 Err(e) => format!("// emit error: {e}\n"),
             };
