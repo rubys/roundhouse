@@ -16,7 +16,7 @@ use super::controller_test::{emit_go_controller_test_body, GoTestCtx};
 use super::expr::emit_literal;
 use super::shared::go_field_name;
 
-pub(super) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
+pub(crate) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
     let fixture_names: Vec<crate::ident::Symbol> =
         app.fixtures.iter().map(|f| f.name.clone()).collect();
     let known_models: Vec<crate::ident::Symbol> =

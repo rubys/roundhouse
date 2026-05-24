@@ -35,7 +35,7 @@ use crate::ty::Ty;
 mod controller;
 mod controller_test;
 mod expr;
-mod fixture;
+pub(crate) mod fixture;
 mod gomod;
 mod importmap;
 mod main;
@@ -43,7 +43,7 @@ mod model;
 mod route;
 mod schema_sql;
 pub(crate) mod shared;
-mod spec;
+pub(crate) mod spec;
 mod ty;
 mod view;
 
