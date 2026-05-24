@@ -464,11 +464,33 @@ fn emit_constructor(
         for p in &init.params {
             ctx.declare_param(p.name.as_str());
         }
+        // Ruby `initialize` is void, so `return if other.nil?` (the
+        // skip-the-rest idiom) is normal. Lowered to ExprNode::Return
+        // with Nil value, naive emit produces `return nil` — but in the
+        // outer ctor (`func New<X>() *<X>`) that returns a nil
+        // pointer, not "skip the rest then return self". Detect early
+        // returns and wrap the body in an IIFE: `return` exits the
+        // closure but the outer fn still runs `return self`. `self`
+        // and the param-unpack locals are captured by reference. The
+        // closure adds no runtime cost the Go inliner can't elide.
+        let wrap_in_iife = body_has_return(&init.body);
+        if wrap_in_iife {
+            // Inside the IIFE the return type is void, so the Return
+            // emit produces bare `return` (truly_void path) instead of
+            // `return nil`.
+            ctx.return_ty = Some(crate::ty::Ty::Nil);
+        }
         // Constructor body executes against `self` directly, just
         // like an instance method would. Keep `in_class_method=false`
         // so `@ivar = …` writes resolve to `self.Field`.
         let body = emit_return_body(&ctx, &init.body);
-        out.push_str(&body);
+        if wrap_in_iife {
+            out.push_str("\tfunc() {\n");
+            out.push_str(&body);
+            out.push_str("\t}()\n");
+        } else {
+            out.push_str(&body);
+        }
         out.push_str("\treturn self\n");
     }
     out.push_str("}\n");
@@ -542,6 +564,48 @@ fn trailing_optional_split(params: &[crate::dialect::Param]) -> usize {
 }
 
 /// Pattern-match the simple-shape constructor body (`Seq` of
+/// Recursive walk: does `e` contain an `ExprNode::Return` anywhere?
+/// Used by `emit_constructor` to decide whether to wrap the ctor body
+/// in an IIFE so the Ruby `return if cond` skip-the-rest idiom doesn't
+/// short-circuit the outer `New<X>` and yield a nil pointer.
+fn body_has_return(e: &Expr) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    match &*e.node {
+        ExprNode::Return { .. } => true,
+        ExprNode::Seq { exprs } => exprs.iter().any(body_has_return),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            body_has_return(cond)
+                || body_has_return(then_branch)
+                || body_has_return(else_branch)
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            body_has_return(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().map(body_has_return).unwrap_or(false)
+                        || body_has_return(&a.body)
+                })
+        }
+        ExprNode::Assign { target, value } => {
+            let target_has = match target {
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => body_has_return(recv),
+                _ => false,
+            };
+            target_has || body_has_return(value)
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            recv.as_ref().map(|r| body_has_return(r)).unwrap_or(false)
+                || args.iter().any(body_has_return)
+                || block.as_ref().map(|b| body_has_return(b)).unwrap_or(false)
+        }
+        ExprNode::Cast { value, .. } => body_has_return(value),
+        // Loops + Lambda bodies have their own return semantics —
+        // a `return` inside a `Lambda` exits the lambda, not the
+        // enclosing ctor, so we don't need IIFE wrapping for those.
+        ExprNode::Lambda { .. } => false,
+        _ => false,
+    }
+}
+
 /// `@ivar = var` assigns where `var` matches the ivar's Pascal field).
 /// Returns the struct literal text on success. `parent_slot`, when
 /// provided, prepends the embedded-parent initializer
