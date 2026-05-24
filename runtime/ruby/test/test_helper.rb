@@ -33,12 +33,24 @@ require "json"
 
 FRAMEWORK_RUBY = File.expand_path("..", __dir__)
 $LOAD_PATH.unshift(FRAMEWORK_RUBY)
+# `runtime/` itself so `spinel/db_cruby` and `spinel/sqlite_adapter`
+# resolve below. Required by base_test.rb's `:memory:` sqlite setup;
+# harmless for tests that don't touch persistence.
+$LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 
 require "active_record"
 require "action_view/view_helpers"
 require "action_dispatch/router"
 require "action_controller/base"
 require "inflector"
+
+# Real Db primitive (gem-backed under CRuby) + SqliteAdapter shim that
+# satisfies the AR adapter contract by routing through Db. base_test
+# exercises Base CRUD against an in-memory SQLite via these — same
+# code path the production sqlite-backed app uses. Other framework
+# tests don't touch persistence; the requires are harmless for them.
+require "spinel/db_cruby"
+require "spinel/sqlite_adapter"
 
 # Reopen Minitest::Test with the AS-flavor assertions framework
 # tests need. Keeps the tests' assertion vocabulary consistent

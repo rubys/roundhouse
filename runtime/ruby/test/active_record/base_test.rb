@@ -1,29 +1,24 @@
 require_relative "../test_helper"
 
-# DISABLED — runner functions removed from
-# tests/framework_tests_{ruby,typescript,crystal,spinel}.rs. File kept
-# as the starting point for a follow-on session that will rewire each
-# target's runner against its real sqlite adapter (CRuby: sqlite3 gem;
-# spinel: libsqlite3 FFI; Crystal: DB::SQLite3; TS: better-sqlite3 /
-# libsql; Rust: rusqlite; Go: modernc.org/sqlite). The prior
-# `FrameworkTestAdapter` polymorphic-Hash mock (~150 LOC in
-# test_helper.rb + 5 per-target mirror files) has been removed.
+# Direct unit tests for `runtime/ruby/active_record/base.rb`. Each
+# CRUD method (find/all/where/count/exists?/save/destroy/reload/
+# create/create!/last) gets exercised against an in-memory SQLite
+# database routed through `Db` + `SqliteAdapter` (the CRuby gem-backed
+# variant — see runtime/spinel/db_cruby.rb required by test_helper).
+# A subclass defines the per-model overrides Base requires
+# (`table_name`, `schema_columns`, `instantiate`, `attributes`,
+# `assign_from_row`) so the framework dispatch + lifecycle is what's
+# under test, not the synthesized model code.
 #
-# Current file shape: setup expects `Db` and `SqliteAdapter` constants
-# from `runtime/spinel/{db_cruby,sqlite_adapter}.rb` — those aren't
-# require'd by `test_helper.rb` anymore (removed to avoid forcing the
-# sqlite3 gem onto unrelated framework tests), so direct invocation
-# fails with `uninitialized constant Db`. The follow-on session will
-# either re-add the requires here OR rewire to per-target Db.
-#
-# Original intent (still valid): direct unit tests for
-# `runtime/ruby/active_record/base.rb`. Each CRUD method
-# (find/all/where/count/exists?/save/destroy/reload/create/create!/last)
-# gets exercised against an in-memory SQLite database. A subclass
-# defines the per-model overrides Base requires (`table_name`,
-# `schema_columns`, `instantiate`, `attributes`, `assign_from_row`)
-# so the framework dispatch + lifecycle is what's under test, not the
-# synthesized model code.
+# Current state: runs under CRuby via the `framework_ruby_tests_pass`
+# autorun gate. Per-target runner functions in
+# tests/framework_tests_{typescript,crystal,spinel}.rs are DISABLED
+# pending a follow-on session that will wire each target against its
+# native sqlite adapter (spinel: libsqlite3 FFI; Crystal: DB::SQLite3;
+# TS: better-sqlite3 / libsql; Rust: rusqlite; Go: modernc.org/sqlite).
+# The prior `FrameworkTestAdapter` polymorphic-Hash mock plus its 5
+# per-target mirror files have been removed; this test going forward
+# travels through the same real-sqlite path as production.
 class BaseTest < Minitest::Test
   # Minimal user-facing model — just enough to satisfy Base's
   # contract markers. Stores a small (id, title) row shape;
