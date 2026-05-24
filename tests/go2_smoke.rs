@@ -369,15 +369,18 @@ fn raise_panic_peephole() {
 
     let emitted = go2::emit_library_class(&class).expect("emit crasher class");
 
-    // 2-arg form drops the class, panics with the message.
+    // 2-arg form with a known framework error class wraps the message
+    // in a typed sentinel struct so the HTTP router_glue's defer-
+    // recover can type-switch (RecordNotFound → 404 etc.). Unknown
+    // classes still produce a bare `panic(msg)`.
+    assert!(
+        emitted.contains("panic(&NotImplementedErrorValue{Message: msg})"),
+        "raise NotImplementedError, msg should wrap with typed sentinel:\n{emitted}",
+    );
+    // 1-arg form still panics with the lone arg (no class to inspect).
     assert!(
         emitted.contains("panic(msg)"),
-        "raise X, msg should panic(msg):\n{emitted}",
-    );
-    // 1-arg form panics with the lone arg.
-    assert!(
-        emitted.matches("panic(msg)").count() >= 2,
-        "1-arg raise should also produce panic(msg):\n{emitted}",
+        "1-arg raise should produce panic(msg):\n{emitted}",
     );
     // Tail-position raise must NOT be wrapped in `return` — Go
     // rejects `return panic(...)` (panic returns nothing).

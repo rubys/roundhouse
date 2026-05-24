@@ -226,7 +226,7 @@ fn emit_ar_class_method_wrappers(name: &str) -> String {
         "func {name}_exists_p(id int64) bool {{ return {name}__adapter_exists_by_id_p(id) }}\n"
     ));
     out.push_str(&format!(
-        "func {name}_find(id int64) *{name} {{\n\tresult := {name}__adapter_find_by_id(id)\n\tif result == nil {{ panic(\"Couldn't find {name} with id=\") }}\n\treturn result\n}}\n"
+        "func {name}_find(id int64) *{name} {{\n\tresult := {name}__adapter_find_by_id(id)\n\tif result == nil {{ panic(&RecordNotFoundError{{Message: fmt.Sprintf(\"Couldn't find {name} with id=%v\", id)}}) }}\n\treturn result\n}}\n"
     ));
     out.push_str(&format!(
         "func {name}_all() []*{name} {{ return {name}__adapter_all() }}\n"

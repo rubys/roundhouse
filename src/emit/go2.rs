@@ -43,6 +43,8 @@ const RT_V2_ADAPTER_INTERFACE: &str =
     include_str!("../../runtime/go/v2/adapter_interface.go");
 const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
+const RT_V2_ERRORS: &str =
+    include_str!("../../runtime/go/v2/errors.go");
 const RT_V2_DB: &str =
     include_str!("../../runtime/go/v2/db.go");
 const RT_V2_BROADCASTS: &str =
@@ -80,6 +82,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("param_value.go", RT_V2_PARAM_VALUE),
+        ("errors.go", RT_V2_ERRORS),
     ] {
         out.push(EmittedFile {
             path: PathBuf::from(format!("app/v2/{name}")),

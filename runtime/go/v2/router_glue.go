@@ -24,8 +24,30 @@ import (
 // Router returns the application's HTTP handler. The handler routes
 // every request through the transpiled match table + per-controller
 // Dispatch function (both emitted alongside this overlay file).
+//
+// A defer-recover catches framework-typed panics (RecordNotFoundError,
+// RecordInvalidError) and translates them to the corresponding HTTP
+// status code (404 / 422), mirroring Rails' ActiveRecord::RecordNotFound
+// → 404 rescue convention. Untyped panics (genuine bugs) re-panic so
+// the http.Server's per-request goroutine surfaces them as 500s with
+// a stack trace.
 func Router() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			switch e := rec.(type) {
+			case *RecordNotFoundError:
+				http.Error(w, e.Error(), http.StatusNotFound)
+			case *RecordInvalidError:
+				http.Error(w, e.Error(), http.StatusUnprocessableEntity)
+			default:
+				panic(rec) // genuine bug → 500 via net/http's per-goroutine recover
+			}
+		}()
+
 		// .json suffix on the path is routed under the bare path
 		// (e.g. `/articles.json` matches `/articles`), then the
 		// dispatcher inspects the suffix to set RequestFormat.

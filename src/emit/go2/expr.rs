@@ -590,22 +590,41 @@ pub(super) fn emit_send(
 
     // Ruby `raise X, "msg"` / `raise "msg"` / `raise X` — parses as
     // an implicit-self Send with method `raise`. Maps to Go
-    // `panic(<msg>)`. Drops the exception class (Go has no class-
-    // typed panic; the message usually carries enough context, and
-    // call sites that depend on rescue-class matching aren't
-    // representable in Go anyway). 0-arg bare `raise` (Ruby
-    // re-raise) emits a placeholder panic since Go has no
-    // current-exception slot. The tail-position return wrap is
-    // suppressed in `emit_return_at` so `return panic(...)` (a
-    // syntax error) never lands.
+    // `panic(<typed_value>)`. When the class arg is one of the known
+    // framework exception classes (RecordNotFound, NotImplementedError,
+    // RecordInvalid), wrap the message in a typed sentinel struct so
+    // the HTTP router_glue's defer-recover can type-switch and map
+    // RecordNotFound to a 404 response (matching Rails' rescue-and-
+    // serve behavior). Unknown classes still emit a bare-string panic
+    // — the message preserves diagnostic context for un-recovered
+    // panics. 0-arg bare `raise` (Ruby re-raise) emits a placeholder
+    // panic since Go has no current-exception slot. The tail-position
+    // return wrap is suppressed in `emit_return_at` so `return
+    // panic(...)` (a syntax error) never lands.
     if recv.is_none() && method == "raise" {
         let msg = match args_s.len() {
             0 => "\"raise\"".to_string(),
             1 => args_s[0].clone(),
-            // `raise X, "msg"` — the message arg is what's worth
-            // preserving; the leading class arg has no Go analog.
             _ => args_s[args_s.len() - 1].clone(),
         };
+        // Detect typed-class raise: first arg is a Const naming a
+        // known framework error class. Wrap the message in a Go
+        // sentinel struct (defined in runtime/go/v2/errors.go).
+        if args.len() >= 2 {
+            if let ExprNode::Const { path } = &*args[0].node {
+                if let Some(last) = path.last() {
+                    let sentinel = match last.as_str() {
+                        "RecordNotFound" => Some("RecordNotFoundError"),
+                        "NotImplementedError" => Some("NotImplementedErrorValue"),
+                        "RecordInvalid" => Some("RecordInvalidError"),
+                        _ => None,
+                    };
+                    if let Some(struct_name) = sentinel {
+                        return format!("panic(&{struct_name}{{Message: {msg}}})");
+                    }
+                }
+            }
+        }
         return format!("panic({msg})");
     }
 
