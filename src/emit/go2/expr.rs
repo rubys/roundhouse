@@ -1499,6 +1499,29 @@ pub(super) fn emit_send(
         }
     }
 
+    // Q1 — bare `self.X(args)` inside an AR-chain class's instance
+    // method, where X is a Modeler interface member. `(*ActiveRecordBase).Save`
+    // body emits `self.AdapterInsert()`, `self.Validate()`,
+    // `self.AfterCreateCommit()` etc.; without rewriting, Go binds
+    // these statically to Base's stub (returns 0 / empty body) because
+    // self's type IS *ActiveRecordBase inside Base's method. Route
+    // through the Self back-pointer so subclass overrides fire — same
+    // mechanism as `self.class.X` above and `self[k]=v` / `self[k]`
+    // earlier in this function. Modeler membership gates which methods
+    // qualify; non-polymorphic methods (Save, NewRecord, FillTimestamps,
+    // OpResolveStatus) stay on the static binding because they're not
+    // overridden by subclasses.
+    if let Some(r) = recv {
+        if ctx.is_ar_class
+            && !ctx.in_class_method
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && is_modeler_member(method)
+        {
+            let pascal = go_method_name(&super::library::sanitize_method_name(method));
+            return format!("self.Self.{pascal}({})", args_s.join(", "));
+        }
+    }
+
     // SelfRef receiver in a class method context — rewrite to the
     // bare-fn call `ClassName_method(args)` because class methods
     // emit as bare functions, not as methods on a struct. Use the
@@ -2319,7 +2342,12 @@ fn try_expand_redirect_to_kwargs(
     };
     let mut notice_s = "\"\"".to_string();
     let mut alert_s = "\"\"".to_string();
-    let mut status_s = "\"\"".to_string();
+    // Ruby `def redirect_to(path, ..., status: :found)` — when the
+    // call site doesn't pass an explicit status:, the framework
+    // default is :found (302). Match that here so POST→create
+    // redirects respond 302 instead of the empty-string-resolves-to-
+    // 200 fallback ResolveStatus produces.
+    let mut status_s = "\"found\"".to_string();
     if args.len() >= 2 {
         if let ExprNode::Hash { entries, .. } = &*args[1].node {
             for (k, v) in entries {
@@ -2503,7 +2531,29 @@ fn is_view_helpers_widen_call(recv: Option<&Expr>, method: &str) -> bool {
 /// interface declaration; adding a member here requires also adding
 /// a method shim per AR subclass.
 fn is_modeler_member(name: &str) -> bool {
-    matches!(name, "schema_columns" | "op_get" | "op_set" | "[]" | "[]=")
+    matches!(
+        name,
+        "schema_columns"
+            | "op_get"
+            | "op_set"
+            | "[]"
+            | "[]="
+            // Adapter primitives — Save() calls `self._adapter_insert`,
+            // `self._adapter_update`, `self._adapter_delete`; each AR
+            // subclass overrides with a real SQL-emitting body.
+            | "_adapter_insert"
+            | "_adapter_update"
+            | "_adapter_delete"
+            // Validation + callbacks — Save() drives `valid?` →
+            // `self.validate`; create/update/destroy paths drive
+            // `after_*_commit` and `before_destroy`. Subclasses (Article,
+            // Comment) define the real bodies; Base's stubs are empty.
+            | "validate"
+            | "before_destroy"
+            | "after_create_commit"
+            | "after_update_commit"
+            | "after_destroy_commit"
+    )
 }
 
 fn is_known_go_method(name: &str) -> bool {

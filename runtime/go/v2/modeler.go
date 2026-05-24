@@ -28,4 +28,19 @@ type Modeler interface {
 	SchemaColumns() []string
 	OpGet(name string) interface{}
 	OpSet(name string, value interface{}) interface{}
+	// Adapter primitives — Save() calls these as `self._adapter_insert`
+	// (etc.) in the Ruby source; each AR subclass overrides with real
+	// SQL-emitting bodies. Base provides stub implementations so the
+	// interface is satisfied even by Base itself.
+	AdapterInsert() int64
+	AdapterUpdate()
+	AdapterDelete()
+	// Validations + callbacks — Save() drives `valid?` →
+	// `self.validate`, then `after_create_commit` (or update/destroy).
+	// Subclasses define real bodies; Base's stubs are empty.
+	Validate()
+	BeforeDestroy()
+	AfterCreateCommit()
+	AfterUpdateCommit()
+	AfterDestroyCommit()
 }

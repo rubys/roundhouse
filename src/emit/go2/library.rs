@@ -94,7 +94,7 @@ pub fn emit_library_class_with_registry(
     // ivars (assigned but no reader/writer) aren't reflected as Go
     // fields yet; they'd surface as missing-symbol errors at use,
     // which is fine inventory.
-    let fields = collect_fields(&class.methods);
+    let mut fields = collect_fields(&class.methods);
     // Q1 — when emitting `ActiveRecordBase` itself, inject a
     // back-pointer `Self Modeler` field for polymorphic dispatch.
     // Subclasses inherit the field through embedding, so writes via
@@ -104,6 +104,19 @@ pub fn emit_library_class_with_registry(
     // emit as `self.Self.X()` interface dispatch, landing on the
     // outer subclass's implementation.
     let is_ar_base = class.name.0.as_str() == "ActiveRecord::Base";
+    // Q1 — `id` is declared by `ActiveRecord::Base` (attr_accessor :id).
+    // Subclasses re-declare it via the lowerer's per-column accessor
+    // synthesis, which would create a shadowing `ID` field on the
+    // subclass struct. Save() writes through the embedded Base's `ID`
+    // slot (`self.ID = self.Self.AdapterInsert()`), but controller
+    // read sites like `RouteHelpers_article_path(self.Article.ID)`
+    // would read the subclass's shadow (always 0). Filter the
+    // subclass-side declaration so the field lives in exactly one
+    // place — Go method/field promotion delivers reads + writes on
+    // the embedded Base.ID transparently.
+    if embedded_parent.is_some() && ar_chain.contains(&name) {
+        fields.retain(|f| f.ruby_name != "id");
+    }
     if embedded_parent.is_none() && fields.is_empty() && !is_ar_base {
         out.push_str(&format!("type {name} struct{{}}\n\n"));
     } else {

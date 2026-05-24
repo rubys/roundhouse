@@ -55,6 +55,8 @@ const RT_V2_SERVER: &str =
     include_str!("../../runtime/go/v2/server.go");
 const RT_V2_ROUTER_GLUE: &str =
     include_str!("../../runtime/go/v2/router_glue.go");
+const RT_V2_FORM_PARAMS: &str =
+    include_str!("../../runtime/go/v2/form_params.go");
 
 /// Append go2 transpiled runtime files to `files` when
 /// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
@@ -154,6 +156,11 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // lands in the next wedge.
             ("server.go", RT_V2_SERVER),
             ("router_glue.go", RT_V2_ROUTER_GLUE),
+            // ParseFormParams — the emitted dispatch.go calls this on
+            // every request to parse x-www-form-urlencoded bodies into
+            // nested RoundhouseParamValue maps (Rails-style bracket
+            // notation, e.g. `article[title]=Hi`).
+            ("form_params.go", RT_V2_FORM_PARAMS),
         ] {
             out.push(EmittedFile {
                 path: PathBuf::from(format!("app/v2/{name}")),
@@ -581,13 +588,18 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     s.push_str("import (\n\t\"net/http\"\n\t\"strings\"\n)\n\n");
     s.push_str("// Dispatch builds a controller for (controller, action), threads\n");
     s.push_str("// request metadata into it, runs the action, and returns the\n");
-    s.push_str("// captured response state. POST/PATCH/PUT bodies are not yet\n");
-    s.push_str("// form-parsed; those wedges follow.\n");
+    s.push_str("// captured response state. POST/PATCH/PUT bodies are parsed\n");
+    s.push_str("// via runtime/go/v2/form_params.go (ParseFormParams) — Rails-\n");
+    s.push_str("// style bracket-notation keys like `article[title]` land as\n");
+    s.push_str("// nested maps so `params[\"article\"][\"title\"]` resolves.\n");
     s.push_str(
         "func Dispatch(controller string, action string, pathParams map[string]string, r *http.Request) (body string, status int64, contentType string, location string) {\n",
     );
     s.push_str("\tparams := map[string]RoundhouseParamValue{}\n");
     s.push_str("\tfor k, v := range pathParams {\n");
+    s.push_str("\t\tparams[k] = v\n");
+    s.push_str("\t}\n");
+    s.push_str("\tfor k, v := range ParseFormParams(r) {\n");
     s.push_str("\t\tparams[k] = v\n");
     s.push_str("\t}\n");
     s.push_str("\trequestFormat := \"html\"\n");
