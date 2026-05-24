@@ -536,7 +536,8 @@ pub(super) fn emit_send(
     // The result re-routes through the standard `{}.{}({})` emit
     // below with the padded args list.
     let render_padded = try_expand_render_kwargs(ctx, recv, method, args)
-        .or_else(|| try_expand_redirect_to_kwargs(ctx, recv, method, args));
+        .or_else(|| try_expand_redirect_to_kwargs(ctx, recv, method, args))
+        .or_else(|| try_expand_head_kwargs(ctx, recv, method, args));
 
     // Hash-widening peephole for module-singleton class methods whose
     // hand-written shim takes `map[string]interface{}` but whose call
@@ -2182,6 +2183,57 @@ fn try_expand_redirect_to_kwargs(
         }
     }
     Some(vec![path_s, notice_s, alert_s, status_s])
+}
+
+/// Sibling of `try_expand_render_kwargs` for `self.head(...)`. Ruby
+/// `head :status` / `head :status, content_type: "..."` lowers to a
+/// `self.Head(status, ...kwargs_or_nothing)` Send. The Go shim
+/// signature is `Head(status string, content_type string)` — two
+/// positional strings. Two call shapes hit this peephole:
+///
+/// - `self.head(:not_found)` → `self.Head("not_found", "")`
+/// - `self.head(:no_content, content_type: "application/json")` →
+///   `self.Head("no_content", "application/json")`
+///
+/// The bare-1-arg shape was previously emitting `self.Head("not_found")`
+/// (arity mismatch); the kwargs shape was emitting the Hash literal
+/// as the second positional (type mismatch). Same hardcoded peephole
+/// rationale as render/redirect_to — pending the
+/// GLOBAL_CLASS_METHOD_DEFAULTS-equivalent registry build-out.
+fn try_expand_head_kwargs(
+    ctx: &EmitCtx,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<Vec<String>> {
+    if method != "head" {
+        return None;
+    }
+    let Some(r) = recv else { return None };
+    if !matches!(&*r.node, ExprNode::SelfRef) {
+        return None;
+    }
+    let status_s = match args.first() {
+        Some(a) => emit_expr(ctx, a),
+        None => return None,
+    };
+    let mut content_type_s = "\"\"".to_string();
+    if args.len() >= 2 {
+        if let ExprNode::Hash { entries, .. } = &*args[1].node {
+            for (k, v) in entries {
+                let key_text = match &*k.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                    _ => None,
+                };
+                let v_s = emit_expr(ctx, v);
+                if key_text.as_deref() == Some("content_type") {
+                    content_type_s = v_s;
+                }
+            }
+        }
+    }
+    Some(vec![status_s, content_type_s])
 }
 
 /// `Broadcasts.{append,prepend,replace,remove}` call detection — the
