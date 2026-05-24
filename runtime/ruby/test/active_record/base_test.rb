@@ -1,5 +1,15 @@
 require_relative "../test_helper"
 
+# Skip entirely when `Db` / `SqliteAdapter` aren't loaded — the requires
+# in test_helper.rb tolerate environments without the sqlite3 gem or
+# without the runtime/spinel/ subtree (per-target scratch in
+# framework_tests_ruby.rs). Defining BaseTest at all would surface
+# `NameError: uninitialized constant Db` at setup time.
+unless defined?(Db) && defined?(SqliteAdapter)
+  warn "skipping BaseTest: Db / SqliteAdapter not loaded (sqlite3 gem unavailable or spinel/ not on load path)"
+  return
+end
+
 # Direct unit tests for `runtime/ruby/active_record/base.rb`. Each
 # CRUD method (find/all/where/count/exists?/save/destroy/reload/
 # create/create!/last) gets exercised against an in-memory SQLite

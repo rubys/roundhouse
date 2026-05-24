@@ -48,9 +48,18 @@ require "inflector"
 # satisfies the AR adapter contract by routing through Db. base_test
 # exercises Base CRUD against an in-memory SQLite via these — same
 # code path the production sqlite-backed app uses. Other framework
-# tests don't touch persistence; the requires are harmless for them.
-require "spinel/db_cruby"
-require "spinel/sqlite_adapter"
+# tests don't touch persistence; load failures are tolerated so this
+# helper still works in environments without the sqlite3 gem (the
+# `unit` CI job) or without the spinel/ subtree (per-target scratch
+# layouts in framework_tests_ruby.rs). base_test.rb checks for `Db`
+# being defined and skips itself if these requires didn't take.
+begin
+  require "spinel/db_cruby"
+  require "spinel/sqlite_adapter"
+rescue LoadError
+  # sqlite3 gem absent OR spinel/ subtree not on load path. base_test
+  # is the only consumer; it self-skips when Db is undefined.
+end
 
 # Reopen Minitest::Test with the AS-flavor assertions framework
 # tests need. Keeps the tests' assertion vocabulary consistent
