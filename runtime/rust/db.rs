@@ -9,16 +9,21 @@
 //!   - `setup_test_db(schema)` — thread-local `:memory:` connection
 //!     for tests. Each test re-installs a fresh DB so prior-test
 //!     state doesn't bleed across.
-//!   - `open_production_db(path, schema)` — file-backed connection
-//!     installed into a process-wide `Mutex<Option<Connection>>`.
-//!     Used by `main.rs` on server startup. `with_conn` reaches
-//!     either slot (test thread-local first, then process mutex).
+//!   - `open_production_db(path, schema)` — file-backed connections
+//!     installed into a process-wide pool (`OnceLock<Vec<Mutex<
+//!     Connection>>>`). Used by `main.rs` on server startup.
+//!     Pool size = `DATABASE_POOL_SIZE` env var, defaulting to
+//!     `std::thread::available_parallelism()`. SQLite is opened in
+//!     WAL mode so N readers actually proceed in parallel.
+//!     `with_conn` reaches either slot — test thread-local first,
+//!     then the production pool (try_lock each entry; fall back to
+//!     blocking-lock on slot 0).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use rusqlite::types::Value;
 use rusqlite::Connection;
@@ -29,13 +34,16 @@ thread_local! {
     static CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
 }
 
-/// Process-wide connection for the production server. `axum`
-/// handlers run on a multi-thread tokio runtime so per-thread
-/// thread-locals don't work — instead a `Mutex<Connection>` lets
-/// every handler serialize access to the single sqlite connection.
-/// Contention is fine for the E2E scaffold; a connection pool is
-/// the right answer for a production workload.
-static PROD_CONN: Mutex<Option<Connection>> = Mutex::new(None);
+/// Process-wide sqlite connection pool for the production server.
+/// `axum` handlers run on a multi-thread tokio runtime so per-thread
+/// thread-locals don't work; each slot in this Vec is an independent
+/// `Connection` guarded by its own `Mutex`, and `with_conn` picks
+/// whichever slot it can `try_lock` first. SQLite is opened in WAL
+/// mode (see `open_production_db`), which is what makes N readers
+/// actually proceed in parallel. Pool size defaults to
+/// `std::thread::available_parallelism()`; override with
+/// `DATABASE_POOL_SIZE`.
+static PROD_POOL: OnceLock<Vec<Mutex<Connection>>> = OnceLock::new();
 
 /// Initialize a fresh `:memory:` SQLite database on the current
 /// thread, run the supplied schema DDL, and install the connection
@@ -74,11 +82,16 @@ pub fn with_conn<R, F: FnOnce(&Connection) -> R>(f: F) -> R {
     match result {
         Ok(out) => out,
         Err(f) => {
-            let guard = PROD_CONN.lock().expect("prod DB mutex poisoned");
-            let conn = guard.as_ref().expect(
+            let pool = PROD_POOL.get().expect(
                 "db not initialized; call setup_test_db or open_production_db first",
             );
-            f(conn)
+            for slot in pool {
+                if let Ok(guard) = slot.try_lock() {
+                    return f(&guard);
+                }
+            }
+            let guard = pool[0].lock().expect("prod DB mutex poisoned");
+            f(&guard)
         }
     }
 }
@@ -95,6 +108,23 @@ pub fn with_conn<R, F: FnOnce(&Connection) -> R>(f: F) -> R {
 /// directly, so re-opening an existing DB no-ops over the
 /// already-present tables.
 pub fn open_production_db(path: &str, schema_sql: &str) {
+    let pool_size = std::env::var("DATABASE_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        });
+    open_production_pool(path, schema_sql, pool_size);
+}
+
+/// Pool builder shared by `open_production_db` and the unit tests.
+/// Kept separate so tests can pick an explicit pool size without
+/// reaching for `std::env::set_var` (which is `unsafe` under
+/// Rust edition 2024).
+pub fn open_production_pool(path: &str, schema_sql: &str, pool_size: usize) {
     if path != ":memory:" {
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -102,13 +132,23 @@ pub fn open_production_db(path: &str, schema_sql: &str) {
             }
         }
     }
-    let conn = Connection::open(path).expect("open sqlite db");
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .expect("enable WAL");
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .expect("enable foreign keys");
-    conn.execute_batch(schema_sql).expect("apply schema");
-    *PROD_CONN.lock().expect("prod DB mutex") = Some(conn);
+    let mut conns: Vec<Mutex<Connection>> = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        let conn = Connection::open(path).expect("open sqlite db");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        // CREATE TABLE IF NOT EXISTS is idempotent on file-backed DBs;
+        // applying per-conn is what lets a `:memory:` pool work, since
+        // each `:memory:` is an independent database.
+        conn.execute_batch(schema_sql).expect("apply schema");
+        conns.push(Mutex::new(conn));
+    }
+    PROD_POOL
+        .set(conns)
+        .map_err(|_| "PROD_POOL already initialized")
+        .expect("set PROD_POOL");
 }
 
 // ── Low-level prepare/step/column API ───────────────────────────────
@@ -311,6 +351,32 @@ CREATE TABLE widgets (
                 .expect("count")
         });
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn production_pool_serves_parallel_readers() {
+        // Force a 4-slot pool against per-conn `:memory:` databases.
+        // Each slot is independent, so we use a query that doesn't
+        // depend on shared state — purpose is to confirm `with_conn`
+        // can hand out slots concurrently without deadlocking, and
+        // that `try_lock` picks an idle slot under contention.
+        open_production_pool(":memory:", TINY_SCHEMA, 4);
+
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    // Read a literal so each slot's empty :memory: is fine.
+                    let n: i64 = with_conn(|c| {
+                        c.query_row("SELECT ?1 + 1", [i as i64], |r| r.get(0))
+                            .expect("query")
+                    });
+                    assert_eq!(n, i as i64 + 1);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker join");
+        }
     }
 
     #[test]
