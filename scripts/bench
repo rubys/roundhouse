@@ -33,6 +33,15 @@
 #   --runs N            Repeated measurement runs per cell (default 3)
 #   --endpoint PATH     URL path to bench (repeatable)
 #                       Default: /articles /articles/1 /articles/new
+#                                /articles.json /articles/1.json
+#                       (JSON endpoints exercise the jbuilder lowerer
+#                       end-to-end; every currently-supported bench
+#                       target handles `.json` suffix routing —
+#                       rails/rails-int via respond_to in the
+#                       articles_controller fixture, ruby/ruby-int via
+#                       the ruby_overlay main.rb's .json strip,
+#                       crystal/typescript/spinel/go/rust via each
+#                       target's server-side .json suffix handling.)
 #   --port N            Base port; targets get N, N+1, ... (default 9000)
 #   --out DIR           Results dir (default bench/results)
 #   --keep              Don't tear down servers / build trees on exit
@@ -89,7 +98,17 @@ done
 # Defaults
 [[ ${#TARGETS[@]} -eq 0 ]] && TARGETS=(rails ruby)
 [[ ${#WORKERS[@]} -eq 0 ]] && WORKERS=(1)
-[[ ${#ENDPOINTS[@]} -eq 0 ]] && ENDPOINTS=(/articles /articles/1 /articles/new)
+if [[ ${#ENDPOINTS[@]} -eq 0 ]]; then
+    ENDPOINTS=(/articles /articles/1 /articles/new)
+    # JSON endpoints — exercise the jbuilder lowerer end-to-end.
+    # Mirrors scripts/compare's per-target JSON path additions (case
+    # branch at scripts/compare:132); all currently-supported bench
+    # targets (rails, rails-int, ruby, ruby-int, typescript, crystal,
+    # rust, spinel, go) strip the `.json` suffix before routing and
+    # dispatch on `controller.request_format`. Add `--endpoint` to
+    # override entirely; this default is the publication-grade mix.
+    ENDPOINTS+=(/articles.json /articles/1.json)
+fi
 
 # Validate + normalize targets
 NORMALIZED=()
