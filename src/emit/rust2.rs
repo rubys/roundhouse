@@ -1210,15 +1210,24 @@ fn render_axum_handler_wrappers(
             r.method,
             HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put,
         );
+        // Path params come in as String. The handler body strips an
+        // optional `.json` suffix off each one before parsing as i64
+        // — for `/articles/{id}` URLs ending in `.json`, matchit's
+        // segment-match captures `1.json` into `id`, and the suffix
+        // strip recovers the bare integer. The `request_format`
+        // middleware tags the format separately via an Extension.
         let path_extractor = match path_params.len() {
             0 => String::new(),
             1 => format!(
-                "axum::extract::Path({param}): axum::extract::Path<i64>",
+                "axum::extract::Path({param}_raw): axum::extract::Path<String>",
                 param = path_params[0],
             ),
             n => {
-                let names: Vec<String> = path_params.iter().cloned().collect();
-                let tys = vec!["i64"; n].join(", ");
+                let names: Vec<String> = path_params
+                    .iter()
+                    .map(|p| format!("{p}_raw"))
+                    .collect();
+                let tys = vec!["String"; n].join(", ");
                 format!(
                     "axum::extract::Path(({names})): axum::extract::Path<({tys})>",
                     names = names.join(", "),
@@ -1264,7 +1273,16 @@ fn render_axum_handler_wrappers(
         // Path params land as serde_json::Value::from(i64) under
         // their Rails-style string key (`"id"`, etc.). The lowered
         // controller body's `self.params.get(\"id\")` reads them out.
+        // The extractor captures the raw segment as String; we strip
+        // an optional `.json` suffix (jbuilder requests) and parse
+        // the result. Unparseable values default to 0 — matches
+        // axum's prior `Path<i64>` error path which would 400 before
+        // reaching the controller; the controller's RecordNotFound
+        // path now surfaces 404 for missing-record lookups instead.
         for p in path_params {
+            body.push_str(&format!(
+                "    let {p}: i64 = {p}_raw.strip_suffix(\".json\").unwrap_or(&{p}_raw).parse().unwrap_or(0);\n",
+            ));
             body.push_str(&format!(
                 "    params.insert({p:?}.to_string(), serde_json::Value::from({p}));\n",
             ));
@@ -1299,7 +1317,7 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
     use std::collections::BTreeMap;
 
     if flat_routes.is_empty() {
-        return "    axum::Router::new()\n".to_string();
+        return "    axum::Router::new()\n        .layer(axum::middleware::from_fn(crate::http::request_format_middleware))\n".to_string();
     }
 
     let mut by_path: BTreeMap<String, Vec<&crate::lower::FlatRoute>> = BTreeMap::new();
@@ -1328,7 +1346,29 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
             }
         }
         out.push_str(&format!("        .route({path:?}, {verbs})\n"));
+        // Register an explicit `.json`-suffixed mirror only when the
+        // path has no parameters. Param routes like `/articles/{id}`
+        // already capture `1.json` as the id segment under matchit's
+        // segment-matching rules — the handler strips the `.json`
+        // tail back off (see `render_axum_handler_wrappers`). matchit
+        // 0.8 disallows mixed `{param}.literal` segments, so a
+        // dedicated entry isn't an option for parameterized paths;
+        // the in-handler strip carries that case.
+        let needs_json_mirror = !path.contains('{');
+        if needs_json_mirror {
+            out.push_str(&format!(
+                "        .route(\"{path}.json\", {verbs})\n",
+            ));
+        }
     }
+    // Attach the request-format layer at router-build time so both
+    // production (`server::start`) and tests (`axum_test::TestServer
+    // ::new(router::router())`) get the RequestFormatExt extension
+    // populated. Without this, the `_axum_<action>` wrapper's
+    // `Extension<RequestFormatExt>` extractor fails in tests.
+    out.push_str(
+        "        .layer(axum::middleware::from_fn(crate::http::request_format_middleware))\n",
+    );
     let _ = HttpMethod::Get; // silence unused-import lint when no routes
     out
 }

@@ -194,6 +194,36 @@ pub fn request_format_get() -> String {
     REQUEST_FORMAT.with(|r| r.borrow().clone())
 }
 
+/// Tag every request with its inferred format ("html" or "json") as
+/// an extension before it reaches the per-action handler. The
+/// emitted router attaches this as a `.layer()` so both `axum::serve`
+/// (production) and `axum_test::TestServer` (controller tests) share
+/// one wiring path.
+///
+/// Why an Extension and not a URI rewrite: in axum 0.8 `Router::layer`
+/// wraps each route's handler — route matching + `Path<...>`
+/// extraction happens *before* the layer runs, so URI rewrites here
+/// are too late to affect routing. The router emit registers explicit
+/// `.json`-suffixed entries for parameterless paths
+/// (`src/emit/rust2.rs::render_axum_router_body`); parameterized
+/// paths capture the `.json` tail as part of the segment (e.g.
+/// `id="1.json"`), and the action wrapper strips the suffix before
+/// parsing the id as `i64`. This layer just surfaces the inferred
+/// format so the `if self.request_format() == "json"` branch dispatches
+/// the JSON jbuilder view.
+pub async fn request_format_middleware(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let format = if req.uri().path().ends_with(".json") {
+        "json"
+    } else {
+        "html"
+    };
+    req.extensions_mut().insert(RequestFormatExt(format.to_string()));
+    next.run(req).await
+}
+
 /// Reset the thread-local to defaults. Called at the top of each
 /// axum wrapper so a prior action's state doesn't leak into the
 /// current request.
