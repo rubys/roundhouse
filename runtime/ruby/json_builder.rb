@@ -30,7 +30,12 @@ module JsonBuilder
     "\f" => "\\f",
   }.freeze
 
-  ESCAPE_PATTERN = /[\\"\n\r\t\b\f]/.freeze
+  # `\x08` rather than `\b` for the backspace because Rust's `regex`
+  # crate rejects `\b` inside a character class (where it would
+  # otherwise be word-boundary, which makes no sense inside `[]`).
+  # Ruby/JS/Crystal/RE2 all accept the hex escape, so this is the
+  # cross-target spelling.
+  ESCAPE_PATTERN = /[\\"\n\r\t\x08\f]/.freeze
 
   # Escape a string for embedding inside JSON double-quotes. Does
   # NOT add the surrounding quotes — `encode_value` wraps a String
