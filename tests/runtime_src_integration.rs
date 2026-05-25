@@ -79,11 +79,12 @@ fn inflector_pluralize_lives_in_runtime_elixir() {
     assert_emitted_lives_in(&emitted, "runtime/elixir/view_helpers.ex");
 }
 
-#[test]
-fn inflector_pluralize_lives_in_runtime_go() {
-    let emitted = roundhouse::emit::go::emit_method(&pluralize_method());
-    assert_emitted_lives_in(&emitted, "runtime/go/view_helpers.go");
-}
+// Phase 6 step 3 (2026-05-24) retired runtime/go/view_helpers.go —
+// the v2 path transpiles `runtime/ruby/action_view/view_helpers.rb`
+// into the emit output instead of hand-writing the Go file. The
+// runtime-extraction `emit::go::emit_method` helper itself stays
+// (used elsewhere), but no longer has a hand-written destination
+// file to validate against.
 
 // ── full-typing invariant ───────────────────────────────────────────
 
