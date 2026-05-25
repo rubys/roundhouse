@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 use axum::{
     body::Body,
     extract::Request,
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::Response,
     routing::get,
@@ -93,7 +93,8 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
         .nest_service("/assets", ServeDir::new("static/assets"))
         .route("/cable", get(cable::cable_handler))
         .layer(middleware::from_fn(layout_wrap))
-        .layer(middleware::from_fn(method_override));
+        .layer(middleware::from_fn(method_override))
+        .layer(middleware::from_fn(request_format));
 
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -101,6 +102,47 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
         .expect("bind listener");
     println!("Roundhouse server listening on http://localhost:{}", port);
     axum::serve(listener, app).await.expect("axum serve");
+}
+
+// ── request format middleware ──────────────────────────────────
+
+/// Strip a `.json` suffix off the request URI before route matching
+/// and stash the inferred format ("html" or "json") in a request
+/// extension. The per-action axum wrappers (emitted by `rust2.rs::
+/// render_axum_handler_wrappers`) extract the extension and thread
+/// it into the controller via `crate::http::request_format_set`, so
+/// emitted `if self.request_format() == "json"` branches dispatch
+/// to JSON jbuilder views.
+///
+/// Outermost layer so the URI rewrite happens before axum's matcher
+/// sees the path — `/articles.json` and `/articles` share one route
+/// entry, matching the TS / Go / Crystal / Ruby shape.
+async fn request_format(mut req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let (format, new_path) = if let Some(stripped) = path.strip_suffix(".json") {
+        ("json", Some(stripped.to_string()))
+    } else {
+        ("html", None)
+    };
+
+    if let Some(new_path) = new_path {
+        let pq = req
+            .uri()
+            .query()
+            .map(|q| format!("{new_path}?{q}"))
+            .unwrap_or(new_path);
+        // Rebuild Uri with the suffix-stripped path. Authority/scheme
+        // are absent on the per-request URI axum hands us (only path
+        // + query), so a path-and-query Uri is sufficient.
+        if let Ok(new_uri) = pq.parse::<Uri>() {
+            *req.uri_mut() = new_uri;
+        }
+    }
+
+    req.extensions_mut()
+        .insert(crate::http::RequestFormatExt(format.to_string()));
+
+    next.run(req).await
 }
 
 // ── method override middleware ─────────────────────────────────

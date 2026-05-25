@@ -854,7 +854,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20       let status_code = status.as_deref().map(crate::http::status_name_to_code_pub);\n\
                     \x20       crate::http::response_set_body_with(content, content_type, status_code);\n\
                     \x20   }}\n\
-                    \x20   pub fn request_format(&self) -> String {{ \"html\".to_string() }}\n\
+                    \x20   pub fn request_format(&self) -> String {{ crate::http::request_format_get() }}\n\
                     \x20   pub fn redirect_to(&self, url: String, opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{\n\
                     \x20       let status = opts.get(\"status\").and_then(|v| v.as_str()).unwrap_or(\"see_other\");\n\
                     \x20       crate::http::response_set_redirect(url, crate::http::status_name_to_code_pub(status));\n\
@@ -1226,6 +1226,16 @@ fn render_axum_handler_wrappers(
             }
         };
         let mut args: Vec<String> = Vec::new();
+        // Request format extension — populated by
+        // `runtime/rust/server.rs::request_format` middleware after
+        // it strips a `.json` suffix off the URI. Always present
+        // (middleware sets "html"/"json"); per axum's ordering rules
+        // an `Extension<T>` extractor must appear before `Path<...>`
+        // and `Form<...>` (which consume the body / uri).
+        args.push(
+            "axum::extract::Extension(_fmt): axum::extract::Extension<crate::http::RequestFormatExt>"
+                .to_string(),
+        );
         if !path_extractor.is_empty() {
             args.push(path_extractor);
         }
@@ -1243,6 +1253,7 @@ fn render_axum_handler_wrappers(
 
         let mut body = String::new();
         body.push_str("    crate::http::response_clear();\n");
+        body.push_str("    crate::http::request_format_set(_fmt.0);\n");
         if has_body {
             body.push_str("    let mut params = crate::http::params_from_form(form);\n");
         } else if !path_params.is_empty() {

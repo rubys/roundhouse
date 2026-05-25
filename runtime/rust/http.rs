@@ -165,6 +165,33 @@ impl Default for ControllerResponse {
 thread_local! {
     static RESPONSE: std::cell::RefCell<ControllerResponse> =
         std::cell::RefCell::new(ControllerResponse::default());
+    static REQUEST_FORMAT: std::cell::RefCell<String> =
+        std::cell::RefCell::new(String::from("html"));
+}
+
+/// Request extension carrying the inferred format ("html"/"json").
+/// Set by the `request_format_middleware` in `server.rs` after it
+/// strips a `.json` suffix off the URI; read by the per-action axum
+/// wrappers (extracted via `axum::extract::Extension<RequestFormatExt>`)
+/// and threaded into the thread-local before the controller body runs.
+#[derive(Clone, Debug)]
+pub struct RequestFormatExt(pub String);
+
+/// Stash the inferred format on the per-task thread-local. The axum
+/// wrapper calls this synchronously immediately before the controller
+/// action body — `AC::Base#request_format` (emitted as a shim method
+/// on each controller) reads it back via `request_format_get`. No
+/// `.await` between set and read, so thread affinity holds.
+pub fn request_format_set(format: String) {
+    REQUEST_FORMAT.with(|r| *r.borrow_mut() = format);
+}
+
+/// Read the current request's format. Called by the controller-shim
+/// `request_format()` method; defaults to `"html"` if no middleware
+/// has populated it (e.g. unit tests instantiating a controller
+/// directly).
+pub fn request_format_get() -> String {
+    REQUEST_FORMAT.with(|r| r.borrow().clone())
 }
 
 /// Reset the thread-local to defaults. Called at the top of each
