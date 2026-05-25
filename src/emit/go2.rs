@@ -57,6 +57,8 @@ const RT_V2_ROUTER_GLUE: &str =
     include_str!("../../runtime/go/v2/router_glue.go");
 const RT_V2_FORM_PARAMS: &str =
     include_str!("../../runtime/go/v2/form_params.go");
+const RT_V2_SLOTS: &str =
+    include_str!("../../runtime/go/v2/slots.go");
 
 /// Append go2 transpiled runtime files to `files`. Phase 6 step 2
 /// (2026-05-24) flipped the env-var gate to unconditional: the v2
@@ -87,6 +89,16 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         ("param_value.go", RT_V2_PARAM_VALUE),
         ("errors.go", RT_V2_ERRORS),
         ("modeler.go", RT_V2_MODELER),
+        // Per-goroutine slot store for content_for/yield — owns the
+        // six ActionViewViewHelpers_<slot-method> package-level
+        // functions that the auto-emit of view_helpers.rb would
+        // otherwise produce against a racy package-level map. The
+        // suppression of the auto-emit lives in `format_module_ivar`
+        // (drops `@slots = {}`) and in `go_units`'s transform
+        // callback below (drops the six slot methods from the
+        // ActionView::ViewHelpers LibraryClass before
+        // emit_library_class walks it).
+        ("slots.go", RT_V2_SLOTS),
     ] {
         out.push(EmittedFile {
             path: PathBuf::from(format!("app/v2/{name}")),
@@ -95,6 +107,33 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     }
 
     let units = match crate::runtime_loader::go_units(|_ns, classes| {
+        // ActionView::ViewHelpers's six slot methods (reset_slots!,
+        // content_for_set/get, get_slot, get_yield, set_yield) are
+        // owned by the hand-written runtime/go/v2/slots.go shim —
+        // per-goroutine storage replaces the package-level map +
+        // RWMutex from commit 1f2a984. Drop them from the LibraryClass
+        // before lower_for_go / emit_library_class walks it so the
+        // auto-emit doesn't produce colliding `func
+        // ActionViewViewHelpers_<slot-method>` definitions.
+        let classes = classes
+            .into_iter()
+            .map(|mut c| {
+                if c.name.0.as_str() == "ActionView::ViewHelpers" {
+                    c.methods.retain(|m| {
+                        !matches!(
+                            m.name.as_str(),
+                            "reset_slots!"
+                                | "content_for_set"
+                                | "content_for_get"
+                                | "get_slot"
+                                | "get_yield"
+                                | "set_yield"
+                        )
+                    });
+                }
+                c
+            })
+            .collect();
         lower::lower_for_go(classes)
     }) {
         Ok(u) => u,
