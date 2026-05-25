@@ -1911,6 +1911,72 @@ fn inflector_v2_compiles_and_runs() {
     std::fs::write(scratch.join("app/v2/router_smoke_test.go"), router_smoke)
         .expect("write router smoke");
 
+    // Slots smoke — per-goroutine isolation of the content_for / yield
+    // store. Pins the regression-test acceptance criterion from issue
+    // #7 section 1: if a future change reverts to a shared map (or the
+    // goroutine-ID scheme breaks), this fails fast on every commit
+    // that runs --ignored. Each goroutine sets its own title, yields
+    // to let others interleave, then re-reads — under a shared map
+    // the read would surface a peer goroutine's value.
+    let slots_smoke = "package v2\n\
+                       \n\
+                       import (\n\
+                       \t\"fmt\"\n\
+                       \t\"runtime\"\n\
+                       \t\"sync\"\n\
+                       \t\"testing\"\n\
+                       )\n\
+                       \n\
+                       func TestSlots_PerGoroutineIsolation_Smoke(t *testing.T) {\n\
+                       \tconst N = 200\n\
+                       \tvar wg sync.WaitGroup\n\
+                       \tfor i := 0; i < N; i++ {\n\
+                       \t\twg.Add(1)\n\
+                       \t\tgo func(i int) {\n\
+                       \t\t\tdefer wg.Done()\n\
+                       \t\t\ttitle := fmt.Sprintf(\"title-%d\", i)\n\
+                       \t\t\tActionViewViewHelpers_reset_slots_bang()\n\
+                       \t\t\tActionViewViewHelpers_content_for_set(\"title\", title)\n\
+                       \t\t\t// Yield so other goroutines get scheduled\n\
+                       \t\t\t// between set and read — under a shared map\n\
+                       \t\t\t// the read would observe a peer's title.\n\
+                       \t\t\tfor j := 0; j < 5; j++ {\n\
+                       \t\t\t\truntime.Gosched()\n\
+                       \t\t\t}\n\
+                       \t\t\tif got := ActionViewViewHelpers_content_for_get(\"title\"); got != title {\n\
+                       \t\t\t\tt.Errorf(\"goroutine %d: get(title) = %q, want %q\", i, got, title)\n\
+                       \t\t\t}\n\
+                       \t\t\tif got := ActionViewViewHelpers_get_slot(\"title\"); got != title {\n\
+                       \t\t\t\tt.Errorf(\"goroutine %d: get_slot(title) = %q, want %q\", i, got, title)\n\
+                       \t\t\t}\n\
+                       \t\t}(i)\n\
+                       \t}\n\
+                       \twg.Wait()\n\
+                       }\n\
+                       \n\
+                       func TestSlots_YieldBodyIsolation_Smoke(t *testing.T) {\n\
+                       \tconst N = 200\n\
+                       \tvar wg sync.WaitGroup\n\
+                       \tfor i := 0; i < N; i++ {\n\
+                       \t\twg.Add(1)\n\
+                       \t\tgo func(i int) {\n\
+                       \t\t\tdefer wg.Done()\n\
+                       \t\t\tbody := fmt.Sprintf(\"<body>%d</body>\", i)\n\
+                       \t\t\tActionViewViewHelpers_reset_slots_bang()\n\
+                       \t\t\tActionViewViewHelpers_set_yield(body)\n\
+                       \t\t\tfor j := 0; j < 5; j++ {\n\
+                       \t\t\t\truntime.Gosched()\n\
+                       \t\t\t}\n\
+                       \t\t\tif got := ActionViewViewHelpers_get_yield(); got != body {\n\
+                       \t\t\t\tt.Errorf(\"goroutine %d: get_yield = %q, want %q\", i, got, body)\n\
+                       \t\t\t}\n\
+                       \t\t}(i)\n\
+                       \t}\n\
+                       \twg.Wait()\n\
+                       }\n";
+    std::fs::write(scratch.join("app/v2/slots_smoke_test.go"), slots_smoke)
+        .expect("write slots smoke");
+
     // FrameworkTestAdapter CRUD smoke removed in tandem with the
     // per-target adapter cleanup. A follow-on session will restore an
     // adapter smoke once base_test is wired against each target's
