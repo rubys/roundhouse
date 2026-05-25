@@ -1364,16 +1364,56 @@ fn emit_module_singleton(class: &LibraryClass) -> Result<String, String> {
         out.push('\n');
     }
 
+    // Sync wrapping for module-singletons that hold shared mutable
+    // state read+written during request handling. Ruby's GVL serializes
+    // all access in MRI; Go runs N HTTP goroutines truly in parallel so
+    // bare map access panics with `fatal error: concurrent map read and
+    // map write`. The fix declares a package-level RWMutex and
+    // emit_module_singleton_method wraps each method body with
+    // Lock/Unlock. Allow-list keyed by class name because the detection
+    // heuristic ("ivar written from multiple methods") is finicky;
+    // ActiveRecord's adapter slot, for instance, is set once at boot
+    // and read many times after — concurrent reads of a post-write
+    // interface value are safe and we want to avoid the mutex overhead.
+    //
+    // Caveat: a process-wide mutex prevents the crash but doesn't fix
+    // the cross-request data bleed. content_for/yield slots are
+    // semantically per-request (Rails resets them per request); a
+    // proper fix threads per-request scope through the view chain. The
+    // mutex + emit-time reset_slots_bang call from Dispatch (added in
+    // go2.rs::emit_dispatch_file alongside this commit) approximates
+    // the right semantics for the single-request-at-a-time case.
+    let needs_sync = class_needs_sync(class.name.0.as_str());
+    if needs_sync {
+        out.push_str(&format!("var {name}_mu sync.RWMutex\n\n"));
+    }
+
     // Methods — every entry is Class-receiver by detection
     // (`all-class-receivers` predicate). Same shape as
     // `emit_method`'s Class-receiver branch, but EmitCtx flips
     // `in_module_singleton=true` so `@ivar` reads/writes resolve
     // to the namespaced slot rather than `self.Field`.
     for m in &class.methods {
-        out.push_str(&emit_module_singleton_method(&name, m));
+        out.push_str(&emit_module_singleton_method(&name, m, needs_sync));
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Module-singleton classes whose slot vars are written from multiple
+/// methods during request handling. Each method body gets wrapped in
+/// `<Class>_mu.Lock()` / `defer ...Unlock()` to prevent the Go
+/// `concurrent map read and map write` panic that bare map access
+/// triggers under parallel HTTP goroutines.
+fn class_needs_sync(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        // `@@slots` written by content_for_set/set_yield/reset_slots!,
+        // read by content_for_get/get_slot/get_yield. Every layout
+        // render hits at least one read; every content_for invocation
+        // in a view hits one write. Bench under c=64 panicked.
+        "ActionView::ViewHelpers"
+    )
 }
 
 /// Pair `attr_reader`/`attr_writer` MethodDefs by ivar name and
@@ -1407,7 +1447,7 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
     out
 }
 
-fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
+fn emit_module_singleton_method(class_name: &str, m: &MethodDef, needs_sync: bool) -> String {
     let (params, optional_unpack) = render_params_with_unpack(m);
     let ret = render_return(m);
     let method = sanitize_method_name(m.name.as_str());
@@ -1438,5 +1478,37 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         ctx.declare_param(p.name.as_str());
     }
     let body = render_body(&ctx, m);
-    format!("func {class_name}_{method}({params}){ret} {{\n{optional_unpack}{body}}}\n")
+    // Lock wrap for sync-needed module-singletons. Detection walks
+    // the rendered body for any `<Class>_<word>_slot` identifier;
+    // methods that don't touch shared state stay lock-free. Without
+    // this scoping, methods that internally CALL other class methods
+    // (e.g. `stylesheet_link_tag` → `render_attrs`) would recursively
+    // try to acquire the same RWMutex and deadlock.
+    let body_touches_slot = if !needs_sync {
+        false
+    } else {
+        let prefix = format!("{class_name}_");
+        let mut found = false;
+        let mut search = body.as_str();
+        while let Some(idx) = search.find(&prefix) {
+            let tail = &search[idx + prefix.len()..];
+            let end = tail
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(tail.len());
+            if tail[..end].ends_with("_slot") {
+                found = true;
+                break;
+            }
+            search = &tail[end..];
+        }
+        found
+    };
+    let lock_prefix = if body_touches_slot {
+        format!(
+            "\t{class_name}_mu.Lock()\n\tdefer {class_name}_mu.Unlock()\n",
+        )
+    } else {
+        String::new()
+    };
+    format!("func {class_name}_{method}({params}){ret} {{\n{lock_prefix}{optional_unpack}{body}}}\n")
 }

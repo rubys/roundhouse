@@ -1032,7 +1032,17 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     s.push_str("\trequestFormat := \"html\"\n");
     s.push_str("\tif strings.HasSuffix(r.URL.Path, \".json\") {\n");
     s.push_str("\t\trequestFormat = \"json\"\n");
-    s.push_str("\t}\n\n");
+    s.push_str("\t}\n");
+    // Reset content_for / yield slot store at dispatch entry. The
+    // slots are a module-singleton package-var map in Go; Rails
+    // resets them per request via ActionView's slot lifecycle. The
+    // mutex emitted in library.rs::emit_module_singleton stops the
+    // race-condition crash; this call ensures the data starts clean
+    // each request instead of leaking content_for values across
+    // sequential requests. Concurrent requests still serialize on
+    // the mutex — a proper per-request scope is the right long-term
+    // fix.
+    s.push_str("\tActionViewViewHelpers_reset_slots_bang()\n\n");
     s.push_str("\tswitch controller {\n");
     for ctrl in &app.controllers {
         let raw = ctrl.name.0.as_str();
@@ -1177,6 +1187,7 @@ fn needed_imports(content: &str) -> Vec<&'static str> {
         (&["slices."], "slices"),
         (&["strconv."], "strconv"),
         (&["strings."], "strings"),
+        (&["sync."], "sync"),
         (&["time.Now(", "time.RFC3339"], "time"),
     ];
     for (probes, name) in entries {
