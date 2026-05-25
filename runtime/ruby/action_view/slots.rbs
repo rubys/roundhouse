@@ -1,0 +1,14 @@
+# Per-request slot store. Instance API — was previously
+# `ActionView::ViewHelpers`'s module-level @slots + 6 class methods.
+# See slots.rb for the threading rationale.
+module ActionView
+  class Slots
+    def initialize: () -> void
+    def reset!: () -> void
+    def set: (Symbol slot, String value) -> void
+    def get: (Symbol slot) -> String?
+    def bracket_get: (Symbol slot) -> String
+    def get_yield: () -> String
+    def set_yield: (String content) -> void
+  end
+end

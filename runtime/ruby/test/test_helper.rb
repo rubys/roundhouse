@@ -39,6 +39,7 @@ $LOAD_PATH.unshift(FRAMEWORK_RUBY)
 $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 
 require "active_record"
+require "action_view/slots"
 require "action_view/view_helpers"
 require "action_dispatch/router"
 require "action_controller/base"

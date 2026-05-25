@@ -23,17 +23,23 @@ module ActionView
     # multi-request server a real implementation would scope this per
     # request. For the spinel-blog specimen (single-threaded by spinel
     # constraint anyway), module state is fine.
+    #
+    # `ActionView::Slots` (see action_view/slots.rb) is the value
+    # object the lowerer migration will thread per-request; the
+    # module-level store here remains the call surface during
+    # migration so existing transpiled call sites in
+    # TS/Crystal/Rust/Go/Spinel keep working.
     @slots = {}
-  
+
     def self.reset_slots!
       @slots = {}
     end
-  
+
     def self.content_for_set(slot, value)
       @slots[slot] = value
       nil
     end
-  
+
     def self.content_for_get(slot)
       # `fetch(slot, nil)` (which the Crystal emit lowers to
       # `@@slots[slot]?`) — Ruby Hash#[] returns nil for missing
@@ -49,7 +55,7 @@ module ActionView
     def self.get_yield
       @slots[:__body__] || ""
     end
-  
+
     def self.set_yield(content)
       @slots[:__body__] = content
       nil
