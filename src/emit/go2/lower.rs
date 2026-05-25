@@ -48,13 +48,23 @@ use crate::dialect::LibraryClass;
 /// hook — every transpiled framework class flows through this
 /// pipeline before go2/emit sees it.
 pub fn lower_for_go(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
+    lower_for_go_with_extras(classes, &[])
+}
+
+/// Variant that threads a wider callee registry through ty-coerce
+/// insertion. Used when lowering a batch of controllers that need
+/// to resolve cross-class calls into models (e.g. `Post.find(...)`
+/// from a controller body needs to see Post's signature to decide
+/// whether to wrap the arg in a Cast for the Int param). Without
+/// `extras` the per-batch registry only sees the batch's own
+/// classes, and cross-batch coercion opportunities go unrealized.
+pub fn lower_for_go_with_extras(
+    classes: Vec<LibraryClass>,
+    extras: &[LibraryClass],
+) -> Vec<LibraryClass> {
     let classes = nil_check_to_comma_ok::apply(classes);
     let mut classes = nil_to_zero_for_string_fields::apply(classes);
-    // Stage 1 of the Ty-coerce-insertion lowerer: scaffolding pass.
-    // No Cast nodes inserted yet (function body is empty); later stages
-    // populate it with the Hash-widening / Option-Some-wrap families
-    // that replace per-emitter back-propagation.
-    crate::lower::insert_ty_coercions(&mut classes);
+    crate::lower::insert_ty_coercions_with_extras(&mut classes, extras);
     classes
 }
 

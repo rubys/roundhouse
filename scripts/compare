@@ -330,13 +330,11 @@ case "$TARGET" in
         (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes")
         ;;
     go)
-        if [[ "${ROUNDHOUSE_GO_V2:-}" == "1" ]]; then
-            step "building go target (v2 — cmd/v2/)"
-            (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/)
-        else
-            step "building go target"
-            (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server .)
-        fi
+        # Phase 6 step 2 (2026-05-24): build from cmd/v2/ unconditionally.
+        # The v2 strangler-fig path is now the default; the legacy main.go
+        # at the build dir root is being retired in Phase 6 step 3.
+        step "building go target"
+        (cd "$BUILD_DIR" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/)
         ;;
     crystal)
         step "building crystal target (release)"

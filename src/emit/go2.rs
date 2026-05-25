@@ -58,13 +58,12 @@ const RT_V2_ROUTER_GLUE: &str =
 const RT_V2_FORM_PARAMS: &str =
     include_str!("../../runtime/go/v2/form_params.go");
 
-/// Append go2 transpiled runtime files to `files` when
-/// `ROUNDHOUSE_GO_V2=1`. No-op otherwise — the default emit pipeline
-/// (legacy go) ships unchanged.
+/// Append go2 transpiled runtime files to `files`. Phase 6 step 2
+/// (2026-05-24) flipped the env-var gate to unconditional: the v2
+/// overlay is now part of every `bin/rh transpile go` output. The
+/// legacy emit still produces `app/*.go` alongside `app/v2/*.go`
+/// for the moment; Phase 6 step 3 will delete the legacy half.
 pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
-    if std::env::var("ROUNDHOUSE_GO_V2").as_deref() != Ok("1") {
-        return;
-    }
     files.extend(emit_overlay_files(app));
 }
 
@@ -130,15 +129,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // Phase 3: app models → `app/v2/<snake>.go`. Inventory-mode for
-    // now — env-gated so the toolchain test (which runs `go vet` over
-    // the whole v2/ overlay) stays clean while the model-emit gaps
-    // close one at a time. `ROUNDHOUSE_GO_V2_MODELS=1` opts in; the
-    // default emit (and the existing inflector_v2_compiles_and_runs
-    // smoke test) ships unchanged. Mirrors rust2's Phase 5 pattern.
-    if std::env::var("ROUNDHOUSE_GO_V2_MODELS").as_deref() == Ok("1")
-        && !app.models.is_empty()
-    {
+    // Phase 6 step 2 (2026-05-24): the ROUNDHOUSE_GO_V2_MODELS env
+    // gate is gone — model + controller + view + test emit now ship
+    // unconditionally whenever the app has models. Pre-flip, this
+    // block was opt-in to let inflector_v2_compiles_and_runs (the
+    // base toolchain smoke test) stay clean during the model emit
+    // build-out; that smoke now passes alongside the full v2 path.
+    if !app.models.is_empty() {
         // Model-only runtime shims. Db_* bridges database/sql for the
         // per-model adapter_emit lowerer's `Db.prepare(sql)` /
         // `Db.step?(stmt)` / `Db.column_*` calls; Broadcasts_* captures
@@ -252,7 +249,13 @@ func main() {\n\
             Some(&app.schema),
             &app.views,
         );
-        let lowered_controllers = lower::lower_for_go(controller_lcs);
+        // Pass the lowered models as the callee-registry extras so
+        // cross-class calls like `Post.find(params[:id])` in a
+        // controller body see Post's Int param signature and get a
+        // Cast inserted around the Str-flowing-into-Int arg. Without
+        // extras, the controller-only ty_coerce_insertion pass can't
+        // resolve Post_find and the coercion never fires.
+        let lowered_controllers = lower::lower_for_go_with_extras(controller_lcs, &lowered_models);
 
         // RouteHelpers module — `lower_routes_to_library_functions` produces
         // one LibraryFunction per named route; bundling them into a
@@ -455,6 +458,61 @@ func main() {\n\
             out.push(EmittedFile {
                 path: PathBuf::from(format!("app/v2/{stem}.go")),
                 content,
+            });
+        }
+
+        // Synthesize stub ApplicationRecord / ApplicationController
+        // when the source app doesn't ship `app/models/application_record.rb`
+        // / `app/controllers/application_controller.rb` (tiny-blog
+        // fixture). Concrete model/controller emit references these
+        // names via the parent embedding chain (Article embeds
+        // *ApplicationRecord → *ActiveRecordBase; PostsController
+        // embeds *ApplicationController → *ActionControllerBase).
+        // Without the file, `go vet` flags the embed as undefined.
+        // The stubs are pass-through: ApplicationRecord embeds
+        // *ActiveRecordBase + ctor delegates; ApplicationController
+        // does the same for AC::Base. Mirrors Rails' implicit
+        // ApplicationRecord/ApplicationController auto-generation.
+        let has_application_record = lowered_models
+            .iter()
+            .any(|lc| lc.name.0.as_str() == "ApplicationRecord");
+        if !has_application_record && !lowered_models.is_empty() {
+            out.push(EmittedFile {
+                path: PathBuf::from("app/v2/application_record.go"),
+                content: "// Synthesized by Roundhouse (go2) — the source\n\
+                          // app doesn't ship app/models/application_record.rb,\n\
+                          // so emit a pass-through stub for the AR-chain\n\
+                          // embedding to resolve.\n\n\
+                          package v2\n\n\
+                          type ApplicationRecord struct {\n\
+                          \t*ActiveRecordBase\n\
+                          }\n\n\
+                          func NewApplicationRecord(_opts ...map[string]interface{}) *ApplicationRecord {\n\
+                          \tself := &ApplicationRecord{ActiveRecordBase: NewActiveRecordBase(_opts...)}\n\
+                          \tself.Self = self\n\
+                          \treturn self\n\
+                          }\n"
+                    .to_string(),
+            });
+        }
+        let has_application_controller = lowered_controllers
+            .iter()
+            .any(|lc| lc.name.0.as_str() == "ApplicationController");
+        if !has_application_controller && !lowered_controllers.is_empty() {
+            out.push(EmittedFile {
+                path: PathBuf::from("app/v2/application_controller.go"),
+                content: "// Synthesized by Roundhouse (go2) — the source\n\
+                          // app doesn't ship app/controllers/application_controller.rb,\n\
+                          // so emit a pass-through stub for the AC-chain\n\
+                          // embedding to resolve.\n\n\
+                          package v2\n\n\
+                          type ApplicationController struct {\n\
+                          \t*ActionControllerBase\n\
+                          }\n\n\
+                          func NewApplicationController() *ApplicationController {\n\
+                          \treturn &ApplicationController{ActionControllerBase: NewActionControllerBase()}\n\
+                          }\n"
+                    .to_string(),
             });
         }
 
@@ -941,6 +999,15 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 /// *ActionControllerBase). One switch arm per concrete controller in
 /// the app. Unknown controller names return a 404.
 fn emit_dispatch_file(app: &App) -> EmittedFile {
+    // Detect whether the app emits a layouts/application view —
+    // real-blog has app/views/layouts/application.html.erb (View
+    // name `layouts/application`); tiny-blog doesn't ship a layout
+    // at all. Without the check, the emitted dispatch.go references
+    // an undefined ViewsLayouts_application symbol on `go vet`.
+    let has_app_layout = app
+        .views
+        .iter()
+        .any(|v| v.name.as_str() == "layouts/application" && v.format.as_str() == "html");
     let mut s = String::new();
     s.push_str("// Generated by Roundhouse (go2 wedge 15).\n");
     s.push_str("// Do not edit by hand — controller list is derived from app/controllers/.\n\n");
@@ -978,14 +1045,21 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         s.push_str("\t\tc.RequestFormat = requestFormat\n");
         s.push_str("\t\tc.ProcessAction(action)\n");
         // Layout wrap — only for text/html responses with non-empty
-        // body. Redirects (empty body, 3xx) and JSON responses skip.
+        // body, and only when the app emits a Layouts::application
+        // view. Redirects (empty body, 3xx) and JSON responses skip.
         // Hardcoded to Layouts::application; multi-layout apps would
         // need per-controller layout selection (Rails `layout :foo`).
-        s.push_str("\t\tfinalBody := c.Body\n");
-        s.push_str("\t\tif strings.HasPrefix(c.ContentType, \"text/html\") && c.Body != \"\" {\n");
-        s.push_str("\t\t\tfinalBody = ViewsLayouts_application(c.Body, c.Flash.OpGet(\"notice\"), c.Flash.OpGet(\"alert\"))\n");
-        s.push_str("\t\t}\n");
-        s.push_str("\t\treturn finalBody, c.Status, c.ContentType, c.Location\n");
+        // The has_app_layout check keeps tiny-blog (and any other
+        // fixture without a layouts/application.html.erb) buildable.
+        if has_app_layout {
+            s.push_str("\t\tfinalBody := c.Body\n");
+            s.push_str("\t\tif strings.HasPrefix(c.ContentType, \"text/html\") && c.Body != \"\" {\n");
+            s.push_str("\t\t\tfinalBody = ViewsLayouts_application(c.Body, c.Flash.OpGet(\"notice\"), c.Flash.OpGet(\"alert\"))\n");
+            s.push_str("\t\t}\n");
+            s.push_str("\t\treturn finalBody, c.Status, c.ContentType, c.Location\n");
+        } else {
+            s.push_str("\t\treturn c.Body, c.Status, c.ContentType, c.Location\n");
+        }
     }
     s.push_str("\t}\n");
     s.push_str("\treturn \"\", 404, \"\", \"\"\n");

@@ -50,6 +50,91 @@ pub fn insert_ty_coercions(lcs: &mut [LibraryClass]) {
     }
 }
 
+/// Variant where the callee registry is built from a wider set than
+/// the rewrite targets. Lets a per-batch lowering (controllers only)
+/// resolve cross-class calls (Post.find from a controller body) by
+/// seeing the model LCs' signatures even though they aren't being
+/// rewritten in this call. Mirrors the rust2 wiring's implicit
+/// behavior — there it works because all classes flow through one
+/// emit pass; go2's overlay does batches.
+pub fn insert_ty_coercions_with_extras(
+    targets: &mut [LibraryClass],
+    extras: &[LibraryClass],
+) {
+    let mut combined: Vec<&LibraryClass> = Vec::with_capacity(targets.len() + extras.len());
+    for lc in targets.iter() {
+        combined.push(lc);
+    }
+    for lc in extras {
+        combined.push(lc);
+    }
+    let registry = build_registry_from(&combined);
+    for lc in targets.iter_mut() {
+        let raw = lc.name.0.as_str();
+        let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        for method in &mut lc.methods {
+            method.body = rewrite_expr(&method.body, &registry, &class_name);
+        }
+    }
+}
+
+fn build_registry_from(lcs: &[&LibraryClass]) -> CalleeRegistry {
+    let mut out: CalleeRegistry = HashMap::new();
+    for lc in lcs {
+        let raw = lc.name.0.as_str();
+        let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        let entry = out.entry(class_name).or_default();
+        for m in &lc.methods {
+            let param_tys: Vec<Ty> = match m.signature.as_ref() {
+                Some(Ty::Fn { params, .. }) => params
+                    .iter()
+                    .filter(|p| {
+                        !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
+                    })
+                    .map(|p| p.ty.clone())
+                    .collect(),
+                _ => continue,
+            };
+            entry.insert(m.name.as_str().to_string(), param_tys);
+        }
+        // AR baseline class methods. The lowerer emits them as bare
+        // `<Class>_find(id int64)` / `<Class>_count()` / etc. functions
+        // via `emit_ar_class_method_wrappers` rather than as MethodDefs
+        // on the LC, so they don't appear in the loop above. Without
+        // these entries, a controller's `Post.find(params[:id])` Send
+        // never sees that `find` takes Int, and the ty_coerce_insertion
+        // pass doesn't insert the Str→Int cast at the arg position.
+        //
+        // Detect "is an AR-chain class" via parent inheritance: the
+        // model_to_library lowerer sets `parent: Some(ClassId)` for
+        // every Post < ApplicationRecord shape (and recursively for
+        // ApplicationRecord < ActiveRecord::Base). Concrete tables
+        // (rows beyond just `id`) get the finders; abstract bases
+        // skip — matches `emit_ar_class_method_wrappers`'s emit gate.
+        if lc.parent.is_some() {
+            // attr_reader / attr_writer methods double as the field
+            // declarations the emit lifts into the struct. Class has
+            // a "table" if it has attr methods beyond `id`/`id=`.
+            use crate::dialect::AccessorKind;
+            let has_table = lc.methods.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+                ) && m.name.as_str().trim_end_matches('=') != "id"
+            });
+            if has_table {
+                entry
+                    .entry("find".to_string())
+                    .or_insert(vec![Ty::Int]);
+                entry
+                    .entry("exists?".to_string())
+                    .or_insert(vec![Ty::Int]);
+            }
+        }
+    }
+    out
+}
+
 fn build_registry(lcs: &[LibraryClass]) -> CalleeRegistry {
     let mut out: CalleeRegistry = HashMap::new();
     for lc in lcs {
@@ -387,7 +472,28 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     if arg_ty == param_ty {
         return false;
     }
-    ty_contains_untyped(arg_ty)
+    // Untyped (interface{}/serde_json::Value/etc) — wide runtime
+    // value flowing into a typed slot.
+    if ty_contains_untyped(arg_ty) {
+        return true;
+    }
+    // Nullable-primitive flowing into a non-nullable typed slot —
+    // `params[:id]` typed Union<Str, Nil> reaching `Post.find(id: Int)`.
+    // Without coercion the call lands with a string-or-nil where the
+    // target wants Int. Insert a Cast so the emit handles the parse
+    // + zero-fallback (Ruby's `nil.to_i == 0` semantics) at the call
+    // site. Fires for any "Union with a Nil arm and a primitive arm,
+    // target primitive differs from the arm" shape.
+    if let Ty::Union { variants } = arg_ty {
+        let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+        let has_other_primitive = variants.iter().any(|v| {
+            matches!(v, Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool) && v != param_ty
+        });
+        if has_nil && has_other_primitive {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `ty` contains a `Ty::Untyped` anywhere — directly or

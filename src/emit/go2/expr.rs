@@ -1842,6 +1842,29 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         if already_typed {
             return inner;
         }
+        // For Int/Float targets prefer Sprintf+ParseInt/ParseFloat
+        // over raw type assertion. Type assertion `(x).(int64)` only
+        // succeeds when the runtime concrete type IS exactly int64;
+        // params-derived values are strings (`params[:id]` lands as
+        // `string` in the underlying map), so `(value).(int64)` would
+        // panic at runtime even when assertion compiles. Sprintf+Parse
+        // handles both shapes uniformly — int64 round-trips through
+        // "%v" formatting, string parses directly, nil/missing falls
+        // back to Go zero. Boolean stays on type assertion since
+        // Ruby's `to_b` idiom doesn't survive the cross-target path.
+        match target_ty {
+            Ty::Int => {
+                return format!(
+                    "func() int64 {{ n, _ := strconv.ParseInt(strings.TrimSpace(fmt.Sprintf(\"%v\", {inner})), 10, 64); return n }}()"
+                );
+            }
+            Ty::Float => {
+                return format!(
+                    "func() float64 {{ n, _ := strconv.ParseFloat(strings.TrimSpace(fmt.Sprintf(\"%v\", {inner})), 64); return n }}()"
+                );
+            }
+            _ => {}
+        }
         return format!(
             "func() {go_ty} {{ _v, _ := ({inner}).({go_ty}); return _v }}()",
         );
@@ -2682,12 +2705,15 @@ fn map_go_str_method(method: &str, recv_text: &str) -> Option<String> {
         // non-numeric, returns 0 on parse failure. Mirror that
         // shape with strconv.Atoi + zero fallback via IIFE. Used
         // heavily by controllers extracting `params[:id]` into a
-        // numeric for `Article.find`.
+        // numeric for `Article.find`. The `fmt.Sprintf("%v", ...)`
+        // wrap lets it cope with `params[k]` which is interface{}
+        // rather than a typed string — without it the call site
+        // type-asserts to string before TrimSpace and `go vet` fails.
         "to_i" => Some(format!(
-            "func() int64 {{ n, _ := strconv.ParseInt(strings.TrimSpace({recv_text}), 10, 64); return n }}()"
+            "func() int64 {{ n, _ := strconv.ParseInt(strings.TrimSpace(fmt.Sprintf(\"%v\", {recv_text})), 10, 64); return n }}()"
         )),
         "to_f" => Some(format!(
-            "func() float64 {{ n, _ := strconv.ParseFloat(strings.TrimSpace({recv_text}), 64); return n }}()"
+            "func() float64 {{ n, _ := strconv.ParseFloat(strings.TrimSpace(fmt.Sprintf(\"%v\", {recv_text})), 64); return n }}()"
         )),
         _ => None,
     }

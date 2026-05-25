@@ -153,9 +153,16 @@ fn ingests_posts_controller_with_actions() {
         "ApplicationController"
     );
     let actions: Vec<&roundhouse::Action> = ctrl.actions().collect();
-    assert_eq!(actions.len(), 4);
+    // 5 = the 4 public scaffold actions + the private `post_params`
+    // helper (`actions()` doesn't filter on Ruby visibility; it walks
+    // every `def`). post_params was added 2026-05-24 alongside Phase 6
+    // step 2 so the `Post.new(post_params)` rewrite finds a callee.
+    assert_eq!(actions.len(), 5);
     let names: Vec<_> = actions.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["index", "show", "create", "destroy"]);
+    assert_eq!(
+        names,
+        vec!["index", "show", "create", "destroy", "post_params"]
+    );
 
     // index body: `@posts = Post.all` — Assign(Ivar(posts), Send(Some(Const(Post)), "all", []))
     let index = actions[0];
