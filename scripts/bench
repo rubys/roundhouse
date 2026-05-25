@@ -11,8 +11,11 @@
 # Usage:  scripts/bench [options] [TARGET ...]
 #
 #   TARGET ∈ { rails | rails-int | ruby | ruby-int | typescript |
-#              crystal | go | rust | python | elixir }
+#              crystal | rust | spinel | go | python | elixir }
 #              (default: rails ruby)
+#
+#   `go` = Roundhouse-emit Go (single AOT binary, net/http server,
+#          modernc.org/sqlite). Built from `cmd/v2/main.go`.
 #
 #   `rails`     = Rails reference (Puma + YJIT, production env)
 #   `rails-int` = Rails reference (Puma, YJIT disabled, baseline)
@@ -92,12 +95,13 @@ done
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|typescript|crystal|rust) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
+        sp) NORMALIZED+=(spinel) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int typescript crystal rust" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -114,6 +118,14 @@ TS_OUT="/tmp/rh-ts-pass2"
 CR_OUT="/tmp/rh-cr-pass2"
 # Rust target — same scratch-dir convention as scripts/compare.
 RS_OUT="/tmp/rh-rs-pass2"
+# Spinel target — uses `bin/rh transpile spinel`, which writes here
+# (matches scripts/compare's BUILD_DIR for the spinel target).
+SP_OUT="$REPO_ROOT/build/transpiled-blog-spinel"
+# Go target — `bin/rh transpile go` writes here. v2 binary lives at
+# `cmd/v2/main.go`; staged DB at `storage/development.sqlite3` (the
+# default path `runtime/go/v2/server.go` looks for when DATABASE_PATH
+# is unset).
+GO_OUT="$REPO_ROOT/build/transpiled-blog-go"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -304,6 +316,43 @@ build_target() {
                 (cd "$RS_OUT" && cargo build --release --quiet)
             fi
             ;;
+        spinel)
+            # `bin/rh transpile spinel` writes to $SP_OUT and additionally
+            # vendors Tep transport (sphttp.c) + per-target Makefile;
+            # `make assets` builds Tailwind + turbo.min.js; `make build`
+            # AOT-compiles main.rb to ./build/blog via the `spinel`
+            # binary (needs to be on PATH, e.g. ~/git/spinel).
+            TARGET_BUILD_DIR="$SP_OUT"
+            TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$SP_OUT/main.rb" ]]; then
+                step "regenerating spinel target (bin/rh transpile spinel)"
+                (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null)
+            fi
+            if [[ ! -f "$SP_OUT/static/assets/tailwind.css" ]]; then
+                step "building spinel assets (tailwind + turbo.min.js)"
+                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null)
+            fi
+            if [[ ! -x "$SP_OUT/build/blog" ]]; then
+                step "AOT-compiling main.rb → build/blog (spinel)"
+                (cd "$SP_OUT" && make build >/dev/null)
+            fi
+            ;;
+        go)
+            # `bin/rh transpile go` writes to $GO_OUT; build the v2
+            # binary from cmd/v2/ (the legacy root main.go is a thin
+            # forward but cmd/v2 is the canonical entry point). Single
+            # binary, no per-target asset or gem dependencies.
+            TARGET_BUILD_DIR="$GO_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$GO_OUT/go.mod" ]]; then
+                step "regenerating go target (bin/rh transpile go)"
+                (cd "$REPO_ROOT" && bin/rh transpile go >/dev/null)
+            fi
+            if [[ ! -x "$GO_OUT/.bin/server" ]]; then
+                step "building go target (cmd/v2/, release shape)"
+                (cd "$GO_OUT" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/)
+            fi
+            ;;
     esac
 }
 
@@ -343,6 +392,20 @@ stage_db() {
             ;;
         rust)
             local db="$RS_OUT/storage/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        spinel)
+            local db="$SP_OUT/tmp/blog.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        go)
+            # Default path the v2 server.go reads when DATABASE_PATH is
+            # unset; mirrors scripts/compare's go DB_DEST.
+            local db="$GO_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -440,6 +503,29 @@ start_target() {
             (cd "$RS_OUT" && \
                 PORT="$port" \
                 ./target/release/app \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        spinel)
+            # AOT-compiled native binary (Spinel codegen) — single-process,
+            # Tep::Server FFI HTTP/1.1, no workers concept. `workers` is
+            # ignored and the per-cell row records workers=1.
+            (cd "$SP_OUT" && \
+                BLOG_DB=tmp/blog.sqlite3 \
+                PORT="$port" \
+                ./build/blog \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        go)
+            # AOT-compiled binary — single-process, net/http server,
+            # no workers concept. `workers` ignored; per-cell row
+            # records workers=1.
+            (cd "$GO_OUT" && \
+                PORT="$port" \
+                ./.bin/server \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
