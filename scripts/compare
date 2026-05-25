@@ -24,7 +24,7 @@
 #                         /articles/1/edit  (plus /articles.json
 #                         and /articles/1.json for targets that
 #                         strip the .json suffix before routing —
-#                         currently ruby + typescript + crystal)
+#                         currently ruby + typescript + crystal + go)
 #   --rails-port N        Port for Rails (default 4000)
 #   --target-port N       Port for target (default 3000)
 #   --keep                Don't tear down servers or wipe the
@@ -130,7 +130,7 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
     # glue (see runtime/typescript/server.ts:149-160 and
     # runtime/spinel/scaffold/main.rb:82-93 for the pattern).
     case "$TARGET" in
-        ruby|spinel|typescript|crystal)
+        ruby|spinel|typescript|crystal|go)
             PATHS+=(/articles.json /articles/1.json)
             ;;
     esac
