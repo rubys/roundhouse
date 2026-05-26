@@ -91,10 +91,8 @@ pub(crate) struct OutputDest {
     /// Go package name the file's `package X` header should declare.
     /// `cmd/v2/main.go` is `main`; everything else under `app/v2/`
     /// is `v2` (Phase 1 invariant). Phase 4 will return per-package
-    /// names (`models`, `controllers`, `actioncontroller`, …) and
-    /// `rewrite_package_to_v2` will consume this instead of hardcoding
-    /// `v2`. Field is currently unread by call sites.
-    #[allow(dead_code)]
+    /// names (`models`, `controllers`, `actioncontroller`, …);
+    /// `rewrite_package` consumes this value.
     pub package: &'static str,
 }
 
