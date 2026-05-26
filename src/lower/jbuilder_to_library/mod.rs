@@ -33,7 +33,7 @@
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::singularize;
 use crate::span::Span;
@@ -175,7 +175,9 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let mut body_stmts: Vec<Expr> = Vec::new();
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
     body_stmts.extend(walk_template(&rewritten, &ctx));
-    body_stmts.push(var_ref(Symbol::from(ctx.accumulator.as_str())));
+    let mut result = var_ref(Symbol::from(ctx.accumulator.as_str()));
+    result.hint = Some(IrHint::StringBuilderResult);
+    body_stmts.push(result);
 
     let body = seq(body_stmts);
 
@@ -729,7 +731,7 @@ fn assign_accumulator_string_new(name: &str) -> Expr {
         },
     );
     let new_call = send(Some(string_const), "new", Vec::new(), None, false);
-    Expr::new(
+    let mut e = Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
             target: LValue::Var {
@@ -738,17 +740,23 @@ fn assign_accumulator_string_new(name: &str) -> Expr {
             },
             value: new_call,
         },
-    )
+    );
+    e.hint = Some(IrHint::StringBuilderInit);
+    e
 }
 
 fn io_append_lit(accumulator: &str, s: &str) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
-    send(Some(recv), "<<", vec![lit_str(s.to_string())], None, false)
+    let mut e = send(Some(recv), "<<", vec![lit_str(s.to_string())], None, false);
+    e.hint = Some(IrHint::StringBuilderAppend);
+    e
 }
 
 fn io_append_call(accumulator: &str, call: Expr) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
-    send(Some(recv), "<<", vec![call], None, false)
+    let mut e = send(Some(recv), "<<", vec![call], None, false);
+    e.hint = Some(IrHint::StringBuilderAppend);
+    e
 }
 
 fn json_builder_encode(value: Expr) -> Expr {

@@ -35,7 +35,7 @@ mod attr_parts;
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize, singularize, snake_case};
 use crate::span::Span;
@@ -276,7 +276,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let mut body_stmts: Vec<Expr> = Vec::new();
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
     body_stmts.extend(walk_body(&rewritten, &ctx));
-    body_stmts.push(var_ref(Symbol::from(ctx.accumulator.as_str())));
+    body_stmts.push(accumulator_result_ref(&ctx.accumulator));
 
     let body = seq(body_stmts);
 
@@ -1163,32 +1163,54 @@ impl ViewCtx {
 /// `<accumulator> = String.new` — synthesized once per template body.
 /// The accumulator name comes from the active ViewCtx (`io` at top
 /// level; `body` inside `form_with` blocks).
+///
+/// Tagged with `IrHint::StringBuilderInit` so non-Ruby emitters that
+/// have a more idiomatic accumulator form (Crystal `String::Builder`,
+/// Go `strings.Builder`, TS array+join) can pick it up. Ruby/Spinel/
+/// Rust ignore the hint (their canonical form already matches).
 pub(super) fn assign_accumulator_string_new(name: &str) -> Expr {
     let string_const = Expr::new(
         Span::synthetic(),
         ExprNode::Const { path: vec![Symbol::from("String")] },
     );
     let new_call = send(Some(string_const), "new", Vec::new(), None, false);
-    Expr::new(
+    let mut e = Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from(name) },
             value: new_call,
         },
-    )
+    );
+    e.hint = Some(IrHint::StringBuilderInit);
+    e
 }
 
 /// `<accumulator> << <arg>` — the per-step append. Always emits with
 /// `<<` (a binary operator the Ruby emit_send_base rewrites to infix
 /// form), so the source comes out as `io << arg`, not `io.<<(arg)`.
+///
+/// Tagged with `IrHint::StringBuilderAppend` so emitters can pick the
+/// target-idiomatic append form (Go `WriteString`, TS array `push`).
 pub(super) fn accumulator_append_call(arg: Expr, ctx: &ViewCtx) -> Expr {
-    send(
+    let mut e = send(
         Some(var_ref(Symbol::from(ctx.accumulator.as_str()))),
         "<<",
         vec![arg],
         None,
         false,
-    )
+    );
+    e.hint = Some(IrHint::StringBuilderAppend);
+    e
+}
+
+/// Terminal `<accumulator>` reference at the tail of a view function
+/// body — returns the accumulated string. Distinct from `var_ref` so
+/// only this site picks up `IrHint::StringBuilderResult`; generic Var
+/// references to `io` elsewhere stay untagged.
+pub(super) fn accumulator_result_ref(name: &str) -> Expr {
+    let mut e = var_ref(Symbol::from(name));
+    e.hint = Some(IrHint::StringBuilderResult);
+    e
 }
 
 pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
