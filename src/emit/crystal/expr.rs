@@ -12,7 +12,7 @@
 //!     Crystal's narrower `case when` semantics; we reuse `case when`
 //!     for the simple shapes the lowerer produces today.
 
-use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
+use crate::expr::{Arm, Expr, ExprNode, InterpPart, IrHint, LValue, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
@@ -38,6 +38,15 @@ where
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    // IrHint::StringBuilder* — lowerer-tagged accumulator triple
+    // (`io = String.new; io << "..."; io`). Crystal's `String + String`
+    // is O(n²) per append (immutable Strings reallocate); swap to
+    // `String::Builder` which writes in place via `IO#<<`. Single
+    // hook at the entry of emit_expr so all three sites — Assign,
+    // Send, terminal Var — get rewritten in one place.
+    if let Some(s) = try_string_builder(e) {
+        return s;
+    }
     // Empty Hash/Array literal with a concrete type annotation —
     // render with the `of K => V` / `of E` clause so Crystal infers
     // the container type from the annotation rather than the default
@@ -217,6 +226,59 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
         // all reach the runtime helpers.
         "Db" => Some("Roundhouse::Db"),
         _ => None,
+    }
+}
+
+/// String-accumulator hint consumer. The lowerer (view_to_library /
+/// jbuilder_to_library) tags the three sites of its `io = String.new;
+/// io << "..."; io` pattern with `IrHint::StringBuilder*`; this
+/// helper rewrites them to Crystal's `String::Builder` idiom so the
+/// inner concat stays O(n) instead of O(n²).
+///
+/// - `Init` rewrites the whole `Assign { Var, String.new }` to
+///   `<var> = String::Builder.new`, bypassing the value-side `<<`
+///   shovel rewrite (which the lowerer's `<<` Send carries instead).
+/// - `Append` keeps the source-faithful `<var> << <arg>` (Crystal's
+///   `IO#<<` works on Builder directly), bypassing the otherwise-
+///   applied `<var> = <var> + <arg>` rewrite for Str-typed recv.
+/// - `Result` rewrites the terminal Var to `<var>.to_s`, so the
+///   function returns the finalized String.
+///
+/// Non-hinted sites (user-authored Ruby outside lowerer synthesis)
+/// still take the legacy `String + String` path — the hint is the
+/// signal that the lowerer guarantees Builder semantics are safe.
+fn try_string_builder(e: &Expr) -> Option<String> {
+    match e.hint? {
+        IrHint::StringBuilderInit => {
+            if let ExprNode::Assign {
+                target: LValue::Var { name, .. }, ..
+            } = &*e.node
+            {
+                return Some(format!(
+                    "{} = String::Builder.new",
+                    escape_ident(name.as_str())
+                ));
+            }
+            None
+        }
+        IrHint::StringBuilderAppend => {
+            if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*r.node {
+                        let var = escape_ident(name.as_str());
+                        let val = emit_expr(&args[0]);
+                        return Some(format!("{var} << {val}"));
+                    }
+                }
+            }
+            None
+        }
+        IrHint::StringBuilderResult => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                return Some(format!("{}.to_s", escape_ident(name.as_str())));
+            }
+            None
+        }
     }
 }
 
