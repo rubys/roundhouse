@@ -1,0 +1,18 @@
+module ActiveRecord
+  # Cross-model registry. See `registry.rb` for the full rationale —
+  # in short, it bridges the import-cycle gap in strict-typed targets
+  # (Go, Rust, future Kotlin/Swift). Lazy targets ignore it.
+  module Registry
+    # Register `klass` under `name`. Idempotent.
+    def self.register: (String name, untyped klass) -> void
+
+    # Return the registered value, or `nil` if missing.
+    def self.lookup: (String name) -> untyped?
+
+    # Predicate for "has this name been registered?"
+    def self.registered?: (String name) -> bool
+
+    # Drop every entry. Test-support only.
+    def self.clear!: () -> void
+  end
+end
