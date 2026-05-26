@@ -374,6 +374,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
         diagnostic: expr.diagnostic.clone(),
         str_coercion: expr.str_coercion,
         hint: expr.hint,
+        decisions: expr.decisions,
     }
 }
 
@@ -539,5 +540,6 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     }
 }

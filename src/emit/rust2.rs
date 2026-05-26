@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 
+pub(crate) mod decide;
 pub(crate) mod expr;
 mod spec;
 pub(crate) mod library;
@@ -276,6 +277,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // self-describing-IR pattern — Crystal/Go/Kotlin/Swift can
         // consume the same flag without recomputing.
         crate::analyze::mutates_self::propagate(&mut classes);
+        // Stamp `Expr.decisions` bits per the rust2 decide pass.
+        // Stage 0 is a no-op; subsequent stages migrate per-node
+        // decisions (parens, str_color, last-use, option-wrap, ...)
+        // out of render-time helpers into bits set here. See
+        // `decide/bits.rs` for the bit allocation and roundhouse#22.
+        decide::decide_classes(&mut classes);
         classes
     })
     .expect("rust runtime transpile failed (Ruby source error)");

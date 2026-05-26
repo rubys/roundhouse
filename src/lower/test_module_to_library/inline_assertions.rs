@@ -177,6 +177,7 @@ fn map_expr(e: &Expr) -> Expr {
         diagnostic: e.diagnostic.clone(),
         str_coercion: e.str_coercion,
         hint: e.hint,
+        decisions: e.decisions,
     };
     rewrite_send(&new_e).unwrap_or(new_e)
 }

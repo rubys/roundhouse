@@ -364,5 +364,6 @@ where
         diagnostic: expr.diagnostic.clone(),
         str_coercion: expr.str_coercion,
         hint: expr.hint,
+        decisions: expr.decisions,
     }
 }

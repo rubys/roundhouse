@@ -467,6 +467,7 @@ impl<'a> BodyTyper<'a> {
                         diagnostic: None,
                         str_coercion: None,
                         hint: None,
+                        decisions: 0,
                     });
                 }
 

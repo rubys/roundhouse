@@ -804,6 +804,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
             diagnostic: e.diagnostic.clone(),
             str_coercion: e.str_coercion,
             hint: e.hint,
+            decisions: e.decisions,
         }
     }
     flatten(expr)

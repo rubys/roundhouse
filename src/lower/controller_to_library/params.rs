@@ -312,6 +312,7 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             diagnostic: None,
             str_coercion: None,
             hint: None,
+            decisions: 0,
         };
         stmts.push(Expr {
             span: Span::synthetic(),
@@ -325,6 +326,7 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             diagnostic: None,
             str_coercion: None,
             hint: None,
+            decisions: 0,
         });
     }
     let body = Expr {
@@ -336,6 +338,7 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     };
     MethodDef {
         name: Symbol::from("initialize"),
@@ -365,6 +368,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     };
     MethodDef {
         name: field.clone(),
@@ -392,6 +396,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     };
     let body = Expr {
         span: Span::synthetic(),
@@ -405,6 +410,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     };
     MethodDef {
         name: Symbol::from(format!("{}=", field.as_str())),
@@ -713,6 +719,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 diagnostic: None,
                 str_coercion: None,
                 hint: None,
+                decisions: 0,
             };
             let value = Expr {
                 span: Span::synthetic(),
@@ -723,6 +730,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 diagnostic: None,
                 str_coercion: None,
                 hint: None,
+                decisions: 0,
             };
             (key, value)
         })
@@ -739,6 +747,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         diagnostic: None,
         str_coercion: None,
         hint: None,
+        decisions: 0,
     };
     let ret_ty = Ty::Hash {
         key: Box::new(Ty::Str),
@@ -909,6 +918,7 @@ pub fn rewrite_typed_bracket_to_field(
             diagnostic: None,
             str_coercion: None,
             hint: None,
+            decisions: 0,
         })
     })
 }
