@@ -373,6 +373,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
         leading_blank_line: expr.leading_blank_line,
         diagnostic: expr.diagnostic.clone(),
         str_coercion: expr.str_coercion,
+        hint: expr.hint,
     }
 }
 
@@ -537,5 +538,6 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         leading_blank_line: arg.leading_blank_line,
         diagnostic: None,
         str_coercion: None,
+        hint: None,
     }
 }

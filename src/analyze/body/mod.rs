@@ -466,6 +466,7 @@ impl<'a> BodyTyper<'a> {
                         leading_blank_line: false,
                         diagnostic: None,
                         str_coercion: None,
+                        hint: None,
                     });
                 }
 

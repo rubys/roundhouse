@@ -803,6 +803,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
             leading_blank_line: e.leading_blank_line,
             diagnostic: e.diagnostic.clone(),
             str_coercion: e.str_coercion,
+            hint: e.hint,
         }
     }
     flatten(expr)

@@ -34,6 +34,42 @@ pub enum StrCoercion {
     Borrow,
 }
 
+/// Cross-target intent annotation for canonical Ruby idioms whose
+/// optimal emit shape differs per target. Set by the lowerer when it
+/// synthesizes a pattern it knows the target-specific name for;
+/// consumed by per-target emitters that want the idiomatic form.
+///
+/// Currently covers the string-accumulator triple emitted by
+/// `view_to_library` (`io = String.new; io << "..."; io`):
+///
+/// - Ruby/Spinel: the canonical `String#<<` form is already optimal;
+///   these emitters ignore the hint.
+/// - Rust: `String::new()` / `push_str` / bare var — already optimal;
+///   hint short-circuits the inference-based pattern detection.
+/// - Crystal: `String::Builder.new` / `<<` / `.to_s` — replaces
+///   O(n²) `io + x` concat chains.
+/// - Go: `var io strings.Builder` / `io.WriteString(...)` /
+///   `io.String()` — replaces O(n²) `io = io + x`.
+/// - TypeScript: `[]` / `.push(...)` / `.join("")` — V8 prefers
+///   array+join over repeated string concat.
+///
+/// `None` means "no hint" — emitters fall through to their default
+/// per-`ExprNode` handling. Adding a variant has zero effect on
+/// existing emit paths until each target opts in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IrHint {
+    /// On the `Assign` node initializing a string accumulator local
+    /// (typically `io = String.new` synthesized by the view lowerer).
+    StringBuilderInit,
+    /// On the `Send { method: "<<" }` node appending to a string
+    /// accumulator local.
+    StringBuilderAppend,
+    /// On the terminal `Var` reference returning a string accumulator
+    /// at the tail of a view function body.
+    StringBuilderResult,
+}
+
 /// The core typed λ-calculus. Ruby's ~80 AST node kinds collapse into ~15 here;
 /// everything else lives in the Rails dialect or is handled by normalization.
 ///
@@ -75,6 +111,12 @@ pub struct Expr {
     /// See `StrCoercion` for the per-variant meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub str_coercion: Option<StrCoercion>,
+    /// Cross-target intent annotation. Set by the lowerer when it
+    /// synthesizes a canonical Ruby idiom whose optimal emit shape
+    /// differs per target. See `IrHint` for variants and per-target
+    /// consumption notes. `None` for nodes the lowerer didn't tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<IrHint>,
 }
 
 impl Expr {
@@ -87,6 +129,7 @@ impl Expr {
             leading_blank_line: false,
             diagnostic: None,
             str_coercion: None,
+            hint: None,
         }
     }
 }
