@@ -157,22 +157,9 @@ class TestBase
   def teardown
   end
 
-  # `assert_operator` is deliberately not lowered by inline_assertions
-  # (Class-subclass `<`/`>` checks don't translate to TS, which has
-  # no operator-on-class-object equivalent). Method body uses `.send`
-  # to dispatch through the operator-name symbol. spinel-target
-  # equivalent will need separate handling when toolchain-spinel
-  # re-enables (likely a more specific lowering when the op symbol
-  # is known at the call site).
-  def assert_operator(lhs, op, rhs, msg = nil)
-    return if lhs.send(op, rhs)
-    raise(msg || "assert_operator failed: #{lhs.inspect} #{op} #{rhs.inspect}")
-  end
-
-  # `assert_match` left as a method for the same reason — nilable
-  # value handling differs per target. spinel-target will need
-  # adjusting when toolchain-spinel re-enables; for now this works
-  # under CRuby.
+  # `assert_match` left as a method — nilable value handling differs
+  # per target. spinel-target will need adjusting when toolchain-spinel
+  # re-enables; for now this works under CRuby.
   def assert_match(pattern, value, msg = nil)
     raise(msg || "assert_match: expected non-nil") if value.nil?
     return if value =~ pattern

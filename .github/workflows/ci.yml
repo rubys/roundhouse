@@ -248,13 +248,18 @@ jobs:
   # target. Same emit pipeline as framework-tests-ruby, but each
   # emitted test is compiled to a native binary via `spinel --rbs sig
   # <file>.rb -o <bin>` and executed; the autorun shim returns
-  # non-zero on any assertion failure. 5/5 tests pass cleanly under
-  # spinel master (inflector, router, ac_base, errors, view_helpers).
-  # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
+  # non-zero on any assertion failure. Was 5/5 green 2026-05-25 against
+  # `b6d7183`; currently 0/5 red against latest spinel master because
+  # of matz/spinel#915 (`return NULL` instead of `sp_box_nil()` in the
+  # dead-code fallback for `sp_RbVal`-returning methods). All 5 tests
+  # hit it via `ActiveRecord::Registry.lookup`'s emit. continue-on-
+  # error until #915 lands; drop the flag then (job will auto-flip
+  # green). `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:
     needs: build-spinel
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -153,11 +153,6 @@ class TestBase
   def teardown
   end
 
-  def assert_operator(lhs, op, rhs, msg = nil)
-    return if lhs.send(op, rhs)
-    raise(msg || "assert_operator failed")
-  end
-
   def assert_match(pattern, value, msg = nil)
     raise(msg || "assert_match: nil value") if value.nil?
     return if value =~ pattern

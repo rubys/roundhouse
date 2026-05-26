@@ -8,7 +8,7 @@ require_relative "../test_helper"
 # still produce a sensible message.
 class RecordNotFoundTest < Minitest::Test
   def test_inherits_from_standard_error
-    assert_operator ActiveRecord::RecordNotFound, :<, StandardError
+    assert ActiveRecord::RecordNotFound < StandardError
   end
 
   def test_carries_user_message
@@ -29,7 +29,7 @@ class RecordInvalidTest < Minitest::Test
   Recordlike = Struct.new(:errors)
 
   def test_inherits_from_standard_error
-    assert_operator ActiveRecord::RecordInvalid, :<, StandardError
+    assert ActiveRecord::RecordInvalid < StandardError
   end
 
   def test_message_joins_errors_with_comma_space

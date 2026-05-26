@@ -49,11 +49,10 @@ class TestBase
   def setup: () -> void
   def teardown: () -> void
 
-  # `assert_operator` and `assert_match` aren't lowered by
-  # inline_assertions (operator-on-class-object and nil-handling
-  # divergence respectively). Method bodies stay; RBS pins their
-  # contracts. `op` is the operator symbol (:<, :>, :==, :>=, etc.).
-  def assert_operator: (untyped lhs, Symbol op, untyped rhs, ?String? msg) -> void
+  # `assert_match` isn't lowered by inline_assertions (nil-handling
+  # divergence across targets). Method body stays; RBS pins the
+  # contract. (`assert_operator` retired — Class-subclass `<` rewritten
+  # to direct `assert <Class> < <Class>` form.)
   def assert_match: (Regexp pattern, String? value, ?String? msg) -> void
 end
 
