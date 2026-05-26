@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, IrHint, Literal};
 use crate::ty::Ty;
 
 // Reused verbatim from legacy go until go2 needs its own dispatch.
@@ -153,6 +153,16 @@ impl EmitCtx {
 }
 
 pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
+    // IrHint::StringBuilder* — lowerer-tagged accumulator triple
+    // (`io = String.new; io << "..."; io`). Go's immutable strings
+    // make `io = io + "..."` O(n²); swap to `strings.Builder` which
+    // amortizes appends. Single hook at the entry of emit_expr so
+    // all three sites — Assign, Send, terminal Var — rewrite in
+    // one place. The "strings" import is auto-added by
+    // `needed_imports` once `strings.Builder` appears in output.
+    if let Some(s) = try_string_builder(ctx, e) {
+        return s;
+    }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => {
@@ -512,6 +522,64 @@ fn emit_case(
 }
 
 /// Trailing-return fallback for `emit_case`'s IIFE — Go's flow
+/// String-accumulator hint consumer. The lowerer (view_to_library /
+/// jbuilder_to_library) tags the three sites of its `io = String.new;
+/// io << "..."; io` pattern with `IrHint::StringBuilder*`; this
+/// helper rewrites them to Go's `strings.Builder` idiom so the inner
+/// concat stays O(n) instead of O(n²).
+///
+/// - `Init` rewrites the whole `Assign { Var, String.new }` to
+///   `var <name> strings.Builder`, bypassing the value-side emit
+///   (which would otherwise produce the `String.new → ""` peephole
+///   plus an `:=` declaration).
+/// - `Append` rewrites the `<name> << <arg>` Send to
+///   `<name>.WriteString(<arg>)`, bypassing the otherwise-applied
+///   `<name> = <name> + <arg>` rewrite for Str-typed recv.
+/// - `Result` rewrites the terminal Var to `<name>.String()`, so
+///   the function returns the finalized string.
+///
+/// Safe-by-construction local retype: every `<name>` reference in
+/// the lowered body flows through one of the three tagged sites
+/// (Init synthesizes once; every append goes through
+/// `accumulator_append_call`; terminal ref via
+/// `accumulator_result_ref`). Nothing else reads `io`, so the
+/// emit-side type change from `string` to `strings.Builder` is
+/// invisible to surrounding code.
+fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
+    use crate::expr::LValue;
+    match e.hint? {
+        IrHint::StringBuilderInit => {
+            if let ExprNode::Assign {
+                target: LValue::Var { name, .. }, ..
+            } = &*e.node
+            {
+                let var = super::library::sanitize(name.as_str());
+                return Some(format!("var {var} strings.Builder"));
+            }
+            None
+        }
+        IrHint::StringBuilderAppend => {
+            if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*r.node {
+                        let var = super::library::sanitize(name.as_str());
+                        let arg = emit_expr(ctx, &args[0]);
+                        return Some(format!("{var}.WriteString({arg})"));
+                    }
+                }
+            }
+            None
+        }
+        IrHint::StringBuilderResult => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                let var = super::library::sanitize(name.as_str());
+                return Some(format!("{var}.String()"));
+            }
+            None
+        }
+    }
+}
+
 /// analysis requires a return after the switch even when every arm
 /// returns. `interface{}` slot → `nil`; primitives → typed zero.
 fn go_case_zero(ty: Option<&Ty>) -> &'static str {
