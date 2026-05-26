@@ -1,0 +1,190 @@
+#!/usr/bin/env ruby
+# scripts/bench-env — capture environment + harness snapshot for a bench run.
+#
+# Writes a JSON document to stdout describing the machine, toolchains,
+# git state, and (optionally) the bench harness invocation. Capture is
+# opportunistic — fields that can't be probed in this environment are
+# omitted, never null-filled. Standalone-safe: run it directly to see
+# what your machine looks like to the bench harness.
+#
+# Usage:
+#   scripts/bench-env                                # machine-only snapshot
+#   scripts/bench-env --workers 1 --concurrency 64 \
+#                     --runs 3 --duration 20 \
+#                     --endpoints "/a /b" --targets "rust go" \
+#                     --command "scripts/bench rust go"
+#
+# Consumed by scripts/bench (writes <OUT_DIR>/env.json at run start) and
+# by scripts/bench-report (data-driven methodology box, eventually).
+
+require 'json'
+require 'optparse'
+require 'time'
+
+harness = {}
+OptionParser.new do |o|
+  o.on('--workers LIST')   { |v| harness[:workers]      = v.split.map(&:to_i) }
+  o.on('--concurrency N')  { |v| harness[:concurrency]  = v.to_i }
+  o.on('--runs N')         { |v| harness[:runs]         = v.to_i }
+  o.on('--duration N')     { |v| harness[:duration_sec] = v.to_i }
+  o.on('--warmup N')       { |v| harness[:warmup_sec]   = v.to_i }
+  o.on('--threads N')      { |v| harness[:threads]      = v.to_i }
+  o.on('--wrk-threads N')  { |v| harness[:wrk_threads]  = v.to_i }
+  o.on('--endpoints LIST') { |v| harness[:endpoints]    = v.split }
+  o.on('--targets LIST')   { |v| harness[:targets]      = v.split }
+  o.on('--command CMD')    { |v| harness[:command]      = v }
+end.parse!
+
+# Shell out with stderr suppressed; nil on missing tool or failure.
+def sh(cmd)
+  out = `#{cmd} 2>/dev/null`
+  $?.success? && !out.strip.empty? ? out.strip : nil
+rescue StandardError
+  nil
+end
+
+def sh_json(cmd)
+  s = sh(cmd) or return nil
+  JSON.parse(s)
+rescue JSON::ParserError
+  nil
+end
+
+# Version probe: doesn't trust the binary's exit code (wrk prints its
+# version to stderr and exits 1, for example) — only requires that the
+# binary exists on PATH and produces output.
+def sh_version(binary, args)
+  return nil unless system("command -v #{binary} > /dev/null 2>&1")
+  out = `#{binary} #{args} 2>&1`
+  out.strip.lines.first&.strip
+end
+
+def read(path)
+  File.read(path).strip
+rescue StandardError
+  nil
+end
+
+env = { 'captured_at' => Time.now.utc.iso8601 }
+
+# ── host ─────────────────────────────────────────────────────────────
+
+env['host'] = {
+  'uname'    => sh('uname -a'),
+  'platform' => sh('uname -s')&.downcase,  # linux | darwin | …
+  'arch'     => sh('uname -m'),            # x86_64 | aarch64 | arm64
+  'hostname' => sh('hostname'),
+}.compact
+
+# ── OS release ───────────────────────────────────────────────────────
+
+if release = read('/etc/os-release')
+  parsed = {}
+  release.each_line do |line|
+    k, v = line.strip.split('=', 2)
+    next unless k && v
+    parsed[k.downcase] = v.delete('"').strip
+  end
+  env['os'] = parsed unless parsed.empty?
+elsif sw = sh('sw_vers')  # macOS
+  parsed = {}
+  sw.each_line do |line|
+    k, v = line.split(':', 2)
+    next unless k && v
+    parsed[k.strip.downcase.tr(' ', '_')] = v.strip
+  end
+  env['os'] = parsed unless parsed.empty?
+end
+
+# ── CPU ──────────────────────────────────────────────────────────────
+
+cpu = {}
+cpu['lscpu']        = sh_json('lscpu --json')          # Linux preferred
+cpu['brand']        = sh('sysctl -n machdep.cpu.brand_string')   # macOS
+cpu['physical']     = sh('sysctl -n hw.physicalcpu')&.to_i        # macOS
+cpu['logical']      = sh('sysctl -n hw.logicalcpu')&.to_i         # macOS
+cpu['board_name']   = read('/sys/class/dmi/id/board_name')        # Linux DMI
+cpu['board_vendor'] = read('/sys/class/dmi/id/board_vendor')
+cpu['product_name'] = read('/sys/class/dmi/id/product_name')      # often the chassis/system model
+env['cpu'] = cpu.compact unless cpu.compact.empty?
+
+# ── memory ───────────────────────────────────────────────────────────
+
+mem_kb = nil
+if line = read('/proc/meminfo')&.lines&.find { |l| l.start_with?('MemTotal') }
+  mem_kb = line.split[1].to_i
+elsif s = sh('sysctl -n hw.memsize')
+  mem_kb = s.to_i / 1024
+end
+env['memory_mb'] = mem_kb / 1024 if mem_kb
+
+# ── clock / frequency / governor ─────────────────────────────────────
+
+clk = {}
+clk['governor']  = read('/sys/devices/system/cpu/cpufreq/policy0/scaling_governor')
+clk['boost']     = read('/sys/devices/system/cpu/cpufreq/boost')
+clk['cur_khz']   = read('/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq')&.to_i
+clk['min_khz']   = read('/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq')&.to_i
+clk['max_khz']   = read('/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq')&.to_i
+env['clock'] = clk.compact unless clk.compact.empty?
+
+# ── toolchains ───────────────────────────────────────────────────────
+
+TOOLCHAINS = {
+  'ruby'    => '--version',
+  'rustc'   => '--version',
+  'cargo'   => '--version',
+  'go'      => 'version',
+  'node'    => '--version',
+  'bun'     => '--version',
+  'crystal' => '--version',
+  'shards'  => '--version',
+  'wrk'     => '--version',
+  'curl'    => '--version',
+  'mise'    => '--version',
+  'sqlite3' => '--version',
+}.freeze
+
+env['toolchains'] = TOOLCHAINS
+  .each_with_object({}) { |(bin, args), h| h[bin] = sh_version(bin, args) }
+  .compact
+
+env['toolchain_paths'] = TOOLCHAINS.keys
+  .each_with_object({}) { |t, h| h[t] = sh("which #{t}") }
+  .compact
+
+# Optional: mise's authoritative view of pinned versions
+if mise_versions = sh_json('mise ls --current --json')
+  env['mise_current'] = mise_versions
+end
+
+# ── git ──────────────────────────────────────────────────────────────
+
+git_dirty = sh('git status --porcelain')
+env['git'] = {
+  'sha'     => sh('git rev-parse HEAD'),
+  'branch'  => sh('git rev-parse --abbrev-ref HEAD'),
+  'subject' => sh('git log -1 --format=%s'),
+  'dirty'   => !(git_dirty.nil? || git_dirty.empty?),
+}.compact
+
+# ── runtime conditions ───────────────────────────────────────────────
+
+cond = {}
+if la = read('/proc/loadavg')
+  parts = la.split
+  cond['loadavg_1_5_15'] = parts[0..2].map(&:to_f)
+elsif up = sh('uptime')
+  if m = up.match(/load averages?: ([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)/)
+    cond['loadavg_1_5_15'] = [m[1], m[2], m[3]].map(&:to_f)
+  end
+end
+cond['uptime']    = sh('uptime')
+cond['date_utc']  = Time.now.utc.iso8601
+env['conditions'] = cond unless cond.empty?
+
+# ── harness invocation (from CLI args) ───────────────────────────────
+
+env['harness'] = harness unless harness.empty?
+
+puts JSON.pretty_generate(env)

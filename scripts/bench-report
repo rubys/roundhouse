@@ -1,0 +1,416 @@
+#!/usr/bin/env ruby
+# scripts/bench-report — render a bench summary.json to self-contained HTML.
+#
+# Usage:
+#   scripts/bench-report PATH/TO/summary.json [OUT.html]
+#
+# Defaults OUT to index.html alongside the input. Pure stdlib; inline
+# SVG charts; no JS, no CDN. Open the resulting file directly in a
+# browser, archive it, or serve it statically — the chart artifacts
+# outlive any chart library's CDN.
+
+require 'json'
+require 'time'
+
+input = ARGV[0] or abort "usage: scripts/bench-report PATH/TO/summary.json [OUT.html]"
+out   = ARGV[1] || File.join(File.dirname(File.expand_path(input)), 'index.html')
+
+cells = JSON.parse(File.read(input))
+
+# ── ordering / metadata ──────────────────────────────────────────────
+
+TARGET_ORDER = %w[rust crystal go typescript ruby ruby-int rails rails-int]
+ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
+
+# Brand-ish but muted; enough contrast in greyscale.
+COLOR = {
+  'rust'       => '#b7410e',
+  'crystal'    => '#1c1c1c',
+  'go'         => '#00add8',
+  'typescript' => '#3178c6',
+  'ruby'       => '#cc342d',
+  'ruby-int'   => '#e89c93',
+  'rails'      => '#666666',
+  'rails-int'  => '#aaaaaa',
+}
+
+GROUP_LABEL = {
+  'AOT'      => 'compiled (AOT)',
+  'JIT'      => 'JIT / interpreter',
+  'interp'   => 'interpreter, no JIT',
+  'baseline' => 'Rails baseline',
+}
+
+# ── index data ───────────────────────────────────────────────────────
+
+by = Hash.new { |h, k| h[k] = {} }
+cells.each { |c| by[c['endpoint']][c['target']] = c }
+
+endpoints = ENDPOINT_ORDER & by.keys
+targets   = TARGET_ORDER & cells.map { |c| c['target'] }.uniq
+
+run_dir   = File.basename(File.dirname(File.expand_path(input)))
+total     = cells.size
+runs      = cells.first['runs']
+
+# ── number formatting ────────────────────────────────────────────────
+
+def fmt_int(n)  ; n.to_i.to_s.reverse.scan(/\d{1,3}/).join(',').reverse ; end
+def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
+
+# ── SVG primitives ───────────────────────────────────────────────────
+
+def svg_open(w, h)
+  %(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 #{w} #{h}" ) +
+  %(width="#{w}" height="#{h}" font-family="-apple-system,system-ui,sans-serif" font-size="12">)
+end
+
+def svg_close ; '</svg>' ; end
+
+def t(x, y, s, anchor: 'start', size: 12, weight: nil, fill: '#222')
+  a = %(text-anchor="#{anchor}" font-size="#{size}" fill="#{fill}")
+  a << %( font-weight="#{weight}") if weight
+  %(<text x="#{x}" y="#{y}" #{a}>#{s}</text>)
+end
+
+def r(x, y, w, h, fill:, stroke: nil)
+  s = stroke ? %( stroke="#{stroke}") : ''
+  %(<rect x="#{x}" y="#{y}" width="#{w}" height="#{h}" fill="#{fill}"#{s}/>)
+end
+
+def l(x1, y1, x2, y2, stroke: '#ddd', sw: 1, dash: nil)
+  d = dash ? %( stroke-dasharray="#{dash}") : ''
+  %(<line x1="#{x1}" y1="#{y1}" x2="#{x2}" y2="#{y2}" stroke="#{stroke}" stroke-width="#{sw}"#{d}/>)
+end
+
+# ── log-scale horizontal bar chart (one per endpoint) ────────────────
+
+def hbar_log(rows, metric:, unit:, min_decade: 2, max_decade: nil)
+  values = rows.map { |c| c[metric].to_f }
+  max_decade ||= [Math.log10(values.max).ceil, min_decade + 1].max
+
+  width      = 760
+  left_pad   = 110
+  right_pad  = 100
+  plot_w     = width - left_pad - right_pad
+  row_h      = 22
+  gap        = 6
+  top        = 10
+  bottom     = 28
+  height     = top + (row_h + gap) * rows.size + bottom
+
+  buf = +svg_open(width, height)
+
+  # X-axis decade gridlines + labels
+  decades = (min_decade..max_decade).to_a
+  decades.each do |d|
+    x = left_pad + (d - min_decade).to_f / (max_decade - min_decade) * plot_w
+    buf << l(x, top, x, height - bottom, stroke: '#e5e5e5')
+    label = 10 ** d
+    buf << t(x, height - bottom + 14, fmt_int(label), anchor: 'middle', fill: '#666', size: 10)
+  end
+  buf << t(width - 4, height - bottom + 14, unit, anchor: 'end', fill: '#999', size: 10)
+
+  # Sort rows by metric desc for visual ranking
+  ranked = rows.sort_by { |c| -c[metric].to_f }
+
+  ranked.each_with_index do |c, i|
+    y = top + i * (row_h + gap)
+    v = c[metric].to_f
+    lv = Math.log10([v, 1].max)
+    bar = ((lv - min_decade) / (max_decade - min_decade) * plot_w).round
+    bar = [bar, 1].max
+
+    target = c['target']
+    buf << t(left_pad - 8, y + row_h * 0.7, target, anchor: 'end', weight: 'bold')
+    buf << r(left_pad, y, bar, row_h, fill: COLOR[target])
+    label = metric == 'req_sec' ? fmt_int(v) : fmt_int(v)
+    buf << t(left_pad + bar + 6, y + row_h * 0.7, label, fill: '#222')
+  end
+
+  buf << svg_close
+  buf
+end
+
+# ── grouped vertical bars (lowerer dividend, YJIT, multiplier) ───────
+
+def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suffix: '')
+  # groups: [{label:, values: {series_key => value}}]
+  width      = 760
+  left_pad   = 50
+  right_pad  = 20
+  plot_w     = width - left_pad - right_pad
+  bot_pad    = 60
+  top_pad    = 30
+  plot_h     = 240
+  height     = top_pad + plot_h + bot_pad
+
+  max_v = max || (groups.flat_map { |g| g[:values].values }.max * 1.15)
+  band  = plot_w.to_f / groups.size
+  bar_count = series.size
+  bar_w = [(band - 24) / bar_count, 80].min
+  inner_gap = 4
+
+  buf = +svg_open(width, height)
+
+  # Y-axis gridlines (nice round ticks at 5 levels)
+  step = nice_step(max_v / 5.0)
+  ticks = (0..(max_v / step).ceil).map { |i| i * step }
+  ticks.each do |v|
+    y = top_pad + plot_h - (v / max_v) * plot_h
+    buf << l(left_pad, y, width - right_pad, y, stroke: '#eee')
+    buf << t(left_pad - 6, y + 4, fmt_int(v), anchor: 'end', fill: '#888', size: 10)
+  end
+
+  groups.each_with_index do |g, gi|
+    cx = left_pad + band * gi + band / 2
+    series.each_with_index do |key, si|
+      v = g[:values][key].to_f
+      bx = cx - (bar_w * bar_count + inner_gap * (bar_count - 1)) / 2.0 + si * (bar_w + inner_gap)
+      bh = (v / max_v) * plot_h
+      by = top_pad + plot_h - bh
+      buf << r(bx, by, bar_w, bh, fill: COLOR[key])
+      buf << t(bx + bar_w / 2.0, by - 4, value_fmt.call(v) + suffix,
+               anchor: 'middle', fill: '#444', size: 10)
+    end
+    # Endpoint label
+    buf << t(cx, top_pad + plot_h + 16, g[:label],
+             anchor: 'middle', fill: '#333', size: 11)
+    # Multi-line second-row annotation
+    if g[:annotation]
+      buf << t(cx, top_pad + plot_h + 32, g[:annotation],
+               anchor: 'middle', fill: '#666', size: 11, weight: 'bold')
+    end
+  end
+
+  # Legend
+  legend_y = 16
+  legend_x = left_pad
+  series.each do |key|
+    buf << r(legend_x, legend_y - 10, 14, 12, fill: COLOR[key])
+    buf << t(legend_x + 18, legend_y, key, fill: '#333')
+    legend_x += 110
+  end
+
+  buf << svg_close
+  buf
+end
+
+def nice_step(raw)
+  exp = Math.log10(raw).floor
+  base = 10 ** exp
+  frac = raw / base
+  step_frac = if frac < 1.5 then 1
+              elsif frac < 3 then 2
+              elsif frac < 7 then 5
+              else 10
+              end
+  step_frac * base
+end
+
+# ── HTML scaffold ────────────────────────────────────────────────────
+
+styles = <<~CSS
+  body { font-family: -apple-system, system-ui, sans-serif; color: #222;
+         max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.5; }
+  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.2em; margin-top: 2em; border-bottom: 1px solid #ddd;
+       padding-bottom: 0.2em; }
+  h3 { font-size: 1.0em; color: #555; margin: 1.4em 0 0.4em; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 1em; }
+  .methodology { background: #f7f7f7; border-left: 3px solid #ccc;
+                 padding: 0.6em 1em; font-size: 0.92em; }
+  .methodology code { background: #ececec; padding: 0.05em 0.3em;
+                      border-radius: 3px; font-size: 0.9em; }
+  .caveat { color: #777; font-size: 0.9em; font-style: italic; }
+  table { border-collapse: collapse; font-size: 0.88em; margin: 0.4em 0; }
+  th, td { padding: 4px 10px; border-bottom: 1px solid #eee; }
+  th { text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  details summary { cursor: pointer; color: #555; padding: 0.4em 0; }
+  .legend { font-size: 0.85em; color: #666; }
+  svg { display: block; margin: 0.4em auto; }
+CSS
+
+html = +"<!doctype html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n"
+html << "<title>Roundhouse bench — #{run_dir}</title>\n<style>#{styles}</style>\n</head>\n<body>\n"
+
+html << "<h1>Roundhouse benchmark results</h1>\n"
+html << %(<div class="meta">Run <code>#{run_dir}</code> · #{total} cells × #{runs} runs · #{endpoints.size} endpoints × #{targets.size} targets</div>\n)
+
+html << <<~METHOD
+  <div class="methodology">
+    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 23, Crystal 1.16. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port).
+    <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
+  </div>
+METHOD
+
+# ── Section: throughput per endpoint ─────────────────────────────────
+
+html << "<h2>1. Throughput across targets</h2>\n"
+html << %(<p>Each endpoint is its own chart. Bars are log-scaled; raw req/sec is shown at the right.</p>\n)
+endpoints.each do |ep|
+  rows = targets.map { |t| by[ep][t] }.compact
+  html << "<h3>#{ep}</h3>\n"
+  html << hbar_log(rows, metric: 'req_sec', unit: 'req/sec', min_decade: 2, max_decade: 6)
+end
+
+# ── Section: lowerer dividend ────────────────────────────────────────
+
+html << "<h2>2. Lowerer dividend (ruby vs rails)</h2>\n"
+html << <<~P
+  <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier above each pair is the lift from the lowerer pipeline.</p>
+P
+
+groups = endpoints.map do |ep|
+  ruby_v  = by[ep]['ruby']&.dig('req_sec').to_f
+  rails_v = by[ep]['rails']&.dig('req_sec').to_f
+  {
+    label:      ep,
+    annotation: rails_v > 0 ? "#{fmt_dec(ruby_v / rails_v, 1)}×" : '',
+    values:     { 'ruby' => ruby_v, 'rails' => rails_v },
+  }
+end
+html << grouped_bars(groups, series: %w[ruby rails])
+
+# ── Section: YJIT contribution ───────────────────────────────────────
+
+html << "<h2>3. YJIT contribution</h2>\n"
+html << <<~P
+  <p>YJIT consistently helps Roundhouse-emitted Ruby (small, predictable call shapes). On Rails it's neutral-to-slightly-negative — the deep autoload + reflection chain blunts it.</p>
+P
+
+yjit_groups = endpoints.map do |ep|
+  {
+    label:  ep,
+    values: {
+      'ruby'      => by[ep]['ruby']&.dig('req_sec').to_f,
+      'ruby-int'  => by[ep]['ruby-int']&.dig('req_sec').to_f,
+      'rails'     => by[ep]['rails']&.dig('req_sec').to_f,
+      'rails-int' => by[ep]['rails-int']&.dig('req_sec').to_f,
+    }
+  }
+end
+html << grouped_bars(yjit_groups, series: %w[ruby ruby-int rails rails-int])
+
+# ── Section: cost economics ──────────────────────────────────────────
+
+html << "<h2>4. Cost economics (req/sec per GB of RSS)</h2>\n"
+html << <<~P
+  <p>Throughput normalized by memory footprint. Reorders the table — rust and crystal pull further ahead; high-RSS targets (typescript, rails) move down. Applicability varies by deployment shape: matters most for metered/serverless surfaces, least for bare-metal-with-headroom.</p>
+P
+endpoints.each do |ep|
+  rows = targets.map { |t| by[ep][t] }.compact
+  html << "<h3>#{ep}</h3>\n"
+  html << hbar_log(rows, metric: 'rps_per_gb', unit: 'req/sec/GB', min_decade: 3, max_decade: 7)
+end
+
+# ── Section: HTML→JSON multiplier ────────────────────────────────────
+
+html << "<h2>5. HTML → JSON multiplier</h2>\n"
+html << <<~P
+  <p>Per-target lift going from <code>/articles</code> (HTML) to <code>/articles.json</code> (JSON). The asymmetry isn't JSON-escape vs HTML-escape — both paths concatenate and escape strings. What JSON skips is the <em>layout chain</em> (csrf_meta_tag, importmap, asset-manifest scan, content_for slots) and the <em>per-row view helpers</em> (link_to, button_to, dom_id, tag.*) that the HTML index template invokes for every record.</p>
+  <p>Interpreter-bound targets (ruby, rails) get only 1.5–1.8× because per-call dispatch overhead dominates whether the work is helpers or serialization. Compiled targets show the helper-chain cost more clearly because their serialization is fast — Go's gap is the largest of the compiled set even after the IR string-builder annotation pass closed part of it.</p>
+P
+
+mult_targets = targets - %w[ruby-int rails-int]  # collapse JIT/non-JIT variants
+mult_groups = [{
+  label:  'HTML→JSON',
+  values: mult_targets.each_with_object({}) do |t, h|
+    html_v = by['/articles'][t]&.dig('req_sec').to_f
+    json_v = by['/articles.json'][t]&.dig('req_sec').to_f
+    h[t] = html_v > 0 ? (json_v / html_v) : 0
+  end
+}]
+# Single-group chart looks silly; redraw as per-target bars
+html << <<~SVG
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 #{40 + 30 * mult_targets.size}" width="760">
+    #{mult_targets.each_with_index.map { |tgt, i|
+      v = mult_groups[0][:values][tgt]
+      bar_w = ((v / 6.0) * 540).round
+      y = 20 + i * 28
+      [
+        %(<text x="100" y="#{y + 14}" text-anchor="end" font-weight="bold" font-family="-apple-system,system-ui,sans-serif" font-size="12">#{tgt}</text>),
+        %(<rect x="110" y="#{y}" width="#{bar_w}" height="20" fill="#{COLOR[tgt]}"/>),
+        %(<text x="#{110 + bar_w + 6}" y="#{y + 14}" font-family="-apple-system,system-ui,sans-serif" font-size="12">#{fmt_dec(v, 1)}×</text>)
+      ].join
+    }.join}
+    #{[1, 2, 3, 4, 5, 6].map { |d|
+      x = 110 + (d / 6.0) * 540
+      %(<line x1="#{x}" y1="10" x2="#{x}" y2="#{20 + 28 * mult_targets.size}" stroke="#e5e5e5"/>) +
+      %(<text x="#{x}" y="#{30 + 28 * mult_targets.size}" text-anchor="middle" font-size="10" fill="#888" font-family="-apple-system,system-ui,sans-serif">#{d}×</text>)
+    }.join}
+  </svg>
+SVG
+
+# ── Section: memory footprint ────────────────────────────────────────
+
+html << "<h2>6. Memory footprint (RSS)</h2>\n"
+html << "<p>Max RSS observed across all endpoints, per target. Rust and crystal sit under 30 MB; ruby and go are an order of magnitude higher; rails and typescript carry roughly another order on top of that. The cost-economics chart above (section 4) compounds these into req/sec/GB, which spans three orders of magnitude end-to-end.</p>\n"
+
+mem_rows = targets.map do |tgt|
+  max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
+  { 'target' => tgt, 'rss_mb' => max_rss }
+end
+mem_rows.sort_by! { |r| r['rss_mb'] }
+
+mem_max = mem_rows.map { |r| r['rss_mb'] }.max
+mem_svg_h = 30 + 28 * mem_rows.size
+html << svg_open(760, mem_svg_h)
+mem_rows.each_with_index do |row, i|
+  y = 10 + i * 28
+  v = row['rss_mb']
+  bar = (v / mem_max * 540).round
+  html << t(100, y + 14, row['target'], anchor: 'end', weight: 'bold')
+  html << r(110, y, bar, 20, fill: COLOR[row['target']])
+  html << t(110 + bar + 6, y + 14, "#{fmt_int(v)} MB", fill: '#444')
+end
+html << svg_close
+
+# ── Section: latency ─────────────────────────────────────────────────
+
+html << "<h2>7. Latency (p50 / p99 at c=64)</h2>\n"
+html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Only rust hits sub-millisecond on any endpoint; crystal lands 1–4 ms, go and typescript 3–17 ms, ruby 9–22 ms, rails 45–135 ms. The order matches the throughput chart inversely, as expected.</p>\n"
+
+html << "<table>\n<thead><tr><th>target</th>"
+endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
+html << "</tr>\n<tr><th></th>"
+endpoints.each { html << "<th>p50</th><th>p99</th>" }
+html << "</tr></thead>\n<tbody>\n"
+targets.each do |tgt|
+  html << "<tr><td><strong>#{tgt}</strong></td>"
+  endpoints.each do |ep|
+    c = by[ep][tgt]
+    if c
+      html << %(<td class="num">#{fmt_dec(c['p50_ms'], 1)}</td><td class="num">#{fmt_dec(c['p99_ms'], 1)}</td>)
+    else
+      html << "<td>-</td><td>-</td>"
+    end
+  end
+  html << "</tr>\n"
+end
+html << "</tbody></table>\n"
+html << %(<p class="legend">All values in milliseconds. Lower is better.</p>\n)
+
+# ── Section: raw data table ──────────────────────────────────────────
+
+html << "<details>\n<summary>Raw cell data (#{cells.size} rows)</summary>\n"
+html << "<table>\n<thead><tr><th>target</th><th>endpoint</th><th>req/sec</th><th>p50 (ms)</th><th>p99 (ms)</th><th>RSS (MB)</th><th>req/sec/GB</th></tr></thead>\n<tbody>\n"
+cells.sort_by { |c| [TARGET_ORDER.index(c['target']) || 99, ENDPOINT_ORDER.index(c['endpoint']) || 99] }.each do |c|
+  html << "<tr>"
+  html << "<td>#{c['target']}</td>"
+  html << "<td>#{c['endpoint']}</td>"
+  html << %(<td class="num">#{fmt_int(c['req_sec'])}</td>)
+  html << %(<td class="num">#{fmt_dec(c['p50_ms'], 2)}</td>)
+  html << %(<td class="num">#{fmt_dec(c['p99_ms'], 2)}</td>)
+  html << %(<td class="num">#{fmt_int(c['rss_mb'])}</td>)
+  html << %(<td class="num">#{fmt_int(c['rps_per_gb'])}</td>)
+  html << "</tr>\n"
+end
+html << "</tbody></table>\n</details>\n"
+
+html << %(<hr><p class="meta">Generated #{Time.now.utc.iso8601} from <code>#{File.basename(input)}</code>.</p>\n)
+html << "</body>\n</html>\n"
+
+File.write(out, html)
+$stderr.puts "wrote #{out} (#{html.bytesize} bytes)"
