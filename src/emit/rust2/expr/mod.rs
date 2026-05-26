@@ -4,7 +4,7 @@
 //! (Lit, Var, Send `==`, StringInterp, If). Extended file-by-file
 //! through Phase 2 as each runtime file forces new IR shapes.
 
-use crate::expr::{Expr, ExprNode, InterpPart, LValue};
+use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue};
 
 mod assign;
 mod control;
@@ -572,7 +572,18 @@ fn collect_var_read_counts(
             collect_var_read_counts(body, out);
         }
         ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { collect_var_read_counts(r, out); }
+            // Skip walking the recv when this Send is a lowerer-tagged
+            // `StringBuilderAppend` (`io << "..."`). The recv is the
+            // accumulator local and `push_str` mutates it in place —
+            // counting it as a read would tag `io` into CLONE_VARS,
+            // adding a no-op `.clone()` workaround at every emit site
+            // (the workaround that `try_string_append` used to carry
+            // before the hint landed). Skipping here makes the cost
+            // model match the actual semantics.
+            let skip_recv = matches!(e.hint, Some(IrHint::StringBuilderAppend));
+            if !skip_recv {
+                if let Some(r) = recv { collect_var_read_counts(r, out); }
+            }
             args.iter().for_each(|a| collect_var_read_counts(a, out));
             if let Some(b) = block { collect_var_read_counts(b, out); }
         }

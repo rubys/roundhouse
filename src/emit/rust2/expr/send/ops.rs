@@ -200,17 +200,20 @@ pub(super) fn try_array_push(
 
 /// String append: `io << s` Ruby idiom → `io.push_str(&s)` in Rust.
 /// Used pervasively in lowered view bodies (`io = String.new; io <<
-/// helper(...); io`). Receiver is unambiguously a local `String`
-/// (the lowerer's `io = String.new` seed) and the arg can be `&str`
-/// literal or `String`; `push_str` wants `&str`, so we always borrow.
+/// helper(...); io`), where the lowerer tags every site with
+/// `IrHint::StringBuilderAppend`. Receiver is unambiguously a local
+/// `String` and the arg can be `&str` literal or `String`;
+/// `push_str` wants `&str`, so we always borrow.
 ///
-/// The fall-through emit prefixes the receiver with `.clone()` from
-/// the multi-read non-Copy detection — that's correct for general
-/// expressions but wrong here because `push_str` mutates in place.
-/// We emit the bare local name (no clone, no borrow) on the recv
-/// side. The lowerer guarantees `io` is a typed local; resolving
-/// through Var → emit_expr would re-apply the clone, so we strip
-/// it by emitting the var name directly when the recv is a Var.
+/// Uses `emit_send_recv` (mirroring `try_array_push`) so the
+/// SUPPRESS_VAR_CLONE flag suppresses the `.clone()` that the
+/// multi-read pre-pass would otherwise append (push_str is
+/// `&mut self`; cloning would mutate a discarded copy and lose
+/// every append). The pre-pass in `with_method_scope` further
+/// skips counting hint-tagged accumulator-recv reads, so for
+/// lowerer-synthesized `io` the recv is below the clone threshold
+/// anyway — the recv-clone suppression remains as a safety net
+/// for user-authored `<<` on Str receivers outside the synthesis.
 pub(super) fn try_string_append(
     recv: Option<&Expr>,
     method: &str,
@@ -223,10 +226,6 @@ pub(super) fn try_string_append(
     if !matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)) {
         return None;
     }
-    let recv_rendered = match &*r.node {
-        ExprNode::Var { name, .. } => super::super::util::sanitize_ident(name.as_str()),
-        _ => emit_expr(r),
-    };
     let arg = &args[0];
     let arg_rendered = match arg.ty.as_ref() {
         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => match &*arg.node {
@@ -235,5 +234,5 @@ pub(super) fn try_string_append(
         },
         _ => format!("&{}.to_string()", emit_expr(arg)),
     };
-    Some(format!("{recv_rendered}.push_str({arg_rendered})"))
+    Some(format!("{}.push_str({arg_rendered})", super::super::emit_send_recv(r)))
 }
