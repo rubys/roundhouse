@@ -679,6 +679,31 @@ jobs:
         run: tar -xzf real-blog.tar.gz
       - name: cargo run --bin build-site
         run: cargo run --release --bin build-site
+
+      # Bench results page — fetched from the Hetzner publishing endpoint
+      # (cron-driven, populates bench/results/latest on each run). The
+      # render step degrades gracefully: if Hetzner is unreachable, the
+      # `_site/bench/` directory simply isn't created and the landing
+      # page's link 404s until the next CI cycle picks up fresh data.
+      - name: Fetch latest bench data
+        id: fetch-bench
+        env:
+          BENCH_URL: https://roundbench.showcase.party
+        run: |
+          mkdir -p _site/bench
+          if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/summary.json; then
+            curl -fsSL --max-time 30 "$BENCH_URL/env.json"     -o _site/bench/env.json     || true
+            curl -fsSL --max-time 30 "$BENCH_URL/summary.md"   -o _site/bench/summary.md   || true
+            echo "bench_data=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::bench data unavailable at $BENCH_URL; skipping bench page render"
+            rmdir _site/bench
+            echo "bench_data=absent" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Render bench page
+        if: steps.fetch-bench.outputs.bench_data == 'present'
+        run: scripts/bench-report _site/bench/summary.json _site/bench/index.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
