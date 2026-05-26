@@ -4,7 +4,7 @@
 //! arbitrary `Expr` rendering.
 
 use super::naming::{ts_field_name, ts_method_name};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, IrHint, LValue, Literal};
 use crate::ty::Ty;
 
 // Async-name set ------------------------------------------------------
@@ -386,11 +386,22 @@ fn count_var_assignments(
         // Buffer-accumulate `var << X` is rewritten by `emit_stmt` to
         // `var += X;` — i.e., an assignment for declaration purposes.
         // Count it so the var gets `let` (mutable) instead of `const`.
+        //
+        // Exception: when the Send is tagged `StringBuilderAppend`,
+        // the emit form is `var.push(X)` against a `string[]` array,
+        // which is a method call, not a reassignment. The array
+        // binding itself is single-assignment (the Init synthesizes
+        // it once), so the local can stay `const`. Skip the count
+        // here so the `let`/`const` decision matches the actual emit.
         ExprNode::Send { recv: Some(recv), method, args, block, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
-            if let ExprNode::Var { name, .. } = &*recv.node {
-                *out.entry(name.clone()).or_insert(0) += 1;
+            let is_string_builder_append =
+                matches!(e.hint, Some(IrHint::StringBuilderAppend));
+            if !is_string_builder_append {
+                if let ExprNode::Var { name, .. } = &*recv.node {
+                    *out.entry(name.clone()).or_insert(0) += 1;
+                }
             }
             count_var_assignments(recv, out);
             for a in args {
@@ -580,6 +591,56 @@ pub(super) fn collect_reassigned(body: &Expr) -> std::collections::HashSet<crate
     counts.into_iter().filter(|(_, n)| *n > 1).map(|(s, _)| s).collect()
 }
 
+/// String-accumulator hint consumer at statement position. Init and
+/// Append are statement-shapes (Result lives in `emit_expr`).
+/// V8 specializes `[]`+`.push(...)`+`.join("")` better than repeated
+/// string concat — measured 1.4-1.8× lift on HTML view bodies per
+/// the bench in #18.
+///
+/// - `Init` rewrites the synthesized `io = String.new` Assign to
+///   `const <name>: string[] = [];` and records the binding so
+///   subsequent statements don't re-declare it. The
+///   `count_var_assignments` pre-pass skips Append-hinted shovels,
+///   so `<name>` correctly lands in single-assignment territory
+///   and `const` is the right choice.
+/// - `Append` rewrites the `<name> << <arg>` Send to
+///   `<name>.push(<arg>);` — never wrapped in `return` (the Result
+///   site is the function's tail; an Append at the tail would be
+///   a lowerer bug).
+fn try_string_builder_stmt(
+    e: &Expr,
+    _is_last: bool,
+    _void_return: bool,
+    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
+) -> Option<String> {
+    match e.hint? {
+        IrHint::StringBuilderInit => {
+            if let ExprNode::Assign {
+                target: LValue::Var { name, .. }, ..
+            } = &*e.node
+            {
+                let escaped = escape_reserved_word(name.as_str());
+                declared.insert(name.clone());
+                return Some(format!("const {escaped}: string[] = [];"));
+            }
+            None
+        }
+        IrHint::StringBuilderAppend => {
+            if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*recv.node {
+                        let escaped = escape_reserved_word(name.as_str());
+                        let val = emit_expr(&args[0]);
+                        return Some(format!("{escaped}.push({val});"));
+                    }
+                }
+            }
+            None
+        }
+        IrHint::StringBuilderResult => None, // handled in emit_expr
+    }
+}
+
 pub(super) fn emit_stmt_with_state(
     e: &Expr,
     is_last: bool,
@@ -587,6 +648,15 @@ pub(super) fn emit_stmt_with_state(
     reassigned: &std::collections::HashSet<crate::ident::Symbol>,
     declared: &mut std::collections::HashSet<crate::ident::Symbol>,
 ) -> String {
+    // IrHint::StringBuilder{Init,Append} — lowerer-tagged accumulator
+    // pattern. Init/Append are statement-position; Result is handled
+    // in `emit_expr` (where the terminal Var read lives). V8 prefers
+    // `array.push(...) + array.join("")` over repeated string concat,
+    // so swap the canonical Ruby shape to that idiom here. See
+    // `try_string_builder_stmt` for variant details.
+    if let Some(s) = try_string_builder_stmt(e, is_last, void_return, declared) {
+        return s;
+    }
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             // First occurrence of a name that we know will be reassigned
@@ -959,6 +1029,34 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
     if e.diagnostic.is_some() {
         return r#"(() => { throw new Error("roundhouse: + with incompatible operand types"); })()"#.to_string();
+    }
+    // IrHint::StringBuilder* — expression-position consumers.
+    // Init/Append at statement position are handled in
+    // `emit_stmt_with_state` first; this branch catches
+    // Append-inside-lambda (`articles.forEach(a => io << render(a))`
+    // — the partial lowerer's collection-render shape) and the
+    // terminal Result Var read at the function tail.
+    match e.hint {
+        Some(IrHint::StringBuilderAppend) => {
+            if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*recv.node {
+                        let escaped = escape_reserved_word(name.as_str());
+                        let val = emit_expr(&args[0]);
+                        return format!("{escaped}.push({val})");
+                    }
+                }
+            }
+        }
+        Some(IrHint::StringBuilderResult) => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                return format!(
+                    "{}.join(\"\")",
+                    escape_reserved_word(name.as_str())
+                );
+            }
+        }
+        _ => {}
     }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
