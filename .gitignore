@@ -21,3 +21,4 @@
 # scripts/bench output — per-run timestamps + summaries. Keep the
 # harness in git, drop the measurement artifacts.
 /bench/results/
+/storage
