@@ -21,6 +21,7 @@
 //! `bits.rs` for the bit allocation and roundhouse#22 for phasing.
 
 pub mod bits;
+mod last_use;
 mod parens;
 pub mod str_color;
 
@@ -37,4 +38,5 @@ use crate::dialect::LibraryClass;
 /// two concerns share a bit. New stages append calls here.
 pub fn decide_classes(classes: &mut [LibraryClass]) {
     parens::stamp(classes);
+    last_use::stamp(classes);
 }

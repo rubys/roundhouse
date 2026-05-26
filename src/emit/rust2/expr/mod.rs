@@ -156,26 +156,15 @@ thread_local! {
         >,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
-    /// Variable names read more than once in the current method body.
-    /// Populated by `with_method_scope`'s pre-pass via
-    /// `collect_var_read_counts`. Consumed by the `Var` emit arm to
-    /// append `.clone()` on every read when the type is non-Copy —
-    /// over-clones the lexically-last read by one (cheap; the alternative
-    /// is a final-use analysis the rust2 emit doesn't track). Closes
-    /// the canonical "use after move" pattern: `let t = ...; if c1
-    /// { f(t) }; if c2 { f(t) }` (no else dominates either way), and
-    /// HashMap-literal entries that name the same Var in two values.
-    static CLONE_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-
     /// True while emitting an expression that's the *immediate* recv
     /// of a method-call Send. At a recv position Rust's auto-ref
     /// (`(&v).method(...)` / `(&mut v).method(...)`) handles borrowing,
-    /// so the `CLONE_VARS` `.clone()` append is unnecessary AND breaks
-    /// `&mut self` setters — `instance.clone().set_id(1)` mutates a
-    /// discarded copy. Set by `with_send_recv_var` (only at Var-shaped
-    /// recvs, so it doesn't leak into sub-expressions) and cleared
-    /// after the Var arm consults it.
+    /// so the decide-pass `CLONE_AT` bit's `.clone()` append is
+    /// unnecessary AND breaks `&mut self` setters —
+    /// `instance.clone().set_id(1)` mutates a discarded copy. Set
+    /// by `emit_send_recv` (only at Var-shaped recvs, so it doesn't
+    /// leak into sub-expressions) and cleared after the Var arm
+    /// consults it.
     static SUPPRESS_VAR_CLONE: std::cell::RefCell<bool> =
         std::cell::RefCell::new(false);
 
@@ -440,30 +429,18 @@ where
     // require receiver-aware Ty inspection (whether `save` takes
     // `&mut self` vs `&self`) which the body-typer doesn't surface.
     collect_var_send_receivers(body, &mut mut_vars);
-    // Pre-pass for `CLONE_VARS`: any local name read more than once
-    // syntactically. Read-counts don't equal move-counts (literal
-    // arguments, method-call receivers that take `&self`, narrowing-
-    // rewritten reads via `.clone().unwrap()` etc. don't consume) —
-    // but the over-clone is cheap and correct. The Var emit arm
-    // gates the .clone() on `!is_copy_ty(e.ty)` so Int/Bool reads
-    // stay unsuffixed.
-    let mut read_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    collect_var_read_counts(body, &mut read_counts);
-    let clone_vars: std::collections::HashSet<String> = read_counts
-        .into_iter()
-        .filter_map(|(name, n)| if n > 1 { Some(name) } else { None })
-        .collect();
+    // The clone-on-multi-read decision is now in
+    // `decide::last_use::stamp` — it stamps `CLONE_AT` per Var read
+    // node, replacing the per-method `CLONE_VARS` thread-local set
+    // that used to live here. See Stage 3 of #22.
     let prev_mut = MUT_VARS.with(|c| c.replace(mut_vars));
     let prev_declared =
         DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
-    let prev_clone = CLONE_VARS.with(|c| c.replace(clone_vars));
     let prev_back_prop = BACK_PROPAGATED_HASH_LOCALS
         .with(|c| c.replace(std::collections::HashSet::new()));
     let r = f();
     MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
     DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
-    CLONE_VARS.with(|c| *c.borrow_mut() = prev_clone);
     BACK_PROPAGATED_HASH_LOCALS.with(|c| *c.borrow_mut() = prev_back_prop);
     r
 }
@@ -552,75 +529,6 @@ fn collect_var_send_receivers(
             collect_var_send_receivers(right, out);
         }
         ExprNode::Lambda { body, .. } => collect_var_send_receivers(body, out),
-        _ => {}
-    }
-}
-
-/// Count `ExprNode::Var` reads per name across the method body.
-/// Mirrors `collect_var_assign_counts`'s recursive walk shape but
-/// counts reads instead of assignments. Names with count > 1 land
-/// in `CLONE_VARS` so the `Var` emit arm appends `.clone()` for
-/// non-Copy types — the use-after-move guard that closes
-/// `view_helpers::submit`'s HashMap-literal-repeats and
-/// `active_record::Base::fill_timestamps`'s `now` across two ifs.
-fn collect_var_read_counts(
-    e: &Expr,
-    out: &mut std::collections::HashMap<String, usize>,
-) {
-    match &*e.node {
-        ExprNode::Var { name, .. } => {
-            *out.entry(name.as_str().to_string()).or_insert(0) += 1;
-        }
-        ExprNode::Assign { target, value } => {
-            if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
-                collect_var_read_counts(recv, out);
-            }
-            collect_var_read_counts(value, out);
-        }
-        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_read_counts(e, out)),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            collect_var_read_counts(cond, out);
-            collect_var_read_counts(then_branch, out);
-            collect_var_read_counts(else_branch, out);
-        }
-        ExprNode::While { cond, body, .. } => {
-            collect_var_read_counts(cond, out);
-            collect_var_read_counts(body, out);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            // Skip walking the recv when this Send is a lowerer-tagged
-            // `StringBuilderAppend` (`io << "..."`). The recv is the
-            // accumulator local and `push_str` mutates it in place —
-            // counting it as a read would tag `io` into CLONE_VARS,
-            // adding a no-op `.clone()` workaround at every emit site
-            // (the workaround that `try_string_append` used to carry
-            // before the hint landed). Skipping here makes the cost
-            // model match the actual semantics.
-            let skip_recv = matches!(e.hint, Some(IrHint::StringBuilderAppend));
-            if !skip_recv {
-                if let Some(r) = recv { collect_var_read_counts(r, out); }
-            }
-            args.iter().for_each(|a| collect_var_read_counts(a, out));
-            if let Some(b) = block { collect_var_read_counts(b, out); }
-        }
-        ExprNode::Return { value } => collect_var_read_counts(value, out),
-        ExprNode::Hash { entries, .. } => entries.iter().for_each(|(k, v)| {
-            collect_var_read_counts(k, out);
-            collect_var_read_counts(v, out);
-        }),
-        ExprNode::Array { elements, .. } => {
-            elements.iter().for_each(|e| collect_var_read_counts(e, out))
-        }
-        ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
-            if let InterpPart::Expr { expr } = p {
-                collect_var_read_counts(expr, out);
-            }
-        }),
-        ExprNode::BoolOp { left, right, .. } => {
-            collect_var_read_counts(left, out);
-            collect_var_read_counts(right, out);
-        }
-        ExprNode::Lambda { body, .. } => collect_var_read_counts(body, out),
         _ => {}
     }
 }
@@ -989,16 +897,16 @@ fn emit_expr_inner(e: &Expr) -> String {
                     }
                 }
             }
-            // Multi-read non-Copy local: clone on every read so a
-            // later use-after-the-first doesn't trip E0382. The pre-
-            // pass in `with_method_scope` records names read > 1
-            // times; the type-gate keeps Int/Bool/Float reads
-            // suffix-free. Over-clones the lexically-last read by
-            // one, fine until a final-use analysis lands.
-            let needs_clone = CLONE_VARS.with(|c| c.borrow().contains(n));
-            let is_non_copy = e.ty.as_ref().map(|t| !is_copy_ty(t)).unwrap_or(false);
+            // Stage 3 (#22): the `CLONE_AT` decide-pass bit is set
+            // when this read site needs `.clone()` — the var is
+            // read more than once in the method, this read is not
+            // the lexically-last use of the name, and the value
+            // type is non-Copy. Render appends `.clone()` unless we
+            // are at a Send recv slot (auto-ref handles borrowing
+            // there). Strict improvement over the prior name-set
+            // approach, which over-cloned the lexically-last read.
             let at_send_recv = SUPPRESS_VAR_CLONE.with(|c| *c.borrow());
-            if needs_clone && is_non_copy && !at_send_recv {
+            if e.decisions & super::decide::bits::CLONE_AT != 0 && !at_send_recv {
                 return format!("{n}.clone()");
             }
             n.to_string()

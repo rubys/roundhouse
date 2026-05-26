@@ -413,6 +413,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let str_color_registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &str_color_registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        decide::decide_classes(&mut lcs);
         (lcs, registry)
     } else {
         (Vec::new(), std::collections::HashMap::new())
@@ -424,6 +425,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        decide::decide_classes(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
         None
@@ -435,6 +437,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        decide::decide_classes(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
         None
@@ -489,6 +492,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        decide::decide_classes(&mut lcs);
         lcs
     } else {
         Vec::new()
@@ -530,6 +534,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        decide::decide_classes(&mut lcs);
         lcs
     } else {
         Vec::new()
@@ -1042,6 +1047,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let registry = crate::emit::rust2::decide::str_color::build_registry(&tmp_lcs, &[]);
             crate::emit::rust2::decide::str_color::color_classes(&mut tmp_lcs, &registry);
             crate::analyze::mutates_self::propagate(&mut tmp_lcs);
+            decide::decide_classes(&mut tmp_lcs);
             let lc = tmp_lcs.into_iter().next().unwrap();
 
             let body = match library::emit_module(&lc.methods) {
