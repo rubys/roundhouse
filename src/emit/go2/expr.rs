@@ -102,6 +102,14 @@ pub(super) struct EmitCtx {
     /// (static class-method form), so subclass overrides land
     /// correctly. Same flag governs `self.OpSet/OpGet` routing.
     pub is_ar_class: bool,
+    /// Go package name the surrounding file emits into. Phase 4.2
+    /// cross-class-reference emit consults
+    /// `super::paths::package_for_class(target)` to decide whether to
+    /// qualify a reference; if `package_for_class(target) != current_pkg`,
+    /// the emit prepends the target package and registers the import.
+    /// Phase 1 invariant: every file is `"v2"`. Defaults to `"v2"` in
+    /// `EmitCtx::none()` so existing call sites stay correct.
+    pub current_pkg: &'static str,
 }
 
 impl EmitCtx {
@@ -116,6 +124,7 @@ impl EmitCtx {
             self_methods: None,
             return_ty: None,
             is_ar_class: false,
+            current_pkg: "v2",
         }
     }
 

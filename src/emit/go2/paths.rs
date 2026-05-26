@@ -130,6 +130,69 @@ pub(crate) fn output_path(kind: OutputKind<'_>) -> OutputDest {
     }
 }
 
+/// Return the Go package the named class is emitted into.
+///
+/// The argument is the canonical IR class name (Ruby-shape, e.g.
+/// `"ActiveRecord::Base"` not the Go-emit-sanitized `"ActiveRecordBase"`).
+/// This is the source-of-truth class-to-package map; cross-class
+/// reference emit (#19 Phase 3) consults it to decide whether to
+/// qualify a reference with its target package.
+///
+/// Phase 1 invariant: every class returns `"v2"`. The match arms below
+/// pre-document the intended Phase 4 layout (one match arm per #19
+/// destination package); the cutover is "flip the right-hand strings."
+///
+/// Arms are organized to mirror the layout table in GitHub issue #19.
+#[allow(dead_code)] // consumed by Phase 4.2 emit-site rewrites
+pub(crate) fn package_for_class(class_name: &str) -> &'static str {
+    match class_name {
+        // pkg/runtime/activerecord/ — `ActiveRecord::Base` and its
+        // collaborators (errors, connection pool, the registry from
+        // #20 Session 2).
+        "ActiveRecord::Base"
+        | "ActiveRecord::ConnectionPool"
+        | "ActiveRecord::Registry"
+        | "ActiveRecord::RecordNotFound"
+        | "ActiveRecord::RecordInvalid" => "v2",
+
+        // pkg/runtime/actioncontroller/ — controllers + flash/session.
+        // (#19 spec groups Flash/Session under actioncontroller even
+        // though Rails-side they're ActionDispatch.)
+        "ActionController::Base"
+        | "ActionDispatch::Flash"
+        | "ActionDispatch::Session" => "v2",
+
+        // pkg/runtime/actionview/ — view helpers, JsonBuilder.
+        "ActionView::ViewHelpers" | "JsonBuilder" => "v2",
+
+        // pkg/runtime/inflector/ — standalone (one file).
+        "Inflector" => "v2",
+
+        // internal/router/ — the router runtime + app-emitted routes
+        // table / dispatch / route helpers / importmap.
+        "ActionDispatch::Router"
+        | "RouteHelpers"
+        | "Importmap" => "v2",
+
+        // internal/models/ — app-defined models. Detect via the
+        // ApplicationRecord inheritance chain at emit time.
+        // (`ApplicationRecord` itself + concrete models.)
+        "ApplicationRecord" => "v2",
+
+        // internal/controllers/ — app-defined controllers. Detect
+        // via the `*Controller` suffix or ApplicationController
+        // chain.
+        "ApplicationController" => "v2",
+
+        // Fallback: app-defined classes the static match above
+        // doesn't enumerate. Today everything lives in `v2`; Phase 4
+        // routes these by name pattern (`*Controller` →
+        // controllers, `Views::*` → views/<resource>, `*Params` →
+        // params, otherwise → models).
+        _ => "v2",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +244,39 @@ mod tests {
             output_path(OutputKind::RoutesTable).package,
             "v2"
         );
+    }
+
+    #[test]
+    fn package_for_class_pins_flat_layout_invariant() {
+        // Phase 1 invariant: every canonical class IR name resolves to
+        // "v2". When Phase 4 flips the layout, this test fails as a
+        // signal that the cutover landed (and a new test pins the
+        // intended per-class destinations).
+        for class in [
+            "ActiveRecord::Base",
+            "ActiveRecord::Registry",
+            "ActiveRecord::RecordNotFound",
+            "ActionController::Base",
+            "ActionDispatch::Flash",
+            "ActionDispatch::Session",
+            "ActionDispatch::Router",
+            "ActionView::ViewHelpers",
+            "JsonBuilder",
+            "Inflector",
+            "RouteHelpers",
+            "Importmap",
+            "ApplicationRecord",
+            "ApplicationController",
+            "Article",
+            "ArticlesController",
+            "ArticleParams",
+            "Views::Articles",
+        ] {
+            assert_eq!(
+                package_for_class(class),
+                "v2",
+                "class {class} should resolve to v2 under flat layout"
+            );
+        }
     }
 }

@@ -988,6 +988,7 @@ fn emit_method(
         self_methods: Some(std::rc::Rc::clone(self_methods)),
         return_ty,
         is_ar_class,
+        current_pkg: "v2",
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
@@ -1453,6 +1454,7 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         // Module-singletons (ActiveRecord, ApplicationCable, …) are
         // not AR-instance classes — Q1 dispatch peepholes don't fire.
         is_ar_class: false,
+        current_pkg: "v2",
     };
     for p in &m.params {
         ctx.declare_param(p.name.as_str());
