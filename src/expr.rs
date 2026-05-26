@@ -6,34 +6,6 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
-/// rust2-specific ownership coercion to apply at this expression's emit site.
-///
-/// Set by the `analyze::str_color` pass (Phase 1 = produced but not yet
-/// consumed) when this Ty::Str expression's producer color (what its
-/// node emits as) differs from its consumer color (what the surrounding
-/// position requires). `None` means "no change at this site" — either
-/// both colors agreed, or this expression isn't string-typed.
-///
-/// Target-specific by design: TS/Crystal/Python don't distinguish
-/// borrowed vs owned strings, so they ignore this field. Lives on the
-/// shared `Expr` (rather than a rust2-side side-table) because Span is
-/// not unique under synthetic lowerer-built nodes, ruling out a
-/// Span-keyed table. Cost: one Option per Expr (~8 bytes), serialized
-/// only when set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StrCoercion {
-    /// Wrap the emit in `.to_string()` (or `.to_owned()`) — the producer
-    /// yielded `&str`/`&'static str` but the position requires `String`.
-    /// Typical site: a literal returned from a `-> String` function or
-    /// assigned to a `String` field.
-    ToOwned,
-    /// Prefix the emit with `&` — the producer yielded `String` but the
-    /// position takes `&str`. Typical site: passing an `Ivar`-typed
-    /// String to a function whose param is `&str`.
-    Borrow,
-}
-
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for;
@@ -105,12 +77,6 @@ pub struct Expr {
     /// to users; empty on well-typed input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<DiagnosticKind>,
-    /// rust2 String/&str ownership coercion at this emit site. Set by
-    /// `analyze::str_color` (Phase 1: populated but not yet consumed).
-    /// `None` for non-string positions or when no coercion is needed.
-    /// See `StrCoercion` for the per-variant meaning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub str_coercion: Option<StrCoercion>,
     /// Cross-target intent annotation. Set by the lowerer when it
     /// synthesizes a canonical Ruby idiom whose optimal emit shape
     /// differs per target. See `IrHint` for variants and per-target
@@ -141,7 +107,6 @@ impl Expr {
             effects: EffectSet::pure(),
             leading_blank_line: false,
             diagnostic: None,
-            str_coercion: None,
             hint: None,
             decisions: 0,
         }

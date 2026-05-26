@@ -259,18 +259,19 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` files
     // converted to Rust at app emit time. Tree-shake comes in a
-    // later pass; today's transform runs the str_color pass to
-    // annotate `Expr.str_coercion` per Ty::Str expression. Phase 2
-    // wires `emit/rust2/expr.rs` to consume those annotations and
-    // retire the IVAR_TYPES/PARAM_TYPES peepholes.
+    // later pass; today's transform runs the str_color decide pass
+    // to stamp `STR_TO_OWNED`/`STR_BORROW` bits on each Ty::Str
+    // expression. `emit/rust2/expr/` reads those bits at a single
+    // central point (`apply_str_coercion`) and at the peephole
+    // predicates that would otherwise double-coerce.
     //
     // Per-unit registry (no cross-unit knowledge): most string-typed
     // calls in a runtime file resolve to other methods in the same
     // file. Cross-unit miscompiles, if they surface, get added to
     // `register_hand_written_runtime` against the concrete site.
     let runtime_units = crate::runtime_loader::rust_units(|_path, mut classes| {
-        let registry = crate::analyze::str_color::build_registry(&classes, &[]);
-        crate::analyze::str_color::color_classes(&mut classes, &registry);
+        let registry = crate::emit::rust2::decide::str_color::build_registry(&classes, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut classes, &registry);
         // Annotate every instance method's `mutates_self` flag. Used by
         // `emit/rust2/library.rs` to pick `&self` vs `&mut self` at the
         // method-emit boundary. Lifted out of emit per the
@@ -409,8 +410,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             vec![],
             &params_specs_simple,
         );
-        let str_color_registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &str_color_registry);
+        let str_color_registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &str_color_registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
         (lcs, registry)
     } else {
@@ -420,8 +421,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helpers_lc: Option<crate::dialect::LibraryClass> = if !route_helper_funcs.is_empty() {
         let mut lcs = vec![module_funcs_to_library_class("RouteHelpers", &route_helper_funcs)];
-        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
@@ -431,8 +432,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     let importmap_lc: Option<crate::dialect::LibraryClass> = if !importmap_funcs.is_empty() {
         let mut lcs = vec![module_funcs_to_library_class("Importmap", &importmap_funcs)];
-        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
@@ -485,8 +486,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 .or_insert(lc);
         }
         let mut lcs: Vec<crate::dialect::LibraryClass> = merged.into_values().collect();
-        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
         lcs
     } else {
@@ -502,8 +503,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut fixture_lcs: Vec<crate::dialect::LibraryClass> =
         if !app.fixtures.is_empty() {
             let mut lcs = crate::lower::lower_fixtures_to_library_classes(app);
-            let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-            crate::analyze::str_color::color_classes(&mut lcs, &registry);
+            let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+            crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
             crate::analyze::mutates_self::propagate(&mut lcs);
             lcs
         } else {
@@ -526,8 +527,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             Some(&app.schema),
             &app.views,
         );
-        let registry = crate::analyze::str_color::build_registry(&lcs, &[]);
-        crate::analyze::str_color::color_classes(&mut lcs, &registry);
+        let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
         lcs
     } else {
@@ -1038,8 +1039,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             }
 
             let mut tmp_lcs = vec![lc];
-            let registry = crate::analyze::str_color::build_registry(&tmp_lcs, &[]);
-            crate::analyze::str_color::color_classes(&mut tmp_lcs, &registry);
+            let registry = crate::emit::rust2::decide::str_color::build_registry(&tmp_lcs, &[]);
+            crate::emit::rust2::decide::str_color::color_classes(&mut tmp_lcs, &registry);
             crate::analyze::mutates_self::propagate(&mut tmp_lcs);
             let lc = tmp_lcs.into_iter().next().unwrap();
 

@@ -22,6 +22,7 @@
 
 pub mod bits;
 mod parens;
+pub mod str_color;
 
 use crate::dialect::LibraryClass;
 

@@ -1,32 +1,46 @@
-//! String-ownership coloring — rust2-specific Phase 1 (inference pass).
+//! String-ownership coloring — rust2's decide-pass module for
+//! `STR_TO_OWNED` / `STR_BORROW` bits on `Expr.decisions`.
 //!
-//! Annotates each `Ty::Str` expression with `Expr.str_coercion` so the
-//! rust2 emitter can produce the right ownership shape at every site
+//! Stamps each `Ty::Str` expression's `decisions` bits so the rust2
+//! emitter can produce the right ownership shape at every site
 //! (`&` for borrows, `.to_string()` for owned-from-borrow). Mirrors
 //! `async_color`'s structure: a registry of callable signatures + an
 //! IR-walk + per-node annotation. The analogy "async call from sync
 //! caller ⇒ mark caller async" maps to "producer color ≠ consumer
 //! color ⇒ insert coercion."
 //!
-//! Phase 1 = produced but not yet consumed: the pass annotates each
-//! `Expr.str_coercion`; the rust2 emitter still relies on its
-//! existing per-site peepholes (the `IVAR_TYPES`/`PARAM_TYPES`
-//! thread-locals in `src/emit/rust2/expr.rs`). Phase 2 flips the
-//! emitter to read `e.str_coercion` and drop the peepholes.
+//! Render reads bits at one central point — `expr/mod.rs::apply_str_
+//! coercion`. Predicate sites (`STR_TO_OWNED | STR_BORROW != 0` checks
+//! in `literal.rs`, `assign.rs`, `control.rs`, `send/coerce.rs`)
+//! gate peepholes that would otherwise double-coerce.
 //!
 //! Unlike async (which is universal across TS/Rust/Python), ownership
 //! coloring is rust-only — TS/Crystal/Python don't distinguish
-//! borrowed vs owned strings. The annotation lives on the shared
-//! `Expr` (rather than a side-table) because synthetic-Span collisions
-//! rule out Span-keyed storage; cost is one `Option<StrCoercion>` per
-//! `Expr`.
+//! borrowed vs owned strings. Relocated to `emit/rust2/decide/`
+//! from `analyze/str_color` in Stage 2 of #22 to concentrate
+//! rust2-local decisions under the decide module.
 
 use std::collections::HashMap;
 
 use crate::dialect::{LibraryClass, LibraryFunction, MethodDef};
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, StrCoercion};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::Symbol;
 use crate::ty::{ParamKind, Ty};
+
+/// Direction of a string ownership coercion at a specific emit site.
+/// Internal to the str_color analysis; the public output is the
+/// `STR_TO_OWNED` / `STR_BORROW` bits stamped onto `Expr.decisions`
+/// (see `super::bits`). Returned by `coercion_for`, consumed at the
+/// terminal write site to choose which bit to set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrCoercion {
+    /// Wrap the emit in `.to_string()`. Producer yielded `&str` but
+    /// position requires `String`.
+    ToOwned,
+    /// Prefix the emit with `&`. Producer yielded `String` but
+    /// position takes `&str`.
+    Borrow,
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -394,7 +408,15 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
         };
         if let (Some(producer), ParentExpect::Color(consumer)) = (producer, expect) {
             if let Some(c) = coercion_for(producer, consumer) {
-                e.str_coercion = Some(c);
+                // Stage 2 of #22: stamp `STR_TO_OWNED` / `STR_BORROW`
+                // bits in place of the legacy `Expr.str_coercion`
+                // enum. Both signals were written during the rollover
+                // commit; this commit removes the enum and reads bits
+                // at every consumer.
+                match c {
+                    StrCoercion::ToOwned => e.decisions |= super::bits::STR_TO_OWNED,
+                    StrCoercion::Borrow => e.decisions |= super::bits::STR_BORROW,
+                }
                 count += 1;
             }
         }
@@ -1129,7 +1151,8 @@ mod tests {
         let ExprNode::Return { value } = m.body.node.as_ref() else {
             panic!("expected Return at top of body");
         };
-        assert_eq!(value.str_coercion, Some(StrCoercion::ToOwned));
+        assert_eq!(value.decisions & super::super::bits::STR_TO_OWNED, super::super::bits::STR_TO_OWNED);
+        assert_eq!(value.decisions & super::super::bits::STR_BORROW, 0);
     }
 
     /// Ivar assigned a string literal: producer is Static, field is
@@ -1155,7 +1178,8 @@ mod tests {
         let ExprNode::Assign { value, .. } = m.body.node.as_ref() else {
             panic!("expected Assign at top of body");
         };
-        assert_eq!(value.str_coercion, Some(StrCoercion::ToOwned));
+        assert_eq!(value.decisions & super::super::bits::STR_TO_OWNED, super::super::bits::STR_TO_OWNED);
+        assert_eq!(value.decisions & super::super::bits::STR_BORROW, 0);
     }
 
     /// Calling a function whose param is `&str`, passing an ivar of
@@ -1184,7 +1208,8 @@ mod tests {
         let ExprNode::Send { args, .. } = caller.body.node.as_ref() else {
             panic!("expected Send at top of body");
         };
-        assert_eq!(args[0].str_coercion, Some(StrCoercion::Borrow));
+        assert_eq!(args[0].decisions & super::super::bits::STR_BORROW, super::super::bits::STR_BORROW);
+        assert_eq!(args[0].decisions & super::super::bits::STR_TO_OWNED, 0);
     }
 
     /// Calling a function whose param is `&str`, passing a literal
@@ -1211,7 +1236,7 @@ mod tests {
         let ExprNode::Send { args, .. } = caller.body.node.as_ref() else {
             panic!("expected Send at top of body");
         };
-        assert_eq!(args[0].str_coercion, None);
+        assert_eq!(args[0].decisions & (super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW), 0);
     }
 
     /// Ivar (Owned) returned directly from a `-> String` function:
@@ -1234,6 +1259,6 @@ mod tests {
         let ExprNode::Return { value } = m.body.node.as_ref() else {
             panic!("expected Return at top of body");
         };
-        assert_eq!(value.str_coercion, None);
+        assert_eq!(value.decisions & (super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW), 0);
     }
 }

@@ -45,14 +45,27 @@ pub const LAST_USE: u64 = 1 << 1;
 // Bits 32–63: rust2-local concerns
 // ────────────────────────────────────────────────────────────────────
 
-/// Stage 2. Set on a `Ty::Str`-typed node whose producer yields an
-/// owned `String` (vs. a borrowed `&str`). Render uses this in
-/// combination with the consumer color to choose between
-/// `.to_string()`, `&`-prefix, `.clone()`, or pass-through.
+/// Stage 2. Set on a `Ty::Str`-typed node when the str_color
+/// analysis decided the emit needs a `.to_string()` wrap — the
+/// producer yields `&str`/`&'static str` (literal returned from a
+/// `-> String` function, etc.) but the consumer position requires
+/// owned `String`. Mutually exclusive with `STR_BORROW`.
+///
+/// Replaces `Expr.str_coercion = Some(StrCoercion::ToOwned)` from
+/// the pre-decide-pass design. Render reads at the single point
+/// `expr/mod.rs::apply_str_coercion`.
 ///
 /// Rust-local: TS/Crystal/Python/Ruby don't distinguish owned vs
 /// borrowed strings.
-pub const OWNED: u64 = 1 << 32;
+pub const STR_TO_OWNED: u64 = 1 << 32;
+
+/// Stage 2. Set on a `Ty::Str`-typed node when the str_color
+/// analysis decided the emit needs a `&`-prefix borrow — the
+/// producer yields owned `String` but the consumer position takes
+/// `&str`. Mutually exclusive with `STR_TO_OWNED`.
+///
+/// Replaces `Expr.str_coercion = Some(StrCoercion::Borrow)`.
+pub const STR_BORROW: u64 = 1 << 33;
 
 /// Stage 3. Set on a `Var` read where the decide pass has concluded
 /// that the read site must emit `name.clone()` rather than `name`.
@@ -61,7 +74,7 @@ pub const OWNED: u64 = 1 << 32;
 /// time) so the rule is centralized in decide.
 ///
 /// Rust-local: only Rust's move semantics need this.
-pub const CLONE_AT: u64 = 1 << 33;
+pub const CLONE_AT: u64 = 1 << 34;
 
 /// Stage 4. Set on an expression whose value is being passed into a
 /// position typed `Option<T>` where the source expression is typed
@@ -71,7 +84,7 @@ pub const CLONE_AT: u64 = 1 << 33;
 /// helpers.
 ///
 /// Rust-local: TS/Crystal use nullability rather than tagged unions.
-pub const OPTION_WRAP: u64 = 1 << 34;
+pub const OPTION_WRAP: u64 = 1 << 35;
 
 // ────────────────────────────────────────────────────────────────────
 // Enum-valued fields (bit groups)

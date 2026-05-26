@@ -1601,7 +1601,6 @@ fn rewrite_free(e: &Expr) -> Expr {
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
         diagnostic: e.diagnostic.clone(),
-        str_coercion: e.str_coercion,
         hint: e.hint,
         decisions: e.decisions,
     }
@@ -1832,7 +1831,6 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
         diagnostic: e.diagnostic.clone(),
-        str_coercion: e.str_coercion,
         hint: e.hint,
         decisions: e.decisions,
     }

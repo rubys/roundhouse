@@ -83,7 +83,7 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
     let pairs: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            let str_color_handled = v.str_coercion.is_some();
+            let str_color_handled = super::has_str_coercion(v);
             let v_raw = emit_expr(v);
             let v_s = if let Some((_, ref v_ty)) = return_hash_kv {
                 // Return-tail Hash storage: keys/values land in the
@@ -91,7 +91,7 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
                 // 4's `Str→&str` Borrow is wrong here — V is `String`
                 // (owned), not `&str`. For Str-storage of an Ivar/Var/
                 // Send (owned-String producers), emit `.clone()` and
-                // strip any prior Borrow str_coercion so the value is
+                // strip any prior STR_BORROW bit so the value is
                 // owned String at the storage slot. Other v_ty shapes
                 // fall through to the param-position coerce.
                 if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
@@ -103,16 +103,15 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
                     // Strip any leading `&(...)` Borrow coercion str_
                     // color applied (it expected an &str arg position),
                     // then clone for ownership at the storage slot.
-                    let bare = match v.str_coercion {
-                        Some(crate::expr::StrCoercion::Borrow) => {
-                            // `&(raw)` ⇒ `raw`
-                            v_raw
-                                .strip_prefix("&(")
-                                .and_then(|s| s.strip_suffix(")"))
-                                .map(|s| s.to_string())
-                                .unwrap_or(v_raw.clone())
-                        }
-                        _ => v_raw.clone(),
+                    let bare = if v.decisions & super::super::decide::bits::STR_BORROW != 0 {
+                        // `&(raw)` ⇒ `raw`
+                        v_raw
+                            .strip_prefix("&(")
+                            .and_then(|s| s.strip_suffix(")"))
+                            .map(|s| s.to_string())
+                            .unwrap_or(v_raw.clone())
+                    } else {
+                        v_raw.clone()
                     };
                     format!("{bare}.clone()")
                 } else {
@@ -133,7 +132,7 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
                         if matches!(
                             &*k.node,
                             ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-                        ) && k.str_coercion.is_none() =>
+                        ) && !super::has_str_coercion(k) =>
                     {
                         format!("{k_raw}.to_string()")
                     }
@@ -192,7 +191,7 @@ pub(super) fn emit_array(elements: &[Expr]) -> String {
                         value: Literal::Str { .. } | Literal::Sym { .. }
                     }
                 )
-                && e.str_coercion.is_none()
+                && !super::has_str_coercion(e)
             {
                 format!("{raw}.to_string()")
             } else {

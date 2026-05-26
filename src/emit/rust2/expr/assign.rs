@@ -265,7 +265,7 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
         effective_value_ty.as_ref(),
         Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
     );
-    let str_color_handled = value.str_coercion.is_some();
+    let str_color_handled = super::has_str_coercion(value);
     let coerced = if !str_color_handled
         && matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
         && matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))

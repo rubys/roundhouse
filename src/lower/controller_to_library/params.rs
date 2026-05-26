@@ -310,7 +310,6 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             effects: EffectSet::default(),
             leading_blank_line: false,
             diagnostic: None,
-            str_coercion: None,
             hint: None,
             decisions: 0,
         };
@@ -324,7 +323,6 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             effects: EffectSet::default(),
             leading_blank_line: false,
             diagnostic: None,
-            str_coercion: None,
             hint: None,
             decisions: 0,
         });
@@ -336,7 +334,6 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
-        str_coercion: None,
         hint: None,
         decisions: 0,
     };
@@ -366,7 +363,6 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
-        str_coercion: None,
         hint: None,
         decisions: 0,
     };
@@ -394,7 +390,6 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
-        str_coercion: None,
         hint: None,
         decisions: 0,
     };
@@ -408,7 +403,6 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
-        str_coercion: None,
         hint: None,
         decisions: 0,
     };
@@ -717,7 +711,6 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 effects: EffectSet::default(),
                 leading_blank_line: false,
                 diagnostic: None,
-                str_coercion: None,
                 hint: None,
                 decisions: 0,
             };
@@ -728,7 +721,6 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
                 effects: EffectSet::default(),
                 leading_blank_line: false,
                 diagnostic: None,
-                str_coercion: None,
                 hint: None,
                 decisions: 0,
             };
@@ -745,7 +737,6 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         effects: EffectSet::default(),
         leading_blank_line: false,
         diagnostic: None,
-        str_coercion: None,
         hint: None,
         decisions: 0,
     };
@@ -916,7 +907,6 @@ pub fn rewrite_typed_bracket_to_field(
             effects: e.effects.clone(),
             leading_blank_line: e.leading_blank_line,
             diagnostic: None,
-            str_coercion: None,
             hint: None,
             decisions: 0,
         })

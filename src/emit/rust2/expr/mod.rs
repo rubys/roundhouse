@@ -899,22 +899,37 @@ pub(super) fn emit_expr_tail(e: &Expr) -> String {
     apply_str_coercion(emit_expr_inner(e), e)
 }
 
-/// Wrap `raw` with the str-coercion shape recorded by
-/// `analyze::str_color`. Single application point so per-node match
-/// arms in `emit_expr_inner` can keep producing the natural
-/// non-coerced shape; coercions land here based on `e.str_coercion`
-/// once and don't have to be re-derived per node kind.
+/// Wrap `raw` with the str-coercion shape stamped by the decide
+/// pass (`emit/rust2/decide/str_color.rs`). Single application
+/// point so per-node match arms in `emit_expr_inner` can keep
+/// producing the natural non-coerced shape; coercions land here
+/// based on the `STR_TO_OWNED` / `STR_BORROW` bits once and don't
+/// have to be re-derived per node kind.
 ///
 /// Defensive parens around the inner emit keep the surrounding
 /// expression context safe — `&` and `.to_string()` both have
 /// surprising precedence when the inner is a method-call chain or
 /// arithmetic expression.
 fn apply_str_coercion(raw: String, e: &Expr) -> String {
-    match e.str_coercion {
-        None => raw,
-        Some(crate::expr::StrCoercion::Borrow) => format!("&({raw})"),
-        Some(crate::expr::StrCoercion::ToOwned) => format!("({raw}).to_string()"),
+    if e.decisions & super::decide::bits::STR_TO_OWNED != 0 {
+        format!("({raw}).to_string()")
+    } else if e.decisions & super::decide::bits::STR_BORROW != 0 {
+        format!("&({raw})")
+    } else {
+        raw
     }
+}
+
+/// `true` when the str_color decide pass stamped a coercion bit
+/// (`STR_TO_OWNED` or `STR_BORROW`) on `e`. Peephole gates in
+/// `literal.rs`, `assign.rs`, `control.rs`, `send/coerce.rs` use
+/// this to skip their own ad-hoc `.to_string()` insertions —
+/// otherwise the literal site would double-coerce on top of the
+/// decide pass's wrap.
+pub(super) fn has_str_coercion(e: &Expr) -> bool {
+    e.decisions
+        & (super::decide::bits::STR_TO_OWNED | super::decide::bits::STR_BORROW)
+        != 0
 }
 
 fn emit_expr_inner(e: &Expr) -> String {

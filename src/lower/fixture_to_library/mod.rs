@@ -477,7 +477,6 @@ fn map_expr(e: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
         diagnostic: e.diagnostic.clone(),
-        str_coercion: e.str_coercion,
         hint: e.hint,
         decisions: e.decisions,
     };

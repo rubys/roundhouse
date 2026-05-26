@@ -133,7 +133,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             &*probe.node,
             ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
         ) && matches!(inner, Ty::Str | Ty::Sym)
-            && probe.str_coercion.is_none()
+            && !super::super::has_str_coercion(probe)
         {
             return format!("Some({raw}.to_string())");
         }
@@ -284,7 +284,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // `html_escape(content_for_get(:title))` reaches a callee declared
     // `(&str) -> String` with a `Option<String>` source.
     if matches!(param_ty, Ty::Str | Ty::Sym)
-        && arg.str_coercion.is_none()
+        && !super::super::has_str_coercion(arg)
         && matches!(arg.ty.as_ref(), Some(t) if is_option_ty(t))
         && matches!(
             arg.ty.as_ref().and_then(|t| {
@@ -300,7 +300,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("{raw}.as_deref().unwrap_or(\"\")");
     }
 
-    if matches!(param_ty, Ty::Str | Ty::Sym) && arg.str_coercion.is_none() {
+    if matches!(param_ty, Ty::Str | Ty::Sym) && !super::super::has_str_coercion(arg) {
         // Peek through `Cast` wrappers — the model lowerer wraps row
         // accessors in `Cast { Send(row.col), col_ty }` to bridge
         // Crystal's nilable row holder, but rust2's row class is

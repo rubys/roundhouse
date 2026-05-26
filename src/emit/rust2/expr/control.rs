@@ -210,9 +210,9 @@ pub(super) fn emit_return(value: &Expr) -> String {
         }
     } else {
         // String-literal return in a String-returning function:
-        // append `.to_string()`. Skip when `analyze::str_color` has
-        // already annotated the value.
-        let str_color_handled = value.str_coercion.is_some();
+        // append `.to_string()`. Skip when str_color has already
+        // stamped a STR_TO_OWNED / STR_BORROW bit on the value.
+        let str_color_handled = super::has_str_coercion(value);
         let needs_to_string = !str_color_handled
             && matches!(
                 &*value.node,
@@ -300,7 +300,7 @@ pub(super) fn emit_bool_op(
                     } else {
                         match &*right.node {
                             ExprNode::Lit { value: Literal::Str { .. } }
-                                if right.str_coercion.is_none() =>
+                                if !super::has_str_coercion(right) =>
                             {
                                 format!("{}.to_string()", emit_expr(right))
                             }
@@ -334,7 +334,7 @@ pub(super) fn emit_bool_op(
                     &*right.node,
                     ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
                 )
-                && right.str_coercion.is_none()
+                && !super::has_str_coercion(right)
             {
                 format!("{rhs_s}.to_string()")
             } else {
