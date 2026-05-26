@@ -470,11 +470,14 @@ pub(super) fn try_recv_typed_method(
         // `arr.length` / `str.length` — Ruby returns Integer.
         // Rust's `.len()` returns `usize`, but Ruby Integers lower
         // to `i64` everywhere else (`while i < arr.length`, `if
-        // arr.length == 0`). Emit as `(recv.len() as i64)` on
-        // sized receivers so downstream i64 arithmetic / comparison
-        // compiles without a per-call-site widen. Untyped receivers
-        // fall through to the generic `.length -> .len()` bridge
-        // (their value-shape may not even support `.len()`).
+        // arr.length == 0`). Emit as `recv.len() as i64` on sized
+        // receivers so downstream i64 arithmetic / comparison
+        // compiles without a per-call-site widen. The `as` cast is
+        // non-primary; decide pass stamps `NEEDS_PARENS` for
+        // chained-recv use, so render wraps only where needed.
+        // Untyped receivers fall through to the generic `.length
+        // -> .len()` bridge (their value-shape may not even
+        // support `.len()`).
         if method == "length"
             && args.is_empty()
             && matches!(
@@ -485,7 +488,7 @@ pub(super) fn try_recv_typed_method(
                     | Some(crate::ty::Ty::Sym)
             )
         {
-            return Some(format!("({}.len() as i64)", emit_expr(r)));
+            return Some(format!("{}.len() as i64", super::super::emit_send_recv(r)));
         }
         // Recv-Ty-aware method bridge — mirrors the structure of
         // `typescript/expr.rs`'s match-on-recv-ty around lines

@@ -21,6 +21,7 @@
 //! `bits.rs` for the bit allocation and roundhouse#22 for phasing.
 
 pub mod bits;
+mod parens;
 
 use crate::dialect::LibraryClass;
 
@@ -30,10 +31,9 @@ use crate::dialect::LibraryClass;
 /// and any future app-code annotation site. Mutates the bodies in
 /// place — render reads the stamped bits later.
 ///
-/// Stage 0: no-op. Subsequent stages add per-concern submodules
-/// (`parens.rs`, `str_color.rs`, etc.) and dispatch them from here.
-pub fn decide_classes(_classes: &mut [LibraryClass]) {
-    // Stage 0 placeholder. Each subsequent stage adds a per-concern
-    // walker call here that traverses method bodies and stamps the
-    // appropriate bit on each matching node.
+/// Per-concern submodules run in sequence. Each stamps an
+/// independent bit family; ordering doesn't matter today because no
+/// two concerns share a bit. New stages append calls here.
+pub fn decide_classes(classes: &mut [LibraryClass]) {
+    parens::stamp(classes);
 }

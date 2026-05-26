@@ -135,7 +135,12 @@ pub(super) fn try_binary_operator(
         ));
     }
     if matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
-        return Some(format!("{} {} {}", emit_expr(r), method, emit_expr(&args[0])));
+        // Binary-op LHS is a primary-demanding position. Without
+        // the wrap, `x.len() as i64 < y` parses as the start of a
+        // turbofish (`i64<y, …>`). Decide pass stamps the bit;
+        // `wrap_if_needs_parens` adds the paren only where needed.
+        let lhs = super::super::wrap_if_needs_parens(r, emit_expr(r));
+        return Some(format!("{} {} {}", lhs, method, emit_expr(&args[0])));
     }
     None
 }

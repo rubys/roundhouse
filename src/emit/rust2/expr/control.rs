@@ -14,6 +14,20 @@ use super::{
     render_self_literal, with_declared_vars_scope, with_rebound_vars_scope,
 };
 
+/// Wrap a branch's emitted body in `{ … }` only when the IR shape is
+/// a multi-statement `Seq` — i.e. when Rust's parser actually needs
+/// the block delimiter to absorb the statement list. Single-expr
+/// branches drop the braces (rustc would otherwise flag
+/// `unused_braces`). Stage 1 of #22.
+fn wrap_as_block_if_multi(branch: &Expr, emitted: String) -> String {
+    let multi = matches!(&*branch.node, ExprNode::Seq { exprs } if exprs.len() > 1);
+    if multi {
+        format!("{{ {emitted} }}")
+    } else {
+        emitted
+    }
+}
+
 pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     // Ruby `cond ? a : b` and `if cond; a; else b; end` both lower to
     // `ExprNode::If`. The lowerer also produces this shape for the
@@ -45,20 +59,23 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
         // `Some({ then_s })` instead of `Some(then_s)` so a
         // multi-statement Seq branch parses: `Some` takes an
         // expression and a bare statement list isn't one, but a `{ … }`
-        // block evaluating to its tail expression is.
+        // block evaluating to its tail expression is. Single-expr
+        // branches don't need the braces — skip them so rustc's
+        // `unused_braces` lint stays clean (Stage 1 of #22).
         let cond_s = emit_expr(cond);
         let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
+        let then_wrapped = wrap_as_block_if_multi(then_branch, then_s);
         if in_return_tail() && current_return_is_option() {
             // Skip the Some wrap when the inner branch already
             // produces an `Option<T>` — the `none_init_option_return_ty`
             // back-prop typed `let mut result: Option<T> = None` so the
             // Seq's tail Var read already produces `Option<T>`.
             if tail_produces_option(then_branch) {
-                return format!("if {cond_s} {{ {{ {then_s} }} }} else {{ None }}");
+                return format!("if {cond_s} {{ {then_wrapped} }} else {{ None }}");
             }
-            return format!("if {cond_s} {{ Some({{ {then_s} }}) }} else {{ None }}");
+            return format!("if {cond_s} {{ Some({then_wrapped}) }} else {{ None }}");
         }
-        return format!("if {cond_s} {{ {then_s} }}");
+        return format!("if {cond_s} {{ {then_wrapped} }}");
     }
     // `STMT unless COND` lowers to `If { cond, then: Nil, else: STMT }`
     // — emit as the negated single-branch form so the Nil-vs-Assign
@@ -67,13 +84,14 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
     if then_is_nil {
         let cond_s = emit_expr(cond);
         let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
+        let else_wrapped = wrap_as_block_if_multi(else_branch, else_s);
         if in_return_tail() && current_return_is_option() {
             if tail_produces_option(else_branch) {
-                return format!("if !({cond_s}) {{ {{ {else_s} }} }} else {{ None }}");
+                return format!("if !({cond_s}) {{ {else_wrapped} }} else {{ None }}");
             }
-            return format!("if !({cond_s}) {{ Some({{ {else_s} }}) }} else {{ None }}");
+            return format!("if !({cond_s}) {{ Some({else_wrapped}) }} else {{ None }}");
         }
-        return format!("if !({cond_s}) {{ {else_s} }}");
+        return format!("if !({cond_s}) {{ {else_wrapped} }}");
     }
     // Per-branch DECLARED_VARS scope: each branch's body is a separate
     // Rust scope, so a `let json = X` in one branch doesn't carry the

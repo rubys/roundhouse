@@ -478,13 +478,29 @@ where
 /// their own recv emission.
 pub(super) fn emit_send_recv(r: &Expr) -> String {
     let is_bare_var = matches!(&*r.node, ExprNode::Var { .. });
-    if !is_bare_var {
-        return emit_expr(r);
+    let s = if !is_bare_var {
+        emit_expr(r)
+    } else {
+        let prev = SUPPRESS_VAR_CLONE.with(|c| c.replace(true));
+        let s = emit_expr(r);
+        SUPPRESS_VAR_CLONE.with(|c| *c.borrow_mut() = prev);
+        s
+    };
+    wrap_if_needs_parens(r, s)
+}
+
+/// Stage 1 (#22): consult the `NEEDS_PARENS` bit stamped by the
+/// decide pass and wrap if set. Used by `emit_send_recv` and by
+/// any other site that places an Expr's emit in a Rust *primary-
+/// demanding* position (binary-op LHS, `as` cast LHS, unary
+/// operand). The bit's semantics are "this Expr's emit shape is
+/// non-primary, wrap it when chained as a recv-equivalent".
+pub(super) fn wrap_if_needs_parens(e: &Expr, emitted: String) -> String {
+    if e.decisions & super::decide::bits::NEEDS_PARENS != 0 {
+        format!("({emitted})")
+    } else {
+        emitted
     }
-    let prev = SUPPRESS_VAR_CLONE.with(|c| c.replace(true));
-    let s = emit_expr(r);
-    SUPPRESS_VAR_CLONE.with(|c| *c.borrow_mut() = prev);
-    s
 }
 
 fn collect_var_send_receivers(

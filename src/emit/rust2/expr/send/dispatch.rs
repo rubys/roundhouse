@@ -108,7 +108,11 @@ pub(super) fn dispatch_method_by_recv_ty(
     args: &[Expr],
 ) -> Option<String> {
     use crate::ty::Ty;
-    let raw_recv_s = emit_expr(recv);
+    // Use `emit_send_recv` so the `NEEDS_PARENS` decide-pass bit
+    // wraps non-primary recvs (`x.len() as i64`, casts, etc.)
+    // before the per-method bridge appends `.<rust_method>(...)`.
+    // Mirrors the bare-var clone-suppression path too.
+    let raw_recv_s = super::super::emit_send_recv(recv);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Peel `Union<T, Nil>` to `T` for dispatch. The body-typer reports
     // Ruby's nil-on-miss shape but rust2 emits panic-on-miss, so the
@@ -171,14 +175,21 @@ pub(super) fn dispatch_method_by_recv_ty(
         None => false,
     };
     let recv_s = if binding_is_option {
-        format!("({raw_recv_s}.clone().unwrap())")
+        // `.clone().unwrap()` is a method chain — already a primary
+        // form. The outer wrap was historically defensive against
+        // downstream `.method` chaining; the `NEEDS_PARENS` decide-
+        // pass now drives wrap insertion at the consumer side instead.
+        format!("{raw_recv_s}.clone().unwrap()")
     } else {
         raw_recv_s
     };
     match recv_ty {
         Some(Ty::Array { .. }) => match method {
             "size" | "length" | "count" if args.is_empty() => {
-                Some(format!("({recv_s}.len() as i64)"))
+                // The `as i64` cast makes this non-primary. The
+                // decide pass stamps `NEEDS_PARENS` on this Send
+                // when used as a chained recv; consumer wraps.
+                Some(format!("{recv_s}.len() as i64"))
             }
             "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
             "any?" if args.is_empty() => Some(format!("!{recv_s}.is_empty()")),
@@ -211,7 +222,10 @@ pub(super) fn dispatch_method_by_recv_ty(
         Some(Ty::Str) | Some(Ty::Sym) => match method {
             "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
             "size" | "length" if args.is_empty() => {
-                Some(format!("({recv_s}.len() as i64)"))
+                // `as i64` cast — non-primary. Decide pass stamps
+                // `NEEDS_PARENS` on this Send for chained-recv use;
+                // consumer wraps. Arg/let-RHS positions stay bare.
+                Some(format!("{recv_s}.len() as i64"))
             }
             // `str.to_i` → Ruby semantics: parse leading digits, 0 on
             // parse failure / non-numeric input. Rust's `parse::<i64>`
@@ -220,10 +234,14 @@ pub(super) fn dispatch_method_by_recv_ty(
             // `.parse()` so this works uniformly across the recv-Ty
             // Str/Sym arms.
             "to_i" if args.is_empty() => {
-                Some(format!("({recv_s}.parse::<i64>().unwrap_or(0))"))
+                // Method chain (already primary). No outer wrap
+                // needed — `.parse::<i64>().unwrap_or(0).method()`
+                // chains correctly. Defensive wrap retired by Stage 1
+                // of #22.
+                Some(format!("{recv_s}.parse::<i64>().unwrap_or(0)"))
             }
             "to_f" if args.is_empty() => {
-                Some(format!("({recv_s}.parse::<f64>().unwrap_or(0.0))"))
+                Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)"))
             }
             "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
             "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
@@ -267,7 +285,12 @@ pub(super) fn dispatch_method_by_recv_ty(
         // false-positive E0599 from a Var-only narrowing rule.
         Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
             "to_s" if args.is_empty() => {
-                Some(format!("({recv_s}).ruby_to_s()"))
+                // `recv_s` is already wrap-aware via `emit_send_recv`
+                // at the top of this function: non-primary recvs
+                // (e.g. `x.len() as i64`) get the bit-driven wrap,
+                // primary recvs (method chains, var reads) stay bare.
+                // `.ruby_to_s()` itself is a method call — primary.
+                Some(format!("{recv_s}.ruby_to_s()"))
             }
             _ => None,
         },
@@ -279,7 +302,10 @@ pub(super) fn dispatch_method_by_recv_ty(
             "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
             "any?" if args.is_empty() => Some(format!("!{recv_s}.is_empty()")),
             "size" | "length" if args.is_empty() => {
-                Some(format!("({recv_s}.len() as i64)"))
+                // `as i64` cast — non-primary. Decide pass stamps
+                // `NEEDS_PARENS` on this Send for chained-recv use;
+                // consumer wraps. Arg/let-RHS positions stay bare.
+                Some(format!("{recv_s}.len() as i64"))
             }
             "keys" if args.is_empty() => Some(format!(
                 "{recv_s}.keys().cloned().collect::<Vec<_>>()"
