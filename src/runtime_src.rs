@@ -1037,7 +1037,7 @@ fn method_def_from(
         MethodReceiver::Instance
     };
 
-    let params = method_params(def, name.as_str())?;
+    let (params, block_param) = method_params(def, name.as_str())?;
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, VIRTUAL_FILE).map_err(|e| format!("in `{name}`: {e}"))?,
@@ -1058,24 +1058,32 @@ fn method_def_from(
         // above with explicit kinds; bare `def` is overwhelmingly Method.
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        mutates_self: false,
+        block_param,
     })
 }
 
-/// Collect every parameter's name, in source order, across all kinds:
-/// required positional, optional positional, rest (`*args`), post-rest,
-/// required keyword, optional keyword, kwargs (`**opts`), and block
-/// (`&block`). Anonymous forms (`*`, `**`, `&`) are skipped.
+/// Collect every parameter's name across positional/keyword kinds, plus
+/// the def-site block parameter (`&block`) split into its own slot.
+/// Anonymous forms (`*`, `**`, `&`) are skipped.
 ///
-/// Returned list is flat — no kind distinction preserved. The RBS
-/// signature's `Ty::Fn` encodes the per-position kind; the arity check
-/// in `parse_methods_with_rbs_in_ctx` ensures same-length alignment,
-/// and the body-typer seeds local bindings by position-zipping names
-/// to signature params.
-fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec<Param>, String> {
+/// Returned list is flat — no positional/keyword kind distinction
+/// preserved. The RBS signature's `Ty::Fn` encodes the per-position
+/// kind; the arity check in `parse_methods_with_rbs_in_ctx` ensures
+/// same-length alignment, and the body-typer seeds local bindings by
+/// position-zipping names to signature params.
+///
+/// The `&block` parameter rides in `MethodDef.block_param` rather than
+/// the flat list — it occupies the call-site `block:` slot, never
+/// `args:`, and keeping it out of `params` aligns Ruby's arity with
+/// the RBS Block-kind filter (`runtime_src.rs:700` etc.) without a
+/// per-call-site length mismatch fallback.
+fn method_params(
+    def: &ruby_prism::DefNode<'_>,
+    method_name: &str,
+) -> Result<(Vec<Param>, Option<Param>), String> {
     let Some(params_node) = def.parameters() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
 
     let mut names = Vec::new();
@@ -1154,14 +1162,20 @@ fn method_params(def: &ruby_prism::DefNode<'_>, method_name: &str) -> Result<Vec
         // NoKeywordsParameterNode (`**nil`) — skip.
     }
 
-    // Block: `&block`. Anonymous `&` has no name — skip.
-    if let Some(block) = params_node.block() {
-        if let Some(loc) = block.name() {
-            names.push(Param::positional(Symbol::new(decode_utf8(loc.as_slice(), method_name)?)));
-        }
-    }
+    // Block: `&block` — populated into `block_param` slot, not the
+    // flat list. Anonymous `&` has no name — return None.
+    let block_param = match params_node.block() {
+        Some(block) => match block.name() {
+            Some(loc) => Some(Param::positional(Symbol::new(decode_utf8(
+                loc.as_slice(),
+                method_name,
+            )?))),
+            None => None,
+        },
+        None => None,
+    };
 
-    Ok(names)
+    Ok((names, block_param))
 }
 
 fn decode_utf8<'a>(bytes: &'a [u8], method_name: &str) -> Result<&'a str, String> {
@@ -1376,11 +1390,14 @@ mod tests {
 
     #[test]
     fn block_params_collected() {
+        // `&blk` rides in `MethodDef.block_param`, not the flat list —
+        // it occupies the call-site `block:` slot, never `args:`.
         let src = "def f(&blk)\n  1\nend\n";
         let m = parse_one(src);
+        assert!(m.params.is_empty());
         assert_eq!(
-            m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            vec!["blk"]
+            m.block_param.as_ref().map(|p| p.name.as_str()),
+            Some("blk")
         );
     }
 
@@ -1400,7 +1417,11 @@ mod tests {
         let m = parse_one(src);
         assert_eq!(
             m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b", "rest", "c", "d", "e", "opts", "blk"],
+            vec!["a", "b", "rest", "c", "d", "e", "opts"],
+        );
+        assert_eq!(
+            m.block_param.as_ref().map(|p| p.name.as_str()),
+            Some("blk")
         );
     }
 

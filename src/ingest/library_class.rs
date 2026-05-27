@@ -393,14 +393,17 @@ pub(super) fn ingest_library_method(
                 }
             }
         }
-        if let Some(block) = pn.block() {
-            if let Some(loc) = block.name() {
-                if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                    params.push(Param::positional(Symbol::from(s)));
-                }
-            }
-        }
     }
+
+    // `&block` rides in `MethodDef.block_param`, not the flat list —
+    // it occupies the call-site `block:` slot, never `args:`. Mirrors
+    // the runtime_src split (see runtime_src::method_params).
+    let block_param = def
+        .parameters()
+        .and_then(|pn| pn.block())
+        .and_then(|block| block.name())
+        .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+        .map(|s| Param::positional(Symbol::from(s)));
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
@@ -422,8 +425,8 @@ pub(super) fn ingest_library_method(
         // that didn't use the attr_* sugar.
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        mutates_self: false,
+        block_param,
     })
 }
 
