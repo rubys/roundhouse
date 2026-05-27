@@ -272,22 +272,35 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // calls in a runtime file resolve to other methods in the same
     // file. Cross-unit miscompiles, if they surface, get added to
     // `register_hand_written_runtime` against the concrete site.
-    let runtime_units = crate::runtime_loader::rust_units(|_path, mut classes| {
-        let registry = crate::emit::rust2::decide::str_color::build_registry(&classes, &[]);
-        crate::emit::rust2::decide::str_color::color_classes(&mut classes, &registry);
-        // Annotate every instance method's `mutates_self` flag. Used by
-        // `emit/rust2/library.rs` to pick `&self` vs `&mut self` at the
-        // method-emit boundary. Lifted out of emit per the
-        // self-describing-IR pattern — Crystal/Go/Kotlin/Swift can
-        // consume the same flag without recomputing.
-        crate::analyze::mutates_self::propagate(&mut classes);
-        // Stamp `Expr.decisions` bits per the rust2 decide pass.
-        // Stage 0 is a no-op; subsequent stages migrate per-node
-        // decisions (parens, str_color, last-use, option-wrap, ...)
-        // out of render-time helpers into bits set here. See
-        // `decide/bits.rs` for the bit allocation and roundhouse#22.
-        decide::decide_classes(&mut classes);
-        classes
+    // Runtime emit (inside `rust_units`) walks `emit_library_class`
+    // before the cross-LC registry exists, so install a default
+    // `EmitCtx` for the duration. Phase 2 of #24 moved the per-class
+    // scope thread-locals (`IVAR_TYPES`, `CLASS_METHOD_PARAM_TYS`,
+    // `STATIC_METHODS`, `CONSTRUCTOR_FIELDS`) onto `EmitCtx` fields;
+    // the `with_X<F>` wrappers panic if no `EmitCtx` is installed.
+    // The empty struct's pipeline-global registries are fine here —
+    // runtime files don't call back into the app's class methods, and
+    // the real `EmitCtx` (populated below by
+    // `collect_global_class_methods`) wraps the subsequent per-file
+    // app emit loop.
+    let runtime_units = crate::emit::rust2::expr::with_emit_ctx(EmitCtx::default(), || {
+        crate::runtime_loader::rust_units(|_path, mut classes| {
+            let registry = crate::emit::rust2::decide::str_color::build_registry(&classes, &[]);
+            crate::emit::rust2::decide::str_color::color_classes(&mut classes, &registry);
+            // Annotate every instance method's `mutates_self` flag. Used by
+            // `emit/rust2/library.rs` to pick `&self` vs `&mut self` at the
+            // method-emit boundary. Lifted out of emit per the
+            // self-describing-IR pattern — Crystal/Go/Kotlin/Swift can
+            // consume the same flag without recomputing.
+            crate::analyze::mutates_self::propagate(&mut classes);
+            // Stamp `Expr.decisions` bits per the rust2 decide pass.
+            // Stage 0 is a no-op; subsequent stages migrate per-node
+            // decisions (parens, str_color, last-use, option-wrap, ...)
+            // out of render-time helpers into bits set here. See
+            // `decide/bits.rs` for the bit allocation and roundhouse#22.
+            decide::decide_classes(&mut classes);
+            classes
+        })
     })
     .expect("rust runtime transpile failed (Ruby source error)");
     // Capture the parsed framework runtime LCs (ViewHelpers,
@@ -1919,6 +1932,7 @@ fn collect_global_class_methods(
     EmitCtx {
         global_class_methods: out,
         global_class_method_defaults: out_defaults,
+        ..EmitCtx::default()
     }
 }
 

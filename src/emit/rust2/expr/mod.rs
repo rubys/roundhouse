@@ -53,24 +53,10 @@ thread_local! {
     /// return; ivars in the body are locals).
     static IN_RETURN_TAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
-    /// Methods in the current `impl` block that were classified as
-    /// static-safe by `library.rs::method_reads_self`. When a Send
-    /// targets one of these via implicit-`self` recv, emit as
-    /// `Self::method(args)` rather than `self.method(args)` — the
-    /// latter wouldn't compile inside `pub fn new` (no instance yet)
-    /// and is also the cleaner Rust form for inherently-static
-    /// helpers regardless of call-site context.
-    static STATIC_METHODS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-
-    /// Field names of the struct being constructed by the current
-    /// `pub fn new`. Empty outside constructor scope. Lets `Return {
-    /// Nil }` inside the constructor emit `return Self { f1, f2 }`
-    /// instead of bare `return` — Ruby's `return if cond` early
-    /// exit lowers to `Return { Nil }`, but the Rust constructor
-    /// must produce `Self`.
-    static CONSTRUCTOR_FIELDS: std::cell::RefCell<Vec<String>> =
-        std::cell::RefCell::new(Vec::new());
+    // `STATIC_METHODS` / `CONSTRUCTOR_FIELDS` (Phase 2 of #24) now
+    // live on `EmitCtx::static_methods` / `EmitCtx::constructor_fields`.
+    // The `with_static_methods` / `with_constructor_mode` wrappers
+    // swap field values on the installed `EmitCtx` via save-restore.
 
     /// Variable names that the current method body assigns more
     /// than once. Pre-computed by `with_method_scope` and consulted
@@ -104,19 +90,9 @@ thread_local! {
     static BACK_PROPAGATED_HASH_LOCALS: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
-    /// Method-name → positional-param-Ty map for the currently-
-    /// emitting class. Populated by `library.rs` via
-    /// `with_class_method_param_tys` before walking each class's
-    /// methods. The Send walker for `Self::method(args)` consults
-    /// this table to coerce args whose Hash<K, V> shape disagrees
-    /// with the callee's declared param type — the
-    /// `view_helpers::button_to → Self::render_attrs(form_attrs)`
-    /// shape where `form_attrs` is locally `HashMap<&str, String>`
-    /// but render_attrs declares `Hash[String, untyped]` =
-    /// `HashMap<String, Value>`.
-    static CLASS_METHOD_PARAM_TYS: std::cell::RefCell<
-        std::collections::HashMap<String, Vec<crate::ty::Ty>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    // `CLASS_METHOD_PARAM_TYS` (Phase 2 of #24) now lives on
+    // `EmitCtx::class_method_param_tys`. `with_class_method_param_tys`
+    // swaps the field value via save-restore.
 
     /// Pipeline-global emit context bundling the cross-LC class-method
     /// registry and the parallel kwarg-default registry. Populated by
@@ -146,15 +122,9 @@ thread_local! {
     static SUPPRESS_VAR_CLONE: std::cell::RefCell<bool> =
         std::cell::RefCell::new(false);
 
-    /// Ivar name → declared field type for the struct currently being
-    /// emitted. Set by `library.rs` around each `impl` block so
-    /// `emit_assign` can coerce mismatched RHS types (the canonical
-    /// case is `self.body = ""`: literal `""` is `&str`, field is
-    /// `String`; without coercion the Rust compiler rejects). Empty
-    /// outside class-body scope; cleared between classes so stale
-    /// entries don't bleed across emit units.
-    static IVAR_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    // `IVAR_TYPES` (Phase 2 of #24) now lives on
+    // `EmitCtx::ivar_types`. `with_ivar_types` swaps the field
+    // value via save-restore.
 
     /// True while emitting a module-singleton class (Ruby pattern
     /// `module X; class << self; attr_accessor :slot; end; end`):
@@ -354,20 +324,26 @@ pub(super) fn module_singleton_slot_name(ivar: &str) -> String {
 
 /// Look up the declared field type for `name` within the struct
 /// currently being emitted. `None` outside class-body scope or for
-/// names not in the ivar table.
+/// names not in the ivar table. Reads through `EmitCtx::ivar_types`
+/// (Phase 2 of #24); returns `None` if no `EmitCtx` is installed
+/// (early decide-pass walks run outside `with_emit_ctx` and don't
+/// touch ivars).
 pub(super) fn ivar_field_ty(name: &str) -> Option<crate::ty::Ty> {
-    IVAR_TYPES.with(|c| c.borrow().get(name).cloned())
+    current_emit_ctx().and_then(|ctx| ctx.ivar_types.borrow().get(name).cloned())
 }
 
 /// Run `f` with the supplied ivar→type table active. Used by
-/// `library.rs` to scope each `impl` block's emit.
+/// `library.rs` to scope each `impl` block's emit. Swaps
+/// `EmitCtx::ivar_types` with save-restore (Phase 2 of #24).
+/// Must be called inside `with_emit_ctx` — panics otherwise.
 pub(super) fn with_ivar_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = IVAR_TYPES.with(|c| c.replace(types));
+    let ctx = current_emit_ctx().expect("with_ivar_types called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.ivar_types.borrow_mut(), types);
     let r = f();
-    IVAR_TYPES.with(|c| *c.borrow_mut() = prev);
+    *ctx.ivar_types.borrow_mut() = prev;
     r
 }
 
@@ -375,11 +351,12 @@ pub(super) fn with_constructor_mode<F, R>(fields: Vec<String>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
+    let ctx = current_emit_ctx().expect("with_constructor_mode called outside with_emit_ctx");
     let prev_mode = IN_CONSTRUCTOR.with(|c| c.replace(true));
-    let prev_fields = CONSTRUCTOR_FIELDS.with(|c| c.replace(fields));
+    let prev_fields = std::mem::replace(&mut *ctx.constructor_fields.borrow_mut(), fields);
     let r = f();
     IN_CONSTRUCTOR.with(|c| c.set(prev_mode));
-    CONSTRUCTOR_FIELDS.with(|c| *c.borrow_mut() = prev_fields);
+    *ctx.constructor_fields.borrow_mut() = prev_fields;
     r
 }
 
@@ -561,14 +538,13 @@ fn collect_var_assign_counts(
 }
 
 pub(super) fn render_self_literal() -> String {
-    CONSTRUCTOR_FIELDS.with(|c| {
-        let fields = c.borrow();
-        if fields.is_empty() {
-            "Self {}".to_string()
-        } else {
-            format!("Self {{ {} }}", fields.join(", "))
-        }
-    })
+    let ctx = current_emit_ctx().expect("render_self_literal called outside with_emit_ctx");
+    let fields = ctx.constructor_fields.borrow();
+    if fields.is_empty() {
+        "Self {}".to_string()
+    } else {
+        format!("Self {{ {} }}", fields.join(", "))
+    }
 }
 
 /// Run `f` with `methods` registered as the current class's static-
@@ -581,15 +557,18 @@ pub(super) fn with_static_methods<F, R>(
 where
     F: FnOnce() -> R,
 {
-    let prev = STATIC_METHODS.with(|c| c.replace(methods));
+    let ctx = current_emit_ctx().expect("with_static_methods called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.static_methods.borrow_mut(), methods);
     let r = f();
-    STATIC_METHODS.with(|c| *c.borrow_mut() = prev);
+    *ctx.static_methods.borrow_mut() = prev;
     r
 }
 
 /// Set the current class's method-name → positional-param-Tys
 /// table for the duration of `f`. Used by `library.rs` to seed the
-/// `Self::method(args)` arg-coercion lookup in emit_send.
+/// `Self::method(args)` arg-coercion lookup in emit_send. Swaps
+/// `EmitCtx::class_method_param_tys` with save-restore (Phase 2 of
+/// #24). Must be called inside `with_emit_ctx`.
 pub(super) fn with_class_method_param_tys<F, R>(
     map: std::collections::HashMap<String, Vec<crate::ty::Ty>>,
     f: F,
@@ -597,18 +576,24 @@ pub(super) fn with_class_method_param_tys<F, R>(
 where
     F: FnOnce() -> R,
 {
-    let prev = CLASS_METHOD_PARAM_TYS.with(|c| c.replace(map));
+    let ctx = current_emit_ctx().expect("with_class_method_param_tys called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.class_method_param_tys.borrow_mut(), map);
     let r = f();
-    CLASS_METHOD_PARAM_TYS.with(|c| *c.borrow_mut() = prev);
+    *ctx.class_method_param_tys.borrow_mut() = prev;
     r
 }
 
 /// Look up the current class's method param types by method name.
 /// Returns None outside any class scope or when the method isn't
-/// in the current class's table.
+/// in the current class's table. Reads through
+/// `EmitCtx::class_method_param_tys` (Phase 2 of #24).
 pub(super) fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
-    CLASS_METHOD_PARAM_TYS
-        .with(|c| c.borrow().get(method).and_then(|tys| tys.get(idx).cloned()))
+    current_emit_ctx().and_then(|ctx| {
+        ctx.class_method_param_tys
+            .borrow()
+            .get(method)
+            .and_then(|tys| tys.get(idx).cloned())
+    })
 }
 
 /// Return the full Vec of positional param Tys for a method in the
@@ -617,8 +602,8 @@ pub(super) fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::t
 /// initialize(attrs = {})` accepts zero-arg `Article.new`, but
 /// Rust requires the explicit `HashMap::new()` default.
 pub(super) fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::ty::Ty>> {
-    CLASS_METHOD_PARAM_TYS
-        .with(|c| c.borrow().get(method).cloned())
+    current_emit_ctx()
+        .and_then(|ctx| ctx.class_method_param_tys.borrow().get(method).cloned())
 }
 
 /// Run `f` with the `EmitCtx` installed. Used by `rust2.rs::emit`
@@ -761,7 +746,9 @@ where
 }
 
 pub(super) fn is_static_method(name: &str) -> bool {
-    STATIC_METHODS.with(|c| c.borrow().contains(name))
+    current_emit_ctx()
+        .map(|ctx| ctx.static_methods.borrow().contains(name))
+        .unwrap_or(false)
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
