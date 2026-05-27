@@ -92,29 +92,48 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_interpolated_string_node().is_some() => {
             let is = n.as_interpolated_string_node().unwrap();
             let mut parts: Vec<InterpPart> = Vec::new();
-            for part in is.parts().iter() {
-                if let Some(sn) = part.as_string_node() {
-                    let bytes = sn.unescaped();
-                    parts.push(InterpPart::Text {
-                        value: String::from_utf8_lossy(bytes).into_owned(),
-                    });
-                } else if let Some(es) = part.as_embedded_statements_node() {
-                    let stmts = es.statements().ok_or_else(|| IngestError::Unsupported {
-                        file: file.into(),
-                        message: "empty `#{}` in interpolated string".into(),
-                    })?;
-                    let inner = ingest_expr(&stmts.as_node(), file)?;
-                    parts.push(InterpPart::Expr { expr: inner });
-                } else {
-                    return Err(IngestError::Unsupported {
-                        file: file.into(),
-                        message: format!(
-                            "unsupported interpolated-string part: {part:?}"
-                        ),
-                    });
-                }
-            }
+            collect_interp_parts(is.parts(), &mut parts, file)?;
             ExprNode::StringInterp { parts }
+        }
+        // `/pattern#{x}flags/` — regex with interpolation. Desugar to
+        // `Regexp.new(<interpolated-string>)` so the IR doesn't need
+        // a separate RegexInterp variant. The static-only `/foo/`
+        // path stays on `Literal::Regex` for round-trip fidelity;
+        // interp regexes are inherently runtime constructs anyway.
+        //
+        // Flag handling is partial: only the no-flags case is wired
+        // because lobsters and real-blog don't have flag-bearing
+        // interp regexes. With-flags surfaces via Unsupported so the
+        // gap is visible.
+        n if n.as_interpolated_regular_expression_node().is_some() => {
+            let r = n.as_interpolated_regular_expression_node().unwrap();
+            if r.is_ignore_case()
+                || r.is_multi_line()
+                || r.is_extended()
+                || r.is_once()
+                || r.is_euc_jp()
+                || r.is_windows_31j()
+                || r.is_utf_8()
+                || r.is_ascii_8bit()
+            {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "interpolated regex with flags not yet supported".into(),
+                });
+            }
+            let mut parts: Vec<InterpPart> = Vec::new();
+            collect_interp_parts(r.parts(), &mut parts, file)?;
+            let pattern_expr = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Regexp")] },
+                )),
+                method: Symbol::from("new"),
+                args: vec![pattern_expr],
+                block: None,
+                parenthesized: true,
+            }
         }
         n if n.as_symbol_node().is_some() => {
             ExprNode::Lit { value: Literal::Sym { value: symbol_value(n).unwrap_or_default().into() } }
@@ -1266,6 +1285,48 @@ fn op_assign_op_from_binary(op: &str) -> Option<crate::expr::OpAssignOp> {
 /// shape: arguments is `Some(ArgumentsNode)` with exactly one child
 /// (the index expression). Multi-dim indexing (`m[i, j]`) is out of
 /// scope; we report `Unsupported` if encountered.
+/// Collect the parts of an interpolated string (or interpolated
+/// regex) into a flat `Vec<InterpPart>`. Recursively flattens any
+/// nested `InterpolatedStringNode` parts — Prism represents adjacent
+/// string literals (`"foo" "bar"`, including line-continued ones
+/// `"foo" \` ↵ `"bar"`) as an outer InterpolatedString with no
+/// opening/closing whose parts are themselves inner InterpolatedStrings.
+/// The IR has a single `StringInterp { parts }` shape, so the inner
+/// parts splice into the outer list.
+fn collect_interp_parts(
+    parts_node: ruby_prism::NodeList<'_>,
+    out: &mut Vec<InterpPart>,
+    file: &str,
+) -> IngestResult<()> {
+    for part in parts_node.iter() {
+        if let Some(sn) = part.as_string_node() {
+            let bytes = sn.unescaped();
+            out.push(InterpPart::Text {
+                value: String::from_utf8_lossy(bytes).into_owned(),
+            });
+        } else if let Some(es) = part.as_embedded_statements_node() {
+            let stmts = es.statements().ok_or_else(|| IngestError::Unsupported {
+                file: file.into(),
+                message: "empty `#{}` in interpolated string".into(),
+            })?;
+            let inner = ingest_expr(&stmts.as_node(), file)?;
+            out.push(InterpPart::Expr { expr: inner });
+        } else if let Some(nested) = part.as_interpolated_string_node() {
+            // Adjacent / line-continued string concatenation — flatten
+            // the inner parts into the outer list. The inner's quote
+            // delimiters drop out at flatten time; they only mattered
+            // for source-level parsing.
+            collect_interp_parts(nested.parts(), out, file)?;
+        } else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("unsupported interpolated-string part: {part:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn ingest_index_argument(
     args: Option<ruby_prism::ArgumentsNode<'_>>,
     file: &str,
