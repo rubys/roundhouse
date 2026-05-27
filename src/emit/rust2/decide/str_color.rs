@@ -487,7 +487,8 @@ fn collect_owned_var_assignments(
                 collect_owned_var_assignments(b, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 collect_owned_var_assignments(recv, out);
             }
@@ -591,7 +592,8 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                 count += walk(b, ParentExpect::None, ctx);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             // Ivar assignment: field is `String`, so RHS must be Owned.
             // Index assignment into a Hash<_, Str>: HashMap stores
             // `String` values, so RHS string must be Owned too. Other

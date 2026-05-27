@@ -109,6 +109,12 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Assign { target, value } => {
             format!("{} = {}", emit_lvalue(target), emit_expr(value))
         }
+        // Native Ruby compound assignment — `target ||= value`,
+        // `target += value`, etc. Preserves source short-circuit
+        // semantics (and Rails dirty-tracking on `||=`).
+        ExprNode::OpAssign { target, op, value } => {
+            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
+        }
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }

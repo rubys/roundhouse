@@ -522,6 +522,12 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Assign { target, value } => {
             format!("{} = {}", emit_lvalue(target), emit_expr(value))
         }
+        // Crystal supports the same compound-assignment surface as
+        // Ruby (`||=`, `&&=`, `+=`, …) with matching short-circuit
+        // semantics.
+        ExprNode::OpAssign { target, op, value } => {
+            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
+        }
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             if args_s.is_empty() {

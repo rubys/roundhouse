@@ -190,7 +190,7 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
                 count_gradual_recurse(&arm.body, total);
             }
         }
-        N::Assign { value, .. } => count_gradual_recurse(value, total),
+        N::Assign { value, .. } | N::OpAssign { value, .. } => count_gradual_recurse(value, total),
         N::Yield { args } => for a in args { count_gradual_recurse(a, total); },
         N::Raise { value } | N::Return { value } => count_gradual_recurse(value, total),
         N::Super { args } => {
@@ -304,7 +304,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
             }
         }
-        ExprNode::Assign { value, .. } => {
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             collect_untyped(value, &format!("{path}/assign.value"), out)
         }
         ExprNode::Yield { args } => {

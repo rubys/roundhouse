@@ -121,7 +121,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
             }
         }
-        ExprNode::Assign { value, .. } => {
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             collect_untyped(value, &format!("{path}/assign.value"), out)
         }
         ExprNode::Yield { args } => {

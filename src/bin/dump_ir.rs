@@ -556,7 +556,9 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
                 f(&arm.body); visit_subexprs(&arm.body, f);
             }
         }
-        ExprNode::Assign { value, .. } => { f(value); visit_subexprs(value, f); }
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
+            f(value); visit_subexprs(value, f);
+        }
         ExprNode::Yield { args } => {
             for a in args { f(a); visit_subexprs(a, f); }
         }

@@ -435,7 +435,7 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(&arm.body, &format!("{path}/case.arm[{i}].body"), out);
             }
         }
-        ExprNode::Assign { value, .. } => {
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             collect_untyped_lowered(value, &format!("{path}/assign.value"), out)
         }
         ExprNode::Yield { args } => {

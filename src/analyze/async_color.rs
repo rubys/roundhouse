@@ -636,6 +636,9 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         }
         ExprNode::Seq { exprs } => exprs.iter().any(|e| walk_expr(e, pred)),
         ExprNode::Assign { target, value } => walk_lvalue(target, pred) || walk_expr(value, pred),
+        ExprNode::OpAssign { target, value, .. } => {
+            walk_lvalue(target, pred) || walk_expr(value, pred)
+        }
         ExprNode::Yield { args } => args.iter().any(|a| walk_expr(a, pred)),
         ExprNode::Raise { value } => walk_expr(value, pred),
         ExprNode::RescueModifier { expr, fallback } => {

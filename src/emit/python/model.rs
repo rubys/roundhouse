@@ -593,6 +593,22 @@ fn emit_model_method_with_attrs(out: &mut String, m: &MethodDef, attrs: &[Symbol
     }
 }
 
+fn rewrite_lvalue_py(target: &LValue, attrs: &[Symbol]) -> LValue {
+    match target {
+        LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+        LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+        LValue::Attr { recv, name } => LValue::Attr {
+            recv: rewrite_bare_attrs_to_ivars_py(recv, attrs),
+            name: name.clone(),
+        },
+        LValue::Index { recv, index } => LValue::Index {
+            recv: rewrite_bare_attrs_to_ivars_py(recv, attrs),
+            index: rewrite_bare_attrs_to_ivars_py(index, attrs),
+        },
+        LValue::Const { path } => LValue::Const { path: path.clone() },
+    }
+}
+
 fn rewrite_bare_attrs_to_ivars_py(e: &Expr, attrs: &[Symbol]) -> Expr {
     use crate::expr::{Arm, InterpPart, Pattern};
     let rewrite = |child: &Expr| rewrite_bare_attrs_to_ivars_py(child, attrs);
@@ -669,21 +685,17 @@ fn rewrite_bare_attrs_to_ivars_py(e: &Expr, attrs: &[Symbol]) -> Expr {
             block: block.as_ref().map(&rewrite),
         },
         ExprNode::Assign { target, value } => {
-            let new_target = match target {
-                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
-                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
-                LValue::Attr { recv, name } => LValue::Attr {
-                    recv: rewrite(recv),
-                    name: name.clone(),
-                },
-                LValue::Index { recv, index } => LValue::Index {
-                    recv: rewrite(recv),
-                    index: rewrite(index),
-                },
-                LValue::Const { path } => LValue::Const { path: path.clone() },
-            };
+            let new_target = rewrite_lvalue_py(target, attrs);
             ExprNode::Assign {
                 target: new_target,
+                value: rewrite(value),
+            }
+        }
+        ExprNode::OpAssign { target, op, value } => {
+            let new_target = rewrite_lvalue_py(target, attrs);
+            ExprNode::OpAssign {
+                target: new_target,
+                op: *op,
                 value: rewrite(value),
             }
         }

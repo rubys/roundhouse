@@ -980,7 +980,8 @@ impl Analyzer {
                 for a in args { self.collect_send_sites(a, out); }
                 if let Some(b) = block { self.collect_send_sites(b, out); }
             }
-            ExprNode::Assign { target, value } => {
+            ExprNode::Assign { target, value }
+            | ExprNode::OpAssign { target, value, .. } => {
                 self.collect_send_sites(value, out);
                 if let LValue::Attr { recv, .. } = target {
                     self.collect_send_sites(recv, out);
@@ -1162,7 +1163,8 @@ impl Analyzer {
             ExprNode::Seq { exprs } => {
                 for e in exprs { self.visit_effects(e, ctx, out); }
             }
-            ExprNode::Assign { target, value } => {
+            ExprNode::Assign { target, value }
+            | ExprNode::OpAssign { target, value, .. } => {
                 self.visit_effects(value, ctx, out);
                 if let LValue::Attr { recv, .. } = target {
                     self.visit_effects(recv, ctx, out);
@@ -2028,7 +2030,8 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
                 diagnose_expr(b, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             diagnose_expr(value, out);
             if let LValue::Attr { recv, .. } = target {
                 diagnose_expr(recv, out);

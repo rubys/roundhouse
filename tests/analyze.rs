@@ -637,7 +637,8 @@ fn action_aggregate_equals_subtree_fold() {
                     fold(e, acc);
                 }
             }
-            ExprNode::Assign { target, value } => {
+            ExprNode::Assign { target, value }
+            | ExprNode::OpAssign { target, value, .. } => {
                 fold(value, acc);
                 match target {
                     LValue::Attr { recv, .. } => fold(recv, acc),
@@ -948,7 +949,8 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
                 collect_ivar_reads(b, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             collect_ivar_reads(value, out);
             if let LValue::Attr { recv, .. } = target {
                 collect_ivar_reads(recv, out);
@@ -1114,7 +1116,8 @@ fn collect_var_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Optio
                 collect_var_reads(b, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             collect_var_reads(value, out);
             if let LValue::Attr { recv, .. } = target {
                 collect_var_reads(recv, out);
@@ -1249,7 +1252,8 @@ fn collect_bare_name_sends(
                 collect_bare_name_sends(b, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             collect_bare_name_sends(value, out);
             if let LValue::Attr { recv, .. } = target {
                 collect_bare_name_sends(recv, out);

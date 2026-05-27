@@ -656,6 +656,24 @@ impl<'a> BodyTyper<'a> {
                 value_ty
             }
 
+            ExprNode::OpAssign { target, value, .. } => {
+                // Same recursion shape as Assign: walk target's child
+                // Exprs + walk value. Short-circuit-aware type
+                // narrowing (suppressing the union-widen on `||=` when
+                // the target is already non-Option) is a follow-on;
+                // for now the analyzer treats the result as the value
+                // expression's type, which matches naive desugar.
+                let value_ty = self.analyze_expr(value, ctx);
+                if let LValue::Attr { recv, .. } = target {
+                    self.analyze_expr(recv, ctx);
+                }
+                if let LValue::Index { recv, index } = target {
+                    self.analyze_expr(recv, ctx);
+                    self.analyze_expr(index, ctx);
+                }
+                value_ty
+            }
+
             ExprNode::Yield { args } => {
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                 // The block's return type isn't tracked through the

@@ -83,7 +83,8 @@ fn collect_var_reads(
             out.push((name.as_str().to_string(), *seq));
             *seq += 1;
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             walk_lvalue_collect(target, seq, out);
             collect_var_reads(value, seq, out);
         }
@@ -280,7 +281,8 @@ fn stamp_var_reads(
                 e.decisions |= CLONE_AT;
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             walk_lvalue_stamp(target, seq, counts, last_seq);
             stamp_var_reads(value, seq, counts, last_seq);
         }

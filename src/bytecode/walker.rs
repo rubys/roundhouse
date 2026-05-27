@@ -509,6 +509,7 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Case { .. } => "Case",
         ExprNode::Seq { .. } => "Seq",
         ExprNode::Assign { .. } => "Assign",
+        ExprNode::OpAssign { .. } => "OpAssign",
         ExprNode::Yield { .. } => "Yield",
         ExprNode::Raise { .. } => "Raise",
         ExprNode::RescueModifier { .. } => "RescueModifier",

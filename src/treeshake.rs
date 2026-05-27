@@ -261,7 +261,8 @@ where
             walk_sends(value, visit);
             walk_sends(body, visit);
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 walk_sends(recv, visit);
             }

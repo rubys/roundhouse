@@ -359,6 +359,309 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // ── Compound-assignment forms — `target op= value`. ──
+        //
+        // Six target shapes × three op categories (Or, And, Operator).
+        // Each lowers to `ExprNode::OpAssign { target, op, value }`,
+        // preserving short-circuit semantics for `||=` / `&&=`. See
+        // `OpAssignOp` for the per-target emit story.
+
+        // `x ||= y` — local var, short-circuit.
+        n if n.as_local_variable_or_write_node().is_some() => {
+            let w = n.as_local_variable_or_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        // `x &&= y` — local var, short-circuit.
+        n if n.as_local_variable_and_write_node().is_some() => {
+            let w = n.as_local_variable_and_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        // `x += y`, `x -= y`, etc. — local var, arithmetic/bitwise.
+        n if n.as_local_variable_operator_write_node().is_some() => {
+            let w = n.as_local_variable_operator_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                op,
+                value,
+            }
+        }
+        // `@x ||= y` — ivar, short-circuit (memoization idiom).
+        n if n.as_instance_variable_or_write_node().is_some() => {
+            let w = n.as_instance_variable_or_write_node().unwrap();
+            let raw = constant_id_str(&w.name());
+            let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Ivar { name },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_instance_variable_and_write_node().is_some() => {
+            let w = n.as_instance_variable_and_write_node().unwrap();
+            let raw = constant_id_str(&w.name());
+            let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Ivar { name },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_instance_variable_operator_write_node().is_some() => {
+            let w = n.as_instance_variable_operator_write_node().unwrap();
+            let raw = constant_id_str(&w.name());
+            let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Ivar { name },
+                op,
+                value,
+            }
+        }
+        // `self.x ||= y`, `obj.x ||= y` — attribute, short-circuit.
+        // Setter (`x=`) is suppressed when the read returns truthy —
+        // critical for Rails dirty-tracking fidelity.
+        n if n.as_call_or_write_node().is_some() => {
+            let w = n.as_call_or_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "CallOrWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let name = Symbol::from(constant_id_str(&w.read_name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Attr { recv, name },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_call_and_write_node().is_some() => {
+            let w = n.as_call_and_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "CallAndWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let name = Symbol::from(constant_id_str(&w.read_name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Attr { recv, name },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_call_operator_write_node().is_some() => {
+            let w = n.as_call_operator_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "CallOperatorWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let name = Symbol::from(constant_id_str(&w.read_name()));
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Attr { recv, name },
+                op,
+                value,
+            }
+        }
+        // `FOO ||= y`, `FOO &&= y`, `FOO += y` — constant compound writes.
+        n if n.as_constant_or_write_node().is_some() => {
+            let w = n.as_constant_or_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path: vec![name] },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_constant_and_write_node().is_some() => {
+            let w = n.as_constant_and_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path: vec![name] },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_constant_operator_write_node().is_some() => {
+            let w = n.as_constant_operator_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path: vec![name] },
+                op,
+                value,
+            }
+        }
+        n if n.as_constant_path_or_write_node().is_some() => {
+            let w = n.as_constant_path_or_write_node().unwrap();
+            let path = crate::ingest::util::constant_path_segments(&w.target());
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_constant_path_and_write_node().is_some() => {
+            let w = n.as_constant_path_and_write_node().unwrap();
+            let path = crate::ingest::util::constant_path_segments(&w.target());
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_constant_path_operator_write_node().is_some() => {
+            let w = n.as_constant_path_operator_write_node().unwrap();
+            let path = crate::ingest::util::constant_path_segments(&w.target());
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Const { path },
+                op,
+                value,
+            }
+        }
+        // `arr[i] ||= y` — index target, short-circuit. Receiver and
+        // index are evaluated once; setter (`[]=`) suppressed on truthy
+        // read.
+        n if n.as_index_or_write_node().is_some() => {
+            let w = n.as_index_or_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "IndexOrWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let index = ingest_index_argument(w.arguments(), file)?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Index { recv, index },
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+            }
+        }
+        n if n.as_index_and_write_node().is_some() => {
+            let w = n.as_index_and_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "IndexAndWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let index = ingest_index_argument(w.arguments(), file)?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Index { recv, index },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value,
+            }
+        }
+        n if n.as_index_operator_write_node().is_some() => {
+            let w = n.as_index_operator_write_node().unwrap();
+            let recv = match w.receiver() {
+                Some(r) => ingest_expr(&r, file)?,
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "IndexOperatorWriteNode without receiver".into(),
+                    });
+                }
+            };
+            let index = ingest_index_argument(w.arguments(), file)?;
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "unsupported compound-assignment operator: {}",
+                        constant_id_str(&w.binary_operator())
+                    ),
+                })?;
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Index { recv, index },
+                op,
+                value,
+            }
+        }
         // `unless cond; then; else alt; end` lowers to `if cond; alt; else then; end`
         // — same IR, swapped branches. Ruby's semantics match exactly.
         n if n.as_unless_node().is_some() => {
@@ -870,6 +1173,56 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
     };
     Ok(Expr::new(span, expr_node))
+}
+
+/// Map a Prism `binary_operator` symbol (`+`, `-`, `<<`, …) to the IR
+/// `OpAssignOp`. Returns `None` if the operator isn't one we model
+/// today — the caller reports `IngestError::Unsupported` so unknown
+/// op names surface explicitly rather than silently emitting wrong code.
+fn op_assign_op_from_binary(op: &str) -> Option<crate::expr::OpAssignOp> {
+    use crate::expr::OpAssignOp;
+    match op {
+        "+" => Some(OpAssignOp::Add),
+        "-" => Some(OpAssignOp::Sub),
+        "*" => Some(OpAssignOp::Mul),
+        "/" => Some(OpAssignOp::Div),
+        "%" => Some(OpAssignOp::Mod),
+        "**" => Some(OpAssignOp::Pow),
+        "&" => Some(OpAssignOp::BitAnd),
+        "|" => Some(OpAssignOp::BitOr),
+        "^" => Some(OpAssignOp::BitXor),
+        "<<" => Some(OpAssignOp::Shl),
+        ">>" => Some(OpAssignOp::Shr),
+        _ => None,
+    }
+}
+
+/// Extract the single index argument from a `[]`-shaped index node's
+/// arguments. The compound `arr[i] op= y` Prism nodes share this
+/// shape: arguments is `Some(ArgumentsNode)` with exactly one child
+/// (the index expression). Multi-dim indexing (`m[i, j]`) is out of
+/// scope; we report `Unsupported` if encountered.
+fn ingest_index_argument(
+    args: Option<ruby_prism::ArgumentsNode<'_>>,
+    file: &str,
+) -> IngestResult<Expr> {
+    let args = args.ok_or_else(|| IngestError::Unsupported {
+        file: file.into(),
+        message: "compound index-write missing argument".into(),
+    })?;
+    let arg_list = args.arguments();
+    let mut iter = arg_list.iter();
+    let first = iter.next().ok_or_else(|| IngestError::Unsupported {
+        file: file.into(),
+        message: "compound index-write argument list is empty".into(),
+    })?;
+    if iter.next().is_some() {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "compound index-write with multi-dim index not yet supported".into(),
+        });
+    }
+    ingest_expr(&first, file)
 }
 
 /// Parse a Ruby source program (possibly multiple top-level statements)

@@ -2266,14 +2266,16 @@ fn collect_ivar_assignments(
 ) {
     use crate::expr::{ExprNode, InterpPart, LValue};
     match &*e.node {
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+        ExprNode::Assign { target: LValue::Ivar { name }, value }
+        | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
             // Type from the RHS, falling back to `any` (Ty::Untyped)
             // when the analyzer didn't infer one.
             let ty = value.ty.clone().unwrap_or(Ty::Untyped);
             out.insert(name.as_str().to_string(), ty);
             collect_ivar_assignments(value, out);
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 collect_ivar_assignments(recv, out);
             }

@@ -1174,13 +1174,15 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
 fn collect_ivar_assignment_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
     use crate::expr::LValue;
     match &*e.node {
-        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+        ExprNode::Assign { target: LValue::Ivar { .. }, value }
+        | ExprNode::OpAssign { target: LValue::Ivar { .. }, value, .. } => {
             if let Some(ty) = &value.ty {
                 collect_ty_class_refs(ty, out);
             }
             collect_ivar_assignment_class_refs(value, out);
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 collect_ivar_assignment_class_refs(recv, out);
             }
@@ -1342,7 +1344,8 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_class_refs(e, out);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
                 collect_class_refs(recv, out);
             }
@@ -1467,6 +1470,22 @@ pub(super) fn rewrite_for_free_function(e: &Expr) -> Expr {
     rewrite_free(e)
 }
 
+fn rewrite_lvalue_free(target: &LValue) -> LValue {
+    match target {
+        LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+        LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+        LValue::Attr { recv, name } => LValue::Attr {
+            recv: rewrite_free(recv),
+            name: name.clone(),
+        },
+        LValue::Index { recv, index } => LValue::Index {
+            recv: rewrite_free(recv),
+            index: rewrite_free(index),
+        },
+        LValue::Const { path } => LValue::Const { path: path.clone() },
+    }
+}
+
 fn rewrite_free(e: &Expr) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
@@ -1516,20 +1535,16 @@ fn rewrite_free(e: &Expr) -> Expr {
             block_style: *block_style,
         },
         ExprNode::Assign { target, value } => {
-            let new_target = match target {
-                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
-                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
-                LValue::Attr { recv, name } => LValue::Attr {
-                    recv: rewrite_free(recv),
-                    name: name.clone(),
-                },
-                LValue::Index { recv, index } => LValue::Index {
-                    recv: rewrite_free(recv),
-                    index: rewrite_free(index),
-                },
-                LValue::Const { path } => LValue::Const { path: path.clone() },
-            };
+            let new_target = rewrite_lvalue_free(target);
             ExprNode::Assign { target: new_target, value: rewrite_free(value) }
+        }
+        ExprNode::OpAssign { target, op, value } => {
+            let new_target = rewrite_lvalue_free(target);
+            ExprNode::OpAssign {
+                target: new_target,
+                op: *op,
+                value: rewrite_free(value),
+            }
         }
         ExprNode::Yield { args } => ExprNode::Yield {
             args: args.iter().map(rewrite_free).collect(),
@@ -1619,6 +1634,22 @@ fn is_kernel_call(method: &str) -> bool {
         "raise" | "puts" | "print" | "p" | "pp"
             | "require" | "require_relative" | "load" | "autoload",
     )
+}
+
+fn rewrite_lvalue_super(target: &LValue, super_method: Option<&str>) -> LValue {
+    match target {
+        LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+        LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
+        LValue::Attr { recv, name } => LValue::Attr {
+            recv: rewrite(recv, super_method),
+            name: name.clone(),
+        },
+        LValue::Index { recv, index } => LValue::Index {
+            recv: rewrite(recv, super_method),
+            index: rewrite(index, super_method),
+        },
+        LValue::Const { path } => LValue::Const { path: path.clone() },
+    }
 }
 
 fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
@@ -1733,21 +1764,17 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
             block: block.as_ref().map(|b| rewrite(b, super_method)),
         },
         ExprNode::Assign { target, value } => {
-            let new_target = match target {
-                LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
-                LValue::Ivar { name } => LValue::Ivar { name: name.clone() },
-                LValue::Attr { recv, name } => LValue::Attr {
-                    recv: rewrite(recv, super_method),
-                    name: name.clone(),
-                },
-                LValue::Index { recv, index } => LValue::Index {
-                    recv: rewrite(recv, super_method),
-                    index: rewrite(index, super_method),
-                },
-                LValue::Const { path } => LValue::Const { path: path.clone() },
-            };
+            let new_target = rewrite_lvalue_super(target, super_method);
             ExprNode::Assign {
                 target: new_target,
+                value: rewrite(value, super_method),
+            }
+        }
+        ExprNode::OpAssign { target, op, value } => {
+            let new_target = rewrite_lvalue_super(target, super_method);
+            ExprNode::OpAssign {
+                target: new_target,
+                op: *op,
                 value: rewrite(value, super_method),
             }
         }

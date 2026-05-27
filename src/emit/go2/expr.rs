@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::expr::{Expr, ExprNode, IrHint, Literal};
+use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, Literal};
 use crate::ty::Ty;
 
 // Reused verbatim from legacy go until go2 needs its own dispatch.
@@ -229,6 +229,17 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         // only the rhs, which loses the binding. go2 needs the real
         // assignment so subsequent statements can refer to `x`.
         ExprNode::Assign { target, value } => emit_assign(ctx, target, value),
+        // Go has native `+=`, `-=`, etc. but no `||=`/`&&=`. Desugar
+        // to existing IR forms (`target = target op value` for
+        // arithmetic; conditional Assign for short-circuit) and let
+        // the existing emit machinery render. The Rails dirty-tracking
+        // concern that motivated the IR variant is Ruby-runtime
+        // specific — Go has no equivalent, so the desugar is faithful
+        // for this target.
+        ExprNode::OpAssign { target, op, value } => {
+            let desugared = desugar_op_assign(target, *op, value, e.span);
+            emit_expr(ctx, &desugared)
+        }
         // Ruby `return X` — emits as a Go return statement. In Ruby
         // this is technically an Expr (type `Never`), so it can
         // appear in value position; the body-position walker

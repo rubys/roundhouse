@@ -126,7 +126,8 @@ fn walk_children(e: &mut Expr) {
                 walk(x, false);
             }
         }
-        ExprNode::Assign { target, value } => {
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
             walk_lvalue(target);
             walk(value, false);
         }

@@ -265,6 +265,17 @@ pub enum ExprNode {
     Case { scrutinee: Expr, arms: Vec<Arm> },
     Seq { exprs: Vec<Expr> },
     Assign { target: LValue, value: Expr },
+    /// Compound assignment: `target ||= value`, `target += value`, etc.
+    /// Distinct from `Assign` because the short-circuit forms (`OrOr`,
+    /// `AndAnd`) only fire the setter when the read returns
+    /// falsy/truthy — naive desugar `target = target || value` ALWAYS
+    /// writes, which triggers Rails dirty-tracking (`*_will_change!`)
+    /// on no-op writes and widens narrowed types in typed targets.
+    /// Carrying the op explicitly lets each emitter pick the faithful
+    /// form: `||=` in Ruby/Crystal, `??=` in TS, conditional in others.
+    /// Arithmetic ops have no short-circuit so emitters may desugar
+    /// freely, but the IR shape preserves source intent.
+    OpAssign { target: LValue, op: OpAssignOp, value: Expr },
     Yield { args: Vec<Expr> },
     Raise { value: Expr },
     /// Trailing `rescue` modifier: `expr rescue fallback`. Semantically
@@ -409,4 +420,172 @@ pub enum LValue {
     /// fully-qualified path; lowerers/emitters resolve to the
     /// containing class as needed.
     Const { path: Vec<Symbol> },
+}
+
+/// Compound-assignment operator carried by `ExprNode::OpAssign`. The
+/// short-circuit forms (`OrOr`, `AndAnd`) are semantically distinct
+/// from the arithmetic forms because they suppress the write when the
+/// read's truthiness already matches; the arithmetic forms always
+/// read-compute-write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpAssignOp {
+    /// `||=` — assign only if the target reads as nil/false. Setter
+    /// (for Attr/Index targets) is suppressed on truthy reads.
+    OrOr,
+    /// `&&=` — assign only if the target reads as truthy.
+    AndAnd,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+impl OpAssignOp {
+    /// Render the operator as it appears in Ruby source. Used by the
+    /// Ruby/Crystal/Spinel emitters for native `target op= value` emit.
+    pub fn as_ruby(self) -> &'static str {
+        match self {
+            OpAssignOp::OrOr => "||=",
+            OpAssignOp::AndAnd => "&&=",
+            OpAssignOp::Add => "+=",
+            OpAssignOp::Sub => "-=",
+            OpAssignOp::Mul => "*=",
+            OpAssignOp::Div => "/=",
+            OpAssignOp::Mod => "%=",
+            OpAssignOp::Pow => "**=",
+            OpAssignOp::BitAnd => "&=",
+            OpAssignOp::BitOr => "|=",
+            OpAssignOp::BitXor => "^=",
+            OpAssignOp::Shl => "<<=",
+            OpAssignOp::Shr => ">>=",
+        }
+    }
+
+    /// The binary operator that the arithmetic forms desugar to (for
+    /// emitters that lack native compound assignment). Returns `None`
+    /// for the short-circuit forms — those have no binary-operator
+    /// equivalent that preserves write-suppression semantics.
+    pub fn binary_op(self) -> Option<&'static str> {
+        match self {
+            OpAssignOp::OrOr | OpAssignOp::AndAnd => None,
+            OpAssignOp::Add => Some("+"),
+            OpAssignOp::Sub => Some("-"),
+            OpAssignOp::Mul => Some("*"),
+            OpAssignOp::Div => Some("/"),
+            OpAssignOp::Mod => Some("%"),
+            OpAssignOp::Pow => Some("**"),
+            OpAssignOp::BitAnd => Some("&"),
+            OpAssignOp::BitOr => Some("|"),
+            OpAssignOp::BitXor => Some("^"),
+            OpAssignOp::Shl => Some("<<"),
+            OpAssignOp::Shr => Some(">>"),
+        }
+    }
+}
+
+/// Desugar an `OpAssign` to the equivalent existing-IR shape. Used by
+/// emitters that lack native compound assignment (Go, Python, Elixir,
+/// Rust2 for non-trivial cases). Arithmetic ops produce
+/// `Assign(target, BinOp(target_read, op, value))`. Short-circuit ops
+/// produce `If(target_read, target_read, Assign(target, value))` for
+/// `||=` and the swapped form for `&&=`.
+///
+/// Note on fidelity: the desugared form re-evaluates the target's
+/// read side, which is observable for Attr/Index targets with setter
+/// side-effects (Rails dirty-tracking, ORM callbacks). Emitters that
+/// care about that fidelity — Ruby, Crystal, Spinel — render
+/// `target op= value` natively instead of calling this. Targets where
+/// dirty-tracking doesn't apply (Go/Python/etc.) can desugar freely.
+pub fn desugar_op_assign(
+    target: &LValue,
+    op: OpAssignOp,
+    value: &Expr,
+    span: crate::span::Span,
+) -> Expr {
+    // Build a read of the target as an Expr, so it can appear on both
+    // sides of the desugared form.
+    let target_read = match target {
+        LValue::Var { id, name } => Expr::new(span, ExprNode::Var { id: *id, name: name.clone() }),
+        LValue::Ivar { name } => Expr::new(span, ExprNode::Ivar { name: name.clone() }),
+        LValue::Attr { recv, name } => Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(recv.clone()),
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        LValue::Index { recv, index } => Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(recv.clone()),
+                method: Symbol::from("[]"),
+                args: vec![index.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        LValue::Const { path } => Expr::new(span, ExprNode::Const { path: path.clone() }),
+    };
+    match op {
+        OpAssignOp::OrOr | OpAssignOp::AndAnd => {
+            // `target ||= value` → `target || (target = value)` — but
+            // the IR has If, not BoolOp-with-Assign-on-the-right; use
+            // If so the assignment is statement-shaped (matters for
+            // emitters that distinguish expression vs statement). For
+            // `||=`: if target is truthy, evaluate to target; else,
+            // assign value and evaluate to that. For `&&=`: opposite.
+            let assign = Expr::new(
+                span,
+                ExprNode::Assign { target: target.clone(), value: value.clone() },
+            );
+            let (then_branch, else_branch) = if matches!(op, OpAssignOp::OrOr) {
+                (target_read.clone(), assign)
+            } else {
+                (assign, target_read.clone())
+            };
+            let mut e = Expr::new(
+                span,
+                ExprNode::If {
+                    cond: target_read,
+                    then_branch,
+                    else_branch,
+                },
+            );
+            e.ty = value.ty.clone();
+            e
+        }
+        _ => {
+            // Arithmetic / bitwise: `target += value` →
+            // `target = target + value`. The BinOp is a Send with the
+            // binary-op string as the method name.
+            let binop_name = op
+                .binary_op()
+                .expect("arithmetic OpAssignOp has a binary_op");
+            let combined = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(target_read),
+                    method: Symbol::from(binop_name),
+                    args: vec![value.clone()],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            Expr::new(
+                span,
+                ExprNode::Assign { target: target.clone(), value: combined },
+            )
+        }
+    }
 }
