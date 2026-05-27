@@ -99,7 +99,7 @@ fn render_params(m: &MethodDef) -> String {
         _ => (None, None),
     };
 
-    if m.params.is_empty() && block_param.is_none() {
+    if m.params.is_empty() && block_param.is_none() && m.block_param.is_none() {
         return "()".to_string();
     }
 
@@ -130,9 +130,29 @@ fn render_params(m: &MethodDef) -> String {
     // the permissive fallback path.
     if let Some(bp) = block_param {
         parts.push(render_block_closure_param(&bp.ty));
+    } else if m.block_param.is_some() {
+        // RBS didn't supply a block signature, but the def-site
+        // declared `&block` (carried in `MethodDef.block_param`).
+        // Emit a heap-closure placeholder — `Box<dyn FnOnce>` is the
+        // ABI-stable shape that forwarding (stage 2: `ExprNode::ProcRef`)
+        // needs to cross method boundaries; `impl FnOnce` here would
+        // break the monomorphic gradient when a callee forwards the
+        // block to another method without itself being generic.
+        // Placeholder signature is zero-arg, unit-return; analyzer
+        // back-prop (stage 3) will refine to match yield arity at
+        // the body's `f(args)` sites.
+        parts.push(render_block_param_placeholder());
     }
 
     format!("({})", parts.join(", "))
+}
+
+/// Heap-closure placeholder rendered when the def-site declares
+/// `&block` (via `MethodDef.block_param`) but no RBS signature
+/// specifies the block's call shape. Permissive zero-arg, unit-return
+/// — refinement to actual yield arity is stage-3 analyzer work.
+fn render_block_param_placeholder() -> String {
+    "f: Box<dyn FnOnce()>".to_string()
 }
 
 /// Render the `f: impl FnOnce(...) -> R` parameter that backs `yield`
@@ -353,7 +373,16 @@ pub(super) fn emit_instance_method(
     // to `Ty::Untyped` — until that improves, body-derived
     // inference is the only signal. HWIA's `each` body yields
     // `(k: String, v: serde_json::Value)`, which is what we want.
-    let block_param = find_yield_signature(&m.body).map(render_block_param_from_args);
+    //
+    // Fallback: when there's no yield but the def-site declared
+    // `&block` (carried in `MethodDef.block_param`), emit a
+    // `Box<dyn FnOnce>` placeholder. Heap-closure shape because
+    // forwarding (stage 2: `ExprNode::ProcRef`) needs an ABI-stable
+    // type that crosses method boundaries; analyzer back-prop
+    // (stage 3) will refine the signature.
+    let block_param = find_yield_signature(&m.body)
+        .map(render_block_param_from_args)
+        .or_else(|| m.block_param.as_ref().map(|_| render_block_param_placeholder()));
     let params = render_instance_params(m, receiver, block_param.as_deref());
     let ret_clause = if is_init {
         " -> Self".to_string()
@@ -701,4 +730,91 @@ fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
 fn render_block_param_from_args(arg_tys: Vec<Ty>) -> String {
     let ps: Vec<String> = arg_tys.iter().map(rust_param_ty).collect();
     format!("mut f: impl FnMut({})", ps.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
+    use crate::effect::EffectSet;
+    use crate::emit::rust2::EmitCtx;
+    use crate::emit::rust2::expr::with_emit_ctx;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+
+    fn empty_body() -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] })
+    }
+
+    fn base_module_method(name: &str) -> MethodDef {
+        MethodDef {
+            name: Symbol::from(name),
+            receiver: MethodReceiver::Class,
+            params: vec![],
+            body: empty_body(),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        }
+    }
+
+    #[test]
+    fn module_method_with_block_param_emits_box_fnonce_placeholder() {
+        let mut m = base_module_method("foo");
+        m.block_param = Some(Param::positional(Symbol::from("blk")));
+        let emitted = with_emit_ctx(EmitCtx::default(), || emit_module_method(&m)).expect("emit");
+        assert!(
+            emitted.contains("f: Box<dyn FnOnce()>"),
+            "expected Box<dyn FnOnce()> placeholder for &block-declaring method, got:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn module_method_without_block_param_unchanged() {
+        let m = base_module_method("bar");
+        let emitted = with_emit_ctx(EmitCtx::default(), || emit_module_method(&m)).expect("emit");
+        assert!(
+            !emitted.contains("FnOnce") && !emitted.contains("FnMut"),
+            "method without block_param should not gain a closure param, got:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("pub fn bar()"),
+            "expected zero-param signature, got:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn instance_method_with_block_param_no_yield_emits_placeholder() {
+        let m = MethodDef {
+            name: Symbol::from("baz"),
+            receiver: MethodReceiver::Instance,
+            params: vec![],
+            body: empty_body(),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: Some(Param::positional(Symbol::from("blk"))),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_instance_method(&m, false, false, "Dummy", &[])
+        })
+        .expect("emit");
+        assert!(
+            emitted.contains("f: Box<dyn FnOnce()>"),
+            "expected Box<dyn FnOnce()> placeholder, got:\n{emitted}"
+        );
+        // Body has no yield, so the FnMut path must NOT trigger.
+        assert!(
+            !emitted.contains("FnMut"),
+            "FnMut path should not trigger for yield-less body, got:\n{emitted}"
+        );
+    }
 }
