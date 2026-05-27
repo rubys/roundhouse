@@ -1,28 +1,30 @@
-//! `EmitCtx` — explicit context object for rust2 emit pipeline globals
-//! and per-class scope state.
+//! `EmitCtx` — explicit context object for rust2 emit state.
 //!
-//! Phase 1 of the EmitCtx refactor bundled the two cross-LC class-method
-//! registries (`GLOBAL_CLASS_METHODS` + `GLOBAL_CLASS_METHOD_DEFAULTS`).
-//! Phase 2 (this revision) lifts the four per-class thread-locals —
-//! `IVAR_TYPES`, `CLASS_METHOD_PARAM_TYS`, `STATIC_METHODS`,
-//! `CONSTRUCTOR_FIELDS` — onto the same struct as `RefCell` fields.
+//! Phase 1 bundled the two cross-LC class-method registries
+//! (`GLOBAL_CLASS_METHODS` + `GLOBAL_CLASS_METHOD_DEFAULTS`).
+//! Phase 2 lifted four per-class thread-locals (`IVAR_TYPES`,
+//! `CLASS_METHOD_PARAM_TYS`, `STATIC_METHODS`, `CONSTRUCTOR_FIELDS`).
+//! Phase 3 (this revision) lifts the seven per-method thread-locals —
+//! `MUT_VARS`, `DECLARED_VARS`, `BACK_PROPAGATED_HASH_LOCALS`,
+//! `PARAM_TYPES`, `LOCAL_VAR_TYPES`, `REBOUND_VARS`,
+//! `CURRENT_RETURN_TY` — onto the same struct as `RefCell` fields.
 //!
 //! Storage shape unchanged: `expr/mod.rs::EMIT_CTX` holds an
 //! `Option<Rc<EmitCtx>>`; the existing accessor functions read through
-//! it; the `with_X<F>(...)` wrappers now swap field values on the
-//! installed `EmitCtx` via save-restore rather than on a dedicated
-//! per-field thread-local.
+//! it; the `with_X<F>(...)` wrappers swap field values on the
+//! installed `EmitCtx` via save-restore rather than on dedicated
+//! per-field thread-locals.
 //!
 //! Why bundle: the registries are exactly what #22's Stage 4
 //! (`OPTION_WRAP` + `COERCE_FAMILY`) decide walker needs for callee
 //! param-Ty lookup. Without `EmitCtx`, state sat behind a sprawl of
 //! parallel thread-locals invisible to non-emit consumers. With
 //! `EmitCtx`, downstream decide-pass work takes `&EmitCtx` as an
-//! explicit parameter and the per-class state is reachable from
-//! anywhere holding an `Rc<EmitCtx>`.
+//! explicit parameter and the per-class / per-method state is
+//! reachable from anywhere holding an `Rc<EmitCtx>`.
 //!
-//! Phases 3 and 4 (per-method state and the transient render flags)
-//! follow the same pattern; each is its own commit.
+//! Phase 4 (the five transient `Cell<bool>` render flags) is the only
+//! thread-local residue left after this commit.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -90,6 +92,64 @@ pub struct EmitCtx {
     /// the constructor early-exits with bare `return` and the type
     /// system rejects.
     pub constructor_fields: RefCell<Vec<String>>,
+
+    /// Variable names that the current method body assigns more than
+    /// once. Pre-computed by `with_method_scope` (a one-shot walker
+    /// counts `Assign LValue::Var` sites + Var-Send-receiver uses).
+    /// First-assignment site emits `let mut name = expr`; later sites
+    /// emit plain `name = expr` (rebind, no shadow). Single-assignment
+    /// locals stay immutable: `let name = expr`. Without this, Ruby
+    /// `i = 0; while ...; i += 1; end` would shadow `i` inside the
+    /// loop and loop forever.
+    pub mut_vars: RefCell<HashSet<String>>,
+
+    /// Variable names the current method body has already emitted a
+    /// `let` binding for. Subsequent `Assign LValue::Var` sites for
+    /// the same name rebind without re-declaring. Scoped per-branch
+    /// by `with_declared_vars_scope` so an `If` branch's locals don't
+    /// leak into the sibling branch or out past the `If`.
+    pub declared_vars: RefCell<HashSet<String>>,
+
+    /// Variable names whose `local_var_ty` was set from the back-
+    /// propagated function-return type (`empty_hash_return_ty`), not
+    /// from the value's body-typer `Ty`. The Send `[]=` peephole uses
+    /// this to know the recorded type is authoritative — for body-
+    /// typer-derived `r.ty` the storage may disagree (e.g. `Hash<Sym,
+    /// Str>` in IR but `HashMap<&str, String>` in emit).
+    pub back_propagated_hash_locals: RefCell<HashSet<String>>,
+
+    /// Parameter name → declared RBS type for the enclosing method,
+    /// set by `method.rs` around each method-body emit. The body-typer
+    /// doesn't always propagate the param's Option-ness to Var reads,
+    /// so `emit_assign`'s String coercion needs this side channel to
+    /// avoid `.to_string()`-ing an `Option<String>`-typed param
+    /// reference (which fails Display).
+    pub param_types: RefCell<HashMap<String, Ty>>,
+
+    /// Per-Seq tracking of local-var declared types. Populated by
+    /// `Assign { LValue::Var, value }` sites with known `value.ty`.
+    /// Read by the narrowing-aware Var emit so a local `params =
+    /// match_pattern(...)` (Option<HashMap>) participates in the same
+    /// narrowing+unwrap dance as an Option-typed function param.
+    /// Snapshot-restored by `with_rebound_vars_scope` alongside
+    /// `rebound_vars`.
+    pub local_var_types: RefCell<HashMap<String, Ty>>,
+
+    /// Names of locals that the Seq emit has rebound to their
+    /// unwrapped shape via `let Some(x) = x else { ... };` (see
+    /// `try_fuse_let_else` / `try_emit_param_guard_unwrap`).
+    /// Subsequent Var reads of these names must NOT re-apply the
+    /// narrowing-write-back `.clone().unwrap()` — the let-Some
+    /// already produced an owned T.
+    pub rebound_vars: RefCell<HashSet<String>>,
+
+    /// Declared return type of the enclosing method, set by
+    /// `method.rs` around each method-body emit. `None` outside a
+    /// method body. `emit_expr` consults it for `return nil` lowering:
+    /// when the method returns `Option<T>`, a bare Ruby `return nil`
+    /// must emit `return None` rather than just `return` (E0069 in
+    /// non-unit-returning functions).
+    pub current_return_ty: RefCell<Option<Ty>>,
 }
 
 impl EmitCtx {

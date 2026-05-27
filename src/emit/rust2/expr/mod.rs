@@ -58,37 +58,10 @@ thread_local! {
     // The `with_static_methods` / `with_constructor_mode` wrappers
     // swap field values on the installed `EmitCtx` via save-restore.
 
-    /// Variable names that the current method body assigns more
-    /// than once. Pre-computed by `with_method_scope` and consulted
-    /// by `emit_assign`. First-assignment site emits `let mut name =
-    /// expr` (mutable binding); later sites emit plain `name = expr`
-    /// (rebind, no shadow). Single-assignment locals stay
-    /// immutable: `let name = expr`. Without this, Ruby `i = 0;
-    /// while ...; i += 1; end` translated naively shadows `i`
-    /// inside the loop and loops forever.
-    ///
-    /// Keyed on name (Symbol) rather than VarId — the body-typer's
-    /// `VarId` is not unique per local in the runtime IR (locals
-    /// within a method share `VarId(0)` until a true scope pass
-    /// lands). Name-based tracking works because `with_method_scope`
-    /// resets the set per method, so cross-method name collisions
-    /// don't matter.
-    static MUT_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-    /// Variable names the current method body has already emitted a
-    /// `let` binding for. Subsequent `Assign LValue::Var` sites for
-    /// the same name rebind without re-declaring.
-    static DECLARED_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-
-    /// Variable names whose `local_var_ty` was set from the
-    /// back-propagated function-return type (`empty_hash_return_ty`),
-    /// not from the value's body-typer `Ty`. The Send `[]=` peephole
-    /// uses this to know the recorded type is authoritative — for
-    /// body-typer-derived `r.ty` the storage may disagree (e.g.
-    /// `Hash<Sym, Str>` in IR but `HashMap<&str, String>` in emit).
-    static BACK_PROPAGATED_HASH_LOCALS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+    // `MUT_VARS` / `DECLARED_VARS` / `BACK_PROPAGATED_HASH_LOCALS`
+    // (Phase 3 of #24) now live on `EmitCtx::mut_vars` /
+    // `declared_vars` / `back_propagated_hash_locals`.
+    // `with_method_scope` swaps all three via save-restore.
 
     // `CLASS_METHOD_PARAM_TYS` (Phase 2 of #24) now lives on
     // `EmitCtx::class_method_param_tys`. `with_class_method_param_tys`
@@ -136,79 +109,48 @@ thread_local! {
     static IN_MODULE_SINGLETON: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 
-    /// Declared return type of the enclosing method, set by
-    /// `method.rs` around each method-body emit. `None` outside a
-    /// method body. `emit_expr` consults it for `return nil` lowering:
-    /// when the method returns `Option<T>`, a bare Ruby `return nil`
-    /// must emit `return None` rather than just `return` (which is
-    /// E0069 in non-Unit-returning functions).
-    static CURRENT_RETURN_TY: std::cell::RefCell<Option<crate::ty::Ty>> =
-        std::cell::RefCell::new(None);
-
-    /// Parameter name → declared RBS type for the enclosing method,
-    /// set by `method.rs` around each method-body emit. The body-typer
-    /// doesn't always propagate the param's Option-ness to Var reads,
-    /// so `emit_assign`'s String coercion needs this side channel to
-    /// avoid adding `.to_string()` to an `Option<String>`-typed param
-    /// reference (which fails Display). Empty outside method body.
-    static PARAM_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-
-    /// Names of locals that the Seq emit has rebound to their unwrapped
-    /// shape via `let Some(x) = x else { ... };` (see
-    /// `try_fuse_let_else` / `try_emit_param_guard_unwrap`). Subsequent
-    /// Var reads of these names must NOT re-apply the narrowing-write-
-    /// back `.clone().unwrap()` — the let-Some already produced an
-    /// owned T. Without this scope, json_builder.rs::encode_datetime
-    /// double-unwraps `s` and yields `s.clone().unwrap()` on a String.
-    static REBOUND_VARS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-
-    /// Per-Seq tracking of local-var declared types. Populated by
-    /// `Assign { LValue::Var, value }` sites with `value.ty` known.
-    /// Read by the narrowing-aware Var emit so a local `params =
-    /// match_pattern(...)` (Option<HashMap>) participates in the same
-    /// narrowing+unwrap dance as an Option-typed function param —
-    /// `unless params.nil?; ...; params; end` then emits a single
-    /// `.clone().unwrap()` at the use site, matching the body-typer's
-    /// narrowing. Snapshot-restored alongside REBOUND_VARS by the
-    /// Seq emit's scope wrapper.
-    static LOCAL_VAR_TYPES: std::cell::RefCell<std::collections::HashMap<String, crate::ty::Ty>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    // `CURRENT_RETURN_TY` / `PARAM_TYPES` / `REBOUND_VARS` /
+    // `LOCAL_VAR_TYPES` (Phase 3 of #24) now live on
+    // `EmitCtx::current_return_ty` / `param_types` / `rebound_vars` /
+    // `local_var_types`. `with_current_return_ty`,
+    // `with_param_types`, `with_rebound_vars_scope`, and the
+    // `mark_*` / `*_ty` accessors swap or read field values via the
+    // installed `EmitCtx`.
 }
 
 pub(super) fn with_param_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = PARAM_TYPES.with(|c| c.replace(types));
+    let ctx = current_emit_ctx().expect("with_param_types called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.param_types.borrow_mut(), types);
     let r = f();
-    PARAM_TYPES.with(|c| *c.borrow_mut() = prev);
+    *ctx.param_types.borrow_mut() = prev;
     r
 }
 
 pub(super) fn param_ty(name: &str) -> Option<crate::ty::Ty> {
-    PARAM_TYPES.with(|c| c.borrow().get(name).cloned())
+    current_emit_ctx().and_then(|ctx| ctx.param_types.borrow().get(name).cloned())
 }
 
 fn is_rebound_var(name: &str) -> bool {
-    REBOUND_VARS.with(|c| c.borrow().contains(name))
+    current_emit_ctx()
+        .map(|ctx| ctx.rebound_vars.borrow().contains(name))
+        .unwrap_or(false)
 }
 
 pub(super) fn mark_rebound_var(name: &str) {
-    REBOUND_VARS.with(|c| {
-        c.borrow_mut().insert(name.to_string());
-    });
+    let ctx = current_emit_ctx().expect("mark_rebound_var called outside with_emit_ctx");
+    ctx.rebound_vars.borrow_mut().insert(name.to_string());
 }
 
 pub(super) fn local_var_ty(name: &str) -> Option<crate::ty::Ty> {
-    LOCAL_VAR_TYPES.with(|c| c.borrow().get(name).cloned())
+    current_emit_ctx().and_then(|ctx| ctx.local_var_types.borrow().get(name).cloned())
 }
 
 pub(super) fn mark_local_var_ty(name: &str, ty: crate::ty::Ty) {
-    LOCAL_VAR_TYPES.with(|c| {
-        c.borrow_mut().insert(name.to_string(), ty);
-    });
+    let ctx = current_emit_ctx().expect("mark_local_var_ty called outside with_emit_ctx");
+    ctx.local_var_types.borrow_mut().insert(name.to_string(), ty);
 }
 
 /// Lookup a Var's declared type. Returns the function param's declared
@@ -260,11 +202,12 @@ pub(super) fn with_rebound_vars_scope<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev_rebound = REBOUND_VARS.with(|c| c.borrow().clone());
-    let prev_locals = LOCAL_VAR_TYPES.with(|c| c.borrow().clone());
+    let ctx = current_emit_ctx().expect("with_rebound_vars_scope called outside with_emit_ctx");
+    let prev_rebound = ctx.rebound_vars.borrow().clone();
+    let prev_locals = ctx.local_var_types.borrow().clone();
     let r = f();
-    REBOUND_VARS.with(|c| *c.borrow_mut() = prev_rebound);
-    LOCAL_VAR_TYPES.with(|c| *c.borrow_mut() = prev_locals);
+    *ctx.rebound_vars.borrow_mut() = prev_rebound;
+    *ctx.local_var_types.borrow_mut() = prev_locals;
     r
 }
 
@@ -272,19 +215,22 @@ pub(super) fn with_current_return_ty<F, R>(ty: Option<crate::ty::Ty>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = CURRENT_RETURN_TY.with(|c| c.replace(ty));
+    let ctx = current_emit_ctx().expect("with_current_return_ty called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.current_return_ty.borrow_mut(), ty);
     let r = f();
-    CURRENT_RETURN_TY.with(|c| *c.borrow_mut() = prev);
+    *ctx.current_return_ty.borrow_mut() = prev;
     r
 }
 
 pub(super) fn current_return_is_option() -> bool {
-    CURRENT_RETURN_TY.with(|c| {
-        matches!(
-            c.borrow().as_ref(),
-            Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-        )
-    })
+    current_emit_ctx()
+        .map(|ctx| {
+            matches!(
+                ctx.current_return_ty.borrow().as_ref(),
+                Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// True when the enclosing function returns unit (`()` — declared
@@ -293,7 +239,9 @@ pub(super) fn current_return_is_option() -> bool {
 /// NOT as `None` (which is the Option::None constructor and would
 /// produce an E0308 in a void function context).
 pub(super) fn current_return_is_unit() -> bool {
-    CURRENT_RETURN_TY.with(|c| matches!(c.borrow().as_ref(), Some(crate::ty::Ty::Nil)))
+    current_emit_ctx()
+        .map(|ctx| matches!(ctx.current_return_ty.borrow().as_ref(), Some(crate::ty::Ty::Nil)))
+        .unwrap_or(false)
 }
 
 /// Run `f` with the module-singleton emit mode active. Used by
@@ -388,15 +336,20 @@ where
     // `decide::last_use::stamp` — it stamps `CLONE_AT` per Var read
     // node, replacing the per-method `CLONE_VARS` thread-local set
     // that used to live here. See Stage 3 of #22.
-    let prev_mut = MUT_VARS.with(|c| c.replace(mut_vars));
-    let prev_declared =
-        DECLARED_VARS.with(|c| c.replace(std::collections::HashSet::new()));
-    let prev_back_prop = BACK_PROPAGATED_HASH_LOCALS
-        .with(|c| c.replace(std::collections::HashSet::new()));
+    let ctx = current_emit_ctx().expect("with_method_scope called outside with_emit_ctx");
+    let prev_mut = std::mem::replace(&mut *ctx.mut_vars.borrow_mut(), mut_vars);
+    let prev_declared = std::mem::replace(
+        &mut *ctx.declared_vars.borrow_mut(),
+        std::collections::HashSet::new(),
+    );
+    let prev_back_prop = std::mem::replace(
+        &mut *ctx.back_propagated_hash_locals.borrow_mut(),
+        std::collections::HashSet::new(),
+    );
     let r = f();
-    MUT_VARS.with(|c| *c.borrow_mut() = prev_mut);
-    DECLARED_VARS.with(|c| *c.borrow_mut() = prev_declared);
-    BACK_PROPAGATED_HASH_LOCALS.with(|c| *c.borrow_mut() = prev_back_prop);
+    *ctx.mut_vars.borrow_mut() = prev_mut;
+    *ctx.declared_vars.borrow_mut() = prev_declared;
+    *ctx.back_propagated_hash_locals.borrow_mut() = prev_back_prop;
     r
 }
 
@@ -700,31 +653,35 @@ where
 }
 
 pub(super) fn current_return_ty() -> Option<crate::ty::Ty> {
-    CURRENT_RETURN_TY.with(|c| c.borrow().clone())
+    current_emit_ctx().and_then(|ctx| ctx.current_return_ty.borrow().clone())
 }
 
 pub(super) fn is_declared_var(name: &str) -> bool {
-    DECLARED_VARS.with(|c| c.borrow().contains(name))
+    current_emit_ctx()
+        .map(|ctx| ctx.declared_vars.borrow().contains(name))
+        .unwrap_or(false)
 }
 
 pub(super) fn declare_var(name: String) {
-    DECLARED_VARS.with(|c| {
-        c.borrow_mut().insert(name);
-    });
+    let ctx = current_emit_ctx().expect("declare_var called outside with_emit_ctx");
+    ctx.declared_vars.borrow_mut().insert(name);
 }
 
 pub(super) fn is_mut_var(name: &str) -> bool {
-    MUT_VARS.with(|c| c.borrow().contains(name))
+    current_emit_ctx()
+        .map(|ctx| ctx.mut_vars.borrow().contains(name))
+        .unwrap_or(false)
 }
 
 pub(super) fn record_back_propagated_hash(name: String) {
-    BACK_PROPAGATED_HASH_LOCALS.with(|c| {
-        c.borrow_mut().insert(name);
-    });
+    let ctx = current_emit_ctx().expect("record_back_propagated_hash called outside with_emit_ctx");
+    ctx.back_propagated_hash_locals.borrow_mut().insert(name);
 }
 
 pub(super) fn is_back_propagated_hash(name: &str) -> bool {
-    BACK_PROPAGATED_HASH_LOCALS.with(|c| c.borrow().contains(name))
+    current_emit_ctx()
+        .map(|ctx| ctx.back_propagated_hash_locals.borrow().contains(name))
+        .unwrap_or(false)
 }
 
 pub(super) fn in_return_tail() -> bool {
@@ -1239,9 +1196,10 @@ pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty
 /// the next branch or after the if. Rust scopes are per-block; the
 /// emit tracker mirrors that.
 pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
-    let snapshot = DECLARED_VARS.with(|c| c.borrow().clone());
+    let ctx = current_emit_ctx().expect("with_declared_vars_scope called outside with_emit_ctx");
+    let snapshot = ctx.declared_vars.borrow().clone();
     let r = f();
-    DECLARED_VARS.with(|c| *c.borrow_mut() = snapshot);
+    *ctx.declared_vars.borrow_mut() = snapshot;
     r
 }
 
