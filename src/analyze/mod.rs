@@ -25,6 +25,7 @@
 
 mod body;
 pub mod async_color;
+pub mod block_refine;
 pub mod mutates_self;
 
 pub use body::{BodyTyper, ClassInfo, Ctx};

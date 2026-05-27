@@ -129,7 +129,17 @@ fn render_params(m: &MethodDef) -> String {
     // produces `Ty::Fn`; older `Ty::Untyped` block placeholders use
     // the permissive fallback path.
     if let Some(bp) = block_param {
-        parts.push(render_block_closure_param(&bp.ty));
+        // Prefer source-declared block-param name (from `MethodDef.block_param`)
+        // when available so the body's `&block` Var refs resolve against the
+        // same identifier. Fall back to "f" — the historical default — when
+        // the method declares no source-level `&block` (RBS-only typed block,
+        // e.g. `def foo() { ... } -> T` where the source uses bare `yield`).
+        let name = m
+            .block_param
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("f");
+        parts.push(render_block_closure_param(name, &bp.ty));
     } else if let Some(bp) = m.block_param.as_ref() {
         // RBS didn't supply a block signature, but the def-site
         // declared `&block` (carried in `MethodDef.block_param`).
@@ -159,11 +169,15 @@ fn render_block_param_placeholder(name: &str) -> String {
     format!("{name}: Box<dyn FnOnce()>")
 }
 
-/// Render the `f: impl FnOnce(...) -> R` parameter that backs `yield`
-/// in the body. `block_ty` should be a `Ty::Fn` parsed from the RBS
-/// block clause; falls back to a permissive `serde_json::Value`-typed
-/// closure when the block was left as `Ty::Untyped`.
-fn render_block_closure_param(block_ty: &Ty) -> String {
+/// Render the `<name>: impl FnOnce(...) -> R` parameter that backs
+/// `yield` (or a forwarded `&block`) in the body. `block_ty` should
+/// be a `Ty::Fn` parsed from the RBS block clause or refined by
+/// `analyze::block_refine`; falls back to a permissive
+/// `serde_json::Value`-typed closure when the block was left as
+/// `Ty::Untyped`. The `name` argument lets callers thread the
+/// source-declared identifier so body Var refs resolve against the
+/// same parameter; legacy `yield`-only callers pass "f".
+fn render_block_closure_param(name: &str, block_ty: &Ty) -> String {
     if let Ty::Fn { params, ret, .. } = block_ty {
         let arg_tys: Vec<String> = params
             .iter()
@@ -171,12 +185,12 @@ fn render_block_closure_param(block_ty: &Ty) -> String {
             .map(|p| rust_param_ty(&p.ty))
             .collect();
         let ret_s = rust_ty(ret);
-        format!("f: impl FnOnce({}) -> {}", arg_tys.join(", "), ret_s)
+        format!("{name}: impl FnOnce({}) -> {}", arg_tys.join(", "), ret_s)
     } else {
         // Permissive fallback for blocks the RBS didn't sign with a
         // signature. Author-signed Untyped accepts any args + returns
         // a String (the common form-helper shape).
-        "f: impl FnOnce(serde_json::Value) -> String".to_string()
+        format!("{name}: impl FnOnce(serde_json::Value) -> String")
     }
 }
 
@@ -844,6 +858,107 @@ mod tests {
         assert!(
             emitted.contains("bar(blk)"),
             "expected forwarded `bar(blk)` referencing the same name, got:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn block_refine_propagates_callee_sig_to_forwarder_emit() {
+        // End-to-end: a class with a typed-block callee + a forwarder.
+        // After `block_refine::propagate`, the forwarder's signature
+        // gains the callee's block sig — and rust2 emit's existing
+        // `render_block_closure_param` path produces the matching
+        // `impl FnOnce` shape instead of the `Box<dyn FnOnce()>`
+        // placeholder. Issue #25 stage 3.
+        use crate::analyze::block_refine;
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        use crate::ty::{Param as TyParam, ParamKind, Ty};
+
+        let blk = Symbol::from("blk");
+        let block_sig = Ty::Fn {
+            params: vec![TyParam {
+                name: Symbol::new("k"),
+                ty: Ty::Str,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: EffectSet::pure(),
+        };
+        let callee = MethodDef {
+            name: Symbol::from("each"),
+            receiver: MethodReceiver::Class,
+            params: vec![],
+            body: empty_body(),
+            signature: Some(Ty::Fn {
+                params: vec![TyParam {
+                    name: Symbol::new("block"),
+                    ty: block_sig.clone(),
+                    kind: ParamKind::Block,
+                }],
+                block: Some(Box::new(block_sig)),
+                ret: Box::new(Ty::Nil),
+                effects: EffectSet::pure(),
+            }),
+            effects: EffectSet::pure(),
+            enclosing_class: Some(Symbol::from("Holder")),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        };
+        let send_each = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("each"),
+                args: vec![],
+                block: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var { id: crate::ident::VarId(0), name: blk.clone() },
+                )),
+                parenthesized: true,
+            },
+        );
+        let forwarder = MethodDef {
+            name: Symbol::from("forwarder"),
+            receiver: MethodReceiver::Class,
+            params: vec![],
+            body: send_each,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: Some(Symbol::from("Holder")),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: Some(Param::positional(blk)),
+        };
+        let mut class = LibraryClass {
+            name: ClassId(Symbol::from("Holder")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![callee, forwarder],
+            origin: None,
+        };
+        block_refine::propagate_one(&mut class);
+        let fwd = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "forwarder")
+            .unwrap();
+        let emitted = with_emit_ctx(EmitCtx::default(), || emit_module_method(fwd)).expect("emit");
+        // Refined signature → existing `render_block_closure_param` path fires.
+        // Placeholder `Box<dyn FnOnce()>` must NOT appear; the typed
+        // `impl FnOnce(String) -> ()` shape must.
+        assert!(
+            !emitted.contains("Box<dyn FnOnce()>"),
+            "placeholder should be displaced by refined sig, got:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("blk: impl FnOnce(&str)"),
+            "expected refined `blk: impl FnOnce(&str) -> _` shape (param name matches \
+             source-declared `&blk` so body's `each(blk)` Var resolves), got:\n{emitted}"
         );
     }
 

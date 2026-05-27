@@ -293,6 +293,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // self-describing-IR pattern — Crystal/Go/Kotlin/Swift can
             // consume the same flag without recomputing.
             crate::analyze::mutates_self::propagate(&mut classes);
+            crate::analyze::block_refine::propagate(&mut classes);
             // Stamp `Expr.decisions` bits per the rust2 decide pass.
             // Stage 0 is a no-op; subsequent stages migrate per-node
             // decisions (parens, str_color, last-use, option-wrap, ...)
@@ -429,6 +430,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let str_color_registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &str_color_registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
         decide::decide_classes(&mut lcs);
         (lcs, registry)
     } else {
@@ -441,6 +443,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
         decide::decide_classes(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
@@ -453,6 +456,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
         decide::decide_classes(&mut lcs);
         Some(lcs.into_iter().next().unwrap())
     } else {
@@ -508,6 +512,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
         decide::decide_classes(&mut lcs);
         lcs
     } else {
@@ -526,6 +531,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
             crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
             crate::analyze::mutates_self::propagate(&mut lcs);
+            crate::analyze::block_refine::propagate(&mut lcs);
             lcs
         } else {
             Vec::new()
@@ -550,6 +556,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
         decide::decide_classes(&mut lcs);
         lcs
     } else {
@@ -1091,6 +1098,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let registry = crate::emit::rust2::decide::str_color::build_registry(&tmp_lcs, &[]);
             crate::emit::rust2::decide::str_color::color_classes(&mut tmp_lcs, &registry);
             crate::analyze::mutates_self::propagate(&mut tmp_lcs);
+            crate::analyze::block_refine::propagate(&mut tmp_lcs);
             decide::decide_classes(&mut tmp_lcs);
             let lc = tmp_lcs.into_iter().next().unwrap();
 
