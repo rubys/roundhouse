@@ -471,10 +471,13 @@ fn collect_untyped_lowered(
                 collect_untyped_lowered(e, &format!("{path}/begin.ensure"), out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value {
                 collect_untyped_lowered(v, &format!("{path}/next.value"), out);
             }
+        }
+        ExprNode::Splat { value } => {
+            collect_untyped_lowered(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
             collect_untyped_lowered(value, &format!("{path}/multi_assign.value"), out);

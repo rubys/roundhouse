@@ -648,7 +648,10 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         ExprNode::Super { args } => args
             .as_ref()
             .map_or(false, |xs| xs.iter().any(|a| walk_expr(a, pred))),
-        ExprNode::Next { value } => value.as_ref().map_or(false, |v| walk_expr(v, pred)),
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            value.as_ref().map_or(false, |v| walk_expr(v, pred))
+        }
+        ExprNode::Splat { value } => walk_expr(value, pred),
         ExprNode::MultiAssign { targets, value } => {
             targets.iter().any(|t| walk_lvalue(t, pred)) || walk_expr(value, pred)
         }

@@ -207,7 +207,10 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
             if let Some(eb) = else_branch { count_gradual_recurse(eb, total); }
             if let Some(en) = ensure { count_gradual_recurse(en, total); }
         }
-        N::Next { value } => if let Some(v) = value { count_gradual_recurse(v, total); },
+        N::Next { value } | N::Break { value } => {
+            if let Some(v) = value { count_gradual_recurse(v, total); }
+        }
+        N::Splat { value } => count_gradual_recurse(value, total),
         N::MultiAssign { value, .. } => count_gradual_recurse(value, total),
         N::While { cond, body, .. } => {
             count_gradual_recurse(cond, total);
@@ -340,10 +343,13 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(e, &format!("{path}/begin.ensure"), out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value {
                 collect_untyped(v, &format!("{path}/next.value"), out);
             }
+        }
+        ExprNode::Splat { value } => {
+            collect_untyped(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
             collect_untyped(value, &format!("{path}/multi_assign.value"), out);

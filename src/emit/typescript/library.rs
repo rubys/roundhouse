@@ -1388,9 +1388,10 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_class_refs(e, out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { collect_class_refs(v, out); }
         }
+        ExprNode::Splat { value } => collect_class_refs(value, out),
         ExprNode::MultiAssign { value, .. } => collect_class_refs(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_class_refs(cond, out);
@@ -1583,6 +1584,10 @@ fn rewrite_free(e: &Expr) -> Expr {
         ExprNode::Next { value } => ExprNode::Next {
             value: value.as_ref().map(rewrite_free),
         },
+        ExprNode::Break { value } => ExprNode::Break {
+            value: value.as_ref().map(rewrite_free),
+        },
+        ExprNode::Splat { value } => ExprNode::Splat { value: rewrite_free(value) },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite_free(value),
@@ -1826,6 +1831,12 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         },
         ExprNode::Next { value } => ExprNode::Next {
             value: value.as_ref().map(|v| rewrite(v, super_method)),
+        },
+        ExprNode::Break { value } => ExprNode::Break {
+            value: value.as_ref().map(|v| rewrite(v, super_method)),
+        },
+        ExprNode::Splat { value } => ExprNode::Splat {
+            value: rewrite(value, super_method),
         },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),

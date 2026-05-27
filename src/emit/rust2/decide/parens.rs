@@ -145,11 +145,12 @@ fn walk_children(e: &mut Expr) {
                 walk(a, false);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value.as_mut() {
                 walk(v, false);
             }
         }
+        ExprNode::Splat { value } => walk(value, false),
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_mut() {
                 for a in arglist {

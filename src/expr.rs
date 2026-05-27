@@ -305,6 +305,21 @@ pub enum ExprNode {
     /// (analyzer treats type as `Never`); only meaningful inside a
     /// Lambda body attached as a block to an iterator Send.
     Next { value: Option<Expr> },
+    /// `break` inside an iterator block — exits the enclosing
+    /// iterator entirely (vs `Next`, which just skips to the next
+    /// iteration). `value` is the result of the WHOLE iterator call
+    /// when present; `None` for bare `break`. Divergent at the source
+    /// site (`Ty::Bottom`); only meaningful inside a Lambda attached
+    /// as a block.
+    Break { value: Option<Expr> },
+    /// `*expr` in argument position (`foo(*arr)`), array-literal
+    /// position (`[a, *rest, b]`), or assignment LHS (rest pattern —
+    /// not yet wired). At call sites the receiver spreads the array
+    /// across formal parameters; analyzer treats the splat's type as
+    /// the element type of the underlying Array. Only valid inside
+    /// argument lists / array literals; standalone Splat is a Ruby
+    /// syntax error.
+    Splat { value: Expr },
     /// Parallel assignment: `a, b = expr` — RHS evaluates once, then
     /// is destructured (Ruby array-like) across the targets. Limited
     /// to the no-rest, no-rights shape; `a, *b = c` is not yet

@@ -1017,9 +1017,10 @@ impl Analyzer {
                 if let Some(e) = else_branch { self.collect_send_sites(e, out); }
                 if let Some(e) = ensure { self.collect_send_sites(e, out); }
             }
-            ExprNode::Next { value } => {
+            ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.collect_send_sites(v, out); }
             }
+            ExprNode::Splat { value } => self.collect_send_sites(value, out),
             ExprNode::MultiAssign { value, .. } => self.collect_send_sites(value, out),
             ExprNode::While { cond, body, .. } => {
                 self.collect_send_sites(cond, out);
@@ -1182,9 +1183,10 @@ impl Analyzer {
                 // Could record a Raises effect here once we track exception
                 // class hierarchies. Skip for now.
             }
-            ExprNode::Next { value } => {
+            ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.visit_effects(v, ctx, out); }
             }
+            ExprNode::Splat { value } => self.visit_effects(value, ctx, out),
             ExprNode::MultiAssign { targets, value } => {
                 self.visit_effects(value, ctx, out);
                 for target in targets.iter_mut() {
@@ -2070,9 +2072,10 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
                 diagnose_expr(e, out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
+        ExprNode::Splat { value } => diagnose_expr(value, out),
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {

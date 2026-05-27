@@ -163,11 +163,12 @@ fn collect_var_reads(
                 collect_var_reads(a, seq, out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value.as_ref() {
                 collect_var_reads(v, seq, out);
             }
         }
+        ExprNode::Splat { value } => collect_var_reads(value, seq, out),
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_ref() {
                 for a in arglist {
@@ -352,11 +353,12 @@ fn stamp_var_reads(
                 stamp_var_reads(a, seq, counts, last_seq);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value.as_mut() {
                 stamp_var_reads(v, seq, counts, last_seq);
             }
         }
+        ExprNode::Splat { value } => stamp_var_reads(value, seq, counts, last_seq),
         ExprNode::Super { args } => {
             if let Some(arglist) = args.as_mut() {
                 for a in arglist {

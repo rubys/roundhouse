@@ -558,6 +558,11 @@ fn emit_node(n: &ExprNode) -> String {
             None => "next".to_string(),
             Some(v) => format!("next {}", emit_expr(v)),
         },
+        ExprNode::Break { value } => match value {
+            None => "break".to_string(),
+            Some(v) => format!("break {}", emit_expr(v)),
+        },
+        ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
             format!("{} = {}", lhs.join(", "), emit_expr(value))

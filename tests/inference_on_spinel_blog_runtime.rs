@@ -153,10 +153,13 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
                 collect_untyped(e, &format!("{path}/begin.ensure"), out);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value {
                 collect_untyped(v, &format!("{path}/next.value"), out);
             }
+        }
+        ExprNode::Splat { value } => {
+            collect_untyped(value, &format!("{path}/splat.value"), out);
         }
         ExprNode::MultiAssign { value, .. } => {
             collect_untyped(value, &format!("{path}/multi_assign.value"), out);

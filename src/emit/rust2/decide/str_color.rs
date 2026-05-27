@@ -824,8 +824,11 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         ExprNode::Cast { value, .. } => {
             count += walk(value, ParentExpect::None, ctx);
         }
-        ExprNode::Next { value: Some(v) } => {
+        ExprNode::Next { value: Some(v) } | ExprNode::Break { value: Some(v) } => {
             count += walk(v, ParentExpect::None, ctx);
+        }
+        ExprNode::Splat { value } => {
+            count += walk(value, ParentExpect::None, ctx);
         }
         // Leaves and shapes that carry no string-typed children we
         // model today.
@@ -835,7 +838,8 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         | ExprNode::Const { .. }
         | ExprNode::SelfRef
         | ExprNode::Super { args: None }
-        | ExprNode::Next { value: None } => {}
+        | ExprNode::Next { value: None }
+        | ExprNode::Break { value: None } => {}
     }
     count
 }

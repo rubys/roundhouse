@@ -518,6 +518,8 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Super { .. } => "Super",
         ExprNode::BeginRescue { .. } => "BeginRescue",
         ExprNode::Next { .. } => "Next",
+        ExprNode::Break { .. } => "Break",
+        ExprNode::Splat { .. } => "Splat",
         ExprNode::MultiAssign { .. } => "MultiAssign",
         ExprNode::While { .. } => "While",
         ExprNode::Range { .. } => "Range",

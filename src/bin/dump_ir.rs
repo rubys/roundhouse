@@ -578,9 +578,10 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             if let Some(e) = else_branch { f(e); visit_subexprs(e, f); }
             if let Some(e) = ensure { f(e); visit_subexprs(e, f); }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { f(v); visit_subexprs(v, f); }
         }
+        ExprNode::Splat { value } => { f(value); visit_subexprs(value, f); }
         ExprNode::MultiAssign { value, .. } => { f(value); visit_subexprs(value, f); }
         ExprNode::While { cond, body, .. } => {
             f(cond); visit_subexprs(cond, f);

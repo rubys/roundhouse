@@ -213,10 +213,13 @@ fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
                 }
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value {
                 f(v);
             }
+        }
+        ExprNode::Splat { value } => {
+            f(value);
         }
         ExprNode::MultiAssign { targets, value } => {
             for t in targets {

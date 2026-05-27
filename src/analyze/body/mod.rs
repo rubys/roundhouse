@@ -694,13 +694,24 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::Next { value } => {
+            ExprNode::Next { value } | ExprNode::Break { value } => {
                 if let Some(v) = value { self.analyze_expr(v, ctx); }
-                // `next` is divergent at the source position — the
-                // surrounding expression skips to the next iteration.
-                // `Bottom` drops out of joins so `if cond then next
-                // else x end` types cleanly as `typeof(x)`.
+                // `next` / `break` are divergent at the source position
+                // — `next` skips to the next iteration, `break` exits
+                // the enclosing iterator. `Bottom` drops out of joins
+                // so `if cond then next else x end` types cleanly as
+                // `typeof(x)`.
                 Ty::Bottom
+            }
+
+            ExprNode::Splat { value } => {
+                // Splat propagates the inner expression's type
+                // unchanged; the splat itself is a structural marker
+                // for the surrounding Send/Array, not a transform.
+                // The Send's argument-typing logic decides whether
+                // the splatted Array's element type satisfies the
+                // formal parameter's variadic/rest signature.
+                self.analyze_expr(value, ctx)
             }
 
             ExprNode::MultiAssign { targets, value } => {

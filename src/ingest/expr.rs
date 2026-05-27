@@ -1083,6 +1083,52 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::Next { value }
         }
+        // `break` / `break value` / `break a, b` — symmetric to Next,
+        // but exits the enclosing iterator entirely. Multi-arg `break`
+        // wraps into an Array (Ruby semantics).
+        n if n.as_break_node().is_some() => {
+            let br = n.as_break_node().unwrap();
+            let value = match br.arguments() {
+                None => None,
+                Some(a) => {
+                    let args: Vec<Node<'_>> = a.arguments().iter().collect();
+                    match args.len() {
+                        0 => None,
+                        1 => Some(ingest_expr(&args[0], file)?),
+                        _ => {
+                            let elems = args
+                                .iter()
+                                .map(|a| ingest_expr(a, file))
+                                .collect::<IngestResult<Vec<_>>>()?;
+                            Some(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Array {
+                                    elements: elems,
+                                    style: crate::expr::ArrayStyle::Brackets,
+                                },
+                            ))
+                        }
+                    }
+                }
+            };
+            ExprNode::Break { value }
+        }
+        // `*expr` — splat. Valid in argument lists (`foo(*arr)`) and
+        // array literals (`[a, *rest, b]`). The caller (Send/Apply/
+        // Array ingest) sees `ExprNode::Splat` wrapping the inner
+        // expr and decides how to emit it (varargs spread, slice
+        // append, etc.).
+        n if n.as_splat_node().is_some() => {
+            let s = n.as_splat_node().unwrap();
+            let value = match s.expression() {
+                Some(e) => ingest_expr(&e, file)?,
+                None => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Nil },
+                ),
+            };
+            ExprNode::Splat { value }
+        }
         n if n.as_multi_write_node().is_some() => {
             let mw = n.as_multi_write_node().unwrap();
             // Only the simple `a, b = expr` shape — no splat (`*rest`)

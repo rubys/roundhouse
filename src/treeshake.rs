@@ -302,11 +302,12 @@ where
                 walk_sends(b, visit);
             }
         }
-        ExprNode::Next { value } => {
+        ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value {
                 walk_sends(v, visit);
             }
         }
+        ExprNode::Splat { value } => walk_sends(value, visit),
         ExprNode::MultiAssign { value, .. } => walk_sends(value, visit),
         ExprNode::While { cond, body, .. } => {
             walk_sends(cond, visit);

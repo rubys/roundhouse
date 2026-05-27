@@ -739,6 +739,10 @@ fn rewrite_bare_attrs_to_ivars_py(e: &Expr, attrs: &[Symbol]) -> Expr {
         ExprNode::Next { value } => ExprNode::Next {
             value: value.as_ref().map(&rewrite),
         },
+        ExprNode::Break { value } => ExprNode::Break {
+            value: value.as_ref().map(&rewrite),
+        },
+        ExprNode::Splat { value } => ExprNode::Splat { value: rewrite(value) },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),
             value: rewrite(value),
