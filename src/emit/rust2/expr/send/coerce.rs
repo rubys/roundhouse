@@ -15,7 +15,7 @@
 
 use crate::expr::{Expr, ExprNode, Literal};
 
-use super::super::util::{is_option_ty, peel_nil, ty_contains_untyped, value_narrowing_coercion};
+use super::super::util::{is_option_ty, peel_nil, ty_contains_untyped};
 use super::super::{arg_hash_var_local_ty, class_method_param_ty, emit_expr};
 
 /// Apply callee-back-propagation coercion for a single arg in a
@@ -137,34 +137,41 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         }
     }
 
+    // Family 1 — Hash widening to `HashMap<String, serde_json::Value>`.
+    // Two paths:
+    //
+    // 1. **Lowerer-inserted Cast** (the common path). When the callee
+    //    param is `Hash<_, Untyped>` and the arg's Hash shape is
+    //    narrower, `lower::ty_coerce_insertion::needs_hash_widening`
+    //    wraps the arg in `Cast { target_ty: Hash<_, Untyped> }`. The
+    //    Cast IS the decision; render trusts it.
+    //
+    // 2. **AC::Base shim recv fallback**. `render_with`, `redirect_to`,
+    //    `head` aren't LC methods (signatures hand-coded in
+    //    `dispatch.rs::controller_shim_method_param_ty`), so they
+    //    aren't in the lowerer's registry — `needs_hash_widening`
+    //    can't fire for `self.render_with(..., {hash})` calls. Keep an
+    //    IR-inspection fallback for non-Cast args at Hash<_, Untyped>
+    //    param positions, covering Var-with-local-Hash-Ty and inline
+    //    Hash-literal shapes (the two arg shapes shim calls receive in
+    //    practice).
+    if let ExprNode::Cast { value, target_ty } = &*arg.node {
+        if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
+            && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
+        {
+            let inner_raw = emit_expr(value);
+            return format!(
+                "{inner_raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
+            );
+        }
+    }
     if let Ty::Hash { value: pv, .. } = param_ty {
-        if matches!(pv.as_ref(), Ty::Untyped) {
-            // Peek through Cast wrappers to find the underlying arg
-            // shape. The `lower::ty_coerce_insertion` lowerer wraps
-            // call-site args in `Cast(inner, Hash<_, Untyped>)` to
-            // record the widening target explicitly; the borrow/owned
-            // checks elsewhere in this fn already peek-through, and
-            // Family 1 mirrors that pattern. `raw` is `emit_expr(arg)`
-            // which is `emit_expr(Cast)` = inner emit (Cast arm's
-            // field-ty coerce is a no-op for non-primitive target_ty),
-            // so the wrap below operates on the right text.
-            let probe_arg = if let ExprNode::Cast { value, .. } = &*arg.node {
-                value
-            } else {
-                arg
-            };
-            // Var arg with a local Hash type that doesn't match —
-            // wrap with the K/V-coercing conversion.
-            if let Some((_lk, _lv)) = arg_hash_var_local_ty(probe_arg) {
-                return format!(
-                    "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
-                );
-            }
-            // Hash-literal arg: HashMap::from([…]) typically infers
-            // `HashMap<&str, T>` from the first entry, which won't
-            // unify with the callee's `HashMap<String, Value>`. Apply
-            // the same transform unconditionally.
-            if matches!(&*probe_arg.node, ExprNode::Hash { .. }) {
+        if matches!(pv.as_ref(), Ty::Untyped)
+            && !matches!(&*arg.node, ExprNode::Cast { .. })
+        {
+            if arg_hash_var_local_ty(arg).is_some()
+                || matches!(&*arg.node, ExprNode::Hash { .. })
+            {
                 return format!(
                     "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
                 );
@@ -172,11 +179,16 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         }
     }
 
-    if matches!(arg_ty_peeled, Some(Ty::Untyped)) {
-        if let Some(coerce) = value_narrowing_coercion(param_ty) {
-            return format!("({raw}).{coerce}");
-        }
-    }
+    // Family 2 — Value→primitive narrowing for bare Untyped args.
+    // Retired: the `lower::ty_coerce_insertion::needs_value_to_primitive`
+    // lowerer wraps Untyped args targeting primitive params in
+    // `Cast { target_ty: primitive }`, and the Cast-aware short-circuit
+    // at the top of this fn handles them. With cross-category visibility
+    // (rust2.rs now passes `&extras` per category) the lowerer reaches
+    // every LC-method callee; the AC::Base shim methods that aren't in
+    // any LC don't have primitive params (Hash<Str, Untyped> only — see
+    // `dispatch.rs::controller_shim_method_param_ty`), so the gap the
+    // fallback used to cover is empty.
 
     // Family 3: primitive → Value. For Ivar reads of non-Copy fields,
     // `Value::from` takes by value and would move out of `&self`. Clone
