@@ -217,8 +217,20 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
 
     // Collect free names other than the inferred arg → those become
     // additional positional params. Today this picks up `notice`,
-    // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars).
+    // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars),
+    // plus names referenced inside `defined?(name)` Sends (partial-
+    // local optionality markers in ERB).
     let extra_params = collect_extra_params(&rewritten, &arg_name);
+
+    // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
+    // Runs AFTER collect_extra_params so the inner Var name has been
+    // captured as a nullable partial parameter. Once the partial's
+    // signature includes `name: nil`, the nil-check captures the
+    // same semantics the author intended ("is this optional local
+    // present?") and downstream emitters don't need target-specific
+    // `defined?` knowledge.
+    let mut rewritten = rewritten;
+    rewrite_defined_to_nil_check(&mut rewritten);
 
     // The inferred record arg (e.g. `articles`, `article`) is the
     // required positional. Free locals discovered downstream
@@ -1074,6 +1086,192 @@ fn rewrite_lvalue(lv: &LValue) -> LValue {
         },
         LValue::Const { path } => LValue::Const { path: path.clone() },
     }
+}
+
+/// Rewrite every `Send(None, :defined?, [Var(name)])` under `expr` to
+/// `Send(Send(Var(name), :nil?, []), :!, [])` — i.e., `!name.nil?`.
+/// Post-order walk: rewrite children first, then test the current
+/// node so nested `defined?` (rare in ERB) lower bottom-up.
+///
+/// The author's intent in writing `defined?(name)` in a partial is
+/// "is the (optional) local `name` present"; once `name` is collected
+/// as a nullable parameter (default `nil`) by `collect_extra_params`,
+/// the nil-check captures the same semantics. Downstream emitters
+/// then handle a plain Send chain instead of needing target-specific
+/// `defined?` keyword knowledge.
+fn rewrite_defined_to_nil_check(expr: &mut Expr) {
+    // Recurse into children first.
+    match &mut *expr.node {
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => {}
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                rewrite_defined_to_nil_check(k);
+                rewrite_defined_to_nil_check(v);
+            }
+        }
+        ExprNode::Array { elements, .. } => {
+            for el in elements {
+                rewrite_defined_to_nil_check(el);
+            }
+        }
+        ExprNode::StringInterp { parts } => {
+            for part in parts {
+                if let InterpPart::Expr { expr } = part {
+                    rewrite_defined_to_nil_check(expr);
+                }
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            rewrite_defined_to_nil_check(left);
+            rewrite_defined_to_nil_check(right);
+        }
+        ExprNode::Let { value, body, .. } => {
+            rewrite_defined_to_nil_check(value);
+            rewrite_defined_to_nil_check(body);
+        }
+        ExprNode::Lambda { body, .. } => rewrite_defined_to_nil_check(body),
+        ExprNode::Apply { fun, args, block } => {
+            rewrite_defined_to_nil_check(fun);
+            for a in args {
+                rewrite_defined_to_nil_check(a);
+            }
+            if let Some(b) = block {
+                rewrite_defined_to_nil_check(b);
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                rewrite_defined_to_nil_check(r);
+            }
+            for a in args {
+                rewrite_defined_to_nil_check(a);
+            }
+            if let Some(b) = block {
+                rewrite_defined_to_nil_check(b);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            rewrite_defined_to_nil_check(cond);
+            rewrite_defined_to_nil_check(then_branch);
+            rewrite_defined_to_nil_check(else_branch);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            rewrite_defined_to_nil_check(scrutinee);
+            for arm in arms {
+                if let Some(g) = arm.guard.as_mut() {
+                    rewrite_defined_to_nil_check(g);
+                }
+                rewrite_defined_to_nil_check(&mut arm.body);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                rewrite_defined_to_nil_check(e);
+            }
+        }
+        ExprNode::Assign { target, value }
+        | ExprNode::OpAssign { target, value, .. } => {
+            rewrite_defined_to_nil_check(value);
+            if let LValue::Attr { recv, .. } = target {
+                rewrite_defined_to_nil_check(recv);
+            }
+            if let LValue::Index { recv, index } = target {
+                rewrite_defined_to_nil_check(recv);
+                rewrite_defined_to_nil_check(index);
+            }
+        }
+        ExprNode::Yield { args } => {
+            for a in args {
+                rewrite_defined_to_nil_check(a);
+            }
+        }
+        ExprNode::Raise { value } => rewrite_defined_to_nil_check(value),
+        ExprNode::RescueModifier { expr, fallback } => {
+            rewrite_defined_to_nil_check(expr);
+            rewrite_defined_to_nil_check(fallback);
+        }
+        ExprNode::Return { value } => rewrite_defined_to_nil_check(value),
+        ExprNode::Super { args } => {
+            if let Some(arglist) = args {
+                for a in arglist {
+                    rewrite_defined_to_nil_check(a);
+                }
+            }
+        }
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            if let Some(v) = value {
+                rewrite_defined_to_nil_check(v);
+            }
+        }
+        ExprNode::Splat { value } => rewrite_defined_to_nil_check(value),
+        ExprNode::MultiAssign { value, .. } => rewrite_defined_to_nil_check(value),
+        ExprNode::While { cond, body, .. } => {
+            rewrite_defined_to_nil_check(cond);
+            rewrite_defined_to_nil_check(body);
+        }
+        ExprNode::Range { begin, end, .. } => {
+            if let Some(b) = begin {
+                rewrite_defined_to_nil_check(b);
+            }
+            if let Some(e) = end {
+                rewrite_defined_to_nil_check(e);
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            rewrite_defined_to_nil_check(body);
+            for r in rescues {
+                rewrite_defined_to_nil_check(&mut r.body);
+            }
+            if let Some(eb) = else_branch {
+                rewrite_defined_to_nil_check(eb);
+            }
+            if let Some(en) = ensure {
+                rewrite_defined_to_nil_check(en);
+            }
+        }
+        ExprNode::Cast { value, .. } => rewrite_defined_to_nil_check(value),
+    }
+
+    // Now test the current node. Match `Send(None, :defined?,
+    // [Var(name)])` exactly.
+    let is_defined_send = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "defined?"
+                && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Var { .. })
+    );
+    if !is_defined_send {
+        return;
+    }
+    // Extract the inner Var and synthesize `!var.nil?`.
+    let var_expr = if let ExprNode::Send { args, .. } = &*expr.node {
+        args[0].clone()
+    } else {
+        return;
+    };
+    let span = expr.span;
+    let nil_check = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(var_expr),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    expr.node = Box::new(ExprNode::Send {
+        recv: Some(nil_check),
+        method: Symbol::from("!"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
 }
 
 // ── FormBuilder binding ──────────────────────────────────────────

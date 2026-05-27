@@ -135,6 +135,66 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 parenthesized: true,
             }
         }
+        // `defined?(x)` — Ruby keyword (not a method call). Common in
+        // Rails view partials to check whether an optional local was
+        // passed: `<% if defined?(show_tree_lines) && show_tree_lines %>`.
+        //
+        // Restrict to the bareword shape Prism produces for the
+        // partial-local idiom: either a no-arg CallNode (when the name
+        // isn't lexically bound, which is the partial-local case) or a
+        // LocalVariableReadNode (when it IS bound). Both lift to a
+        // `Var(name)` reference inside a marker Send. Other shapes
+        // (`defined?(@ivar)`, `defined?(Foo)`, `defined?(obj.method)`)
+        // have target-different semantics and surface as Unsupported
+        // for now — lobsters/real-blog don't use them.
+        //
+        // The view-lowerer picks up the inner Var as a partial
+        // parameter (collect_extra_params) then rewrites the marker
+        // Send to `!name.nil?` (rewrite_defined_to_nil_check).
+        n if n.as_defined_node().is_some() => {
+            let d = n.as_defined_node().unwrap();
+            let inner = d.value();
+            let name: Option<String> = if let Some(c) = inner.as_call_node() {
+                let bareword = c.receiver().is_none()
+                    && c.arguments().is_none()
+                    && c.block().is_none();
+                if bareword {
+                    Some(constant_id_str(&c.name()).to_string())
+                } else {
+                    None
+                }
+            } else if let Some(lv) = inner.as_local_variable_read_node() {
+                Some(constant_id_str(&lv.name()).to_string())
+            } else {
+                None
+            };
+            match name {
+                Some(name) => {
+                    let var = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var {
+                            id: crate::ident::VarId(0),
+                            name: Symbol::from(name),
+                        },
+                    );
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("defined?"),
+                        args: vec![var],
+                        block: None,
+                        parenthesized: true,
+                    }
+                }
+                None => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "`defined?` only supports bareword targets today: {inner:?}"
+                        ),
+                    });
+                }
+            }
+        }
         n if n.as_symbol_node().is_some() => {
             ExprNode::Lit { value: Literal::Sym { value: symbol_value(n).unwrap_or_default().into() } }
         }

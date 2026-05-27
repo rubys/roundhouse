@@ -50,6 +50,21 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
                     out.push(n.to_string());
                 }
             }
+            // `defined?(name)` ingest produces `Send(None, :defined?,
+            // [Var(name)])`. The author wrote `defined?(name)`
+            // *specifically* to mark `name` as an optional partial-
+            // local; collect it as an extra param regardless of
+            // is_flash_name. Without this, `defined?(force_open)` in
+            // _comment.html.erb would leave `force_open` as a free
+            // reference the analyzer can't resolve.
+            if recv.is_none() && method.as_str() == "defined?" && args.len() == 1 {
+                if let ExprNode::Var { name, .. } = &*args[0].node {
+                    let n = name.as_str();
+                    if !bound.iter().any(|b| b == n) && !out.iter().any(|x| x == n) {
+                        out.push(n.to_string());
+                    }
+                }
+            }
             if let Some(r) = recv {
                 walk_for_extra(r, bound, out);
             }
