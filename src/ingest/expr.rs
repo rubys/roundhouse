@@ -15,6 +15,24 @@ use super::util::{
 use super::{IngestError, IngestResult};
 
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
+    // Survey-mode gate: when active, intercept Err returns and
+    // substitute a `Literal::Nil` placeholder so the surrounding
+    // ingester keeps going. Errors are recorded into the per-thread
+    // collector for the post-run punch list. See `survey.rs`.
+    match ingest_expr_strict(node, file) {
+        Ok(e) => Ok(e),
+        Err(err) if super::survey::is_active() => {
+            super::survey::record(&err);
+            Ok(Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Nil },
+            ))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     let span = Span::synthetic(); // Real spans land when miette is wired in.
     let expr_node = match node {
         n if n.as_constant_read_node().is_some() => {
