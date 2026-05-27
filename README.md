@@ -83,6 +83,10 @@ updated on each push to `main` — Rust, TypeScript, Crystal, Elixir,
 Go, Python, plus Ruby (the original source) and Spinel (the lowered
 output that runs as the demo below).
 
+**Compare performance.** [rubys.github.io/roundhouse/bench](https://rubys.github.io/roundhouse/bench/)
+plots throughput, memory, latency, and req/sec/GB across the live
+targets on the same `fixtures/real-blog`, run on a fixed Hetzner box.
+
 **Run the demo.** A working transpiled blog — articles, comments,
 real-time Turbo Stream broadcasts over WebSocket, SQLite persistence,
 Tailwind styling, create + destroy flows — in two `bin/rh` commands:

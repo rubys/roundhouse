@@ -57,20 +57,19 @@ world the application now operates in:
   runtime your platform team already operates. None of these were
   on the original whiteboard.
 
-The cost-economics constraint is worth dwelling on, because it's
-the most measurable of the five and the one most often dismissed.
-The standard objection — "Rails apps are I/O-bound, the runtime
-doesn't matter" — inverts the problem. Because of the GVL, CRuby
-scales by forking Puma workers, each carrying its own ~200–400 MB
-copy of the framework. Fifty concurrent requests means ten workers
-and several GB resident, and the I/O-bound framing is exactly why
-that's wasteful: those processes mostly sit blocked on the database
-while still pinning memory. A Rust, Go, or Elixir target handles
-the same concurrency through threads sharing a single image, at a
-fraction of the RAM. The metric that captures this is **requests
-per second per gigabyte of resident memory** — and whether you're
-paying GB-hours to a PaaS or amortizing a Kamal box, it's what the
-bill is actually charging for.
+The cost-economics constraint is the most measurable of the five,
+and the [benchmark results](https://rubys.github.io/roundhouse/bench/)
+on the real-blog fixture cover it across Rust, Crystal, Go,
+TypeScript, Ruby, and Rails on a fixed Hetzner box. The standard
+objection — "Rails apps are I/O-bound, the runtime doesn't matter" —
+inverts the problem. Because of the GVL, CRuby scales by forking
+Puma workers, each carrying its own copy of the framework; those
+processes mostly sit blocked on the database while still pinning
+memory. Threaded targets handle the same concurrency through a
+single image at a fraction of the RAM. Requests per second per
+gigabyte of resident memory spans three orders of magnitude across
+the targets, and whether you're paying GB-hours to a PaaS or
+amortizing a Kamal box, it's what the bill is actually charging for.
 
 These pressures don't show up evenly. Most applications hit one or
 two of them; very few hit all five. The hard part is that you can't
