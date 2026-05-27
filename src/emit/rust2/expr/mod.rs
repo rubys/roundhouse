@@ -118,43 +118,21 @@ thread_local! {
         std::collections::HashMap<String, Vec<crate::ty::Ty>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
-    /// Cross-LC registry: `(ClassName, method) → Vec<Param>` for every
-    /// class method visible at app-emit time. Populated by `rust2.rs::emit`
-    /// once all LCs (models, views, route_helpers) are lowered, then
-    /// installed via `with_global_class_methods` around the per-file
-    /// emit loop. Consulted by emit_send's Const-recv dispatch as the
-    /// third fallback (after `external_class_method_param_tys` and
-    /// `current_class_method_param_tys`) so a model's `Articles::
-    /// article(self)` call into a view module finds the callee's full
-    /// param-Ty list and pads missing trailing optionals with
-    /// `synth_default_for_ty` defaults. Without this fallback,
-    /// cross-class arity mismatches surface as E0061. Stores full
-    /// `Param` (name + ty + kind) so the kwargs-unpack pre-pass can
-    /// map trailing-kwargs Hash entries onto Keyword-param positions
-    /// by name.
-    static GLOBAL_CLASS_METHODS: std::cell::RefCell<
-        std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, Vec<crate::ty::Param>>,
-        >,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-
-    /// Parallel to `GLOBAL_CLASS_METHODS`: per-position pre-rendered
-    /// kwarg defaults. When a Const-recv call leaves a kwarg unsupplied,
-    /// the dispatch consults this BEFORE falling back to
-    /// `synth_default_for_ty` (which only knows the param's Ty and
-    /// emits `""` for any Str param — losing source-level non-empty
-    /// defaults like `omission: "..."`). Stored as `Option<String>`
-    /// per position: `Some(rendered)` for literals
-    /// (`render_param_default_literal`-supported shapes), `None` for
-    /// positional non-default params and complex defaults the dispatch
-    /// can't render statically.
-    static GLOBAL_CLASS_METHOD_DEFAULTS: std::cell::RefCell<
-        std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, Vec<Option<String>>>,
-        >,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Pipeline-global emit context bundling the cross-LC class-method
+    /// registry and the parallel kwarg-default registry. Populated by
+    /// `rust2.rs::emit` once all LCs (models, views, route_helpers)
+    /// are lowered, then installed via `with_emit_ctx` around the
+    /// per-file emit loop. The previous design used two parallel
+    /// `RefCell<HashMap>` thread-locals (`GLOBAL_CLASS_METHODS` +
+    /// `GLOBAL_CLASS_METHOD_DEFAULTS`); they now live as fields on
+    /// `EmitCtx` so non-emit consumers (the decide pass for #22
+    /// Stage 4) can take an explicit `&EmitCtx` parameter.
+    ///
+    /// `None` outside `with_emit_ctx`. Inside, all accessor functions
+    /// (`global_class_method_*`, `current_emit_ctx`) read through this
+    /// slot.
+    static EMIT_CTX: std::cell::RefCell<Option<std::rc::Rc<super::EmitCtx>>> =
+        std::cell::RefCell::new(None);
 
     /// True while emitting an expression that's the *immediate* recv
     /// of a method-call Send. At a recv position Rust's auto-ref
@@ -643,29 +621,28 @@ pub(super) fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::
         .with(|c| c.borrow().get(method).cloned())
 }
 
-/// Run `f` with the cross-LC class-method registry installed. Used
-/// by `rust2.rs::emit` to wrap the per-file emit loop once the
-/// global map is built from every lowered LC.
-pub(crate) fn with_global_class_methods<F, R>(
-    map: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, Vec<crate::ty::Param>>,
-    >,
-    defaults: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, Vec<Option<String>>>,
-    >,
-    f: F,
-) -> R
+/// Run `f` with the `EmitCtx` installed. Used by `rust2.rs::emit`
+/// to wrap the per-file emit loop once the global registries are
+/// built. Save-restore semantics: nested calls (rare — only the
+/// outermost emit invocation today) cleanly stack.
+pub(crate) fn with_emit_ctx<F, R>(ctx: super::EmitCtx, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = GLOBAL_CLASS_METHODS.with(|c| c.replace(map));
-    let prev_defaults = GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| c.replace(defaults));
+    let ctx = std::rc::Rc::new(ctx);
+    let prev = EMIT_CTX.with(|c| c.replace(Some(ctx)));
     let r = f();
-    GLOBAL_CLASS_METHODS.with(|c| *c.borrow_mut() = prev);
-    GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| *c.borrow_mut() = prev_defaults);
+    EMIT_CTX.with(|c| *c.borrow_mut() = prev);
     r
+}
+
+/// Borrow the currently-installed `EmitCtx`, if any. Used by
+/// decide-pass walkers (#22 Stage 4) that run inside `with_emit_ctx`
+/// and consult the global registries by reference rather than via
+/// the per-accessor thread-local pattern. Returns `None` outside
+/// the `with_emit_ctx` scope.
+pub(crate) fn current_emit_ctx() -> Option<std::rc::Rc<super::EmitCtx>> {
+    EMIT_CTX.with(|c| c.borrow().clone())
 }
 
 /// Per-position kwarg-default lookup for a Const-recv callee. Returns
@@ -679,12 +656,10 @@ pub(super) fn global_class_method_param_default(
     method: &str,
     idx: usize,
 ) -> Option<String> {
-    GLOBAL_CLASS_METHOD_DEFAULTS.with(|c| {
+    EMIT_CTX.with(|c| {
         c.borrow()
-            .get(class)
-            .and_then(|methods| methods.get(method))
-            .and_then(|defaults| defaults.get(idx).cloned())
-            .flatten()
+            .as_ref()
+            .and_then(|ctx| ctx.lookup_param_default(class, method, idx))
     })
 }
 
@@ -699,11 +674,10 @@ pub(super) fn global_class_method_param_tys(
     class: &str,
     method: &str,
 ) -> Option<Vec<crate::ty::Ty>> {
-    GLOBAL_CLASS_METHODS.with(|c| {
+    EMIT_CTX.with(|c| {
         c.borrow()
-            .get(class)
-            .and_then(|methods| methods.get(method))
-            .map(|params| params.iter().map(|p| p.ty.clone()).collect())
+            .as_ref()
+            .and_then(|ctx| ctx.lookup_param_tys(class, method))
     })
 }
 
@@ -715,10 +689,10 @@ pub(super) fn global_class_method_params(
     class: &str,
     method: &str,
 ) -> Option<Vec<crate::ty::Param>> {
-    GLOBAL_CLASS_METHODS.with(|c| {
+    EMIT_CTX.with(|c| {
         c.borrow()
-            .get(class)
-            .and_then(|methods| methods.get(method).cloned())
+            .as_ref()
+            .and_then(|ctx| ctx.lookup_params(class, method))
     })
 }
 

@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 
+pub(crate) mod ctx;
 pub(crate) mod decide;
 pub(crate) mod expr;
 mod spec;
@@ -29,6 +30,8 @@ pub(crate) mod library;
 mod method;
 mod shared;
 pub(crate) mod ty;
+
+pub(crate) use ctx::EmitCtx;
 
 /// Minimal Cargo.toml for the migration-target crate. Mirrors what
 /// the migration plan's "Cargo.toml shape" section described: rust
@@ -540,7 +543,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec::new()
     };
 
-    let (global_methods, global_method_defaults) = collect_global_class_methods(
+    let emit_ctx = collect_global_class_methods(
         &model_lcs,
         route_helpers_lc.as_ref(),
         importmap_lc.as_ref(),
@@ -561,7 +564,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // any one of them is empty for the current fixture.
     let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);
 
-    crate::emit::rust2::expr::with_global_class_methods(global_methods, global_method_defaults, || {
+    crate::emit::rust2::expr::with_emit_ctx(emit_ctx, || {
     if !model_lcs.is_empty() {
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());
@@ -1802,7 +1805,7 @@ fn collect_global_class_methods(
     controller_lcs: &[crate::dialect::LibraryClass],
     fixture_lcs: &[crate::dialect::LibraryClass],
     runtime_lcs: &[crate::dialect::LibraryClass],
-) -> (GlobalMethodsMap, GlobalDefaultsMap) {
+) -> EmitCtx {
     use crate::dialect::LibraryClass;
     use crate::ident::Symbol;
     use crate::ty::{Param, ParamKind, Ty};
@@ -1902,7 +1905,10 @@ fn collect_global_class_methods(
     for lc in runtime_lcs {
         collect_one(lc, &mut out, &mut out_defaults);
     }
-    (out, out_defaults)
+    EmitCtx {
+        global_class_methods: out,
+        global_class_method_defaults: out_defaults,
+    }
 }
 
 /// Build a synthetic `LibraryClass` from a flat list of
