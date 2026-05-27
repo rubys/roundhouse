@@ -80,6 +80,24 @@ fn err_message(err: &IngestError) -> String {
     }
 }
 
+/// Survey-aware error gate for per-file ingest. In survey mode,
+/// records the error and returns `Ok(None)` so the caller can skip
+/// the file. In strict mode, propagates.
+///
+/// Used by [`ingest_app_with_vfs`] to wrap each per-file call so a
+/// single failed file (e.g., routes.rb with an unsupported DSL form)
+/// doesn't abort the survey before later files get walked.
+pub fn unwrap_or_record<T>(result: super::IngestResult<T>) -> super::IngestResult<Option<T>> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(err) if is_active() => {
+            record(&err);
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Bucket key for aggregation: the message prefix up to the first `(`
 /// (which truncates the Prism-node-Debug repr's pointer-bearing
 /// payload). Used by the punch-list printer to dedupe "ConstantWriteNode

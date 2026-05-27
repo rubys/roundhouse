@@ -26,6 +26,7 @@ use super::routes::ingest_routes;
 use super::schema::ingest_schema;
 use super::test::ingest_test_file;
 use super::view::ingest_view;
+use super::survey::unwrap_or_record;
 use super::{IngestError, IngestResult};
 
 /// Ingest an entire Rails app directory from disk.
@@ -49,7 +50,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let schema_path = dir.join("db/schema.rb");
     if vfs.exists(&schema_path) {
         let source = vfs.read(&schema_path)?;
-        app.schema = ingest_schema(&source, &schema_path.display().to_string())?;
+        if let Some(schema) =
+            unwrap_or_record(ingest_schema(&source, &schema_path.display().to_string()))?
+        {
+            app.schema = schema;
+        }
     }
 
     let models_dir = dir.join("app/models");
@@ -59,13 +64,21 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             let path_str = entry.display().to_string();
             match classify_class_file(&source) {
                 Some(ClassKind::Model) | None => {
-                    if let Some(model) = ingest_model(&source, &path_str, &app.schema)? {
-                        app.models.push(model);
+                    if let Some(maybe_model) =
+                        unwrap_or_record(ingest_model(&source, &path_str, &app.schema))?
+                    {
+                        if let Some(model) = maybe_model {
+                            app.models.push(model);
+                        }
                     }
                 }
                 Some(ClassKind::LibraryClass) => {
-                    if let Some(lc) = ingest_library_class(&source, &path_str)? {
-                        app.library_classes.push(lc);
+                    if let Some(maybe_lc) =
+                        unwrap_or_record(ingest_library_class(&source, &path_str))?
+                    {
+                        if let Some(lc) = maybe_lc {
+                            app.library_classes.push(lc);
+                        }
                     }
                 }
             }
@@ -76,8 +89,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.is_dir(&controllers_dir) {
         for entry in read_rb_files(vfs, &controllers_dir)? {
             let source = vfs.read(&entry)?;
-            if let Some(controller) = ingest_controller(&source, &entry.display().to_string())? {
-                app.controllers.push(controller);
+            if let Some(maybe_controller) =
+                unwrap_or_record(ingest_controller(&source, &entry.display().to_string()))?
+            {
+                if let Some(controller) = maybe_controller {
+                    app.controllers.push(controller);
+                }
             }
         }
     }
@@ -85,7 +102,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let routes_path = dir.join("config/routes.rb");
     if vfs.exists(&routes_path) {
         let source = vfs.read(&routes_path)?;
-        app.routes = ingest_routes(&source, &routes_path.display().to_string())?;
+        if let Some(routes) =
+            unwrap_or_record(ingest_routes(&source, &routes_path.display().to_string()))?
+        {
+            app.routes = routes;
+        }
     }
 
     let views_dir = dir.join("app/views");
@@ -99,8 +120,13 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     file: erb_path.display().to_string(),
                     message: "view path outside views dir".into(),
                 })?;
-            let view = ingest_view(&source, rel, &erb_path.display().to_string())?;
-            app.views.push(view);
+            if let Some(view) = unwrap_or_record(ingest_view(
+                &source,
+                rel,
+                &erb_path.display().to_string(),
+            ))? {
+                app.views.push(view);
+            }
         }
 
         let jbuilder_files = read_jbuilder_files(vfs, &views_dir)?;
@@ -112,8 +138,13 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     file: jb_path.display().to_string(),
                     message: "view path outside views dir".into(),
                 })?;
-            let view = ingest_jbuilder(&source, rel, &jb_path.display().to_string())?;
-            app.views.push(view);
+            if let Some(view) = unwrap_or_record(ingest_jbuilder(
+                &source,
+                rel,
+                &jb_path.display().to_string(),
+            ))? {
+                app.views.push(view);
+            }
         }
     }
 
@@ -128,8 +159,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         if vfs.is_dir(&tests_dir) {
             for entry in read_rb_files(vfs, &tests_dir)? {
                 let source = vfs.read(&entry)?;
-                if let Some(tm) = ingest_test_file(&source, &entry.display().to_string())? {
-                    app.test_modules.push(tm);
+                if let Some(maybe_tm) =
+                    unwrap_or_record(ingest_test_file(&source, &entry.display().to_string()))?
+                {
+                    if let Some(tm) = maybe_tm {
+                        app.test_modules.push(tm);
+                    }
                 }
             }
         }
@@ -143,8 +178,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.is_dir(&fixtures_dir) {
         for entry in read_yml_files(vfs, &fixtures_dir)? {
             let source = vfs.read(&entry)?;
-            let fixture = ingest_fixture_file(&source, &entry)?;
-            app.fixtures.push(fixture);
+            if let Some(fixture) = unwrap_or_record(ingest_fixture_file(&source, &entry))? {
+                app.fixtures.push(fixture);
+            }
         }
     }
 
@@ -157,8 +193,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let seeds_path = dir.join("db/seeds.rb");
     if vfs.exists(&seeds_path) {
         let source = vfs.read_to_string(&seeds_path)?;
-        let expr = ingest_ruby_program(&source, &seeds_path.display().to_string())?;
-        app.seeds = Some(expr);
+        if let Some(expr) =
+            unwrap_or_record(ingest_ruby_program(&source, &seeds_path.display().to_string()))?
+        {
+            app.seeds = Some(expr);
+        }
     }
 
     // `config/importmap.rb` — tiny DSL of `pin` + `pin_all_from`
@@ -169,9 +208,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let importmap_path = dir.join("config/importmap.rb");
     if vfs.exists(&importmap_path) {
         let source = vfs.read_to_string(&importmap_path)?;
-        let importmap = ingest_importmap(vfs, &source, dir, &importmap_path.display().to_string())?;
-        if !importmap.pins.is_empty() {
-            app.importmap = Some(importmap);
+        if let Some(importmap) = unwrap_or_record(ingest_importmap(
+            vfs,
+            &source,
+            dir,
+            &importmap_path.display().to_string(),
+        ))? {
+            if !importmap.pins.is_empty() {
+                app.importmap = Some(importmap);
+            }
         }
     }
 
@@ -222,18 +267,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 }
                 let source = vfs.read_to_string(&entry)?;
                 let path_str = entry.display().to_string();
-                let sigs =
-                    crate::rbs::parse_app_signatures(&source).map_err(|message| {
-                        IngestError::Parse {
-                            file: path_str.clone(),
-                            message,
-                        }
-                    })?;
-                for (class_id, methods) in sigs {
-                    app.rbs_signatures
-                        .entry(class_id)
-                        .or_default()
-                        .extend(methods);
+                let parsed = crate::rbs::parse_app_signatures(&source).map_err(|message| {
+                    IngestError::Parse {
+                        file: path_str.clone(),
+                        message,
+                    }
+                });
+                if let Some(sigs) = unwrap_or_record(parsed)? {
+                    for (class_id, methods) in sigs {
+                        app.rbs_signatures
+                            .entry(class_id)
+                            .or_default()
+                            .extend(methods);
+                    }
                 }
             }
         }
