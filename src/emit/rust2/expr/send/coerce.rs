@@ -190,56 +190,82 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // `dispatch.rs::controller_shim_method_param_ty`), so the gap the
     // fallback used to cover is empty.
 
-    // Family 3: primitive → Value. For Ivar reads of non-Copy fields,
-    // `Value::from` takes by value and would move out of `&self`. Clone
-    // first to materialize the owned value. `Roundhouse::ParamValue`
-    // is a type alias for `serde_json::Value` (see `runtime/rust/
-    // param_value.rs`), so the Class form goes through the same
-    // primitive-wrap shape as the bare `Ty::Untyped` callee.
-    let param_renders_as_value = matches!(param_ty, Ty::Untyped)
-        || matches!(
-            param_ty,
-            Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
-        );
-    if param_renders_as_value
-        && matches!(
-            arg_ty_peeled,
-            Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
-        )
-    {
-        let needs_clone = matches!(&*arg.node, ExprNode::Ivar { .. })
-            && !matches!(arg_ty_peeled, Some(Ty::Int | Ty::Float | Ty::Bool));
-        if needs_clone {
-            return format!("serde_json::Value::from({raw}.clone())");
+    // Family 3 + 3b — primitive → Value and Hash literal → Value(Object).
+    // Two paths:
+    //
+    // 1. **Lowerer-inserted Cast** (common path for Send arg
+    //    positions). The `lower::ty_coerce_insertion::
+    //    needs_primitive_to_value` and `needs_hash_literal_to_value`
+    //    lowerers wrap eligible args in `Cast { target_ty: Untyped |
+    //    Class(ParamValue) | Record }`.
+    //
+    // 2. **Emit-time caller fallback** (for sites the lowerer can't
+    //    see, like `index.rs::fetch` peephole calling this fn with an
+    //    explicit `param_ty` derived from the recv's Hash value-Ty —
+    //    `Hash#fetch` isn't an LC method so the lowerer's registry
+    //    doesn't reach it). Gated on `!Cast` so the lowerer path
+    //    stays authoritative for Send arg sites.
+    //
+    // Ivar args with non-Copy fields need `.clone()` first because
+    // `Value::from` takes by value and would move out of `&self`
+    // (E0507). Integer/Float/Bool fields are Copy so skip the clone.
+    let value_target = |ty: &Ty| -> bool {
+        matches!(ty, Ty::Untyped | Ty::Record { .. })
+            || matches!(
+                ty,
+                Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+            )
+    };
+    if let ExprNode::Cast { value, target_ty } = &*arg.node {
+        if value_target(target_ty) {
+            // Family 3b — Hash literal → Value::Object.
+            if let ExprNode::Hash { entries, .. } = &*value.node {
+                if entries.is_empty() {
+                    return "serde_json::Value::Object(serde_json::Map::new())".to_string();
+                }
+                let inner_raw = emit_expr(value);
+                return format!(
+                    "serde_json::Value::Object({inner_raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect())"
+                );
+            }
+            // Family 3 — primitive → Value.
+            let inner_ty_peeled = value.ty.as_ref().map(peel_nil);
+            if matches!(
+                inner_ty_peeled,
+                Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
+            ) {
+                let inner_raw = emit_expr(value);
+                let needs_clone = matches!(&*value.node, ExprNode::Ivar { .. })
+                    && !matches!(inner_ty_peeled, Some(Ty::Int | Ty::Float | Ty::Bool));
+                if needs_clone {
+                    return format!("serde_json::Value::from({inner_raw}.clone())");
+                }
+                return format!("serde_json::Value::from({inner_raw})");
+            }
         }
-        return format!("serde_json::Value::from({raw})");
     }
-
-    // Family 3b: Hash literal → Value (Object). When callee/storage
-    // expects `serde_json::Value` (Ty::Untyped) or a Record /
-    // `Roundhouse::ParamValue` (both render as Value in rust2's
-    // ty.rs) and the arg is an inline Hash literal, reshape via
-    // `Value::Object(HashMap.into_iter().map().collect())`. The
-    // Importmap pins literal (Vec<Record>) and the synth_from_raw
-    // `params.fetch("...", {})` default (Hash<Str, ParamValue>) are
-    // the canonical cases.
-    let param_renders_as_value = matches!(param_ty, Ty::Untyped | Ty::Record { .. })
-        || matches!(
-            param_ty,
-            Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
-        );
-    if param_renders_as_value {
+    // Non-Cast fallback for the emit-time caller path (Hash#fetch and
+    // similar peepholes that call `coerce_arg_for_param_ty` with an
+    // explicit `param_ty` the lowerer didn't see).
+    if !matches!(&*arg.node, ExprNode::Cast { .. }) && value_target(param_ty) {
         if let ExprNode::Hash { entries, .. } = &*arg.node {
-            // Empty Hash literal — the `into_iter().map().collect()`
-            // shape leaves K/V unconstrained and trips E0282. Emit the
-            // canonical empty `Value::Object` directly via the
-            // `serde_json::Map` constructor.
             if entries.is_empty() {
                 return "serde_json::Value::Object(serde_json::Map::new())".to_string();
             }
             return format!(
                 "serde_json::Value::Object({raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect())"
             );
+        }
+        if matches!(
+            arg_ty_peeled,
+            Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool)
+        ) {
+            let needs_clone = matches!(&*arg.node, ExprNode::Ivar { .. })
+                && !matches!(arg_ty_peeled, Some(Ty::Int | Ty::Float | Ty::Bool));
+            if needs_clone {
+                return format!("serde_json::Value::from({raw}.clone())");
+            }
+            return format!("serde_json::Value::from({raw})");
         }
     }
 
@@ -261,6 +287,17 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // param ty exactly AND arg is SelfRef/Var/Ivar (always emit as a
     // borrowed-place reference, not owned). Send arms returning
     // owned T don't need a clone; Const-typed args don't either.
+    //
+    // **Why this stays in rust2 and isn't lifted to the
+    // `ty_coerce_insertion` lowerer.** The decision is Rust-borrow-
+    // semantics-specific: it's not "the IR's typing is wrong" but
+    // "the Rust callsite would consume from a borrowed place." TS,
+    // Crystal, Go, Spinel all auto-clone or auto-borrow without a
+    // separate annotation. Lifting this to the lowerer would either
+    // produce a Cast that all targets need to learn to ignore, or a
+    // rust-specific IR annotation that doesn't fit the cross-target
+    // Cast shape. Same reasoning as #22's "bits 32–63 are rust2-
+    // local" partition.
     if matches!(
         param_ty,
         Ty::Class { .. } | Ty::Hash { .. } | Ty::Array { .. }
@@ -293,6 +330,17 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // for None. Closes the layouts.rs::application path where
     // `html_escape(content_for_get(:title))` reaches a callee declared
     // `(&str) -> String` with a `Option<String>` source.
+    //
+    // **Why this stays in rust2 and isn't lifted to the
+    // `ty_coerce_insertion` lowerer.** The decision composes two
+    // rust-local shape choices: (1) rust2 emits `Ty::Str` params as
+    // `&str` (not `String`) — a target-rendering decision — and (2)
+    // `Option<String>::as_deref().unwrap_or("")` is the idiomatic
+    // Rust deref shape; Crystal's `option || ""`, TS's `?? ""`, Go's
+    // zero-value fallback all spell this differently. Lifting to the
+    // lowerer would either over-fire on targets that handle nilable
+    // strings natively or produce a target-specific Cast — neither
+    // pulls its weight vs. keeping the decision rust-local.
     if matches!(param_ty, Ty::Str | Ty::Sym)
         && !super::super::has_str_coercion(arg)
         && matches!(arg.ty.as_ref(), Some(t) if is_option_ty(t))

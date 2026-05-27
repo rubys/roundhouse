@@ -212,6 +212,8 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                         if needs_hash_widening(param_ty, &arg)
                             || needs_some_wrap(param_ty, &arg)
                             || needs_value_to_primitive(param_ty, &arg)
+                            || needs_primitive_to_value(param_ty, &arg)
+                            || needs_hash_literal_to_value(param_ty, &arg)
                         {
                             wrap_in_cast(&arg, param_ty)
                         } else {
@@ -511,6 +513,82 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
         }
     }
     false
+}
+
+/// Primitive-to-Value trigger: param renders as a wide runtime value
+/// (`Ty::Untyped` directly, or `Ty::Class` for known value-alias names
+/// like `Roundhouse::ParamValue`) AND arg's body-typer ty is a
+/// concrete primitive (`Str`/`Sym`/`Int`/`Float`/`Bool`). Mirror of
+/// `needs_value_to_primitive` in the other direction: a typed
+/// primitive flowing into a Value-shaped slot.
+///
+/// Cross-target value: every target with a runtime-value type has
+/// this shape.
+///   - Rust: `T → serde_json::Value::from(T)`
+///   - Go: `T → any(T)`
+///   - Spinel: `T → sp_box_T(T)`
+///   - TS/Crystal: identity (no boxing needed)
+///
+/// rust2 consumes via the Cast-aware short-circuit in
+/// `coerce_arg_for_param_ty` (Family 3).
+fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
+    if matches!(&*arg.node, ExprNode::Cast { .. }) {
+        return false;
+    }
+    // Param must render as a wide value. Either `Untyped` directly
+    // or a known Value-alias `Class` id (matches the rust2-emit
+    // recognition in `coerce.rs` Family 3 — kept name-keyed at the
+    // IR level rather than promoted to a Ty variant since `ParamValue`
+    // is a target-rendering decision, not an IR shape).
+    let param_renders_as_value = matches!(param_ty, Ty::Untyped)
+        || matches!(
+            param_ty,
+            Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+        );
+    if !param_renders_as_value {
+        return false;
+    }
+    let Some(arg_ty) = arg.ty.as_ref() else {
+        return false;
+    };
+    let arg_ty_peeled = peel_nil(arg_ty);
+    matches!(
+        arg_ty_peeled,
+        Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
+    )
+}
+
+/// Hash-literal-to-Value trigger: param renders as a wide runtime
+/// value or `Record` shape, AND arg is an inline Hash literal.
+/// Reshapes via `Value::Object(HashMap.into_iter().map().collect())`
+/// at rust2 emit time; Go's `map[string]any` literal, Spinel's
+/// `sp_box_object`, etc. The lowerer just records the intent; per-
+/// target emit picks the right reshaping.
+///
+/// Distinct from `needs_primitive_to_value` because the arg shape is
+/// structural (Hash literal) rather than typed (peel-Nil check),
+/// and the param can be `Record` here (which `needs_primitive_to_value`
+/// excludes).
+fn needs_hash_literal_to_value(param_ty: &Ty, arg: &Expr) -> bool {
+    if matches!(&*arg.node, ExprNode::Cast { .. }) {
+        return false;
+    }
+    if !matches!(&*arg.node, ExprNode::Hash { .. }) {
+        return false;
+    }
+    matches!(param_ty, Ty::Untyped | Ty::Record { .. })
+        || matches!(
+            param_ty,
+            Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
+        )
+}
+
+/// Peel `Option<T>` (`Union { Nil, T }`) to `T`; identity for non-
+/// Option types. Variant of `peel_option` that returns the input
+/// unchanged when no peel applies, useful for "if it's nullable,
+/// look at the non-Nil arm, else look at the type itself".
+fn peel_nil(ty: &Ty) -> &Ty {
+    peel_option(ty).unwrap_or(ty)
 }
 
 /// True when `ty` contains a `Ty::Untyped` anywhere — directly or
