@@ -24,6 +24,12 @@ pub enum CmpCase {
     /// Int vs Float or Float vs Int — most targets coerce silently;
     /// Rust and Go need explicit casts on the Int side.
     NumericPromote,
+    /// Both operands are Class refs. Ruby's `Module#<` / `<=` / `>` /
+    /// `>=` do subclass-relation checks here, not value comparison
+    /// (`Child < Parent` is `true`). Targets with native class-relation
+    /// semantics (Crystal) render as infix; others (TypeScript) lower
+    /// to a prototype-chain check.
+    ClassSubclass,
     /// Known concrete types but `Comparable` doesn't cover the pair
     /// (`1 < "hello"`, Array comparison we don't handle yet, etc.).
     /// Ruby raises at runtime; callers annotate a diagnostic and
@@ -61,6 +67,7 @@ pub fn classify_cmp(lhs: &Expr, rhs: &Expr) -> CmpCase {
         (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => CmpCase::SameType,
         (Ty::Str, Ty::Str) | (Ty::Sym, Ty::Sym) => CmpCase::SameType,
         (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => CmpCase::NumericPromote,
+        (Ty::Class { .. }, Ty::Class { .. }) => CmpCase::ClassSubclass,
         _ => CmpCase::Incompatible,
     }
 }
@@ -169,5 +176,23 @@ mod tests {
         let l = var_typed("a", Ty::Bool);
         let r = var_typed("b", Ty::Bool);
         assert!(matches!(classify_cmp(&l, &r), CmpCase::Incompatible));
+    }
+
+    #[test]
+    fn class_vs_class_is_subclass_check() {
+        // `RecordNotFound < StandardError` in Ruby is `Module#<`
+        // (subclass relation), not value comparison. The classifier
+        // must surface this so emitters render a target-appropriate
+        // relation check instead of raising "incompatible operands".
+        use crate::ident::ClassId;
+        let lhs = var_typed(
+            "L",
+            Ty::Class { id: ClassId(Symbol::from("RecordNotFound")), args: vec![] },
+        );
+        let rhs = var_typed(
+            "R",
+            Ty::Class { id: ClassId(Symbol::from("StandardError")), args: vec![] },
+        );
+        assert!(matches!(classify_cmp(&lhs, &rhs), CmpCase::ClassSubclass));
     }
 }

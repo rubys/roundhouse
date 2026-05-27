@@ -187,6 +187,11 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         r#"panic("roundhouse: `{method}` with incompatible operand types")"#
                     );
                 }
+                CmpCase::ClassSubclass => {
+                    return format!(
+                        r#"panic("roundhouse: `{method}` between Class refs not yet supported for Go target")"#
+                    );
+                }
                 CmpCase::SameType | CmpCase::Unknown => {}
             }
         }

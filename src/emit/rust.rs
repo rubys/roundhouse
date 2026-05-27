@@ -139,6 +139,11 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         r#"panic!("roundhouse: `{method}` with incompatible operand types")"#
                     );
                 }
+                CmpCase::ClassSubclass => {
+                    return format!(
+                        r#"panic!("roundhouse: `{method}` between Class refs not yet supported for Rust target")"#
+                    );
+                }
                 CmpCase::SameType | CmpCase::Unknown => {}
             }
         }

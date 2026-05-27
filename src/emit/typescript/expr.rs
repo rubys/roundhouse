@@ -2553,6 +2553,26 @@ fn emit_send_with_parens_inner(
                 _ => {}
             }
         }
+        // Comparison dispatch: between two Class refs, Ruby's `<`/`<=`/
+        // `>`/`>=` are Module#<-family subclass-relation checks, not
+        // value comparison. JS has no native equivalent; lower to a
+        // prototype-chain check via `instanceof` on the prototype.
+        // (`A.prototype instanceof B` is true iff A is a strict
+        // subclass of B; strict subclass + identity covers <=/>=.)
+        if matches!(method, "<" | "<=" | ">" | ">=") {
+            use crate::emit::shared::cmp::{classify_cmp, CmpCase};
+            if matches!(classify_cmp(r, arg), CmpCase::ClassSubclass) {
+                let l = emit_expr(r);
+                let a = emit_expr(arg);
+                return match method {
+                    "<" => format!("({l}.prototype instanceof {a})"),
+                    "<=" => format!("({l} === {a} || {l}.prototype instanceof {a})"),
+                    ">" => format!("({a}.prototype instanceof {l})"),
+                    ">=" => format!("({l} === {a} || {a}.prototype instanceof {l})"),
+                    _ => unreachable!(),
+                };
+            }
+        }
         if let Some(op) = ts_binop(method) {
             return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
         }
