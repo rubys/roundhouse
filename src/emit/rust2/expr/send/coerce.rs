@@ -101,52 +101,46 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    that needs an inner `.to_string()` too — out of scope for
     //    this wedge.
     if is_option_ty(param_ty) {
-        let inner = peel_nil(param_ty);
-        // Peek through Cast wrappers — `lower::ty_coerce_insertion`
-        // inserts `Cast(arg, Option<T>)` at Send arg positions whose
-        // callee param is Option<T>. Family 6's owned-producing and
-        // literal-Str checks below need to see the inner arg shape
-        // (Var/Send/Ivar/Literal), not the Cast wrapper. Same pattern
-        // Family 1 (Hash widening) uses below.
-        let probe: &Expr = if let ExprNode::Cast { value, .. } = &*arg.node {
-            value
-        } else {
-            arg
-        };
-        // Stage 4 of #22: the `OPTION_WRAP` decide-pass bit (set by
-        // `decide/coerce_family.rs` for Const-recv Sends whose
-        // callee resolves through `EmitCtx::lookup_param_tys`) is
-        // the authoritative Family 6 branch-A signal. Render trusts
-        // it and short-circuits. The IR-inspection fallback below
-        // still fires for recv shapes the decide walker doesn't yet
-        // cover (SelfRef instance method, Var-recv class method),
-        // pending EmitCtx Phase 2 of #24.
+        // Family 6 — T → Option<T> Some-wrap. Signal sources, in
+        // order of preference:
+        //
+        // 1. **Lowerer-inserted Cast** (authoritative). When
+        //    `lower::ty_coerce_insertion::needs_some_wrap` matches at a
+        //    Send arg position, the arg becomes `Cast { value,
+        //    target_ty: Option<U> }`. The Cast IS the decision —
+        //    emit `Some(inner)` directly. Inner needs `.to_string()`
+        //    for `Lit::Str | Lit::Sym → Option<String>` (the literal
+        //    emits as `&'static str` and `Some(&str) = Option<&str>`
+        //    would mismatch `Option<String>`).
+        //
+        // 2. **Decide-pass `OPTION_WRAP` bit** (#22 Stage 4). The
+        //    walker stamps this for Const-recv + SelfRef + Var(Class)-
+        //    recv Sends. The lowerer covers Const + SelfRef +
+        //    implicit-self but NOT Var-recv, so this bit catches the
+        //    Var-recv shape until the lowerer is extended.
+        //
+        // The two signal paths agree where they overlap. The bare
+        // IR-inspection fallback (owned-producing + literal-Str) was
+        // retired here — both branches are subsumed by the lowerer's
+        // Cast wrapper, which fires on the same predicates.
+        if let ExprNode::Cast { value, target_ty } = &*arg.node {
+            if let Some(cast_inner) = is_option_ty(target_ty).then(|| peel_nil(target_ty)) {
+                let inner_raw = emit_expr(value);
+                let needs_to_string = matches!(
+                    &*value.node,
+                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                ) && matches!(cast_inner, Ty::Str | Ty::Sym)
+                    && !super::super::has_str_coercion(value);
+                let payload = if needs_to_string {
+                    format!("{inner_raw}.to_string()")
+                } else {
+                    inner_raw
+                };
+                return format!("Some({payload})");
+            }
+        }
         if arg.decisions & super::super::super::decide::bits::OPTION_WRAP != 0 {
             return format!("Some({raw})");
-        }
-        let owned_producing = matches!(
-            &*probe.node,
-            ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }
-        );
-        if owned_producing
-            && probe.ty.as_ref() == Some(inner)
-            && !matches!(inner, Ty::Untyped)
-        {
-            return format!("Some({raw})");
-        }
-        // Literal-Str arg → Option<String>: wrap with
-        // `Some(literal.to_string())` so the &'static str is promoted
-        // to owned `String` inside the Option. Closes the
-        // `ViewHelpers::dom_id(article, "comments_count")` shape where
-        // the suffix slot is declared `Option<String>` but the source
-        // passes a bare string literal.
-        if matches!(
-            &*probe.node,
-            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-        ) && matches!(inner, Ty::Str | Ty::Sym)
-            && !super::super::has_str_coercion(probe)
-        {
-            return format!("Some({raw}.to_string())");
         }
     }
 
