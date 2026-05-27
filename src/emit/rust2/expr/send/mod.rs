@@ -377,7 +377,16 @@ fn try_view_helpers_dom_id(
     // (which we'd need to make generic for those to compile, but no
     // real-blog site hits them today).
     let suffix = &args[1];
-    let suffix_lit: Option<&str> = match &*suffix.node {
+    // Peek through Cast wrappers — `lower::ty_coerce_insertion` may have
+    // wrapped the literal suffix in `Cast(arg, Option<Sym>)` since
+    // `dom_id`'s second param is declared `Symbol?`. The peephole's
+    // suffix-literal extraction needs to see the inner Lit shape.
+    let suffix_inner = if let ExprNode::Cast { value, .. } = &*suffix.node {
+        value
+    } else {
+        suffix
+    };
+    let suffix_lit: Option<&str> = match &*suffix_inner.node {
         ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
         ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.as_str()),
         _ => None,

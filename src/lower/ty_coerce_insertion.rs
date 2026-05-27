@@ -21,10 +21,12 @@
 //! coercion families (`T → Option<T>` Some-wrap, `Sym → Str` key
 //! rewrites) land in subsequent stages.
 //!
-//! Callee resolution covers three recv shapes:
+//! Callee resolution covers four recv shapes:
 //!   - `Const { path }` — class method dispatch (`ViewHelpers::render_attrs`)
 //!   - `SelfRef` — sibling method in the current class
 //!   - `None` (implicit self) — same as SelfRef
+//!   - `Var { .. }` / `Ivar { .. }` with `Ty::Class { id }` — cross-LC
+//!     instance-method dispatch resolved by the class id's last segment
 
 use crate::dialect::LibraryClass;
 use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, RescueClause};
@@ -59,15 +61,13 @@ pub fn insert_ty_coercions(lcs: &mut [LibraryClass]) {
 /// emit pass; go2's overlay does batches.
 pub fn insert_ty_coercions_with_extras(
     targets: &mut [LibraryClass],
-    extras: &[LibraryClass],
+    extras: &[&LibraryClass],
 ) {
     let mut combined: Vec<&LibraryClass> = Vec::with_capacity(targets.len() + extras.len());
     for lc in targets.iter() {
         combined.push(lc);
     }
-    for lc in extras {
-        combined.push(lc);
-    }
+    combined.extend(extras.iter().copied());
     let registry = build_registry_from(&combined);
     for lc in targets.iter_mut() {
         let raw = lc.name.0.as_str();
@@ -179,6 +179,22 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                 // SelfRef and implicit-self (recv=None) both resolve to
                 // the enclosing LC.
                 Some(ExprNode::SelfRef) | None => Some(class_name.to_string()),
+                // Var/Ivar recv with a body-typer-known `Ty::Class { id }`
+                // — resolve via the id's last segment. Lets
+                // `instance.some_method(arg)` / `@member.some_method(arg)`
+                // get Cast wrappers when `instance` / `@member` are typed
+                // to a class with a matching method signature in the
+                // registry. Same id-last-segment rule the cross-LC
+                // dispatch in `emit/rust2/expr/send` uses.
+                Some(ExprNode::Var { .. } | ExprNode::Ivar { .. }) => {
+                    new_recv.as_ref().and_then(|r| match r.ty.as_ref()? {
+                        Ty::Class { id, .. } => {
+                            let raw = id.0.as_str();
+                            Some(raw.rsplit("::").next().unwrap_or(raw).to_string())
+                        }
+                        _ => None,
+                    })
+                }
                 _ => None,
             };
             let final_args: Vec<Expr> = match callee_class

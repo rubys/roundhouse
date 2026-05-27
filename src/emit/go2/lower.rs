@@ -64,7 +64,8 @@ pub fn lower_for_go_with_extras(
 ) -> Vec<LibraryClass> {
     let classes = nil_check_to_comma_ok::apply(classes);
     let mut classes = nil_to_zero_for_string_fields::apply(classes);
-    crate::lower::insert_ty_coercions_with_extras(&mut classes, extras);
+    let extras_refs: Vec<&LibraryClass> = extras.iter().collect();
+    crate::lower::insert_ty_coercions_with_extras(&mut classes, &extras_refs);
     classes
 }
 

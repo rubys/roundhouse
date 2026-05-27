@@ -76,15 +76,13 @@ pub const STR_BORROW: u64 = 1 << 33;
 /// Rust-local: only Rust's move semantics need this.
 pub const CLONE_AT: u64 = 1 << 34;
 
-/// Stage 4. Set on an expression whose value is being passed into a
-/// position typed `Option<T>` where the source expression is typed
-/// `T`. Render wraps as `Some(inner)` iff set. Centralizes the
-/// "wrap with Some" decision that today is scattered across
-/// `coerce.rs::coerce_arg_for_param_ty` and the field-assign coerce
-/// helpers.
-///
-/// Rust-local: TS/Crystal use nullability rather than tagged unions.
-pub const OPTION_WRAP: u64 = 1 << 35;
+// Bit 35 was `OPTION_WRAP` (Stage 4 of #22). Retired once the
+// `lower::ty_coerce_insertion` lowerer gained cross-LC visibility +
+// Var-recv coverage (Const + SelfRef + implicit-self + Var(Class) +
+// Ivar(Class)), making the lowerer-inserted `Cast { target_ty:
+// Option<U> }` the sole signal for Some-wrap. The walker that
+// stamped this bit (`decide/coerce_family.rs`) was deleted in the
+// same commit; the position stays unallocated for future use.
 
 // ────────────────────────────────────────────────────────────────────
 // Enum-valued fields (bit groups)

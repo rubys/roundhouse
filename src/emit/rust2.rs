@@ -565,30 +565,47 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &fixture_lcs,
         &runtime_lcs,
     );
-    // Stage 1 of the Ty-coerce-insertion lowerer: scaffolding pass.
-    // No Cast nodes inserted yet (function body is empty); later stages
-    // populate it with the Hash-widening / Option-Some-wrap families
-    // that replace per-emitter back-propagation.
-    crate::lower::insert_ty_coercions(&mut model_lcs);
-    crate::lower::insert_ty_coercions(&mut view_lcs);
-    crate::lower::insert_ty_coercions(&mut controller_lcs);
-    crate::lower::insert_ty_coercions(&mut fixture_lcs);
-    // Avoid unused-mut warnings on the lowered LC accumulators when
-    // any one of them is empty for the current fixture.
-    let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);
+    // Ty-coerce-insertion lowerer — wraps Send args in `Cast { value,
+    // target_ty }` per the Hash-widening / Option-Some-wrap /
+    // Value→primitive coerce families. Each per-category call passes
+    // the OTHER categories + framework runtime as extras so the
+    // registry has full cross-LC visibility: a model's `view.method(x)`
+    // Send sees the view's param Tys, a controller's `Model.find(id)`
+    // sees the AR-baseline finder, etc. Without the extras the per-
+    // category registry would miss cross-category callees and the
+    // backstop them (which it used to until the lowerer caught up).
+    let runtime_refs: Vec<&crate::dialect::LibraryClass> = runtime_lcs.iter().collect();
+    {
+        let mut model_extras: Vec<&crate::dialect::LibraryClass> =
+            view_lcs.iter().chain(controller_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        model_extras.extend(runtime_refs.iter().copied());
+        crate::lower::insert_ty_coercions_with_extras(&mut model_lcs, &model_extras);
+    }
+    {
+        let mut view_extras: Vec<&crate::dialect::LibraryClass> =
+            model_lcs.iter().chain(controller_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        view_extras.extend(runtime_refs.iter().copied());
+        crate::lower::insert_ty_coercions_with_extras(&mut view_lcs, &view_extras);
+    }
+    {
+        let mut controller_extras: Vec<&crate::dialect::LibraryClass> =
+            model_lcs.iter().chain(view_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        controller_extras.extend(runtime_refs.iter().copied());
+        crate::lower::insert_ty_coercions_with_extras(&mut controller_lcs, &controller_extras);
+    }
+    {
+        let mut fixture_extras: Vec<&crate::dialect::LibraryClass> =
+            model_lcs.iter().chain(view_lcs.iter()).chain(controller_lcs.iter()).collect();
+        fixture_extras.extend(runtime_refs.iter().copied());
+        crate::lower::insert_ty_coercions_with_extras(&mut fixture_lcs, &fixture_extras);
+    }
 
     crate::emit::rust2::expr::with_emit_ctx(emit_ctx, || {
-    // Late decide pass (#22 Stage 4): registry-dependent bits
-    // (`OPTION_WRAP` and future `COERCE_FAMILY`) — needs the
-    // installed `EmitCtx` to look up callee param Tys. Per-category
-    // decide_classes earlier in this fn ran only the registry-
-    // independent bits (parens, str_color, last_use).
-    if let Some(ctx) = crate::emit::rust2::expr::current_emit_ctx() {
-        crate::emit::rust2::decide::decide_classes_late(&mut model_lcs, &ctx);
-        crate::emit::rust2::decide::decide_classes_late(&mut view_lcs, &ctx);
-        crate::emit::rust2::decide::decide_classes_late(&mut controller_lcs, &ctx);
-        crate::emit::rust2::decide::decide_classes_late(&mut fixture_lcs, &ctx);
-    }
+    // (The late decide pass that used to stamp `OPTION_WRAP` was
+    // retired once the `ty_coerce_insertion` lowerer subsumed its
+    // coverage. The per-category `decide_classes` call earlier in
+    // this fn handles the remaining registry-independent bits —
+    // parens, str_color, last_use.)
     if !model_lcs.is_empty() {
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());

@@ -101,28 +101,24 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    that needs an inner `.to_string()` too — out of scope for
     //    this wedge.
     if is_option_ty(param_ty) {
-        // Family 6 — T → Option<T> Some-wrap. Signal sources, in
-        // order of preference:
+        // Family 6 — T → Option<T> Some-wrap. The
+        // `lower::ty_coerce_insertion` lowerer wraps eligible Send arg
+        // positions in `Cast { value, target_ty: Option<U> }` across
+        // every recv shape (Const, SelfRef, implicit-self, Var(Class),
+        // Ivar(Class)) and across category boundaries (via
+        // `insert_ty_coercions_with_extras`). The Cast IS the
+        // decision; render trusts it and emits `Some(inner)`.
         //
-        // 1. **Lowerer-inserted Cast** (authoritative). When
-        //    `lower::ty_coerce_insertion::needs_some_wrap` matches at a
-        //    Send arg position, the arg becomes `Cast { value,
-        //    target_ty: Option<U> }`. The Cast IS the decision —
-        //    emit `Some(inner)` directly. Inner needs `.to_string()`
-        //    for `Lit::Str | Lit::Sym → Option<String>` (the literal
-        //    emits as `&'static str` and `Some(&str) = Option<&str>`
-        //    would mismatch `Option<String>`).
+        // Inner needs `.to_string()` for `Lit::Str | Lit::Sym →
+        // Option<String>`: the literal emits as `&'static str` and
+        // `Some(&str) = Option<&str>` would mismatch `Option<String>`.
         //
-        // 2. **Decide-pass `OPTION_WRAP` bit** (#22 Stage 4). The
-        //    walker stamps this for Const-recv + SelfRef + Var(Class)-
-        //    recv Sends. The lowerer covers Const + SelfRef +
-        //    implicit-self but NOT Var-recv, so this bit catches the
-        //    Var-recv shape until the lowerer is extended.
-        //
-        // The two signal paths agree where they overlap. The bare
-        // IR-inspection fallback (owned-producing + literal-Str) was
-        // retired here — both branches are subsumed by the lowerer's
-        // Cast wrapper, which fires on the same predicates.
+        // The OPTION_WRAP decide-pass bit + walker that used to back
+        // up the Cast were retired alongside the lowerer's Var-recv
+        // extension — the lowerer subsumes their coverage. The bare
+        // IR-inspection fallback (owned-producing match + literal-Str
+        // match) was retired earlier; both branches are subsumed by
+        // the same Cast wrapper.
         if let ExprNode::Cast { value, target_ty } = &*arg.node {
             if let Some(cast_inner) = is_option_ty(target_ty).then(|| peel_nil(target_ty)) {
                 let inner_raw = emit_expr(value);
@@ -138,9 +134,6 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 };
                 return format!("Some({payload})");
             }
-        }
-        if arg.decisions & super::super::super::decide::bits::OPTION_WRAP != 0 {
-            return format!("Some({raw})");
         }
     }
 
