@@ -4,7 +4,7 @@
 //! arbitrary `Expr` rendering.
 
 use super::naming::{ts_field_name, ts_method_name};
-use crate::expr::{Expr, ExprNode, IrHint, LValue, Literal};
+use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, LValue, Literal};
 use crate::ty::Ty;
 
 // Async-name set ------------------------------------------------------
@@ -378,11 +378,14 @@ fn count_var_assignments(
     out: &mut std::collections::HashMap<crate::ident::Symbol, usize>,
 ) {
     match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
             *out.entry(name.clone()).or_insert(0) += 1;
             count_var_assignments(value, out);
         }
-        ExprNode::Assign { value, .. } => count_var_assignments(value, out),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
+            count_var_assignments(value, out)
+        }
         // Buffer-accumulate `var << X` is rewritten by `emit_stmt` to
         // `var += X;` — i.e., an assignment for declaration purposes.
         // Count it so the var gets `let` (mutable) instead of `const`.
@@ -1379,6 +1382,17 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // emitter wraps the IIFE call in `(...)();` at statement
             // position, which is valid noise.
             format!("(() => {{ throw {}; }})()", emit_expr(value))
+        }
+        ExprNode::OpAssign { target, op, value } => {
+            // Desugar `target op= value` to the existing-IR shape and
+            // recurse. TS has native compound assignment, but the
+            // desugared form routes back through the Assign + Send/If
+            // arms above without duplicating LValue dispatch. The
+            // Rails dirty-tracking concern that motivated the IR
+            // variant is Ruby-runtime specific — TS has no equivalent
+            // setter side-effect, so the desugar is faithful here.
+            let desugared = desugar_op_assign(target, *op, value, e.span);
+            emit_expr(&desugared)
         }
         other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
     }
