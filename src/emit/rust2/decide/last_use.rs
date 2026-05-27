@@ -227,7 +227,7 @@ fn collect_var_reads(
 
 fn walk_lvalue_collect(lv: &LValue, seq: &mut usize, out: &mut Vec<(String, usize)>) {
     match lv {
-        LValue::Var { .. } | LValue::Ivar { .. } => {}
+        LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
         LValue::Attr { recv, .. } => collect_var_reads(recv, seq, out),
         LValue::Index { recv, index } => {
             collect_var_reads(recv, seq, out);
@@ -420,7 +420,7 @@ fn walk_lvalue_stamp(
     last_seq: &HashMap<String, usize>,
 ) {
     match lv {
-        LValue::Var { .. } | LValue::Ivar { .. } => {}
+        LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
         LValue::Attr { recv, .. } => stamp_var_reads(recv, seq, counts, last_seq),
         LValue::Index { recv, index } => {
             stamp_var_reads(recv, seq, counts, last_seq);

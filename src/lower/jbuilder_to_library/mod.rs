@@ -1027,6 +1027,7 @@ fn rewrite_lvalue(lv: &LValue) -> LValue {
             recv: rewrite_ivars_to_locals(recv),
             index: rewrite_ivars_to_locals(index),
         },
+        LValue::Const { path } => LValue::Const { path: path.clone() },
     }
 }
 

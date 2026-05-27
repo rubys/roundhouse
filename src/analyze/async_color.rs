@@ -669,7 +669,7 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
 
 fn walk_lvalue<F: FnMut(&Expr) -> bool>(lv: &LValue, pred: &mut F) -> bool {
     match lv {
-        LValue::Var { .. } | LValue::Ivar { .. } => false,
+        LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => false,
         LValue::Attr { recv, .. } => walk_expr(recv, pred),
         LValue::Index { recv, index } => walk_expr(recv, pred) || walk_expr(index, pred),
     }

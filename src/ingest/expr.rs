@@ -336,6 +336,29 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // `FOO = expr` — bare constant write. In a class body this is
+        // a class-scoped constant; at top level it's a global constant.
+        // Lowerers/emitters resolve the containing scope.
+        n if n.as_constant_write_node().is_some() => {
+            let w = n.as_constant_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::Assign {
+                target: crate::expr::LValue::Const { path: vec![name] },
+                value,
+            }
+        }
+        // `Foo::BAR = expr` — qualified constant write.
+        n if n.as_constant_path_write_node().is_some() => {
+            let w = n.as_constant_path_write_node().unwrap();
+            let target_node = w.target();
+            let path = crate::ingest::util::constant_path_segments(&target_node);
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::Assign {
+                target: crate::expr::LValue::Const { path },
+                value,
+            }
+        }
         // `unless cond; then; else alt; end` lowers to `if cond; alt; else then; end`
         // — same IR, swapped branches. Ruby's semantics match exactly.
         n if n.as_unless_node().is_some() => {

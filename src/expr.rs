@@ -402,4 +402,11 @@ pub enum LValue {
     Ivar { name: Symbol },
     Attr { recv: Expr, name: Symbol },
     Index { recv: Expr, index: Expr },
+    /// In-class constant assignment: `FLAGGABLE_DAYS = 7` inside a
+    /// `class` body, or `Foo::BAR = 1` qualified write. Reads use
+    /// `ExprNode::Const { path }`. Class-scoped — the path here is
+    /// the constant's name relative to the enclosing scope, not the
+    /// fully-qualified path; lowerers/emitters resolve to the
+    /// containing class as needed.
+    Const { path: Vec<Symbol> },
 }

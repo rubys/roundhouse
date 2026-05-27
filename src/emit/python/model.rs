@@ -680,6 +680,7 @@ fn rewrite_bare_attrs_to_ivars_py(e: &Expr, attrs: &[Symbol]) -> Expr {
                     recv: rewrite(recv),
                     index: rewrite(index),
                 },
+                LValue::Const { path } => LValue::Const { path: path.clone() },
             };
             ExprNode::Assign {
                 target: new_target,

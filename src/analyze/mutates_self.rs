@@ -84,7 +84,7 @@ fn has_local_mutation(body: &Expr) -> bool {
                     matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
                         || walk(recv)
                 }
-                LValue::Var { .. } => false,
+                LValue::Var { .. } | LValue::Const { .. } => false,
             },
             // `self[k] = v` and `self.foo = v` lower as `Send`s to
             // `[]=` / setter-suffixed methods, not Assign. Same for

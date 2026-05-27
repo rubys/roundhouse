@@ -208,7 +208,7 @@ fn walk_children(e: &mut Expr) {
 
 fn walk_lvalue(lv: &mut LValue) {
     match lv {
-        LValue::Var { .. } | LValue::Ivar { .. } => {}
+        LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
         LValue::Attr { recv, .. } => walk(recv, true),
         LValue::Index { recv, index } => {
             walk(recv, true);

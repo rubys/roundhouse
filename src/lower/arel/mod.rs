@@ -257,7 +257,7 @@ fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
 fn walk_lvalue_mut(lv: &mut crate::expr::LValue, f: &mut dyn FnMut(&mut Expr)) {
     use crate::expr::LValue;
     match lv {
-        LValue::Var { .. } | LValue::Ivar { .. } => {}
+        LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
         LValue::Attr { recv, .. } => f(recv),
         LValue::Index { recv, index } => {
             f(recv);

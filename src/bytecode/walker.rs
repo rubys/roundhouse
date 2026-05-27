@@ -306,6 +306,7 @@ impl Walker {
             LValue::Ivar { .. } => Err(WalkError::NotYetSupported("assign to ivar".into())),
             LValue::Attr { .. } => Err(WalkError::NotYetSupported("assign to attr".into())),
             LValue::Index { .. } => Err(WalkError::NotYetSupported("assign to index[]".into())),
+            LValue::Const { .. } => Err(WalkError::NotYetSupported("assign to const".into())),
         }
     }
 

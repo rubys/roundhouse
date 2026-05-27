@@ -1527,6 +1527,7 @@ fn rewrite_free(e: &Expr) -> Expr {
                     recv: rewrite_free(recv),
                     index: rewrite_free(index),
                 },
+                LValue::Const { path } => LValue::Const { path: path.clone() },
             };
             ExprNode::Assign { target: new_target, value: rewrite_free(value) }
         }
@@ -1743,6 +1744,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
                     recv: rewrite(recv, super_method),
                     index: rewrite(index, super_method),
                 },
+                LValue::Const { path } => LValue::Const { path: path.clone() },
             };
             ExprNode::Assign {
                 target: new_target,

@@ -156,6 +156,17 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }
+        LValue::Const { path } => {
+            // Class-body / top-level constants reach emit through their
+            // own collection pipeline (rust2 emits class-scoped `const`
+            // items separately). This arm only fires if a `Const = ...`
+            // appears in a method-body Seq — rare in idiomatic Ruby.
+            // Emit as a plain `let` so the assignment is at least
+            // observable; a hoisting pass can replace this when the
+            // pattern shows up in practice.
+            let name = path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>().join("_");
+            format!("let {name} = {rhs}")
+        }
     }
 }
 

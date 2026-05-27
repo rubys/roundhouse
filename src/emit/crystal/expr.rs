@@ -1608,6 +1608,7 @@ fn emit_lvalue(lv: &LValue) -> String {
         LValue::Ivar { name } => format!("@{name}"),
         LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Const { path } => path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>().join("::"),
     }
 }
 
