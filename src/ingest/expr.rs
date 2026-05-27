@@ -1215,16 +1215,16 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 let patterns = when.conditions();
                 for pat_node in patterns.iter() {
                     let pat_expr = ingest_expr(&pat_node, file)?;
+                    // Literal patterns fold into `Pattern::Lit` (cheap
+                    // emit + typed-target switch coverage). Anything
+                    // else — lambdas, ranges, class refs, calls — lifts
+                    // to `Pattern::Expr` so the source `pattern ===
+                    // scrutinee` dispatch is preserved. Ruby/Crystal
+                    // round-trip these natively; typed-target emit
+                    // desugars to predicate-call chains.
                     let pattern = match &*pat_expr.node {
                         ExprNode::Lit { value } => Pattern::Lit { value: value.clone() },
-                        _ => {
-                            return Err(IngestError::Unsupported {
-                                file: file.into(),
-                                message: format!(
-                                    "unsupported when-pattern (only literal patterns currently): {pat_node:?}"
-                                ),
-                            });
-                        }
+                        _ => Pattern::Expr { expr: pat_expr.clone() },
                     };
                     arms.push(Arm { pattern, guard: None, body: body.clone() });
                 }

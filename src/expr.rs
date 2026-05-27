@@ -419,6 +419,16 @@ pub enum Pattern {
     Lit { value: Literal },
     Array { elems: Vec<Pattern>, rest: Option<Symbol> },
     Record { fields: Vec<(Symbol, Pattern)>, rest: bool },
+    /// `when <expr>` with a non-literal pattern — e.g.
+    /// `when ->(b) { b == Story }` (lambda predicate, common Rails
+    /// idiom for class-equality matching since `Class === instance`
+    /// is true but `Class === Class` isn't). Ruby evaluates
+    /// `pattern === scrutinee` for each `when`; Proc#=== invokes the
+    /// proc with the scrutinee, so a lambda acts as a predicate.
+    /// Ruby/Crystal emit renders `when <expr>` directly (their `===`
+    /// dispatch handles it); typed targets desugar to
+    /// `if expr.call(scrutinee)` chains.
+    Expr { expr: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

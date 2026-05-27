@@ -222,6 +222,7 @@ fn walk_lvalue(lv: &mut LValue) {
 fn walk_pattern(p: &mut Pattern) {
     match p {
         Pattern::Wildcard | Pattern::Bind { .. } | Pattern::Lit { .. } => {}
+        Pattern::Expr { expr } => walk(expr, false),
         Pattern::Array { elems, .. } => {
             for el in elems {
                 walk_pattern(el);

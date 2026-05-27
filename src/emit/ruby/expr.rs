@@ -632,6 +632,11 @@ fn emit_pattern(p: &Pattern) -> String {
             if *rest { parts.push("**".into()); }
             format!("{{ {} }}", parts.join(", "))
         }
+        // Non-literal pattern (lambda predicate, range, class ref,
+        // call, …). Emit verbatim — Ruby's `when` invokes
+        // `pattern === scrutinee` and the dispatch handles Proc /
+        // Range / Class / etc. natively.
+        Pattern::Expr { expr } => emit_expr(expr),
     }
 }
 

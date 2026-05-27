@@ -1639,6 +1639,7 @@ fn emit_pattern(p: &Pattern) -> String {
         Pattern::Wildcard => "_".to_string(),
         Pattern::Bind { name } => name.to_string(),
         Pattern::Lit { value } => emit_literal(value),
+        Pattern::Expr { expr } => emit_expr(expr),
         Pattern::Array { elems, rest } => {
             let mut parts: Vec<String> = elems.iter().map(emit_pattern).collect();
             if let Some(r) = rest {
