@@ -565,6 +565,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let _ = (&mut model_lcs, &mut view_lcs, &mut controller_lcs, &mut fixture_lcs);
 
     crate::emit::rust2::expr::with_emit_ctx(emit_ctx, || {
+    // Late decide pass (#22 Stage 4): registry-dependent bits
+    // (`OPTION_WRAP` and future `COERCE_FAMILY`) — needs the
+    // installed `EmitCtx` to look up callee param Tys. Per-category
+    // decide_classes earlier in this fn ran only the registry-
+    // independent bits (parens, str_color, last_use).
+    if let Some(ctx) = crate::emit::rust2::expr::current_emit_ctx() {
+        crate::emit::rust2::decide::decide_classes_late(&mut model_lcs, &ctx);
+        crate::emit::rust2::decide::decide_classes_late(&mut view_lcs, &ctx);
+        crate::emit::rust2::decide::decide_classes_late(&mut controller_lcs, &ctx);
+        crate::emit::rust2::decide::decide_classes_late(&mut fixture_lcs, &ctx);
+    }
     if !model_lcs.is_empty() {
         for lc in &model_lcs {
             let stem = crate::naming::snake_case(lc.name.0.as_str());

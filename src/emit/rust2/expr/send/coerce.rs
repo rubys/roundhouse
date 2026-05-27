@@ -113,6 +113,17 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         } else {
             arg
         };
+        // Stage 4 of #22: the `OPTION_WRAP` decide-pass bit (set by
+        // `decide/coerce_family.rs` for Const-recv Sends whose
+        // callee resolves through `EmitCtx::lookup_param_tys`) is
+        // the authoritative Family 6 branch-A signal. Render trusts
+        // it and short-circuits. The IR-inspection fallback below
+        // still fires for recv shapes the decide walker doesn't yet
+        // cover (SelfRef instance method, Var-recv class method),
+        // pending EmitCtx Phase 2 of #24.
+        if arg.decisions & super::super::super::decide::bits::OPTION_WRAP != 0 {
+            return format!("Some({raw})");
+        }
         let owned_producing = matches!(
             &*probe.node,
             ExprNode::Var { .. } | ExprNode::Send { .. } | ExprNode::Ivar { .. }

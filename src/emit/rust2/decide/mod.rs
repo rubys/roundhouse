@@ -21,6 +21,7 @@
 //! `bits.rs` for the bit allocation and roundhouse#22 for phasing.
 
 pub mod bits;
+mod coerce_family;
 mod last_use;
 mod parens;
 pub mod str_color;
@@ -39,4 +40,18 @@ use crate::dialect::LibraryClass;
 pub fn decide_classes(classes: &mut [LibraryClass]) {
     parens::stamp(classes);
     last_use::stamp(classes);
+}
+
+/// Late decide pass — runs *after* `with_emit_ctx` installs the
+/// cross-LC class-method registry. Stamps bits that depend on
+/// callee param-Ty lookup:
+///
+/// - `OPTION_WRAP` (Stage 4 of #22) — Family 6 branch A: `T →
+///   Option<T>` Some-wrap at Const-recv Send arg positions.
+///
+/// Wired from `rust2.rs::emit` inside the `with_emit_ctx` closure;
+/// the per-category `decide_classes` call earlier in `emit()` handles
+/// the registry-independent bits (parens, str_color, last_use).
+pub fn decide_classes_late(classes: &mut [LibraryClass], ctx: &super::EmitCtx) {
+    coerce_family::stamp(classes, ctx);
 }
