@@ -96,6 +96,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -122,6 +123,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -162,6 +164,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -198,6 +201,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -220,6 +224,7 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -244,6 +249,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -270,6 +276,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -290,6 +297,7 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -428,6 +436,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 

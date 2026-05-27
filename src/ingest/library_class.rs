@@ -271,6 +271,7 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         kind: crate::dialect::AccessorKind::AttributeReader,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -304,6 +305,7 @@ fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
         kind: crate::dialect::AccessorKind::AttributeWriter,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -421,6 +423,7 @@ pub(super) fn ingest_library_method(
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     })
 }
 

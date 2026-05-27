@@ -325,6 +325,17 @@ pub struct MethodDef {
     pub name: Symbol,
     pub receiver: MethodReceiver,
     pub params: Vec<Param>,
+    /// Block parameter declared at the `def` site (`def foo(x, &block)`).
+    /// Distinct from `params` because it occupies the call-site `block:`
+    /// slot, never `args:`. Present only when the method binds an
+    /// incoming block to a name; methods that `yield` without naming the
+    /// block, or that take no block at all, carry `None`. Default exists
+    /// in IR today but is not yet consumed by analyzer/emit — landed
+    /// ahead of `ExprNode::ProcRef` work (issue #25) so construction
+    /// sites can be swept in one commit, decoupled from the
+    /// Proc-as-value semantics that will read this field later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_param: Option<Param>,
     pub body: Expr,
     pub signature: Option<Ty>,
     pub effects: EffectSet,

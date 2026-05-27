@@ -1978,6 +1978,7 @@ fn module_funcs_to_library_class(
             kind: AccessorKind::Method,
             is_async: f.is_async,
             mutates_self: false,
+            block_param: None,
         })
         .collect();
     LibraryClass {

@@ -62,6 +62,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     });
 }
 

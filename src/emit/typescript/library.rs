@@ -166,6 +166,7 @@ fn synthesize_module_lc(
             kind: crate::dialect::AccessorKind::Method,
             is_async: false,
             mutates_self: false,
+            block_param: None,
         })
         .collect();
     LibraryClass {
@@ -478,6 +479,7 @@ fn render_imports_for_function(
             kind: crate::dialect::AccessorKind::Method,
             is_async: false,
             mutates_self: false,
+            block_param: None,
         }],
         origin: None,
     };

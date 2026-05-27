@@ -61,6 +61,7 @@ pub(super) fn synthesize_process_action(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 

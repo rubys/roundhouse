@@ -314,6 +314,7 @@ fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> Method
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 

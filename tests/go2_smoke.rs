@@ -90,6 +90,7 @@ fn module_singleton_shape() {
         kind: AccessorKind::AttributeReader,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     // `def self.adapter=(value); @adapter = value; end`.
     let writer = MethodDef {
@@ -124,6 +125,7 @@ fn module_singleton_shape() {
         kind: AccessorKind::AttributeWriter,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("ActiveRecord")),
@@ -243,6 +245,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         kind: AccessorKind::AttributeReader,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Configurable")),
@@ -321,6 +324,7 @@ fn raise_panic_peephole() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     // `def abort_with(msg); raise msg; end` — 1-arg form. Body
     // is a Send with one arg (the message itself).
@@ -357,6 +361,7 @@ fn raise_panic_peephole() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Crasher")),
@@ -454,6 +459,7 @@ fn time_now_utc_iso8601_peephole() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Clock")),
@@ -531,6 +537,7 @@ fn include_array_recv_routes_to_slices_contains() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("ColCheck")),
@@ -602,6 +609,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Tailer")),
@@ -682,6 +690,7 @@ fn class_reflection_rewrites() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
 
     // ---- Case 2: self.class.name (instance method)
@@ -720,6 +729,7 @@ fn class_reflection_rewrites() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
 
     // ---- Case 3: bare `name` in class method context.
@@ -752,6 +762,7 @@ fn class_reflection_rewrites() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Reflect")),
@@ -835,6 +846,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Widget")),
@@ -893,6 +905,7 @@ fn implicit_self_method_call_resolution() {
         kind: AccessorKind::AttributeReader,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     // `def notify; end` — no-op real method. Becomes
     // `func (self *Worker) notify() {}` in emit.
@@ -912,6 +925,7 @@ fn implicit_self_method_call_resolution() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     // `def tick; s = self.status; self.notify; s; end` — Seq of:
     //   Assign(s, self.status)       — must stay self.Status (field)
@@ -966,6 +980,7 @@ fn implicit_self_method_call_resolution() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Worker")),
@@ -1053,6 +1068,7 @@ fn each_array_block_shape() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Loop")),
@@ -1128,6 +1144,7 @@ fn each_hash_block_shape() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("HashLoop")),
@@ -1193,6 +1210,7 @@ fn map_array_block_shape() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("Mapper")),
@@ -1267,6 +1285,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
 
     // Bare Lit::Nil body + int64 return.
@@ -1369,6 +1388,7 @@ fn typed_empty_literals_back_propagate() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     // `def lookup; {}; end` — same shape for Hash, against return
     // `Hash[String, String]`. Emit must produce `map[string]string{}`.
@@ -1388,6 +1408,7 @@ fn typed_empty_literals_back_propagate() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
 
     let class = LibraryClass {
@@ -1666,6 +1687,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("StubFlash")),
@@ -1750,6 +1772,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     };
     let class = LibraryClass {
         name: ClassId(Symbol::from("StubFlash")),

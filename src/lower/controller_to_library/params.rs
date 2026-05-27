@@ -348,6 +348,7 @@ fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
+        block_param: None,
     }
 }
 
@@ -377,6 +378,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         kind: AccessorKind::AttributeReader,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -417,6 +419,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol) -> MethodDef {
         kind: AccessorKind::AttributeWriter,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -688,6 +691,7 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -755,6 +759,7 @@ fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 

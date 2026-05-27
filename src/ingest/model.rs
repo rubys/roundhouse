@@ -219,6 +219,7 @@ fn ingest_method(
         kind: crate::dialect::AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     })
 }
 

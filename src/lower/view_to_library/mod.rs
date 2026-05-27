@@ -293,6 +293,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     };
 
     // Run the body-typer over the lowered body so per-target emitters

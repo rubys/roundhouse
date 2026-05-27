@@ -78,6 +78,7 @@ fn synth_has_many_reader(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -157,6 +158,7 @@ fn synth_belongs_to_reader(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -228,5 +230,6 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     });
 }

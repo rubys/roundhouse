@@ -1057,6 +1057,7 @@ mod tests {
             kind: AccessorKind::Method,
             is_async: false,
             mutates_self: false,
+            block_param: None,
         }
     }
 

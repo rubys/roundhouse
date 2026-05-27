@@ -52,6 +52,7 @@ pub(super) fn push_schema_methods(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     });
 
     // def self.schema_columns
@@ -80,6 +81,7 @@ pub(super) fn push_schema_methods(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     });
 
     // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
@@ -151,6 +153,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
         kind: AccessorKind::AttributeReader,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -180,6 +183,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         kind: AccessorKind::AttributeWriter,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -251,6 +255,7 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -332,6 +337,7 @@ pub(super) fn push_from_params_method(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     });
 }
 
@@ -421,6 +427,7 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -481,6 +488,7 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -579,6 +587,7 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -622,6 +631,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -660,6 +670,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -746,6 +757,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -904,6 +916,7 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }
 
@@ -982,5 +995,6 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
+            block_param: None,
     }
 }

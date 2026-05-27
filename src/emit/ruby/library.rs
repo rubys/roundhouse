@@ -153,6 +153,7 @@ fn synthesize_module_lc(
             kind: AccessorKind::Method,
             is_async: false,
             mutates_self: false,
+            block_param: None,
         })
         .collect();
     LibraryClass {
