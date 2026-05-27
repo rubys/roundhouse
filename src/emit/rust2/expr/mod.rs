@@ -21,101 +21,18 @@ pub(super) use util::sanitize_ident;
 use util::{indent, is_copy_ty, is_option_of, peel_nil, value_narrowing_coercion};
 
 thread_local! {
-    /// True while rendering the body of a `pub fn new(...) -> Self`
-    /// (Ruby `def initialize`). Rust constructors have no `self`
-    /// mid-body — the ivar emit shifts:
-    ///   `@x` (read) → bare `x` (local)
-    ///   `@x = value` → `let mut x = value` (binds a local)
-    /// The caller appends `Self { f1, f2, ... }` at the end, building
-    /// the instance from the locals. `self.method(args)` calls now
-    /// route through STATIC_METHODS (below) — methods marked static
-    /// emit as `Self::method(args)` and compile pre-instance.
-    static IN_CONSTRUCTOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
-    /// True while rendering the body of a `def self.X` (class method),
-    /// emitted as `pub fn X(...)` with no `self` parameter. Ruby's
-    /// `self` inside a class method *is* the class, so `SelfRef` →
-    /// `Self` and `SelfRef.method(args)` → `Self::method(args)`. The
-    /// body-typer (see `analyze/body/mod.rs::resolves_through_self`)
-    /// rewrites implicit-receiver class-method calls to explicit
-    /// `recv = Some(SelfRef)`, so the emitter sees the explicit form
-    /// regardless of how the Ruby source was written.
-    static IN_CLASS_METHOD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
-    /// True at expression positions whose value flows out of the
-    /// enclosing function as the return value: top-level body emit,
-    /// tail of a `Seq`, value of a `Return`. Reset when entering
-    /// non-tail child positions (Send args, If conds, etc.). Lets
-    /// the `Ivar` arm append `.clone()` for non-Copy fields read in
-    /// tail position — `pub fn body(&self) -> String { self.body }`
-    /// otherwise moves out of `&self` (E0507). Off in constructor
-    /// mode (the closing `Self { fields }` literal handles the
-    /// return; ivars in the body are locals).
-    static IN_RETURN_TAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
-    // `STATIC_METHODS` / `CONSTRUCTOR_FIELDS` (Phase 2 of #24) now
-    // live on `EmitCtx::static_methods` / `EmitCtx::constructor_fields`.
-    // The `with_static_methods` / `with_constructor_mode` wrappers
-    // swap field values on the installed `EmitCtx` via save-restore.
-
-    // `MUT_VARS` / `DECLARED_VARS` / `BACK_PROPAGATED_HASH_LOCALS`
-    // (Phase 3 of #24) now live on `EmitCtx::mut_vars` /
-    // `declared_vars` / `back_propagated_hash_locals`.
-    // `with_method_scope` swaps all three via save-restore.
-
-    // `CLASS_METHOD_PARAM_TYS` (Phase 2 of #24) now lives on
-    // `EmitCtx::class_method_param_tys`. `with_class_method_param_tys`
-    // swaps the field value via save-restore.
-
-    /// Pipeline-global emit context bundling the cross-LC class-method
-    /// registry and the parallel kwarg-default registry. Populated by
-    /// `rust2.rs::emit` once all LCs (models, views, route_helpers)
-    /// are lowered, then installed via `with_emit_ctx` around the
-    /// per-file emit loop. The previous design used two parallel
-    /// `RefCell<HashMap>` thread-locals (`GLOBAL_CLASS_METHODS` +
-    /// `GLOBAL_CLASS_METHOD_DEFAULTS`); they now live as fields on
-    /// `EmitCtx` so non-emit consumers (the decide pass for #22
-    /// Stage 4) can take an explicit `&EmitCtx` parameter.
+    /// Pipeline-global emit context — install slot for `with_emit_ctx`.
+    /// Holds `None` outside the install scope; `Some(Rc<EmitCtx>)`
+    /// inside. All other emit state (per-class, per-method, transient
+    /// render flags) lives as fields on the `EmitCtx` and is reachable
+    /// via `current_emit_ctx()`.
     ///
-    /// `None` outside `with_emit_ctx`. Inside, all accessor functions
-    /// (`global_class_method_*`, `current_emit_ctx`) read through this
-    /// slot.
+    /// This is the only thread-local in rust2 emit after #24 Phases
+    /// 1–4. It cannot itself move onto `EmitCtx` because it's the
+    /// install point that publishes the `EmitCtx` to the rest of the
+    /// emit code.
     static EMIT_CTX: std::cell::RefCell<Option<std::rc::Rc<super::EmitCtx>>> =
         std::cell::RefCell::new(None);
-
-    /// True while emitting an expression that's the *immediate* recv
-    /// of a method-call Send. At a recv position Rust's auto-ref
-    /// (`(&v).method(...)` / `(&mut v).method(...)`) handles borrowing,
-    /// so the decide-pass `CLONE_AT` bit's `.clone()` append is
-    /// unnecessary AND breaks `&mut self` setters —
-    /// `instance.clone().set_id(1)` mutates a discarded copy. Set
-    /// by `emit_send_recv` (only at Var-shaped recvs, so it doesn't
-    /// leak into sub-expressions) and cleared after the Var arm
-    /// consults it.
-    static SUPPRESS_VAR_CLONE: std::cell::RefCell<bool> =
-        std::cell::RefCell::new(false);
-
-    // `IVAR_TYPES` (Phase 2 of #24) now lives on
-    // `EmitCtx::ivar_types`. `with_ivar_types` swaps the field
-    // value via save-restore.
-
-    /// True while emitting a module-singleton class (Ruby pattern
-    /// `module X; class << self; attr_accessor :slot; end; end`):
-    /// all methods are class methods, "ivars" are module-level
-    /// state. In this mode `@x` reads emit as
-    /// `X_SLOT.lock().unwrap().clone()...` and `@x = v` emits as
-    /// `*X_SLOT.lock().unwrap() = Some(v)`, against per-ivar
-    /// `static` Mutex slots emitted alongside the impl block.
-    static IN_MODULE_SINGLETON: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-
-    // `CURRENT_RETURN_TY` / `PARAM_TYPES` / `REBOUND_VARS` /
-    // `LOCAL_VAR_TYPES` (Phase 3 of #24) now live on
-    // `EmitCtx::current_return_ty` / `param_types` / `rebound_vars` /
-    // `local_var_types`. `with_current_return_ty`,
-    // `with_param_types`, `with_rebound_vars_scope`, and the
-    // `mark_*` / `*_ty` accessors swap or read field values via the
-    // installed `EmitCtx`.
 }
 
 pub(super) fn with_param_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
@@ -251,14 +168,17 @@ pub(super) fn with_module_singleton<F, R>(active: bool, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = IN_MODULE_SINGLETON.with(|c| c.replace(active));
+    let ctx = current_emit_ctx().expect("with_module_singleton called outside with_emit_ctx");
+    let prev = ctx.in_module_singleton.replace(active);
     let r = f();
-    IN_MODULE_SINGLETON.with(|c| c.set(prev));
+    ctx.in_module_singleton.set(prev);
     r
 }
 
 pub(super) fn in_module_singleton() -> bool {
-    IN_MODULE_SINGLETON.with(|c| c.get())
+    current_emit_ctx()
+        .map(|ctx| ctx.in_module_singleton.get())
+        .unwrap_or(false)
 }
 
 /// Slot identifier for an ivar in module-singleton emit. `@adapter`
@@ -300,10 +220,10 @@ where
     F: FnOnce() -> R,
 {
     let ctx = current_emit_ctx().expect("with_constructor_mode called outside with_emit_ctx");
-    let prev_mode = IN_CONSTRUCTOR.with(|c| c.replace(true));
+    let prev_mode = ctx.in_constructor.replace(true);
     let prev_fields = std::mem::replace(&mut *ctx.constructor_fields.borrow_mut(), fields);
     let r = f();
-    IN_CONSTRUCTOR.with(|c| c.set(prev_mode));
+    ctx.in_constructor.set(prev_mode);
     *ctx.constructor_fields.borrow_mut() = prev_fields;
     r
 }
@@ -366,9 +286,10 @@ pub(super) fn emit_send_recv(r: &Expr) -> String {
     let s = if !is_bare_var {
         emit_expr(r)
     } else {
-        let prev = SUPPRESS_VAR_CLONE.with(|c| c.replace(true));
+        let ctx = current_emit_ctx().expect("emit_send_recv called outside with_emit_ctx");
+        let prev = ctx.suppress_var_clone.replace(true);
         let s = emit_expr(r);
-        SUPPRESS_VAR_CLONE.with(|c| *c.borrow_mut() = prev);
+        ctx.suppress_var_clone.set(prev);
         s
     };
     wrap_if_needs_parens(r, s)
@@ -635,20 +556,25 @@ pub(super) fn global_class_method_params(
 }
 
 fn in_constructor() -> bool {
-    IN_CONSTRUCTOR.with(|c| c.get())
+    current_emit_ctx()
+        .map(|ctx| ctx.in_constructor.get())
+        .unwrap_or(false)
 }
 
 fn in_class_method() -> bool {
-    IN_CLASS_METHOD.with(|c| c.get())
+    current_emit_ctx()
+        .map(|ctx| ctx.in_class_method.get())
+        .unwrap_or(false)
 }
 
 pub(super) fn with_class_method_scope<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = IN_CLASS_METHOD.with(|c| c.replace(true));
+    let ctx = current_emit_ctx().expect("with_class_method_scope called outside with_emit_ctx");
+    let prev = ctx.in_class_method.replace(true);
     let r = f();
-    IN_CLASS_METHOD.with(|c| c.set(prev));
+    ctx.in_class_method.set(prev);
     r
 }
 
@@ -685,7 +611,9 @@ pub(super) fn is_back_propagated_hash(name: &str) -> bool {
 }
 
 pub(super) fn in_return_tail() -> bool {
-    IN_RETURN_TAIL.with(|c| c.get())
+    current_emit_ctx()
+        .map(|ctx| ctx.in_return_tail.get())
+        .unwrap_or(false)
 }
 
 /// Set the return-tail flag and run `f`. Used by `method.rs` around
@@ -696,9 +624,10 @@ pub(super) fn with_return_tail<F, R>(value: bool, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = IN_RETURN_TAIL.with(|c| c.replace(value));
+    let ctx = current_emit_ctx().expect("with_return_tail called outside with_emit_ctx");
+    let prev = ctx.in_return_tail.replace(value);
     let r = f();
-    IN_RETURN_TAIL.with(|c| c.set(prev));
+    ctx.in_return_tail.set(prev);
     r
 }
 
@@ -823,7 +752,9 @@ fn emit_expr_inner(e: &Expr) -> String {
             // are at a Send recv slot (auto-ref handles borrowing
             // there). Strict improvement over the prior name-set
             // approach, which over-cloned the lexically-last read.
-            let at_send_recv = SUPPRESS_VAR_CLONE.with(|c| *c.borrow());
+            let at_send_recv = current_emit_ctx()
+                .map(|ctx| ctx.suppress_var_clone.get())
+                .unwrap_or(false);
             if e.decisions & super::decide::bits::CLONE_AT != 0 && !at_send_recv {
                 return format!("{n}.clone()");
             }

@@ -2,12 +2,15 @@
 //!
 //! Phase 1 bundled the two cross-LC class-method registries
 //! (`GLOBAL_CLASS_METHODS` + `GLOBAL_CLASS_METHOD_DEFAULTS`).
-//! Phase 2 lifted four per-class thread-locals (`IVAR_TYPES`,
+//! Phase 2 lifted the four per-class thread-locals (`IVAR_TYPES`,
 //! `CLASS_METHOD_PARAM_TYS`, `STATIC_METHODS`, `CONSTRUCTOR_FIELDS`).
-//! Phase 3 (this revision) lifts the seven per-method thread-locals —
-//! `MUT_VARS`, `DECLARED_VARS`, `BACK_PROPAGATED_HASH_LOCALS`,
-//! `PARAM_TYPES`, `LOCAL_VAR_TYPES`, `REBOUND_VARS`,
-//! `CURRENT_RETURN_TY` — onto the same struct as `RefCell` fields.
+//! Phase 3 lifted the seven per-method thread-locals (`MUT_VARS`,
+//! `DECLARED_VARS`, `BACK_PROPAGATED_HASH_LOCALS`, `PARAM_TYPES`,
+//! `LOCAL_VAR_TYPES`, `REBOUND_VARS`, `CURRENT_RETURN_TY`).
+//! Phase 4 (this revision) lifts the five transient render flags —
+//! `IN_CONSTRUCTOR`, `IN_CLASS_METHOD`, `IN_RETURN_TAIL`,
+//! `IN_MODULE_SINGLETON`, `SUPPRESS_VAR_CLONE` — as `Cell<bool>`
+//! fields. Cheap get/set, no `RefCell` overhead.
 //!
 //! Storage shape unchanged: `expr/mod.rs::EMIT_CTX` holds an
 //! `Option<Rc<EmitCtx>>`; the existing accessor functions read through
@@ -15,18 +18,12 @@
 //! installed `EmitCtx` via save-restore rather than on dedicated
 //! per-field thread-locals.
 //!
-//! Why bundle: the registries are exactly what #22's Stage 4
-//! (`OPTION_WRAP` + `COERCE_FAMILY`) decide walker needs for callee
-//! param-Ty lookup. Without `EmitCtx`, state sat behind a sprawl of
-//! parallel thread-locals invisible to non-emit consumers. With
-//! `EmitCtx`, downstream decide-pass work takes `&EmitCtx` as an
-//! explicit parameter and the per-class / per-method state is
-//! reachable from anywhere holding an `Rc<EmitCtx>`.
-//!
-//! Phase 4 (the five transient `Cell<bool>` render flags) is the only
-//! thread-local residue left after this commit.
+//! After Phase 4 the only thread-local left in `expr/mod.rs` is
+//! `EMIT_CTX` itself — the install slot. Every other emit state
+//! lives on `EmitCtx` and is reachable from any code holding an
+//! `Rc<EmitCtx>`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use crate::ty::{Param, Ty};
@@ -150,6 +147,45 @@ pub struct EmitCtx {
     /// must emit `return None` rather than just `return` (E0069 in
     /// non-unit-returning functions).
     pub current_return_ty: RefCell<Option<Ty>>,
+
+    /// True while rendering the body of a `pub fn new(...) -> Self`
+    /// (Ruby `def initialize`). Rust constructors have no `self`
+    /// mid-body — ivar reads emit as bare locals, ivar assigns emit
+    /// as `let mut`. The caller appends `Self { f1, f2, ... }` at the
+    /// end, building the instance from the locals. Set by
+    /// `with_constructor_mode`.
+    pub in_constructor: Cell<bool>,
+
+    /// True while rendering the body of a `def self.X` (class method),
+    /// emitted as `pub fn X(...)` with no `self` parameter. Ruby's
+    /// `self` inside a class method *is* the class, so `SelfRef`
+    /// emits as `Self`. Set by `with_class_method_scope`.
+    pub in_class_method: Cell<bool>,
+
+    /// True at expression positions whose value flows out of the
+    /// enclosing function as the return value: top-level body emit,
+    /// tail of a `Seq`, value of a `Return`. Reset when entering
+    /// non-tail child positions (Send args, If conds, etc.). Lets
+    /// the `Ivar` arm append `.clone()` for non-Copy fields read in
+    /// tail position. Toggled by `with_return_tail`.
+    pub in_return_tail: Cell<bool>,
+
+    /// True while emitting a module-singleton class (Ruby pattern
+    /// `module X; class << self; attr_accessor :slot; end; end`):
+    /// all methods are class methods, "ivars" are module-level state
+    /// stored in per-ivar `Mutex<Option<T>>` statics. Set by
+    /// `with_module_singleton`.
+    pub in_module_singleton: Cell<bool>,
+
+    /// True while emitting an expression that's the *immediate* recv
+    /// of a method-call Send. At a recv position Rust's auto-ref
+    /// (`(&v).method(...)` / `(&mut v).method(...)`) handles
+    /// borrowing, so the decide-pass `CLONE_AT` bit's `.clone()`
+    /// append is unnecessary AND breaks `&mut self` setters —
+    /// `instance.clone().set_id(1)` mutates a discarded copy. Set
+    /// transiently by `emit_send_recv` (only at Var-shaped recvs) so
+    /// the Var arm can suppress its multi-read clone.
+    pub suppress_var_clone: Cell<bool>,
 }
 
 impl EmitCtx {
