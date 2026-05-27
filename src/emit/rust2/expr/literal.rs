@@ -218,13 +218,21 @@ pub(super) fn emit_closure(params: &[crate::ident::Symbol], body: &Expr) -> Stri
 }
 
 /// Append a block-as-closure to a `recv.method(...)` call. The block's
-/// Lambda IR carries params + body; we emit a closure literal and
-/// splice it as the last arg.
+/// IR shape determines what gets spliced as the last arg:
+///   - `Lambda { params, body }`: emit a closure literal `|p1,..| { body }`.
+///   - `Var { name }`: emit the bare identifier — `&block` forwarding
+///     idiom (issue #25 stage 2). The slot context (`Send.block:`)
+///     signals "this Var is a Proc forward", so no new IR variant
+///     is needed. The forwarded name matches the def-site closure
+///     param (see `render_block_param_placeholder` in method.rs).
 pub(super) fn attach_block(base: &str, block: &Expr) -> String {
-    let closure = if let ExprNode::Lambda { params, body, .. } = &*block.node {
-        emit_closure(params, body)
-    } else {
-        format!("/* TODO rust2: non-Lambda block: {:?} */", std::mem::discriminant(&*block.node))
+    let closure = match &*block.node {
+        ExprNode::Lambda { params, body, .. } => emit_closure(params, body),
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        _ => format!(
+            "/* TODO rust2: non-Lambda/non-Var block: {:?} */",
+            std::mem::discriminant(&*block.node)
+        ),
     };
     if let Some(stripped) = base.strip_suffix("()") {
         format!("{stripped}({closure})")

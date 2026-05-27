@@ -1374,11 +1374,31 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
                     },
                 )));
             }
-            // `&some_proc_var` — passing an existing proc. Not a literal
-            // closure; flag as unsupported rather than silently dropping.
+            // `&block_var` — forwarding an existing proc bound to a
+            // local (the `&block` parameter idiom). Lower to a bare
+            // `ExprNode::Var` in the `block:` slot — the slot itself
+            // signals Proc-forward (slot context disambiguates Var-as-
+            // value vs Var-as-Proc, sidestepping a new IR variant +
+            // its ~84-site exhaustive-match sweep). Per-target emit
+            // recognizes a non-Lambda block expression as forwarding.
+            // Issue #25 stage 2.
+            if let Some(v) = expr.as_local_variable_read_node() {
+                return Ok(Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: Symbol::from(constant_id_str(&v.name())),
+                    },
+                )));
+            }
+            // Other `&expr` shapes (`&method(:foo)`, `&proc { ... }`,
+            // `&self.bar`) are not yet supported. Filing this as
+            // unsupported keeps the error surface narrow — the local-
+            // variable case covers the `&block` forwarding idiom that
+            // motivates issue #25.
             return Err(IngestError::Unsupported {
                 file: file.into(),
-                message: "block-argument forms other than `&:symbol` not yet supported".into(),
+                message: "block-argument forms other than `&:symbol` and `&local_var` not yet supported".into(),
             });
         }
         return Ok(None);

@@ -1412,6 +1412,34 @@ mod tests {
     }
 
     #[test]
+    fn block_forwarding_ingests_as_var_in_send_block_slot() {
+        // `def foo(&blk); bar(&blk); end` — the def-site `&blk` lands
+        // in `MethodDef.block_param`; the call-site `&blk` ingests as
+        // `Send { method: bar, block: Some(Var("blk")) }`. The slot
+        // context (`Send.block:`) signals Proc-forward without a new
+        // IR variant. Issue #25 stage 2.
+        let src = "def foo(&blk)\n  bar(&blk)\nend\n";
+        let m = parse_one(src);
+        assert_eq!(
+            m.block_param.as_ref().map(|p| p.name.as_str()),
+            Some("blk")
+        );
+        // Body should be a Send to `bar` whose `block:` slot holds a
+        // Var referencing `blk` (not a Lambda, not an error).
+        let send = match &*m.body.node {
+            ExprNode::Send { method, block, .. } => {
+                assert_eq!(method.as_str(), "bar");
+                block.as_ref().expect("&blk forwarding produces a block expr")
+            }
+            other => panic!("expected Send in body, got {other:?}"),
+        };
+        match &*send.node {
+            ExprNode::Var { name, .. } => assert_eq!(name.as_str(), "blk"),
+            other => panic!("expected Var in Send.block:, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mixed_param_kinds_in_source_order() {
         let src = "def f(a, b = 1, *rest, c, d:, e: 2, **opts, &blk)\n  a\nend\n";
         let m = parse_one(src);

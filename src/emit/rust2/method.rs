@@ -130,18 +130,20 @@ fn render_params(m: &MethodDef) -> String {
     // the permissive fallback path.
     if let Some(bp) = block_param {
         parts.push(render_block_closure_param(&bp.ty));
-    } else if m.block_param.is_some() {
+    } else if let Some(bp) = m.block_param.as_ref() {
         // RBS didn't supply a block signature, but the def-site
         // declared `&block` (carried in `MethodDef.block_param`).
         // Emit a heap-closure placeholder — `Box<dyn FnOnce>` is the
-        // ABI-stable shape that forwarding (stage 2: `ExprNode::ProcRef`)
+        // ABI-stable shape that forwarding (issue #25 stage 2)
         // needs to cross method boundaries; `impl FnOnce` here would
         // break the monomorphic gradient when a callee forwards the
         // block to another method without itself being generic.
         // Placeholder signature is zero-arg, unit-return; analyzer
         // back-prop (stage 3) will refine to match yield arity at
-        // the body's `f(args)` sites.
-        parts.push(render_block_param_placeholder());
+        // the body's `f(args)` sites. Param name uses the source-
+        // declared identifier so forwarded `&block` Var refs in the
+        // body resolve against the same name.
+        parts.push(render_block_param_placeholder(bp.name.as_str()));
     }
 
     format!("({})", parts.join(", "))
@@ -151,8 +153,10 @@ fn render_params(m: &MethodDef) -> String {
 /// `&block` (via `MethodDef.block_param`) but no RBS signature
 /// specifies the block's call shape. Permissive zero-arg, unit-return
 /// — refinement to actual yield arity is stage-3 analyzer work.
-fn render_block_param_placeholder() -> String {
-    "f: Box<dyn FnOnce()>".to_string()
+/// The param name matches the source-declared identifier so that
+/// `&block` forwarding in the body resolves against the same name.
+fn render_block_param_placeholder(name: &str) -> String {
+    format!("{name}: Box<dyn FnOnce()>")
 }
 
 /// Render the `f: impl FnOnce(...) -> R` parameter that backs `yield`
@@ -382,7 +386,11 @@ pub(super) fn emit_instance_method(
     // (stage 3) will refine the signature.
     let block_param = find_yield_signature(&m.body)
         .map(render_block_param_from_args)
-        .or_else(|| m.block_param.as_ref().map(|_| render_block_param_placeholder()));
+        .or_else(|| {
+            m.block_param
+                .as_ref()
+                .map(|bp| render_block_param_placeholder(bp.name.as_str()))
+        });
     let params = render_instance_params(m, receiver, block_param.as_deref());
     let ret_clause = if is_init {
         " -> Self".to_string()
@@ -769,7 +777,7 @@ mod tests {
         m.block_param = Some(Param::positional(Symbol::from("blk")));
         let emitted = with_emit_ctx(EmitCtx::default(), || emit_module_method(&m)).expect("emit");
         assert!(
-            emitted.contains("f: Box<dyn FnOnce()>"),
+            emitted.contains("blk: Box<dyn FnOnce()>"),
             "expected Box<dyn FnOnce()> placeholder for &block-declaring method, got:\n{emitted}"
         );
     }
@@ -785,6 +793,57 @@ mod tests {
         assert!(
             emitted.contains("pub fn bar()"),
             "expected zero-param signature, got:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn block_forwarding_var_in_send_block_slot_emits_bare_identifier() {
+        // `def foo(&blk); bar(&blk); end` shape — the def-site `&blk`
+        // populates `MethodDef.block_param`; the call-site `&blk`
+        // ingests as `Send { method: bar, block: Some(Var("blk")) }`
+        // (issue #25 stage 2 ingest, src/ingest/expr.rs).
+        // Emit must (a) declare the closure param with the source name
+        // and (b) splice the same name as the forwarded closure arg
+        // so the body references the parameter that's actually in
+        // scope.
+        let blk_name = Symbol::from("blk");
+        let bar_call = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("bar"),
+                args: vec![],
+                block: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: blk_name.clone(),
+                    },
+                )),
+                parenthesized: true,
+            },
+        );
+        let m = MethodDef {
+            name: Symbol::from("foo"),
+            receiver: MethodReceiver::Class,
+            params: vec![],
+            body: bar_call,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: Some(Param::positional(blk_name)),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || emit_module_method(&m)).expect("emit");
+        assert!(
+            emitted.contains("blk: Box<dyn FnOnce()>"),
+            "expected Box<dyn FnOnce()> with source name, got:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("bar(blk)"),
+            "expected forwarded `bar(blk)` referencing the same name, got:\n{emitted}"
         );
     }
 
@@ -808,7 +867,7 @@ mod tests {
         })
         .expect("emit");
         assert!(
-            emitted.contains("f: Box<dyn FnOnce()>"),
+            emitted.contains("blk: Box<dyn FnOnce()>"),
             "expected Box<dyn FnOnce()> placeholder, got:\n{emitted}"
         );
         // Body has no yield, so the FnMut path must NOT trigger.
