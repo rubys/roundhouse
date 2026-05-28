@@ -608,13 +608,11 @@ jobs:
   # target vendors the Tep transport (precompiles sphttp.o + sed-
   # substitutes @TEP_SPHTTP_O@ in net.rb) before AOT-compile; the
   # scaffold's `make build` then drives `spinel main.rb -o build/blog`.
-  # 3/7 paths match today; remaining 4 are all driven by matz/spinel
-  # #634 (nil-default widened to non-nullable type when other call
-  # sites pass a typed value) — surfaces as `id="<sym>_<model>_<n>"`
-  # on dom_id calls without explicit suffix, and `value="0"` on
-  # empty form inputs. Drop continue-on-error when #634 lands.
+  # 7/7 paths match against Rails as of matz/spinel#1017 (PR #1018)
+  # + #1020 (commit 23d9a18). `continue-on-error` is still on because
+  # spinel master can churn faster than this job rebuilds against it;
+  # drop it once the upstream cadence settles.
   compare-spinel:
-    if: false  # disabled until spinel tests start passing again
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
