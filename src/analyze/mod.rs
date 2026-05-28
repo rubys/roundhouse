@@ -34,7 +34,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
 use crate::App;
-use crate::dialect::{Action, Filter, FilterKind, RenderTarget};
+use crate::dialect::{Action, ControllerBodyItem, Filter, FilterKind, ModelBodyItem, RenderTarget};
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
@@ -453,6 +453,31 @@ impl Analyzer {
         let mut action_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
         for controller in &mut app.controllers {
+            // Phase 0: type the controller's `Unknown` body items so
+            // in-class constants (`COMMENTS_PER_PAGE = 20`,
+            // `TOTP_SESSION_TIMEOUT = (60 * 15)`, etc.) get
+            // `value.ty` populated for the extract pass below. Same
+            // rationale as the model loop.
+            let const_ctx = Ctx {
+                self_ty: Some(Ty::Class {
+                    id: controller
+                        .parent
+                        .clone()
+                        .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
+                    args: vec![],
+                }),
+                ivar_bindings: HashMap::new(),
+                local_bindings: HashMap::new(),
+                constants: HashMap::new(),
+                annotate_self_dispatch: false,
+            };
+            for item in controller.body.iter_mut() {
+                if let ControllerBodyItem::Unknown { expr, .. } = item {
+                    self.body_typer().analyze_expr(expr, &const_ctx);
+                }
+            }
+            let class_constants = extract_controller_const_assignments(&controller.body);
+
             let ctx = Ctx {
                 self_ty: Some(Ty::Class {
                     id: controller
@@ -463,7 +488,8 @@ impl Analyzer {
                 }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
-                constants: HashMap::new(), annotate_self_dispatch: false,
+                constants: class_constants.clone(),
+                annotate_self_dispatch: false,
             };
             let ctrl_name = controller.name.clone();
 
@@ -508,7 +534,8 @@ impl Analyzer {
                             self_ty: ctx.self_ty.clone(),
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
-                            constants: HashMap::new(), annotate_self_dispatch: false,
+                            constants: class_constants.clone(),
+                            annotate_self_dispatch: false,
                         };
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                         action.effects = self.collect_effects(&mut action.body, &inner_ctx);
@@ -567,11 +594,36 @@ impl Analyzer {
                     },
                 );
             }
+
+            // Phase 0: type the model's `Unknown` body items so the
+            // RHS of in-class constant assignments (`FLAGGABLE_DAYS = 7`,
+            // `MIN_KARMA_TO_SUGGEST = 50`, `COMMENT_REASONS = {...}`)
+            // gets `value.ty` populated. Without this, the subsequent
+            // const-table extraction sees `None` and the body-typer
+            // falls through to `Ty::Class { id: ConstName }` for every
+            // read — observable as `incompatible_binop` errors
+            // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
+            // (`days` on `Class { NEW_USER_DAYS }`).
+            let const_ctx = Ctx {
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                ivar_bindings: class_ivars.clone(),
+                local_bindings: HashMap::new(),
+                constants: HashMap::new(),
+                annotate_self_dispatch: false,
+            };
+            for item in model.body.iter_mut() {
+                if let ModelBodyItem::Unknown { expr, .. } = item {
+                    self.body_typer().analyze_expr(expr, &const_ctx);
+                }
+            }
+            let class_constants = extract_const_assignments(&model.body);
+
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
-                constants: HashMap::new(), annotate_self_dispatch: false,
+                constants: class_constants.clone(),
+                annotate_self_dispatch: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -614,7 +666,8 @@ impl Analyzer {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
-                    constants: HashMap::new(), annotate_self_dispatch: false,
+                    constants: class_constants.clone(),
+                    annotate_self_dispatch: false,
                 };
 
                 for scope in model.scopes_mut() {
@@ -1644,6 +1697,58 @@ fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol>
 /// conditionally still show up. Deliberately does NOT walk into blocks
 /// (Lambda bodies): ivars assigned inside iteration are run-time per-element
 /// state, not the "data the controller passes to the view."
+/// Walk a model's `Vec<ModelBodyItem>` collecting every in-class
+/// constant assignment (`FLAGGABLE_DAYS = 7`, `COMMENT_REASONS =
+/// {...}`, etc.) into a name→type table the body-typer's
+/// `Ctx::constants` map consumes. Returns only those constants whose
+/// RHS has been typed (Pass 0 in the model loop populates
+/// `value.ty` by running the body-typer over each `Unknown` item
+/// before this extraction runs).
+///
+/// Constants land in `ModelBodyItem::Unknown` because the model-body
+/// classifier doesn't have a `Constant` variant — they're just bare
+/// `Assign { LValue::Const, value }` expressions sitting at class
+/// scope. The name comes from the LValue's path (last segment for
+/// the common single-name case; qualified writes `Foo::BAR = 1` use
+/// the joined path as their key, matching how the body-typer's
+/// Const-read arm looks up `path.last()`).
+pub(crate) fn extract_const_assignments(body: &[ModelBodyItem]) -> HashMap<Symbol, Ty> {
+    let mut out: HashMap<Symbol, Ty> = HashMap::new();
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        record_const(expr, &mut out);
+    }
+    out
+}
+
+/// Controller analog of [`extract_const_assignments`] — same shape,
+/// different body-item enum. Controllers like `comments_controller.rb`
+/// declare in-class constants (`COMMENTS_PER_PAGE = 20`,
+/// `TOTP_SESSION_TIMEOUT = (60 * 15)`) the same way models do; the
+/// body-typer needs the resulting name→type table to avoid the
+/// `Ty::Class { id: ConstName }` fallback when method bodies
+/// reference these constants.
+pub(crate) fn extract_controller_const_assignments(
+    body: &[ControllerBodyItem],
+) -> HashMap<Symbol, Ty> {
+    let mut out: HashMap<Symbol, Ty> = HashMap::new();
+    for item in body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        record_const(expr, &mut out);
+    }
+    out
+}
+
+fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
+    let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node else {
+        return;
+    };
+    let Some(last) = path.last() else { return };
+    if let Some(ty) = value.ty.clone() {
+        out.insert(last.clone(), ty);
+    }
+}
+
 pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
