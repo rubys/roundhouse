@@ -452,20 +452,51 @@ impl Analyzer {
         // against the `@article` bound in `ArticlesController#show`.
         let mut action_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
+        // Per-controller metadata captured during Pass A so Pass B
+        // (below) can resolve parent-class filters + action bindings
+        // without an inner re-borrow of `app.controllers`. Restructured
+        // from a single loop to a two-phase loop because Rails'
+        // `before_action :authenticate_user` on ApplicationController
+        // applies to every subclass controller's actions — and the
+        // target method (`authenticate_user`) is defined on the
+        // parent, so resolving the seeded ivars (`@user = ...`)
+        // requires looking up the parent's typed action bodies. The
+        // first loop types each controller in isolation (no parent
+        // inheritance), then the second loop walks the parent chain
+        // using the captured metadata.
+        struct ControllerMeta {
+            self_ty: Ty,
+            before_filters: Vec<Filter>,
+            action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>>,
+            class_constants: HashMap<Symbol, Ty>,
+        }
+        let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
+        // Snapshot parent links separately so Phase B can walk
+        // arbitrary-depth chains without re-borrowing `app.controllers`
+        // (which is mutably borrowed inside the analysis loops).
+        let parent_link_by_name: HashMap<ClassId, Option<ClassId>> = app
+            .controllers
+            .iter()
+            .map(|c| (c.name.clone(), c.parent.clone()))
+            .collect();
+
+        // ── Phase A: type Unknown body items + every action body
+        // ── once per controller, with no parent inheritance.
         for controller in &mut app.controllers {
             // Phase 0: type the controller's `Unknown` body items so
             // in-class constants (`COMMENTS_PER_PAGE = 20`,
             // `TOTP_SESSION_TIMEOUT = (60 * 15)`, etc.) get
             // `value.ty` populated for the extract pass below. Same
             // rationale as the model loop.
+            let self_ty = Ty::Class {
+                id: controller
+                    .parent
+                    .clone()
+                    .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
+                args: vec![],
+            };
             let const_ctx = Ctx {
-                self_ty: Some(Ty::Class {
-                    id: controller
-                        .parent
-                        .clone()
-                        .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
-                    args: vec![],
-                }),
+                self_ty: Some(self_ty.clone()),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: HashMap::new(),
@@ -479,38 +510,33 @@ impl Analyzer {
             let class_constants = extract_controller_const_assignments(&controller.body);
 
             let ctx = Ctx {
-                self_ty: Some(Ty::Class {
-                    id: controller
-                        .parent
-                        .clone()
-                        .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
-                    args: vec![],
-                }),
+                self_ty: Some(self_ty.clone()),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false,
             };
-            let ctrl_name = controller.name.clone();
 
-            // Snapshot every `before_action` on this controller once, so the
-            // two-pass analysis below can consult the list without re-borrow.
+            // Snapshot every `before_action` declared on this
+            // controller (not yet including parent's — that's Phase B).
             let before_filters: Vec<Filter> = controller
                 .filters()
                 .filter(|f| matches!(f.kind, FilterKind::Before))
                 .cloned()
                 .collect();
 
-            // Pass A: analyze every action body once with no seed. Required
-            // before we can harvest each action's produced ivar bindings —
-            // the callback targets (`set_article`) are themselves actions.
+            // Pass A: analyze every action body once with no seed.
+            // Required before we can harvest each action's produced
+            // ivar bindings — the callback targets (`set_article`)
+            // are themselves actions.
             for action in controller.actions_mut() {
                 self.body_typer().analyze_expr(&mut action.body, &ctx);
                 action.effects = self.collect_effects(&mut action.body, &ctx);
             }
 
-            // Snapshot each action's ivar_bindings. Used both to resolve
-            // before_action targets (Pass B) and to seed view Ctx (below).
+            // Snapshot each action's ivar bindings (this controller's
+            // own actions only — parent's actions get layered in by
+            // Phase B's `chained_bindings` builder).
             let action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = controller
                 .actions()
                 .map(|a| {
@@ -520,21 +546,82 @@ impl Analyzer {
                 })
                 .collect();
 
-            // Pass B: re-analyze actions affected by a before_action with the
-            // target's bindings pre-seeded into Ctx. Rails' `before_action`
-            // runs before the action body, so any ivar the filter sets is in
-            // scope for the whole body. Idempotent analyze means two passes
-            // produce consistent types; cost is negligible for real
-            // controllers.
-            if !before_filters.is_empty() {
+            meta_by_name.insert(
+                controller.name.clone(),
+                ControllerMeta { self_ty, before_filters, action_bindings, class_constants },
+            );
+        }
+
+        // ── Phase B: walk each controller's parent chain to build
+        // ── inherited (chained) filters + action bindings, then
+        // ── re-analyze actions and harvest view ivars.
+        //
+        // Parent filters run BEFORE child filters (Rails semantics).
+        // Action bindings are merged with NEAREST parent first so the
+        // closest definition wins on name conflicts (mirrors Ruby
+        // method-resolution order).
+        for controller in &mut app.controllers {
+            let ctrl_name = controller.name.clone();
+            let Some(meta) = meta_by_name.get(&ctrl_name) else { continue };
+
+            // Walk the parent chain to collect ancestor metadata,
+            // using the pre-built `parent_link_by_name` map (built
+            // before the analysis loops so it's available without
+            // re-borrowing `app.controllers`). Walks all the way up
+            // until hitting a class not registered as a Controller —
+            // that's the boundary with framework-supplied parents
+            // (e.g., `ActionController::Base`).
+            let mut ancestors: Vec<&ControllerMeta> = Vec::new();
+            let mut walk = controller.parent.clone();
+            let mut visited: BTreeSet<ClassId> = BTreeSet::new();
+            while let Some(parent_id) = walk {
+                if !visited.insert(parent_id.clone()) {
+                    // Defensive: cycles shouldn't exist in real Rails
+                    // inheritance, but guard against pathological ingests.
+                    break;
+                }
+                let Some(parent_meta) = meta_by_name.get(&parent_id) else { break };
+                ancestors.push(parent_meta);
+                walk = parent_link_by_name.get(&parent_id).cloned().flatten();
+            }
+
+            // Build chained filters: ancestors first (oldest → newest),
+            // then self. Rails: `before_action` callbacks fire in
+            // registration order, with parent's running before child's.
+            let mut chained_filters: Vec<Filter> = Vec::new();
+            for ancestor in ancestors.iter().rev() {
+                chained_filters.extend(ancestor.before_filters.iter().cloned());
+            }
+            chained_filters.extend(meta.before_filters.iter().cloned());
+
+            // Build chained action_bindings: nearest parent's
+            // overlay last so closer-defined targets win.
+            let mut chained_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+            for ancestor in ancestors.iter().rev() {
+                for (name, ivars) in &ancestor.action_bindings {
+                    chained_bindings.insert(name.clone(), ivars.clone());
+                }
+            }
+            for (name, ivars) in &meta.action_bindings {
+                chained_bindings.insert(name.clone(), ivars.clone());
+            }
+
+            // Pass B: re-analyze actions affected by any before_action
+            // (own or inherited) with the target's bindings pre-seeded
+            // into Ctx.
+            if !chained_filters.is_empty() {
                 for action in controller.actions_mut() {
-                    let seed = merged_before_seed(&before_filters, &action.name, &action_bindings);
+                    let seed = merged_before_seed(
+                        &chained_filters,
+                        &action.name,
+                        &chained_bindings,
+                    );
                     if !seed.is_empty() {
                         let inner_ctx = Ctx {
-                            self_ty: ctx.self_ty.clone(),
+                            self_ty: Some(meta.self_ty.clone()),
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
-                            constants: class_constants.clone(),
+                            constants: meta.class_constants.clone(),
                             annotate_self_dispatch: false,
                         };
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
@@ -543,16 +630,17 @@ impl Analyzer {
                 }
             }
 
-            // Build the per-view ivar map. Each view gets the action's own
-            // assignments *plus* any before_action contribution (which isn't
-            // syntactically present in the action body).
+            // Build the per-view ivar map. Each view gets the action's
+            // own assignments *plus* any before_action contribution
+            // (which isn't syntactically present in the action body) —
+            // both own and inherited filters apply.
             for action in controller.actions() {
                 if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
                     let mut ivars = HashMap::new();
                     extract_ivar_assignments(&action.body, &mut ivars);
-                    for filter in &before_filters {
+                    for filter in &chained_filters {
                         if before_filter_applies(filter, &action.name) {
-                            if let Some(fivars) = action_bindings.get(&filter.target) {
+                            if let Some(fivars) = chained_bindings.get(&filter.target) {
                                 for (k, v) in fivars {
                                     ivars.entry(k.clone()).or_insert_with(|| v.clone());
                                 }
