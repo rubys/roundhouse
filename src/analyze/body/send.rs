@@ -757,6 +757,25 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // harvest as `Ty::Var` and the dispatch registry never
         // learns their declared return type from the RBS contract.
         "raise" | "throw" => Some(Ty::Bottom),
+        // ActiveSupport's universal `try` / `try!` — call a method if
+        // the receiver responds, else nil. Return type is opaque
+        // (depends on the dispatched method); `Ty::Untyped` propagates
+        // the gradual choice rather than bottoming out at Var.
+        // Recognized universally because it's a Kernel-style addition
+        // that applies to every object regardless of receiver type.
+        "try" | "try!" => Some(Ty::Untyped),
+        // Object#tap returns the receiver itself; the block's return
+        // is ignored. Receiver-aware in spirit but `dispatch` already
+        // handles the receiver outside of this universal table — we
+        // return Untyped here as a no-worse-than-Var fallback that
+        // doesn't pretend to know more than it does.
+        "tap" | "itself" => Some(Ty::Untyped),
+        // `presence` and `present?` are ActiveSupport's
+        // blank-aware predicates. `presence` returns the receiver or
+        // nil; we don't statically distinguish, so Untyped is the
+        // gradual answer. `present?` / `blank?` are universally Bool.
+        "present?" | "blank?" => Some(Ty::Bool),
+        "presence" => Some(Ty::Untyped),
         _ => None,
     }
 }

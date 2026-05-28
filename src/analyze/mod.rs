@@ -371,6 +371,44 @@ impl Analyzer {
             adapter_iface,
         );
 
+        // Rails singleton — `Rails.application` / `Rails.logger` /
+        // `Rails.cache` / `Rails.env` / `Rails.root` are pervasive
+        // call shapes in real Rails code. Each maps to a runtime
+        // object that's not modeled structurally here; return
+        // `Ty::Untyped` (gradual escape) so method chains off them
+        // propagate through dispatch without bottoming out at Var.
+        // `Rails.env` is the one we can type concretely as Str.
+        let mut rails_cls = ClassInfo::default();
+        rails_cls.class_methods.insert(Symbol::from("application"), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from("cache"), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from("configuration"), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from("root"), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from("env"), Ty::Str);
+        classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
+
+        // Time singleton — `Time.current` (Rails) / `Time.now`
+        // (Ruby core) / `Time.zone` (Rails). Time arithmetic
+        // (`Time.current - 1.day`, etc.) flows through Untyped
+        // because we don't model the Time class structurally.
+        let mut time_cls = ClassInfo::default();
+        time_cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
+        time_cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
+        time_cls.class_methods.insert(Symbol::from("zone"), Ty::Untyped);
+        time_cls.class_methods.insert(Symbol::from("at"), Ty::Untyped);
+        classes.insert(ClassId(Symbol::from("Time")), time_cls);
+
+        // Date / DateTime singletons — analogous to Time. Same
+        // rationale: structural typing of these classes hasn't been
+        // wired, but the call shape needs to resolve.
+        for name in ["Date", "DateTime"] {
+            let mut cls = ClassInfo::default();
+            cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("today"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
+            classes.insert(ClassId(Symbol::from(name)), cls);
+        }
+
         // Hardcoded ApplicationController-ish surface. Real inheritance chains
         // and per-controller overrides land when a fixture forces them.
         let mut app_ctrl = ClassInfo::default();
