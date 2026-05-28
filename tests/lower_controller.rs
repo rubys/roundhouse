@@ -319,6 +319,7 @@ fn controller(
         name: ClassId(Symbol::from("ArticlesController")),
         parent: None,
         body: items,
+        layout: Default::default(),
     }
 }
 

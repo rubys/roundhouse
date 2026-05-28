@@ -88,6 +88,7 @@ fn tiny_blog_round_trips() {
             leading_comments: vec![],
             leading_blank_line: false,
         }],
+        layout: Default::default(),
     };
 
     let routes = RouteTable {

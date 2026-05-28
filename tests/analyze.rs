@@ -445,6 +445,7 @@ fn actions_without_db_calls_stay_pure() {
                 leading_comments: vec![],
                 leading_blank_line: false,
             }],
+            layout: Default::default(),
         });
         analyzer.analyze(&mut app);
         app.controllers[0].actions().next().unwrap().effects.clone()
@@ -735,6 +736,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
             leading_comments: vec![],
             leading_blank_line: false,
         }],
+        layout: Default::default(),
     });
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);

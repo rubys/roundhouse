@@ -4,7 +4,7 @@
 
 use ruby_prism::{Node, parse};
 
-use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, RenderTarget};
+use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::span::Span;
@@ -38,6 +38,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     let mut comments = collect_comments(&result);
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body_items: Vec<ControllerBodyItem> = Vec::new();
+    let mut layout = LayoutDecl::Inherit;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         for stmt in flatten_statements(class_body) {
@@ -49,6 +50,15 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             let leading_blank = prev_end
                 .map(|pe| source_has_blank_line(source, pe, leading_area_start))
                 .unwrap_or(false);
+            // Recognize `layout :name` / `layout "name"` / `layout false`
+            // at the controller class level. Last declaration wins
+            // (matches Rails: a later `layout` call overrides an earlier
+            // one). The call still falls through to Unknown for source
+            // round-trip; the side-channel `Controller.layout` is what
+            // analyze reads to seed layout-view ivar types.
+            if let Some(decl) = parse_layout_call(&stmt) {
+                layout = decl;
+            }
             let mut item = ingest_controller_body_item(&stmt, file, leading)?;
             item.set_leading_blank_line(leading_blank);
             body_items.push(item);
@@ -60,7 +70,46 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
         name: ClassId(Symbol::from(name_path.join("::"))),
         parent,
         body: body_items,
+        layout,
     }))
+}
+
+/// Recognize a `layout` class-body call. Returns `Some(decl)` if this
+/// is a `layout ...` call we can interpret, `None` otherwise (including
+/// for unsupported shapes like `layout :method_name` where the symbol
+/// names a controller method — those degrade to `Inherit` and the
+/// effective layout falls back to convention).
+///
+/// Note: we can't tell `layout :foo` (static name "foo") from
+/// `layout :foo` (dispatch to method `foo`) syntactically. v1 treats
+/// every `layout :sym` as a static name. The dispatch form is rare
+/// enough on real Rails controllers that this is a safe v1 assumption;
+/// the worst case is a layout-view-name miss, not a crash.
+fn parse_layout_call(stmt: &Node<'_>) -> Option<LayoutDecl> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() {
+        return None;
+    }
+    if constant_id_str(&call.name()) != "layout" {
+        return None;
+    }
+    let args = call.arguments()?;
+    let all_args = args.arguments();
+    let first = all_args.iter().next()?;
+    if let Some(sym) = first.as_symbol_node() {
+        let bytes = sym.unescaped();
+        let name = std::str::from_utf8(bytes).ok()?;
+        return Some(LayoutDecl::Name { name: Symbol::from(name) });
+    }
+    if let Some(s) = first.as_string_node() {
+        let bytes = s.unescaped();
+        let name = std::str::from_utf8(bytes).ok()?;
+        return Some(LayoutDecl::Name { name: Symbol::from(name) });
+    }
+    if first.as_false_node().is_some() || first.as_nil_node().is_some() {
+        return Some(LayoutDecl::None);
+    }
+    None
 }
 
 /// Classify one class-body statement into its `ControllerBodyItem` variant.

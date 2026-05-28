@@ -34,7 +34,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
 use crate::App;
-use crate::dialect::{Action, ControllerBodyItem, Filter, FilterKind, ModelBodyItem, RenderTarget};
+use crate::dialect::{
+    Action, ControllerBodyItem, Filter, FilterKind, LayoutDecl, ModelBodyItem, RenderTarget,
+};
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
@@ -469,6 +471,7 @@ impl Analyzer {
             before_filters: Vec<Filter>,
             action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>>,
             class_constants: HashMap<Symbol, Ty>,
+            layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
         // Snapshot parent links separately so Phase B can walk
@@ -546,11 +549,32 @@ impl Analyzer {
                 })
                 .collect();
 
+            let layout = controller.layout.clone();
             meta_by_name.insert(
                 controller.name.clone(),
-                ControllerMeta { self_ty, before_filters, action_bindings, class_constants },
+                ControllerMeta {
+                    self_ty,
+                    before_filters,
+                    action_bindings,
+                    class_constants,
+                    layout,
+                },
             );
         }
+
+        // Controller→layout-view ivar channel: every action that
+        // renders also flows its ivars into whatever layout wraps it
+        // (resolved via the parent-chain walk below). Ivar reads in
+        // the layout (e.g. `@current_user.name` in
+        // `layouts/application.html.erb`) then type cleanly against
+        // the union of all contributing actions' assignments.
+        //
+        // Convention: an action's effective layout is the nearest
+        // ancestor's `layout` declaration. If every ancestor (and
+        // self) is `Inherit`, the layout name defaults to
+        // `application` per Rails convention. `LayoutDecl::None`
+        // (an explicit `layout false`) suppresses the contribution.
+        let mut layout_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
         // ── Phase B: walk each controller's parent chain to build
         // ── inherited (chained) filters + action bindings, then
@@ -630,23 +654,74 @@ impl Analyzer {
                 }
             }
 
+            // Resolve this controller's effective layout view name by
+            // walking the inheritance chain. First explicit decl wins;
+            // an explicit `LayoutDecl::None` suppresses the layout
+            // contribution entirely. If nothing is declared anywhere
+            // up the chain, Rails convention falls back to
+            // `layouts/application`.
+            let effective_layout: Option<Symbol> = {
+                let mut decl = &meta.layout;
+                let mut iter = ancestors.iter();
+                while matches!(decl, LayoutDecl::Inherit) {
+                    match iter.next() {
+                        Some(a) => decl = &a.layout,
+                        None => break,
+                    }
+                }
+                match decl {
+                    LayoutDecl::Name { name } => {
+                        Some(Symbol::from(format!("layouts/{}", name.as_str())))
+                    }
+                    LayoutDecl::None => None,
+                    LayoutDecl::Inherit => Some(Symbol::from("layouts/application")),
+                }
+            };
+
             // Build the per-view ivar map. Each view gets the action's
             // own assignments *plus* any before_action contribution
             // (which isn't syntactically present in the action body) —
-            // both own and inherited filters apply.
+            // both own and inherited filters apply. The same merged
+            // ivar set is also folded into the effective layout's map
+            // (union of names, union of types across all contributing
+            // actions and controllers).
             for action in controller.actions() {
-                if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
-                    let mut ivars = HashMap::new();
-                    extract_ivar_assignments(&action.body, &mut ivars);
-                    for filter in &chained_filters {
-                        if before_filter_applies(filter, &action.name) {
-                            if let Some(fivars) = chained_bindings.get(&filter.target) {
-                                for (k, v) in fivars {
-                                    ivars.entry(k.clone()).or_insert_with(|| v.clone());
-                                }
+                let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                extract_ivar_assignments(&action.body, &mut ivars);
+                for filter in &chained_filters {
+                    if before_filter_applies(filter, &action.name) {
+                        if let Some(fivars) = chained_bindings.get(&filter.target) {
+                            for (k, v) in fivars {
+                                ivars.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                         }
                     }
+                }
+                if let Some(layout_name) = &effective_layout {
+                    let layout_map = layout_ivars_by_view
+                        .entry(layout_name.clone())
+                        .or_default();
+                    for (k, v) in &ivars {
+                        // `Ty::Var` / `Ty::Untyped` carry no usable
+                        // shape — they pollute the union without
+                        // refining it. Drop them in either slot:
+                        //   - new is noise → keep prev (or noise if no prev)
+                        //   - prev is noise → take new
+                        // Without this, N controllers each failing to
+                        // type `@user` would either fan a Var into
+                        // every union variant or be order-sensitive.
+                        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                        let merged = match layout_map.remove(k) {
+                            Some(prev) if noise(&prev) => v.clone(),
+                            Some(prev) if noise(v) => prev,
+                            Some(prev) if prev == *v => prev,
+                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                            None => v.clone(),
+                        };
+                        layout_map.insert(k.clone(), merged);
+                    }
+                }
+                if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
                     action_ivars_by_view.insert(view_name, ivars);
                 }
             }
@@ -839,7 +914,15 @@ impl Analyzer {
                 continue;
             }
             let mut view_ctx = Ctx::default();
-            if let Some(ivars) = action_ivars_by_view.get(&view.name) {
+            // Action views look up by view name (e.g. `articles/show`);
+            // layout views (`layouts/application`) have no matching
+            // action and fall through to the layout-ivar map, which is
+            // the union of every action whose `effective_layout`
+            // resolved to this layout.
+            if let Some(ivars) = action_ivars_by_view
+                .get(&view.name)
+                .or_else(|| layout_ivars_by_view.get(&view.name))
+            {
                 view_ctx.ivar_bindings = ivars.clone();
             }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);

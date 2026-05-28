@@ -535,6 +535,33 @@ pub struct Controller {
     /// emitter iterates in order so `private` markers land at the right
     /// position and unknown class-body calls round-trip verbatim.
     pub body: Vec<ControllerBodyItem>,
+    /// Layout declaration from `layout :foo` / `layout "foo"` /
+    /// `layout false`. Absent → `Inherit` (walk parent chain; final
+    /// fallback is `layouts/application` per Rails convention).
+    /// Used by analyze to seed ivar types into layout views from the
+    /// union of actions that render through this controller.
+    #[serde(default, skip_serializing_if = "LayoutDecl::is_inherit")]
+    pub layout: LayoutDecl,
+}
+
+/// What `layout` was declared at the controller class level.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutDecl {
+    /// No `layout` declaration. Effective layout comes from the parent
+    /// chain or convention default (`layouts/application`).
+    #[default]
+    Inherit,
+    /// `layout :foo` or `layout "foo"`. Resolves to `layouts/<name>`.
+    Name { name: Symbol },
+    /// `layout false` / `layout nil` — render bare, no layout.
+    None,
+}
+
+impl LayoutDecl {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, LayoutDecl::Inherit)
+    }
 }
 
 impl Controller {

@@ -40,7 +40,8 @@ pub use app::App;
 pub use profile::{Database, DeploymentProfile, HttpShim, ProfileError, Target};
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,
-    Dependent, Filter, FilterKind, HttpMethod, MethodDef, MethodReceiver, Model, ModelBodyItem,
+    Dependent, Filter, FilterKind, HttpMethod, LayoutDecl, MethodDef, MethodReceiver, Model,
+    ModelBodyItem,
     RenderTarget, Route, RouteSpec, RouteTable, Scope, Validation, ValidationRule, View,
 };
 pub use effect::{Effect, EffectSet};
