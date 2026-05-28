@@ -448,13 +448,48 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         match method.as_str() {
             // Relation chain methods preserve Array<Self>.
             "where" | "order" | "limit" | "offset" | "includes" | "preload"
-            | "joins" | "distinct" | "group" | "having" => {
+            | "joins" | "distinct" | "group" | "having"
+            | "references" | "eager_load" | "readonly" | "reorder"
+            | "rewhere" | "merge" | "extending" | "unscope" => {
                 return Ty::Array { elem: Box::new(elem.clone()) };
             }
             // CollectionProxy constructors return an element instance.
-            "build" | "create" | "create!" | "find" | "find!" => {
+            "build" | "create" | "create!" | "find" | "find!" | "find_by!"
+            | "first!" | "last!" | "take!" => {
                 return elem.clone();
             }
+            // `find_by` / `take` on a relation return Element | Nil
+            // (same as a class call). Already covered by AR_CATALOG
+            // for class receivers; cover the Array<Model> shape here.
+            "find_by" | "take" => {
+                return Ty::Union {
+                    variants: vec![elem.clone(), Ty::Nil],
+                };
+            }
+            // `find_each` / `find_in_batches` yield the elem but
+            // return the receiver-relation for chaining.
+            "find_each" | "find_in_batches" | "in_batches" => {
+                return Ty::Array { elem: Box::new(elem.clone()) };
+            }
+            // `pluck(*cols)` returns Array of the column values; we
+            // can't tell the column type from method/elem alone, so
+            // produce `Array<Untyped>` (gradual escape — emitters
+            // handle the cast at the call site if needed).
+            "pluck" | "pick" => {
+                return Ty::Array { elem: Box::new(Ty::Untyped) };
+            }
+            // `count` / `sum` / `average` on a relation return Int
+            // (count) or Numeric (sum/avg). Approximate as Int; the
+            // sum/avg float case is rare in controller code.
+            "count" | "sum" | "average" | "minimum" | "maximum" => {
+                return Ty::Int;
+            }
+            // `exists?` / `any?` / `none?` predicates.
+            "exists?" => return Ty::Bool,
+            // `update_all` / `delete_all` / `destroy_all` return
+            // affected-row count (Int) or affected records.
+            "update_all" | "delete_all" => return Ty::Int,
+            "destroy_all" => return Ty::Array { elem: Box::new(elem.clone()) },
             _ => {}
         }
     }
@@ -650,12 +685,21 @@ pub(super) fn hash_method(
             key: Box::new(block_ret.cloned().unwrap_or_else(|| key.clone())),
             value: Box::new(value.clone()),
         },
-        // Rails strong-params: `params.expect(:id)` and
-        // `params.expect(k: [...])` both return the coerced value (a
-        // scalar or a permitted-params-hash). Approximate both as the
-        // value type for now; refine when a fixture forces a richer
-        // return shape.
-        "expect" | "require" | "permit" => value.clone(),
+        // Rails strong-params: `params.expect(:id)` returns the
+        // coerced value at that key. `params.require(:category)` and
+        // `params.permit(...)` return a `Parameters`-shaped sub-Hash
+        // that the caller typically chains further (`.permit(...)`,
+        // `.except(...)`, `.to_h`). Return the receiver's Hash type
+        // so chained calls resolve through hash_method instead of
+        // bottoming out at the value's type. `expect` keeps its
+        // value-type return since it's the terminal form in the
+        // current Rails 8 idiom (`params.expect(article: [...])` →
+        // the permitted hash).
+        "expect" => value.clone(),
+        "require" | "permit" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
         _ => unknown(),
     }
 }
@@ -673,6 +717,12 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
+        // `String#match(regex)` returns MatchData or nil; we don't
+        // model MatchData structurally so propagate Untyped (the
+        // value is typically chained as `m[1]` which on Untyped
+        // continues to flow gradually). `match` is also the regex
+        // form of `=~` — same return shape.
+        "match" => Ty::Untyped,
         // String slicing — `s[0, 4]`, `s[1..]`, `s[/regex/]` all
         // return String? (nil if out-of-range). Keep as Str for
         // simplicity; the nil-or-Str distinction can refine later.
@@ -682,6 +732,23 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // uniformly return Bool.
         "+" | "<<" | "*" | "%" | "concat" => Ty::Str,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        // ActiveSupport String extensions. Pluralization/inflection
+        // methods all return Str; comparison-style return Bool. Match
+        // the surface of `ActiveSupport::Inflector` that real Rails
+        // code reaches for in views and helpers.
+        "pluralize" | "singularize" | "camelize" | "camelcase"
+        | "underscore" | "dasherize" | "titleize" | "titlecase"
+        | "humanize" | "demodulize" | "deconstantize" | "classify"
+        | "tableize" | "foreign_key" | "parameterize" | "truncate"
+        | "squish" | "remove" | "indent" | "strip_heredoc"
+        | "html_safe" | "to_query" | "to_param" => Ty::Str,
+        "constantize" | "safe_constantize" => unknown(),
+        // ActiveSupport boolean predicates (Object#blank? is universal
+        // and lives there; String#starts_with? / ends_with? are
+        // ActiveSupport's underscore-style aliases of start_with? /
+        // end_with?).
+        "starts_with?" | "ends_with?" | "html_safe?"
+        | "acts_like?" | "in?" => Ty::Bool,
         _ => unknown(),
     }
 }
@@ -710,6 +777,19 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // refine when a fixture demands it).
         "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        // ActiveSupport Numeric duration helpers — `1.day`, `2.hours`,
+        // `30.minutes`, etc. Each returns an ActiveSupport::Duration
+        // instance; we don't model that structurally so propagate
+        // gradual escape via Untyped (Duration supports arithmetic
+        // with Time/Date that flows through Untyped chains).
+        "second" | "seconds" | "minute" | "minutes" | "hour" | "hours"
+        | "day" | "days" | "week" | "weeks" | "fortnight" | "fortnights"
+        | "month" | "months" | "year" | "years" => Ty::Untyped,
+        // `ago` / `from_now` / `since` / `until` produce a Time-ish
+        // value; same propagation rationale.
+        "ago" | "from_now" | "since" | "until" => Ty::Untyped,
+        // Common Int formatters from ActiveSupport.
+        "ordinalize" | "ordinal" => Ty::Str,
         _ => unknown(),
     }
 }
@@ -770,6 +850,12 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // return Untyped here as a no-worse-than-Var fallback that
         // doesn't pretend to know more than it does.
         "tap" | "itself" => Some(Ty::Untyped),
+        // `Hash#dig` / `Array#dig` / `Object#dig` walks a nested
+        // structure by keys/indices. Receiver-aware dispatch would
+        // need the full structural shape; in practice it's used at
+        // the boundary with deeply-nested untyped data (params,
+        // JSON), where Untyped is the honest answer.
+        "dig" => Some(Ty::Untyped),
         // `presence` and `present?` are ActiveSupport's
         // blank-aware predicates. `presence` returns the receiver or
         // nil; we don't statically distinguish, so Untyped is the

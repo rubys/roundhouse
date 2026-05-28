@@ -128,6 +128,32 @@ impl Analyzer {
                 let Some(kind) = entry.return_kind else { continue };
                 cls.class_methods.insert(Symbol::from(entry.name), instantiate(kind));
             }
+            // AR class-side framework methods not yet in the catalog.
+            // `Model.transaction { ... }` runs the block in a DB
+            // transaction; we don't model the block-yield through
+            // catalog metadata so it sits here. `connection` returns
+            // an AR connection adapter (gradual). `establish_connection`
+            // / `connection_pool` similarly. Block-yielding ones
+            // return whatever the block returned, which we don't
+            // statically track — Untyped is the gradual escape.
+            cls.class_methods.insert(Symbol::from("transaction"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("connection"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);
+            cls.class_methods.insert(Symbol::from("primary_key"), Ty::Str);
+            cls.class_methods.insert(Symbol::from("arel_table"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: Box::new(Ty::Str) });
+            cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: Box::new(Ty::Str) });
+            cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
+            // `Model.unscoped { }` block escape; `Model.none` returns
+            // an empty relation (Array<Model>). `delete_all` /
+            // `update_all` return Int (affected row count).
+            cls.class_methods.insert(Symbol::from("unscoped"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("none"),
+                Ty::Array { elem: Box::new(self_ty.clone()) });
+            cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
+            cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
 
             // Instance methods from schema-derived attributes.
             // These are per-model (column names differ across
