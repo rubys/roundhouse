@@ -134,8 +134,19 @@ impl Analyzer {
             // models), so they stay outside the catalog — the
             // catalog is for per-receiver-kind AR methods, not
             // per-model schema projections.
+            //
+            // Each column `name` also produces Rails-generated
+            // accessors: `name?` (presence predicate, Bool) and
+            // `name=` (writer, returns the assigned value). Register
+            // all three so `@user.is_admin` (column read),
+            // `@user.is_admin?` (predicate), and `@user.user_id = x`
+            // (writer) all resolve.
             for (name, ty) in &model.attributes.fields {
                 cls.instance_methods.insert(name.clone(), ty.clone());
+                let predicate = Symbol::from(format!("{}?", name.as_str()));
+                cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
+                let writer = Symbol::from(format!("{}=", name.as_str()));
+                cls.instance_methods.entry(writer).or_insert(ty.clone());
             }
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class

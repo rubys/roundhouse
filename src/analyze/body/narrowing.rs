@@ -39,6 +39,15 @@ pub(super) enum NarrowPred {
     IsA(VarKey, Ty),
     /// `!x.is_a?(T)` — inverse.
     IsNotA(VarKey, Ty),
+    /// Bare variable as truthiness guard (`if x` / `x && x.foo`).
+    /// True branch removes Nil from `x`'s union; false branch leaves
+    /// only Nil. Ruby's truthiness also excludes `false`, but Bool
+    /// isn't split between true/false in our type system, so we don't
+    /// narrow Bool. Functionally equivalent to `IsNotNil` for the then
+    /// side but recognized from a different surface shape.
+    IsTruthy(VarKey),
+    /// Negated truthiness (`if !x` / `unless x`).
+    IsFalsy(VarKey),
 }
 
 pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
@@ -88,7 +97,12 @@ pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
         ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
             extract_narrowing(left).or_else(|| extract_narrowing(right))
         }
-        _ => None,
+        // Bare variable / ivar / bareword as truthiness guard. Tried
+        // last because the explicit predicate matches above are more
+        // specific (`x.nil?` is also a Send-on-Var but with a method
+        // name we recognize). `if @user` / `@user && @user.foo` /
+        // `if notice` all flow through this fallback.
+        _ => var_key(cond).map(NarrowPred::IsTruthy),
     }
 }
 
@@ -98,6 +112,8 @@ fn negate_pred(p: NarrowPred) -> NarrowPred {
         NarrowPred::IsNotNil(k) => NarrowPred::IsNil(k),
         NarrowPred::IsA(k, t) => NarrowPred::IsNotA(k, t),
         NarrowPred::IsNotA(k, t) => NarrowPred::IsA(k, t),
+        NarrowPred::IsTruthy(k) => NarrowPred::IsFalsy(k),
+        NarrowPred::IsFalsy(k) => NarrowPred::IsTruthy(k),
     }
 }
 
@@ -191,6 +207,20 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
                     remove_variant(current, ty)
                 }
             });
+        }
+        NarrowPred::IsTruthy(k) | NarrowPred::IsFalsy(k) => {
+            // Only narrow the truthy side. The falsy side would
+            // normally narrow to `Ty::Nil`, but that turns subsequent
+            // `@user.foo` in the else-branch into Nil-receiver
+            // dispatch failures — surfacing pre-existing Rails-code
+            // bugs as roundhouse errors. The truthy side is the
+            // dominant pattern (`if @user; @user.foo; end`); the
+            // falsy side rarely reads the variable at all.
+            let is_is_truthy = matches!(pred, NarrowPred::IsTruthy(_));
+            let narrow_to_truthy = is_is_truthy == then_branch;
+            if narrow_to_truthy {
+                narrow_binding(&mut new_ctx, k, |current| remove_nil(current));
+            }
         }
     }
     new_ctx
