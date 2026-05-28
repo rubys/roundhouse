@@ -11,11 +11,25 @@ module Sock
 
   ffi_func :sphttp_listen,        [:int, :int],     :int
   ffi_func :sphttp_accept,        [:int],           :int
+  # Non-blocking accept variant used by Tep::Server::Scheduled.
+  # Listen fd must be in non-blocking mode (sphttp_set_nonblock).
+  # Returns -1 with errno EAGAIN/EWOULDBLOCK if no pending connection.
+  ffi_func :sphttp_accept_nb,     [:int],           :int
   ffi_func :sphttp_read_request,  [:int],           :int
   ffi_func :sphttp_request_buf,   [],               :str
   ffi_func :sphttp_request_len,   [],               :int
   ffi_func :sphttp_drain_body,    [:int, :int],     :str
   ffi_func :sphttp_write_str,     [:int, :str],     :int
+
+  # Binary-safe write + recv pair, used by Tep::WebSocket (and any
+  # other caller that needs to send/receive bytes containing 0x00).
+  # The recv side mirrors the request_buf / _len accessor pattern.
+  # See sphttp.c for the binary-safety contract.
+  ffi_func :sphttp_write_bytes,   [:int, :str, :int], :int
+  ffi_func :sphttp_recv_into_frame, [:int],         :int
+  ffi_func :sphttp_recv_frame_buf, [],              :str
+  ffi_func :sphttp_recv_frame_len, [],              :int
+
   ffi_func :sphttp_sendfile,      [:int, :str],     :int
   ffi_func :sphttp_filesize,      [:str],           :int
   ffi_func :sphttp_close,         [:int],           :int
@@ -23,12 +37,6 @@ module Sock
   ffi_func :sphttp_exit,          [:int],           :int
   ffi_func :sphttp_getpid,        [],               :int
   ffi_func :sphttp_wait_any,      [],               :int
-  ffi_func :sphttp_hmac_sha256_hex,    [:str, :str], :str
-  ffi_func :sphttp_hmac_sha256_b64url, [:str, :str], :str
-  ffi_func :sphttp_b64url_encode,      [:str],       :str
-  ffi_func :sphttp_b64url_decode,      [:str],       :str
-  ffi_func :sphttp_pbkdf2_sha256_b64url, [:str, :str, :int], :str
-  ffi_func :sphttp_random_b64url,      [:int],       :str
   ffi_func :sphttp_write_chunk,   [:int, :str],     :int
   ffi_func :sphttp_write_chunk_end, [:int],         :int
 
@@ -45,8 +53,26 @@ module Sock
   ffi_func :sphttp_recv_some,     [:int, :int],     :str
   ffi_func :sphttp_recv_all,      [:int, :int],     :str
 
-  # Process + file helpers used by Tep::Shell.
+  # popen-shaped shell capture used by Tep::Shell.run. File I/O goes
+  # through spinel's built-in File.read / File.write since master
+  # (matz/spinel#505 made File.write binary-safe).
   ffi_func :sphttp_shell_capture, [:str, :int],     :str
-  ffi_func :sphttp_file_read,     [:str, :int],     :str
-  ffi_func :sphttp_file_write,    [:str, :str],     :int
+end
+
+# Crypto FFI -- SHA-256/HMAC/PBKDF2/B64URL/random. Symbols live in
+# spinel's libspinel_rt.a (added upstream as lib/sp_crypto.c via
+# matz/spinel#514), which the spinel driver auto-links into every
+# binary. No ffi_cflags needed; just declare the signatures.
+module Crypto
+  ffi_func :sp_crypto_hmac_sha256_hex,      [:str, :str],       :str
+  ffi_func :sp_crypto_hmac_sha256_b64url,   [:str, :str],       :str
+  ffi_func :sp_crypto_b64url_encode,        [:str],             :str
+  ffi_func :sp_crypto_b64url_decode,        [:str],             :str
+  ffi_func :sp_crypto_pbkdf2_sha256_b64url, [:str, :str, :int], :str
+  ffi_func :sp_crypto_random_b64url,        [:int],             :str
+  # SHA-1 + WebSocket accept-key compute. SHA-1 is shipped only
+  # because RFC 6455 requires it for the Sec-WebSocket-Accept
+  # derivation; do NOT use it for anything else (collision-broken).
+  ffi_func :sp_crypto_sha1_hex,             [:str],             :str
+  ffi_func :sp_crypto_websocket_accept,     [:str],             :str
 end

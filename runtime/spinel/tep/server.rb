@@ -90,17 +90,7 @@ module Tep
           break
         end
 
-        cl = req.content_length
-        already = req.raw_body.length
-        if cl > already
-          rest = Sock.sphttp_drain_body(client, cl - already)
-          req.raw_body = req.raw_body + rest
-        end
-        if req.form?
-          Url.parse_query(req.raw_body).each do |k, v|
-            req.params[k] = v
-          end
-        end
+        req.consume_body(client)
 
         res = Response.new
         @app.dispatch(req, res)

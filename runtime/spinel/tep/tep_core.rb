@@ -1,5 +1,5 @@
 module Tep
-  VERSION = "0.4.0-vendored"
+  VERSION = "0.8.1-vendored"
 
   def self.str_hash
     h = {"" => ""}

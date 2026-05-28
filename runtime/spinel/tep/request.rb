@@ -63,6 +63,15 @@ module Tep
       @req_headers["content-type"].downcase.start_with?("application/x-www-form-urlencoded")
     end
 
+    # True when the request body is a multipart/form-data submission
+    # (browsers use this for any form built via `new FormData(...)`
+    # or carrying file inputs). Tep::Multipart is not vendored — the
+    # roundhouse request surface goes through ActionDispatch params,
+    # which only emits urlencoded — so consume_body skips multipart.
+    def multipart?
+      @req_headers["content-type"].downcase.start_with?("multipart/form-data")
+    end
+
     # ---- Rack::Request-style accessors (reads only, no .ip yet) ----
     # These are convenience getters over headers we already parse;
     # `.ip` would need a sphttp_accept_with_peer C helper before it
@@ -89,6 +98,31 @@ module Tep
 
     def ssl?
       scheme == "https"
+    end
+
+    # Pull any remaining body bytes from `client_fd` up to the
+    # advertised Content-Length, then merge form fields into @params.
+    # Called once per request by the server right after Parser.parse
+    # populates the request headers + the body bytes already in the
+    # recv buffer.
+    #
+    # No-op on bodyless requests. Form parsing handles
+    # `application/x-www-form-urlencoded`; multipart bodies leave
+    # @raw_body intact (Tep::Multipart isn't vendored; roundhouse
+    # callers don't reach this path).
+    def consume_body(client_fd)
+      cl = content_length
+      already = @raw_body.length
+      if cl > already
+        rest = Sock.sphttp_drain_body(client_fd, cl - already)
+        @raw_body = @raw_body + rest
+      end
+      if form?
+        Url.parse_query(@raw_body).each do |k, v|
+          @params[k] = v
+        end
+      end
+      0
     end
   end
 end
