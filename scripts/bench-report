@@ -19,7 +19,7 @@ cells = JSON.parse(File.read(input))
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go typescript ruby ruby-int rails rails-int]
+TARGET_ORDER = %w[rust crystal go spinel typescript ruby ruby-int rails rails-int]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # Brand-ish but muted; enough contrast in greyscale.
@@ -27,6 +27,7 @@ COLOR = {
   'rust'       => '#b7410e',
   'crystal'    => '#1c1c1c',
   'go'         => '#00add8',
+  'spinel'     => '#7d4cdb',
   'typescript' => '#3178c6',
   'ruby'       => '#cc342d',
   'ruby-int'   => '#e89c93',
@@ -244,6 +245,14 @@ html << <<~METHOD
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
   </div>
 METHOD
+
+if targets.include?('spinel')
+  html << <<~SPINEL_NOTE
+    <div class="methodology">
+      <strong>Spinel concurrency note.</strong> Spinel's <code>Tep::Server</code> is currently prefork-blocking — one connection at a time per worker, no user-space scheduler. At <code>workers=1</code> with <code>c=64</code>, 63 connections wait in the kernel accept queue while one is being serviced. Every other target in this table has some form of intra-process concurrency at <code>workers=1</code> (Rust/Crystal/Go via async runtimes or fibers, TypeScript via Node's event loop, Rails via Puma's 5 threads-per-worker default). The spinel numbers below therefore represent a deliberately-conservative ceiling: throughput is bounded by the single in-flight connection's per-request CPU cost, and p99 latency is dominated by accept-queue wait for the other 63 connections. Phase 2b lifts this constraint via <code>Tep::Server::Scheduled</code> — see <a href="https://github.com/rubys/roundhouse/issues/3">#3</a>.
+    </div>
+  SPINEL_NOTE
+end
 
 # ── Section: throughput per endpoint ─────────────────────────────────
 
