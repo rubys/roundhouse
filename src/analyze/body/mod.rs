@@ -342,7 +342,7 @@ impl<'a> BodyTyper<'a> {
                 // see the refined type. Mirrors how the `If` arm
                 // threads narrowing into its then/else branches.
                 let pred = narrowing::extract_narrowing(left);
-                let right_ctx = match (&pred, &*op) {
+                let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(ctx, p, true)
                     }
@@ -351,6 +351,16 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => ctx.clone(),
                 };
+                // Var assignments inside `left` (the canonical case is
+                // `(x = find_by(...)) && x.foo`) need to flow into
+                // `right`'s scope. Without this, `x` reads as Var
+                // because the Seq-level Assign-to-Var handler only
+                // catches statement-position assignments, not nested
+                // ones inside expressions. For `&&` the assignment
+                // executed (left was truthy); for `||` it executed
+                // because left was falsy — in either case the binding
+                // is observable on the right side.
+                collect_var_assignments_into(left, &mut right_ctx.local_bindings);
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -556,19 +566,45 @@ impl<'a> BodyTyper<'a> {
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
                 let pred = narrowing::extract_narrowing(cond);
+                // Var assignments inside `cond` (e.g.
+                // `if (user = User.find_by(...)) && user.is_active?`)
+                // must flow into both branches: the assignment
+                // executed during cond evaluation regardless of
+                // branch taken. Then-branch may further narrow via
+                // truthiness; else-branch sees the raw assigned type.
+                let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
+                collect_var_assignments_into(cond, &mut cond_assigns);
                 let t = match &pred {
                     Some(p) => {
-                        let then_ctx = narrowing::apply_narrowing(ctx, p, true);
+                        let mut then_ctx = narrowing::apply_narrowing(ctx, p, true);
+                        for (k, v) in &cond_assigns {
+                            then_ctx.local_bindings.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
                         self.analyze_expr(then_branch, &then_ctx)
                     }
-                    None => self.analyze_expr(then_branch, ctx),
+                    None => {
+                        let mut then_ctx = ctx.clone();
+                        for (k, v) in &cond_assigns {
+                            then_ctx.local_bindings.insert(k.clone(), v.clone());
+                        }
+                        self.analyze_expr(then_branch, &then_ctx)
+                    }
                 };
                 let e = match &pred {
                     Some(p) => {
-                        let else_ctx = narrowing::apply_narrowing(ctx, p, false);
+                        let mut else_ctx = narrowing::apply_narrowing(ctx, p, false);
+                        for (k, v) in &cond_assigns {
+                            else_ctx.local_bindings.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
                         self.analyze_expr(else_branch, &else_ctx)
                     }
-                    None => self.analyze_expr(else_branch, ctx),
+                    None => {
+                        let mut else_ctx = ctx.clone();
+                        for (k, v) in &cond_assigns {
+                            else_ctx.local_bindings.insert(k.clone(), v.clone());
+                        }
+                        self.analyze_expr(else_branch, &else_ctx)
+                    }
                 };
                 union_of(t, e)
             }
@@ -824,6 +860,47 @@ fn peel_nilable(ty: &Ty) -> &Ty {
         }
     }
     ty
+}
+
+/// Walk an Expr collecting every `Assign { target: LValue::Var, .. }`
+/// it contains, recording `name → expr.ty`. Used to thread local
+/// bindings produced by an embedded assignment (`(x = find_by(...))`)
+/// from a `BoolOp::And` left-arm or `If::cond` into the subsequent
+/// arm's Ctx. The Seq-statement-level handler covers the common case
+/// of top-level `x = ...` statements; this covers the nested form.
+///
+/// Descent stops at scope-introducing nodes (`Lambda`, `Let`) so a
+/// block parameter assignment doesn't leak out.
+fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            if let Some(ty) = value.ty.clone() {
+                out.insert(name.clone(), ty);
+            }
+            collect_var_assignments_into(value, out);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_var_assignments_into(left, out);
+            collect_var_assignments_into(right, out);
+        }
+        ExprNode::Send { recv, args, .. } => {
+            if let Some(r) = recv {
+                collect_var_assignments_into(r, out);
+            }
+            for a in args {
+                collect_var_assignments_into(a, out);
+            }
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_var_assignments_into(e, out);
+            }
+        }
+        // Scope-introducing forms: Lambda's body and Let's binding
+        // belong to inner scopes; their assignments don't escape.
+        ExprNode::Lambda { .. } | ExprNode::Let { .. } => {}
+        _ => {}
+    }
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
