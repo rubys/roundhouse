@@ -76,30 +76,37 @@ module Tep
     end
 
     # Keep-alive loop on a single accepted connection.
+    # Per-request work is in handle_one so each iteration gets its own
+    # SP_GC_SAVE/RESTORE scope — without that, transient roots from
+    # earlier iterations pile up in the global root set inside the
+    # surrounding while loop and prevent the young-gen GC from
+    # reclaiming the previous request's allocations.
     def handle_connection(client)
       keep_going = true
       while keep_going
-        n = Sock.sphttp_read_request(client)
-        if n <= 0
-          break
-        end
-        blob = Sock.sphttp_request_buf
-        req = Parser.parse(blob)
-        if req == nil
-          send_simple(client, 400, "bad request")
-          break
-        end
-
-        req.consume_body(client)
-
-        res = Response.new
-        @app.dispatch(req, res)
-
-        keep_alive = req.keep_alive? && !res.halted_close?
-        write_response(client, req, res, keep_alive)
-        keep_going = keep_alive
+        keep_going = handle_one(client)
       end
       Sock.sphttp_close(client)
+    end
+
+    # Process exactly one request on `client`. Returns true if the
+    # connection should remain open for the next request (keep-alive)
+    # or false if it should close.
+    def handle_one(client)
+      n = Sock.sphttp_read_request(client)
+      return false if n <= 0
+      blob = Sock.sphttp_request_buf
+      req = Parser.parse(blob)
+      if req == nil
+        send_simple(client, 400, "bad request")
+        return false
+      end
+      req.consume_body(client)
+      res = Response.new
+      @app.dispatch(req, res)
+      keep_alive = req.keep_alive? && !res.halted_close?
+      write_response(client, req, res, keep_alive)
+      keep_alive
     end
 
     def write_response(client, req, res, keep_alive)
