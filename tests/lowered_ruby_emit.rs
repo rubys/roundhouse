@@ -1490,16 +1490,17 @@ fn lowered_form_partial_form_with_inline_expansion() {
         "expected static accept-charset + method=post in open tag; got:\n{src}",
     );
     assert!(
-        src.contains("io << ActionView::ViewHelpers.method_override_input(form_method)"),
+        src.contains("ActionView::ViewHelpers.method_override_input(form_method)"),
         "expected method_override_input(form_method) call; got:\n{src}",
     );
     assert!(
-        src.contains("io << ActionView::ViewHelpers.csrf_token_hidden_input"),
+        src.contains("ActionView::ViewHelpers.csrf_token_hidden_input"),
         "expected csrf_token_hidden_input call; got:\n{src}",
     );
-    // Inline per-input HTML (representative samples).
+    // Inline per-input HTML (representative samples). After append-
+    // coalescing the literal often lives inside a larger Lit::Str run.
     assert!(
-        src.contains("io << \"<label for=\\\"article_title\\\">Title</label>\""),
+        src.contains("<label for=\\\"article_title\\\">Title</label>"),
         "expected inline label HTML; got:\n{src}",
     );
     assert!(
@@ -1532,8 +1533,8 @@ fn lowered_form_partial_form_with_inline_expansion() {
         "expected `Create Article` default text branch; got:\n{src}",
     );
     assert!(
-        src.contains("io << \"</form>\""),
-        "expected closing `</form>` append; got:\n{src}",
+        src.contains("</form>"),
+        "expected closing `</form>` literal in body; got:\n{src}",
     );
 }
 
@@ -1622,8 +1623,10 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
     // `<%= error.full_message %>` becomes just `error` after the
     // errors-each adapter rewrite (spinel-runtime errors are plain
     // Strings, no `full_message` method). Auto-escape still applies.
+    // After coalescing, the call typically lives inside a wider
+    // `io << "<li>#{...}</li>"` Lit::Str/StringInterp.
     assert!(
-        src.contains("io << ActionView::ViewHelpers.html_escape(error)"),
+        src.contains("ActionView::ViewHelpers.html_escape(error)"),
         "expected html_escape on bare `error` (full_message stripped); got:\n{src}",
     );
     assert!(
@@ -1841,22 +1844,27 @@ fn lowered_layout_view_emits_module_method() {
 #[test]
 fn lowered_layout_view_bare_yield_renders_body_local() {
     // `<%= yield %>` (no slot arg) is the layout's body slot — lowers
-    // to `io << body` (the explicit param), not a ViewHelpers call.
+    // to a reference to `body` (the explicit param), not a ViewHelpers
+    // call. After append-coalescing this often interpolates inline as
+    // `#{body}` within a wider StringInterp instead of standing alone
+    // as `io << body`.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << body"),
-        "expected `io << body` from bare yield; got:\n{src}",
+        src.contains("#{body}") || src.contains("io << body"),
+        "expected `body` interpolation from bare yield; got:\n{src}",
     );
 }
 
 #[test]
 fn lowered_layout_view_yield_slot_uses_get_slot() {
-    // `<%= yield :head %>` → `ViewHelpers.get_slot(:head)`.
+    // `<%= yield :head %>` → `ViewHelpers.get_slot(:head)`. May land
+    // either as a standalone append or interpolated into the
+    // surrounding StringInterp post-coalesce.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << ActionView::ViewHelpers.get_slot(:head)"),
+        src.contains("ActionView::ViewHelpers.get_slot(:head)"),
         "expected `ViewHelpers.get_slot(:head)` for yielded slot; got:\n{src}",
     );
 }
@@ -1864,18 +1872,20 @@ fn lowered_layout_view_yield_slot_uses_get_slot() {
 #[test]
 fn lowered_layout_view_head_helpers() {
     // The bare zero-arg layout helpers all dispatch to ViewHelpers.*.
+    // Substring (no `io << ` prefix) matches both standalone-append
+    // and post-coalesce StringInterp `#{...}` forms.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
-        src.contains("io << ActionView::ViewHelpers.csrf_meta_tags"),
+        src.contains("ActionView::ViewHelpers.csrf_meta_tags"),
         "expected csrf_meta_tags rewrite; got:\n{src}",
     );
     assert!(
-        src.contains("io << ActionView::ViewHelpers.csp_meta_tag"),
+        src.contains("ActionView::ViewHelpers.csp_meta_tag"),
         "expected csp_meta_tag rewrite; got:\n{src}",
     );
     assert!(
-        src.contains("io << ActionView::ViewHelpers.javascript_importmap_tags"),
+        src.contains("ActionView::ViewHelpers.javascript_importmap_tags"),
         "expected javascript_importmap_tags rewrite; got:\n{src}",
     );
 }
@@ -1946,7 +1956,7 @@ fn lowered_new_view_dispatches_named_partial() {
         "expected `def self.new(article, notice, alert)`; got:\n{src}",
     );
     assert!(
-        src.contains("io << Views::Articles.form(article)"),
+        src.contains("Views::Articles.form(article)"),
         "expected named-partial dispatch to Views::Articles.form(article); got:\n{src}",
     );
 }
@@ -1961,7 +1971,7 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
     );
     // Same shared partial as `new.html.erb`.
     assert!(
-        src.contains("io << Views::Articles.form(article)"),
+        src.contains("Views::Articles.form(article)"),
         "expected named-partial dispatch; got:\n{src}",
     );
     // `<%= link_to "Show this article", @article, ... %>` — the URL

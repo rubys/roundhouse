@@ -31,6 +31,7 @@ mod partial;
 mod form_with;
 mod form_builder;
 mod attr_parts;
+mod coalesce;
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
@@ -289,6 +290,11 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
     body_stmts.extend(walk_body(&rewritten, &ctx));
     body_stmts.push(accumulator_result_ref(&ctx.accumulator));
+
+    // Coalesce adjacent `io << x` appends into one wider StringInterp
+    // append. Pure IR rewrite — runs before typing so the typer sees
+    // (and per-target emitters consume) the collapsed shape.
+    let body_stmts = self::coalesce::coalesce_appends(body_stmts, &ctx.accumulator);
 
     let body = seq(body_stmts);
 

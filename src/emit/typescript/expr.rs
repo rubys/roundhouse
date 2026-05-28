@@ -1182,13 +1182,23 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 match p {
                     InterpPart::Text { value } => {
                         for c in value.chars() {
-                            if c == '`' || c == '\\' {
-                                out.push('\\');
-                                out.push(c);
-                            } else if c == '$' {
-                                out.push_str("\\$");
-                            } else {
-                                out.push(c);
+                            // Escape control whitespace so the
+                            // template literal stays on one source
+                            // line — the function-body indenter
+                            // adds leading spaces per source line,
+                            // and any raw `\n` inside the literal
+                            // would silently get 2 spaces inserted,
+                            // corrupting the string contents.
+                            match c {
+                                '`' | '\\' => {
+                                    out.push('\\');
+                                    out.push(c);
+                                }
+                                '$' => out.push_str("\\$"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                _ => out.push(c),
                             }
                         }
                     }
