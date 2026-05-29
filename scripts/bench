@@ -548,9 +548,14 @@ start_target() {
             # AOT-compiled native binary (Spinel codegen) — single-process,
             # Tep::Server FFI HTTP/1.1, no workers concept. `workers` is
             # ignored and the per-cell row records workers=1.
+            # Size the connection pool to the wrk concurrency: the
+            # fiber-per-connection server serves up to `c` requests at
+            # once, so a smaller pool would make fibers park on a handle.
+            # Same DATABASE_POOL_SIZE knob the rust target reads.
             (cd "$SP_OUT" && \
                 BLOG_DB=tmp/blog.sqlite3 \
                 PORT="$port" \
+                DATABASE_POOL_SIZE="$CONNECTIONS" \
                 ./build/blog \
                 >"$log" 2>&1) &
             TARGET_PID=$!

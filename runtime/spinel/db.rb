@@ -73,12 +73,13 @@ end
 module Db
   @pool = nil
 
-  # Pool size: kwarg wins; otherwise DB_POOL_SIZE env (so the bench can
-  # size the pool to the worker's max concurrent fibers without a code
-  # change); else 1. Each entry is one FFI sqlite3 handle to `path`.
-  def self.configure(path, pool_size: 1)
+  # Pool size: kwarg wins; otherwise DATABASE_POOL_SIZE env (the same
+  # knob the rust target reads — set it to the server's max concurrent
+  # connections so no fiber parks waiting for a handle); else a modest
+  # default. Each entry is one FFI sqlite3 handle to `path`.
+  def self.configure(path, pool_size: 8)
     n = pool_size
-    ev = ENV["DB_POOL_SIZE"]
+    ev = ENV["DATABASE_POOL_SIZE"]
     if !ev.nil? && ev != ""
       n = ev.to_i
     end
