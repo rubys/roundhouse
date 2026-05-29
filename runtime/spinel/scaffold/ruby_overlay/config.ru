@@ -81,7 +81,10 @@ app = lambda do |env|
   RACK_TO_CGI.each { |rack_key, cgi_key| cgi_env[cgi_key] = env[rack_key].to_s }
   stdin = env["rack.input"] || StringIO.new("")
   stdout = StringIO.new
-  Main.run(cgi_env, stdin, stdout)
+  # Lease one pooled DB connection for the whole request so concurrent
+  # Puma worker threads each read/write through their own handle rather
+  # than serializing on a single shared one.
+  Db.with_connection { Main.run(cgi_env, stdin, stdout) }
   parse_cgi_response(stdout.string)
 end
 

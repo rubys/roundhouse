@@ -41,8 +41,15 @@ module Db
   @pool    = nil
   @rows    = {}
   @next_id = 0
+  @mutex   = nil
+  @cv      = nil
 
-  def self.configure(path, pool_size: 1)
+  # Pool size defaults to the Puma thread count (RAILS_MAX_THREADS) so
+  # every concurrently-serving thread can hold its own handle without
+  # contending. Override explicitly for tests.
+  def self.configure(path, pool_size: ENV.fetch("RAILS_MAX_THREADS", "3").to_i)
+    @mutex = Mutex.new
+    @cv    = ConditionVariable.new
     @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(pool_size) do
       db = SQLite3::Database.new(path)
       db.results_as_hash = false
@@ -50,14 +57,44 @@ module Db
     end
   end
 
-  # The SQLite3::Database this fiber should read/write through. Set by
+  # The SQLite3::Database this thread should read/write through. Set by
   # `with_connection` (request scope) when wired; falls back to the
-  # pool's first free handle for single-fiber test/dev modes.
-  # `Fiber[:k]` is spinel's per-fiber storage indexer (#577/#578).
+  # pool's first free handle for single-thread test/dev modes.
+  # `Fiber[:k]` is fiber-storage — under Puma's thread-per-request it is
+  # effectively thread-local (each worker thread's root fiber).
   def self.current_dbh
     h = Fiber[:db_handle]
     return h if !h.nil?
     @pool.free[0]
+  end
+
+  # Request-scoped connection lease. Checks out a handle, binds it to
+  # this thread's fiber-storage so `current_dbh` resolves to it for the
+  # block's duration, and returns it on completion (even on raise).
+  #
+  # Thread-safe for the CRuby/Puma target where N worker threads share
+  # one pool: the pool's free list (not itself thread-safe) is mutated
+  # only under @mutex, and a thread parks on @cv when the pool is
+  # momentarily exhausted (size < live requests) rather than raising.
+  # With pool_size == thread count, the wait loop never trips.
+  def self.with_connection
+    h = nil
+    @mutex.synchronize do
+      while @pool.available_count == 0
+        @cv.wait(@mutex)
+      end
+      h = @pool.checkout
+    end
+    Fiber[:db_handle] = h
+    begin
+      yield
+    ensure
+      Fiber[:db_handle] = nil
+      @mutex.synchronize do
+        @pool.checkin(h)
+        @cv.signal
+      end
+    end
   end
 
   def self.close
