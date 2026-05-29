@@ -260,7 +260,11 @@ end
 # which Tep::App delegates to Main.dispatch — same destination.)
 class MainApp
   def dispatch(req, res)
-    Main.dispatch(req, res)
+    # Lease one pooled DB connection for the whole request so concurrent
+    # connection-fibers each read/write through their own handle rather
+    # than serializing on a single shared one. Mirrors the ruby target's
+    # config.ru wrap; the cooperative-fiber analog of Puma's thread pool.
+    Db.with_connection { Main.dispatch(req, res) }
   end
 end
 

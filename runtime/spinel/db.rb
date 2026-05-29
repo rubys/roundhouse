@@ -73,8 +73,16 @@ end
 module Db
   @pool = nil
 
+  # Pool size: kwarg wins; otherwise DB_POOL_SIZE env (so the bench can
+  # size the pool to the worker's max concurrent fibers without a code
+  # change); else 1. Each entry is one FFI sqlite3 handle to `path`.
   def self.configure(path, pool_size: 1)
-    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(pool_size) do
+    n = pool_size
+    ev = ENV["DB_POOL_SIZE"]
+    if !ev.nil? && ev != ""
+      n = ev.to_i
+    end
+    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(n) do
       rc = SQL.sqlite3_open(path, SQL.db_out)
       if rc != SQL::OK
         # Best-effort error surface — sqlite3_errmsg requires a valid
@@ -94,6 +102,29 @@ module Db
     h = Fiber[:db_handle]
     return h if !h.nil?
     @pool.free[0]
+  end
+
+  # Request-scoped connection lease for the fiber-per-connection server.
+  # Checks out a handle, binds it to this fiber's storage so current_dbh
+  # resolves to it for the request, then returns it. No mutex: spinel
+  # fibers are cooperative (no preemption), so checkout/checkin on the
+  # free list is atomic between yields. On exhaustion the fiber parks via
+  # Tep::Scheduler (cooperative yield) until a checkin frees one; with
+  # pool_size >= max concurrent fibers the wait loop never trips.
+  #
+  # NOTE: no begin/ensure (not used elsewhere in spinel-compiled code), so
+  # a raise inside the block leaks the handle — acceptable on the happy
+  # path; revisit if the dispatch path starts raising under load.
+  def self.with_connection
+    while @pool.available_count == 0
+      Tep::Scheduler.pause(0.001)
+    end
+    h = @pool.checkout
+    Fiber[:db_handle] = h
+    result = yield
+    Fiber[:db_handle] = nil
+    @pool.checkin(h)
+    result
   end
 
   def self.close
