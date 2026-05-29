@@ -20,6 +20,8 @@ package v2
 
 import (
 	"database/sql"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,10 +31,17 @@ import (
 
 // Process-wide connection. Tests call SetupTestDB to reinstall a
 // fresh in-memory connection per test; production wires this once
-// in main.go via OpenProductionDB. Multi-goroutine access goes
-// through dbMu so the per-stmt table stays consistent.
+// in main.go via OpenProductionDB.
 var (
-	dbMu sync.Mutex
+	// dbMu guards the `db` POINTER (swapped by SetupTestDB /
+	// OpenProductionDB), not query execution — `*sql.DB` is already a
+	// concurrency-safe connection pool. Read paths take RLock so many
+	// queries run in parallel across the pool (the point of WAL +
+	// SetMaxOpenConns); only a connection swap takes the exclusive
+	// Lock. Holding an exclusive lock around `db.Query` would serialize
+	// every read and cap throughput at single-connection work no matter
+	// how large the pool is.
+	dbMu sync.RWMutex
 	db   *sql.DB
 )
 
@@ -92,10 +101,22 @@ func OpenProductionDB(path, schemaSQL string) {
 	if db != nil {
 		db.Close()
 	}
-	conn, err := sql.Open("sqlite", path)
+	// WAL + a sized connection pool (#17). The two are joint: WAL lets
+	// readers proceed concurrently, but that concurrency has nowhere to
+	// go unless the pool can hand out more than one connection at a
+	// time. SQLite PRAGMAs are per-connection, so set them in the DSN —
+	// every connection database/sql opens for the pool picks them up
+	// (a one-shot `Exec("PRAGMA …")` would only configure whichever
+	// single connection it happened to land on). journal_mode=WAL
+	// persists in the file header; synchronous/busy_timeout are
+	// per-connection and must ride the DSN each open.
+	dsn := "file:" + path +
+		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
+	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		panic("open sqlite: " + err.Error())
 	}
+	conn.SetMaxOpenConns(prodPoolSize())
 	var count int
 	row := conn.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -116,6 +137,28 @@ func OpenProductionDB(path, schemaSQL string) {
 	}
 	db = conn
 	resetStmts()
+}
+
+// prodPoolSize picks the production pool's max-open-connections.
+// Honors DATABASE_POOL_SIZE (the same env knob rust/spinel read) as an
+// override, but defaults to runtime.NumCPU() rather than the request
+// concurrency: pure-Go modernc sqlite has heavy internal locking and
+// its throughput peaks at a small pool (~cores), then collapses when
+// oversized — measured ~13.8k req/s at pool=4 vs ~6.8k at pool=64 on
+// /articles. The bench harness therefore does NOT pass a
+// wrk-concurrency-sized value for go (unlike rust/spinel). Falls back
+// to 4 if NumCPU is unavailable. Tests use SetupTestDB's `:memory:`
+// connection and don't go through here.
+func prodPoolSize() int {
+	if s := os.Getenv("DATABASE_POOL_SIZE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+	}
+	if n := runtime.NumCPU(); n > 0 {
+		return n
+	}
+	return 4
 }
 
 func resetStmts() {
@@ -153,13 +196,13 @@ func Db_exec(query string) {
 // / Db_finalize calls take the id by value. Mirrors rust/db.rs's
 // pre-fetch strategy — sidesteps the *sql.Rows borrow chain.
 func Db_prepare(query string) int64 {
-	dbMu.Lock()
+	dbMu.RLock()
 	if db == nil {
-		dbMu.Unlock()
+		dbMu.RUnlock()
 		panic("db not initialized; call SetupTestDB or OpenProductionDB first")
 	}
 	rows, err := db.Query(query)
-	dbMu.Unlock()
+	dbMu.RUnlock()
 	if err != nil {
 		panic("Db_prepare: " + err.Error())
 	}

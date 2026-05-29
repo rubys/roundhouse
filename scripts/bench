@@ -564,7 +564,13 @@ start_target() {
         go)
             # AOT-compiled binary — single-process, net/http server,
             # no workers concept. `workers` ignored; per-cell row
-            # records workers=1.
+            # records workers=1. Deliberately does NOT pass
+            # DATABASE_POOL_SIZE=$CONNECTIONS the way rust/spinel do:
+            # the Go target is backed by pure-Go modernc sqlite, whose
+            # internal locking collapses under a wrk-concurrency-sized
+            # pool (measured: pool=64 → ~half the throughput of pool=4).
+            # The runtime defaults the pool to runtime.NumCPU(), which
+            # sits on modernc's throughput plateau.
             (cd "$GO_OUT" && \
                 PORT="$port" \
                 ./.bin/server \
