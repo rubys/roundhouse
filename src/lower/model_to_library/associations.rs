@@ -2,9 +2,11 @@
 //! query. dependent: :destroy generates a `before_destroy` cascade that
 //! iterates and destroys each child.
 
-use crate::dialect::{AccessorKind, Association, Dependent, MethodDef, MethodReceiver, Model};
+use crate::dialect::{
+    AccessorKind, Association, Dependent, MethodDef, MethodReceiver, Model, Param,
+};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -17,6 +19,7 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
         match assoc {
             Association::HasMany { name, target, foreign_key, .. } => {
                 methods.push(synth_has_many_reader(owner, name, target, foreign_key));
+                methods.push(synth_preload_setter(owner, name, target));
             }
             Association::BelongsTo { name, target, foreign_key, .. } => {
                 methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
@@ -48,7 +51,7 @@ fn synth_has_many_reader(
         },
     )];
 
-    let body = Expr::new(
+    let lazy_query = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(class_const(target)),
@@ -56,6 +59,31 @@ fn synth_has_many_reader(
             args: where_args,
             block: None,
             parenthesized: true,
+        },
+    );
+
+    // Cache-aware body (issue #27):
+    //   def comments
+    //     return @comments_cache if @comments_loaded   # eager-loaded
+    //     Comment.where(article_id: @id)               # lazy fallback
+    //   end
+    // The lazy fallback MUST stay — paths like `render @article.comments`
+    // (show.html.erb) reach the reader with no `includes` upstream, so
+    // `@comments_loaded` is unset (nil/false) and the query runs. When
+    // a controller's `includes(:comments)` preload ran, the setter
+    // `_preload_comments` flipped the flag and the cache short-circuits.
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: loaded_ivar(name) },
+            ),
+            then_branch: Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: cache_ivar(name) },
+            ),
+            else_branch: lazy_query,
         },
     );
 
@@ -79,6 +107,65 @@ fn synth_has_many_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// Cache + loaded-flag ivar names for a has_many association. Kept in
+/// one place so the reader (which reads them) and the setter (which
+/// writes them) can't drift.
+fn cache_ivar(name: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_cache", name.as_str()))
+}
+fn loaded_ivar(name: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_loaded", name.as_str()))
+}
+
+/// `def _preload_comments(list); @comments_cache = list;
+/// @comments_loaded = true; end` — the controller's eager-load
+/// distribute loop calls this per parent to seed the cache. Owning the
+/// ivar writes here (rather than in the controller IR) keeps the cache
+/// representation encapsulated in the model lowerer; the only contract
+/// the controller side depends on is the `_preload_<assoc>` method name.
+fn synth_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
+    let list = Symbol::from("list");
+    let list_ty = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+
+    let body = seq(vec![
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: cache_ivar(name) },
+                value: var_ref(list.clone()),
+            },
+        ),
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: loaded_ivar(name) },
+                value: {
+                    let mut e = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Bool { value: true } },
+                    );
+                    e.ty = Some(Ty::Bool);
+                    e
+                },
+            },
+        ),
+    ]);
+
+    MethodDef {
+        name: Symbol::from(format!("_preload_{}", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(list.clone())],
+        body,
+        signature: Some(fn_sig(vec![(list, list_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
     }
 }
 

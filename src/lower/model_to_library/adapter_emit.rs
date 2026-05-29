@@ -83,6 +83,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
         orders: vec![],
         limit: Some(LimitSpec(1)),
         joins: vec![],
+            preloads: vec![],
     });
 
     MethodDef {
@@ -110,6 +111,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         orders: vec![],
         limit: None,
         joins: vec![],
+            preloads: vec![],
     });
 
     MethodDef {
@@ -236,6 +238,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         orders: vec![],
         limit: None,
         joins: vec![],
+            preloads: vec![],
     });
 
     MethodDef {
@@ -263,6 +266,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         orders: vec![],
         limit: Some(LimitSpec(1)),
         joins: vec![],
+            preloads: vec![],
     });
 
     MethodDef {

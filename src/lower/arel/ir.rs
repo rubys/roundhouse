@@ -31,7 +31,7 @@
 //! See `project_arel_compile_time_first.md` for the broader architecture.
 
 use crate::expr::Expr;
-use crate::ident::{Symbol, TableRef};
+use crate::ident::{ClassId, Symbol, TableRef};
 
 /// Top-level Arel operation. One per call-site recognized by
 /// `try_build_arel`.
@@ -61,6 +61,30 @@ pub struct Select {
     /// Reserved for joins / includes / preload — Phase 3+. Empty for
     /// every Select built today; visitor ignores.
     pub joins: Vec<Join>,
+    /// `includes(:assoc)` eager-load directives captured off the chain.
+    /// Empty unless the source chain carried `includes`/`preload`/
+    /// `eager_load` AND the lowerer was handed the association graph.
+    /// The visitor renders each as a batched `WHERE fk IN (ids)` query
+    /// after the parent hydrate, distributing rows into each parent's
+    /// association cache (issue #27). Empty → no preload, lazy fallback.
+    pub preloads: Vec<PreloadDirective>,
+}
+
+/// One resolved `includes(:assoc)` eager-load. Resolution happens at
+/// build time (the association graph + registry are available there),
+/// so the visitor needs only the schema to render the batched query.
+#[derive(Clone, Debug)]
+pub struct PreloadDirective {
+    /// Association name as written (`:comments`). Drives the cache
+    /// setter name (`_preload_comments`) the distribute loop calls.
+    pub name: Symbol,
+    /// Class whose rows the batched query hydrates (`Comment`).
+    pub target_class: ClassId,
+    /// Table holding the associated rows (`comments`).
+    pub target_table: TableRef,
+    /// FK column on the target table pointing back at the parent
+    /// (`article_id`). Both the `IN` filter and the group key.
+    pub foreign_key: Symbol,
 }
 
 /// `INSERT INTO <table> (<cols>) VALUES (<values>)`.

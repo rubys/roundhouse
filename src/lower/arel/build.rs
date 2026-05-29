@@ -29,10 +29,11 @@ use std::collections::HashMap;
 use crate::analyze::ClassInfo;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, TableRef};
+use crate::lower::model_associations::{AssocKind, AssociationEdge};
 use crate::schema::{ColumnType, Schema, Table};
 
 use super::ir::{
-    ArelOp, ColumnSpec, LimitSpec, Predicate, Select, Value, ValueType,
+    ArelOp, ColumnSpec, LimitSpec, Predicate, PreloadDirective, Select, Value, ValueType,
 };
 
 /// Try to build an `ArelOp` from a Send call site. Returns
@@ -55,6 +56,19 @@ pub fn try_build_arel(
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
 ) -> Option<(ArelOp, ClassId)> {
+    try_build_arel_with_assocs(send, schema, registry, &[])
+}
+
+/// As `try_build_arel`, but with the app's association graph so
+/// `includes(:assoc)` lifts to a `PreloadDirective` instead of being
+/// dropped. Callers without the graph (model bodies, tests) use the
+/// 3-arg wrapper and get the legacy drop-includes behavior.
+pub fn try_build_arel_with_assocs(
+    send: &Expr,
+    schema: &Schema,
+    registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[AssociationEdge],
+) -> Option<(ArelOp, ClassId)> {
     let ExprNode::Send { recv: Some(recv), method, args, .. } = send.node.as_ref() else {
         return None;
     };
@@ -65,18 +79,23 @@ pub fn try_build_arel(
     // `Article.includes(:c).order(...)` both lift cleanly.
     match method.as_str() {
         "order" => {
-            let (op, owner) = try_chain_recv(recv, schema, registry)?;
+            let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
             return apply_order(op, args).map(|op| (op, owner));
         }
         "limit" => {
-            let (op, owner) = try_chain_recv(recv, schema, registry)?;
+            let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
             return apply_limit(op, args).map(|op| (op, owner));
         }
-        // `includes(:assoc)` is a no-op chain link in the IR today —
-        // eager-loading / preload is Phase 3+ work. Drop the link
-        // and recurse so the rest of the chain still recognizes.
+        // `includes(:assoc)` — capture each association as a
+        // `PreloadDirective` on the underlying Select so the visitor
+        // can batch-load it (issue #27). When the association graph
+        // wasn't supplied (empty `assocs`) or the assoc doesn't
+        // resolve to a has_many edge, it silently falls back to the
+        // legacy no-op drop: recurse and keep the rest of the chain.
         "includes" | "preload" | "eager_load" => {
-            return try_chain_recv(recv, schema, registry);
+            let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
+            let op = attach_preloads(op, &owner, args, registry, assocs);
+            return Some((op, owner));
         }
         _ => {}
     }
@@ -110,8 +129,9 @@ fn try_chain_recv(
     recv: &Expr,
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[AssociationEdge],
 ) -> Option<(ArelOp, ClassId)> {
-    if let Some((op, owner)) = try_build_arel(recv, schema, registry) {
+    if let Some((op, owner)) = try_build_arel_with_assocs(recv, schema, registry, assocs) {
         return Some((op, owner));
     }
     // Implicit `.all` for bare-Const recv. `Article.order(...)` →
@@ -121,6 +141,43 @@ fn try_chain_recv(
     let table_ref = info.table.as_ref()?.clone();
     let _ = schema.tables.get(&table_ref.0)?;
     Some((ArelOp::Select(build_all(&table_ref)), class_id))
+}
+
+/// Resolve each `:assoc` symbol arg of an `includes(...)` call against
+/// the association graph and attach a `PreloadDirective` to the
+/// underlying Select. Only `has_many` edges are eager-loaded for now
+/// (`belongs_to` / `has_one` / `:through` are out of scope, issue #27);
+/// unresolved args are skipped, preserving the legacy no-op behavior.
+fn attach_preloads(
+    op: ArelOp,
+    owner: &ClassId,
+    args: &[Expr],
+    registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[AssociationEdge],
+) -> ArelOp {
+    let ArelOp::Select(mut sel) = op else {
+        return op;
+    };
+    for arg in args {
+        let ExprNode::Lit { value: Literal::Sym { value: assoc_name } } = arg.node.as_ref() else {
+            continue;
+        };
+        let Some(edge) = assocs.iter().find(|e| {
+            &e.from == owner && &e.name == assoc_name && e.kind == AssocKind::HasMany
+        }) else {
+            continue;
+        };
+        let Some(table_ref) = registry.get(&edge.to).and_then(|i| i.table.clone()) else {
+            continue;
+        };
+        sel.preloads.push(PreloadDirective {
+            name: assoc_name.clone(),
+            target_class: edge.to.clone(),
+            target_table: table_ref,
+            foreign_key: edge.foreign_key.clone(),
+        });
+    }
+    ArelOp::Select(sel)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +296,7 @@ fn build_all(table_ref: &TableRef) -> Select {
         orders: vec![],
         limit: None,
         joins: vec![],
+                preloads: vec![],
     }
 }
 
@@ -250,6 +308,7 @@ fn build_count(table_ref: &TableRef) -> Select {
         orders: vec![],
         limit: None,
         joins: vec![],
+                preloads: vec![],
     }
 }
 
@@ -265,6 +324,7 @@ fn build_where_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Opt
         orders: vec![],
         limit: None,
         joins: vec![],
+                preloads: vec![],
     })
 }
 
@@ -279,6 +339,7 @@ fn build_find_by_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> O
         orders: vec![],
         limit: Some(LimitSpec(1)),
         joins: vec![],
+                preloads: vec![],
     })
 }
 
@@ -293,6 +354,7 @@ fn build_exists_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Op
         orders: vec![],
         limit: Some(LimitSpec(1)),
         joins: vec![],
+                preloads: vec![],
     })
 }
 

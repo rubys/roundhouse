@@ -21,7 +21,7 @@ pub mod visitor;
 pub use build::try_build_arel;
 pub use ir::{
     ArelOp, Assignment, ColRef, ColumnSpec, Delete, Direction, Insert, Join, JoinKind, LimitSpec,
-    Order, Predicate, Select, Update, Value, ValueType,
+    Order, Predicate, PreloadDirective, Select, Update, Value, ValueType,
 };
 pub use visitor::{ArelVisitor, SqliteVisitor};
 
@@ -47,14 +47,30 @@ pub fn rewrite_arel_in_expr(
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
 ) {
+    rewrite_arel_in_expr_with_assocs(expr, schema, registry, &[]);
+}
+
+/// As `rewrite_arel_in_expr`, but with the app's association graph so
+/// `includes(:assoc)` chains lower to eager-load preloads (issue #27).
+/// The 3-arg wrapper passes an empty graph → legacy drop-includes.
+pub fn rewrite_arel_in_expr_with_assocs(
+    expr: &mut Expr,
+    schema: &Schema,
+    registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+) {
     if let ExprNode::Send { .. } = expr.node.as_ref() {
-        if let Some((op, owner)) = try_build_arel(expr, schema, registry) {
+        if let Some((op, owner)) =
+            build::try_build_arel_with_assocs(expr, schema, registry, assocs)
+        {
             let replacement = SqliteVisitor.visit(&op, schema, &owner);
             *expr = replacement;
             return;
         }
     }
-    walk_subexprs_mut(expr, &mut |e| rewrite_arel_in_expr(e, schema, registry));
+    walk_subexprs_mut(expr, &mut |e| {
+        rewrite_arel_in_expr_with_assocs(e, schema, registry, assocs)
+    });
     // Post-pass: when an Arel rewrite landed a Seq in an Assign's
     // value slot (e.g. `@articles = <multi-row hydrate Seq>`),
     // hoist the Seq's leading stmts out into the enclosing Seq so

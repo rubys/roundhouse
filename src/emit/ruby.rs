@@ -248,11 +248,16 @@ fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
     );
     let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
-    crate::lower::lower_controllers_with_arel_and_views(
+    // Association graph drives `includes(:assoc)` eager-load lowering
+    // (issue #27) — without it the Arel pass drops includes and the
+    // reader N+1s.
+    let assocs = crate::lower::model_associations::compute_association_graph(app);
+    crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
         model_extras,
         Some(&app.schema),
         &app.views,
+        &assocs,
     )
 }
 

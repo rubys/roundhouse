@@ -13,14 +13,15 @@
 
 use crate::dialect::AccessorKind;
 use crate::effect::EffectSet;
-use crate::expr::{ArrayStyle, Expr, ExprNode, Literal, LValue};
+use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, Literal, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::Ty;
 
 use super::ir::{
-    ArelOp, Assignment, ColumnSpec, Delete, Insert, Predicate, Select, Update, Value, ValueType,
+    ArelOp, Assignment, ColumnSpec, Delete, Insert, Predicate, PreloadDirective, Select, Update,
+    Value, ValueType,
 };
 
 const DB_MOD: &str = "Db";
@@ -61,7 +62,7 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
         ColumnSpec::Exists => emit_exists(sel, table),
         ColumnSpec::All => match sel.limit {
             Some(super::ir::LimitSpec(1)) => emit_single_hydrate(sel, table, owner),
-            _ => emit_multi_hydrate(sel, table, owner),
+            _ => emit_multi_hydrate(sel, table, owner, schema),
         },
         ColumnSpec::Named(_) => {
             // Reserved — no Phase 1 builder produces Named.
@@ -103,7 +104,7 @@ fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
 
 /// `SELECT <cols> FROM <table> [WHERE …]` →
 /// `Array[<Owner>]` via `while step?` loop.
-fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
+fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId, schema: &Schema) -> Expr {
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
     let instance = Symbol::from("instance");
@@ -150,7 +151,116 @@ fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
     );
 
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
-    seq(vec![stmt_assign, results_init, while_loop, finalize, var_ref(&results)])
+
+    // Base hydrate, then any `includes(:assoc)` preloads (issue #27).
+    // Each preload appends a batched `WHERE fk IN (ids)` query +
+    // distribute loop that fills the parents' association caches, all
+    // operating on `results` before it's returned. With no preloads
+    // this is byte-identical to the pre-#27 5-stmt Seq.
+    let mut stmts = vec![stmt_assign, results_init, while_loop, finalize];
+    for directive in &sel.preloads {
+        push_preload_stmts(&mut stmts, directive, schema, owner, &results);
+    }
+    stmts.push(var_ref(&results));
+    seq(stmts)
+}
+
+/// Emit the eager-load steps for one `includes(:assoc)` directive,
+/// appending to `out`. Given the parent rows already hydrated into
+/// `parent_results`, this:
+///   1. collects parent ids,
+///   2. runs ONE `SELECT … WHERE fk IN (ids)` over the target table,
+///   3. distributes the loaded rows into each parent via the
+///      `_preload_<assoc>` setter the model lowerer synthesized.
+/// Turns Rails' eager-load into 2 queries total instead of 1 + N.
+fn push_preload_stmts(
+    out: &mut Vec<Expr>,
+    directive: &PreloadDirective,
+    schema: &Schema,
+    parent_owner: &ClassId,
+    parent_results: &Symbol,
+) {
+    let _ = parent_owner;
+    let db = ClassId(Symbol::from(DB_MOD));
+    let target_table = lookup_table(schema, &directive.target_table.0);
+    let assoc = directive.name.as_str();
+
+    let ids = Symbol::from(format!("__{}_ids", assoc));
+    let pstmt = Symbol::from(format!("__{}_stmt", assoc));
+    let loaded = Symbol::from(format!("__{}_loaded", assoc));
+    let pinst = Symbol::from(format!("__{}_row", assoc));
+
+    // ids = parent_results.map { |a| a.id }
+    let map_block = block1(
+        "a",
+        send_to(var_ref(&Symbol::from("a")), "id", vec![], false),
+    );
+    out.push(assign_var(&ids, send_block(var_ref(parent_results), "map", map_block)));
+
+    // pstmt = Db.prepare("SELECT <cols> FROM <tbl> WHERE <fk> IN (" + Db.escape_int_list(ids) + ")")
+    let sql = concat_chain(vec![
+        lit_str(format!(
+            "SELECT {} FROM {} WHERE {} IN (",
+            select_cols_csv(target_table),
+            target_table.name.as_str(),
+            directive.foreign_key.as_str(),
+        )),
+        db_call(&db, "escape_int_list", vec![var_ref(&ids)]),
+        lit_str(")".to_string()),
+    ]);
+    out.push(assign_var(&pstmt, db_call(&db, "prepare", vec![sql])));
+
+    // loaded = [] (typed Array<Target> so the `<<` push types cleanly)
+    let elem_ty = Ty::Class { id: directive.target_class.clone(), args: vec![] };
+    let loaded_init = crate::lower::typing::with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+        ),
+        Ty::Array { elem: Box::new(elem_ty) },
+    );
+    out.push(assign_var(&loaded, loaded_init));
+
+    // while Db.step?(pstmt) { row = Target.new ; <hydrate> ; mark_persisted! ; loaded << row }
+    let mut loop_body = vec![assign_var(&pinst, new_call(&directive.target_class))];
+    push_hydrate_columns(&mut loop_body, target_table, &db, &pstmt, &pinst);
+    loop_body.push(send_to(var_ref(&pinst), "mark_persisted!", vec![], true));
+    loop_body.push(send_to(var_ref(&loaded), "<<", vec![var_ref(&pinst)], false));
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::While {
+            cond: db_call(&db, "step?", vec![var_ref(&pstmt)]),
+            body: seq(loop_body),
+            until_form: false,
+        },
+    ));
+
+    // Db.finalize(pstmt)
+    out.push(db_call(&db, "finalize", vec![var_ref(&pstmt)]));
+
+    // parent_results.each { |a| a._preload_<assoc>(loaded.select { |r| r.<fk> == a.id }) }
+    let match_pred = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(send_to(
+                var_ref(&Symbol::from("r")),
+                directive.foreign_key.as_str(),
+                vec![],
+                false,
+            )),
+            method: Symbol::from("=="),
+            args: vec![send_to(var_ref(&Symbol::from("a")), "id", vec![], false)],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let select_call = send_block(var_ref(&loaded), "select", block1("r", match_pred));
+    let setter = format!("_preload_{}", assoc);
+    let each_block = block1(
+        "a",
+        send_to(var_ref(&Symbol::from("a")), &setter, vec![select_call], true),
+    );
+    out.push(send_block(var_ref(parent_results), "each", each_block));
 }
 
 /// `SELECT COUNT(*) FROM <table> [WHERE …]` → integer scalar.
@@ -473,6 +583,33 @@ fn send_to(recv: Expr, method: &str, args: Vec<Expr>, parenthesized: bool) -> Ex
     )
 }
 
+/// A single-param brace block `{ |name| <body> }`.
+fn block1(param: &str, body: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![Symbol::from(param)],
+            block_param: None,
+            body,
+            block_style: BlockStyle::Brace,
+        },
+    )
+}
+
+/// `recv.method { <block> }` — a Send carrying a block, no args.
+fn send_block(recv: Expr, method: &str, block: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    )
+}
+
 fn new_call(owner: &ClassId) -> Expr {
     Expr::new(
         Span::synthetic(),
@@ -651,6 +788,7 @@ mod tests {
             orders: vec![],
             limit: None,
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         // stmt = prepare ; results = [] ; while step? { ... } ; finalize ; results
@@ -671,6 +809,7 @@ mod tests {
             orders: vec![],
             limit: Some(LimitSpec(1)),
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         // stmt = prepare ; result = nil ; if step? { ... } ; finalize ; result
@@ -688,6 +827,7 @@ mod tests {
             orders: vec![],
             limit: None,
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         // stmt = prepare ; step? ; result = column_int ; finalize ; result
@@ -708,6 +848,7 @@ mod tests {
             orders: vec![],
             limit: Some(LimitSpec(1)),
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         // stmt = prepare ; result = step? ; finalize ; result
@@ -807,6 +948,7 @@ mod tests {
             }],
             limit: None,
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         // Walk the body to the prepare call's SQL literal and assert
@@ -863,6 +1005,7 @@ mod tests {
             ],
             limit: None,
             joins: vec![],
+            preloads: vec![],
         });
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!() };
@@ -899,6 +1042,7 @@ mod tests {
             orders: vec![],
             limit: None,
             joins: vec![],
+            preloads: vec![],
         });
         // No-limit + ColumnSpec::All + WHERE → multi-hydrate (the
         // has_many proxy shape: `Comment.where(article_id: @id)`).

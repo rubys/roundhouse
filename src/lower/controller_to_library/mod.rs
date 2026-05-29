@@ -131,6 +131,21 @@ pub fn lower_controllers_with_arel_and_views(
     schema: Option<&crate::schema::Schema>,
     views: &[crate::dialect::View],
 ) -> Vec<LibraryClass> {
+    lower_controllers_with_arel_views_and_assocs(controllers, extras, schema, views, &[])
+}
+
+/// As `lower_controllers_with_arel_and_views`, plus the app's
+/// association graph so action-body `includes(:assoc)` chains lower to
+/// eager-load preloads (issue #27). The 4-arg wrapper passes an empty
+/// graph, preserving the legacy drop-includes behavior for callers that
+/// haven't wired the graph yet.
+pub fn lower_controllers_with_arel_views_and_assocs(
+    controllers: &[Controller],
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    schema: Option<&crate::schema::Schema>,
+    views: &[crate::dialect::View],
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+) -> Vec<LibraryClass> {
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -299,7 +314,9 @@ pub fn lower_controllers_with_arel_and_views(
             // primitive surface. Re-type after so the body-typer's
             // earlier annotations on the rewritten subtree refresh.
             if let Some(schema) = schema {
-                crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+                crate::lower::arel::rewrite_arel_in_expr_with_assocs(
+                    &mut method.body, schema, &classes, assocs,
+                );
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }

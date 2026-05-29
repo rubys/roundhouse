@@ -220,6 +220,15 @@ module Db
     n.to_i.to_s
   end
 
+  # Render an integer list for `IN (...)` eager-load batches (issue
+  # #27). Empty list → "NULL" so `IN (NULL)` is valid SQL matching no
+  # rows (an empty `IN ()` is a syntax error). Mirrors the cruby shim.
+  def self.escape_int_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
   # SQLite stores booleans as 0/1 integers (no native bool type) —
   # mirrors the cruby sibling shim.
   def self.escape_bool(b)

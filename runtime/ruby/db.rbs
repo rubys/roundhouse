@@ -25,4 +25,5 @@ module Db
   # the cruby gem also accepts inlined values).
   def self.escape_string: (String) -> String
   def self.escape_int: (Integer) -> String
+  def self.escape_int_list: (Array[Integer]) -> String
 end
