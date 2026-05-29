@@ -423,14 +423,15 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   when an article is created. The FFI-SQLite + sphttp/tep substrate
   ([matz/spinel#214](https://github.com/matz/spinel/issues/214)) is
   in place; the binary is a single self-contained artifact.
-- **Known spinel-master gap:** `form_with` currently renders a raw
-  object id instead of the form HTML (so `/articles/new` and
-  `/articles/:id/edit` lack their `<form>`, and the controller tests
-  that assert on form content fail). This is a spinel codegen
-  regression on current master — it reproduces independently of the
-  cable/transport work and predates it — not a fixture bug. The
-  create/update/broadcast path is unaffected (it runs off params, not
-  the rendered form). To be filed as a minimal repro upstream.
+- **`scripts/compare spinel` is 4/7** against current spinel master:
+  `/articles/new`, `/articles/:id/edit`, and both `.json` paths match
+  Rails byte-for-DOM-node. The three list/show pages (`/`, `/articles`,
+  `/articles/:id`) differ only by a trailing whitespace text node in
+  `<body>` — a cosmetic spinel-master rendering nuance, not a fixture
+  bug: it reproduces identically on a pre-cable build, so it's
+  independent of the transport work. (An earlier `form_with`-renders-an-
+  object-id codegen regression that blanked the form pages was fixed
+  upstream by matz/spinel#1028's string-interpolation `mutable_str` arm.)
 
 ## How to read this fixture
 
