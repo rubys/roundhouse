@@ -583,6 +583,21 @@ fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
                 if method.as_str() == "<<" && args.len() == 1 {
                     if let ExprNode::Var { name, .. } = &*r.node {
                         let var = super::library::sanitize(name.as_str());
+                        // A coalesced view append (`io << "…#{a}…#{b}…"`)
+                        // arrives as a StringInterp. Collapsing it to one
+                        // `WriteString(fmt.Sprintf("…%v…", a, b))` forces
+                        // every fragment — including already-`Str`-typed
+                        // ones — through the reflection-based `%v`
+                        // formatter and boxes each into `interface{}`.
+                        // Split into one `WriteString` per part instead:
+                        // literal text and `Str`-typed expressions write
+                        // directly (no Sprintf, no boxing); only genuinely
+                        // non-string values keep a `Sprintf("%v", …)`. The
+                        // emitted bytes are identical — same fragments,
+                        // same order — so `compare go` is unaffected.
+                        if let ExprNode::StringInterp { parts } = &*args[0].node {
+                            return Some(emit_interp_appends(ctx, &var, parts));
+                        }
                         let arg = emit_expr(ctx, &args[0]);
                         return Some(format!("{var}.WriteString({arg})"));
                     }
@@ -598,6 +613,41 @@ fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
             None
         }
     }
+}
+
+/// Emit a coalesced view append as a sequence of `<var>.WriteString(…)`
+/// statements, one per `StringInterp` part. Literal text and
+/// `Str`-typed expressions write directly; non-string parts retain a
+/// `fmt.Sprintf("%v", …)` so their stringification (and the emitted
+/// bytes) match the prior single-Sprintf shape. Returned newline-joined
+/// — only ever called in statement position (the append hint sits on a
+/// body statement), so multiple lines are well-formed.
+fn emit_interp_appends(ctx: &EmitCtx, var: &str, parts: &[crate::expr::InterpPart]) -> String {
+    use crate::expr::InterpPart;
+    let mut lines: Vec<String> = Vec::new();
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => {
+                lines.push(format!("{var}.WriteString({})", go_str_literal(value)));
+            }
+            InterpPart::Expr { expr } => {
+                let s = emit_expr(ctx, expr);
+                if matches!(expr.ty, Some(Ty::Str)) {
+                    lines.push(format!("{var}.WriteString({s})"));
+                } else {
+                    lines.push(format!("{var}.WriteString(fmt.Sprintf(\"%v\", {s}))"));
+                }
+            }
+        }
+    }
+    // Indentation is cosmetic only (Go ignores it; the emitted source
+    // isn't gofmt'd). The top-level Seq emitter indents just the first
+    // line of a statement, so prefix continuation lines with one tab to
+    // line up the common case (a body-level append run). Inside a
+    // re-indented block the continuations end up one tab deeper than the
+    // first line — a minor wart we accept rather than thread depth
+    // through every leaf emitter.
+    lines.join("\n\t")
 }
 
 /// analysis requires a return after the switch even when every arm
