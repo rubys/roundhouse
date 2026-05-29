@@ -31,6 +31,31 @@
 static char sphttp_req_buf[SPHTTP_BUFSIZE];
 static int  sphttp_req_len = 0;
 
+/* Shutdown-on-signal plumbing. SIGTERM/SIGINT set the flag; the
+ * scheduled server's accept loop checks it once per second and breaks
+ * out cleanly so Ruby-level shutdown hooks can fire before exit.
+ * SA_RESETHAND restores the default handler after the first delivery
+ * so a second signal kills the process immediately if shutdown stalls
+ * (a non-cooperative second Ctrl-C). */
+static volatile sig_atomic_t sphttp_term_flag = 0;
+static void sphttp_term_signal(int sig) {
+    (void)sig;
+    sphttp_term_flag = 1;
+}
+int sphttp_install_term_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sphttp_term_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;       /* second signal -> default action */
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
+    return 0;
+}
+int sphttp_shutdown_requested(void) {
+    return (int)sphttp_term_flag;
+}
+
 /* Bind & listen on 0.0.0.0:port. If `reuseport` != 0 we set
  * SO_REUSEPORT so multiple worker processes can listen on the same
  * port and the kernel will load-balance accept() across them. */
@@ -221,6 +246,21 @@ const char *sphttp_recv_frame_buf(void) {
 
 int sphttp_recv_frame_len(void) {
     return sphttp_frame_len;
+}
+
+/* Per-byte accessor into the frame buffer. Returns the unsigned byte
+ * value at index `i` (0..255), or -1 if out of range. Required for
+ * WebSocket frame parsing: the buffer holds arbitrary bytes including
+ * 0x00, so the `sphttp_recv_frame_buf` (:str) accessor — which the
+ * Ruby side receives as a NUL-terminated string — truncates a masked
+ * frame at its first zero byte (e.g. the 16-bit length's high byte,
+ * which is 0x00 for any payload <= 255 bytes). Reading byte-by-byte
+ * through this accessor sidesteps that truncation entirely. */
+int sphttp_recv_frame_byte(int i) {
+    if (i < 0 || i >= sphttp_frame_len) {
+        return -1;
+    }
+    return (int)(unsigned char)sphttp_frame_buf[i];
 }
 
 /* Send a file's contents straight from disk -- used for static

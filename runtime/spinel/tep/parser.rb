@@ -52,7 +52,7 @@ module Tep
       # Pre-merge query into params; path captures will be folded in
       # by the router on a successful match.
       req.query.each do |k, v|
-        req.params[k] = v
+        req.req_params[k] = v
       end
 
       # Parse Cookie header into req.cookies. Format: "k=v; k2=v2; ...".

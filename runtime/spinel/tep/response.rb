@@ -18,13 +18,31 @@ module Tep
       @set_cookies.delete_at(0)
       @streamer    = Streamer.new   # default no-op; only used when @streaming
       @streaming   = false
+      # WebSocket upgrade slots. When @upgrading_ws is set (by
+      # start_websocket, from the /cable handler), Tep::Server::Scheduled's
+      # write path emits the 101 Switching Protocols handshake and then
+      # drives Tep::WebSocket::Connection's recv loop instead of writing
+      # a normal body.
+      @upgrading_ws  = false
+      @ws_accept_key = ""
+      @ws_driver     = Tep::WebSocket::Driver.new(0)
     end
 
     attr_accessor :streamer, :streaming
+    attr_accessor :upgrading_ws, :ws_accept_key, :ws_driver
 
     def start_stream(streamer)
       @streamer  = streamer
       @streaming = true
+    end
+
+    # Mark the response as a WebSocket upgrade. The server writes a
+    # 101 Switching Protocols response with the accept-key, assigns
+    # the live client fd onto the driver, then runs the recv loop.
+    def start_websocket(accept_key, driver)
+      @upgrading_ws  = true
+      @ws_accept_key = accept_key
+      @ws_driver     = driver
     end
 
     # Sinatra-style cookie writer. `opts` is a Bag-of-strings

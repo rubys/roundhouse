@@ -477,15 +477,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files
 }
 
-/// Standalone go.mod for the emitted project. Phase 6 step 2/3 left
-/// the v2 overlay needing modernc.org/sqlite (db.go) — the legacy
-/// nhooyr.io/websocket dep was the cable.go binding, retired here.
-/// Future cable.go restoration would re-add the websocket dep when
-/// it lands. Module name `app`; subpackages `app/v2`, `cmd/v2`.
+/// Standalone go.mod for the emitted project. Two direct deps:
+/// modernc.org/sqlite (db.go, the cgo-free SQLite driver) and
+/// github.com/coder/websocket (cable.go, the Action Cable `/cable`
+/// endpoint — the maintained successor to nhooyr.io/websocket that
+/// the legacy cable.go used before Phase 6 retired it). `go mod tidy`
+/// resolves the transitive set + go.sum on first build. Module name
+/// `app`; subpackages `app/v2`, `cmd/v2`.
 fn emit_go_mod() -> EmittedFile {
     EmittedFile {
         path: std::path::PathBuf::from("go.mod"),
-        content: "module app\n\ngo 1.24\n\nrequire modernc.org/sqlite v1.34.1\n".to_string(),
+        content: "module app\n\ngo 1.24\n\nrequire (\n\tgithub.com/coder/websocket v1.8.12\n\tmodernc.org/sqlite v1.34.1\n)\n".to_string(),
     }
 }
 
@@ -541,7 +543,13 @@ fn emit_readme() -> EmittedFile {
                   ```\n\
                   go build -o server ./cmd/v2/\n\
                   ./server\n\
-                  ```\n"
+                  ```\n\n\
+                  The server listens on `:3000` (override with `$PORT`). It serves\n\
+                  the Tailwind-styled pages and mounts an Action Cable WebSocket at\n\
+                  `/cable`: model after-commit hooks broadcast Turbo Stream fragments\n\
+                  to subscribed browsers, so creates/updates/destroys appear live\n\
+                  without a page refresh. Uses github.com/coder/websocket (resolved\n\
+                  by `go mod tidy`).\n"
             .to_string(),
     }
 }

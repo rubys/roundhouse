@@ -19,30 +19,32 @@ across an end-to-end MVC + WebSocket stack.
 
 The destination is a **single deployable binary**: Spinel compiles
 `main.rb` end-to-end into native code, the binary serves production
-HTTP traffic, SQLite-backed persistence survives restarts. Today's
-demo runs the lowered output under CRuby; the spinel-compile half
-of the round trip is the unfinished half of the bet. Most of this
-fixture's design choices are in service of getting there.
+HTTP + WebSocket traffic, SQLite-backed persistence survives restarts.
+That round trip now closes — `spinel main.rb -o build/blog` produces a
+binary that serves the Tailwind-styled pages, persists through FFI
+SQLite, and pushes live Turbo Stream updates over `/cable`. The CRuby
+target runs the same lowered output under Puma for development.
 
-Two substrate gaps stand between the current demo and that endpoint,
-both FFI-shaped:
+Both former substrate gaps are now FFI-shaped and landed:
 
 - **Persistence.** `runtime/sqlite_adapter.rb` wraps the CRuby
-  `sqlite3` gem (a C extension that doesn't compile under spinel).
-  The adapter is shaped for FFI lowering — the moment spinel can
-  link SQLite directly, the existing adapter swaps in unchanged.
-  Spinel-AOT compiles against the FFI shim in `runtime/db.rb`.
+  `sqlite3` gem (a C extension that doesn't compile under spinel);
+  the spinel binary links SQLite directly through the FFI shim in
+  `runtime/db.rb`. The adapter is shaped so the gem and FFI paths
+  share one surface.
 - **HTTP/WebSocket server.** The CRuby target serves traffic via
-  Puma + a Rack adapter (`config.ru` → `Main.run`). Puma uses
-  Thread/Mutex/IO.select — things spinel doesn't compile. The
-  intentional split — fixture proper does CGI shape under `Main.run`;
-  Rack adapter terminates HTTP and lifts requests into that shape —
-  keeps the spinel-compile path narrow. The compiled binary is
-  destined to embed [civetweb](https://github.com/civetweb/civetweb)
-  (or similar) via FFI for the same `Main.run` entry point.
+  Puma + a Rack adapter (`config.ru` → `Main.run`); Puma uses
+  Thread/Mutex/IO.select, which spinel doesn't compile. The spinel
+  binary instead uses the vendored [tep](https://github.com/OriPekelman/tep)
+  transport — `runtime/tep/sphttp.c` (POSIX sockets + poll(2) via FFI)
+  driving `Tep::Server::Scheduled`, a fiber-per-connection server that
+  holds long-lived `/cable` WebSocket connections without pinning the
+  worker. Same `Main.dispatch` entry point under both transports.
 
-The substrate request is tracked in [matz/spinel#214](https://github.com/matz/spinel/issues/214);
-the fixture works without it today, just not as a single binary.
+The original substrate request was tracked in [matz/spinel#214](https://github.com/matz/spinel/issues/214);
+the `sp_net`/`sp_crypto` upstreaming that lets this link cleanly is
+discussed in [OriPekelman/tep#6](https://github.com/OriPekelman/tep/issues/6)
++ [rubys/roundhouse#1](https://github.com/rubys/roundhouse/issues/1).
 
 ## Quick start
 
@@ -144,37 +146,45 @@ Rack/Puma dependency):
     db.rb                        FFI shim (libsqlite3) — Spinel-AOT path
     db_cruby.rb                  CRuby/gem variant of the same Db surface
     cgi_io.rb                    CGI/1.1 request parser + response writer
-    broadcasts.rb                in-memory log of Turbo Stream fragments
+    broadcasts.rb                in-memory log of Turbo Stream fragments + transport hook
+    cable.rb                     spinel Action Cable glue (tep WebSocket + Broadcast)
     inflector.rb                 pluralize (verbatim from runtime/ruby/)
+    tep/                         vendored tep transport: sphttp.c FFI, scheduler,
+                                 server_scheduled, websocket/* codec, broadcast
   test/
     {runtime,models,controllers,integration,views,tools}/*_test.rb
   tools/
     check_spinel_subset.rb       grep-based linter
-  main.rb                        CGI entry point (the file spinel compiles)
+  main.rb                        entry point: Tep::Server::Scheduled (spinel binary)
   config.ru                      CRuby-only; Rack adapter to Main.run
-  cable.rb                       CRuby-only; in-process WebSocket Registry
+  cable.rb                       CRuby-only; Puma rack-hijack WebSocket Registry
   Gemfile  Rakefile  Makefile
 ```
 
-`config.ru` / `cable.rb` / `config/puma.rb` ship in the CRuby overlay
-only (`runtime/spinel/scaffold/ruby_overlay/`); the spinel-target
-emitted tree omits them.
+`config.ru` / `ruby_overlay/cable.rb` / `config/puma.rb` ship in the
+CRuby overlay only (`runtime/spinel/scaffold/ruby_overlay/`); the
+spinel-target emitted tree omits them and uses `runtime/cable.rb` +
+`runtime/tep/` instead. (Note the two `cable.rb`s: the CRuby overlay's
+rides Puma + the websocket-driver gem; the spinel `runtime/cable.rb`
+rides tep's fiber-scheduled WebSocket codec.)
 
 **Two layers, intentional split:**
 
 1. The **fixture proper** (`main.rb` + `runtime/` + `app/` + `config/`)
-   is metaprogramming-free Ruby that reads CGI-shaped requests
-   (`ENV` + stdin-equivalent), dispatches through the Router, and
-   writes a CGI-shaped response. No sockets, no Threads. This is the
-   layer that spinel will eventually compile.
-2. The **CRuby-only transport** (`config.ru` + `cable.rb` +
+   is metaprogramming-free Ruby that dispatches a request through the
+   Router and writes a response. The spinel binary drives it through
+   `Tep::Server::Scheduled` (fiber-per-connection, no Threads); the
+   CRuby target drives the same `Main.dispatch` through the Rack
+   adapter below. This is the layer spinel compiles.
+2. The **CRuby-only transport** (`config.ru` + `ruby_overlay/cable.rb` +
    `config/puma.rb`) terminates HTTP and WebSocket on the Puma side,
    lifts each request into the CGI shape, calls `Main.run`, and parses
    the CGI response back into a Rack tuple. WebSocket upgrades hijack
-   the Puma socket and run a per-connection read loop. This layer
-   uses Threads, Mutex, IO.select — things spinel doesn't support
-   and never needs to compile. The spinel-compiled binary swaps this
-   layer for sphttp + fibers ([tep](https://github.com/OriPekelman/tep)).
+   the Puma socket and run a per-connection read loop. This layer uses
+   Threads, Mutex, IO.select — things spinel doesn't support — so the
+   spinel binary instead uses the vendored tep transport (`runtime/tep/`:
+   sphttp FFI + fiber `Tep::Scheduler` + `Tep::WebSocket` codec), driven
+   by `runtime/cable.rb` ([tep](https://github.com/OriPekelman/tep)).
 
 Broadcasts are in-process: model after-commit hooks call
 `Broadcasts.append`/`prepend`/`replace`/`remove`, which records to
@@ -201,7 +211,9 @@ Turbo clients) is layered on top of that log by `cable.rb`'s
 | Forms | POST/PATCH/DELETE via hidden `_method` field; method override on the dev-server side; full create/update/destroy flow |
 | HTTP entry point | `main.rb` parses CGI, dispatches, writes response with status + headers + body |
 | HTTP server (CRuby) | Puma + Rack adapter (`config.ru`) — terminates HTTP/1.1, lifts requests into CGI shape, calls `Main.run`, parses the response back to a Rack tuple. `Rack::Static` serves `/assets/*` and root icons. |
-| WebSocket (CRuby) | `cable.rb`'s `Cable::Registry` — Puma `rack.hijack` per `/cable` upgrade; per-connection read loop; subscription dispatch into in-memory broadcasts log |
+| HTTP server (spinel) | `Tep::Server::Scheduled` — fiber-per-connection, poll(2)-driven, sphttp FFI transport; serves the compiled binary's HTTP + WebSocket on one port |
+| WebSocket (CRuby) | `ruby_overlay/cable.rb`'s `Cable::Registry` — Puma `rack.hijack` per `/cable` upgrade; per-connection read loop; subscription dispatch into in-memory broadcasts log |
+| WebSocket (spinel) | `runtime/cable.rb` on tep's `Tep::WebSocket` codec + `Tep::Scheduler` fibers + `Tep::Broadcast` fan-out — `/cable` upgrade, `actioncable-v1-json` welcome/ping/subscribe/confirm, live Turbo Stream broadcasts |
 | Asset pipeline | Tailwind v4 via `npx @tailwindcss/cli`; turbo.min.js copied from gem dir |
 
 ## No metaprogramming
@@ -352,14 +364,20 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   3 threads / single process) all ship in the
   `runtime/spinel/scaffold/ruby_overlay/` tree. `bundle exec rake dev`
   is the entry point.
-- **Spinel target:** sphttp + fibers (vendored from
+- **Spinel target:** sphttp + a fiber scheduler (vendored from
   [tep](https://github.com/OriPekelman/tep)) for the compiled binary
-  — **planned**. Single self-contained executable, no .so
-  dependencies. Same `Main.run` entry point; the transport layer
-  swaps under it.
+  — **landed**. `Tep::Server::Scheduled` (fiber-per-connection,
+  poll(2)-driven) is the entry point in `main.rb`; the binary is a
+  single self-contained executable with no Ruby dependency. SQLite
+  links via FFI (`runtime/db.rb`).
 - **WebSocket:** in-process for both targets — Puma `rack.hijack`
-  under CRuby (landed), fiber-multiplexed under spinel (planned).
-  Replaces the retired file-IPC + dev-server pattern.
+  under CRuby (`ruby_overlay/cable.rb`, websocket-driver gem),
+  fiber-multiplexed under spinel (`runtime/cable.rb` on tep's
+  `Tep::WebSocket` codec + `Tep::Scheduler` + `Tep::Broadcast`). Both
+  speak `actioncable-v1-json` and fan model after-commit Turbo Stream
+  fragments out to subscribers live. Single-worker (`WORKERS=1`):
+  fan-out is in-process per worker. Replaces the retired file-IPC +
+  dev-server pattern.
 
 ### Testing posture
 
@@ -397,13 +415,22 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   #203, #204, #207, #208, #219, #224, #229, #239), each removing
   a category of inference or codegen mismatch. real-blog now
   spinel-compiles end-to-end with zero C errors.
-- **Running the compiled binary is the remaining step.** Clean
-  C-compile means the codegen pipeline produces a syntactically
-  valid C program; verifying the binary executes correctly is the
-  next gate. Beyond that, the substrate gaps in
-  [matz/spinel#214](https://github.com/matz/spinel/issues/214)
-  (FFI for SQLite + civetweb) stand between today's compiled
-  binary and a single deployable production artifact.
+- **The compiled binary runs.** `spinel main.rb -o build/blog`
+  produces a native binary that serves the blog over HTTP +
+  WebSocket on `Tep::Server::Scheduled`: GET pages render with
+  Tailwind, `POST /articles` persists through FFI SQLite, and a
+  `/cable` subscriber receives the `<turbo-stream>` broadcast live
+  when an article is created. The FFI-SQLite + sphttp/tep substrate
+  ([matz/spinel#214](https://github.com/matz/spinel/issues/214)) is
+  in place; the binary is a single self-contained artifact.
+- **Known spinel-master gap:** `form_with` currently renders a raw
+  object id instead of the form HTML (so `/articles/new` and
+  `/articles/:id/edit` lack their `<form>`, and the controller tests
+  that assert on form content fail). This is a spinel codegen
+  regression on current master — it reproduces independently of the
+  cable/transport work and predates it — not a fixture bug. The
+  create/update/broadcast path is unaffected (it runs off params, not
+  the rendered form). To be filed as a minimal repro upstream.
 
 ## How to read this fixture
 

@@ -48,4 +48,45 @@ module Base64
     end
     out
   end
+
+  # RFC 4648 §4 decode — inverse of strict_encode64. Skips "=" padding
+  # and any non-alphabet byte. Accumulates 6 bits per input char into a
+  # bit buffer, emitting one byte per 8 accumulated bits. Added for the
+  # Action Cable glue's signed_stream_name decode (the encode side is
+  # turbo_stream_from). Returns the decoded String.
+  def self.strict_decode64(s)
+    out = ""
+    acc = 0
+    nbits = 0
+    i = 0
+    n = s.length
+    while i < n
+      val = char_value(s[i])
+      i = i + 1
+      if val < 0
+        next   # padding "=" or stray byte
+      end
+      acc = (acc << 6) | val
+      nbits = nbits + 6
+      if nbits >= 8
+        nbits = nbits - 8
+        byte = (acc >> nbits) & 0xFF
+        out = out + byte.chr
+      end
+    end
+    out
+  end
+
+  # Map one base64 alphabet character to its 6-bit value, or -1 for
+  # anything outside the alphabet (padding / separators).
+  def self.char_value(c)
+    idx = 0
+    while idx < 64
+      if ALPHABET[idx] == c
+        return idx
+      end
+      idx = idx + 1
+    end
+    -1
+  end
 end

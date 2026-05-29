@@ -54,6 +54,8 @@ const RT_V2_DB: &str =
     include_str!("../../runtime/go/v2/db.go");
 const RT_V2_BROADCASTS: &str =
     include_str!("../../runtime/go/v2/broadcasts.go");
+const RT_V2_CABLE: &str =
+    include_str!("../../runtime/go/v2/cable.go");
 const RT_V2_SERVER: &str =
     include_str!("../../runtime/go/v2/server.go");
 const RT_V2_ROUTER_GLUE: &str =
@@ -192,6 +194,11 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         for (name, src) in [
             ("db.go", RT_V2_DB),
             ("broadcasts.go", RT_V2_BROADCASTS),
+            // Action Cable WebSocket endpoint + Turbo Streams fan-out.
+            // Gated alongside broadcasts.go (which calls into it) and
+            // db.go because it pulls github.com/coder/websocket into
+            // go.mod, which the default toolchain test won't tidy.
+            ("cable.go", RT_V2_CABLE),
             // Phase 4 minimum wedge — server boot + empty-mux router
             // glue so the emitted main.go compiles. Per-route binding
             // lands in the next wedge.

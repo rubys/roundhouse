@@ -82,8 +82,17 @@ func recordBroadcast(action string, attrs map[string]interface{}) {
 		HTML:   anyToString(attrs["html"]),
 	}
 	broadcastsMu.Lock()
-	defer broadcastsMu.Unlock()
 	broadcastsLog = append(broadcastsLog, entry)
+	broadcastsMu.Unlock()
+
+	// Live fan-out: compose the <turbo-stream> wrapper and push it to
+	// every WebSocket subscriber on this stream (cable.go). The log
+	// append above stays the test-visible contract; this is the
+	// live-server contract. dispatch is a no-op when nothing is
+	// subscribed, so non-cable scenarios (tests, one-shot runs) are
+	// unaffected. Done outside the broadcastsMu critical section —
+	// cable.go owns its own subscriber mutex.
+	dispatch(entry.Stream, TurboStreamHTML(entry.Action, entry.Target, entry.HTML))
 }
 
 func anyToString(v any) string {

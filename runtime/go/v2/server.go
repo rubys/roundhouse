@@ -51,8 +51,16 @@ func Server_start(handler http.Handler, opts StartOptions) {
 			port = "3000"
 		}
 	}
+	// Mount the Action Cable WebSocket endpoint alongside the app
+	// handler. `/cable` upgrades to a WebSocket (cable.go); every
+	// other path falls through to the transpiled router. Turbo's
+	// default cable URL is `/cable`, matching CableHandler.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cable", CableHandler)
+	mux.Handle("/", handler)
+
 	addr := ":" + port
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		panic("Server_start: " + err.Error())
 	}
 }

@@ -29,6 +29,12 @@ module Sock
   ffi_func :sphttp_recv_into_frame, [:int],         :int
   ffi_func :sphttp_recv_frame_buf, [],              :str
   ffi_func :sphttp_recv_frame_len, [],              :int
+  # Per-byte frame accessor (returns 0..255, or -1 OOB). Used by the
+  # WebSocket frame codec instead of `sphttp_recv_frame_buf.bytes`:
+  # the :str accessor is NUL-terminated on the Ruby side, so a masked
+  # frame truncates at its first 0x00 (the 16-bit length high byte is
+  # 0x00 for any payload <= 255 bytes). See sphttp.c for the contract.
+  ffi_func :sphttp_recv_frame_byte, [:int],         :int
 
   ffi_func :sphttp_sendfile,      [:int, :str],     :int
   ffi_func :sphttp_filesize,      [:str],           :int
@@ -37,6 +43,13 @@ module Sock
   ffi_func :sphttp_exit,          [:int],           :int
   ffi_func :sphttp_getpid,        [],               :int
   ffi_func :sphttp_wait_any,      [],               :int
+
+  # SIGTERM/SIGINT shutdown plumbing, used by Tep::Server::Scheduled's
+  # accept loop. install_term_handlers arms the signal handlers (call
+  # once before fork); shutdown_requested returns nonzero once a
+  # TERM/INT has been delivered so the accept loop can break cleanly.
+  ffi_func :sphttp_install_term_handlers, [],       :int
+  ffi_func :sphttp_shutdown_requested,    [],       :int
   ffi_func :sphttp_write_chunk,   [:int, :str],     :int
   ffi_func :sphttp_write_chunk_end, [:int],         :int
 

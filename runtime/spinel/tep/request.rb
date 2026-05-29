@@ -2,7 +2,13 @@
 module Tep
   class Request
     attr_accessor :verb, :path, :raw_path, :http_version
-    attr_accessor :params, :query, :req_headers, :raw_body, :cookies
+    # `req_params` (not `params`): renamed to avoid sharing an ivar
+    # slot with the controller's `@params`. Roundhouse assigns the
+    # controller a nested poly hash (params["article"]["title"]); under
+    # spinel two classes sharing an ivar name unify its type, so a
+    # plain `@params` here would be widened to that poly hash and break
+    # this class's String->String reads. Same fix as req_headers.
+    attr_accessor :req_params, :query, :req_headers, :raw_body, :cookies
     attr_accessor :remote_host
     attr_accessor :ivars
 
@@ -11,7 +17,7 @@ module Tep
       @path         = ""
       @raw_path     = ""
       @http_version = "HTTP/1.0"
-      @params       = Tep.str_hash   # path captures + query + form merged
+      @req_params       = Tep.str_hash   # path captures + query + form merged
       @query        = Tep.str_hash   # raw query string only
       @req_headers  = Tep.str_hash   # downcased header names; renamed
                                      # from `headers` to avoid sharing
@@ -101,7 +107,7 @@ module Tep
     end
 
     # Pull any remaining body bytes from `client_fd` up to the
-    # advertised Content-Length, then merge form fields into @params.
+    # advertised Content-Length, then merge form fields into @req_params.
     # Called once per request by the server right after Parser.parse
     # populates the request headers + the body bytes already in the
     # recv buffer.
@@ -119,7 +125,35 @@ module Tep
       end
       if form?
         Url.parse_query(@raw_body).each do |k, v|
-          @params[k] = v
+          @req_params[k] = v
+        end
+      end
+      0
+    end
+
+    # Scheduler-friendly body drain, used by Tep::Server::Scheduled
+    # (whose client fd is non-blocking — a blocking recv would starve
+    # the whole worker). Loops on Sock.sphttp_recv_some +
+    # Tep::Scheduler.io_wait so other fibers keep running while we wait
+    # for body bytes; a 5s per-recv timeout drops a client that opened
+    # the request but never sent the body. Form parse mirrors
+    # consume_body (urlencoded only; multipart isn't vendored).
+    def consume_body_via_scheduler(client_fd)
+      cl = content_length
+      while @raw_body.length < cl
+        ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
+        if ready == 0
+          break   # timeout -- client never finished sending
+        end
+        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.length)
+        if chunk.length == 0
+          break   # peer closed mid-body
+        end
+        @raw_body = @raw_body + chunk
+      end
+      if form?
+        Url.parse_query(@raw_body).each do |k, v|
+          @req_params[k] = v
         end
       end
       0
