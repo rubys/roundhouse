@@ -246,13 +246,16 @@ html << <<~METHOD
   </div>
 METHOD
 
-if targets.include?('spinel')
-  html << <<~SPINEL_NOTE
-    <div class="methodology">
-      <strong>Spinel concurrency note.</strong> Spinel's <code>Tep::Server</code> is currently prefork-blocking — one connection at a time per worker, no user-space scheduler. At <code>workers=1</code> with <code>c=64</code>, 63 connections wait in the kernel accept queue while one is being serviced. Every other target in this table has some form of intra-process concurrency at <code>workers=1</code> (Rust/Crystal/Go via async runtimes or fibers, TypeScript via Node's event loop, Rails via Puma's 5 threads-per-worker default). The spinel numbers below therefore represent a deliberately-conservative ceiling: throughput is bounded by the single in-flight connection's per-request CPU cost, and p99 latency is dominated by accept-queue wait for the other 63 connections. Phase 2b lifts this constraint via <code>Tep::Server::Scheduled</code> — see <a href="https://github.com/rubys/roundhouse/issues/3">#3</a>.
-    </div>
-  SPINEL_NOTE
-end
+# NOTE: the former "Spinel concurrency note" was removed 2026-05-29. It
+# described a prefork-blocking Tep::Server that no longer matches the
+# artifact (Tep::Server::Scheduled — fiber-per-connection — is now the
+# default, and a fiber-aware connection pool is wired). Rather than
+# publish a speculative replacement before there's data, write the
+# caveat against a real spinel run. When the spinel row lands, add a
+# note covering: concurrent numbers gated on spinel#1052 (GC UAF crashes
+# the fiber server under load) until fixed; and that on the RAM-cached
+# DB the pool's concurrency benefit is largely latent (CPU-bound) until
+# an I/O-bound working-set variant exists. See issue #3.
 
 # ── Section: throughput per endpoint ─────────────────────────────────
 
