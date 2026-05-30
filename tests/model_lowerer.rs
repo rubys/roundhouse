@@ -111,13 +111,14 @@ fn article_lowers_with_schema_methods() {
     }
 
     // Receiver checks: table_name, schema_columns, instantiate, from_row,
-    // and the per-model `_adapter_*` Level-3 primitives are class methods;
-    // everything else is instance.
+    // from_stmt, and the per-model `_adapter_*` Level-3 primitives are
+    // class methods; everything else is instance.
     let class_methods = [
         "table_name",
         "schema_columns",
         "instantiate",
         "from_row",
+        "from_stmt",
         "_adapter_find_by_id",
         "_adapter_all",
         "_adapter_count",

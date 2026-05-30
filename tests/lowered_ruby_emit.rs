@@ -147,9 +147,12 @@ fn article_renders_has_many_reader_and_dependent_destroy() {
         src.contains("Db.escape_int(@id)"),
         "expected runtime FK value to be escaped via Db.escape_int; got:\n{src}",
     );
+    // The per-row hydrate now delegates to the synthesized positional
+    // factory `Comment.from_stmt(stmt)` (the column reads live once in
+    // Comment's `from_stmt` body, not inlined at every query site).
     assert!(
-        src.contains("instance = Comment.new") && src.contains("Db.column_int(stmt, "),
-        "expected hydrate loop assigning into a fresh Comment; got:\n{src}",
+        src.contains("Comment.from_stmt(stmt)"),
+        "expected hydrate loop to call Comment.from_stmt(stmt); got:\n{src}",
     );
     assert!(
         src.contains("def before_destroy") && src.contains("comments.each"),
@@ -179,9 +182,11 @@ fn comment_renders_belongs_to_with_fk_guard() {
         src.contains("Db.escape_int(@article_id)"),
         "expected runtime FK value to be escaped via Db.escape_int; got:\n{src}",
     );
+    // Single-row hydrate delegates to the positional factory
+    // `Article.from_stmt(stmt)` (see synth_from_stmt).
     assert!(
-        src.contains("instance = Article.new"),
-        "expected hydrate to construct Article instance; got:\n{src}",
+        src.contains("Article.from_stmt(stmt)"),
+        "expected hydrate to call Article.from_stmt(stmt); got:\n{src}",
     );
 }
 
@@ -959,9 +964,11 @@ fn controllers_index_lowers_chain_to_inline_select_with_order_by() {
         src.contains("ORDER BY created_at DESC"),
         "expected SQL ORDER BY clause; got:\n{src}",
     );
+    // Per-row hydrate delegates to the positional factory
+    // `Article.from_stmt(stmt)` (see synth_from_stmt).
     assert!(
-        src.contains("instance = Article.new") && src.contains("Db.column_int(stmt, "),
-        "expected per-row hydrate loop into Article instances; got:\n{src}",
+        src.contains("Article.from_stmt(stmt)"),
+        "expected per-row hydrate loop to call Article.from_stmt(stmt); got:\n{src}",
     );
     // Surface forms that the legacy chain rewrites used to produce
     // — these must NOT survive Arel's lift.
