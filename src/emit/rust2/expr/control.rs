@@ -236,14 +236,22 @@ pub(super) fn emit_return(value: &Expr) -> String {
                 Some(t) if !super::util::is_option_ty(t) => true,
                 _ => false,
             };
+        // A `return X` always places X in return position, even when the
+        // `return` statement is physically nested in a non-tail spot
+        // (e.g. the guard `return @cache if @loaded` that sits as the
+        // first stmt of a Seq). Set the return-tail flag so value-emit's
+        // tail-aware coercions fire — notably the Ivar arm's `.clone()`
+        // for a non-Copy field read, which otherwise moves out of `&self`
+        // (E0507). Without this the eager-load guard `return
+        // self.comments_cache` failed to compile (issue #27).
         if needs_to_string {
-            format!("return {}.to_string()", emit_expr_tail(value))
+            format!("return {}.to_string()", super::with_return_tail(true, || emit_expr_tail(value)))
         } else if needs_self_clone {
             "return self.clone()".to_string()
         } else if needs_some_wrap {
-            format!("return Some({})", emit_expr_tail(value))
+            format!("return Some({})", super::with_return_tail(true, || emit_expr_tail(value)))
         } else {
-            format!("return {}", emit_expr_tail(value))
+            format!("return {}", super::with_return_tail(true, || emit_expr_tail(value)))
         }
     }
 }
