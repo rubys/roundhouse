@@ -13,16 +13,15 @@
 //! - Inheritance (`parent`) is ignored — the lowerer linearizes method
 //!   overrides onto each class (same as rust2).
 //!
-//! **Naked body contract.** `emit_library_class` emits the module BODY
-//! only — `def`s (and `defstruct`), NO `defmodule` wrapper. The
-//! enclosing `defmodule V2.<Name> do … end` is supplied by
-//! `runtime_loader::elixir_wrap_namespace`. This is what lets module-
-//! level constants (emitted by `format_constant` as `@attr` lines just
-//! ahead of the class body) sit INSIDE the module — Elixir module
-//! attributes don't cross module boundaries, so a nested `defmodule`
-//! wouldn't see them. The contract assumes one module per runtime file
-//! (true for every current `ELIXIR_RUNTIME` entry); a multi-class file
-//! would merge bodies and needs revisiting.
+//! Each class emits its OWN `defmodule V2.<DottedName> do … end`, named
+//! from its (fully-qualified) `ClassId` with the `V2.` overlay prefix —
+//! so a multi-class file (`action_dispatch/router.rb` →
+//! `V2.ActionDispatch.Router.Route` / `.MatchResult` / `.Router`) emits
+//! three sibling modules. Module-level constants don't appear in
+//! `emit_library_class` (they're parsed separately); they're injected
+//! INTO their owning module by `runtime_loader::elixir_wrap_namespace`,
+//! because Elixir module attributes don't cross module boundaries and
+//! Elixir has no file-level constants.
 
 use std::fmt::Write;
 
@@ -31,9 +30,17 @@ use crate::expr::Expr;
 
 use super::expr;
 
-/// Emit a `LibraryClass` as the BODY of an Elixir module (def/defstruct
-/// lines, indented one level for inside-`defmodule`; no wrapper).
+/// Emit a `LibraryClass` as a full Elixir `defmodule V2.<DottedName> do
+/// … end` (trailing newline included).
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    let v2_name = format!("V2.{}", class.name.0.as_str().replace("::", "."));
+    let body = emit_class_body(class)?;
+    Ok(format!("defmodule {v2_name} do\n{body}end\n"))
+}
+
+/// The body (def/defstruct lines, indented one level) that goes inside
+/// the `defmodule`.
+fn emit_class_body(class: &LibraryClass) -> Result<String, String> {
     let is_module_singleton = class.is_module
         && !class.methods.is_empty()
         && class

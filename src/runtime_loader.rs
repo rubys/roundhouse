@@ -1048,37 +1048,59 @@ fn elixir_format_constant(name: &str, value: &Expr) -> String {
     crate::emit::elixir2::format_constant(name, value)
 }
 
-/// Wrap a transpiled unit's body in its enclosing module. Each
-/// `ELIXIR_RUNTIME` entry passes its full target module name (with the
-/// `V2.` overlay prefix), e.g. `V2.JsonBuilder` — so the body's
-/// constants + `def`s land directly inside `defmodule V2.JsonBuilder`.
-/// The `V2.` prefix isolates the transpiled runtime from the legacy
-/// `Roundhouse.*` runtime and app modules (`Router`, `Post`, …).
-///
-/// Elixir module names are global + dotted, so no nesting is needed
-/// (and would in fact break: module attributes don't cross module
-/// boundaries — `emit_library_class` emits a NAKED body precisely so
-/// the constants stay in-module). An empty namespace is a no-op.
-fn elixir_wrap_namespace(namespace: &str, body: &str) -> String {
-    if namespace.is_empty() {
-        body.to_string()
-    } else {
-        format!("defmodule {namespace} do\n{body}end\n")
+/// Each class already emits its own `defmodule V2.<Name>` (see
+/// `emit_library_class`), so this hook's job for Elixir is just to
+/// place module-level constants INSIDE their module. `transpile_entry`
+/// emits constants (via `format_constant`) as lines ahead of the class
+/// bodies, but Elixir has no file-level constants and module attributes
+/// don't cross module boundaries — so move any leading constant lines
+/// into the first `defmodule`. (Current const-bearing files are single-
+/// module — `json_builder`, `action_controller/base`; a multi-module
+/// file with constants would need owner-aware routing, revisit then.)
+/// The `namespace` arg is unused: V2-prefixing + naming happen in
+/// `emit_library_class`.
+fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(first_mod) = lines.iter().position(|l| l.trim_start().starts_with("defmodule "))
+    else {
+        return body.to_string();
+    };
+    let consts: Vec<&str> = lines[..first_mod]
+        .iter()
+        .copied()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if consts.is_empty() {
+        return body.to_string();
     }
+    let mut out = String::new();
+    out.push_str(lines[first_mod]); // `defmodule V2.X do`
+    out.push('\n');
+    for c in &consts {
+        out.push_str(c);
+        out.push('\n');
+    }
+    for l in &lines[first_mod + 1..] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
 }
 
 /// Elixir runtime transpile table. Widened one file at a time as
 /// `elixir2`'s body walker grows, keeping the `lib/v2/` overlay
 /// compile-clean so the inventory signal is whether the CURRENT scope
-/// passes. `namespace` carries the full `V2.<Module>` target name (see
-/// `elixir_wrap_namespace`). Remaining files (router, active_record/
-/// base, action_controller/base, view_helpers) land in later phases.
+/// passes. Each class self-names as `V2.<Module>` in
+/// `emit_library_class`, so the `namespace` field is unused for Elixir
+/// (left empty). Remaining files (router, active_record/base,
+/// action_controller/base, view_helpers) land as the body walker grows
+/// to cover while-loop→recursion and instance mutation-threading.
 const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/inflector.rb"),
         rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
         rb_path: "runtime/ruby/inflector.rb",
-        namespace: "V2.Inflector",
+        namespace: "",
         out_path: "lib/v2/inflector.ex",
         mode: Mode::Library,
         imports: NO_IMPORTS,
@@ -1089,7 +1111,7 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         rb_src: include_str!("../runtime/ruby/json_builder.rb"),
         rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
         rb_path: "runtime/ruby/json_builder.rb",
-        namespace: "V2.JsonBuilder",
+        namespace: "",
         out_path: "lib/v2/json_builder.ex",
         mode: Mode::Library,
         imports: NO_IMPORTS,
