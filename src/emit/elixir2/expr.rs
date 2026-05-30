@@ -1,17 +1,487 @@
-//! IR method body → Elixir.
+//! IR method body / value → Elixir.
 //!
-//! Phase 1: every body is a stub (`raise "elixir2 stub"`). This is the
-//! per-variant widening point — Phase 2 grows a real `Expr`/`Stmt`
-//! walker here, one variant at a time, as `ELIXIR_RUNTIME` adds files.
-//! Lift idioms from the legacy `src/emit/elixir/expr.rs` and
-//! `model.rs` (ivar read → `record.field`, ivar write →
-//! `%{record | field: v}`, `self.foo = x` threading through returns).
+//! Phase 2 walker, grown to cover `json_builder.rb`. Elixir is
+//! expression-oriented and immutable, so two Ruby constructs need real
+//! transformation rather than 1:1 syntax mapping:
+//!
+//! - **`return` elimination.** Elixir has no `return`. A guard-clause
+//!   sequence (`return X if c1; return Y if c2; Z`) folds into nested
+//!   `if c1, do: X, else: (if c2 …)`. `emit_stmts` does this by putting
+//!   the rest of the block in the `else` branch of each guard.
+//! - **Conditional local reassignment.** A variable reassigned inside an
+//!   `if` body doesn't leak out in Elixir. `ms = "000"; if c do … ms = X
+//!   end` becomes `ms = if c do … X else ms end`.
+//!
+//! Everything else is per-construct mapping: `is_a?`/`nil?`/`to_s`/
+//! `length`/`gsub` Sends, `[]` slicing → `String.slice`, Regex/Range/
+//! Hash literals, string interpolation (syntax matches Ruby).
 
-use crate::dialect::MethodDef;
+use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal};
 
-/// Phase 1 stub body. Valid Elixir that compiles clean under
-/// `--warnings-as-errors` (no unused locals — params are `_`-prefixed
-/// by the caller in `library.rs`). Replaced per-variant in Phase 2.
-pub(super) fn emit_body(_m: &MethodDef) -> String {
-    "raise \"elixir2 stub\"".to_string()
+/// Emit a method body as Elixir (indent level 0; the caller indents).
+pub(super) fn emit_method_body(body: &Expr) -> String {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs),
+        _ => emit_tail(body),
+    }
+}
+
+/// Render an expression for use as a top-level module constant value
+/// (the `value` in `@name value`). `.freeze` is stripped (Elixir is
+/// immutable). Used by `library::format_constant`.
+pub(super) fn emit_const_value(value: &Expr) -> String {
+    emit_expr(value)
+}
+
+// ---- statement-list emit (return-elim + cond-rebind) ----------------
+
+fn emit_stmts(stmts: &[Expr]) -> String {
+    let Some((head, rest)) = stmts.split_first() else {
+        return "nil".to_string();
+    };
+    if rest.is_empty() {
+        return emit_tail(head);
+    }
+
+    // Guard clause: `return X if cond` → `if cond do X else <rest> end`.
+    if let ExprNode::If { cond, then_branch, else_branch } = &*head.node {
+        if is_empty(else_branch) && ends_in_return(then_branch) {
+            let cond_s = emit_expr(cond);
+            let then_s = emit_return_value(then_branch);
+            let else_s = emit_stmts(rest);
+            return format!(
+                "if {cond_s} do\n{}\nelse\n{}\nend",
+                indent(&then_s, 1),
+                indent(&else_s, 1),
+            );
+        }
+
+        // Conditional reassignment: `if cond do … v = X end` where the
+        // branch's last statement rebinds an already-bound `v`. Elixir
+        // scoping discards the inner binding, so lift it:
+        // `v = if cond do … X else v end`.
+        if is_empty(else_branch) {
+            if let Some(v) = reassigned_var(then_branch) {
+                let cond_s = emit_expr(cond);
+                let then_s = emit_block_with_value(then_branch);
+                let rebind = format!(
+                    "{v} = if {cond_s} do\n{}\nelse\n{}\nend",
+                    indent(&then_s, 1),
+                    indent(v, 1),
+                );
+                return format!("{rebind}\n{}", emit_stmts(rest));
+            }
+        }
+    }
+
+    format!("{}\n{}", emit_stmt(head), emit_stmts(rest))
+}
+
+/// A single non-terminal statement (a `let` binding or a bare expr).
+fn emit_stmt(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            // Elixir has no instance state; an `@ivar =` rebind at this
+            // depth is a plain local rebind (the real mutation-threading
+            // work lands in a later phase).
+            format!("{} = {}", name, emit_expr(value))
+        }
+        _ => emit_expr(e),
+    }
+}
+
+/// The trailing (value-producing) position of a block. A bare `return X`
+/// here is just `X`.
+fn emit_tail(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Return { value } => emit_expr(value),
+        ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs),
+        _ => emit_expr(e),
+    }
+}
+
+/// True when `e` is an empty/absent branch (modifier-`if` has no else).
+fn is_empty(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+        || matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+}
+
+/// True when the then-branch of a guard ends in a `return`.
+fn ends_in_return(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Return { .. } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(ends_in_return),
+        _ => false,
+    }
+}
+
+/// Emit the value a guard's `return` yields.
+fn emit_return_value(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Return { value } => emit_expr(value),
+        ExprNode::Seq { exprs } => {
+            // Lets before the return stay; the trailing return becomes
+            // the block's value.
+            emit_stmts(exprs)
+        }
+        _ => emit_expr(e),
+    }
+}
+
+/// If the block's last statement reassigns an (already-bound) local
+/// variable, return its name — the signal for the cond-rebind lift.
+fn reassigned_var(e: &Expr) -> Option<&str> {
+    let last = match &*e.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => e,
+    };
+    match &*last.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Emit a block whose trailing `v = X` is rewritten to yield `X`
+/// (used inside a cond-rebind `if`). Leading lets are preserved.
+fn emit_block_with_value(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let (last, leading) = exprs.split_last().unwrap();
+            let mut lines: Vec<String> = leading.iter().map(emit_stmt).collect();
+            match &*last.node {
+                ExprNode::Assign { value, .. } => lines.push(emit_expr(value)),
+                _ => lines.push(emit_stmt(last)),
+            }
+            lines.join("\n")
+        }
+        ExprNode::Assign { value, .. } => emit_expr(value),
+        _ => emit_tail(e),
+    }
+}
+
+// ---- expression emit ------------------------------------------------
+
+pub(super) fn emit_expr(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Lit { value } => emit_literal(value),
+        ExprNode::Const { path } => emit_const(path),
+        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Ivar { name } => name.to_string(),
+        ExprNode::Send { recv, method, args, .. } => {
+            emit_send(recv.as_ref(), method.as_str(), args)
+        }
+        ExprNode::Return { value } => emit_expr(value),
+        ExprNode::Assign { target: _, value } => emit_expr(value),
+        ExprNode::Seq { exprs } => emit_stmts(exprs),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let cond_s = emit_expr(cond);
+            let then_s = emit_tail(then_branch);
+            let else_s = if is_empty(else_branch) {
+                "nil".to_string()
+            } else {
+                emit_tail(else_branch)
+            };
+            format!(
+                "if {cond_s} do\n{}\nelse\n{}\nend",
+                indent(&then_s, 1),
+                indent(&else_s, 1),
+            )
+        }
+        ExprNode::BoolOp { op, left, right, .. } => {
+            let op_s = match op {
+                BoolOpKind::Or => "or",
+                BoolOpKind::And => "and",
+            };
+            format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+        }
+        ExprNode::Array { elements, .. } => {
+            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        ExprNode::Hash { entries, .. } => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+                        format!("{value}: {}", emit_expr(v))
+                    } else {
+                        format!("{} => {}", emit_expr(k), emit_expr(v))
+                    }
+                })
+                .collect();
+            format!("%{{{}}}", parts.join(", "))
+        }
+        ExprNode::Range { begin, end, exclusive } => {
+            let b = begin.as_ref().map(emit_expr).unwrap_or_default();
+            let e = end.as_ref().map(emit_expr).unwrap_or_default();
+            // Elixir ranges are inclusive `b..e`; exclusive Ruby `b...e`
+            // → `b..(e - 1)//1` is awkward, so use `Range` only for the
+            // inclusive/endless forms json_builder needs (`20..`).
+            if *exclusive {
+                format!("{b}..{e}//1")
+            } else {
+                format!("{b}..{e}")
+            }
+        }
+        ExprNode::StringInterp { parts } => emit_string_interp(parts),
+        ExprNode::Cast { value, .. } => emit_expr(value),
+        other => format!("raise \"elixir2: unhandled {:?}\"", std::mem::discriminant(other)),
+    }
+}
+
+fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // A `self.foo(...)` call inside a module is just a same-module
+    // bareword call in Elixir — collapse the receiver.
+    let recv = match recv {
+        Some(r) if matches!(&*r.node, ExprNode::SelfRef) => None,
+        other => other,
+    };
+
+    // `.freeze` — Elixir is immutable; the receiver is the value.
+    if method == "freeze" && args.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(r);
+        }
+    }
+
+    // `recv.nil?` → `is_nil(recv)`.
+    if method == "nil?" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("is_nil({})", emit_expr(r));
+        }
+    }
+
+    // `recv.is_a?(Class)` → Elixir type guard / equality.
+    if method == "is_a?" && args.len() == 1 {
+        if let (Some(r), ExprNode::Const { path }) = (recv, &*args[0].node) {
+            if let Some(class) = path.last() {
+                let r_s = emit_expr(r);
+                let mapped = match class.as_str() {
+                    "TrueClass" => Some(format!("{r_s} == true")),
+                    "FalseClass" => Some(format!("{r_s} == false")),
+                    "NilClass" => Some(format!("is_nil({r_s})")),
+                    "Integer" => Some(format!("is_integer({r_s})")),
+                    "Float" => Some(format!("is_float({r_s})")),
+                    "Numeric" => Some(format!("is_number({r_s})")),
+                    "String" => Some(format!("is_binary({r_s})")),
+                    "Array" => Some(format!("is_list({r_s})")),
+                    "Hash" => Some(format!("is_map({r_s})")),
+                    _ => None,
+                };
+                if let Some(s) = mapped {
+                    return s;
+                }
+            }
+        }
+    }
+
+    // `s.gsub(regex, hash)` → `Regex.replace(regex, s, fn m -> Map.get(hash, m) end)`.
+    // `s.gsub(needle, repl)` (string args) → `String.replace(s, needle, repl)`.
+    if method == "gsub" && args.len() == 2 {
+        if let Some(r) = recv {
+            let r_s = emit_expr(r);
+            let a0 = emit_expr(&args[0]);
+            let a1 = emit_expr(&args[1]);
+            let hash_repl = matches!(
+                &*args[1].node,
+                ExprNode::Hash { .. } | ExprNode::Const { .. }
+            );
+            if hash_repl {
+                return format!(
+                    "Regex.replace({a0}, {r_s}, fn m -> Map.get({a1}, m, \"\") end)"
+                );
+            }
+            return format!("String.replace({r_s}, {a0}, {a1})");
+        }
+    }
+
+    // `recv.to_s` → `to_string(recv)`.
+    if method == "to_s" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("to_string({})", emit_expr(r));
+        }
+    }
+
+    // `recv.length` / `recv.size` → `String.length(recv)` (json_builder
+    // receivers are all strings; widen when array receivers appear).
+    if (method == "length" || method == "size") && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("String.length({})", emit_expr(r));
+        }
+    }
+
+    // `recv[...]` indexing.
+    if method == "[]" && recv.is_some() {
+        let r_s = emit_expr(recv.unwrap());
+        // Two-arg `recv[start, len]` → string slice.
+        if args.len() == 2 {
+            return format!("String.slice({r_s}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1]));
+        }
+        if args.len() == 1 {
+            // Range index → string slice. Elixir has no endless-range
+            // literal (`20..` is a syntax error), so an open end uses
+            // the `start, length` form; bounded ranges slice directly.
+            if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                let b = begin.as_ref().map(emit_expr).unwrap_or_else(|| "0".into());
+                return match end {
+                    None => format!("String.slice({r_s}, {b}, String.length({r_s}))"),
+                    Some(e) if *exclusive => {
+                        format!("String.slice({r_s}, {b}..({} - 1)//1)", emit_expr(e))
+                    }
+                    Some(e) => format!("String.slice({r_s}, {b}..{})", emit_expr(e)),
+                };
+            }
+            // Otherwise a map/keyword access: `map[key]`.
+            return format!("{r_s}[{}]", emit_expr(&args[0]));
+        }
+        return format!("{r_s}[{}]", emit_args(args));
+    }
+
+    // Binary operators ride the Send channel; Elixir's surface matches.
+    if let (Some(r), [arg]) = (recv, args) {
+        if is_infix(method) {
+            return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
+        }
+    }
+
+    // Default call forms.
+    match recv {
+        None => {
+            // Bareword — a function in the enclosing module (e.g.
+            // `encode_string(v)`).
+            if args.is_empty() {
+                method.to_string()
+            } else {
+                format!("{}({})", method, emit_args(args))
+            }
+        }
+        Some(r) => {
+            let r_s = emit_expr(r);
+            if args.is_empty() {
+                format!("{r_s}.{method}")
+            } else {
+                format!("{r_s}.{method}({})", emit_args(args))
+            }
+        }
+    }
+}
+
+fn emit_args(args: &[Expr]) -> String {
+    args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+}
+
+/// Ruby infix operators whose Elixir spelling is identical.
+fn is_infix(method: &str) -> bool {
+    matches!(
+        method,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*"
+    )
+}
+
+fn emit_const(path: &[crate::ident::Symbol]) -> String {
+    // SCREAMING_SNAKE single-segment name → module attribute (`ESCAPES`
+    // → `@escapes`). CamelCase → a module reference (dotted).
+    if path.len() == 1 {
+        let name = path[0].as_str();
+        if is_screaming_snake(name) {
+            return format!("@{}", name.to_lowercase());
+        }
+    }
+    path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
+}
+
+fn emit_string_interp(parts: &[InterpPart]) -> String {
+    let mut out = String::from("\"");
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => push_escaped(&mut out, value),
+            InterpPart::Expr { expr } => {
+                out.push_str("#{");
+                out.push_str(&emit_expr(expr));
+                out.push('}');
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Escape a string for an Elixir double-quoted literal body. Handles
+/// the quote/backslash/`#` (interpolation) cases plus the control
+/// characters json_builder's `ESCAPES` keys carry as raw bytes
+/// (backspace `\b` 0x08, form feed `\f` 0x0c, …). Other control chars
+/// fall back to `\xHH`.
+fn push_escaped(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02X}", c as u32)),
+            other => out.push(other),
+        }
+    }
+}
+
+pub(super) fn emit_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Nil => "nil".to_string(),
+        Literal::Bool { value } => value.to_string(),
+        Literal::Int { value } => value.to_string(),
+        Literal::Float { value } => format!("{value:?}"),
+        Literal::Str { value } => emit_str_literal(value),
+        Literal::Sym { value } => format!(":{value}"),
+        Literal::Regex { pattern, flags } => emit_regex(pattern, flags),
+    }
+}
+
+fn emit_str_literal(value: &str) -> String {
+    let mut out = String::from("\"");
+    push_escaped(&mut out, value);
+    out.push('"');
+    out
+}
+
+/// Ruby `/pat/flags` → Elixir `~r/pat/flags`. `pattern` is the regex
+/// source text (backslash escapes preserved). Ruby's `m` flag (dotall)
+/// maps to Elixir's `s`; `i`/`x` carry over.
+fn emit_regex(pattern: &str, flags: &str) -> String {
+    let escaped = pattern.replace('/', "\\/");
+    let ex_flags: String = flags
+        .chars()
+        .filter_map(|f| match f {
+            'i' => Some('i'),
+            'm' => Some('s'),
+            'x' => Some('x'),
+            _ => None,
+        })
+        .collect();
+    format!("~r/{escaped}/{ex_flags}")
+}
+
+fn is_screaming_snake(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && s.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// Indent every non-empty line by `levels * 2` spaces.
+pub(super) fn indent(s: &str, levels: usize) -> String {
+    let pad = "  ".repeat(levels);
+    s.lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

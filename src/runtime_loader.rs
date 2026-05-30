@@ -1040,20 +1040,25 @@ fn elixir_format_import(name: &str, _source: &str) -> String {
     format!("alias {name}\n")
 }
 
-/// Module attribute. Phase 1's runtime slice (`inflector.rb`) has no
-/// module-level constants, so this is never exercised; the real value
-/// renderer lands with the Phase 2 expr walker. Emit a valid, inert
-/// placeholder so an accidental call can't break `mix compile`.
-fn elixir_format_constant(name: &str, _value: &Expr) -> String {
-    format!("@{} nil", crate::naming::snake_case(name))
+/// Module-level constant → Elixir module attribute (delegated to
+/// `elixir2`, which renders the value and strips `.freeze`). Emitted
+/// just ahead of the class body so it sits INSIDE the module the
+/// namespace wrapper supplies.
+fn elixir_format_constant(name: &str, value: &Expr) -> String {
+    crate::emit::elixir2::format_constant(name, value)
 }
 
-/// Wrap a transpiled unit's body in its enclosing module. Phase 1
-/// passes `namespace: "V2"` for every entry so the overlay lives under
-/// a dedicated `V2.*` namespace — `defmodule V2 do …(defmodule
-/// Inflector …)… end` yields `V2.Inflector`, isolating the transpiled
-/// runtime from the legacy `Roundhouse.*` runtime and app modules
-/// (`Router`, `Post`, …). An empty namespace is a no-op.
+/// Wrap a transpiled unit's body in its enclosing module. Each
+/// `ELIXIR_RUNTIME` entry passes its full target module name (with the
+/// `V2.` overlay prefix), e.g. `V2.JsonBuilder` — so the body's
+/// constants + `def`s land directly inside `defmodule V2.JsonBuilder`.
+/// The `V2.` prefix isolates the transpiled runtime from the legacy
+/// `Roundhouse.*` runtime and app modules (`Router`, `Post`, …).
+///
+/// Elixir module names are global + dotted, so no nesting is needed
+/// (and would in fact break: module attributes don't cross module
+/// boundaries — `emit_library_class` emits a NAKED body precisely so
+/// the constants stay in-module). An empty namespace is a no-op.
 fn elixir_wrap_namespace(namespace: &str, body: &str) -> String {
     if namespace.is_empty() {
         body.to_string()
@@ -1062,23 +1067,36 @@ fn elixir_wrap_namespace(namespace: &str, body: &str) -> String {
     }
 }
 
-/// Elixir runtime transpile table. Phase 1: the narrowest slice
-/// (`inflector.rb` — one method, no cross-class deps), so the
-/// `lib/v2/` overlay stays compile-clean and the inventory signal is
-/// whether the CURRENT scope passes. Additional entries (json_builder,
-/// router, active_record/base, …) land one at a time as `elixir2`'s
-/// per-variant body walker grows.
-const ELIXIR_RUNTIME: &[RuntimeEntry] = &[RuntimeEntry {
-    rb_src: include_str!("../runtime/ruby/inflector.rb"),
-    rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-    rb_path: "runtime/ruby/inflector.rb",
-    namespace: "V2",
-    out_path: "lib/v2/inflector.ex",
-    mode: Mode::Library,
-    imports: NO_IMPORTS,
-    prelude: NO_PRELUDE,
-    extra_roots: NO_EXTRA_ROOTS,
-}];
+/// Elixir runtime transpile table. Widened one file at a time as
+/// `elixir2`'s body walker grows, keeping the `lib/v2/` overlay
+/// compile-clean so the inventory signal is whether the CURRENT scope
+/// passes. `namespace` carries the full `V2.<Module>` target name (see
+/// `elixir_wrap_namespace`). Remaining files (router, active_record/
+/// base, action_controller/base, view_helpers) land in later phases.
+const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "V2.Inflector",
+        out_path: "lib/v2/inflector.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "V2.JsonBuilder",
+        out_path: "lib/v2/json_builder.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape
 /// is stubbed (see `src/emit/elixir2/library.rs`).

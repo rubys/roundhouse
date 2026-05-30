@@ -42,7 +42,7 @@ use paths::{output_path, OutputKind};
 
 // Re-export the library emit functions consumed by
 // `runtime_loader::ELIXIR_TARGET`.
-pub use library::{emit_library_class, emit_module};
+pub use library::{emit_library_class, emit_module, format_constant};
 
 /// Append the elixir2 transpiled-runtime overlay to `files`.
 pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
