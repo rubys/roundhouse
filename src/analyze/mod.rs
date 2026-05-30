@@ -2254,6 +2254,14 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             DiagnosticKind::GradualUntyped { expr_kind } => {
                 format!("{} resolves to RBS `untyped` (gradual escape)", expr_kind.as_str())
             }
+            DiagnosticKind::Unsupported { target, construct, detail } => {
+                let mut m = Diagnostic::unsupported_text(target.as_ref(), construct);
+                if !detail.is_empty() {
+                    m.push_str(": ");
+                    m.push_str(detail);
+                }
+                m
+            }
         };
         out.push(Diagnostic {
             span: expr.span,

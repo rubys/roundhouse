@@ -55,6 +55,7 @@ impl Diagnostic {
             DiagnosticKind::SendDispatchFailed { .. } => "send_dispatch_failed",
             DiagnosticKind::IncompatibleBinop { .. } => "incompatible_binop",
             DiagnosticKind::GradualUntyped { .. } => "gradual_untyped",
+            DiagnosticKind::Unsupported { .. } => "unsupported",
         }
     }
 
@@ -67,6 +68,49 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
             _ => Severity::Error,
         }
+    }
+
+    /// Construct an `Unsupported` diagnostic for a tool-coverage gap.
+    /// The span is synthetic (real spans are a separate, stubbed gap);
+    /// severity is the kind default (`Error`); the message is the
+    /// canonical [`Self::unsupported_text`] plus any `detail`.
+    ///
+    /// `target` is `None` for target-agnostic gaps (e.g. a shared
+    /// lowerer). `construct` and `detail` accept anything `Into<…>` so
+    /// call sites can pass `&str`/`String`/`Symbol` without ceremony.
+    pub fn unsupported(
+        target: Option<Symbol>,
+        construct: impl Into<Symbol>,
+        detail: impl Into<String>,
+    ) -> Self {
+        let construct = construct.into();
+        let detail = detail.into();
+        let mut message = Self::unsupported_text(target.as_ref(), &construct);
+        if !detail.is_empty() {
+            message.push_str(": ");
+            message.push_str(&detail);
+        }
+        let kind = DiagnosticKind::Unsupported { target, construct, detail };
+        Diagnostic {
+            span: Span::synthetic(),
+            severity: Self::default_severity(&kind),
+            kind,
+            message,
+        }
+    }
+
+    /// Canonical human text for an unsupported construct, shared between
+    /// the diagnostic `message` and the `raise`/`panic` stub an emitter
+    /// drops at the site — so the collected report and the compiled
+    /// program name the gap identically. Renders `"<construct> not
+    /// supported (<target>)"`, or `"… (all targets)"` when target-
+    /// agnostic.
+    pub fn unsupported_text(target: Option<&Symbol>, construct: &Symbol) -> String {
+        let where_ = match target {
+            Some(t) => t.as_str(),
+            None => "all targets",
+        };
+        format!("{construct} not supported ({where_})")
     }
 }
 
@@ -140,6 +184,40 @@ mod tests {
             "error[incompatible_binop]: `+` with incompatible operand types: Int + Str"
         );
     }
+
+    #[test]
+    fn unsupported_constructor_targeted_with_detail() {
+        let d = Diagnostic::unsupported(
+            Some(Symbol::from("go")),
+            "While",
+            "loop body has non-tail statement",
+        );
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.code(), "unsupported");
+        assert_eq!(
+            d.to_string(),
+            "error[unsupported]: While not supported (go): loop body has non-tail statement"
+        );
+    }
+
+    #[test]
+    fn unsupported_constructor_target_agnostic_no_detail() {
+        let d = Diagnostic::unsupported(None, "ColumnSpec::Named", "");
+        assert_eq!(
+            d.to_string(),
+            "error[unsupported]: ColumnSpec::Named not supported (all targets)"
+        );
+    }
+
+    #[test]
+    fn unsupported_text_is_shared_canonical_form() {
+        let construct = Symbol::from("While");
+        let target = Symbol::from("rust");
+        assert_eq!(
+            Diagnostic::unsupported_text(Some(&target), &construct),
+            "While not supported (rust)"
+        );
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,4 +254,22 @@ pub enum DiagnosticKind {
     /// variant can name "method receiver", "argument", "return",
     /// etc., for downstream rendering.
     GradualUntyped { expr_kind: Symbol },
+    /// Valid Ruby the tool can't compile *yet* — a coverage gap in a
+    /// lowerer or emitter, distinct from `IncompatibleBinop` (where the
+    /// *source* is wrong and Ruby itself would raise). Default severity
+    /// is `Error` (the output isn't a faithful compile), but it is
+    /// **collected, not fatal**: the producing site emits a `raise`
+    /// stub at that one location and lets the rest of the app
+    /// transpile, so a single run yields the whole inventory of gaps.
+    ///
+    /// `target` names the backend that couldn't emit the construct
+    /// (`None` when the gap is target-agnostic, e.g. produced by a
+    /// shared lowerer). `construct` is a stable, grep-able identifier
+    /// for what wasn't handled (an IR node kind, a method name). `detail`
+    /// carries free-form context (the offending class, an inner error).
+    Unsupported {
+        target: Option<Symbol>,
+        construct: Symbol,
+        detail: String,
+    },
 }

@@ -4,6 +4,7 @@
 //! Emitters are pure: no I/O, no filesystem — the caller decides where to write.
 
 pub mod crystal;
+pub mod diagnostics;
 pub mod elixir;
 pub mod elixir2;
 pub mod go;
