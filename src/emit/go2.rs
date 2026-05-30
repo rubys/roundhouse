@@ -294,11 +294,13 @@ func main() {\n\
         // variadicity — see library::emit_default_embedded_constructor.
         let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.into_iter().collect();
-        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
+        let assocs = crate::lower::model_associations::compute_association_graph(app);
+        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_views_and_assocs(
             &app.controllers,
             model_extras.clone(),
             Some(&app.schema),
             &app.views,
+            &assocs,
         );
         // Pass the lowered models as the callee-registry extras so
         // cross-class calls like `Post.find(params[:id])` in a

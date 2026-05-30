@@ -65,27 +65,41 @@ fn synth_has_many_reader(
     // Cache-aware body (issue #27):
     //   def comments
     //     return @comments_cache if @comments_loaded   # eager-loaded
-    //     Comment.where(article_id: @id)               # lazy fallback
+    //     @comments_cache = Comment.where(article_id: @id)  # lazy + memoize
+    //     @comments_loaded = true
+    //     @comments_cache
     //   end
     // The lazy fallback MUST stay — paths like `render @article.comments`
     // (show.html.erb) reach the reader with no `includes` upstream, so
-    // `@comments_loaded` is unset (nil/false) and the query runs. When
-    // a controller's `includes(:comments)` preload ran, the setter
-    // `_preload_comments` flipped the flag and the cache short-circuits.
-    let body = Expr::new(
+    // `@comments_loaded` is unset (false) and the query runs. When a
+    // controller's `includes(:comments)` preload ran, the setter
+    // `_preload_comments` flipped the flag and the guard short-circuits.
+    //
+    // Pure-read guard form (no memoize):
+    //   return @comments_cache if @comments_loaded
+    //   Comment.where(article_id: @id)
+    // Crucially the reader does NOT write any ivar, so it stays a read-
+    // only method — Rust emits `&self` and the read-only callers (views
+    // iterating `@articles` and calling `article.comments()`) borrow
+    // immutably. A memoizing variant (`@cache = …` in the reader) would
+    // force `&mut self` and break every immutable caller. The guard's
+    // early `return @cache` matches the belongs_to reader shape, which
+    // every target already compiles; the lazy query stays at statement
+    // level so TS doesn't ternary-ize a multi-statement branch.
+    let guard = Expr::new(
         Span::synthetic(),
         ExprNode::If {
-            cond: Expr::new(
-                Span::synthetic(),
-                ExprNode::Ivar { name: loaded_ivar(name) },
-            ),
+            cond: Expr::new(Span::synthetic(), ExprNode::Ivar { name: loaded_ivar(name) }),
             then_branch: Expr::new(
                 Span::synthetic(),
-                ExprNode::Ivar { name: cache_ivar(name) },
+                ExprNode::Return {
+                    value: Expr::new(Span::synthetic(), ExprNode::Ivar { name: cache_ivar(name) }),
+                },
             ),
-            else_branch: lazy_query,
+            else_branch: nil_lit(),
         },
     );
+    let body = seq(vec![guard, lazy_query]);
 
     // has_many reader — body computes (`Comment.where(...)`), so it
     // must remain a Method even though Ruby's `article.comments` reads
@@ -119,6 +133,11 @@ fn cache_ivar(name: &Symbol) -> Symbol {
 fn loaded_ivar(name: &Symbol) -> Symbol {
     Symbol::from(format!("{}_loaded", name.as_str()))
 }
+fn lit_bool(value: bool) -> Expr {
+    let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value } });
+    e.ty = Some(Ty::Bool);
+    e
+}
 
 /// `def _preload_comments(list); @comments_cache = list;
 /// @comments_loaded = true; end` — the controller's eager-load
@@ -142,14 +161,7 @@ fn synth_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> Met
             Span::synthetic(),
             ExprNode::Assign {
                 target: LValue::Ivar { name: loaded_ivar(name) },
-                value: {
-                    let mut e = Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Lit { value: Literal::Bool { value: true } },
-                    );
-                    e.ty = Some(Ty::Bool);
-                    e
-                },
+                value: lit_bool(true),
             },
         ),
     ]);

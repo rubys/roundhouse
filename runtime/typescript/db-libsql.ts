@@ -133,6 +133,12 @@ function escape_int(n: unknown): string {
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 
+function escape_int_list(ids: unknown[]): string {
+  // `IN (...)` eager-load batches (issue #27); empty → "NULL".
+  if (ids.length === 0) return "NULL";
+  return ids.map((n) => escape_int(n)).join(", ");
+}
+
 function escape_bool(b: unknown): string {
   return b ? "1" : "0";
 }
@@ -166,6 +172,7 @@ export const Db = {
   changes,
   escape_string,
   escape_int,
+  escape_int_list,
   escape_bool,
 };
 

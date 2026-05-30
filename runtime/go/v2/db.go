@@ -348,3 +348,17 @@ func Db_escape_string(s string) string {
 func Db_escape_int(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
+
+// Db_escape_int_list renders an integer list for `IN (...)` eager-load
+// batches (issue #27). An empty list yields "NULL" so `IN (NULL)` is
+// valid SQL matching no rows — an empty `IN ()` is a syntax error.
+func Db_escape_int_list(ids []int64) string {
+	if len(ids) == 0 {
+		return "NULL"
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return strings.Join(parts, ", ")
+}

@@ -292,11 +292,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     controller_extras.extend(route_helper_extras);
-    let controller_lcs = crate::lower::lower_controllers_with_arel_and_views(
+    let assocs = crate::lower::model_associations::compute_association_graph(app);
+    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
         controller_extras,
         Some(&app.schema),
         &app.views,
+        &assocs,
     );
     let controller_synth: Vec<(String, String)> = controller_lcs
         .iter()

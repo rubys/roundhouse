@@ -1,7 +1,7 @@
 //! Schema-driven methods: attr accessors, table_name, schema_columns,
 //! instantiate, initialize, attributes, [], []=, update.
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, Param};
+use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -111,7 +111,7 @@ pub(super) fn push_schema_methods(
     methods.push(synth_assign_from_row(owner, table));
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table));
+    methods.push(synth_initialize(owner, table, model));
 
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table));
@@ -492,7 +492,7 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
-fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
     let mut stmts: Vec<Expr> = Vec::new();
@@ -552,6 +552,47 @@ fn synth_initialize(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: false,
             },
         ));
+    }
+
+    // has_many eager-load cache fields (issue #27): initialize each
+    // `@<assoc>_cache = [] of <Target>` + `@<assoc>_loaded = false` so
+    // the cache-aware reader's `@cache` reads/returns are non-nilable in
+    // strict targets (Crystal types an ivar nilable unless it's assigned
+    // in every initialize path). Harmless on dynamic targets. Mirrors the
+    // ivar names in `associations::cache_ivar` / `loaded_ivar`.
+    for assoc in model.associations() {
+        if let Association::HasMany { name, target, .. } = assoc {
+            let elem = Ty::Class { id: target.clone(), args: vec![] };
+            let empty = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+                ),
+                Ty::Array { elem: Box::new(elem) },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+                    value: empty,
+                },
+            ));
+            let false_lit = {
+                let mut e = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Bool { value: false } },
+                );
+                e.ty = Some(Ty::Bool);
+                e
+            };
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+                    value: false_lit,
+                },
+            ));
+        }
     }
 
     // Spinel-blog's `def initialize(attrs = {})` — empty hash default

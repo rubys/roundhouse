@@ -238,7 +238,15 @@ fn push_preload_stmts(
     // Db.finalize(pstmt)
     out.push(db_call(&db, "finalize", vec![var_ref(&pstmt)]));
 
-    // parent_results.each { |a| a._preload_<assoc>(loaded.select { |r| r.<fk> == a.id }) }
+    // Distribute, grouping by FK with a portable nested loop rather than
+    // `loaded.select { … }` — Ruby's `Array#select` has no universal
+    // emitter mapping (Go has no `.Select`):
+    //   parent_results.each do |a|
+    //     group = []                       # Array<Target>
+    //     loaded.each { |r| group << r if r.<fk> == a.id }
+    //     a._preload_<assoc>(group)
+    //   end
+    let group = Symbol::from(format!("__{}_group", assoc));
     let match_pred = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -254,11 +262,29 @@ fn push_preload_stmts(
             parenthesized: false,
         },
     );
-    let select_call = send_block(var_ref(&loaded), "select", block1("r", match_pred));
+    let push_if = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: match_pred,
+            then_branch: send_to(var_ref(&group), "<<", vec![var_ref(&Symbol::from("r"))], false),
+            else_branch: nil_lit(),
+        },
+    );
+    let group_init = crate::lower::typing::with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
+        ),
+        Ty::Array { elem: Box::new(Ty::Class { id: directive.target_class.clone(), args: vec![] }) },
+    );
     let setter = format!("_preload_{}", assoc);
     let each_block = block1(
         "a",
-        send_to(var_ref(&Symbol::from("a")), &setter, vec![select_call], true),
+        seq(vec![
+            assign_var(&group, group_init),
+            send_block(var_ref(&loaded), "each", block1("r", push_if)),
+            send_to(var_ref(&Symbol::from("a")), &setter, vec![var_ref(&group)], true),
+        ]),
     );
     out.push(send_block(var_ref(parent_results), "each", each_block));
 }

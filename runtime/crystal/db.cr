@@ -203,6 +203,16 @@ module Roundhouse
       n.to_s
     end
 
+    # Render an integer list for `IN (...)` eager-load batches (issue
+    # #27). An empty list yields "NULL" so `IN (NULL)` is valid SQL
+    # matching no rows — an empty `IN ()` is a syntax error. Generic over
+    # the element type so it accepts Array(Int32)/Array(Int64) alike.
+    def self.escape_int_list(ids : Array(T)) : String forall T
+      return "NULL" if ids.empty?
+
+      ids.map(&.to_s).join(", ")
+    end
+
     # SQLite stores booleans as 0/1 integers (no native bool type) —
     # mirrors the Ruby/spinel sibling shims.
     def self.escape_bool(b : Bool) : String

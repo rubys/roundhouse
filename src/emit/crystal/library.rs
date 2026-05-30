@@ -607,6 +607,15 @@ fn default_value_for_crystal_ty(ty_s: &str) -> Option<String> {
         "Float32" => Some("0.0_f32".to_string()),
         "Float64" => Some("0.0".to_string()),
         "Bool" => Some("false".to_string()),
+        // `Array(T)` → `[] of T` (e.g. the has_many eager-load cache
+        // field `@comments_cache : Array(Comment) = [] of Comment`,
+        // issue #27). The empty-array default lets the parent's
+        // inherited `initialize` path see the ivar pre-set, satisfying
+        // Crystal's all-paths-initialized check.
+        _ if ty_s.starts_with("Array(") && ty_s.ends_with(')') => {
+            let elem = &ty_s["Array(".len()..ty_s.len() - 1];
+            Some(format!("[] of {elem}"))
+        }
         _ => None,
     }
 }

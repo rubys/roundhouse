@@ -162,6 +162,14 @@ function escapeInt(n: unknown): string {
   return Number.isFinite(parsed) ? String(Math.trunc(parsed)) : "0";
 }
 
+function escapeIntList(ids: unknown[]): string {
+  // Render an integer list for `IN (...)` eager-load batches (issue
+  // #27). Empty list → "NULL" so `IN (NULL)` is valid SQL matching no
+  // rows (an empty `IN ()` is a syntax error).
+  if (ids.length === 0) return "NULL";
+  return ids.map((n) => escapeInt(n)).join(", ");
+}
+
 function escapeBool(b: unknown): string {
   // SQLite stores booleans as 0/1 integers — mirror the Ruby/Crystal
   // sibling shims. Truthiness check accepts Ruby's `truthy` interp.
@@ -192,6 +200,7 @@ export const Db = {
   changes,
   escape_string: escapeString,
   escape_int: escapeInt,
+  escape_int_list: escapeIntList,
   escape_bool: escapeBool,
 };
 

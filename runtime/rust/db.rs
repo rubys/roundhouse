@@ -321,6 +321,16 @@ impl Db {
         n.to_string()
     }
 
+    /// Render an integer list for `IN (...)` eager-load batches (issue
+    /// #27). An empty list yields "NULL" so `IN (NULL)` is valid SQL
+    /// matching no rows — an empty `IN ()` is a syntax error.
+    pub fn escape_int_list(ids: Vec<i64>) -> String {
+        if ids.is_empty() {
+            return "NULL".to_string();
+        }
+        ids.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+    }
+
     /// SQLite stores booleans as 0/1 integers.
     pub fn escape_bool(b: bool) -> String {
         (if b { "1" } else { "0" }).to_string()
