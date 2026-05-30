@@ -1008,3 +1008,88 @@ where
     }
     Ok(out)
 }
+
+// -------- Elixir target (Phase 1: scaffolded, stubs only) --------
+//
+// Mirrors the Go/Rust target wiring above. The `ELIXIR_TARGET`
+// callbacks dispatch into `src/emit/elixir2/library.rs`, which emits
+// syntactically-valid Elixir for every method shape but stubs bodies
+// with `raise "elixir2 stub"`. The point of Phase 1 is end-to-end
+// emit, not correct semantics — `mix compile --warnings-as-errors`
+// over the `lib/v2/` overlay surfaces a real error inventory for
+// subsequent sessions. See `src/emit/elixir2.rs` for the overlay
+// strategy.
+
+const ELIXIR_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::elixir2::emit_module,
+    emit_library_class: crate::emit::elixir2::emit_library_class,
+    format_import: elixir_format_import,
+    format_constant: elixir_format_constant,
+    // Elixir has no module-level mutable state (modules are static).
+    // `ActionView::ViewHelpers`'s `@slots` and friends defer to a
+    // hand-written process/Agent-based holder in a later phase, the
+    // same way TS/Crystal/Rust opt out here.
+    format_module_ivar: None,
+    wrap_namespace: elixir_wrap_namespace,
+};
+
+/// Elixir `alias`. `name` is the module; the source path is implicit
+/// (Mix compiles the project together). Informational for Phase 1 —
+/// the `ELIXIR_RUNTIME` slice declares no imports yet.
+fn elixir_format_import(name: &str, _source: &str) -> String {
+    format!("alias {name}\n")
+}
+
+/// Module attribute. Phase 1's runtime slice (`inflector.rb`) has no
+/// module-level constants, so this is never exercised; the real value
+/// renderer lands with the Phase 2 expr walker. Emit a valid, inert
+/// placeholder so an accidental call can't break `mix compile`.
+fn elixir_format_constant(name: &str, _value: &Expr) -> String {
+    format!("@{} nil", crate::naming::snake_case(name))
+}
+
+/// Wrap a transpiled unit's body in its enclosing module. Phase 1
+/// passes `namespace: "V2"` for every entry so the overlay lives under
+/// a dedicated `V2.*` namespace — `defmodule V2 do …(defmodule
+/// Inflector …)… end` yields `V2.Inflector`, isolating the transpiled
+/// runtime from the legacy `Roundhouse.*` runtime and app modules
+/// (`Router`, `Post`, …). An empty namespace is a no-op.
+fn elixir_wrap_namespace(namespace: &str, body: &str) -> String {
+    if namespace.is_empty() {
+        body.to_string()
+    } else {
+        format!("defmodule {namespace} do\n{body}end\n")
+    }
+}
+
+/// Elixir runtime transpile table. Phase 1: the narrowest slice
+/// (`inflector.rb` — one method, no cross-class deps), so the
+/// `lib/v2/` overlay stays compile-clean and the inventory signal is
+/// whether the CURRENT scope passes. Additional entries (json_builder,
+/// router, active_record/base, …) land one at a time as `elixir2`'s
+/// per-variant body walker grows.
+const ELIXIR_RUNTIME: &[RuntimeEntry] = &[RuntimeEntry {
+    rb_src: include_str!("../runtime/ruby/inflector.rb"),
+    rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+    rb_path: "runtime/ruby/inflector.rb",
+    namespace: "V2",
+    out_path: "lib/v2/inflector.ex",
+    mode: Mode::Library,
+    imports: NO_IMPORTS,
+    prelude: NO_PRELUDE,
+    extra_roots: NO_EXTRA_ROOTS,
+}];
+
+/// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape
+/// is stubbed (see `src/emit/elixir2/library.rs`).
+pub fn elixir_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(ELIXIR_RUNTIME.len());
+    for entry in ELIXIR_RUNTIME {
+        let unit = transpile_entry(entry, &ELIXIR_TARGET, "#", &mut transform)?;
+        out.push(unit);
+    }
+    Ok(out)
+}

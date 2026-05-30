@@ -139,6 +139,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             files.push(spec::emit_ex_test(tm, app));
         }
     }
+    // elixir2 strangler overlay — transpiled framework runtime under
+    // `lib/v2/` (`V2.*` namespace), additive to the legacy emit above.
+    // Mirrors how `src/emit/go.rs::emit` appends `go2::emit_overlay_files`.
+    // `mix compile` picks up `lib/v2/**` via the `lib/**/*.ex` glob in
+    // the emitted `mix.exs` `elixirc_paths`, so no mix.exs change is
+    // needed.
+    files.extend(super::elixir2::emit_overlay_files(app));
     files
 }
 

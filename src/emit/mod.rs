@@ -5,6 +5,7 @@
 
 pub mod crystal;
 pub mod elixir;
+pub mod elixir2;
 pub mod go;
 pub mod go2;
 pub mod python;
