@@ -369,9 +369,14 @@ build_target() {
                 step "building spinel assets (tailwind + turbo.min.js)"
                 (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null)
             fi
-            if [[ ! -x "$SP_OUT/build/blog" ]]; then
+            # Recompile whenever we re-emitted (SKIP_EMIT==0) — the spinel
+            # COMPILER may have changed under us (git pull && make), and
+            # `make`'s mtime check alone can miss that, so force a clean
+            # build. Skipping a stale build/blog here silently re-ran an
+            # old binary across compiler updates.
+            if (( SKIP_EMIT == 0 )) || [[ ! -x "$SP_OUT/build/blog" ]]; then
                 step "AOT-compiling main.rb → build/blog (spinel)"
-                (cd "$SP_OUT" && make build >/dev/null)
+                (cd "$SP_OUT" && rm -f build/blog && make build >/dev/null)
             fi
             ;;
         go)
