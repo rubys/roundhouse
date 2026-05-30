@@ -15,7 +15,7 @@ use crate::dialect::AccessorKind;
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, Literal, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::schema::{Column, ColumnType, Schema, Table};
+use crate::schema::{Column, Schema, Table};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -76,18 +76,17 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
 fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
-    let instance = Symbol::from("instance");
     let db = ClassId(Symbol::from(DB_MOD));
 
     let sql = compose_sql_select(sel, table);
     let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
     let result_init = assign_var(&result, nil_lit());
 
-    // if Db.step?(stmt) ; instance = new ; <hydrate cols> ; mark_persisted! ; result = instance ; end
-    let mut if_body = vec![assign_var(&instance, new_call(owner))];
-    push_hydrate_columns(&mut if_body, table, &db, &stmt, &instance);
-    if_body.push(send_to(var_ref(&instance), "mark_persisted!", vec![], true));
-    if_body.push(assign_var(&result, var_ref(&instance)));
+    // if Db.step?(stmt) ; result = <Owner>.from_stmt(stmt) ; end
+    // (`from_stmt` news the instance, reads every column, and marks it
+    // persisted — see `synth_from_stmt`. Sound here because a single
+    // hydrate is always `ColumnSpec::All`.)
+    let if_body = vec![assign_var(&result, model_from_stmt(owner, &stmt))];
 
     let if_expr = Expr::new(
         Span::synthetic(),
@@ -107,7 +106,6 @@ fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
 fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId, schema: &Schema) -> Expr {
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
-    let instance = Symbol::from("instance");
     let db = ClassId(Symbol::from(DB_MOD));
 
     let sql = compose_sql_select(sel, table);
@@ -135,11 +133,15 @@ fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId, schema: &Sch
         ),
     );
 
-    // while Db.step?(stmt) ; instance = new ; <hydrate> ; mark_persisted! ; results << instance ; end
-    let mut loop_body = vec![assign_var(&instance, new_call(owner))];
-    push_hydrate_columns(&mut loop_body, table, &db, &stmt, &instance);
-    loop_body.push(send_to(var_ref(&instance), "mark_persisted!", vec![], true));
-    loop_body.push(send_to(var_ref(&results), "<<", vec![var_ref(&instance)], false));
+    // while Db.step?(stmt) ; results << <Owner>.from_stmt(stmt) ; end
+    // (`from_stmt` news + hydrates + marks persisted — see
+    // `synth_from_stmt`. Sound because a multi hydrate is `ColumnSpec::All`.)
+    let loop_body = vec![send_to(
+        var_ref(&results),
+        "<<",
+        vec![model_from_stmt(owner, &stmt)],
+        false,
+    )];
 
     let while_loop = Expr::new(
         Span::synthetic(),
@@ -188,7 +190,6 @@ fn push_preload_stmts(
     let ids = Symbol::from(format!("__{}_ids", assoc));
     let pstmt = Symbol::from(format!("__{}_stmt", assoc));
     let loaded = Symbol::from(format!("__{}_loaded", assoc));
-    let pinst = Symbol::from(format!("__{}_row", assoc));
 
     // ids = parent_results.map { |a| a.id }
     let map_block = block1(
@@ -221,11 +222,16 @@ fn push_preload_stmts(
     );
     out.push(assign_var(&loaded, loaded_init));
 
-    // while Db.step?(pstmt) { row = Target.new ; <hydrate> ; mark_persisted! ; loaded << row }
-    let mut loop_body = vec![assign_var(&pinst, new_call(&directive.target_class))];
-    push_hydrate_columns(&mut loop_body, target_table, &db, &pstmt, &pinst);
-    loop_body.push(send_to(var_ref(&pinst), "mark_persisted!", vec![], true));
-    loop_body.push(send_to(var_ref(&loaded), "<<", vec![var_ref(&pinst)], false));
+    // while Db.step?(pstmt) { loaded << Target.from_stmt(pstmt) }
+    // The preload SQL is built from `select_cols_csv(target_table)` —
+    // full row in declaration order — so it's `ColumnSpec::All`-shaped
+    // by construction and `from_stmt`'s positional reads line up.
+    let loop_body = vec![send_to(
+        var_ref(&loaded),
+        "<<",
+        vec![model_from_stmt(&directive.target_class, &pstmt)],
+        false,
+    )];
     out.push(Expr::new(
         Span::synthetic(),
         ExprNode::While {
@@ -537,35 +543,25 @@ fn escape_value(db: &ClassId, val: &Value) -> Expr {
 // Hydration
 // ---------------------------------------------------------------------------
 
-/// Append per-column reads `instance.<col> = Db.column_<int|text>(stmt, <i>)`
-/// in schema order. Mirrors `adapter_emit::hydrate_instance_body`.
-fn push_hydrate_columns(
-    out: &mut Vec<Expr>,
-    table: &Table,
-    db: &ClassId,
-    stmt: &Symbol,
-    instance: &Symbol,
-) {
-    for (i, col) in table.columns.iter().enumerate() {
-        let read_method = read_method_for(&col.col_type);
-        let read_call = db_call(db, read_method, vec![var_ref(stmt), lit_int(i as i64)]);
-        out.push(send_to(
-            var_ref(instance),
-            &format!("{}=", col.name.as_str()),
-            vec![read_call],
-            false,
-        ));
-    }
-}
-
-/// Pick `column_int` / `column_bool` / `column_text` based on the
-/// schema column's type. Mirrors today's `adapter_emit` branch.
-fn read_method_for(t: &ColumnType) -> &'static str {
-    match ty_of_column(t) {
-        Ty::Int => "column_int",
-        Ty::Bool => "column_bool",
-        _ => "column_text",
-    }
+/// `<Owner>.from_stmt(stmt)` — the synthesized positional factory
+/// (`model_to_library::schema::synth_from_stmt`) that news an instance,
+/// reads every schema column from the prepared statement, marks it
+/// persisted, and returns it. Replaces the inline
+/// `new + per-column read + mark_persisted!` block at every
+/// `ColumnSpec::All` hydrate site (single, multi, and eager-load
+/// preload). The per-column read logic now lives once, in `from_stmt`'s
+/// body, rather than being re-emitted at each query site.
+fn model_from_stmt(owner: &ClassId, stmt: &Symbol) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(owner)),
+            method: Symbol::from("from_stmt"),
+            args: vec![var_ref(stmt)],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 fn select_cols_csv(table: &Table) -> String {
@@ -636,19 +632,6 @@ fn send_block(recv: Expr, method: &str, block: Expr) -> Expr {
     )
 }
 
-fn new_call(owner: &ClassId) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(class_const(owner)),
-            method: Symbol::from("new"),
-            args: vec![],
-            block: None,
-            parenthesized: true,
-        },
-    )
-}
-
 fn assign_var(name: &Symbol, value: Expr) -> Expr {
     Expr::new(
         Span::synthetic(),
@@ -708,24 +691,6 @@ fn concat_chain(segments: Vec<Expr>) -> Expr {
     acc
 }
 
-/// Schema column type → roundhouse `Ty`. Mirrors
-/// `lower::model_to_library::ty_of_column`. Visitor uses the
-/// resulting `Ty::Int` to pick `column_int`/`escape_int`.
-fn ty_of_column(t: &ColumnType) -> Ty {
-    match t {
-        ColumnType::Integer | ColumnType::BigInt => Ty::Int,
-        ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
-        ColumnType::String { .. } | ColumnType::Text => Ty::Str,
-        ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
-        ColumnType::Binary => Ty::Str,
-        ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
-        ColumnType::Reference { .. } => Ty::Int,
-    }
-}
-
-// ---------------------------------------------------------------------------
-
 fn lookup_table<'s>(schema: &'s Schema, name: &Symbol) -> &'s Table {
     schema
         .tables
@@ -747,7 +712,7 @@ mod tests {
     };
     use super::*;
     use crate::ident::TableRef;
-    use crate::schema::{Column, Schema, Table};
+    use crate::schema::{Column, ColumnType, Schema, Table};
     use indexmap::IndexMap;
 
     // Two-column "articles" table: id (Int), title (Str).

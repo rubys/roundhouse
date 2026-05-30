@@ -696,8 +696,19 @@ fn build_class_info(
         "from_row",
         fn_sig(
             vec![(Symbol::from("row"), Ty::Class { id: row_class_id, args: vec![] })],
-            owner_ty,
+            owner_ty.clone(),
         ),
+    );
+
+    // Positional twin of `from_row` (`synth_from_stmt`): hydrates from a
+    // prepared-statement handle (`stmt : Int`). Registered so the Arel
+    // visitor's `<Model>.from_stmt(stmt)` hydrate calls — same-class in
+    // the adapter methods, cross-class in eager-load preloads — type
+    // before their callers' bodies are walked.
+    insert_default(
+        &mut info.class_methods,
+        "from_stmt",
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], owner_ty),
     );
 
     // Tag every entry the baseline added as Method (defaults match —

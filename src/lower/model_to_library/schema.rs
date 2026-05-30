@@ -100,6 +100,19 @@ pub(super) fn push_schema_methods(
     // class-method factories rather than overloaded initialize.
     methods.push(synth_from_row(owner, table));
 
+    // def self.from_stmt(stmt); instance = new; instance.<col> = Db.column_*(stmt, i); ...; mark_persisted!; instance; end
+    //
+    // Positional-path twin of `from_row`. Where `from_row` takes a
+    // typed `<Model>Row` (the Hash/gem-adapter boundary), `from_stmt`
+    // reads straight off a prepared-statement handle via the per-target
+    // `Db.column_*` surface — no intermediate Row allocation on the hot
+    // read path. Hydrates the full schema-column set in declaration
+    // order at offset 0, so the SELECT feeding it MUST project every
+    // column in that order (`ColumnSpec::All`). The Arel visitor only
+    // routes `All`-projection hydrate sites here; a future `Named`
+    // (partial/reordered) projection stays on its own inline path.
+    methods.push(synth_from_stmt(owner, table));
+
     // def assign_from_row(row); self.<col> = row[:<col>]; ...; end
     //
     // Instance-level reload helper. ActiveRecord::Base#reload re-fetches
@@ -428,6 +441,105 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// `def self.from_stmt(stmt); instance = new; instance.col = Db.column_*(stmt, i); ...; mark_persisted!; instance; end`
+///
+/// Reads each schema column positionally from a prepared-statement
+/// handle (`stmt : Int`, the FFI int-as-ptr the `Db` surface uses) via
+/// the type-appropriate `Db.column_int`/`column_bool`/`column_text`.
+/// No `Cast` wrapping (unlike `from_row`): `column_*` returns the exact
+/// non-nilable scalar each setter expects, so the types line up
+/// directly. Marks the instance persisted before returning it.
+fn synth_from_stmt(owner: &ClassId, table: &Table) -> MethodDef {
+    let stmt = Symbol::from("stmt");
+    let instance = Symbol::from("instance");
+    let db = ClassId(Symbol::from("Db"));
+
+    let new_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(owner)),
+            method: Symbol::from("new"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    let mut stmts: Vec<Expr> = Vec::new();
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: instance.clone() },
+            value: new_call,
+        },
+    ));
+
+    for (i, col) in table.columns.iter().enumerate() {
+        // Db.column_*(stmt, i) — read method picked from the column's
+        // type, mirroring the Arel visitor's `read_method_for`.
+        let read_method = column_read_method(&ty_of_column(&col.col_type));
+        let read_call = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(class_const(&db)),
+                method: Symbol::from(read_method),
+                args: vec![var_ref(stmt.clone()), lit_int(i as i64)],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        // instance.<col>= = Db.column_*(stmt, i)
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from(format!("{}=", col.name.as_str())),
+                args: vec![read_call],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
+
+    // instance.mark_persisted!
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(instance.clone())),
+            method: Symbol::from("mark_persisted!"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    ));
+    stmts.push(var_ref(instance));
+
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    MethodDef {
+        name: Symbol::from("from_stmt"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(stmt.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(stmt, Ty::Int)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// Schema-column `Ty` → the `Db.column_*` reader that yields it.
+/// Mirrors `lower::arel::visitor::read_method_for`.
+fn column_read_method(col_ty: &Ty) -> &'static str {
+    match col_ty {
+        Ty::Int => "column_int",
+        Ty::Bool => "column_bool",
+        _ => "column_text",
     }
 }
 
