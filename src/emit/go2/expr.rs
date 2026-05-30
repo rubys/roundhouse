@@ -476,7 +476,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
-        other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
+        other => crate::emit::diagnostics::report_unsupported("go2", other.kind_str(), ""),
     }
 }
 

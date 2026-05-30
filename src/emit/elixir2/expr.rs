@@ -226,7 +226,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::Cast { value, .. } => emit_expr(value),
-        other => format!("raise \"elixir2: unhandled {:?}\"", std::mem::discriminant(other)),
+        other => crate::emit::diagnostics::report_unsupported("elixir2", other.kind_str(), ""),
     }
 }
 

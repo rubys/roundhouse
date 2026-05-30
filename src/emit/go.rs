@@ -160,7 +160,7 @@ fn rt_emit_expr(e: &Expr) -> String {
                  not yet supported (would need IIFE lowering)"
             )
         }
-        other => format!("/* TODO: emit {:?} */", std::mem::discriminant(other)),
+        other => crate::emit::diagnostics::report_unsupported("go", other.kind_str(), ""),
     }
 }
 
@@ -371,7 +371,7 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             );
         }
     }
-    format!("/* TODO: send {method} */")
+    crate::emit::diagnostics::report_unsupported("go", "Send", format!("method `{method}`"))
 }
 
 fn is_go_binop(method: &str) -> bool {

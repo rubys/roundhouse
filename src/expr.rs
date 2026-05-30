@@ -377,6 +377,49 @@ pub enum ExprNode {
     Cast { value: Expr, target_ty: crate::ty::Ty },
 }
 
+impl ExprNode {
+    /// Stable, human-readable name for this node kind — the grep-able
+    /// `construct` label an emitter passes to `report_unsupported` when
+    /// it hits a node it can't lower yet. Preferred over
+    /// `std::mem::discriminant`, which renders as an opaque
+    /// `Discriminant(..)`.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            ExprNode::Lit { .. } => "Lit",
+            ExprNode::Var { .. } => "Var",
+            ExprNode::Ivar { .. } => "Ivar",
+            ExprNode::Const { .. } => "Const",
+            ExprNode::Hash { .. } => "Hash",
+            ExprNode::Array { .. } => "Array",
+            ExprNode::StringInterp { .. } => "StringInterp",
+            ExprNode::BoolOp { .. } => "BoolOp",
+            ExprNode::Let { .. } => "Let",
+            ExprNode::Lambda { .. } => "Lambda",
+            ExprNode::Apply { .. } => "Apply",
+            ExprNode::Send { .. } => "Send",
+            ExprNode::If { .. } => "If",
+            ExprNode::Case { .. } => "Case",
+            ExprNode::Seq { .. } => "Seq",
+            ExprNode::Assign { .. } => "Assign",
+            ExprNode::OpAssign { .. } => "OpAssign",
+            ExprNode::Yield { .. } => "Yield",
+            ExprNode::Raise { .. } => "Raise",
+            ExprNode::RescueModifier { .. } => "RescueModifier",
+            ExprNode::SelfRef => "SelfRef",
+            ExprNode::Return { .. } => "Return",
+            ExprNode::Super { .. } => "Super",
+            ExprNode::Next { .. } => "Next",
+            ExprNode::Break { .. } => "Break",
+            ExprNode::Splat { .. } => "Splat",
+            ExprNode::MultiAssign { .. } => "MultiAssign",
+            ExprNode::While { .. } => "While",
+            ExprNode::Range { .. } => "Range",
+            ExprNode::BeginRescue { .. } => "BeginRescue",
+            ExprNode::Cast { .. } => "Cast",
+        }
+    }
+}
+
 /// One `rescue` clause inside a `BeginRescue`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RescueClause {

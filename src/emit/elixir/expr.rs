@@ -168,7 +168,7 @@ pub(super) fn emit_expr(e: &Expr, receiver_arg: Option<&str>) -> String {
             format!("send(self(), {{:yield, {}}})", parts.join(", "))
         }
         ExprNode::Cast { value, .. } => emit_expr(value, receiver_arg),
-        other => format!("# TODO: emit {:?}", std::mem::discriminant(other)),
+        other => crate::emit::diagnostics::report_unsupported("elixir", other.kind_str(), ""),
     }
 }
 
