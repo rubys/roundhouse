@@ -719,6 +719,29 @@ pub(super) fn emit_stmt_with_state(
                 format!("{};", emit_expr(e))
             }
         }
+        // Nested `Seq` at statement position — flatten it. A Seq can
+        // reach here as the last element of an enclosing Seq (e.g. the
+        // cache-aware has_many reader, whose body is
+        // `[guard-If, <hydrate Seq>]` — issue #27). Without this arm the
+        // hydrate Seq falls to the default arm and emits
+        // `return <emit_expr(seq)>`, inlining the statement list as a
+        // broken expression (undeclared `stmt`/`instance`, a stray
+        // `return` glued onto the first statement). Recurse per child so
+        // each statement gets proper `let`/`const`/`return` treatment;
+        // only the final child inherits this Seq's `is_last`/void flags.
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let mut lines: Vec<String> = Vec::with_capacity(exprs.len());
+            for (i, inner) in exprs.iter().enumerate() {
+                lines.push(emit_stmt_with_state(
+                    inner,
+                    is_last && i == exprs.len() - 1,
+                    void_return,
+                    reassigned,
+                    declared,
+                ));
+            }
+            lines.join("\n")
+        }
         // Return at statement position: emit as a native `return`
         // rather than wrapping in an IIFE. Ruby's `return nil` returns
         // nil, not undefined — emit `return null;` (not bare `return;`)
