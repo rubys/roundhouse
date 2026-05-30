@@ -225,6 +225,19 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         // the surrounding context expects an instance). Without a
         // class name in ctx (module-mode), emit a TODO marker.
         ExprNode::SelfRef => self_ref_expr(ctx),
+        // Ruby `super` in a model `initialize` (the only shape real-blog
+        // emits): its effect — running the parent's constructor — is
+        // already performed by go2's struct-embedding init
+        // (`&T{ApplicationRecord: NewApplicationRecord(...)}`), so there
+        // is nothing to emit. Render a documenting no-op comment rather
+        // than falling through to the unsupported catch-all (which would
+        // panic mid-constructor and leave the rest unreachable). General
+        // `super` to a non-ctor parent method isn't wired yet; if one
+        // ever appears it still no-ops here — acceptable parity with the
+        // pre-#28 drop, and the catch-all still guards every other node.
+        ExprNode::Super { .. } => {
+            "// super: parent dispatch handled via struct embedding".to_string()
+        }
         // Ruby `x = value` — legacy go drops the lvalue and emits
         // only the rhs, which loses the binding. go2 needs the real
         // assignment so subsequent statements can refer to `x`.
