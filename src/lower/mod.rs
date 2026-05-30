@@ -25,6 +25,7 @@ pub mod controller;
 pub mod controller_test;
 pub mod erb_trim;
 pub mod fixtures;
+pub mod functionalize;
 pub mod model_associations;
 pub mod persistence;
 pub mod controller_to_library;

@@ -55,7 +55,14 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
 
-    let units = match crate::runtime_loader::elixir_units(|_ns, classes| classes) {
+    // Functional-target lowerings (issue #29): rewrite imperative
+    // control flow (while→recursion, …) into the functional IR the
+    // Elixir emitter can render directly. No-op on shapes it doesn't
+    // support — those degrade via the emitter's report_unsupported
+    // catch-all. Gated here: only functional emitters opt in.
+    let units = match crate::runtime_loader::elixir_units(|_ns, classes| {
+        crate::lower::functionalize::functionalize(classes)
+    }) {
         Ok(u) => u,
         Err(e) => {
             // Transpile failure surfaces as a sentinel file rather than
