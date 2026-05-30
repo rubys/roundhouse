@@ -92,8 +92,9 @@ fn rust_return_ty(ty: &Ty) -> String {
 fn rt_emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if e.diagnostic.is_some() {
-        return r#"panic!("roundhouse: + with incompatible operand types")"#.to_string();
+    if let Some(kind) = &e.diagnostic {
+        return crate::emit::diagnostics::StubStyle::RustPanic
+            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     match &*e.node {
         ExprNode::Lit { value } => rt_emit_literal(value),

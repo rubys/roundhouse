@@ -126,8 +126,16 @@ fn rt_emit_body(body: &Expr) -> String {
                     out.push_str(&rt_emit_body(e));
                 } else {
                     // Other stmt shapes (Assign, etc.) arrive when runtime
-                    // code actually uses them — for now, reject.
-                    panic!("non-tail statement in method body not yet supported");
+                    // code actually uses them — degrade to a reported stub
+                    // statement (panic(...) is a valid Go statement) so the
+                    // rest of the body still emits.
+                    let stub = crate::emit::diagnostics::report_unsupported(
+                        "go",
+                        "non-tail-statement",
+                        format!("{} in method body", e.node.kind_str()),
+                    );
+                    out.push_str(&stub);
+                    out.push('\n');
                 }
             }
             out
@@ -139,8 +147,9 @@ fn rt_emit_body(body: &Expr) -> String {
 fn rt_emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if e.diagnostic.is_some() {
-        return r#"panic("roundhouse: + with incompatible operand types")"#.to_string();
+    if let Some(kind) = &e.diagnostic {
+        return crate::emit::diagnostics::StubStyle::GoPanic
+            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     match &*e.node {
         ExprNode::Lit { value } => rt_emit_literal(value),
@@ -153,11 +162,12 @@ fn rt_emit_expr(e: &Expr) -> String {
         ExprNode::If { .. } => {
             // Go has no ternary. A tail / assign-RHS If is lifted to
             // statement form by rt_emit_body; any other If is embedded
-            // in mid-expression, which would need an IIFE — fail
-            // loudly until a real case forces that work.
-            panic!(
-                "Go emit: ternary in embedded expression position — \
-                 not yet supported (would need IIFE lowering)"
+            // in mid-expression, which would need an IIFE — report the
+            // gap and degrade to a panic stub at that one site.
+            crate::emit::diagnostics::report_unsupported(
+                "go",
+                "If",
+                "ternary in embedded expression position (needs IIFE lowering)",
             )
         }
         other => crate::emit::diagnostics::report_unsupported("go", other.kind_str(), ""),

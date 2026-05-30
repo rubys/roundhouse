@@ -99,6 +99,34 @@ impl Diagnostic {
         }
     }
 
+    /// Short human text for a diagnostic *kind*, used to render the
+    /// runtime raise/panic/throw stub an emitter drops at a site
+    /// carrying `Expr.diagnostic` (via [`crate::emit::diagnostics::StubStyle::render`]).
+    /// Unlike the per-`Diagnostic` `message`, this is reconstructable
+    /// from the kind alone — so the emit short-circuit names the actual
+    /// gap (`While`, `ColumnSpec::Named`) instead of a hardcoded
+    /// operator. Kept terse; the full detail lives on the collected
+    /// `Diagnostic`.
+    pub fn stub_text(kind: &DiagnosticKind) -> String {
+        match kind {
+            DiagnosticKind::IncompatibleBinop { op, .. } => {
+                format!("`{}` with incompatible operand types", op.as_str())
+            }
+            DiagnosticKind::IvarUnresolved { name } => {
+                format!("@{} has no known type", name.as_str())
+            }
+            DiagnosticKind::SendDispatchFailed { method, .. } => {
+                format!("no known method `{}`", method.as_str())
+            }
+            DiagnosticKind::GradualUntyped { expr_kind } => {
+                format!("{} resolves to untyped", expr_kind.as_str())
+            }
+            DiagnosticKind::Unsupported { target, construct, .. } => {
+                Self::unsupported_text(target.as_ref(), construct)
+            }
+        }
+    }
+
     /// Canonical human text for an unsupported construct, shared between
     /// the diagnostic `message` and the `raise`/`panic` stub an emitter
     /// drops at the site — so the collected report and the compiled
@@ -206,6 +234,28 @@ mod tests {
         assert_eq!(
             d.to_string(),
             "error[unsupported]: ColumnSpec::Named not supported (all targets)"
+        );
+    }
+
+    #[test]
+    fn stub_text_names_the_actual_kind() {
+        // IncompatibleBinop names the real operator, not a hardcoded `+`.
+        assert_eq!(
+            Diagnostic::stub_text(&DiagnosticKind::IncompatibleBinop {
+                op: Symbol::from("-"),
+                lhs_ty: Ty::Int,
+                rhs_ty: Ty::Str,
+            }),
+            "`-` with incompatible operand types"
+        );
+        // Unsupported renders the construct, reusing the canonical text.
+        assert_eq!(
+            Diagnostic::stub_text(&DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("ColumnSpec::Named"),
+                detail: "ignored in the terse stub".to_string(),
+            }),
+            "ColumnSpec::Named not supported (all targets)"
         );
     }
 

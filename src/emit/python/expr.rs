@@ -61,8 +61,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     // (e.g., Incompatible `+`). If so, emit the target raise-
     // equivalent instead of the normal rendering — matches Ruby's
     // behavior of raising at runtime.
-    if e.diagnostic.is_some() {
-        return r#"(_ for _ in ()).throw(TypeError("roundhouse: + with incompatible operand types"))"#.to_string();
+    if let Some(kind) = &e.diagnostic {
+        return crate::emit::diagnostics::StubStyle::PythonThrow
+            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),

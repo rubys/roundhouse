@@ -2376,7 +2376,7 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 format!("self.{pascal} = {v}")
             }
         }
-        _ => format!("/* TODO: emit Assign target shape */ _ = {v}"),
+        _ => crate::emit::diagnostics::report_unsupported("go2", "Assign-target", ""),
     }
 }
 

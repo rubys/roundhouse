@@ -1053,8 +1053,9 @@ fn is_nil_or_empty(e: &Expr) -> bool {
 pub(super) fn emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if e.diagnostic.is_some() {
-        return r#"(() => { throw new Error("roundhouse: + with incompatible operand types"); })()"#.to_string();
+    if let Some(kind) = &e.diagnostic {
+        return crate::emit::diagnostics::StubStyle::TsThrow
+            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     // IrHint::StringBuilder* — expression-position consumers.
     // Init/Append at statement position are handled in

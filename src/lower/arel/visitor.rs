@@ -65,8 +65,25 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
             _ => emit_multi_hydrate(sel, table, owner, schema),
         },
         ColumnSpec::Named(_) => {
-            // Reserved — no Phase 1 builder produces Named.
-            unimplemented!("ColumnSpec::Named is reserved for find_by(<col>); not yet wired")
+            // Reserved — no Phase 1 builder produces Named yet (it's for
+            // find_by(<col>)). Degrade instead of crashing: report the
+            // gap to the emit sink (so the transpile path surfaces and
+            // gates on it) and return a stub node annotated with the
+            // diagnostic, so every per-target emitter drops a raise stub
+            // at the site via the `Expr.diagnostic` short-circuit.
+            let detail = "find_by(<col>) projection not yet wired";
+            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                None,
+                "ColumnSpec::Named",
+                detail,
+            ));
+            let mut stub = nil_lit();
+            stub.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("ColumnSpec::Named"),
+                detail: detail.to_string(),
+            });
+            stub
         }
     }
 }
