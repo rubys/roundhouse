@@ -43,6 +43,11 @@ module Db
   @next_id = 0
   @mutex   = nil
   @cv      = nil
+  # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
+  # accumulate the SQL each prepare/exec issues. The funnel hook
+  # `record_query` is near-free (one nil check) when not capturing, so
+  # this stays out of the way on the production path.
+  @query_log = nil
 
   # Pool size defaults to the Puma thread count (RAILS_MAX_THREADS) so
   # every concurrently-serving thread can hold its own handle without
@@ -108,10 +113,12 @@ module Db
   end
 
   def self.exec(sql)
+    record_query(sql)
     current_dbh.execute(sql)
   end
 
   def self.prepare(sql)
+    record_query(sql)
     @next_id += 1
     @rows[@next_id] = { stmt: current_dbh.prepare(sql), row: nil }
     @next_id
@@ -152,6 +159,35 @@ module Db
 
   def self.changes
     current_dbh.changes
+  end
+
+  # Query-log capture — the test-side analog of Rails'
+  # `ActiveSupport::Notifications.subscribed(counter, "sql.active_record")`
+  # (activerecord testing/query_assertions.rb). Records the SQL every
+  # prepare/exec issues during the block and returns it as an Array of
+  # SQL strings, the shape Rails' `capture_sql` yields. Nestable: an
+  # outer capture is restored on exit. Production never calls this, so
+  # the funnel hook stays a single nil check off the hot path.
+  #
+  # The only instrument that can see the `includes(:assoc)` N+1:
+  # byte-identical `compare` is blind to it (eager-load and N+1 render
+  # the same HTML; only the query strategy differs). See issue #27.
+  def self.capture_sql
+    prev = @query_log
+    log = []
+    @query_log = log
+    begin
+      yield
+    ensure
+      @query_log = prev
+    end
+    log
+  end
+
+  # Funnel hook: record one SQL string into the active capture, if any.
+  # No-op (single nil check) when no capture is installed.
+  def self.record_query(sql)
+    @query_log.push(sql) unless @query_log.nil?
   end
 
   # SQL-value escaping primitives — lowerer-emitted code uses these

@@ -199,6 +199,10 @@ fn real_blog_spinel_tests_pass() {
         "test/models/comment_test.rb",
         "test/controllers/articles_controller_test.rb",
         "test/controllers/comments_controller_test.rb",
+        // Query-count harness (issue #27): asserts /articles eager-loads
+        // comments in 2 queries rather than the 1+N `compare` is blind
+        // to. Rides in via runtime/spinel/test/query_count_test.rb.
+        "test/query_count_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

@@ -20,6 +20,12 @@ module Db
   def self.finalize: (Integer) -> void
   def self.last_insert_rowid: () -> Integer
   def self.changes: () -> Integer
+  # Query-log capture (issue #27) — records the SQL each prepare/exec
+  # issues during the block, returned as an Array of SQL strings. The
+  # test-side analog of Rails' `capture_sql`; `record_query` is the
+  # funnel hook prepare/exec call.
+  def self.capture_sql: () { () -> void } -> Array[String]
+  def self.record_query: (String) -> void
   # SQL-value escaping primitives. Lowerer-emitted code uses these
   # to inline values into SQL strings (spinel FFI can't bind_text;
   # the cruby gem also accepts inlined values).

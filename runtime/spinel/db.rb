@@ -72,6 +72,10 @@ end
 
 module Db
   @pool = nil
+  # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
+  # accumulate the SQL each prepare/exec issues. Kept in parity with the
+  # cruby shim (db_cruby.rb); see `capture_sql` below.
+  @query_log = nil
 
   # Pool size: kwarg wins; otherwise DATABASE_POOL_SIZE env (the same
   # knob the rust target reads — set it to the server's max concurrent
@@ -142,6 +146,7 @@ module Db
   # callers that want last_insert_rowid / changes consult those
   # accessors immediately after.
   def self.exec(sql)
+    record_query(sql)
     rc = SQL.sqlite3_exec(current_dbh, sql, nil, nil, nil)
     if rc != SQL::OK
       raise "Db.exec failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
@@ -153,11 +158,34 @@ module Db
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
+    record_query(sql)
     rc = SQL.sqlite3_prepare_v2(current_dbh, sql, -1, SQL.stmt_out, nil)
     if rc != SQL::OK
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
     end
     SQL.read_ptr(SQL.stmt_out)
+  end
+
+  # Query-log capture — see db_cruby.rb for the full rationale (the
+  # test-side analog of Rails' `sql.active_record` SQLCounter; the one
+  # instrument that can see the includes(:assoc) N+1 `compare` is blind
+  # to, issue #27). Kept in parity across both Db shims.
+  def self.capture_sql
+    prev = @query_log
+    log = []
+    @query_log = log
+    begin
+      yield
+    ensure
+      @query_log = prev
+    end
+    log
+  end
+
+  # Funnel hook: record one SQL string into the active capture, if any.
+  # No-op (single nil check) when no capture is installed.
+  def self.record_query(sql)
+    @query_log.push(sql) unless @query_log.nil?
   end
 
   def self.step?(stmt)
