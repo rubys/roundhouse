@@ -154,19 +154,53 @@ fn article_lowers_has_many_to_collection_reader() {
     assert!(matches!(comments.receiver, MethodReceiver::Instance));
     assert!(comments.params.is_empty());
 
-    // Body should be `Comment.where(article_id: @id)`.
-    let (recv_path, method) = match &*comments.body.node {
+    // Cache-aware body (issue #27):
+    //   return @comments_cache if @comments_loaded   # eager-loaded
+    //   Comment.where(article_id: @id)                # lazy fallback
+    // A Seq whose guard short-circuits to the preloaded cache and whose
+    // tail keeps the lazy query (so `render @article.comments` with no
+    // upstream `includes` still works). The guard's ivar reads are typed
+    // (Bool / Array<Comment>) so the strict-0 untyped residual holds —
+    // see lowered_real_blog_typing_residual.
+    let stmts = match &*comments.body.node {
+        roundhouse::ExprNode::Seq { exprs } => exprs,
+        other => panic!("comments body should be a Seq (guard + lazy query); got {other:?}"),
+    };
+    assert_eq!(stmts.len(), 2, "expected [loaded-guard, lazy query]");
+
+    // Guard: `return @comments_cache if @comments_loaded`.
+    match &*stmts[0].node {
+        roundhouse::ExprNode::If { cond, then_branch, .. } => {
+            assert!(
+                matches!(&*cond.node, roundhouse::ExprNode::Ivar { name } if name.as_str() == "comments_loaded"),
+                "guard cond should read @comments_loaded; got {:?}",
+                cond.node,
+            );
+            match &*then_branch.node {
+                roundhouse::ExprNode::Return { value } => assert!(
+                    matches!(&*value.node, roundhouse::ExprNode::Ivar { name } if name.as_str() == "comments_cache"),
+                    "guard should return @comments_cache; got {:?}",
+                    value.node,
+                ),
+                other => panic!("guard then-branch should return the cache; got {other:?}"),
+            }
+        }
+        other => panic!("first stmt should be the loaded-guard If; got {other:?}"),
+    }
+
+    // Lazy fallback tail: `Comment.where(article_id: @id)`.
+    let (recv_path, method) = match &*stmts[1].node {
         roundhouse::ExprNode::Send { recv, method, .. } => {
-            let recv = recv.as_ref().expect("comments body should be Comment.where(...)");
+            let recv = recv.as_ref().expect("lazy tail should be Comment.where(...)");
             let path = match &*recv.node {
                 roundhouse::ExprNode::Const { path } => {
                     path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>()
                 }
-                other => panic!("comments receiver should be Const; got {other:?}"),
+                other => panic!("lazy tail receiver should be Const; got {other:?}"),
             };
             (path, method.as_str().to_string())
         }
-        other => panic!("comments body is not Send: {other:?}"),
+        other => panic!("lazy tail is not Send: {other:?}"),
     };
     assert_eq!(recv_path, vec!["Comment".to_string()]);
     assert_eq!(method, "where");
@@ -174,13 +208,14 @@ fn article_lowers_has_many_to_collection_reader() {
 
 #[test]
 fn bulk_lowering_rewrites_has_many_proxy_via_arel() {
-    // The single-model lowerer (above) emits the `Comment.where(article_id:
-    // @id)` Send and stops there. The bulk lowerer additionally runs the
-    // Arel pass, which recognizes that Send (Comment is in the registry)
-    // and replaces it with the inline SELECT/hydrate Expr emitted by
-    // SqliteVisitor. The body should no longer be a top-level Send to
-    // Comment.where; instead a Seq starting with the prepare call. See
-    // project_arel_compile_time_first.md.
+    // The single-model lowerer (above) emits the cache-aware reader
+    // `[guard-If, Comment.where(article_id: @id)]`. The bulk lowerer
+    // additionally runs the Arel pass, which recognizes the lazy-tail
+    // Send (Comment is in the registry) and replaces it with the inline
+    // SELECT/hydrate Expr emitted by SqliteVisitor. So the body stays a
+    // 2-stmt Seq, but the tail is now the SELECT/hydrate Seq rather than
+    // a bare `Comment.where` Send. The guard is untouched (no AR call to
+    // rewrite). See project_arel_compile_time_first.md + issue #27.
     let app = ingest_app(fixture_path()).expect("ingest real-blog");
     let (lcs, _) = lower_models_with_registry(&app.models, &app.schema, vec![]);
     let article = lcs
@@ -193,7 +228,26 @@ fn bulk_lowering_rewrites_has_many_proxy_via_arel() {
         .find(|m| m.name.as_str() == "comments")
         .expect("comments method present");
 
-    match &*comments.body.node {
+    let stmts = match &*comments.body.node {
+        roundhouse::ExprNode::Seq { exprs } => exprs,
+        roundhouse::ExprNode::Send { method, .. } => panic!(
+            "comments body is a bare Send {{ method: {} }} — the cache-aware \
+             reader shape was lost",
+            method.as_str()
+        ),
+        other => panic!("comments body has unexpected shape: {other:?}"),
+    };
+    assert_eq!(stmts.len(), 2, "expected [loaded-guard, arel hydrate Seq]");
+
+    // Guard is left alone (no AR call to rewrite).
+    assert!(
+        matches!(&*stmts[0].node, roundhouse::ExprNode::If { .. }),
+        "first stmt should remain the loaded-guard If; got {:?}",
+        stmts[0].node,
+    );
+
+    // Lazy tail is rewritten into the SELECT/hydrate Seq.
+    match &*stmts[1].node {
         roundhouse::ExprNode::Seq { exprs } => {
             assert!(
                 exprs.len() >= 5,
@@ -203,10 +257,10 @@ fn bulk_lowering_rewrites_has_many_proxy_via_arel() {
             );
         }
         roundhouse::ExprNode::Send { method, .. } => panic!(
-            "Arel pass did not fire — comments body is still `Send {{ method: {} }}`",
+            "Arel pass did not fire — lazy tail is still `Send {{ method: {} }}`",
             method.as_str()
         ),
-        other => panic!("comments body has unexpected shape: {other:?}"),
+        other => panic!("lazy tail has unexpected shape: {other:?}"),
     }
 }
 

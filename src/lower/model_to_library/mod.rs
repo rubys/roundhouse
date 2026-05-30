@@ -195,7 +195,7 @@ fn lower_models_inner(
             // handle (Phase 2 will route them to a runtime Arel
             // module instead). See project_arel_compile_time_first.md.
             crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
-            type_method_body(method, &classes, table);
+            type_method_body(method, &classes, table, Some(model));
         }
         out.push(LibraryClass {
             name: model.name.clone(),
@@ -220,7 +220,9 @@ fn lower_models_inner(
             .find(|m| m.name.0.as_str() == model_name)
             .and_then(|m| schema.tables.get(&m.table.0));
         for method in &mut row_lc.methods {
-            type_method_body(method, &classes, table);
+            // Row classes hold scalar schema fields only — no
+            // associations, so no cache ivars to seed.
+            type_method_body(method, &classes, table, None);
         }
     }
     // Append synthesized Row classes after the model classes. Per-target
@@ -349,7 +351,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         classes.insert(row_lc.name.clone(), self::row::row_class_info(row_lc));
     }
     for method in &mut methods {
-        type_method_body(method, &classes, table);
+        type_method_body(method, &classes, table, Some(model));
     }
     LibraryClass {
         name: model.name.clone(),
@@ -764,6 +766,7 @@ fn type_method_body(
     method: &mut MethodDef,
     classes: &HashMap<ClassId, crate::analyze::ClassInfo>,
     table: Option<&Table>,
+    model: Option<&Model>,
 ) {
     let typer = crate::analyze::BodyTyper::new(classes);
     let mut ctx = crate::analyze::Ctx::default();
@@ -786,6 +789,16 @@ fn type_method_body(
             for col in &t.columns {
                 ctx.ivar_bindings
                     .insert(col.name.clone(), ty_of_column(&col.col_type));
+            }
+        }
+        // has_many eager-load cache ivars (`@<assoc>_cache` /
+        // `@<assoc>_loaded`) aren't schema columns, so seed them too —
+        // otherwise the cache-aware reader's reads stay `Var(0)`
+        // (issue #27). Row classes pass `None` (scalar fields only, no
+        // associations).
+        if let Some(m) = model {
+            for (name, ty) in self::associations::assoc_cache_ivar_bindings(m) {
+                ctx.ivar_bindings.insert(name, ty);
             }
         }
     }

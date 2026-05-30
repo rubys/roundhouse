@@ -133,6 +133,36 @@ fn cache_ivar(name: &Symbol) -> Symbol {
 fn loaded_ivar(name: &Symbol) -> Symbol {
     Symbol::from(format!("{}_loaded", name.as_str()))
 }
+
+/// Body-typer ivar bindings for a model's has_many eager-load caches
+/// (issue #27): `@<assoc>_cache` is `Array<Target>`, `@<assoc>_loaded`
+/// is `Bool`. The reader reads both and the constructor
+/// (model_to_library::schema) initializes them to `[]` / `false`, but
+/// they aren't schema columns, so the per-method typer must be seeded
+/// with them explicitly or the reads stay `Var(0)` (the strict-0
+/// untyped residual the lowered_real_blog_typing_residual gate counts).
+///
+/// Non-nilable on purpose: the constructor always initializes them, and
+/// the reader's `return @<assoc>_cache` must match its `Array<Target>`
+/// signature — a Nil union would reintroduce the Crystal "returning
+/// (Array(Comment)|Nil)" mismatch the eager-load fan-out already closed.
+/// Shares `cache_ivar`/`loaded_ivar` with the synthesizers so the names
+/// can't drift.
+pub(in crate::lower::model_to_library) fn assoc_cache_ivar_bindings(
+    model: &Model,
+) -> Vec<(Symbol, Ty)> {
+    let mut out = Vec::new();
+    for assoc in model.associations() {
+        if let Association::HasMany { name, target, .. } = assoc {
+            out.push((
+                cache_ivar(name),
+                Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+            ));
+            out.push((loaded_ivar(name), Ty::Bool));
+        }
+    }
+    out
+}
 fn lit_bool(value: bool) -> Expr {
     let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value } });
     e.ty = Some(Ty::Bool);
