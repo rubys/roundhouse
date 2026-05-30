@@ -33,6 +33,25 @@ pub(crate) mod ty;
 
 pub(crate) use ctx::EmitCtx;
 
+/// Degrade a failed library-class / module emit into a collected
+/// `Unsupported` diagnostic plus a `compile_error!` stub, instead of
+/// `panic!`-ing the whole transpile (issue #28). The rest of the crate
+/// still emits, so one run surfaces the full inventory of gaps; the
+/// stub is a clean, located compile error rather than cascading
+/// garbage. `subject` names what failed (`model \`Article\``); `err` is
+/// the inner emit error.
+fn emit_failure_stub(subject: &str, err: &str) -> String {
+    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        Some(crate::ident::Symbol::from("rust2")),
+        subject,
+        err,
+    ));
+    format!(
+        "compile_error!({:?});",
+        format!("roundhouse: rust2 {subject} emit failed: {err}")
+    )
+}
+
 /// Minimal Cargo.toml for the migration-target crate. Mirrors what
 /// the migration plan's "Cargo.toml shape" section described: rust
 /// 2024 edition, axum + tokio + rusqlite for primitive runtime,
@@ -621,7 +640,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => {
-                    panic!("rust2 model emit failed for {}: {e}", lc.name.0.as_str());
+                    emit_failure_stub(&format!("model `{}`", lc.name.0.as_str()), &e)
                 }
             };
             // App-model emit calls into the rust2 primitive runtime
@@ -781,7 +800,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if let Some(lc) = &route_helpers_lc {
         let body = match library::emit_library_class(lc) {
             Ok(s) => s,
-            Err(e) => panic!("rust2 route_helpers emit failed: {e}"),
+            Err(e) => emit_failure_stub("route_helpers", &e),
         };
         // Wedge 2c.3: bare-fn compat shim. Legacy-emit controller
         // tests call `route_helpers::article_path(id)`; rust2 emits
@@ -798,7 +817,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if let Some(lc) = &importmap_lc {
         let body = match library::emit_library_class(lc) {
             Ok(s) => s,
-            Err(e) => panic!("rust2 importmap emit failed: {e}"),
+            Err(e) => emit_failure_stub("importmap", &e),
         };
         files.push(EmittedFile {
             path: PathBuf::from("src/importmap.rs"),
@@ -815,7 +834,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => {
-                    panic!("rust2 view emit failed for {}: {e}", lc.name.0.as_str());
+                    emit_failure_stub(&format!("view `{}`", lc.name.0.as_str()), &e)
                 }
             };
             // Layout bridge (mirrors Crystal's
@@ -879,7 +898,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => {
-                    panic!("rust2 controller emit failed for {}: {e}", lc.name.0.as_str());
+                    emit_failure_stub(&format!("controller `{}`", lc.name.0.as_str()), &e)
                 }
             };
             if lc.origin.is_some() {
@@ -991,7 +1010,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
                 Err(e) => {
-                    panic!("rust2 fixture emit failed for {}: {e}", lc.name.0.as_str());
+                    emit_failure_stub(&format!("fixture `{}`", lc.name.0.as_str()), &e)
                 }
             };
             // Wedge 2c.3: bare-fn compat shim for per-fixture-module
@@ -1106,7 +1125,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
             let body = match library::emit_module(&lc.methods) {
                 Ok(s) => s,
-                Err(e) => panic!("rust2 test emit failed for {class_name}: {e}"),
+                Err(e) => emit_failure_stub(&format!("test `{class_name}`"), &e),
             };
 
             // Prepend `#[test]` before each `pub fn test_*` — helpers

@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use roundhouse::analyze::Analyzer;
+use roundhouse::analyze::{Analyzer, Severity};
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::{self, BuildTarget};
 
@@ -43,6 +43,11 @@ Options:
       --site           Build all targets + landing-page assets.
                        Default INPUT=fixtures/real-blog  Default OUT=./_site/
   -o, --output PATH    Output directory.
+      --allow-unsupported
+                       Don't fail on unsupported-construct gaps: emit a
+                       stub at each site, downgrade the diagnostics to
+                       warnings, and write the output anyway. Use to see
+                       the full inventory of gaps in one run.
   -h, --help           Show this help and exit.
   -V, --version        Show version and exit.
 
@@ -63,13 +68,15 @@ fn main() -> ExitCode {
             println!("roundhouse {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Ok(Action::Transpile { target, input, out }) => match run_transpile(target, &input, &out) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("roundhouse: {e}");
-                ExitCode::FAILURE
+        Ok(Action::Transpile { target, input, out, allow_unsupported }) => {
+            match run_transpile(target, &input, &out, allow_unsupported) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("roundhouse: {e}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Ok(Action::Site { input, out }) => match project::build_site(&input, &out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -93,6 +100,7 @@ enum Action {
         target: BuildTarget,
         input: PathBuf,
         out: PathBuf,
+        allow_unsupported: bool,
     },
     Site {
         input: PathBuf,
@@ -104,6 +112,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
     let mut target: Option<BuildTarget> = None;
     let mut site = false;
     let mut out: Option<PathBuf> = None;
+    let mut allow_unsupported = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut iter = args.into_iter();
@@ -112,6 +121,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "--site" => site = true,
+            "--allow-unsupported" => allow_unsupported = true,
             "-t" | "--target" => {
                 let v = iter
                     .next()
@@ -155,7 +165,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
                 .unwrap_or_else(|| PathBuf::from("."));
             let out =
                 out.unwrap_or_else(|| PathBuf::from("out").join(target.as_str()));
-            Ok(Action::Transpile { target, input, out })
+            Ok(Action::Transpile { target, input, out, allow_unsupported })
         }
         (None, true) => {
             let input = positional
@@ -189,6 +199,7 @@ fn run_transpile(
     target: BuildTarget,
     input: &std::path::Path,
     out: &std::path::Path,
+    allow_unsupported: bool,
 ) -> Result<(), String> {
     if !input.exists() {
         return Err(format!("input {} does not exist", input.display()));
@@ -197,7 +208,37 @@ fn run_transpile(
         ingest_app(input).map_err(|e| format!("ingest {}: {e}", input.display()))?;
     Analyzer::new(&app).analyze(&mut app);
 
-    let mut files = project::target_files(&app, input, target)?;
+    // Emit inside a diagnostic scope so unsupported-construct gaps in
+    // any lowerer/emitter are collected rather than lost (issue #28).
+    // Each gap still degrades to a stub in the emitted output, so a
+    // single run surfaces the whole inventory instead of dying on the
+    // first one.
+    let (files_result, mut diags) =
+        roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
+    let mut files = files_result?;
+
+    // Policy: unsupported-construct errors fail the transpile cleanly by
+    // default. With --allow-unsupported they downgrade to warnings and
+    // the stub'd output is written, so the user can inspect the full
+    // inventory in one pass.
+    if allow_unsupported {
+        for d in &mut diags {
+            if d.severity == Severity::Error {
+                d.severity = Severity::Warning;
+            }
+        }
+    }
+    for d in &diags {
+        eprintln!("roundhouse: {d}");
+    }
+    let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+    if errors > 0 {
+        return Err(format!(
+            "{errors} unsupported construct(s) — rerun with --allow-unsupported \
+             to emit stubs and write the full inventory"
+        ));
+    }
+
     let has_readme = files.iter().any(|(p, _)| p == "README.md");
     if !has_readme {
         files.push(("README.md".to_string(), project::target_readme(target)));
