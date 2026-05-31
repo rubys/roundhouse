@@ -62,8 +62,16 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     // a time, so a per-unit registration alone can't see modules it
     // hasn't reached yet. Clear first so a prior emit doesn't leak.
     expr::clear_modules();
+    expr::clear_field_names();
     if let Err(e) = crate::runtime_loader::elixir_library_classes(|classes| {
         expr::register_modules(classes.iter());
+        // Register each class's struct fields (post-functionalize, since
+        // mutation-threading is what surfaces bare-ivar fields) so a
+        // method-on-typed-local can tell a field read from a method call.
+        for class in crate::lower::functionalize::functionalize(classes.to_vec()) {
+            let fields = library::struct_fields(&class);
+            expr::register_field_names(class.name.0.as_str(), &fields);
+        }
     }) {
         out.push(EmittedFile {
             path: output_path(OutputKind::TranspileError).path,

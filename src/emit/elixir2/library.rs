@@ -57,11 +57,13 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
             .iter()
             .all(|m| matches!(m.receiver, MethodReceiver::Class));
 
-    // Record-threading instance methods of this class: a self-call
-    // routes a leading `record` arg only to these (see expr::RECORD_METHODS).
-    // A pure instance method (no `@ivar`/`self`, so no `record` in its
-    // lowered body — e.g. `resolve_status`) is excluded, keeping its
-    // self-call arity-correct.
+    // Instance methods of this class, by emitted name. EVERY instance
+    // method threads a leading `record` param (a pure one gets `_record`),
+    // so a self-call, an implicit-self bareword call, and cross-instance
+    // `x.__struct__.m(x, …)` dispatch all agree on arity. Membership tells
+    // the call-site router which barewords are instance methods (thread
+    // record) vs class methods / module functions (don't). `initialize`
+    // is the constructor (`new`), not a threaded instance method.
     let record_methods: std::collections::HashSet<String> = class
         .methods
         .iter()
@@ -69,7 +71,10 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
             !is_module_singleton
                 && matches!(m.receiver, MethodReceiver::Instance)
                 && m.name.as_str() != "initialize"
-                && body_references_record(&m.body)
+                && !matches!(
+                    m.kind,
+                    AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+                )
         })
         .map(|m| elixir_fn_name(m.name.as_str()))
         .collect();
@@ -193,7 +198,10 @@ pub fn format_constant(name: &str, value: &Expr) -> String {
 /// The struct's `defstruct` fields: attr-declared names plus every
 /// `@ivar` the method bodies reference (read or written). Covers structs
 /// whose state is a bare ivar with no accessor (session's `@data`).
-fn struct_fields(class: &LibraryClass) -> Vec<String> {
+/// `pub(super)` so the overlay can register a global field registry for
+/// method-on-typed-local routing (a `x.id` field read vs `x.save()`
+/// method call on a typed record).
+pub(super) fn struct_fields(class: &LibraryClass) -> Vec<String> {
     let mut out = collect_struct_fields(&class.methods);
     for m in &class.methods {
         collect_ivar_names(&m.body, &mut out);
@@ -274,17 +282,19 @@ fn collect_struct_fields(methods: &[MethodDef]) -> Vec<String> {
 }
 
 /// Emit one method as an Elixir `def` (indented one level for inside a
-/// `defmodule`; the body is indented a further level). An instance
-/// method threads a leading `record` param — but only when its
-/// (mutation-lowered) body actually references `record`; pure instance
-/// methods (no `@ivar` use) take no record param so bareword self-calls
-/// stay arity-correct.
+/// `defmodule`; the body is indented a further level). EVERY instance
+/// method threads a leading `record` param so call sites (self-calls,
+/// bareword implicit-self, and cross-instance `x.__struct__.m(x, …)`)
+/// agree on arity; a method whose body doesn't reference `record` (a
+/// pure one, e.g. `resolve_status`) names it `_record` to stay
+/// warning-clean.
 fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     let body = expr::emit_method_body(&m.body);
 
     let mut params: Vec<String> = Vec::new();
-    if instance_method && references_token(&body, "record") {
-        params.push("record".to_string());
+    if instance_method {
+        let name = if references_token(&body, "record") { "record" } else { "_record" };
+        params.push(name.to_string());
     }
     params.extend(m.params.iter().map(param_decl));
     // A body that `yield`s calls the block through a trailing `block_fn`.
@@ -302,69 +312,6 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     out.push_str(&expr::indent(&body, 2));
     out.push('\n');
     out.push_str("  end\n");
-}
-
-/// Whether a (post-functionalize) method body threads `record` — i.e.
-/// contains a `record` Var or a `self` reference. Mutation-threading
-/// rewrites `@ivar`/`self` to `record` (Var) + `record.__field__`/
-/// `__struct_put__` bridges (recv = `record` Var), so a body that touches
-/// instance state has a `record` Var; a pure method (reads only constants/
-/// params, like `resolve_status`) does not. Drives the per-class
-/// record-threading set used by self-call routing.
-fn body_references_record(e: &Expr) -> bool {
-    let mut found = false;
-    let mut visit = |n: &Expr| {
-        match &*n.node {
-            ExprNode::Var { name, .. } if name.as_str() == "record" => found = true,
-            ExprNode::SelfRef => found = true,
-            _ => {}
-        }
-    };
-    walk_expr(e, &mut visit);
-    found
-}
-
-/// Pre-order walk over every sub-expression of `e`.
-fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
-    f(e);
-    match &*e.node {
-        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
-            exprs.iter().for_each(|x| walk_expr(x, f))
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                walk_expr(r, f)
-            }
-            args.iter().for_each(|a| walk_expr(a, f));
-            if let Some(b) = block {
-                walk_expr(b, f)
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_expr(cond, f);
-            walk_expr(then_branch, f);
-            walk_expr(else_branch, f);
-        }
-        ExprNode::While { cond, body, .. } => {
-            walk_expr(cond, f);
-            walk_expr(body, f);
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_expr(left, f);
-            walk_expr(right, f);
-        }
-        ExprNode::Assign { value, .. } => walk_expr(value, f),
-        ExprNode::Return { value } | ExprNode::Cast { value, .. } => walk_expr(value, f),
-        ExprNode::Yield { args } => args.iter().for_each(|a| walk_expr(a, f)),
-        ExprNode::Lambda { body, .. } => walk_expr(body, f),
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_expr(k, f);
-                walk_expr(v, f);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Whether a rendered body references `tok` as an identifier token

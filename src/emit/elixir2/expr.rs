@@ -84,6 +84,38 @@ pub(super) fn register_declared_constant(name: &str) {
     });
 }
 
+thread_local! {
+    /// Ruby class name → its struct field names, across all units
+    /// (registered up front). Lets a method-on-typed-local distinguish a
+    /// struct FIELD read (`record.id` → `record.id`) from a METHOD call
+    /// (`instance.save` → `instance.__struct__.save(instance)`).
+    static FIELD_NAMES: RefCell<HashMap<String, std::collections::HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Reset the field registry (start of an overlay emit).
+pub(super) fn clear_field_names() {
+    FIELD_NAMES.with(|f| f.borrow_mut().clear());
+}
+
+/// Register a class's struct field names (see `FIELD_NAMES`).
+pub(super) fn register_field_names(class: &str, fields: &[String]) {
+    FIELD_NAMES.with(|f| {
+        f.borrow_mut()
+            .insert(class.to_string(), fields.iter().cloned().collect());
+    });
+}
+
+/// True when `field` is a known struct field of class `id` — so
+/// `value.field` is a field read rather than a 0-arg method call.
+fn is_struct_field(class_id: &str, field: &str) -> bool {
+    FIELD_NAMES.with(|f| {
+        f.borrow()
+            .get(class_id)
+            .is_some_and(|set| set.contains(field))
+    })
+}
+
 /// True when `name` is a record-threading instance method of the current
 /// class — so a self-call to it takes a leading `record` arg.
 fn threads_record(name: &str) -> bool {
@@ -834,6 +866,36 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Method/field access on a typed record value — a local/param typed
+    // as a model class (`instance.save`, `r.destroy`, `record.id`), as
+    // opposed to the threaded `record` self (handled above). A known
+    // struct field is a field read (`x.field`); anything else is an
+    // instance-method call, dispatched polymorphically through the
+    // struct's module so the actual subclass's implementation runs:
+    // `x.__struct__.m(x, args)` (record threaded as the first arg).
+    if let Some(r) = recv {
+        // A `Const` receiver (`Session.new`, `Article.find`) is a CLASS
+        // reference — a static call `Module.method(args)`, handled by the
+        // default form below — NOT an instance value, even though the
+        // class const carries `Ty::Class`. Only route a value receiver
+        // (local/param/expression) through the instance dispatch.
+        let is_class_ref = matches!(&*r.node, ExprNode::Const { .. });
+        if let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() {
+            if !is_record_var(r) && !is_class_ref {
+                let r_s = emit_expr(r);
+                if args.is_empty() && is_struct_field(id.0.as_str(), method) {
+                    return format!("{r_s}.{method}");
+                }
+                let fname = super::library::elixir_fn_name(method);
+                return if args.is_empty() {
+                    format!("{r_s}.__struct__.{fname}({r_s})")
+                } else {
+                    format!("{r_s}.__struct__.{fname}({r_s}, {})", emit_args(args))
+                };
+            }
+        }
+    }
+
     // Default call forms.
     match recv {
         None => {
@@ -842,6 +904,25 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // recv-less `Send` is always a CALL (a bare local read is a
             // `Var` node), so 0-arity gets `()` too — Elixir reads
             // `table_name` without parens as an undefined variable.
+            //
+            // An implicit-self call to a same-class INSTANCE method
+            // threads `record` (we're inside an instance method, so it's
+            // in scope) — e.g. `save` inside `save!` → `save(record)` —
+            // keeping arity in step with explicit `record.m`/`x.__struct__
+            // .m` call sites. Class methods / module functions aren't in
+            // the set, so they stay bare.
+            //
+            // A `*__loop` recursion helper is excluded: `while_to_recursion`
+            // already builds its entry/recurse calls with `record` as the
+            // explicit first arg, so auto-threading would double it.
+            let fname = super::library::elixir_fn_name(method);
+            if threads_record(&fname) && !fname.ends_with("__loop") {
+                return if args.is_empty() {
+                    format!("{fname}(record)")
+                } else {
+                    format!("{fname}(record, {})", emit_args(args))
+                };
+            }
             format!("{}({})", method, emit_args(args))
         }
         Some(r) => {
@@ -1278,13 +1359,50 @@ mod tests {
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
-        // The pure method takes no record param; the self-call to it from
-        // the record-threading `render` stays arity-correct (no record arg).
-        assert!(ex.contains("def resolve_status(s)"), "pure method, no record param:\n{ex}");
-        assert!(ex.contains("resolve_status(s)"), "self-call drops record:\n{ex}");
-        assert!(!ex.contains("resolve_status(record"), "no record threaded into pure call:\n{ex}");
-        // `render` itself does thread record (it writes @status).
+        // Uniform record threading: EVERY instance method takes a leading
+        // `record` param (a pure one — `resolve_status` reads only a
+        // constant — names it `_record`), and the self-call passes it. So
+        // self-calls, bareword implicit-self, and `x.__struct__.m` dispatch
+        // all agree on arity.
+        assert!(ex.contains("def resolve_status(_record, s)"), "pure method takes _record:\n{ex}");
+        assert!(ex.contains("resolve_status(record, s)"), "self-call threads record:\n{ex}");
         assert!(ex.contains("def render(record, s)"), "render threads record:\n{ex}");
+    }
+
+    #[test]
+    fn method_on_typed_local_dispatches_via_struct() {
+        use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, AccessorKind};
+        use crate::effect::EffectSet;
+        use crate::ident::ClassId;
+        fn sym(s: &str) -> Symbol { Symbol::from(s) }
+        fn syn(node: ExprNode) -> Expr { Expr::new(crate::span::Span::synthetic(), node) }
+
+        // `instance.save` where `instance: Ty::Class{Foo}` (a value, not
+        // the threaded record) → polymorphic `instance.__struct__.save(
+        // instance)`. `instance.id` (a struct field) → field read.
+        let mut instance = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
+        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+        let save_call = call(instance.clone(), "save", vec![]);
+        let id_read = call(instance, "id", vec![]);
+
+        // Register Foo's struct fields so `id` is a field, `save` a method.
+        super::register_field_names("Foo", &["id".to_string()]);
+        assert_eq!(emit_expr(&save_call), "instance.__struct__.save(instance)");
+        assert_eq!(emit_expr(&id_read), "instance.id");
+        super::clear_field_names();
+        // After clearing, `id` (unknown field) routes as a method call.
+        assert_eq!(
+            emit_expr(&call(
+                {
+                    let mut v = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
+                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+                    v
+                },
+                "id",
+                vec![]
+            )),
+            "instance.__struct__.id(instance)"
+        );
     }
 
     fn call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {

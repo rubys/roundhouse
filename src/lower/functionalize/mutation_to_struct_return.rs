@@ -699,13 +699,15 @@ mod tests {
     }
 
     #[test]
-    fn pure_instance_method_takes_no_record() {
-        // `def resolve_status(s); s; end` — no @ivar, so no record param.
+    fn pure_instance_method_takes_underscore_record() {
+        // `def resolve_status(s); s; end` — no @ivar, but under uniform
+        // record threading every instance method takes a leading record
+        // param; a pure one names it `_record` (warning-clean) so call
+        // sites can pass `record` uniformly.
         let m = instance_method("resolve_status", &["s"], syn(ExprNode::Seq { exprs: vec![vr("s")] }));
         let out = transform_method(m);
         let ex = render_via_elixir(vec![out]);
-        assert!(ex.contains("def resolve_status(s)"), "no record param:\n{ex}");
-        assert!(!ex.contains("record"), "pure method untouched:\n{ex}");
+        assert!(ex.contains("def resolve_status(_record, s)"), "underscore record param:\n{ex}");
     }
 
     #[test]
