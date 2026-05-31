@@ -250,6 +250,11 @@ fn append_record_return(body: Expr) -> Expr {
             match exprs.last() {
                 // Already returns `record` (self) — leave it.
                 Some(e) if is_record_var(e) => return body,
+                // Tail is a guard `if` (`return X if c` → then-branch
+                // returns) — it's the terminal value (both branches yield
+                // record), so don't append. (Constructor-with-loop:
+                // `if is_nil(other) do record else …__loop(record,…) end`.)
+                Some(e) if is_guard_if(e) => return body,
                 // Drop a trailing `nil` or a bare local-var read: in a
                 // threaded mutator the method's own return value is
                 // superseded by `record` (e.g. `[]=` returns the assigned
@@ -269,6 +274,21 @@ fn append_record_return(body: Expr) -> Expr {
         }
         ExprNode::Lit { value: Literal::Nil } => record,
         _ => syn(ExprNode::Seq { exprs: vec![body, record] }),
+    }
+}
+
+/// True when `e` is an `if` whose then-branch ends in a `return` — a
+/// guard that produces the method's value (so it shouldn't get a
+/// trailing `record` appended after it).
+fn is_guard_if(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::If { then_branch, .. } if ends_in_return(then_branch))
+}
+
+fn ends_in_return(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Return { .. } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(ends_in_return),
+        _ => false,
     }
 }
 

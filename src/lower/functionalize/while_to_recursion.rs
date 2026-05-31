@@ -134,6 +134,12 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
         recurse_args.push(var(&Symbol::from("record")));
     }
     recurse_args.extend(helper_params.iter().map(|p| var(&p.name)));
+    // A `yield` in the loop body becomes `block_fn.(…)`; thread `block_fn`
+    // through the recursion (the emitter appends it as the trailing param
+    // of both the entry and the helper).
+    if contains_yield(while_body) {
+        recurse_args.push(var(&Symbol::from("block_fn")));
+    }
     let recurse_call = bareword_call(&helper_name, recurse_args);
 
     // Loop body (accumulators threaded) with the trailing step lowered.
@@ -327,10 +333,10 @@ fn has_unsupported(e: &Expr) -> bool {
         | ExprNode::OpAssign { target: LValue::Index { .. } | LValue::Attr { .. }, .. }
         // A compound assignment other than the (already-excluded) trailing step.
         | ExprNode::OpAssign { target: LValue::Var { .. }, .. }
-        // Loop control / blocks / nested loops.
+        // Loop control / nested loops. (`yield` IS supported — it threads
+        // `block_fn` through the recursion.)
         | ExprNode::Break { .. }
         | ExprNode::Next { .. }
-        | ExprNode::Yield { .. }
         | ExprNode::While { .. } => bad = true,
         _ => {}
     });
@@ -374,6 +380,17 @@ fn referenced_vars(e: &Expr) -> Vec<Symbol> {
         }
     });
     out
+}
+
+/// True when the body contains a `yield` — the signal to thread `block_fn`.
+fn contains_yield(e: &Expr) -> bool {
+    let mut found = false;
+    walk(e, &mut |n| {
+        if matches!(&*n.node, ExprNode::Yield { .. }) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// True when the method body reads/writes instance state (`@ivar`/`self`)
@@ -846,6 +863,56 @@ mod tests {
         assert!(ex.contains("fill__loop(record, n, i)"), "initial call passes record:\n{ex}");
         assert!(ex.contains("def fill__loop(record, n, i)"), "helper threads record:\n{ex}");
         assert!(ex.contains("record = %{record | data: Map.put(record.data, i, i)}"), "nested @data in loop:\n{ex}");
+        assert!(!ex.contains("while"), "no while:\n{ex}");
+    }
+
+    #[test]
+    fn instance_loop_with_yield_threads_record_and_block_fn() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        // def each            # Instance
+        //   keys = @data.keys
+        //   i = 0
+        //   while i < keys.length
+        //     k = keys[i]
+        //     yield k          # (simplified: yield one value)
+        //     i += 1
+        //   end
+        //   self
+        // end
+        let ivar_keys = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Ivar { name: sym("data") })),
+            method: sym("keys"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        let loop_body = seq(vec![
+            assign("k", index_get("keys", vr("i"))),
+            syn(ExprNode::Yield { args: vec![vr("k")] }),
+            step_add("i"),
+        ]);
+        let body = seq(vec![
+            assign("keys", ivar_keys),
+            assign("i", lit_int(0)),
+            while_(binop(vr("i"), "<", binop_call(vr("keys"), "length")), loop_body),
+            syn(ExprNode::SelfRef),
+        ]);
+        let class = LibraryClass {
+            name: ClassId(sym("Sess")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![method("each", MethodReceiver::Instance, &[], body)],
+            origin: None,
+        };
+        let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- each w/ yield ---\n{ex}\n---------------------");
+        assert!(ex.contains("def each(record, block_fn)"), "entry threads record+block_fn:\n{ex}");
+        assert!(ex.contains("each__loop(record, keys, i, block_fn)"), "recurse threads both:\n{ex}");
+        assert!(ex.contains("def each__loop(record, keys, i, block_fn)"), "helper params:\n{ex}");
+        assert!(ex.contains("block_fn.(k)"), "yield → block_fn call:\n{ex}");
         assert!(!ex.contains("while"), "no while:\n{ex}");
     }
 
