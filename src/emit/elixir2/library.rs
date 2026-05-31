@@ -168,10 +168,14 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     let body = expr::emit_method_body(&m.body);
 
     let mut params: Vec<String> = Vec::new();
-    if instance_method && references_record(&body) {
+    if instance_method && references_token(&body, "record") {
         params.push("record".to_string());
     }
     params.extend(m.params.iter().map(|p| p.as_str().to_string()));
+    // A body that `yield`s calls the block through a trailing `block_fn`.
+    if references_token(&body, "block_fn") {
+        params.push("block_fn".to_string());
+    }
 
     writeln!(
         out,
@@ -185,11 +189,12 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     out.push_str("  end\n");
 }
 
-/// Whether a rendered body references the `record` var as a token (the
-/// signal that mutation-threading rewrote this instance method).
-fn references_record(body: &str) -> bool {
+/// Whether a rendered body references `tok` as an identifier token
+/// (used to detect emitter-introduced params: `record` from mutation-
+/// threading, `block_fn` from `yield`).
+fn references_token(body: &str, tok: &str) -> bool {
     body.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .any(|tok| tok == "record")
+        .any(|t| t == tok)
 }
 
 /// Map a Ruby method name to a legal Elixir function name. `?`/`!`

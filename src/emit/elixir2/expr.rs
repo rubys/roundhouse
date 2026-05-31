@@ -211,6 +211,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             emit_send(recv.as_ref(), method.as_str(), args)
         }
         ExprNode::Return { value } => emit_expr(value),
+        // `yield a, b` → call the block passed as the trailing `block_fn`
+        // param (added by emit_fn when the body yields).
+        ExprNode::Yield { args } => format!("block_fn.({})", emit_args(args)),
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => emit_stmts(exprs),
         ExprNode::If { cond, then_branch, else_branch } => {

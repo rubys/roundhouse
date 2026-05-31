@@ -52,8 +52,8 @@ fn should_thread(m: &MethodDef) -> bool {
     if m.name.as_str() == "initialize" {
         return false;
     }
-    // Must touch instance state, and stay inside v1's coverage.
-    touches_ivar(&m.body) && !has_nested_mutation_or_loop(&m.body)
+    // Must touch instance state (`@ivar` or `self`), and stay in coverage.
+    touches_self(&m.body) && !has_nested_mutation_or_loop(&m.body)
 }
 
 fn rewrite(mut m: MethodDef) -> MethodDef {
@@ -73,8 +73,13 @@ fn rewrite(mut m: MethodDef) -> MethodDef {
 
 fn rewrite_expr(e: &Expr) -> Expr {
     match &*e.node {
-        // `@x` read → `record.x`.
+        // `@x` read → `record.x`; `self` → `record`.
         ExprNode::Ivar { name } => field_read(name),
+        ExprNode::SelfRef => var(RECORD),
+        // Rewrite into yielded args (they may read `@ivar`/`self`).
+        ExprNode::Yield { args } => {
+            syn(ExprNode::Yield { args: args.iter().map(rewrite_expr).collect() })
+        }
         // `@x = v` write → `record = record.__struct_put__(:x, v)`.
         ExprNode::Assign { target: LValue::Ivar { name }, value } => syn(ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
@@ -140,11 +145,20 @@ fn rewrite_expr(e: &Expr) -> Expr {
 /// method yields the updated struct.
 fn append_record_return(body: Expr) -> Expr {
     let record = var(RECORD);
+    // Already returns `record` (e.g. a rewritten trailing `self`)? Leave it.
+    if is_record_var(&body) {
+        return body;
+    }
     match &*body.node {
         ExprNode::Seq { exprs } => {
             let mut exprs = exprs.clone();
-            if matches!(exprs.last().map(|e| &*e.node), Some(ExprNode::Lit { value: Literal::Nil })) {
-                exprs.pop();
+            match exprs.last().map(|e| &*e.node) {
+                // Drop a trailing `nil`; leave a trailing `record` (self).
+                Some(ExprNode::Lit { value: Literal::Nil }) => {
+                    exprs.pop();
+                }
+                _ if exprs.last().is_some_and(is_record_var) => return body,
+                _ => {}
             }
             exprs.push(record);
             syn(ExprNode::Seq { exprs })
@@ -154,12 +168,16 @@ fn append_record_return(body: Expr) -> Expr {
     }
 }
 
+fn is_record_var(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == RECORD)
+}
+
 // ---- detection -------------------------------------------------------
 
-fn touches_ivar(e: &Expr) -> bool {
+fn touches_self(e: &Expr) -> bool {
     let mut found = false;
     walk(e, &mut |n| {
-        if matches!(&*n.node, ExprNode::Ivar { .. })
+        if matches!(&*n.node, ExprNode::Ivar { .. } | ExprNode::SelfRef)
             || matches!(&*n.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. })
         {
             found = true;
@@ -179,7 +197,7 @@ fn writes_ivar(e: &Expr) -> bool {
 }
 
 /// Nested mutation (`@flash[:notice] = v` → `Send{recv: Ivar, "[]="}`)
-/// or a loop/`yield` — outside v1; bail.
+/// or a loop — outside v1; bail. (`yield` IS supported.)
 fn has_nested_mutation_or_loop(e: &Expr) -> bool {
     let mut bad = false;
     walk(e, &mut |n| match &*n.node {
@@ -188,7 +206,7 @@ fn has_nested_mutation_or_loop(e: &Expr) -> bool {
         {
             bad = true
         }
-        ExprNode::While { .. } | ExprNode::Yield { .. } => bad = true,
+        ExprNode::While { .. } => bad = true,
         _ => {}
     });
     bad
@@ -367,6 +385,24 @@ mod tests {
         let trimmed = ex.trim_end();
         assert!(trimmed.ends_with("record\n  end\nend"), "returns record:\n{ex}");
         assert!(!ex.contains("@"), "no raw ivars remain:\n{ex}");
+    }
+
+    #[test]
+    fn yielding_method_takes_block_fn_and_returns_record() {
+        // `def each; yield @notice; self; end` (Instance).
+        let body = syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Yield { args: vec![syn(ExprNode::Ivar { name: sym("notice") })] }),
+                syn(ExprNode::SelfRef),
+            ],
+        });
+        let out = transform_method(instance_method("each", &[], body));
+        let ex = render_via_elixir(vec![out]);
+        eprintln!("--- each ---\n{ex}\n------------");
+        assert!(ex.contains("def each(record, block_fn)"), "threads record + block_fn:\n{ex}");
+        assert!(ex.contains("block_fn.(record.notice)"), "yield → block_fn call:\n{ex}");
+        assert!(!ex.contains("self") && !ex.contains("@"), "self/@ rewritten:\n{ex}");
+        assert!(ex.trim_end().ends_with("record\n  end\nend"), "returns record:\n{ex}");
     }
 
     #[test]
