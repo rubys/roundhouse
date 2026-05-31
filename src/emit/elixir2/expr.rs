@@ -770,6 +770,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         if method == "+" {
             use crate::emit::shared::add::{classify_add, AddCase};
             let (ls, rs) = (emit_expr(r), emit_expr(arg));
+            // String concatenation is `<>` in Elixir, never `+`. The
+            // classifier needs BOTH operands typed `Str`, but the
+            // functionalize passes build fresh IR nodes that drop the
+            // `.ty` the body-typer set — so a SQL-building chain
+            // (`"INSERT…" + Db.escape_string(x) + …`) loses its types.
+            // Fall back to a structural check: a `+` whose left spine
+            // bottoms out in a string literal/interpolation (or a
+            // Str-typed node) IS string concatenation.
+            if is_string_rooted(r) || is_string_rooted(arg) {
+                return format!("{ls} <> {rs}");
+            }
             return match classify_add(r, arg) {
                 AddCase::StringConcat => format!("{ls} <> {rs}"),
                 AddCase::ArrayConcat { .. } => format!("{ls} ++ {rs}"),
@@ -1063,6 +1074,26 @@ fn recv_is_array(e: &Expr) -> bool {
 /// route to the same-module renamed accessor.
 fn is_record_var(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
+}
+
+/// True when `e` is structurally a String — a string literal,
+/// interpolation, a `Str`-typed node, or a `+` concatenation whose left
+/// operand is itself string-rooted. Used to recognize string concat
+/// (`<>`) when the body-typer's `.ty` was dropped by the functionalize
+/// passes (which rebuild IR nodes): a SQL-building `+` chain always
+/// roots in a string literal at its leftmost segment.
+fn is_string_rooted(e: &Expr) -> bool {
+    if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Str)) {
+        return true;
+    }
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { .. } } => true,
+        ExprNode::StringInterp { .. } => true,
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "+" => {
+            is_string_rooted(r)
+        }
+        _ => false,
+    }
 }
 
 /// True when `e` is `self.class` — a no-arg `class` Send whose receiver
@@ -1530,6 +1561,18 @@ mod tests {
         Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
             value: Literal::Str { value: s.to_string() },
         })
+    }
+
+    #[test]
+    fn string_rooted_plus_chain_emits_concat() {
+        // A `+` chain rooted in a string literal with UNTYPED operands
+        // (the functionalize passes drop the body-typer's `.ty`) still
+        // emits `<>`, not `+` — the SQL-building concat shape.
+        let inner = call(str_lit_e("SELECT "), "+", vec![var_t("col", Ty::Untyped)]);
+        let outer = call(inner, "+", vec![var_t("tail", Ty::Untyped)]);
+        assert_eq!(emit_expr(&outer), "\"SELECT \" <> col <> tail");
+        // A genuinely numeric `+` (no string root) stays `+`.
+        assert_eq!(emit_expr(&call(var_t("m", Ty::Int), "+", vec![var_t("n", Ty::Int)])), "m + n");
     }
 }
 
