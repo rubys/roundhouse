@@ -428,9 +428,32 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             let r_s = emit_expr(r);
             return if recv_is_array(r) {
                 format!("length({r_s})")
+            } else if recv_is_hash(r) {
+                format!("map_size({r_s})")
             } else {
                 format!("String.length({r_s})")
             };
+        }
+    }
+
+    // Ruby Hash methods → Elixir `Map.*` (gated on a Hash-typed receiver,
+    // so a struct's `key?`/`keys` route to its own methods instead).
+    if let Some(r) = recv {
+        if recv_is_hash(r) {
+            let r_s = emit_expr(r);
+            match (method, args.len()) {
+                ("keys", 0) => return format!("Map.keys({r_s})"),
+                ("values", 0) => return format!("Map.values({r_s})"),
+                ("empty?", 0) => return format!("map_size({r_s}) == 0"),
+                ("key?" | "has_key?" | "include?", 1) => {
+                    return format!("Map.has_key?({r_s}, {})", emit_expr(&args[0]))
+                }
+                ("fetch", 2) => {
+                    return format!("Map.get({r_s}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1]))
+                }
+                ("fetch", 1) => return format!("Map.fetch!({r_s}, {})", emit_expr(&args[0])),
+                _ => {}
+            }
         }
     }
 
@@ -744,6 +767,11 @@ fn is_record_var(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
 }
 
+/// True when the analyzer typed `e` as a `Hash` — route its methods to `Map.*`.
+fn recv_is_hash(e: &Expr) -> bool {
+    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+}
+
 /// Ruby infix operators whose Elixir spelling is identical.
 /// Operators whose Elixir spelling is a plain infix (comparisons, plus
 /// `/` which is numeric-only in both languages). `+`/`-`/`*`/`%`/`**`
@@ -838,6 +866,33 @@ mod tests {
             "total = Enum.reduce(items, total, fn x, total ->\n  total = total + x\n  total\nend)",
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn hash_methods_map_to_elixir_map() {
+        let hash = || {
+            var_t("h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) })
+        };
+        let no_args = |m: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(hash()),
+            method: Symbol::from(m),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        assert_eq!(emit_expr(&no_args("keys")), "Map.keys(h)");
+        assert_eq!(emit_expr(&no_args("values")), "Map.values(h)");
+        assert_eq!(emit_expr(&no_args("length")), "map_size(h)");
+        assert_eq!(emit_expr(&no_args("empty?")), "map_size(h) == 0");
+        // key?(k)
+        let key_q = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(hash()),
+            method: Symbol::from("key?"),
+            args: vec![var_t("k", Ty::Str)],
+            block: None,
+            parenthesized: false,
+        });
+        assert_eq!(emit_expr(&key_q), "Map.has_key?(h, k)");
     }
 
     #[test]
