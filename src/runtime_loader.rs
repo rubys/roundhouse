@@ -1118,6 +1118,17 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "lib/v2/router.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape

@@ -169,10 +169,13 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
 /// nodes are returned unchanged.
 fn rewrite_accumulators(e: &Expr, carried: &[Symbol]) -> Expr {
     match &*e.node {
-        ExprNode::Assign { target: LValue::Index { recv, index }, value } => {
+        // `acc[k] = v` rides the Send channel as `acc.[]=(k, v)`.
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
             if let ExprNode::Var { name, .. } = &*recv.node {
                 if carried.contains(name) {
-                    let entry = (index.clone(), value.clone());
+                    let entry = (args[0].clone(), args[1].clone());
                     let merged = binop(
                         var(name),
                         "merge",
@@ -302,7 +305,10 @@ fn lower_counter_step(stmt: &Expr) -> Option<(Symbol, Expr)> {
 fn has_unsupported(e: &Expr) -> bool {
     let mut bad = false;
     walk(e, &mut |n| match &*n.node {
-        // Accumulator / field mutation can't be threaded yet.
+        // Accumulator / field mutation that couldn't be threaded (a
+        // carried `acc.[]=` was already rewritten to a merge rebind, so
+        // any `[]=` still here is on a non-carried receiver).
+        ExprNode::Send { method, .. } if method.as_str() == "[]=" => bad = true,
         ExprNode::Assign { target: LValue::Index { .. } | LValue::Attr { .. }, .. }
         | ExprNode::OpAssign { target: LValue::Index { .. } | LValue::Attr { .. }, .. }
         // A compound assignment other than the (already-excluded) trailing step.
@@ -515,9 +521,13 @@ mod tests {
         })
     }
     fn index_assign(recv: &str, key: Expr, value: Expr) -> Expr {
-        syn(ExprNode::Assign {
-            target: LValue::Index { recv: var(&sym(recv)), index: key },
-            value,
+        // `recv[key] = value` rides the Send channel as `recv.[]=(key, value)`.
+        syn(ExprNode::Send {
+            recv: Some(vr(recv)),
+            method: sym("[]="),
+            args: vec![key, value],
+            block: None,
+            parenthesized: false,
         })
     }
     fn ret(value: Expr) -> Expr {
@@ -797,17 +807,14 @@ mod tests {
     }
 
     #[test]
-    fn field_mutation_bails() {
-        // `o.x = v` (attr mutation) can't be threaded — left unchanged.
+    fn noncarried_index_write_bails() {
+        // `other[i] = i` where `other` is not a carried (pre-loop-bound)
+        // var — can't be threaded, so the loop is left unchanged.
         let cond = binop(vr("i"), "<", binop_call(vr("table"), "length"));
-        let attr_assign = syn(ExprNode::Assign {
-            target: LValue::Attr { recv: vr("o"), name: sym("x") },
-            value: vr("i"),
-        });
-        let loop_body = seq(vec![attr_assign, step_add("i")]);
+        let loop_body = seq(vec![index_assign("other", vr("i"), vr("i")), step_add("i")]);
         let body = seq(vec![assign("i", lit_int(0)), while_(cond, loop_body), nil()]);
-        let out = transform_method(method("mut", MethodReceiver::Class, &["table", "o"], body));
-        assert_eq!(out.len(), 1, "field mutation should be left unchanged");
+        let out = transform_method(method("mut", MethodReceiver::Class, &["table", "other"], body));
+        assert_eq!(out.len(), 1, "non-carried index write should be left unchanged");
         assert!(has_while(&out[0].body));
     }
 

@@ -26,21 +26,27 @@
 use std::fmt::Write;
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprNode, LValue};
 
 use super::expr;
+
+/// Map a `ClassId` to its emitted Elixir module name (with the `V2.`
+/// overlay prefix). `ActiveRecord::Base` → `V2.ActiveRecord.Base`.
+pub(super) fn v2_module_name(class: &str) -> String {
+    format!("V2.{}", class.replace("::", "."))
+}
 
 /// Emit a `LibraryClass` as a full Elixir `defmodule V2.<DottedName> do
 /// … end` (trailing newline included).
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
-    let v2_name = format!("V2.{}", class.name.0.as_str().replace("::", "."));
-    let body = emit_class_body(class)?;
+    let v2_name = v2_module_name(class.name.0.as_str());
+    let body = emit_class_body(class, &v2_name)?;
     Ok(format!("defmodule {v2_name} do\n{body}end\n"))
 }
 
 /// The body (def/defstruct lines, indented one level) that goes inside
 /// the `defmodule`.
-fn emit_class_body(class: &LibraryClass) -> Result<String, String> {
+fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String> {
     let is_module_singleton = class.is_module
         && !class.methods.is_empty()
         && class
@@ -73,12 +79,47 @@ fn emit_class_body(class: &LibraryClass) -> Result<String, String> {
             // Represented by struct fields; no accessor function.
             continue;
         }
+        // `initialize` → a `new/n` constructor returning a struct literal
+        // built from the `@field = value` assignments in its body.
+        if m.name.as_str() == "initialize" {
+            emit_constructor(&mut out, m, v2_name);
+            continue;
+        }
         let thread_record =
             !is_module_singleton && matches!(m.receiver, MethodReceiver::Instance);
         emit_fn(&mut out, m, thread_record);
     }
 
     Ok(out)
+}
+
+/// Emit `def new(params) do %V2.Name{field: value, …} end` from an
+/// `initialize` whose body is a sequence of `@field = value` assigns.
+/// (Constructors with richer bodies — e.g. loops — aren't covered yet;
+/// only the `@ivar =` assignments contribute fields.)
+fn emit_constructor(out: &mut String, m: &MethodDef, v2_name: &str) {
+    let params: Vec<String> = m.params.iter().map(|p| p.as_str().to_string()).collect();
+    let stmts: Vec<&Expr> = match &*m.body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![&m.body],
+    };
+    let pairs: Vec<String> = stmts
+        .iter()
+        .filter_map(|s| match &*s.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                Some(format!("{name}: {}", expr::emit_expr(value)))
+            }
+            _ => None,
+        })
+        .collect();
+
+    writeln!(out, "  def new({}) do", params.join(", ")).unwrap();
+    if pairs.is_empty() {
+        writeln!(out, "    %{v2_name}{{}}").unwrap();
+    } else {
+        writeln!(out, "    %{v2_name}{{{}}}", pairs.join(", ")).unwrap();
+    }
+    out.push_str("  end\n");
 }
 
 /// Emit a flat list of `MethodDef`s (Ruby `Mode::Module`) as Elixir

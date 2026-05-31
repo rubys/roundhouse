@@ -16,7 +16,41 @@
 //! `length`/`gsub` Sends, `[]` slicing → `String.slice`, Regex/Range/
 //! Hash literals, string interpolation (syntax matches Ruby).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal};
+
+thread_local! {
+    /// Simple class name → emitted `V2.*` module name, for the unit
+    /// currently being emitted. Elixir doesn't resolve a bare sibling
+    /// reference (`MatchResult` inside `V2.ActionDispatch.Router`) the
+    /// way Ruby's lexical scoping does, so `emit_const` rewrites such
+    /// refs to the fully-qualified module name using this map.
+    static MODULE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// Register the `V2.*` names of the classes in the current unit (clears
+/// any prior registration — scope is one runtime file). Called from the
+/// elixir2 overlay's transform before the unit is emitted.
+pub(super) fn register_modules<'a>(classes: impl IntoIterator<Item = &'a crate::dialect::LibraryClass>) {
+    MODULE_NAMES.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for c in classes {
+            let full = super::library::v2_module_name(c.name.0.as_str());
+            let simple = c
+                .name
+                .0
+                .as_str()
+                .rsplit("::")
+                .next()
+                .unwrap_or_else(|| c.name.0.as_str())
+                .to_string();
+            m.insert(simple, full);
+        }
+    });
+}
 
 /// Emit a method body as Elixir (indent level 0; the caller indents).
 pub(super) fn emit_method_body(body: &Expr) -> String {
@@ -430,10 +464,16 @@ fn is_infix(method: &str) -> bool {
 fn emit_const(path: &[crate::ident::Symbol]) -> String {
     // SCREAMING_SNAKE single-segment name → module attribute (`ESCAPES`
     // → `@escapes`). CamelCase → a module reference (dotted).
-    if path.len() == 1 {
-        let name = path[0].as_str();
-        if is_screaming_snake(name) {
-            return format!("@{}", name.to_lowercase());
+    if path.len() == 1 && is_screaming_snake(path[0].as_str()) {
+        return format!("@{}", path[0].as_str().to_lowercase());
+    }
+    // A reference to a sibling module in the same unit — whether bare
+    // (`MatchResult`) or fully qualified (`ActionDispatch::Router::
+    // MatchResult`) — resolves by its last segment to the emitted
+    // `V2.*` name.
+    if let Some(last) = path.last() {
+        if let Some(full) = MODULE_NAMES.with(|m| m.borrow().get(last.as_str()).cloned()) {
+            return full;
         }
     }
     path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")

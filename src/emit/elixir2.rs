@@ -61,6 +61,10 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     // support — those degrade via the emitter's report_unsupported
     // catch-all. Gated here: only functional emitters opt in.
     let units = match crate::runtime_loader::elixir_units(|_ns, classes| {
+        // Register the unit's module names so cross-module references
+        // (e.g. `MatchResult.new` inside `Router`) resolve to their
+        // fully-qualified `V2.*` names at emit time.
+        expr::register_modules(classes.iter());
         crate::lower::functionalize::functionalize(classes)
     }) {
         Ok(u) => u,
