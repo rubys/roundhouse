@@ -1129,6 +1129,11 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // flash.rb: most methods now emit correctly (merge/has_key?/accessors/
+    // each/length/keys/values/to_h). Not yet wired — `put`/`delete` need
+    // if/elsif-chain reassignment lifting, and `delete` the mutate-and-
+    // return-value case. Wired once those land (flash is self-contained,
+    // so no cross-file const needed).
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape

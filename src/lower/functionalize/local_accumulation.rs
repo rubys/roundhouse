@@ -21,7 +21,7 @@
 //! mutation→rebind step; the conditional handling is shared.
 
 use crate::dialect::MethodDef;
-use crate::expr::{desugar_op_assign, Expr, ExprNode, LValue};
+use crate::expr::{desugar_op_assign, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -69,6 +69,30 @@ fn rewrite(e: &Expr) -> Expr {
                 None => clone_send(e),
             }
         }
+        // `x.foo = v` (attr setter on a local struct) → `x = %{x | foo: v}`
+        // via the __struct_put__ bridge. Guarded so comparison operators
+        // ending in `=` (`==`, `<=`, …) and `[]=` don't match.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if args.len() == 1 && attr_setter_field(method.as_str()).is_some() =>
+        {
+            match local_name(r) {
+                Some(name) => {
+                    let field = attr_setter_field(method.as_str()).unwrap();
+                    let put = syn(ExprNode::Send {
+                        recv: Some(r.clone()),
+                        method: Symbol::from("__struct_put__"),
+                        args: vec![
+                            syn(ExprNode::Lit { value: Literal::Sym { value: Symbol::from(field) } }),
+                            rewrite(&args[0]),
+                        ],
+                        block: None,
+                        parenthesized: true,
+                    });
+                    rebind(&name, put)
+                }
+                None => clone_send(e),
+            }
+        }
         // Recurse through the containers these statements live in.
         ExprNode::Seq { exprs } => {
             syn(ExprNode::Seq { exprs: exprs.iter().map(rewrite).collect() })
@@ -84,6 +108,13 @@ fn rewrite(e: &Expr) -> Expr {
             value: rewrite(value),
         }),
         ExprNode::Return { value } => syn(ExprNode::Return { value: rewrite(value) }),
+        // Recurse into block bodies (`coll.each do |x| acc[k] = x end`).
+        ExprNode::Lambda { params, block_param, body, block_style } => syn(ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite(body),
+            block_style: *block_style,
+        }),
         _ => e.clone(),
     }
 }
@@ -100,6 +131,21 @@ fn clone_send(e: &Expr) -> Expr {
         block: block.as_ref().map(rewrite),
         parenthesized: *parenthesized,
     })
+}
+
+/// If `method` is an attribute setter (`foo=` with an identifier base —
+/// not `==`/`<=`/`[]=`/etc.), return the field name `foo`.
+fn attr_setter_field(method: &str) -> Option<&str> {
+    let base = method.strip_suffix('=')?;
+    let mut chars = base.chars();
+    let first = chars.next()?;
+    if (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        Some(base)
+    } else {
+        None
+    }
 }
 
 fn local_name(e: &Expr) -> Option<Symbol> {
@@ -219,6 +265,98 @@ mod tests {
         // += → rebind.
         assert!(ex.contains("n = n + 1"), "OpAssign → rebind:\n{ex}");
         assert!(ex.trim_end().ends_with("result\n  end\nend"), "returns result:\n{ex}");
+    }
+
+    #[test]
+    fn attr_setter_on_local_becomes_struct_update() {
+        // `r = init(); r.notice = v; r`
+        let body = syn(ExprNode::Seq {
+            exprs: vec![
+                rebind(&s("r"), send("init", "call", vec![])),
+                syn(ExprNode::Send {
+                    recv: Some(var(&s("r"))),
+                    method: s("notice="),
+                    args: vec![var(&s("v"))],
+                    block: None,
+                    parenthesized: false,
+                }),
+                var(&s("r")),
+            ],
+        });
+        let m = MethodDef {
+            name: s("build"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(s("v"))],
+            block_param: None,
+            body,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = LibraryClass {
+            name: ClassId(s("A")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![transform_method(m)],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        assert!(ex.contains("r = %{r | notice: v}"), "attr setter → struct update:\n{ex}");
+    }
+
+    #[test]
+    fn block_index_put_threads_through_reduce() {
+        // `coll.each do |x| acc[k] = x end` → reduce, with the []= inside
+        // the block rewritten (passes recurse into Lambda bodies).
+        let block_body = syn(ExprNode::Send {
+            recv: Some(var(&s("acc"))),
+            method: s("[]="),
+            args: vec![var(&s("k")), var(&s("x"))],
+            block: None,
+            parenthesized: false,
+        });
+        let lambda = syn(ExprNode::Lambda {
+            params: vec![s("x")],
+            block_param: None,
+            body: block_body,
+            block_style: Default::default(),
+        });
+        let each = syn(ExprNode::Send {
+            recv: Some(var(&s("coll"))),
+            method: s("each"),
+            args: vec![],
+            block: Some(lambda),
+            parenthesized: false,
+        });
+        let m = MethodDef {
+            name: s("fill"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(s("coll")), Param::positional(s("k"))],
+            block_param: None,
+            body: syn(ExprNode::Seq { exprs: vec![each, var(&s("acc"))] }),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = LibraryClass {
+            name: ClassId(s("B")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![transform_method(m)],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- block reduce ---\n{ex}\n--------------------");
+        assert!(ex.contains("acc = Enum.reduce(coll, acc, fn x, acc ->"), "block → reduce:\n{ex}");
+        assert!(ex.contains("acc = Map.put(acc, k, x)"), "inner []= threaded:\n{ex}");
     }
 
     #[test]

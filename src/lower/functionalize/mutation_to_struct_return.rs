@@ -154,6 +154,13 @@ fn rewrite_expr(e: &Expr) -> Expr {
             value: rewrite_expr(value),
             target_ty: target_ty.clone(),
         }),
+        // Recurse into block bodies (a block may read `@ivar`/`self`).
+        ExprNode::Lambda { params, block_param, body, block_style } => syn(ExprNode::Lambda {
+            params: params.clone(),
+            block_param: block_param.clone(),
+            body: rewrite_expr(body),
+            block_style: *block_style,
+        }),
         // Leaves and variants v1 doesn't expect inside a threaded body.
         _ => e.clone(),
     }

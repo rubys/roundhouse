@@ -403,6 +403,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         let fname = super::library::elixir_fn_name(method);
         return format!("{fname}(record, {})", emit_args(args));
     }
+    // `self.foo(args)` (a method call, not a field read) on the threaded
+    // `record` → the same-module function `foo(record, args)`. Zero-arg
+    // sends stay `record.foo` (struct field access).
+    if recv.is_some_and(is_record_var)
+        && !args.is_empty()
+        && method.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        let fname = super::library::elixir_fn_name(method);
+        return format!("{fname}(record, {})", emit_args(args));
+    }
 
     // `recv[...]` indexing.
     if method == "[]" && recv.is_some() {
