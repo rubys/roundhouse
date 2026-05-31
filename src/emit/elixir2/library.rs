@@ -93,33 +93,61 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
     Ok(out)
 }
 
-/// Emit `def new(params) do %V2.Name{field: value, …} end` from an
-/// `initialize` whose body is a sequence of `@field = value` assigns.
-/// (Constructors with richer bodies — e.g. loops — aren't covered yet;
-/// only the `@ivar =` assignments contribute fields.)
+/// Emit `initialize` as a `new/n` constructor. A flat body (only
+/// `@field = value` assigns) emits a clean struct literal `%V2.Name{f:
+/// v, …}`. A richer body (conditionals, early returns, locals — e.g.
+/// flash's cross-request population) seeds `record = %V2.Name{}` and
+/// runs the body threaded through `record` (via
+/// `mutation_to_struct_return::thread_constructor_body`).
 fn emit_constructor(out: &mut String, m: &MethodDef, v2_name: &str) {
-    let params: Vec<String> = m.params.iter().map(|p| p.as_str().to_string()).collect();
-    let stmts: Vec<&Expr> = match &*m.body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![&m.body],
-    };
-    let pairs: Vec<String> = stmts
-        .iter()
-        .filter_map(|s| match &*s.node {
-            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-                Some(format!("{name}: {}", expr::emit_expr(value)))
-            }
-            _ => None,
-        })
-        .collect();
+    let params = m.params.iter().map(param_decl).collect::<Vec<_>>().join(", ");
 
-    writeln!(out, "  def new({}) do", params.join(", ")).unwrap();
-    if pairs.is_empty() {
-        writeln!(out, "    %{v2_name}{{}}").unwrap();
-    } else {
-        writeln!(out, "    %{v2_name}{{{}}}", pairs.join(", ")).unwrap();
+    writeln!(out, "  def new({params}) do").unwrap();
+    match flat_field_assigns(&m.body) {
+        Some(pairs) if pairs.is_empty() => {
+            writeln!(out, "    %{v2_name}{{}}").unwrap();
+        }
+        Some(pairs) => {
+            writeln!(out, "    %{v2_name}{{{}}}", pairs.join(", ")).unwrap();
+        }
+        None => {
+            // Non-flat: seed the struct, then run the threaded body.
+            let threaded = crate::lower::functionalize::mutation_to_struct_return::thread_constructor_body(
+                &m.body,
+            );
+            writeln!(out, "    record = %{v2_name}{{}}").unwrap();
+            out.push_str(&expr::indent(&expr::emit_method_body(&threaded), 2));
+            out.push('\n');
+        }
     }
     out.push_str("  end\n");
+}
+
+/// `Some(pairs)` when every top-level statement is a `@field = value`
+/// assign (a flat constructor → struct literal); `None` otherwise.
+fn flat_field_assigns(body: &Expr) -> Option<Vec<String>> {
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    let mut pairs = Vec::new();
+    for s in stmts {
+        match &*s.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                pairs.push(format!("{name}: {}", expr::emit_expr(value)))
+            }
+            _ => return None,
+        }
+    }
+    Some(pairs)
+}
+
+/// Render one param, applying Elixir default-arg syntax (`name \\ default`).
+fn param_decl(p: &crate::dialect::Param) -> String {
+    match &p.default {
+        Some(d) => format!("{} \\\\ {}", p.as_str(), expr::emit_expr(d)),
+        None => p.as_str().to_string(),
+    }
 }
 
 /// Emit a flat list of `MethodDef`s (Ruby `Mode::Module`) as Elixir
@@ -171,7 +199,7 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     if instance_method && references_token(&body, "record") {
         params.push("record".to_string());
     }
-    params.extend(m.params.iter().map(|p| p.as_str().to_string()));
+    params.extend(m.params.iter().map(param_decl));
     // A body that `yield`s calls the block through a trailing `block_fn`.
     if references_token(&body, "block_fn") {
         params.push("block_fn".to_string());

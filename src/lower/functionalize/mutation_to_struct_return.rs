@@ -47,6 +47,16 @@ pub fn transform_method(m: MethodDef) -> MethodDef {
     }
 }
 
+/// Thread a constructor (`initialize`) body for struct-update emit: the
+/// `@field = v` writes become `record` updates and the body returns
+/// `record`. The caller (elixir2's `emit_constructor`) seeds
+/// `record = %Struct{}` ahead of this. Used only for non-flat
+/// constructors (flat `@field = value` ones emit a struct literal
+/// directly).
+pub fn thread_constructor_body(body: &Expr) -> Expr {
+    append_record_return(rewrite_expr(body))
+}
+
 fn should_thread(m: &MethodDef) -> bool {
     // `initialize` is the constructor (emitted as `new`), not a mutator.
     if m.name.as_str() == "initialize" {
@@ -111,7 +121,15 @@ fn rewrite_expr(e: &Expr) -> Expr {
             target: target.clone(),
             value: rewrite_expr(value),
         }),
-        ExprNode::Return { value } => syn(ExprNode::Return { value: rewrite_expr(value) }),
+        // A bare `return` (return self/nil) in a threaded method returns
+        // the updated `record`; `return expr` threads the expr.
+        ExprNode::Return { value } => {
+            if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                syn(ExprNode::Return { value: var(RECORD) })
+            } else {
+                syn(ExprNode::Return { value: rewrite_expr(value) })
+            }
+        }
         ExprNode::Array { elements, style } => syn(ExprNode::Array {
             elements: elements.iter().map(rewrite_expr).collect(),
             style: *style,
@@ -426,6 +444,54 @@ mod tests {
         assert!(ex.contains("record.notice"), "getter reads field:\n{ex}");
         assert!(ex.contains("def fetch(record, key)"), "fetch threaded:\n{ex}");
         assert!(ex.contains("get(record, key)"), "self[key] → get(record, key):\n{ex}");
+    }
+
+    #[test]
+    fn non_flat_constructor_threads_a_seeded_record() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        // def initialize(other = nil)
+        //   @notice = nil
+        //   return if other.nil?
+        //   @notice = other
+        // end
+        let body = syn(ExprNode::Seq {
+            exprs: vec![
+                assign_ivar("notice", nil()),
+                if_(send(Some(vr("other")), "nil?", vec![]), syn(ExprNode::Return { value: nil() }), nil()),
+                assign_ivar("notice", vr("other")),
+            ],
+        });
+        let init = MethodDef {
+            name: sym("initialize"),
+            receiver: MethodReceiver::Instance,
+            params: vec![Param::with_default(sym("other"), nil())],
+            block_param: None,
+            body,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        // initialize isn't threaded by the pipeline; emit_constructor calls
+        // thread_constructor_body itself. Render it through a class.
+        let class = LibraryClass {
+            name: ClassId(sym("Flash")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![init],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- ctor ---\n{ex}\n------------");
+        assert!(ex.contains("def new(other \\\\ nil)"), "default param:\n{ex}");
+        assert!(ex.contains("record = %V2.Flash{}"), "seeds struct:\n{ex}");
+        assert!(ex.contains("record = %{record | notice: nil}"), "threaded write:\n{ex}");
+        assert!(ex.contains("if is_nil(other) do"), "guard:\n{ex}");
+        assert!(!ex.contains("@"), "no raw ivars:\n{ex}");
     }
 
     #[test]
