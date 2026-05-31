@@ -146,7 +146,9 @@ def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suf
   plot_h     = 240
   height     = top_pad + plot_h + bot_pad
 
-  max_v = max || (groups.flat_map { |g| g[:values].values }.max * 1.15)
+  all_vals = groups.flat_map { |g| g[:values].values }.compact
+  max_v = max || ((all_vals.max || 0) * 1.15)
+  max_v = 1.0 if !max_v.is_a?(Numeric) || !max_v.finite? || max_v <= 0
   band  = plot_w.to_f / groups.size
   bar_count = series.size
   bar_w = [(band - 24) / bar_count, 80].min
@@ -198,6 +200,11 @@ def grouped_bars(groups, series:, max: nil, value_fmt: ->(v) { fmt_int(v) }, suf
 end
 
 def nice_step(raw)
+  # Guard against degenerate input: an all-zero / empty series (e.g. a
+  # partial run that didn't measure a target this chart references)
+  # yields raw <= 0, and Math.log10(0) is -Infinity, which #floor
+  # rejects with FloatDomainError. Fall back to a step of 1.
+  return 1.0 unless raw.is_a?(Numeric) && raw.finite? && raw > 0
   exp = Math.log10(raw).floor
   base = 10 ** exp
   frac = raw / base
@@ -269,41 +276,46 @@ end
 
 # ── Section: lowerer dividend ────────────────────────────────────────
 
-html << "<h2>2. Lowerer dividend (ruby vs rails)</h2>\n"
-html << <<~P
-  <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier above each pair is the lift from the lowerer pipeline.</p>
-P
+# Cross-language comparison: only meaningful when both ruby and rails
+# were measured this run. Skip the whole section otherwise so a partial
+# run (e.g. spinel-only) still produces a report.
+if (%w[ruby rails] - targets).empty?
+  html << "<h2>2. Lowerer dividend (ruby vs rails)</h2>\n"
+  html << <<~P
+    <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier above each pair is the lift from the lowerer pipeline.</p>
+  P
 
-groups = endpoints.map do |ep|
-  ruby_v  = by[ep]['ruby']&.dig('req_sec').to_f
-  rails_v = by[ep]['rails']&.dig('req_sec').to_f
-  {
-    label:      ep,
-    annotation: rails_v > 0 ? "#{fmt_dec(ruby_v / rails_v, 1)}×" : '',
-    values:     { 'ruby' => ruby_v, 'rails' => rails_v },
-  }
+  groups = endpoints.map do |ep|
+    ruby_v  = by[ep]['ruby']&.dig('req_sec').to_f
+    rails_v = by[ep]['rails']&.dig('req_sec').to_f
+    {
+      label:      ep,
+      annotation: rails_v > 0 ? "#{fmt_dec(ruby_v / rails_v, 1)}×" : '',
+      values:     { 'ruby' => ruby_v, 'rails' => rails_v },
+    }
+  end
+  html << grouped_bars(groups, series: %w[ruby rails])
 end
-html << grouped_bars(groups, series: %w[ruby rails])
 
 # ── Section: YJIT contribution ───────────────────────────────────────
 
-html << "<h2>3. YJIT contribution</h2>\n"
-html << <<~P
-  <p>YJIT consistently helps Roundhouse-emitted Ruby (small, predictable call shapes). On Rails it's neutral-to-slightly-negative — the deep autoload + reflection chain blunts it.</p>
-P
+# Restrict to the JIT/interp variants that were actually measured; skip
+# the section if none of them ran.
+yjit_series = %w[ruby ruby-int rails rails-int] & targets
+unless yjit_series.empty?
+  html << "<h2>3. YJIT contribution</h2>\n"
+  html << <<~P
+    <p>YJIT consistently helps Roundhouse-emitted Ruby (small, predictable call shapes). On Rails it's neutral-to-slightly-negative — the deep autoload + reflection chain blunts it.</p>
+  P
 
-yjit_groups = endpoints.map do |ep|
-  {
-    label:  ep,
-    values: {
-      'ruby'      => by[ep]['ruby']&.dig('req_sec').to_f,
-      'ruby-int'  => by[ep]['ruby-int']&.dig('req_sec').to_f,
-      'rails'     => by[ep]['rails']&.dig('req_sec').to_f,
-      'rails-int' => by[ep]['rails-int']&.dig('req_sec').to_f,
+  yjit_groups = endpoints.map do |ep|
+    {
+      label:  ep,
+      values: yjit_series.each_with_object({}) { |t, h| h[t] = by[ep][t]&.dig('req_sec').to_f },
     }
-  }
+  end
+  html << grouped_bars(yjit_groups, series: yjit_series)
 end
-html << grouped_bars(yjit_groups, series: %w[ruby ruby-int rails rails-int])
 
 # ── Section: cost economics ──────────────────────────────────────────
 
