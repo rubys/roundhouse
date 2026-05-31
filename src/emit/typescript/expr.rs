@@ -1768,7 +1768,22 @@ fn emit_send_with_parens_inner(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // `x[range]` slice indexing (handled just below) re-derives `.slice(…)`
+    // straight from the raw Range node and returns before args_s is read for
+    // that arg. Emitting the Range here as a value would hit the
+    // unsupported-Range fallthrough and push a spurious diagnostic, so skip
+    // it — the placeholder is never used.
+    let args_s: Vec<String> = args
+        .iter()
+        .map(|a| {
+            if method == "[]" {
+                if let ExprNode::Range { .. } = &*a.node {
+                    return String::new();
+                }
+            }
+            emit_expr(a)
+        })
+        .collect();
     if method == "[]" && recv.is_some() && args.len() == 1 {
         // Ruby's `x[i..j]` slice form — when the indexer's argument is
         // a Range, lower to `.slice(i, j+1)` (or `.slice(i)` for an
