@@ -30,7 +30,7 @@ pub mod local_accumulation;
 pub mod mutation_to_struct_return;
 pub mod while_to_recursion;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::dialect::LibraryClass;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -45,9 +45,10 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
         .into_iter()
         .map(|mut class| {
             let methods = std::mem::take(&mut class.methods);
-            // Fields backed by a Hash (`@data = {}` / `@data[k] = v`) so
-            // the post-pass below can route reads of them to `Map.*`.
-            let hash_fields = collect_hash_fields(&methods);
+            // `@ivar` field → container Ty (`@data = {}` → Hash,
+            // `@errors = []` → Array), so the post-pass below can route
+            // reads of them to `Map.*` / `Enum.*`.
+            let field_types = collect_field_types(&methods);
             class.methods = methods
                 .into_iter()
                 // while→recursion first (may split a method into entry +
@@ -57,7 +58,7 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
                 .map(mutation_to_struct_return::transform_method)
                 .map(local_accumulation::transform_method)
                 .map(|mut m| {
-                    stamp_hash_fields(&mut m.body, &hash_fields);
+                    stamp_field_types(&mut m.body, &field_types);
                     m
                 })
                 .collect();
@@ -66,26 +67,35 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
         .collect()
 }
 
-/// Names of `@ivar` fields whose storage is a Hash — detected from a
-/// Hash-literal assignment (`@data = {}`) or an index write
-/// (`@data[k] = v`). The elixir2 emitter routes Hash methods
-/// (`key?`/`keys`/`delete`/…) to `Map.*` only on a Hash-typed receiver,
-/// so stamping these fields' `__field__` reads as `Ty::Hash` is what
-/// lets `record.data.key?(k)` become `Map.has_key?(record.data, k)`.
-fn collect_hash_fields(methods: &[crate::dialect::MethodDef]) -> HashSet<String> {
-    let mut out = HashSet::new();
+/// `@ivar` field → its container `Ty`, inferred from a literal
+/// initializer: `@data = {}` → `Ty::Hash`, `@errors = []` → `Ty::Array`;
+/// an index write (`@data[k] = v`) also implies Hash. The elixir2
+/// emitter routes container methods (`key?`/`keys`/`empty?`/…) to
+/// `Map.*`/`Enum.*` only on a typed receiver, so stamping a field's
+/// `__field__` reads with this Ty is what lets `record.data.key?(k)`
+/// become `Map.has_key?(record.data, k)` and `record.errors.empty?`
+/// become `Enum.empty?(record.errors)` — the analyzer doesn't type
+/// these ivars in library mode.
+fn collect_field_types(methods: &[crate::dialect::MethodDef]) -> HashMap<String, Ty> {
+    let mut out = HashMap::new();
+    let hash_ty = || Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) };
+    let array_ty = || Ty::Array { elem: Box::new(Ty::Untyped) };
     for m in methods {
         walk(&m.body, &mut |n| match &*n.node {
-            ExprNode::Assign { target: LValue::Ivar { name }, value }
-                if matches!(&*value.node, ExprNode::Hash { .. }) =>
-            {
-                out.insert(name.to_string());
-            }
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => match &*value.node {
+                ExprNode::Hash { .. } => {
+                    out.insert(name.to_string(), hash_ty());
+                }
+                ExprNode::Array { .. } => {
+                    out.insert(name.to_string(), array_ty());
+                }
+                _ => {}
+            },
             ExprNode::Send { recv: Some(r), method, args, .. }
                 if method.as_str() == "[]=" && args.len() == 2 =>
             {
                 if let ExprNode::Ivar { name } = &*r.node {
-                    out.insert(name.to_string());
+                    out.entry(name.to_string()).or_insert_with(hash_ty);
                 }
             }
             _ => {}
@@ -94,30 +104,28 @@ fn collect_hash_fields(methods: &[crate::dialect::MethodDef]) -> HashSet<String>
     out
 }
 
-/// Stamp `Ty::Hash` onto every `record.__field__(:f)` bridge whose
-/// field `f` is a known Hash field, so the emitter's `recv_is_hash`
-/// gate fires for reads of it. Runs after the rewrite passes (which is
-/// when the bridges exist).
-fn stamp_hash_fields(e: &mut Expr, hash_fields: &HashSet<String>) {
-    let is_hash_field_read = match &*e.node {
+/// Stamp the inferred container `Ty` onto every `record.__field__(:f)`
+/// bridge whose field `f` is in `field_types`, so the emitter's
+/// `recv_is_hash`/`recv_is_array` gates fire for reads of it. Runs after
+/// the rewrite passes (which is when the bridges exist).
+fn stamp_field_types(e: &mut Expr, field_types: &HashMap<String, Ty>) {
+    let field_ty = match &*e.node {
         ExprNode::Send { method, args, .. }
             if method.as_str() == "__field__" && args.len() == 1 =>
         {
-            matches!(
-                &*args[0].node,
-                ExprNode::Lit { value: Literal::Sym { value } }
-                    if hash_fields.contains(value.as_str())
-            )
+            match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => {
+                    field_types.get(value.as_str()).cloned()
+                }
+                _ => None,
+            }
         }
-        _ => false,
+        _ => None,
     };
-    if is_hash_field_read {
-        e.ty = Some(Ty::Hash {
-            key: Box::new(Ty::Untyped),
-            value: Box::new(Ty::Untyped),
-        });
+    if let Some(ty) = field_ty {
+        e.ty = Some(ty);
     }
-    walk_mut(e, &mut |c| stamp_hash_fields(c, hash_fields));
+    walk_mut(e, &mut |c| stamp_field_types(c, field_types));
 }
 
 /// Visit each direct child of `e` (one level), applying `f`.

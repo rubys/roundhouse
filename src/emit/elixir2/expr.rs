@@ -503,6 +503,62 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
+    // An unknown/struct receiver falls through (a struct's own `empty?`
+    // method routes via the self-call / method-on-record paths).
+    if method == "empty?" && args.is_empty() {
+        if let Some(r) = recv {
+            if recv_is_array(r) {
+                return format!("Enum.empty?({})", emit_expr(r));
+            }
+            if recv_is_hash(r) {
+                return format!("map_size({}) == 0", emit_expr(r));
+            }
+        }
+    }
+
+    // `arr.include?(x)` → `Enum.member?(arr, x)` for an Array receiver.
+    // (Hash `include?` is key-membership — handled in the Map block.)
+    if method == "include?" && args.len() == 1 {
+        if let Some(r) = recv {
+            if recv_is_array(r) {
+                return format!("Enum.member?({}, {})", emit_expr(r), emit_expr(&args[0]));
+            }
+        }
+    }
+
+    // `recv.to_h` — a map is already its own hash in Elixir, so this is
+    // the identity (`conditions.to_h` → `conditions`).
+    if method == "to_h" && args.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(r);
+        }
+    }
+
+    // `Time.now` → `DateTime.utc_now()` (Elixir's UTC clock). The Ruby
+    // idiom `Time.now.utc.iso8601` maps to
+    // `DateTime.to_iso8601(DateTime.utc_now())`: `.utc` is the identity
+    // (already UTC) and `.iso8601` wraps in `DateTime.to_iso8601`.
+    if method == "now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("Time") {
+                    return "DateTime.utc_now()".to_string();
+                }
+            }
+        }
+    }
+    if method == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(r);
+        }
+    }
+    if method == "iso8601" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("DateTime.to_iso8601({})", emit_expr(r));
+        }
+    }
+
     // Ruby Hash methods → Elixir `Map.*` (gated on a Hash-typed receiver,
     // so a struct's `key?`/`keys` route to its own methods instead).
     if let Some(r) = recv {
@@ -1129,6 +1185,53 @@ mod tests {
         assert!(!ex.contains("resolve_status(record"), "no record threaded into pure call:\n{ex}");
         // `render` itself does thread record (it writes @status).
         assert!(ex.contains("def render(record, s)"), "render threads record:\n{ex}");
+    }
+
+    fn call(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        })
+    }
+    fn const_path(name: &str) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Const {
+            path: vec![Symbol::from(name)],
+        })
+    }
+
+    #[test]
+    fn container_query_methods_dispatch_on_type() {
+        // Array receiver → Enum.*; Hash receiver → Map.* / map_size.
+        let arr = || var_t("xs", arr());
+        let hsh = || var_t("h", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) });
+        assert_eq!(emit_expr(&call(arr(), "empty?", vec![])), "Enum.empty?(xs)");
+        assert_eq!(emit_expr(&call(hsh(), "empty?", vec![])), "map_size(h) == 0");
+        assert_eq!(
+            emit_expr(&call(arr(), "include?", vec![var_t("y", Ty::Untyped)])),
+            "Enum.member?(xs, y)"
+        );
+        // Hash include? is key membership.
+        assert_eq!(
+            emit_expr(&call(hsh(), "include?", vec![var_t("k", Ty::Untyped)])),
+            "Map.has_key?(h, k)"
+        );
+    }
+
+    #[test]
+    fn to_h_is_identity() {
+        assert_eq!(emit_expr(&call(var_t("conditions", Ty::Untyped), "to_h", vec![])), "conditions");
+    }
+
+    #[test]
+    fn time_now_utc_iso8601_maps_to_datetime() {
+        // Time.now.utc.iso8601 → DateTime.to_iso8601(DateTime.utc_now())
+        let now = call(const_path("Time"), "now", vec![]);
+        let utc = call(now, "utc", vec![]);
+        let iso = call(utc, "iso8601", vec![]);
+        assert_eq!(emit_expr(&iso), "DateTime.to_iso8601(DateTime.utc_now())");
     }
 }
 
