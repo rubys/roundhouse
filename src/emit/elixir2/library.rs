@@ -54,6 +54,24 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
             .iter()
             .all(|m| matches!(m.receiver, MethodReceiver::Class));
 
+    // Record-threading instance methods of this class: a self-call
+    // routes a leading `record` arg only to these (see expr::RECORD_METHODS).
+    // A pure instance method (no `@ivar`/`self`, so no `record` in its
+    // lowered body — e.g. `resolve_status`) is excluded, keeping its
+    // self-call arity-correct.
+    let record_methods: std::collections::HashSet<String> = class
+        .methods
+        .iter()
+        .filter(|m| {
+            !is_module_singleton
+                && matches!(m.receiver, MethodReceiver::Instance)
+                && m.name.as_str() != "initialize"
+                && body_references_record(&m.body)
+        })
+        .map(|m| elixir_fn_name(m.name.as_str()))
+        .collect();
+    expr::set_record_methods(record_methods);
+
     let mut out = String::new();
 
     if !is_module_singleton {
@@ -281,6 +299,69 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     out.push_str(&expr::indent(&body, 2));
     out.push('\n');
     out.push_str("  end\n");
+}
+
+/// Whether a (post-functionalize) method body threads `record` — i.e.
+/// contains a `record` Var or a `self` reference. Mutation-threading
+/// rewrites `@ivar`/`self` to `record` (Var) + `record.__field__`/
+/// `__struct_put__` bridges (recv = `record` Var), so a body that touches
+/// instance state has a `record` Var; a pure method (reads only constants/
+/// params, like `resolve_status`) does not. Drives the per-class
+/// record-threading set used by self-call routing.
+fn body_references_record(e: &Expr) -> bool {
+    let mut found = false;
+    let mut visit = |n: &Expr| {
+        match &*n.node {
+            ExprNode::Var { name, .. } if name.as_str() == "record" => found = true,
+            ExprNode::SelfRef => found = true,
+            _ => {}
+        }
+    };
+    walk_expr(e, &mut visit);
+    found
+}
+
+/// Pre-order walk over every sub-expression of `e`.
+fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    match &*e.node {
+        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+            exprs.iter().for_each(|x| walk_expr(x, f))
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                walk_expr(r, f)
+            }
+            args.iter().for_each(|a| walk_expr(a, f));
+            if let Some(b) = block {
+                walk_expr(b, f)
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_expr(cond, f);
+            walk_expr(then_branch, f);
+            walk_expr(else_branch, f);
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_expr(cond, f);
+            walk_expr(body, f);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            walk_expr(left, f);
+            walk_expr(right, f);
+        }
+        ExprNode::Assign { value, .. } => walk_expr(value, f),
+        ExprNode::Return { value } | ExprNode::Cast { value, .. } => walk_expr(value, f),
+        ExprNode::Yield { args } => args.iter().for_each(|a| walk_expr(a, f)),
+        ExprNode::Lambda { body, .. } => walk_expr(body, f),
+        ExprNode::Hash { entries, .. } => {
+            for (k, v) in entries {
+                walk_expr(k, f);
+                walk_expr(v, f);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether a rendered body references `tok` as an identifier token

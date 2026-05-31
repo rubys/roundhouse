@@ -29,6 +29,28 @@ thread_local! {
     /// the way Ruby's lexical scoping does, so `emit_const` rewrites such
     /// refs to the fully-qualified module name using this map.
     static MODULE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+
+    /// Elixir function names of the CURRENT class's instance methods that
+    /// thread a leading `record` param. A self-call (`record.foo(args)`)
+    /// routes to `foo(record, args)` only when `foo` is in here; a pure
+    /// instance method (e.g. `resolve_status`, which reads only a module
+    /// constant) is NOT, so its self-call stays arity-correct as
+    /// `foo(args)`. Set per class by `emit_library_class`.
+    static RECORD_METHODS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Set the current class's record-threading instance-method names (see
+/// `RECORD_METHODS`). Called by `emit_library_class` before emitting a
+/// class's methods.
+pub(super) fn set_record_methods(names: std::collections::HashSet<String>) {
+    RECORD_METHODS.with(|m| *m.borrow_mut() = names);
+}
+
+/// True when `name` is a record-threading instance method of the current
+/// class — so a self-call to it takes a leading `record` arg.
+fn threads_record(name: &str) -> bool {
+    RECORD_METHODS.with(|m| m.borrow().contains(name))
 }
 
 /// Clear the module-name registry. Called once at the start of an
@@ -374,6 +396,29 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `raise Class, msg` / `raise msg`. Ruby exception classes (e.g.
+    // `NotImplementedError`) mostly have no Elixir module — emitting
+    // `raise NotImplementedError, msg` is an undefined-module error. Keep
+    // the 2-arg form only for an exception that exists in Elixir;
+    // otherwise raise the message string (a `RuntimeError`), preserving
+    // the message and staying compile-clean.
+    if method == "raise" && recv.is_none() {
+        match args {
+            [msg] => return format!("raise {}", emit_expr(msg)),
+            [class, msg] => {
+                if let ExprNode::Const { path } = &*class.node {
+                    if let Some(name) = path.last().map(|s| s.to_string()) {
+                        if is_elixir_exception(&name) {
+                            return format!("raise {name}, {}", emit_expr(msg));
+                        }
+                    }
+                }
+                return format!("raise {}", emit_expr(msg));
+            }
+            _ => {}
+        }
+    }
+
     // `.freeze` — Elixir is immutable; the receiver is the value.
     if method == "freeze" && args.is_empty() {
         if let Some(r) = recv {
@@ -488,11 +533,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     }
     // `self.foo(args)` / `self.foo` on the threaded `record` is a method
     // call (field reads come through `__field__`, handled above) → the
-    // same-module `foo(record, …)`, including 0-arg `self.to_h`.
+    // same-module `foo(record, …)`, including 0-arg `self.to_h`. A self-
+    // call to a PURE instance method (one that doesn't thread record —
+    // e.g. `resolve_status`, which reads only a module constant) drops
+    // the record arg to stay arity-correct (`foo(args)`).
     if recv.is_some_and(is_record_var)
         && method.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     {
         let fname = super::library::elixir_fn_name(method);
+        if !threads_record(&fname) {
+            return format!("{fname}({})", emit_args(args));
+        }
         return if args.is_empty() {
             format!("{fname}(record)")
         } else {
@@ -978,6 +1029,118 @@ mod tests {
         assert_eq!(emit_expr(&const_ref(&["SomeUnknown"])), "SomeUnknown");
         clear_modules();
     }
+
+    #[test]
+    fn raise_maps_ruby_exception_classes() {
+        fn raise_call(args: Vec<Expr>) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+                recv: None,
+                method: Symbol::from("raise"),
+                args,
+                block: None,
+                parenthesized: true,
+            })
+        }
+        fn const_ref(name: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Const {
+                path: vec![Symbol::from(name)],
+            })
+        }
+        fn str_lit(s: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: Literal::Str { value: s.to_string() },
+            })
+        }
+        clear_modules();
+        // A Ruby-only exception class drops to a message-only raise.
+        assert_eq!(
+            emit_expr(&raise_call(vec![const_ref("NotImplementedError"), str_lit("nope")])),
+            r#"raise "nope""#
+        );
+        // An Elixir-valid exception keeps its class.
+        assert_eq!(
+            emit_expr(&raise_call(vec![const_ref("ArgumentError"), str_lit("bad")])),
+            r#"raise ArgumentError, "bad""#
+        );
+        // Single-arg `raise msg` is unchanged.
+        assert_eq!(emit_expr(&raise_call(vec![str_lit("boom")])), r#"raise "boom""#);
+    }
+
+    #[test]
+    fn pure_instance_method_self_call_drops_record() {
+        use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, AccessorKind};
+        use crate::effect::EffectSet;
+        use crate::ident::ClassId;
+
+        fn sym(s: &str) -> Symbol { Symbol::from(s) }
+        fn syn(node: ExprNode) -> Expr { Expr::new(crate::span::Span::synthetic(), node) }
+        fn m(name: &str, params: &[&str], body: Expr) -> MethodDef {
+            MethodDef {
+                name: sym(name),
+                receiver: MethodReceiver::Instance,
+                params: params.iter().map(|p| Param::positional(sym(p))).collect(),
+                block_param: None,
+                body,
+                signature: None,
+                effects: EffectSet::pure(),
+                enclosing_class: None,
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+            }
+        }
+        // def render(s); @status = resolve_status(s); end  (threads record)
+        // def resolve_status(s); STATUS_CODES.fetch(s, 200); end  (pure)
+        let self_call = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::SelfRef)),
+            method: sym("resolve_status"),
+            args: vec![syn(ExprNode::Var { id: VarId(0), name: sym("s") })],
+            block: None,
+            parenthesized: true,
+        });
+        let render = m("render", &["s"], syn(ExprNode::Assign {
+            target: crate::expr::LValue::Ivar { name: sym("status") },
+            value: self_call,
+        }));
+        let resolve = m("resolve_status", &["s"], syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Const { path: vec![sym("STATUS_CODES")] })),
+            method: sym("fetch"),
+            args: vec![
+                syn(ExprNode::Var { id: VarId(0), name: sym("s") }),
+                syn(ExprNode::Lit { value: Literal::Int { value: 200 } }),
+            ],
+            block: None,
+            parenthesized: true,
+        }));
+        let class = LibraryClass {
+            name: ClassId(sym("ActionController::Base")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![render, resolve],
+            origin: None,
+        };
+        let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        // The pure method takes no record param; the self-call to it from
+        // the record-threading `render` stays arity-correct (no record arg).
+        assert!(ex.contains("def resolve_status(s)"), "pure method, no record param:\n{ex}");
+        assert!(ex.contains("resolve_status(s)"), "self-call drops record:\n{ex}");
+        assert!(!ex.contains("resolve_status(record"), "no record threaded into pure call:\n{ex}");
+        // `render` itself does thread record (it writes @status).
+        assert!(ex.contains("def render(record, s)"), "render threads record:\n{ex}");
+    }
+}
+
+/// Exception modules that exist in Elixir's standard library, so a
+/// Ruby `raise Class, msg` keeps its class. Anything else (Ruby-only
+/// `NotImplementedError`, Rails' `RecordNotFound`, …) falls back to a
+/// message-only `raise` (a `RuntimeError`).
+fn is_elixir_exception(name: &str) -> bool {
+    matches!(
+        name,
+        "ArgumentError" | "RuntimeError" | "KeyError" | "ArithmeticError"
+    )
 }
 
 fn emit_const(path: &[crate::ident::Symbol]) -> String {
