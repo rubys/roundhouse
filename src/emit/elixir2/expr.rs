@@ -303,17 +303,37 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
-    // `recv.length` / `recv.size` → `String.length(recv)` (json_builder
-    // receivers are all strings; widen when array receivers appear).
+    // `recv.length` / `recv.size` — lists use `Kernel.length/1`, strings
+    // use `String.length/1`. Driven by the analyzer's `Ty` on the
+    // receiver; defaults to `String.length` when the type is unknown.
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
-            return format!("String.length({})", emit_expr(r));
+            let r_s = emit_expr(r);
+            return if recv_is_array(r) {
+                format!("length({r_s})")
+            } else {
+                format!("String.length({r_s})")
+            };
         }
     }
 
     // `recv[...]` indexing.
     if method == "[]" && recv.is_some() {
-        let r_s = emit_expr(recv.unwrap());
+        let r = recv.unwrap();
+        let r_s = emit_expr(r);
+        // List indexing: `list[i]` raises in Elixir (lists aren't Access
+        // by integer), so route through `Enum`.
+        if recv_is_array(r) {
+            if args.len() == 1 {
+                if let ExprNode::Range { .. } = &*args[0].node {
+                    return format!("Enum.slice({r_s}, {})", emit_expr(&args[0]));
+                }
+                return format!("Enum.at({r_s}, {})", emit_expr(&args[0]));
+            }
+            if args.len() == 2 {
+                return format!("Enum.slice({r_s}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1]));
+            }
+        }
         // Two-arg `recv[start, len]` → string slice.
         if args.len() == 2 {
             return format!("String.slice({r_s}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1]));
@@ -345,6 +365,28 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Ruby String / Hash methods → Elixir module-function calls (Elixir
+    // has no `recv.method` dispatch on builtins).
+    if let Some(r) = recv {
+        let r_s = emit_expr(r);
+        match (method, args.len()) {
+            ("upcase", 0) => return format!("String.upcase({r_s})"),
+            ("downcase", 0) => return format!("String.downcase({r_s})"),
+            ("strip", 0) => return format!("String.trim({r_s})"),
+            ("split", 1) => return format!("String.split({r_s}, {})", emit_expr(&args[0])),
+            ("start_with?", 1) => {
+                return format!("String.starts_with?({r_s}, {})", emit_expr(&args[0]))
+            }
+            ("end_with?", 1) => {
+                return format!("String.ends_with?({r_s}, {})", emit_expr(&args[0]))
+            }
+            // `acc.merge({k => v})` — the threaded-accumulator update
+            // emitted by while_to_recursion.
+            ("merge", 1) => return format!("Map.merge({r_s}, {})", emit_expr(&args[0])),
+            _ => {}
+        }
+    }
+
     // Default call forms.
     match recv {
         None => {
@@ -369,6 +411,12 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 
 fn emit_args(args: &[Expr]) -> String {
     args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+}
+
+/// True when the analyzer typed `e` as an `Array` — the signal to use
+/// `Enum`/`Kernel.length` rather than the `String`/`Access` forms.
+fn recv_is_array(e: &Expr) -> bool {
+    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
 }
 
 /// Ruby infix operators whose Elixir spelling is identical.

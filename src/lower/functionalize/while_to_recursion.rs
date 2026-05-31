@@ -80,16 +80,10 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     // advanced counter by name.
     let (counter, step_rebind) = lower_counter_step(last)?;
 
-    // Reject shapes outside v1: accumulator/field mutation, break/next,
-    // yield, or a second compound assignment in the loop body (the
-    // trailing counter step `last` is already excluded — we scan only
-    // `leading`).
-    if leading.iter().any(has_unsupported) {
-        return None;
-    }
-
     // Carried locals = vars bound in the pre-loop statements, in order,
-    // that are referenced in the condition or loop body.
+    // that are referenced in the condition or loop body. (An accumulator
+    // like `params = {}` is found here because `walk` descends into
+    // index-assign targets, so `params[k] = v` counts as a reference.)
     let pre_assigned = assigned_vars(pre);
     let carried: Vec<Symbol> = pre_assigned
         .into_iter()
@@ -109,6 +103,20 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
         }
     }
 
+    // Thread accumulators: `acc[k] = v` on a carried `acc` becomes a
+    // non-destructive rebind `acc = acc.merge({k => v})`, so the value
+    // flows to the next iteration via the recursive call's by-name args.
+    // (Index/field assignment to a *non*-carried var remains and trips
+    // `has_unsupported` below — we can't thread what we don't carry.)
+    let leading_rw: Vec<Expr> = leading.iter().map(|s| rewrite_accumulators(s, &carried)).collect();
+
+    // Reject shapes outside v1: remaining accumulator/field mutation,
+    // break/next, yield, or a second compound assignment (the trailing
+    // counter step is excluded — we scan only `leading`).
+    if leading_rw.iter().any(has_unsupported) {
+        return None;
+    }
+
     // --- build the two methods ---
     let helper_name = Symbol::from(format!("{}__loop", m.name.as_str()).as_str());
 
@@ -117,27 +125,25 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     helper_params.extend(carried.iter().map(|n| Param::positional(n.clone())));
 
     // The recursive tail call passes every helper param by name; the
-    // lowered counter step (in scope at the call site) advances `i`.
+    // lowered counter step + accumulator rebinds (in scope at the call
+    // site) advance the carried state.
     let recurse_args: Vec<Expr> = helper_params.iter().map(|p| var(&p.name)).collect();
     let recurse_call = bareword_call(&helper_name, recurse_args);
 
-    // Loop body with the trailing step lowered to a rebind.
-    let mut body_stmts: Vec<Expr> = leading.to_vec();
+    // Loop body (accumulators threaded) with the trailing step lowered.
+    let mut body_stmts: Vec<Expr> = leading_rw;
     body_stmts.push(step_rebind);
-
-    let post_value = value_of(post);
-    let helper_body = syn(ExprNode::If {
-        cond: cond.clone(),
-        then_branch: cps(&body_stmts, &recurse_call),
-        else_branch: post_value,
-    });
 
     let helper = MethodDef {
         name: helper_name,
         receiver: MethodReceiver::Class,
         params: helper_params,
         block_param: None,
-        body: helper_body,
+        body: syn(ExprNode::If {
+            cond: cond.clone(),
+            then_branch: cps(&body_stmts, &recurse_call),
+            else_branch: value_of(post),
+        }),
         signature: None,
         effects: m.effects.clone(),
         enclosing_class: m.enclosing_class.clone(),
@@ -146,14 +152,50 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
         mutates_self: false,
     };
 
-    // Entry: pre-loop statements (which bind the carried locals), then
-    // the initial call into the helper.
-    let mut entry_stmts: Vec<Expr> = pre.to_vec();
-    entry_stmts.push(recurse_call);
+    // Entry: the pre-loop statements (which bind the carried locals),
+    // ending in the initial call into the helper. CPS so a pre-loop
+    // guard (`return X if c`) becomes an `if`, not a bare `return`.
     let mut entry = m.clone();
-    entry.body = syn(ExprNode::Seq { exprs: entry_stmts });
+    entry.body = cps(pre, &recurse_call);
 
     Some(vec![entry, helper])
+}
+
+// ---- accumulator threading ------------------------------------------
+
+/// Rewrite `acc[k] = v` (index assignment to a carried var) into the
+/// non-destructive rebind `acc = acc.merge({k => v})`. Descends through
+/// `Seq` and `If` branches (where loop-body statements live). Other
+/// nodes are returned unchanged.
+fn rewrite_accumulators(e: &Expr, carried: &[Symbol]) -> Expr {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Index { recv, index }, value } => {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                if carried.contains(name) {
+                    let entry = (index.clone(), value.clone());
+                    let merged = binop(
+                        var(name),
+                        "merge",
+                        syn(ExprNode::Hash { entries: vec![entry], kwargs: false }),
+                    );
+                    return syn(ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: name.clone() },
+                        value: merged,
+                    });
+                }
+            }
+            e.clone()
+        }
+        ExprNode::Seq { exprs } => syn(ExprNode::Seq {
+            exprs: exprs.iter().map(|x| rewrite_accumulators(x, carried)).collect(),
+        }),
+        ExprNode::If { cond, then_branch, else_branch } => syn(ExprNode::If {
+            cond: cond.clone(),
+            then_branch: rewrite_accumulators(then_branch, carried),
+            else_branch: rewrite_accumulators(else_branch, carried),
+        }),
+        _ => e.clone(),
+    }
 }
 
 // ---- CPS: loop body → expression, with a tail continuation ----------
@@ -388,7 +430,14 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
             walk(left, f);
             walk(right, f);
         }
-        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk(value, f),
+        ExprNode::Assign { target, value } => {
+            walk_lvalue(target, f);
+            walk(value, f);
+        }
+        ExprNode::OpAssign { target, value, .. } => {
+            walk_lvalue(target, f);
+            walk(value, f);
+        }
         ExprNode::Return { value } | ExprNode::Raise { value } | ExprNode::Splat { value } => {
             walk(value, f)
         }
@@ -425,6 +474,18 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
         // Leaves / variants this pass doesn't descend into.
+        _ => {}
+    }
+}
+
+/// Walk the sub-expressions inside an assignment target (`a[k]`, `o.x`).
+fn walk_lvalue(lv: &LValue, f: &mut impl FnMut(&Expr)) {
+    match lv {
+        LValue::Index { recv, index } => {
+            walk(recv, f);
+            walk(index, f);
+        }
+        LValue::Attr { recv, .. } => walk(recv, f),
         _ => {}
     }
 }
@@ -599,6 +660,117 @@ mod tests {
         assert!(!ex.contains("elixir2: unhandled"), "no unsupported-node stub:\n{ex}");
     }
 
+    fn str_lit(s: &str) -> Expr {
+        syn(ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
+    }
+    fn call1(recv: Expr, method: &str, arg: Expr) -> Expr {
+        syn(ExprNode::Send {
+            recv: Some(recv),
+            method: sym(method),
+            args: vec![arg],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    /// `def self.mp(pattern, path); parts = pattern.split("/");
+    ///  return nil if parts.length == 0; params = {}; i = 0;
+    ///  while i < parts.length; pp = parts[i];
+    ///    if pp.start_with?(":"); params[pp] = pp; end; i += 1; end; params; end`
+    fn match_pattern_method() -> MethodDef {
+        let cond = binop(vr("i"), "<", binop_call(vr("parts"), "length"));
+        let acc = if_(
+            call1(vr("pp"), "start_with?", str_lit(":")),
+            index_assign("params", vr("pp"), vr("pp")),
+            nil(),
+        );
+        let loop_body = seq(vec![
+            assign("pp", index_get("parts", vr("i"))),
+            acc,
+            step_add("i"),
+        ]);
+        let pre_guard = if_(
+            binop(binop_call(vr("parts"), "length"), "==", lit_int(0)),
+            ret(nil()),
+            nil(),
+        );
+        let body = seq(vec![
+            assign("parts", call1(vr("pattern"), "split", str_lit("/"))),
+            pre_guard,
+            assign("params", syn(ExprNode::Hash { entries: vec![], kwargs: false })),
+            assign("i", lit_int(0)),
+            while_(cond, loop_body),
+            vr("params"),
+        ]);
+        method("mp", MethodReceiver::Class, &["pattern", "path"], body)
+    }
+
+    #[test]
+    fn pre_loop_guard_and_accumulator_are_handled() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+
+        let out = transform_method(match_pattern_method());
+        assert_eq!(out.len(), 2);
+        let helper = &out[1];
+        assert_eq!(helper.name.as_str(), "mp__loop");
+
+        // The accumulator is carried (a helper param) and threaded — no
+        // index-assignment survives in the helper body.
+        let params: Vec<&str> = helper.params.iter().map(|p| p.name.as_str()).collect();
+        assert!(params.contains(&"params"), "accumulator must be carried: {params:?}");
+        assert!(params.contains(&"i") && params.contains(&"parts"));
+        let mut index_assigns = 0;
+        walk(&helper.body, &mut |n| {
+            if matches!(&*n.node, ExprNode::Assign { target: LValue::Index { .. }, .. }) {
+                index_assigns += 1;
+            }
+        });
+        assert_eq!(index_assigns, 0, "index-assign should be threaded to a merge rebind");
+
+        // Render through the real Elixir walker.
+        let class = LibraryClass {
+            name: ClassId(sym("Pat")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: out,
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- match_pattern ---\n{ex}\n---------------------");
+        assert!(!ex.contains("while"), "no while:\n{ex}");
+        assert!(ex.contains("Map.merge(params,"), "accumulator merge:\n{ex}");
+        assert!(ex.contains("mp__loop("), "recurses:\n{ex}");
+        assert!(!ex.contains("elixir2: unhandled"), "no unsupported stub:\n{ex}");
+        // The pre-loop guard became an `if`, not a bare `return`.
+        assert!(!ex.contains("return"), "no bare return:\n{ex}");
+    }
+
+    #[test]
+    fn list_receiver_uses_enum_and_kernel_length() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        use crate::ty::Ty;
+
+        // `def self.first(table); table.length; end` with `table: Array`.
+        let mut table = vr("table");
+        table.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        let body = seq(vec![binop_call(table, "length")]);
+        let m = method("len", MethodReceiver::Class, &["table"], body);
+        let class = LibraryClass {
+            name: ClassId(sym("L")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![m],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        assert!(ex.contains("length(table)"), "list length via Kernel.length:\n{ex}");
+        assert!(!ex.contains("String.length(table)"), "should not use String.length:\n{ex}");
+    }
+
     #[test]
     fn method_without_loop_is_unchanged() {
         let m = method("plain", MethodReceiver::Class, &["x"], seq(vec![ret(vr("x"))]));
@@ -608,13 +780,11 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_mutation_bails() {
-        // Same as find, but the body also does `acc[k] = v` — outside v1.
+    fn carried_accumulator_threads() {
+        // `acc = {}; while …; acc[i] = i; i += 1; end; acc` — the carried
+        // accumulator is threaded (no longer bailed).
         let cond = binop(vr("i"), "<", binop_call(vr("table"), "length"));
-        let loop_body = seq(vec![
-            index_assign("acc", vr("i"), vr("i")),
-            step_add("i"),
-        ]);
+        let loop_body = seq(vec![index_assign("acc", vr("i"), vr("i")), step_add("i")]);
         let body = seq(vec![
             assign("acc", syn(ExprNode::Hash { entries: vec![], kwargs: false })),
             assign("i", lit_int(0)),
@@ -622,7 +792,22 @@ mod tests {
             vr("acc"),
         ]);
         let out = transform_method(method("build", MethodReceiver::Class, &["table"], body));
-        assert_eq!(out.len(), 1, "accumulator loop should be left unchanged");
+        assert_eq!(out.len(), 2, "carried accumulator loop should transform");
+        assert!(!has_while(&out[1].body));
+    }
+
+    #[test]
+    fn field_mutation_bails() {
+        // `o.x = v` (attr mutation) can't be threaded — left unchanged.
+        let cond = binop(vr("i"), "<", binop_call(vr("table"), "length"));
+        let attr_assign = syn(ExprNode::Assign {
+            target: LValue::Attr { recv: vr("o"), name: sym("x") },
+            value: vr("i"),
+        });
+        let loop_body = seq(vec![attr_assign, step_add("i")]);
+        let body = seq(vec![assign("i", lit_int(0)), while_(cond, loop_body), nil()]);
+        let out = transform_method(method("mut", MethodReceiver::Class, &["table", "o"], body));
+        assert_eq!(out.len(), 1, "field mutation should be left unchanged");
         assert!(has_while(&out[0].body));
     }
 
