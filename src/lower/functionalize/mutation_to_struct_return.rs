@@ -109,8 +109,10 @@ fn rewrite(mut m: MethodDef) -> MethodDef {
     let writes = writes_ivar(&m.body);
     let body = rewrite_expr(&m.body);
     // A mutator returns the updated record; a read-only method keeps its
-    // own value. Replace a trailing `nil` return with `record`.
-    m.body = if writes {
+    // own value. A while→recursion helper (`*__loop`) already returns
+    // `record` through its `if` branches (recurse / post-value), so it
+    // must NOT get a trailing `record` appended.
+    m.body = if writes && !m.name.as_str().ends_with("__loop") {
         append_record_return(body)
     } else {
         body

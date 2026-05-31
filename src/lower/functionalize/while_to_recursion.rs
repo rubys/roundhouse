@@ -52,12 +52,6 @@ pub fn transform_method(m: MethodDef) -> Vec<MethodDef> {
 }
 
 fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
-    // v1: module-singleton functions only. Instance-method loops need
-    // record-threading (mutation-threading subsystem) and are deferred.
-    if m.receiver != MethodReceiver::Class {
-        return None;
-    }
-
     let stmts = seq_stmts(&m.body)?;
 
     // Exactly one loop in the whole method, at the top level of the body.
@@ -124,10 +118,22 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     let mut helper_params: Vec<Param> = m.params.clone();
     helper_params.extend(carried.iter().map(|n| Param::positional(n.clone())));
 
+    // An instance-method loop that touches `@ivar`/`self` threads the
+    // record: `record` leads both the recursive call and (via the
+    // emitter's instance-method threading) the helper's params. The
+    // helper body's `@ivar` reads/writes are rewritten to `record.x` by
+    // mutation_to_struct_return, which runs after this pass.
+    let threads_record =
+        m.receiver == MethodReceiver::Instance && touches_self(&m.body);
+
     // The recursive tail call passes every helper param by name; the
     // lowered counter step + accumulator rebinds (in scope at the call
     // site) advance the carried state.
-    let recurse_args: Vec<Expr> = helper_params.iter().map(|p| var(&p.name)).collect();
+    let mut recurse_args: Vec<Expr> = Vec::new();
+    if threads_record {
+        recurse_args.push(var(&Symbol::from("record")));
+    }
+    recurse_args.extend(helper_params.iter().map(|p| var(&p.name)));
     let recurse_call = bareword_call(&helper_name, recurse_args);
 
     // Loop body (accumulators threaded) with the trailing step lowered.
@@ -136,7 +142,10 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
 
     let helper = MethodDef {
         name: helper_name,
-        receiver: MethodReceiver::Class,
+        // Same receiver as the entry: an instance-method loop's helper is
+        // also an instance method, so mutation_to_struct_return threads
+        // `record` through it and the emitter prepends the `record` param.
+        receiver: m.receiver,
         params: helper_params,
         block_param: None,
         body: syn(ExprNode::If {
@@ -305,10 +314,15 @@ fn lower_counter_step(stmt: &Expr) -> Option<(Symbol, Expr)> {
 fn has_unsupported(e: &Expr) -> bool {
     let mut bad = false;
     walk(e, &mut |n| match &*n.node {
-        // Accumulator / field mutation that couldn't be threaded (a
-        // carried `acc.[]=` was already rewritten to a merge rebind, so
-        // any `[]=` still here is on a non-carried receiver).
-        ExprNode::Send { method, .. } if method.as_str() == "[]=" => bad = true,
+        // A `[]=` on a non-carried local can't be threaded. A carried
+        // `acc.[]=` was already rewritten to a merge rebind, and an
+        // ivar-rooted `@x[k] = v` is threaded later by
+        // mutation_to_struct_return — both are allowed here.
+        ExprNode::Send { recv: Some(r), method, .. }
+            if method.as_str() == "[]=" && !matches!(&*r.node, ExprNode::Ivar { .. }) =>
+        {
+            bad = true
+        }
         ExprNode::Assign { target: LValue::Index { .. } | LValue::Attr { .. }, .. }
         | ExprNode::OpAssign { target: LValue::Index { .. } | LValue::Attr { .. }, .. }
         // A compound assignment other than the (already-excluded) trailing step.
@@ -360,6 +374,18 @@ fn referenced_vars(e: &Expr) -> Vec<Symbol> {
         }
     });
     out
+}
+
+/// True when the method body reads/writes instance state (`@ivar`/`self`)
+/// — the signal that an instance-method loop must thread `record`.
+fn touches_self(e: &Expr) -> bool {
+    let mut found = false;
+    walk(e, &mut |n| {
+        if matches!(&*n.node, ExprNode::Ivar { .. } | ExprNode::SelfRef) {
+            found = true;
+        }
+    });
+    found
 }
 
 fn count_loops(e: &Expr) -> usize {
@@ -782,6 +808,58 @@ mod tests {
     }
 
     #[test]
+    fn instance_method_loop_threads_record() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        // def fill(n)            # Instance
+        //   i = 0
+        //   while i < n
+        //     @data[i] = i
+        //     i += 1
+        //   end
+        //   self
+        // end
+        let loop_body = seq(vec![
+            index_assign_ivar("data", vr("i"), vr("i")),
+            step_add("i"),
+        ]);
+        let body = seq(vec![
+            assign("i", lit_int(0)),
+            while_(binop(vr("i"), "<", vr("n")), loop_body),
+            syn(ExprNode::SelfRef),
+        ]);
+        let m = method("fill", MethodReceiver::Instance, &["n"], body);
+        // Run the full functionalize pipeline (while→recursion, then
+        // mutation-threading) and render.
+        let class = LibraryClass {
+            name: ClassId(sym("S")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![m],
+            origin: None,
+        };
+        let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- instance loop ---\n{ex}\n---------------------");
+        assert!(ex.contains("def fill(record, n)"), "entry threads record:\n{ex}");
+        assert!(ex.contains("fill__loop(record, n, i)"), "initial call passes record:\n{ex}");
+        assert!(ex.contains("def fill__loop(record, n, i)"), "helper threads record:\n{ex}");
+        assert!(ex.contains("record = %{record | data: Map.put(record.data, i, i)}"), "nested @data in loop:\n{ex}");
+        assert!(!ex.contains("while"), "no while:\n{ex}");
+    }
+
+    fn index_assign_ivar(ivar: &str, key: Expr, value: Expr) -> Expr {
+        syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Ivar { name: sym(ivar) })),
+            method: sym("[]="),
+            args: vec![key, value],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    #[test]
     fn method_without_loop_is_unchanged() {
         let m = method("plain", MethodReceiver::Class, &["x"], seq(vec![ret(vr("x"))]));
         let out = transform_method(m);
@@ -819,10 +897,13 @@ mod tests {
     }
 
     #[test]
-    fn instance_receiver_loop_bails() {
+    fn instance_receiver_loop_transforms() {
         let mut m = find_method();
         m.receiver = MethodReceiver::Instance;
         let out = transform_method(m);
-        assert_eq!(out.len(), 1, "instance-method loop is deferred (mutation-threading)");
+        // Instance-method loops now transform (entry + helper); the helper
+        // inherits the Instance receiver so record can thread through it.
+        assert_eq!(out.len(), 2, "instance-method loop transforms");
+        assert_eq!(out[1].receiver, MethodReceiver::Instance);
     }
 }
