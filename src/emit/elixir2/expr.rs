@@ -47,6 +47,20 @@ pub(super) fn set_record_methods(names: std::collections::HashSet<String>) {
     RECORD_METHODS.with(|m| *m.borrow_mut() = names);
 }
 
+thread_local! {
+    /// The Ruby name of the class currently being emitted (e.g.
+    /// `ActiveRecord::Base`), used to resolve `Module#name` reflection
+    /// (`#{name}` in a class method) to a static string — Elixir module
+    /// functions have no class-name reflection.
+    static CURRENT_CLASS_NAME: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set the Ruby name of the class currently being emitted. Called by
+/// `emit_library_class`.
+pub(super) fn set_current_class_name(name: &str) {
+    CURRENT_CLASS_NAME.with(|n| *n.borrow_mut() = name.to_string());
+}
+
 /// True when `name` is a record-threading instance method of the current
 /// class — so a self-call to it takes a leading `record` arg.
 fn threads_record(name: &str) -> bool {
@@ -348,6 +362,20 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         other => other,
     };
 
+    // `self.class.foo(args)` → same-module `foo(args)`: Elixir has no
+    // class reflection, and the defining module IS the class. (Real
+    // subclass dispatch is handled by the lowerer linearizing these
+    // methods per-model; on Base itself the same-module call lands on
+    // the stub.) A bare `self.class` → `__MODULE__`.
+    if let Some(r) = recv {
+        if is_self_class(r) {
+            return format!("{}({})", super::library::elixir_fn_name(method), emit_args(args));
+        }
+    }
+    if method == "class" && args.is_empty() && recv.is_none() {
+        return "__MODULE__".to_string();
+    }
+
     // `recv.__index_put__(k, v)` (from local_accumulation's `x[k]=v`)
     // rendered by receiver type: a struct routes to its `put` setter,
     // a map (or unknown) to `Map.put`.
@@ -484,6 +512,19 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Bareword `name` / `self.name` (receiver collapsed to None above) in
+    // a class method is `Module#name` reflection — Elixir module
+    // functions have no class-name reflection, so resolve it to the
+    // defining class's name string at emit time. Used only in these
+    // runtime files' contract-marker raises (`"#{name}.table_name must
+    // be overridden"`); no runtime class defines a `name` method/local.
+    if method == "name" && args.is_empty() && recv.is_none() {
+        let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+        if !class.is_empty() {
+            return format!("{class:?}");
+        }
+    }
+
     // `recv.length` / `recv.size` — lists use `Kernel.length/1`, strings
     // use `String.length/1`. Driven by the analyzer's `Ty` on the
     // receiver; defaults to `String.length` when the type is unknown.
@@ -582,10 +623,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     }
 
     // `self[k]` / `self[k] = v` on the threaded `record` → the renamed
-    // same-module accessor (`def []` → `get`, `def []=` → `put`).
+    // same-module accessor (`def []` → `get`, `def []=` → `put`). Threads
+    // `record` only when that accessor does (the per-model indexer reads/
+    // writes columns → record-threaded; Base's stub raises → pure, so
+    // `self[:x]` lands on `get/1`, arity-correct).
     if (method == "[]" || method == "[]=") && recv.is_some_and(is_record_var) {
         let fname = super::library::elixir_fn_name(method);
-        return format!("{fname}(record, {})", emit_args(args));
+        if threads_record(&fname) {
+            return format!("{fname}(record, {})", emit_args(args));
+        }
+        return format!("{fname}({})", emit_args(args));
     }
     // `self.foo(args)` / `self.foo` on the threaded `record` is a method
     // call (field reads come through `__field__`, handled above) → the
@@ -752,13 +799,12 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // Default call forms.
     match recv {
         None => {
-            // Bareword — a function in the enclosing module (e.g.
-            // `encode_string(v)`).
-            if args.is_empty() {
-                method.to_string()
-            } else {
-                format!("{}({})", method, emit_args(args))
-            }
+            // Bareword — a 0-or-more-arg call to a function in the
+            // enclosing module (`encode_string(v)`, `table_name()`). A
+            // recv-less `Send` is always a CALL (a bare local read is a
+            // `Var` node), so 0-arity gets `()` too — Elixir reads
+            // `table_name` without parens as an undefined variable.
+            format!("{}({})", method, emit_args(args))
         }
         Some(r) => {
             let r_s = emit_expr(r);
@@ -898,6 +944,22 @@ fn recv_is_array(e: &Expr) -> bool {
 /// route to the same-module renamed accessor.
 fn is_record_var(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
+}
+
+/// True when `e` is `self.class` — a no-arg `class` Send whose receiver
+/// is `self`, already collapsed to none, or the threaded `record` var
+/// (mutation-threading rewrites `self` → `record`). `self.class.foo` is
+/// the only `class` call shape these runtime files use.
+fn is_self_class(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Send { recv, method, args, .. }
+            if method.as_str() == "class"
+                && args.is_empty()
+                && recv.as_ref().is_none_or(|r| {
+                    matches!(&*r.node, ExprNode::SelfRef) || is_record_var(r)
+                })
+    )
 }
 
 /// True when the analyzer typed `e` as a `Hash` — route its methods to `Map.*`.
@@ -1232,6 +1294,49 @@ mod tests {
         let utc = call(now, "utc", vec![]);
         let iso = call(utc, "iso8601", vec![]);
         assert_eq!(emit_expr(&iso), "DateTime.to_iso8601(DateTime.utc_now())");
+    }
+
+    fn bare_call(method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: None,
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        })
+    }
+    fn self_ref() -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef)
+    }
+
+    #[test]
+    fn zero_arg_bareword_call_gets_parens() {
+        // A recv-less Send is a CALL; 0-arity needs `()` (bare `table_name`
+        // would be an undefined variable in Elixir).
+        assert_eq!(emit_expr(&bare_call("table_name", vec![])), "table_name()");
+        assert_eq!(
+            emit_expr(&bare_call("foo", vec![var_t("x", Ty::Untyped)])),
+            "foo(x)"
+        );
+    }
+
+    #[test]
+    fn self_class_routes_to_same_module() {
+        // `self.class.schema_columns` → `schema_columns()` (Elixir's
+        // module IS the class). Covers both the `self`- and threaded-
+        // `record`-receiver forms.
+        let via_self = call(call(self_ref(), "class", vec![]), "schema_columns", vec![]);
+        assert_eq!(emit_expr(&via_self), "schema_columns()");
+        let via_record =
+            call(call(var_t("record", Ty::Untyped), "class", vec![]), "schema_columns", vec![]);
+        assert_eq!(emit_expr(&via_record), "schema_columns()");
+    }
+
+    #[test]
+    fn name_reflection_resolves_to_class_string() {
+        set_current_class_name("ActiveRecord::Base");
+        assert_eq!(emit_expr(&bare_call("name", vec![])), "\"ActiveRecord::Base\"");
+        set_current_class_name("");
     }
 }
 

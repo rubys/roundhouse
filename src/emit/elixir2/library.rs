@@ -40,6 +40,9 @@ pub(super) fn v2_module_name(class: &str) -> String {
 /// … end` (trailing newline included).
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     let v2_name = v2_module_name(class.name.0.as_str());
+    // Register the Ruby class name for `Module#name` reflection
+    // (`#{name}` in a class method resolves to this string).
+    expr::set_current_class_name(class.name.0.as_str());
     let body = emit_class_body(class, &v2_name)?;
     Ok(format!("defmodule {v2_name} do\n{body}end\n"))
 }
