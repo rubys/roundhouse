@@ -406,6 +406,29 @@ mod tests {
     }
 
     #[test]
+    fn index_operator_def_and_self_call_route_to_get() {
+        // def [](key); @notice; end   →  def get(record, key) do record.notice end
+        // def fetch(key); self[key]; end → def fetch(record, key) do get(record, key) end
+        let getter = instance_method(
+            "[]",
+            &["key"],
+            syn(ExprNode::Seq { exprs: vec![syn(ExprNode::Ivar { name: sym("notice") })] }),
+        );
+        let self_index = send(
+            Some(syn(ExprNode::SelfRef)),
+            "[]",
+            vec![vr("key")],
+        );
+        let fetch = instance_method("fetch", &["key"], syn(ExprNode::Seq { exprs: vec![self_index] }));
+        let ex = render_via_elixir(vec![transform_method(getter), transform_method(fetch)]);
+        eprintln!("--- index ops ---\n{ex}\n-----------------");
+        assert!(ex.contains("def get(record, key)"), "[] def → get:\n{ex}");
+        assert!(ex.contains("record.notice"), "getter reads field:\n{ex}");
+        assert!(ex.contains("def fetch(record, key)"), "fetch threaded:\n{ex}");
+        assert!(ex.contains("get(record, key)"), "self[key] → get(record, key):\n{ex}");
+    }
+
+    #[test]
     fn pure_instance_method_takes_no_record() {
         // `def resolve_status(s); s; end` — no @ivar, so no record param.
         let m = instance_method("resolve_status", &["s"], syn(ExprNode::Seq { exprs: vec![vr("s")] }));

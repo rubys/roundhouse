@@ -381,6 +381,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `self[k]` / `self[k] = v` on the threaded `record` → the renamed
+    // same-module accessor (`def []` → `get`, `def []=` → `put`).
+    if (method == "[]" || method == "[]=") && recv.is_some_and(is_record_var) {
+        let fname = super::library::elixir_fn_name(method);
+        return format!("{fname}(record, {})", emit_args(args));
+    }
+
     // `recv[...]` indexing.
     if method == "[]" && recv.is_some() {
         let r = recv.unwrap();
@@ -553,6 +560,12 @@ fn emit_args(args: &[Expr]) -> String {
 /// `Enum`/`Kernel.length` rather than the `String`/`Access` forms.
 fn recv_is_array(e: &Expr) -> bool {
     matches!(e.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
+}
+
+/// True when `e` is the threaded `record` var (self) — its `[]`/`[]=`
+/// route to the same-module renamed accessor.
+fn is_record_var(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
 }
 
 /// Ruby infix operators whose Elixir spelling is identical.

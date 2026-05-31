@@ -198,9 +198,15 @@ fn references_token(body: &str, tok: &str) -> bool {
 }
 
 /// Map a Ruby method name to a legal Elixir function name. `?`/`!`
-/// suffixes are valid in Elixir and pass through; a writer `foo=`
-/// becomes `set_foo` (`=` can't appear in a function name).
-fn elixir_fn_name(name: &str) -> String {
+/// suffixes are valid in Elixir and pass through. The indexing
+/// operators `[]`/`[]=` (illegal as Elixir function names) become
+/// `get`/`put`; a writer `foo=` becomes `set_foo`.
+pub(super) fn elixir_fn_name(name: &str) -> String {
+    match name {
+        "[]" => return "get".to_string(),
+        "[]=" => return "put".to_string(),
+        _ => {}
+    }
     if let Some(base) = name.strip_suffix('=') {
         format!("set_{base}")
     } else {
