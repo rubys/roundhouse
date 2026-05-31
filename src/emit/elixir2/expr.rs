@@ -90,21 +90,26 @@ fn emit_stmts(stmts: &[Expr]) -> String {
             );
         }
 
-        // Conditional reassignment: `if cond do … v = X end` where the
-        // branch's last statement rebinds an already-bound `v`. Elixir
-        // scoping discards the inner binding, so lift it:
-        // `v = if cond do … X else v end`.
-        if is_empty(else_branch) {
-            if let Some(v) = reassigned_var(then_branch) {
-                let cond_s = emit_expr(cond);
-                let then_s = emit_block_with_value(then_branch);
-                let rebind = format!(
-                    "{v} = if {cond_s} do\n{}\nelse\n{}\nend",
-                    indent(&then_s, 1),
-                    indent(v, 1),
-                );
-                return format!("{rebind}\n{}", emit_stmts(rest));
-            }
+        // Conditional reassignment: an `if` whose one non-empty branch
+        // rebinds an already-bound `v` (the other branch empty). Elixir
+        // scoping discards the inner binding, so lift it to
+        // `v = if cond do <new> else v end`. Handles both the `if`
+        // (reassign in then) and `unless` (reassign in else) shapes.
+        let rebind = if is_empty(else_branch) {
+            reassigned_var(then_branch).map(|v| (v, emit_block_with_value(then_branch), v.to_string()))
+        } else if is_empty(then_branch) {
+            reassigned_var(else_branch).map(|v| (v, v.to_string(), emit_block_with_value(else_branch)))
+        } else {
+            None
+        };
+        if let Some((v, then_s, else_s)) = rebind {
+            let cond_s = emit_expr(cond);
+            let lifted = format!(
+                "{v} = if {cond_s} do\n{}\nelse\n{}\nend",
+                indent(&then_s, 1),
+                indent(&else_s, 1),
+            );
+            return format!("{lifted}\n{}", emit_stmts(rest));
         }
     }
 
@@ -271,6 +276,19 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => None,
         other => other,
     };
+
+    // `record.__struct_put__(:field, value)` → `%{record | field: value}`
+    // (the mutation-threading bridge — see lower::functionalize::
+    // mutation_to_struct_return).
+    if method == "__struct_put__" && args.len() == 2 {
+        if let Some(r) = recv {
+            let field = match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.to_string(),
+                _ => emit_expr(&args[0]),
+            };
+            return format!("%{{{} | {field}: {}}}", emit_expr(r), emit_expr(&args[1]));
+        }
+    }
 
     // `.freeze` — Elixir is immutable; the receiver is the value.
     if method == "freeze" && args.is_empty() {

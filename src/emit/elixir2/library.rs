@@ -159,17 +159,19 @@ fn collect_struct_fields(methods: &[MethodDef]) -> Vec<String> {
 }
 
 /// Emit one method as an Elixir `def` (indented one level for inside a
-/// `defmodule`; the body is indented a further level). When
-/// `thread_record` is set, the instance receiver is threaded as a
-/// leading `record` param.
-fn emit_fn(out: &mut String, m: &MethodDef, thread_record: bool) {
+/// `defmodule`; the body is indented a further level). An instance
+/// method threads a leading `record` param — but only when its
+/// (mutation-lowered) body actually references `record`; pure instance
+/// methods (no `@ivar` use) take no record param so bareword self-calls
+/// stay arity-correct.
+fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
+    let body = expr::emit_method_body(&m.body);
+
     let mut params: Vec<String> = Vec::new();
-    if thread_record {
+    if instance_method && references_record(&body) {
         params.push("record".to_string());
     }
     params.extend(m.params.iter().map(|p| p.as_str().to_string()));
-
-    let body = expr::emit_method_body(&m.body);
 
     writeln!(
         out,
@@ -181,6 +183,13 @@ fn emit_fn(out: &mut String, m: &MethodDef, thread_record: bool) {
     out.push_str(&expr::indent(&body, 2));
     out.push('\n');
     out.push_str("  end\n");
+}
+
+/// Whether a rendered body references the `record` var as a token (the
+/// signal that mutation-threading rewrote this instance method).
+fn references_record(body: &str) -> bool {
+    body.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == "record")
 }
 
 /// Map a Ruby method name to a legal Elixir function name. `?`/`!`

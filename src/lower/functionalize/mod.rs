@@ -26,6 +26,7 @@
 //! program still transpiles, and coverage gaps self-report rather than
 //! crashing.
 
+pub mod mutation_to_struct_return;
 pub mod while_to_recursion;
 
 use crate::dialect::LibraryClass;
@@ -41,7 +42,11 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
             let methods = std::mem::take(&mut class.methods);
             class.methods = methods
                 .into_iter()
+                // while→recursion first (may split a method into entry +
+                // helper), then thread instance mutation through the
+                // results.
                 .flat_map(while_to_recursion::transform_method)
+                .map(mutation_to_struct_return::transform_method)
                 .collect();
             class
         })
