@@ -61,6 +61,29 @@ pub(super) fn set_current_class_name(name: &str) {
     CURRENT_CLASS_NAME.with(|n| *n.borrow_mut() = name.to_string());
 }
 
+thread_local! {
+    /// Module-level constant names DECLARED in the runtime files (e.g.
+    /// `HTML_ESCAPES`, `ESCAPES`, `STATUS_CODES`), registered up front by
+    /// the overlay pre-pass. `emit_const` rewrites a SCREAMING_SNAKE name
+    /// to a module attribute (`@html_escapes`) only when it's in here —
+    /// so an all-caps *module* reference (`JSON`, `IO`, `URI`) is NOT
+    /// mistaken for a constant and stays a module name.
+    static DECLARED_CONSTANTS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Reset the declared-constant registry (start of an overlay emit).
+pub(super) fn clear_declared_constants() {
+    DECLARED_CONSTANTS.with(|c| c.borrow_mut().clear());
+}
+
+/// Register a declared module-level constant name (see `DECLARED_CONSTANTS`).
+pub(super) fn register_declared_constant(name: &str) {
+    DECLARED_CONSTANTS.with(|c| {
+        c.borrow_mut().insert(name.to_string());
+    });
+}
+
 /// True when `name` is a record-threading instance method of the current
 /// class — so a self-call to it takes a leading `record` arg.
 fn threads_record(name: &str) -> bool {
@@ -792,6 +815,21 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // `acc.merge({k => v})` — the threaded-accumulator update
             // emitted by while_to_recursion.
             ("merge", 1) => return format!("Map.merge({r_s}, {})", emit_expr(&args[0])),
+            // `arr.join` / `arr.join(sep)` → `Enum.join`. Array-only in
+            // Ruby (String has no `join`), so safe to route unconditionally
+            // — covers `pins.map {…}.join(",\n")` where the map result is
+            // an untyped list.
+            ("join", 0) => return format!("Enum.join({r_s})"),
+            ("join", 1) => return format!("Enum.join({r_s}, {})", emit_expr(&args[0])),
+            // `s.tr(from, to)` → `String.replace` (single-char translation,
+            // the only form these runtime files use — `tr("_", "-")`).
+            ("tr", 2) => {
+                return format!(
+                    "String.replace({r_s}, {}, {})",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1])
+                )
+            }
             _ => {}
         }
     }
@@ -1338,6 +1376,43 @@ mod tests {
         assert_eq!(emit_expr(&bare_call("name", vec![])), "\"ActiveRecord::Base\"");
         set_current_class_name("");
     }
+
+    #[test]
+    fn array_join_and_string_tr() {
+        let xs = || var_t("xs", arr());
+        assert_eq!(emit_expr(&call(xs(), "join", vec![])), "Enum.join(xs)");
+        assert_eq!(
+            emit_expr(&call(xs(), "join", vec![str_lit_e(", ")])),
+            "Enum.join(xs, \", \")"
+        );
+        assert_eq!(
+            emit_expr(&call(var_t("s", Ty::Str), "tr", vec![str_lit_e("_"), str_lit_e("-")])),
+            "String.replace(s, \"_\", \"-\")"
+        );
+    }
+
+    #[test]
+    fn declared_constant_is_attr_but_module_ref_is_not() {
+        fn const_ref(name: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Const {
+                path: vec![Symbol::from(name)],
+            })
+        }
+        clear_declared_constants();
+        register_declared_constant("ESCAPES");
+        // A declared SCREAMING_SNAKE constant → module attribute.
+        assert_eq!(emit_expr(&const_ref("ESCAPES")), "@escapes");
+        // An all-caps MODULE reference (not declared) stays a module name,
+        // not a bogus `@json` attribute.
+        assert_eq!(emit_expr(&const_ref("JSON")), "JSON");
+        clear_declared_constants();
+    }
+
+    fn str_lit_e(s: &str) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+            value: Literal::Str { value: s.to_string() },
+        })
+    }
 }
 
 /// Exception modules that exist in Elixir's standard library, so a
@@ -1352,9 +1427,15 @@ fn is_elixir_exception(name: &str) -> bool {
 }
 
 fn emit_const(path: &[crate::ident::Symbol]) -> String {
-    // SCREAMING_SNAKE single-segment name → module attribute (`ESCAPES`
-    // → `@escapes`). CamelCase → a module reference (dotted).
-    if path.len() == 1 && is_screaming_snake(path[0].as_str()) {
+    // A DECLARED SCREAMING_SNAKE constant → module attribute (`ESCAPES`
+    // → `@escapes`). Gated on the declared-constant registry so an
+    // all-caps *module* reference (`JSON`, `IO`, `URI`) — which has the
+    // same shape but isn't a constant — stays a module name rather than
+    // becoming a bogus `@json` attribute.
+    if path.len() == 1
+        && is_screaming_snake(path[0].as_str())
+        && DECLARED_CONSTANTS.with(|c| c.borrow().contains(path[0].as_str()))
+    {
         return format!("@{}", path[0].as_str().to_lowercase());
     }
     // A reference to a sibling module in the same unit — whether bare

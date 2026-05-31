@@ -1197,3 +1197,19 @@ where
     }
     Ok(())
 }
+
+/// Hand every Elixir runtime entry's module-level constant NAMES (e.g.
+/// `HTML_ESCAPES`, `ESCAPES`) to `f`. A pre-emit pass registers these so
+/// `emit_const` only rewrites a SCREAMING_SNAKE reference to a module
+/// attribute (`@html_escapes`) when it's a DECLARED constant — an
+/// all-caps *module* reference like `JSON`/`IO` stays a module name.
+pub fn elixir_constant_names<F>(mut f: F)
+where
+    F: FnMut(&str),
+{
+    for entry in ELIXIR_RUNTIME {
+        for (name, _value) in parse_module_constant_exprs(entry.rb_src).unwrap_or_default() {
+            f(name.as_str());
+        }
+    }
+}

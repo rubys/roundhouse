@@ -72,6 +72,13 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
         return out;
     }
 
+    // Register the runtime's DECLARED module-level constant names so a
+    // SCREAMING_SNAKE reference becomes a module attribute (`@escapes`)
+    // only when it's actually a constant — not for an all-caps module
+    // reference like `JSON` (which would otherwise become `@json`).
+    expr::clear_declared_constants();
+    crate::runtime_loader::elixir_constant_names(expr::register_declared_constant);
+
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the
     // Elixir emitter can render directly. No-op on shapes it doesn't
