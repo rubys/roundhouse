@@ -26,6 +26,7 @@
 //! program still transpiles, and coverage gaps self-report rather than
 //! crashing.
 
+pub mod local_accumulation;
 pub mod mutation_to_struct_return;
 pub mod while_to_recursion;
 
@@ -47,6 +48,7 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
                 // results.
                 .flat_map(while_to_recursion::transform_method)
                 .map(mutation_to_struct_return::transform_method)
+                .map(local_accumulation::transform_method)
                 .collect();
             class
         })
