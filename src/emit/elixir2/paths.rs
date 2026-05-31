@@ -14,6 +14,12 @@ pub(crate) enum OutputKind<'a> {
     /// `runtime_loader::elixir_units` (e.g. `inflector.ex`).
     TranspiledRuntime { file_name: &'a str },
 
+    /// Hand-written runtime module copied verbatim (e.g. `db.ex` — the
+    /// portable prepared-cursor surface the lowered model emit targets,
+    /// with no useful Ruby source to transpile). Mirrors go2's
+    /// `HandWrittenRuntime`.
+    HandWrittenRuntime { name: &'a str },
+
     /// Sentinel emitted when transpile fails — picked up by
     /// `mix compile` so the failure surfaces as a real build error.
     TranspileError,
@@ -30,6 +36,7 @@ pub(crate) fn output_path(kind: OutputKind<'_>) -> OutputDest {
     use OutputKind::*;
     let path = match kind {
         TranspiledRuntime { file_name } => format!("lib/v2/{file_name}"),
+        HandWrittenRuntime { name } => format!("lib/v2/{name}"),
         TranspileError => "lib/v2/transpile_error.txt".to_string(),
     };
     OutputDest {

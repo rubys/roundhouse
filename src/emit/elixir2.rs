@@ -52,7 +52,7 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 /// Produce the elixir2 overlay files. Phase 1: just the transpiled
 /// framework runtime (`lib/v2/inflector.ex`, …), emitted
 /// unconditionally — the slice has no app-dependent shims yet.
-pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
+pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
 
     // Cross-file constant resolution: register EVERY unit's `V2.*` module
@@ -122,6 +122,19 @@ pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
         out.push(EmittedFile {
             path: dest.path,
             content: unit.content.clone(),
+        });
+    }
+
+    // Model-support runtime: the portable prepared-cursor DB surface the
+    // lowered model emit targets (`V2.Db.prepare/step?/column_*/exec/…`),
+    // a thin hand-written wrapper over `Exqlite.Sqlite3` reusing
+    // `Roundhouse.Db`'s connection. Gated on models (it references
+    // `Roundhouse.Db`, only emitted when the app has models). Mirrors
+    // go2's `db.go` / rust2's `db.rs` hand-written-runtime rationale.
+    if !app.models.is_empty() {
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime { name: "db.ex" }).path,
+            content: include_str!("../../runtime/elixir/v2/db.ex").to_string(),
         });
     }
 
