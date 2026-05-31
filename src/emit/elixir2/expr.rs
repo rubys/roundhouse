@@ -207,9 +207,10 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Const { path } => emit_const(path),
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => name.to_string(),
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_send(recv.as_ref(), method.as_str(), args)
-        }
+        ExprNode::Send { recv, method, args, block, .. } => match block {
+            Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
+            None => emit_send(recv.as_ref(), method.as_str(), args),
+        },
         ExprNode::Return { value } => emit_expr(value),
         // `yield a, b` → call the block passed as the trailing `block_fn`
         // param (added by emit_fn when the body yields).
@@ -556,6 +557,49 @@ fn emit_args(args: &[Expr]) -> String {
     args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
 }
 
+/// `recv.each do |x| body end` → `Enum.each(recv, fn x -> body end)`.
+/// Ruby Enumerable methods map onto `Enum.*`; the block becomes an
+/// Elixir anonymous function. (v1: non-mutating bodies — a block that
+/// reassigns an outer local doesn't leak the rebind; `reduce`-shaped
+/// accumulation is a follow-up.)
+fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Expr) -> String {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        // A block that isn't a plain lambda is outside coverage.
+        return crate::emit::diagnostics::report_unsupported(
+            "elixir2",
+            "block",
+            &format!("non-lambda block on `{method}`"),
+        );
+    };
+    let recv_s = recv.map(emit_expr).unwrap_or_default();
+    let enum_fn = enum_method(method);
+    let params_s = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+    let body_s = emit_method_body(body);
+
+    // Leading positional args (e.g. `inject(0) do`) sit before the fn.
+    let lead = if args.is_empty() {
+        String::new()
+    } else {
+        format!("{}, ", emit_args(args))
+    };
+    format!(
+        "Enum.{enum_fn}({recv_s}, {lead}fn {params_s} ->\n{}\nend)",
+        indent(&body_s, 1),
+    )
+}
+
+/// Map a Ruby Enumerable method to its `Enum` counterpart. Renamed
+/// forms are listed; everything else passes through (most names match).
+fn enum_method(method: &str) -> &str {
+    match method {
+        "collect" => "map",
+        "select" | "find_all" => "filter",
+        "detect" => "find",
+        "inject" => "reduce",
+        other => other,
+    }
+}
+
 /// True when the analyzer typed `e` as an `Array` — the signal to use
 /// `Enum`/`Kernel.length` rather than the `String`/`Access` forms.
 fn recv_is_array(e: &Expr) -> bool {
@@ -616,6 +660,36 @@ mod tests {
             block: None,
             parenthesized: false,
         })
+    }
+
+    fn block_send(recv: &str, method: &str, params: &[&str], body: Expr) -> Expr {
+        let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda {
+            params: params.iter().map(|p| Symbol::from(*p)).collect(),
+            block_param: None,
+            body,
+            block_style: Default::default(),
+        });
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(var_t(recv, Ty::Untyped)),
+            method: Symbol::from(method),
+            args: vec![],
+            block: Some(lambda),
+            parenthesized: false,
+        })
+    }
+
+    #[test]
+    fn block_calls_map_to_enum() {
+        let each = block_send("items", "each", &["x"], var_t("x", Ty::Untyped));
+        assert_eq!(emit_expr(&each), "Enum.each(items, fn x ->\n  x\nend)");
+        // Renames: collect→map, select→filter, detect→find.
+        let mapped = block_send("items", "collect", &["x"], var_t("x", Ty::Untyped));
+        assert!(emit_expr(&mapped).starts_with("Enum.map(items, fn x ->"));
+        let filtered = block_send("items", "select", &["x"], var_t("x", Ty::Untyped));
+        assert!(emit_expr(&filtered).starts_with("Enum.filter(items, fn x ->"));
+        // Two-param block (`each do |k, v|`).
+        let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::Untyped));
+        assert!(emit_expr(&kv).starts_with("Enum.each(h, fn k, v ->"));
     }
 
     #[test]
