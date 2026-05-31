@@ -134,6 +134,35 @@ fn rewrite_expr(e: &Expr) -> Expr {
             target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
             value: struct_put(name, rewrite_expr(value)),
         }),
+        // `@x[k] = v` → `record = %{record | x: Map.put(record.x, k, v)}`,
+        // bridged: a struct-put of field `x` to (record.x with k→v). The
+        // emitter renders __struct_put__ as `%{record | x: …}` and
+        // __index_put__ on the (Hash) field as `Map.put`.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Ivar { name } = &*r.node {
+                let updated_field = syn(ExprNode::Send {
+                    recv: Some(field_read(name)),
+                    method: Symbol::from("__index_put__"),
+                    args: vec![rewrite_expr(&args[0]), rewrite_expr(&args[1])],
+                    block: None,
+                    parenthesized: true,
+                });
+                return syn(ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                    value: struct_put(name, updated_field),
+                });
+            }
+            // Non-ivar `[]=` (e.g. on a local) is left for local_accumulation.
+            syn(ExprNode::Send {
+                recv: Some(rewrite_expr(r)),
+                method: method.clone(),
+                args: args.iter().map(rewrite_expr).collect(),
+                block: None,
+                parenthesized: true,
+            })
+        }
         // Recurse through the container variants the runtime bodies use.
         ExprNode::Seq { exprs } => syn(ExprNode::Seq {
             exprs: exprs.iter().map(rewrite_expr).collect(),
@@ -261,26 +290,30 @@ fn touches_self(e: &Expr) -> bool {
 
 fn writes_ivar(e: &Expr) -> bool {
     let mut found = false;
-    walk(e, &mut |n| {
-        if matches!(&*n.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. }) {
-            found = true;
+    walk(e, &mut |n| match &*n.node {
+        ExprNode::Assign { target: LValue::Ivar { .. }, .. } => found = true,
+        // Nested `@x[k] = v` (an ivar-rooted `[]=`) also mutates state.
+        ExprNode::Send { recv: Some(r), method, .. }
+            if method.as_str() == "[]=" && matches!(&*r.node, ExprNode::Ivar { .. }) =>
+        {
+            found = true
         }
+        _ => {}
     });
     found
 }
 
 /// Nested mutation (`@flash[:notice] = v` → `Send{recv: Ivar, "[]="}`)
 /// or a loop — outside v1; bail. (`yield` IS supported.)
+/// A `while` loop in an instance method — not yet threaded (the
+/// recursion would need to carry `record`). `each`/`initialize` bail
+/// here for now. (Nested `@x[k] = v` IS handled — see `rewrite_expr`.)
 fn has_nested_mutation_or_loop(e: &Expr) -> bool {
     let mut bad = false;
-    walk(e, &mut |n| match &*n.node {
-        ExprNode::Send { recv: Some(r), method, .. }
-            if method.as_str() == "[]=" && matches!(&*r.node, ExprNode::Ivar { .. }) =>
-        {
-            bad = true
+    walk(e, &mut |n| {
+        if matches!(&*n.node, ExprNode::While { .. }) {
+            bad = true;
         }
-        ExprNode::While { .. } => bad = true,
-        _ => {}
     });
     bad
 }
@@ -461,6 +494,25 @@ mod tests {
     }
 
     #[test]
+    fn nested_ivar_index_assign_threads_via_map_put() {
+        // def []=(key, value); @data[key] = value; end
+        let assign = send(
+            Some(syn(ExprNode::Ivar { name: sym("data") })),
+            "[]=",
+            vec![vr("key"), vr("value")],
+        );
+        let m = instance_method("[]=", &["key", "value"], syn(ExprNode::Seq { exprs: vec![assign] }));
+        let ex = render_via_elixir(vec![transform_method(m)]);
+        eprintln!("--- nested []= ---\n{ex}\n------------------");
+        assert!(ex.contains("def put(record, key, value)"), "[]= → put, threaded:\n{ex}");
+        assert!(
+            ex.contains("record = %{record | data: Map.put(record.data, key, value)}"),
+            "nested @data[k]=v → struct-update with Map.put:\n{ex}"
+        );
+        assert!(ex.trim_end().ends_with("record\n  end\nend"), "returns record:\n{ex}");
+    }
+
+    #[test]
     fn yielding_method_takes_block_fn_and_returns_record() {
         // `def each; yield @notice; self; end` (Instance).
         let body = syn(ExprNode::Seq {
@@ -588,16 +640,16 @@ mod tests {
     }
 
     #[test]
-    fn nested_mutation_bails() {
-        // `@flash[:notice] = notice` rides Send `[]=` on an ivar — bail.
-        let nested = send(
-            Some(syn(ExprNode::Ivar { name: sym("flash") })),
-            "[]=",
-            vec![syn(ExprNode::Lit { value: Literal::Sym { value: sym("notice") } }), vr("notice")],
-        );
-        let m = instance_method("redir", &["notice"], syn(ExprNode::Seq { exprs: vec![nested, nil()] }));
+    fn instance_method_with_while_bails() {
+        // A `while` in an instance method isn't threaded yet (the
+        // recursion would need to carry `record`) — left unchanged.
+        let loop_ = syn(ExprNode::While {
+            cond: send(Some(vr("i")), "<", vec![vr("n")]),
+            body: syn(ExprNode::Seq { exprs: vec![assign_ivar("data", vr("i"))] }),
+            until_form: false,
+        });
+        let m = instance_method("walk", &["n"], syn(ExprNode::Seq { exprs: vec![loop_, nil()] }));
         let out = transform_method(m.clone());
-        // Unchanged: still has the raw ivar-rooted `[]=` (not threaded).
-        assert_eq!(out.body, m.body, "nested mutation should bail (unchanged)");
+        assert_eq!(out.body, m.body, "instance-method while should bail (unchanged)");
     }
 }
