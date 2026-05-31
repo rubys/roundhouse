@@ -40,11 +40,50 @@ const RECORD: &str = "record";
 /// Rewrite one method for struct-return threading, or return it
 /// unchanged when it isn't an applicable instance mutator.
 pub fn transform_method(m: MethodDef) -> MethodDef {
-    if m.receiver != MethodReceiver::Class && should_thread(&m) {
-        rewrite(m)
-    } else {
-        m
+    if m.receiver == MethodReceiver::Class || !should_thread(&m) {
+        return m;
     }
+    // Mutate-and-return-value (`@x = nil; return v` — returns a value,
+    // not self) can't thread to a single struct return; degrade to a
+    // documented stub rather than emit a silently-wrong (record-unused)
+    // body. Rare (flash#delete); a tuple return is a future option.
+    if writes_ivar(&m.body) && has_value_return(&m.body) {
+        return stub_mutate_and_return(m);
+    }
+    rewrite(m)
+}
+
+/// True if the body has a `return <non-nil>` — a value the method yields
+/// in addition to mutating instance state.
+fn has_value_return(e: &Expr) -> bool {
+    let mut found = false;
+    walk(e, &mut |n| {
+        if let ExprNode::Return { value } = &*n.node {
+            if !matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
+fn stub_mutate_and_return(mut m: MethodDef) -> MethodDef {
+    use crate::dialect::Param;
+    let msg = format!(
+        "roundhouse: {} mutates instance state and returns a value — \
+         unsupported by the Elixir functional lowering",
+        m.name.as_str()
+    );
+    // Params are unused in the stub; `_`-prefix to stay warning-clean.
+    m.params = m
+        .params
+        .iter()
+        .map(|p| Param::positional(Symbol::from(format!("_{}", p.as_str()).as_str())))
+        .collect();
+    m.body = syn(ExprNode::Raise {
+        value: syn(ExprNode::Lit { value: Literal::Str { value: msg } }),
+    });
+    m
 }
 
 /// Thread a constructor (`initialize`) body for struct-update emit: the

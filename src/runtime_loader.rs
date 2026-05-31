@@ -1129,10 +1129,17 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // flash.rb: all methods now correct EXCEPT `delete` (mutate-and-
-    // return-value: `@x = nil; return v` — returns the deleted value, not
-    // self). Wired once `delete` is handled (a tuple return, or a
-    // structured #28 diagnostic + stub). flash is self-contained.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "",
+        out_path: "lib/v2/flash.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape

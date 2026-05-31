@@ -248,6 +248,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             None => emit_send(recv.as_ref(), method.as_str(), args),
         },
         ExprNode::Return { value } => emit_expr(value),
+        ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
         // `yield a, b` → call the block passed as the trailing `block_fn`
         // param (added by emit_fn when the body yields).
         ExprNode::Yield { args } => format!("block_fn.({})", emit_args(args)),
@@ -638,6 +639,14 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
     let recv_s = recv.map(emit_expr).unwrap_or_default();
     let body_s = emit_method_body(body);
     let block_params = params.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    // The `Enum.*` callback receives ONE element per item; a Ruby block
+    // with multiple params (`each do |k, v|`) is iterating pairs, so the
+    // element destructures as a tuple `{k, v}`.
+    let element = match block_params.len() {
+        0 => "_".to_string(),
+        1 => block_params[0].clone(),
+        _ => format!("{{{}}}", block_params.join(", ")),
+    };
 
     let accs = block_accumulators(body, params);
     if accs.len() > 1 {
@@ -653,12 +662,7 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
         // append a trailing `acc` reference so the rebind is preserved as
         // a statement rather than collapsing to its value). The outer
         // rebind captures the fold's result.
-        let fn_params = block_params
-            .iter()
-            .cloned()
-            .chain(std::iter::once(acc.clone()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let fn_params = format!("{element}, {acc}");
         let acc_var = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
             id: crate::ident::VarId(0),
             name: crate::ident::Symbol::from(acc.as_str()),
@@ -680,14 +684,13 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
 
     // Non-accumulating: directly-mapped Enum.* with the block as a fn.
     let enum_fn = enum_method(method);
-    let params_s = block_params.join(", ");
     let lead = if args.is_empty() {
         String::new()
     } else {
         format!("{}, ", emit_args(args))
     };
     format!(
-        "Enum.{enum_fn}({recv_s}, {lead}fn {params_s} ->\n{}\nend)",
+        "Enum.{enum_fn}({recv_s}, {lead}fn {element} ->\n{}\nend)",
         indent(&body_s, 1),
     )
 }
@@ -816,9 +819,9 @@ mod tests {
         assert!(emit_expr(&mapped).starts_with("Enum.map(items, fn x ->"));
         let filtered = block_send("items", "select", &["x"], var_t("x", Ty::Untyped));
         assert!(emit_expr(&filtered).starts_with("Enum.filter(items, fn x ->"));
-        // Two-param block (`each do |k, v|`).
+        // Two-param block (`each do |k, v|`) destructures the element tuple.
         let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::Untyped));
-        assert!(emit_expr(&kv).starts_with("Enum.each(h, fn k, v ->"));
+        assert!(emit_expr(&kv).starts_with("Enum.each(h, fn {k, v} ->"));
     }
 
     #[test]
