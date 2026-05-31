@@ -37,9 +37,13 @@ fn rewrite(e: &Expr) -> Expr {
         ExprNode::OpAssign { target: target @ LValue::Var { .. }, op, value } => {
             desugar_op_assign(target, *op, &rewrite(value), Span::synthetic())
         }
-        // `x.push(v)` on a local → `x = x ++ [v]`.
+        // `x.push(v)` / `x << v` on a local → `x = x ++ [v]`. Ruby's `<<`
+        // append on an Array is the same in-place mutation as `push`; on
+        // a plain local it becomes the same rebind. (A non-local `<<`,
+        // e.g. `errors() << msg` through an accessor, isn't a local
+        // accumulator and is left for the instance-state threading path.)
         ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "push" && args.len() == 1 =>
+            if matches!(method.as_str(), "push" | "<<") && args.len() == 1 =>
         {
             match local_name(r) {
                 Some(name) => rebind(&name, binop(var(&name), "++", array(vec![rewrite(&args[0])]))),
@@ -265,6 +269,42 @@ mod tests {
         // += → rebind.
         assert!(ex.contains("n = n + 1"), "OpAssign → rebind:\n{ex}");
         assert!(ex.trim_end().ends_with("result\n  end\nend"), "returns result:\n{ex}");
+    }
+
+    #[test]
+    fn shovel_on_local_becomes_append_rebind() {
+        // `acc = []; acc << v; acc` — `<<` on a local array is the same
+        // in-place append as `push`, so it rebinds to `acc = acc ++ [v]`.
+        let body = syn(ExprNode::Seq {
+            exprs: vec![
+                rebind(&s("acc"), array(vec![])),
+                send("acc", "<<", vec![var(&s("v"))]),
+                var(&s("acc")),
+            ],
+        });
+        let m = MethodDef {
+            name: s("build"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(s("v"))],
+            block_param: None,
+            body,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = LibraryClass {
+            name: ClassId(s("Acc")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![transform_method(m)],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
     }
 
     #[test]

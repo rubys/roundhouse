@@ -610,6 +610,9 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             if recv_is_hash(r) {
                 return format!("map_size({}) == 0", emit_expr(r));
             }
+            if recv_is_string(r) {
+                return format!("{} == \"\"", emit_expr(r));
+            }
         }
     }
 
@@ -1070,6 +1073,13 @@ fn recv_is_array(e: &Expr) -> bool {
     matches!(e.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
 }
 
+/// True when the analyzer typed `e` as a `String` — its `empty?` becomes
+/// `== ""` (Elixir has no `String.empty?`). A string literal counts too.
+fn recv_is_string(e: &Expr) -> bool {
+    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Str))
+        || matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
+}
+
 /// True when `e` is the threaded `record` var (self) — its `[]`/`[]=`
 /// route to the same-module renamed accessor.
 fn is_record_var(e: &Expr) -> bool {
@@ -1467,6 +1477,8 @@ mod tests {
             emit_expr(&call(hsh(), "include?", vec![var_t("k", Ty::Untyped)])),
             "Map.has_key?(h, k)"
         );
+        // String receiver → `== ""` (Elixir has no String.empty?).
+        assert_eq!(emit_expr(&call(var_t("s", Ty::Str), "empty?", vec![])), "s == \"\"");
     }
 
     #[test]
