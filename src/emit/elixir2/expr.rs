@@ -413,8 +413,80 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         return format!("{r_s}[{}]", emit_args(args));
     }
 
-    // Binary operators ride the Send channel; Elixir's surface matches.
+    // Binary operators ride the Send channel. Comparisons map 1:1;
+    // `+`/`-`/`*`/`/`/`%`/`**` dispatch on operand type because Elixir's
+    // arithmetic operators are numeric-only (strings use `<>`, lists
+    // `++`/`--`, etc.). Ported from the legacy elixir emitter.
     if let (Some(r), [arg]) = (recv, args) {
+        // `== nil` / `!= nil` → `is_nil/1` guard.
+        if method == "==" || method == "!=" {
+            use crate::emit::shared::eq::{classify_eq, EqCase};
+            if let EqCase::NilCheck { subject } = classify_eq(r, arg) {
+                let s = emit_expr(subject);
+                return if method == "==" {
+                    format!("is_nil({s})")
+                } else {
+                    format!("not is_nil({s})")
+                };
+            }
+        }
+        if method == "+" {
+            use crate::emit::shared::add::{classify_add, AddCase};
+            let (ls, rs) = (emit_expr(r), emit_expr(arg));
+            return match classify_add(r, arg) {
+                AddCase::StringConcat => format!("{ls} <> {rs}"),
+                AddCase::ArrayConcat { .. } => format!("{ls} ++ {rs}"),
+                AddCase::Incompatible => {
+                    r#"raise "roundhouse: + with incompatible operand types""#.to_string()
+                }
+                _ => format!("{ls} + {rs}"),
+            };
+        }
+        if method == "-" {
+            use crate::emit::shared::sub::{classify_sub, SubCase};
+            let (ls, rs) = (emit_expr(r), emit_expr(arg));
+            return match classify_sub(r, arg) {
+                SubCase::ArrayDifference { .. } => format!("{ls} -- {rs}"),
+                SubCase::Incompatible => {
+                    r#"raise "roundhouse: - with incompatible operand types""#.to_string()
+                }
+                _ => format!("{ls} - {rs}"),
+            };
+        }
+        if method == "*" {
+            use crate::emit::shared::mul::{classify_mul, MulCase};
+            let (ls, rs) = (emit_expr(r), emit_expr(arg));
+            return match classify_mul(r, arg) {
+                MulCase::StringRepeat => format!("String.duplicate({ls}, {rs})"),
+                MulCase::ArrayRepeat { .. } => format!("List.duplicate({ls}, {rs}) |> List.flatten()"),
+                MulCase::ArrayJoin { .. } => format!("Enum.join({ls}, {rs})"),
+                MulCase::Incompatible => {
+                    r#"raise "roundhouse: * with incompatible operand types""#.to_string()
+                }
+                _ => format!("{ls} * {rs}"),
+            };
+        }
+        if method == "%" {
+            use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+            let (ls, rs) = (emit_expr(r), emit_expr(arg));
+            return match classify_modulo(r, arg) {
+                ModuloCase::NumericPromote => format!(":math.fmod({ls}, {rs})"),
+                ModuloCase::StringFormat => {
+                    r#"raise "roundhouse: String % (sprintf) not yet supported for Elixir target""#.to_string()
+                }
+                ModuloCase::Incompatible => {
+                    r#"raise "roundhouse: % with incompatible operand types""#.to_string()
+                }
+                // Numeric/Unknown: rem/2 (integer) or fmod (float recv).
+                _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Float)) => {
+                    format!(":math.fmod({ls}, {rs})")
+                }
+                _ => format!("rem({ls}, {rs})"),
+            };
+        }
+        if method == "**" {
+            return format!(":math.pow({}, {})", emit_expr(r), emit_expr(arg));
+        }
         if is_infix(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }
@@ -475,11 +547,48 @@ fn recv_is_array(e: &Expr) -> bool {
 }
 
 /// Ruby infix operators whose Elixir spelling is identical.
+/// Operators whose Elixir spelling is a plain infix (comparisons, plus
+/// `/` which is numeric-only in both languages). `+`/`-`/`*`/`%`/`**`
+/// are handled by the type-dispatching arms above.
 fn is_infix(method: &str) -> bool {
-    matches!(
-        method,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*"
-    )
+    matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=" | "/" | "and" | "or")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::{Symbol, VarId};
+    use crate::ty::Ty;
+
+    fn var_t(name: &str, ty: Ty) -> Expr {
+        let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+            id: VarId(0),
+            name: Symbol::from(name),
+        });
+        e.ty = Some(ty);
+        e
+    }
+    fn binop(l: Expr, op: &str, r: Expr) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(l),
+            method: Symbol::from(op),
+            args: vec![r],
+            block: None,
+            parenthesized: false,
+        })
+    }
+    fn arr() -> Ty {
+        Ty::Array { elem: Box::new(Ty::Untyped) }
+    }
+
+    #[test]
+    fn operator_dispatch_by_operand_type() {
+        assert_eq!(emit_expr(&binop(var_t("a", Ty::Str), "+", var_t("b", Ty::Str))), "a <> b");
+        assert_eq!(emit_expr(&binop(var_t("a", arr()), "+", var_t("b", arr()))), "a ++ b");
+        assert_eq!(emit_expr(&binop(var_t("a", Ty::Int), "+", var_t("b", Ty::Int))), "a + b");
+        assert_eq!(emit_expr(&binop(var_t("a", arr()), "-", var_t("b", arr()))), "a -- b");
+        assert_eq!(emit_expr(&binop(var_t("a", Ty::Int), "<", var_t("b", Ty::Int))), "a < b");
+    }
 }
 
 fn emit_const(path: &[crate::ident::Symbol]) -> String {
