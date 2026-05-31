@@ -1092,7 +1092,7 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
 /// compile-clean so the inventory signal is whether the CURRENT scope
 /// passes. Each class self-names as `V2.<Module>` in
 /// `emit_library_class`, so the `namespace` field is unused for Elixir
-/// (left empty). Remaining files (router, active_record/base,
+/// (left empty). Remaining files (active_record/base,
 /// action_controller/base, view_helpers) land as the body walker grows
 /// to cover while-loop→recursion and instance mutation-threading.
 const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
@@ -1140,11 +1140,17 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // session.rb: defstruct, simple @data methods, []=, each, and merge
-    // now emit correctly. Not yet wired — `delete` (`@data.delete(k)` is
-    // a nested mutate-and-return; emits an invalid `map.delete(...)`) and
-    // `initialize` (constructor+loop: the loop result isn't captured and
-    // the bare-return self-return is unwrapped to nil) remain.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "",
+        out_path: "lib/v2/session.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape

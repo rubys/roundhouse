@@ -434,11 +434,14 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // `recv.length` / `recv.size` — lists use `Kernel.length/1`, strings
     // use `String.length/1`. Driven by the analyzer's `Ty` on the
     // receiver; defaults to `String.length` when the type is unknown.
+    // `Kernel.length` is fully qualified so it survives in a module that
+    // defines its own `length/1` (e.g. session's HWIA `length` shim),
+    // where a bare `length(list)` would be an ambiguous-import error.
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
             let r_s = emit_expr(r);
             return if recv_is_array(r) {
-                format!("length({r_s})")
+                format!("Kernel.length({r_s})")
             } else if recv_is_hash(r) {
                 format!("map_size({r_s})")
             } else {
@@ -463,6 +466,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     return format!("Map.get({r_s}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1]))
                 }
                 ("fetch", 1) => return format!("Map.fetch!({r_s}, {})", emit_expr(&args[0])),
+                ("delete", 1) => return format!("Map.delete({r_s}, {})", emit_expr(&args[0])),
                 _ => {}
             }
         }

@@ -93,7 +93,50 @@ fn stub_mutate_and_return(mut m: MethodDef) -> MethodDef {
 /// constructors (flat `@field = value` ones emit a struct literal
 /// directly).
 pub fn thread_constructor_body(body: &Expr) -> Expr {
-    append_record_return(rewrite_expr(body))
+    let rewritten = rewrite_expr(body);
+    // A constructor always returns `record`. When the tail is a
+    // control-flow `if` (e.g. session's `return if other.nil?` followed
+    // by a record-threading populate loop), its value carries the
+    // threaded struct — bind it back to `record`, mapping each branch's
+    // trailing `nil` (a rewritten bare `return self`) to the unchanged
+    // `record`, then return `record`.
+    if let ExprNode::Seq { exprs } = &*rewritten.node {
+        if let Some(last) = exprs.last() {
+            if matches!(&*last.node, ExprNode::If { .. }) && !is_guard_if(last) {
+                let mut head: Vec<Expr> = exprs[..exprs.len() - 1].to_vec();
+                head.push(syn(ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                    value: tail_nil_to_record(last),
+                }));
+                head.push(var(RECORD));
+                return syn(ExprNode::Seq { exprs: head });
+            }
+        }
+    }
+    append_record_return(rewritten)
+}
+
+/// Map an expression's trailing value position so a bare `nil` (a
+/// rewritten bare `return self` in a constructor) yields `record`.
+/// Descends `Seq` tails and both `If` branches; leaves any other tail
+/// (e.g. a record-threading loop call) untouched.
+fn tail_nil_to_record(e: &Expr) -> Expr {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => var(RECORD),
+        ExprNode::Seq { exprs } => {
+            let mut exprs = exprs.clone();
+            if let Some(last) = exprs.pop() {
+                exprs.push(tail_nil_to_record(&last));
+            }
+            syn(ExprNode::Seq { exprs })
+        }
+        ExprNode::If { cond, then_branch, else_branch } => syn(ExprNode::If {
+            cond: cond.clone(),
+            then_branch: tail_nil_to_record(then_branch),
+            else_branch: tail_nil_to_record(else_branch),
+        }),
+        _ => e.clone(),
+    }
 }
 
 fn should_thread(m: &MethodDef) -> bool {

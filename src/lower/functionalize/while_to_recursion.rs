@@ -115,7 +115,12 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     let helper_name = Symbol::from(format!("{}__loop", m.name.as_str()).as_str());
 
     // Helper params: the method's own params, then the carried locals.
-    let mut helper_params: Vec<Param> = m.params.clone();
+    // Drop param defaults — the helper is always invoked with every
+    // argument explicit (the entry call + each recursive tail pass all
+    // of them by name), and a non-trailing default (e.g. `other \\ nil`
+    // ahead of carried `keys`/`i`) is a compile error in Elixir.
+    let mut helper_params: Vec<Param> =
+        m.params.iter().map(|p| Param::positional(p.name.clone())).collect();
     helper_params.extend(carried.iter().map(|n| Param::positional(n.clone())));
 
     // An instance-method loop that touches `@ivar`/`self` threads the
@@ -157,7 +162,16 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
         body: syn(ExprNode::If {
             cond: cond.clone(),
             then_branch: cps(&body_stmts, &recurse_call),
-            else_branch: value_of(post),
+            // Post-loop value. A record-threading helper with nothing
+            // after the loop (e.g. session#initialize's populate loop)
+            // must yield the threaded `record` so the accumulated
+            // struct flows back to the caller — not the `nil` that
+            // falling off a Ruby `while` would produce.
+            else_branch: if threads_record && post.is_empty() {
+                var(&Symbol::from("record"))
+            } else {
+                value_of(post)
+            },
         }),
         signature: None,
         effects: m.effects.clone(),
@@ -921,6 +935,104 @@ mod tests {
             recv: Some(syn(ExprNode::Ivar { name: sym(ivar) })),
             method: sym("[]="),
             args: vec![key, value],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    #[test]
+    fn constructor_with_guard_and_populate_loop_threads_record() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        // Mirrors session#initialize:
+        //   def initialize(other = nil)
+        //     @data = {}
+        //     return if other.nil?
+        //     keys = other.keys
+        //     i = 0
+        //     while i < keys.length
+        //       @data[keys[i]] = other[keys[i]]
+        //       i += 1
+        //     end
+        //   end
+        // plus Hash-backed read methods (`key?`, `delete`) that must
+        // route to `Map.*` once `@data` is recognized as a Hash field.
+        let other_keys = binop_call(vr("other"), "keys");
+        let other_nil = binop_call(vr("other"), "nil?");
+        let loop_body = seq(vec![
+            index_assign_ivar("data", index_get("keys", vr("i")), index_get("other", vr("i"))),
+            step_add("i"),
+        ]);
+        let init_body = seq(vec![
+            assign_ivar_hash("data"),
+            if_(other_nil, ret(nil()), nil()),
+            assign("keys", other_keys),
+            assign("i", lit_int(0)),
+            while_(binop(vr("i"), "<", binop_call(vr("keys"), "length")), loop_body),
+        ]);
+        let mut initialize = method("initialize", MethodReceiver::Instance, &[], init_body);
+        initialize.params = vec![Param::with_default(sym("other"), nil())];
+
+        let key_q = method(
+            "key?",
+            MethodReceiver::Instance,
+            &["key"],
+            ivar_method_call("data", "key?", vec![vr("key")]),
+        );
+        let del = method(
+            "delete",
+            MethodReceiver::Instance,
+            &["key"],
+            ivar_method_call("data", "delete", vec![vr("key")]),
+        );
+
+        let class = LibraryClass {
+            name: ClassId(sym("Session")),
+            is_module: false,
+            parent: None,
+            includes: vec![],
+            methods: vec![initialize, key_q, del],
+            origin: None,
+        };
+        let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- constructor+loop ---\n{ex}\n------------------------");
+
+        // Constructor: the guard `if` binds back to `record`, the nil
+        // (bare-return-self) branch yields the unchanged `record`, and
+        // the trailing `record` returns it.
+        assert!(ex.contains("def new(other \\\\ nil)"), "new keeps its default:\n{ex}");
+        assert!(
+            ex.contains("record = if is_nil(other) do\n      record\n    else"),
+            "guard binds to record, nil→record:\n{ex}"
+        );
+        // Helper carries NO param default (a mid-list `other \\ nil`
+        // would be an Elixir compile error) and returns `record` after
+        // the loop.
+        assert!(
+            ex.contains("def initialize__loop(record, other, keys, i)"),
+            "helper params have no default:\n{ex}"
+        );
+        assert!(!ex.contains("other \\\\ nil, keys"), "no mid-list default:\n{ex}");
+        // Hash-field reads route to Map.* (field typed Hash via the
+        // `@data = {}` detection).
+        assert!(ex.contains("Map.has_key?(record.data, key)"), "key? → Map.has_key?:\n{ex}");
+        assert!(ex.contains("Map.delete(record.data, key)"), "delete → Map.delete:\n{ex}");
+        assert!(!ex.contains("while"), "no while:\n{ex}");
+    }
+
+    fn assign_ivar_hash(name: &str) -> Expr {
+        syn(ExprNode::Assign {
+            target: LValue::Ivar { name: sym(name) },
+            value: syn(ExprNode::Hash { entries: vec![], kwargs: false }),
+        })
+    }
+
+    fn ivar_method_call(ivar: &str, method: &str, args: Vec<Expr>) -> Expr {
+        syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Ivar { name: sym(ivar) })),
+            method: sym(method),
+            args,
             block: None,
             parenthesized: false,
         })
