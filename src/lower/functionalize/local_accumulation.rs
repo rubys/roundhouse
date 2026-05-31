@@ -46,14 +46,25 @@ fn rewrite(e: &Expr) -> Expr {
                 None => clone_send(e),
             }
         }
-        // `x[k] = v` on a local → `x = x.merge(%{k => v})`.
+        // `x[k] = v` on a local → `x = x.__index_put__(k, v)`. The
+        // emitter renders the bridge by receiver type (Map.put for a
+        // map, `<Struct>.put` for a struct), so a Flash/Session struct
+        // accumulator routes to its setter rather than Map.merge.
         ExprNode::Send { recv: Some(r), method, args, .. }
             if method.as_str() == "[]=" && args.len() == 2 =>
         {
             match local_name(r) {
                 Some(name) => {
-                    let entry = (rewrite(&args[0]), rewrite(&args[1]));
-                    rebind(&name, binop(var(&name), "merge", hash(vec![entry])))
+                    // Keep the original (typed) receiver so the emitter
+                    // can dispatch `__index_put__` on its struct/map type.
+                    let put = syn(ExprNode::Send {
+                        recv: Some(r.clone()),
+                        method: Symbol::from("__index_put__"),
+                        args: vec![rewrite(&args[0]), rewrite(&args[1])],
+                        block: None,
+                        parenthesized: true,
+                    });
+                    rebind(&name, put)
                 }
                 None => clone_send(e),
             }
@@ -122,9 +133,6 @@ fn binop(lhs: Expr, method: &str, rhs: Expr) -> Expr {
 }
 fn array(elements: Vec<Expr>) -> Expr {
     syn(ExprNode::Array { elements, style: Default::default() })
-}
-fn hash(entries: Vec<(Expr, Expr)>) -> Expr {
-    syn(ExprNode::Hash { entries, kwargs: false })
 }
 
 #[cfg(test)]
@@ -206,10 +214,52 @@ mod tests {
         // push → list append, lifted through the conditional.
         assert!(ex.contains("result = if flag do"), "cond-rebind:\n{ex}");
         assert!(ex.contains("result ++ [\"a\"]"), "push → ++:\n{ex}");
-        // []= → Map.merge.
-        assert!(ex.contains("result = Map.merge(result, %{\"k\" => \"v\"})"), "[]= → merge:\n{ex}");
+        // []= on an untyped local → Map.put.
+        assert!(ex.contains("result = Map.put(result, \"k\", \"v\")"), "[]= → Map.put:\n{ex}");
         // += → rebind.
         assert!(ex.contains("n = n + 1"), "OpAssign → rebind:\n{ex}");
         assert!(ex.trim_end().ends_with("result\n  end\nend"), "returns result:\n{ex}");
+    }
+
+    #[test]
+    fn index_put_on_a_struct_routes_to_its_setter() {
+        use crate::ident::ClassId;
+        use crate::ty::Ty;
+        // `acc[k] = v` where `acc` is a Flash struct → Flash.put.
+        let mut acc = var(&s("acc"));
+        acc.ty = Some(Ty::Class { id: ClassId(s("ActionDispatch::Flash")), args: vec![] });
+        let index_set = syn(ExprNode::Send {
+            recv: Some(acc),
+            method: s("[]="),
+            args: vec![var(&s("k")), var(&s("v"))],
+            block: None,
+            parenthesized: false,
+        });
+        let m = MethodDef {
+            name: s("fill"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(s("k")), Param::positional(s("v"))],
+            block_param: None,
+            body: syn(ExprNode::Seq { exprs: vec![index_set, var(&s("acc"))] }),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = LibraryClass {
+            name: ClassId(s("F")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![transform_method(m)],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        assert!(
+            ex.contains("acc = V2.ActionDispatch.Flash.put(acc, k, v)"),
+            "struct []= → <Struct>.put:\n{ex}"
+        );
     }
 }

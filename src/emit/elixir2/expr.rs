@@ -281,6 +281,21 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         other => other,
     };
 
+    // `recv.__index_put__(k, v)` (from local_accumulation's `x[k]=v`)
+    // rendered by receiver type: a struct routes to its `put` setter,
+    // a map (or unknown) to `Map.put`.
+    if method == "__index_put__" && args.len() == 2 {
+        if let Some(r) = recv {
+            let r_s = emit_expr(r);
+            let (k, v) = (emit_expr(&args[0]), emit_expr(&args[1]));
+            if let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() {
+                let module = super::library::v2_module_name(id.0.as_str());
+                return format!("{module}.put({r_s}, {k}, {v})");
+            }
+            return format!("Map.put({r_s}, {k}, {v})");
+        }
+    }
+
     // `record.__struct_put__(:field, value)` → `%{record | field: value}`
     // (the mutation-threading bridge — see lower::functionalize::
     // mutation_to_struct_return).
