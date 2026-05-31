@@ -293,6 +293,15 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Unary `!x` (Ruby `CallNode` with method `!`, no args) → Elixir
+    // `!(x)`. Parenthesized so it binds tighter than any operator in the
+    // receiver (`!(a and b)`, `!(is_nil(x))`).
+    if method == "!" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("!({})", emit_expr(r));
+        }
+    }
+
     // `.freeze` — Elixir is immutable; the receiver is the value.
     if method == "freeze" && args.is_empty() {
         if let Some(r) = recv {
@@ -584,6 +593,24 @@ mod tests {
     }
     fn arr() -> Ty {
         Ty::Array { elem: Box::new(Ty::Untyped) }
+    }
+
+    fn unary(method: &str, recv: Expr) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    #[test]
+    fn unary_bang_negates() {
+        // `!(@notice.nil?)` shape: `!` over a `nil?` call.
+        let inner = unary("nil?", var_t("x", Ty::Str));
+        assert_eq!(emit_expr(&inner), "is_nil(x)");
+        assert_eq!(emit_expr(&unary("!", inner)), "!(is_nil(x))");
     }
 
     #[test]
