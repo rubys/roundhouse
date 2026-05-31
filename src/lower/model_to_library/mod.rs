@@ -878,7 +878,7 @@ pub(super) fn with_ty(mut e: Expr, ty: Ty) -> Expr {
 /// committing the IR to `Ty::Str` lets Crystal join the convention
 /// without a target-side override and removes the type-system tension
 /// at `[]=`/`[]` cast sites.
-pub(super) fn ty_of_column(t: &ColumnType) -> Ty {
+pub fn ty_of_column(t: &ColumnType) -> Ty {
     match t {
         ColumnType::Integer | ColumnType::BigInt => Ty::Int,
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,

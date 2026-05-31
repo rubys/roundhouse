@@ -87,6 +87,28 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     expr::clear_declared_constants();
     crate::runtime_loader::elixir_constant_names(expr::register_declared_constant);
 
+    // Register each model's struct fields WITH their schema column types,
+    // for both `<Model>` and the synthesized `<Model>Row` holder. Drives
+    // (a) method-on-typed-local field-vs-method routing (`row.id` →
+    // `row.id`, not `row.__struct__.id(row)`) and (b) field-read type
+    // dispatch (`record.title.empty?` → `record.title == ""` when
+    // `title: Str`) — the body-typer's annotations don't survive the
+    // functionalize passes, so the schema type is recorded here instead.
+    for model in &app.models {
+        if let Some(table) = app.schema.tables.get(&model.table.0) {
+            let fields: Vec<(String, crate::ty::Ty)> = table
+                .columns
+                .iter()
+                .map(|c| {
+                    (c.name.to_string(), crate::lower::model_to_library::ty_of_column(&c.col_type))
+                })
+                .collect();
+            let name = model.name.0.as_str();
+            expr::register_field_types(name, &fields);
+            expr::register_field_types(&format!("{name}Row"), &fields);
+        }
+    }
+
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the
     // Elixir emitter can render directly. No-op on shapes it doesn't
@@ -136,6 +158,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             path: output_path(OutputKind::HandWrittenRuntime { name: "db.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/db.ex").to_string(),
         });
+
     }
 
     out

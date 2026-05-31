@@ -85,35 +85,51 @@ pub(super) fn register_declared_constant(name: &str) {
 }
 
 thread_local! {
-    /// Ruby class name → its struct field names, across all units
-    /// (registered up front). Lets a method-on-typed-local distinguish a
-    /// struct FIELD read (`record.id` → `record.id`) from a METHOD call
-    /// (`instance.save` → `instance.__struct__.save(instance)`).
-    static FIELD_NAMES: RefCell<HashMap<String, std::collections::HashSet<String>>> =
+    /// Ruby class name → (struct field name → field `Ty`), across all
+    /// units (registered up front). Two uses: (1) method-on-typed-local
+    /// distinguishes a struct FIELD read (`record.id` → `record.id`) from
+    /// a METHOD call (`instance.save` → `instance.__struct__.save(…)`) by
+    /// key presence; (2) field reads carry the recorded `Ty` so emit can
+    /// dispatch on it (`record.title.empty?` → `== ""` when `title: Str`).
+    /// Runtime classes register names only (`Ty::Untyped`); model + Row
+    /// classes register schema-derived column types.
+    static FIELD_TYPES: RefCell<HashMap<String, HashMap<String, crate::ty::Ty>>> =
         RefCell::new(HashMap::new());
 }
 
 /// Reset the field registry (start of an overlay emit).
 pub(super) fn clear_field_names() {
-    FIELD_NAMES.with(|f| f.borrow_mut().clear());
+    FIELD_TYPES.with(|f| f.borrow_mut().clear());
 }
 
-/// Register a class's struct field names (see `FIELD_NAMES`).
+/// Register a class's struct field names with unknown types (runtime
+/// classes — their bare-ivar fields carry no schema type).
 pub(super) fn register_field_names(class: &str, fields: &[String]) {
-    FIELD_NAMES.with(|f| {
-        f.borrow_mut()
-            .insert(class.to_string(), fields.iter().cloned().collect());
+    FIELD_TYPES.with(|f| {
+        f.borrow_mut().insert(
+            class.to_string(),
+            fields.iter().map(|n| (n.clone(), crate::ty::Ty::Untyped)).collect(),
+        );
+    });
+}
+
+/// Register a class's struct fields with their `Ty` (model + `<Model>Row`
+/// classes — column types from the schema).
+pub(super) fn register_field_types(class: &str, fields: &[(String, crate::ty::Ty)]) {
+    FIELD_TYPES.with(|f| {
+        f.borrow_mut().insert(class.to_string(), fields.iter().cloned().collect());
     });
 }
 
 /// True when `field` is a known struct field of class `id` — so
 /// `value.field` is a field read rather than a 0-arg method call.
 fn is_struct_field(class_id: &str, field: &str) -> bool {
-    FIELD_NAMES.with(|f| {
-        f.borrow()
-            .get(class_id)
-            .is_some_and(|set| set.contains(field))
-    })
+    FIELD_TYPES.with(|f| f.borrow().get(class_id).is_some_and(|m| m.contains_key(field)))
+}
+
+/// The recorded `Ty` of `class_id`'s `field`, if registered with one.
+fn field_type(class_id: &str, field: &str) -> Option<crate::ty::Ty> {
+    FIELD_TYPES.with(|f| f.borrow().get(class_id).and_then(|m| m.get(field).cloned()))
 }
 
 /// True when `name` is a record-threading instance method of the current
@@ -1069,14 +1085,43 @@ fn enum_method(method: &str) -> &str {
 
 /// True when the analyzer typed `e` as an `Array` — the signal to use
 /// `Enum`/`Kernel.length` rather than the `String`/`Access` forms.
-fn recv_is_array(e: &Expr) -> bool {
-    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Array { .. }))
+/// The effective type of a receiver — its `.ty` when concrete, else (for
+/// a self-record field read `record.__field__(:f)`, whose `.ty` the
+/// functionalize passes dropped) the field's recorded type resolved
+/// against the class currently being emitted. Lets field reads dispatch
+/// on their schema type (`record.title.empty?` → `== ""`) without the
+/// body-typer's annotations surviving lowering.
+fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
+    match e.ty.as_ref() {
+        Some(t) if !matches!(t, crate::ty::Ty::Untyped) => return Some(t.clone()),
+        _ => {}
+    }
+    let field = field_bridge_name(e)?;
+    let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+    field_type(&class, &field)
 }
 
-/// True when the analyzer typed `e` as a `String` — its `empty?` becomes
-/// `== ""` (Elixir has no `String.empty?`). A string literal counts too.
+/// The field name of a `record.__field__(:f)` bridge (a self-record field
+/// read), if `e` is one.
+fn field_bridge_name(e: &Expr) -> Option<String> {
+    if let ExprNode::Send { method, args, .. } = &*e.node {
+        if method.as_str() == "__field__" && args.len() == 1 {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn recv_is_array(e: &Expr) -> bool {
+    matches!(effective_recv_ty(e), Some(crate::ty::Ty::Array { .. }))
+}
+
+/// True when `e` is a `String` (or a string literal) — its `empty?`
+/// becomes `== ""` (Elixir has no `String.empty?`).
 fn recv_is_string(e: &Expr) -> bool {
-    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Str))
+    matches!(effective_recv_ty(e), Some(crate::ty::Ty::Str))
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
 }
 
@@ -1122,9 +1167,9 @@ fn is_self_class(e: &Expr) -> bool {
     )
 }
 
-/// True when the analyzer typed `e` as a `Hash` — route its methods to `Map.*`.
+/// True when `e` is a `Hash` — route its methods to `Map.*`.
 fn recv_is_hash(e: &Expr) -> bool {
-    matches!(e.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+    matches!(effective_recv_ty(e), Some(crate::ty::Ty::Hash { .. }))
 }
 
 /// Ruby infix operators whose Elixir spelling is identical.
@@ -1479,6 +1524,46 @@ mod tests {
         );
         // String receiver → `== ""` (Elixir has no String.empty?).
         assert_eq!(emit_expr(&call(var_t("s", Ty::Str), "empty?", vec![])), "s == \"\"");
+    }
+
+    #[test]
+    fn field_type_registry_drives_field_read_dispatch() {
+        use crate::ident::ClassId;
+        fn field_bridge(field: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+                recv: Some(Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+                    id: VarId(0),
+                    name: Symbol::from("record"),
+                })),
+                method: Symbol::from("__field__"),
+                args: vec![Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                    value: Literal::Sym { value: Symbol::from(field) },
+                })],
+                block: None,
+                parenthesized: true,
+            })
+        }
+        clear_field_names();
+        register_field_types("Article", &[("title".to_string(), Ty::Str)]);
+        register_field_types("ArticleRow", &[("id".to_string(), Ty::Int)]);
+        set_current_class_name("Article");
+
+        // A self-record field read resolves its type via the registry +
+        // current class (the body-typer's `.ty` didn't survive lowering):
+        // `record.title.empty?` → `record.title == ""`.
+        assert_eq!(emit_expr(&call(field_bridge("title"), "empty?", vec![])), "record.title == \"\"");
+
+        // A registered field on a typed-Class value reads as a field, not
+        // a method dispatch: `row.id` → `row.id`.
+        let mut row = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+            id: VarId(0),
+            name: Symbol::from("row"),
+        });
+        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![] });
+        assert_eq!(emit_expr(&call(row, "id", vec![])), "row.id");
+
+        set_current_class_name("");
+        clear_field_names();
     }
 
     #[test]
