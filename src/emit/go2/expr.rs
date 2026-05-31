@@ -489,6 +489,16 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
+        // Ruby `next` inside a block → Go `continue`. The `each`/`map`
+        // block emit wraps the body in a real `for … range` loop (not a
+        // nested IIFE), so a value-less `next` lands directly inside the
+        // loop and `continue` is valid Go. The value-carrying form
+        // (`next x` in a `map`/`select` accumulator) has no statement-level
+        // Go equivalent here, so it stays unsupported and surfaces loudly.
+        ExprNode::Next { value } => match value {
+            None => "continue".to_string(),
+            Some(_) => crate::emit::diagnostics::report_unsupported("go2", "Next", "value-carrying"),
+        },
         other => crate::emit::diagnostics::report_unsupported("go2", other.kind_str(), ""),
     }
 }
@@ -721,6 +731,18 @@ pub(super) fn emit_send(
         args
             .iter()
             .map(|a| {
+                // `recv[range]` slice indexing (handled in the `method ==
+                // "[]"` block below) re-derives Go slice syntax straight
+                // from the raw Range node and returns before args_s is
+                // read for that arg. Emitting the Range here as a value
+                // would hit the unsupported-Range fallthrough and push a
+                // spurious diagnostic, so skip it — the placeholder is
+                // never used.
+                if method == "[]" {
+                    if let ExprNode::Range { .. } = &*a.node {
+                        return String::new();
+                    }
+                }
                 if widen_hash_args {
                     if let ExprNode::Hash { .. } = &*a.node {
                         let mut widened = a.clone();
