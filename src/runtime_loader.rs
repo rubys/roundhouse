@@ -1140,13 +1140,11 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    // session.rb: simple @data methods + []= + each (structure) emit
-    // correctly, but not yet wired. Remaining: initialize (constructor +
-    // loop: the bare `return` self-return is unwrapped to nil by cps before
-    // constructor threading; needs bare-return→record + capture the loop
-    // result); delete (`@data.delete(k)` — nested mutate-and-return);
-    // merge's `record.to_h` (a 0-arg self-method mis-read as a field —
-    // needs field-vs-method disambiguation from the defstruct).
+    // session.rb: defstruct, simple @data methods, []=, each, and merge
+    // now emit correctly. Not yet wired — `delete` (`@data.delete(k)` is
+    // a nested mutate-and-return; emits an invalid `map.delete(...)`) and
+    // `initialize` (constructor+loop: the loop result isn't captured and
+    // the bare-return self-return is unwrapped to nil) remain.
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape

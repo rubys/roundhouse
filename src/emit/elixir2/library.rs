@@ -26,7 +26,7 @@
 use std::fmt::Write;
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 
 use super::expr;
 
@@ -57,9 +57,10 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
     let mut out = String::new();
 
     if !is_module_singleton {
-        // Struct payload for normal classes (dormant until a struct
-        // class enters ELIXIR_RUNTIME; module-singletons skip it).
-        let fields = collect_struct_fields(&class.methods);
+        // Struct payload: attr-declared fields plus any field the
+        // mutation-threaded bodies touch (via the `__field__` /
+        // `__struct_put__` bridges — session's `@data` has no attr).
+        let fields = struct_fields(class);
         if !fields.is_empty() {
             let decls = fields
                 .iter()
@@ -166,6 +167,71 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
 /// sit inside the `defmodule` the namespace wrapper supplies.
 pub fn format_constant(name: &str, value: &Expr) -> String {
     format!("  @{} {}", name.to_lowercase(), expr::emit_const_value(value))
+}
+
+/// The struct's `defstruct` fields: attr-declared names plus every
+/// `@ivar` the method bodies reference (read or written). Covers structs
+/// whose state is a bare ivar with no accessor (session's `@data`).
+fn struct_fields(class: &LibraryClass) -> Vec<String> {
+    let mut out = collect_struct_fields(&class.methods);
+    for m in &class.methods {
+        collect_ivar_names(&m.body, &mut out);
+    }
+    out
+}
+
+/// Collect struct field names from the mutation-threading bridges in a
+/// (post-functionalize) body: `record.__field__(:x)` reads and
+/// `record.__struct_put__(:x, …)` writes carry the field as a Sym arg.
+fn collect_ivar_names(e: &Expr, out: &mut Vec<String>) {
+    match &*e.node {
+        ExprNode::Send { method, args, recv, block, .. } => {
+            let m = method.as_str();
+            if (m == "__field__" || m == "__struct_put__") && !args.is_empty() {
+                if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+                    let n = value.to_string();
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+            }
+            if let Some(r) = recv {
+                collect_ivar_names(r, out);
+            }
+            args.iter().for_each(|a| collect_ivar_names(a, out));
+            if let Some(b) = block {
+                collect_ivar_names(b, out);
+            }
+        }
+        ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
+            exprs.iter().for_each(|x| collect_ivar_names(x, out))
+        }
+        ExprNode::Assign { value, .. }
+        | ExprNode::OpAssign { value, .. }
+        | ExprNode::Return { value }
+        | ExprNode::Raise { value }
+        | ExprNode::Cast { value, .. } => collect_ivar_names(value, out),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_ivar_names(cond, out);
+            collect_ivar_names(then_branch, out);
+            collect_ivar_names(else_branch, out);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_ivar_names(cond, out);
+            collect_ivar_names(body, out);
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            collect_ivar_names(left, out);
+            collect_ivar_names(right, out);
+        }
+        ExprNode::Lambda { body, .. } => collect_ivar_names(body, out),
+        ExprNode::Yield { args } => args.iter().for_each(|a| collect_ivar_names(a, out)),
+        ExprNode::Hash { entries, .. } => entries.iter().for_each(|(k, v)| {
+            collect_ivar_names(k, out);
+            collect_ivar_names(v, out);
+        }),
+        _ => {}
+    }
 }
 
 /// Collect unique `defstruct` field names from attr accessor methods.

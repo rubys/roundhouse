@@ -333,6 +333,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `record.__field__(:x)` → `record.x` (struct field read).
+    if method == "__field__" && args.len() == 1 {
+        if let Some(r) = recv {
+            let field = match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.to_string(),
+                _ => emit_expr(&args[0]),
+            };
+            return format!("{}.{field}", emit_expr(r));
+        }
+    }
+
     // `record.__struct_put__(:field, value)` → `%{record | field: value}`
     // (the mutation-threading bridge — see lower::functionalize::
     // mutation_to_struct_return).
@@ -463,15 +474,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         let fname = super::library::elixir_fn_name(method);
         return format!("{fname}(record, {})", emit_args(args));
     }
-    // `self.foo(args)` (a method call, not a field read) on the threaded
-    // `record` → the same-module function `foo(record, args)`. Zero-arg
-    // sends stay `record.foo` (struct field access).
+    // `self.foo(args)` / `self.foo` on the threaded `record` is a method
+    // call (field reads come through `__field__`, handled above) → the
+    // same-module `foo(record, …)`, including 0-arg `self.to_h`.
     if recv.is_some_and(is_record_var)
-        && !args.is_empty()
         && method.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     {
         let fname = super::library::elixir_fn_name(method);
-        return format!("{fname}(record, {})", emit_args(args));
+        return if args.is_empty() {
+            format!("{fname}(record)")
+        } else {
+            format!("{fname}(record, {})", emit_args(args))
+        };
     }
 
     // `recv[...]` indexing.

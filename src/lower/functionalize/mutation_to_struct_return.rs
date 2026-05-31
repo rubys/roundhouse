@@ -350,14 +350,18 @@ fn var(name: &str) -> Expr {
     syn(ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
 }
 
-/// `record.<field>` — a no-arg Send the emitter renders as struct field access.
+/// `@field` read → `record.__field__(:field)`, a bridge the emitter
+/// renders as `record.field` (struct field access). Using a bridge —
+/// rather than a bare `record.field` Send — keeps field reads
+/// unambiguous from method calls (`record.to_h`), which the emitter
+/// routes to a same-module function.
 fn field_read(field: &Symbol) -> Expr {
     syn(ExprNode::Send {
         recv: Some(var(RECORD)),
-        method: field.clone(),
-        args: vec![],
+        method: Symbol::from("__field__"),
+        args: vec![syn(ExprNode::Lit { value: Literal::Sym { value: field.clone() } })],
         block: None,
-        parenthesized: false,
+        parenthesized: true,
     })
 }
 
