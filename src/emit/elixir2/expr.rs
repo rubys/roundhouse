@@ -557,14 +557,17 @@ fn emit_args(args: &[Expr]) -> String {
     args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
 }
 
-/// `recv.each do |x| body end` → `Enum.each(recv, fn x -> body end)`.
-/// Ruby Enumerable methods map onto `Enum.*`; the block becomes an
-/// Elixir anonymous function. (v1: non-mutating bodies — a block that
-/// reassigns an outer local doesn't leak the rebind; `reduce`-shaped
-/// accumulation is a follow-up.)
+/// `recv.each do |x| body end` → an `Enum.*` call with the block as an
+/// anonymous function.
+///
+/// If the block reassigns a single outer local (an accumulator, e.g.
+/// `result = result.merge(...)`), it lowers to `Enum.reduce`, threading
+/// that local as the accumulator and rebinding it at the call site —
+/// the Elixir answer to block-local mutation not leaking. A
+/// non-accumulating block uses the directly-mapped `Enum.*` (each/map/
+/// filter/…). Multi-accumulator blocks (tuple reduce) aren't covered.
 fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Expr) -> String {
     let ExprNode::Lambda { params, body, .. } = &*block.node else {
-        // A block that isn't a plain lambda is outside coverage.
         return crate::emit::diagnostics::report_unsupported(
             "elixir2",
             "block",
@@ -572,11 +575,51 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
         );
     };
     let recv_s = recv.map(emit_expr).unwrap_or_default();
-    let enum_fn = enum_method(method);
-    let params_s = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
     let body_s = emit_method_body(body);
+    let block_params = params.iter().map(|p| p.to_string()).collect::<Vec<_>>();
 
-    // Leading positional args (e.g. `inject(0) do`) sit before the fn.
+    let accs = block_accumulators(body, params);
+    if accs.len() > 1 {
+        return crate::emit::diagnostics::report_unsupported(
+            "elixir2",
+            "block",
+            "block reassigns multiple outer locals (tuple reduce)",
+        );
+    }
+    if let Some(acc) = accs.first() {
+        // Accumulating block → reduce. The fn takes the block params plus
+        // the accumulator; the body rebinds the acc and yields it (we
+        // append a trailing `acc` reference so the rebind is preserved as
+        // a statement rather than collapsing to its value). The outer
+        // rebind captures the fold's result.
+        let fn_params = block_params
+            .iter()
+            .cloned()
+            .chain(std::iter::once(acc.clone()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let acc_var = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+            id: crate::ident::VarId(0),
+            name: crate::ident::Symbol::from(acc.as_str()),
+        });
+        let mut stmts: Vec<Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.clone(),
+            _ => vec![body.clone()],
+        };
+        stmts.push(acc_var);
+        let threaded = emit_method_body(&Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq { exprs: stmts },
+        ));
+        return format!(
+            "{acc} = Enum.reduce({recv_s}, {acc}, fn {fn_params} ->\n{}\nend)",
+            indent(&threaded, 1),
+        );
+    }
+
+    // Non-accumulating: directly-mapped Enum.* with the block as a fn.
+    let enum_fn = enum_method(method);
+    let params_s = block_params.join(", ");
     let lead = if args.is_empty() {
         String::new()
     } else {
@@ -586,6 +629,31 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
         "Enum.{enum_fn}({recv_s}, {lead}fn {params_s} ->\n{}\nend)",
         indent(&body_s, 1),
     )
+}
+
+/// Outer locals the block reassigns to a value derived from themselves
+/// (`v = …v…`) — i.e. accumulators threaded through a fold. Block
+/// params and block-local lets (`tmp = x`) are excluded. Detection is
+/// over the block body's top-level statements (renders the RHS and
+/// checks for a self-reference token).
+fn block_accumulators(body: &Expr, params: &[crate::ident::Symbol]) -> Vec<String> {
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for s in stmts {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*s.node {
+            let n = name.as_str();
+            if !params.iter().any(|p| p.as_str() == n)
+                && super::library::references_token(&emit_expr(value), n)
+                && !out.iter().any(|a| a == n)
+            {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Map a Ruby Enumerable method to its `Enum` counterpart. Renamed
@@ -690,6 +758,22 @@ mod tests {
         // Two-param block (`each do |k, v|`).
         let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::Untyped));
         assert!(emit_expr(&kv).starts_with("Enum.each(h, fn k, v ->"));
+    }
+
+    #[test]
+    fn accumulating_block_lowers_to_reduce() {
+        // items.each do |x| total = total + x end
+        let acc_assign = Expr::new(crate::span::Span::synthetic(), ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("total") },
+            value: binop(var_t("total", Ty::Int), "+", var_t("x", Ty::Int)),
+        });
+        let e = block_send("items", "each", &["x"], acc_assign);
+        let out = emit_expr(&e);
+        assert_eq!(
+            out,
+            "total = Enum.reduce(items, total, fn x, total ->\n  total = total + x\n  total\nend)",
+            "got: {out}"
+        );
     }
 
     #[test]

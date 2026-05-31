@@ -192,7 +192,7 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
 /// Whether a rendered body references `tok` as an identifier token
 /// (used to detect emitter-introduced params: `record` from mutation-
 /// threading, `block_fn` from `yield`).
-fn references_token(body: &str, tok: &str) -> bool {
+pub(super) fn references_token(body: &str, tok: &str) -> bool {
     body.split(|c: char| !c.is_alphanumeric() && c != '_')
         .any(|t| t == tok)
 }
