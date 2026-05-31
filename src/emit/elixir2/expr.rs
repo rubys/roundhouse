@@ -90,25 +90,14 @@ fn emit_stmts(stmts: &[Expr]) -> String {
             );
         }
 
-        // Conditional reassignment: an `if` whose one non-empty branch
-        // rebinds an already-bound `v` (the other branch empty). Elixir
-        // scoping discards the inner binding, so lift it to
-        // `v = if cond do <new> else v end`. Handles both the `if`
-        // (reassign in then) and `unless` (reassign in else) shapes.
-        let rebind = if is_empty(else_branch) {
-            reassigned_var(then_branch).map(|v| (v, emit_block_with_value(then_branch), v.to_string()))
-        } else if is_empty(then_branch) {
-            reassigned_var(else_branch).map(|v| (v, v.to_string(), emit_block_with_value(else_branch)))
-        } else {
-            None
-        };
-        if let Some((v, then_s, else_s)) = rebind {
-            let cond_s = emit_expr(cond);
-            let lifted = format!(
-                "{v} = if {cond_s} do\n{}\nelse\n{}\nend",
-                indent(&then_s, 1),
-                indent(&else_s, 1),
-            );
+        // Conditional reassignment: an `if`/`elsif` chain where every
+        // branch yields the same reassigned local `v` (reassigns it, is
+        // empty, or is a nested chain yielding it). Elixir scoping
+        // discards a rebind inside a branch, so lift the whole chain to
+        // `v = if cond do <new> else <…> end`. Covers the single `if`
+        // (`@x = v unless c`) and `if/elsif` chains (`[]=`/case-on-key).
+        if let Some(v) = chain_reassigned_var(then_branch, else_branch) {
+            let lifted = format!("{v} = {}", render_chain(cond, then_branch, else_branch, &v));
             return format!("{lifted}\n{}", emit_stmts(rest));
         }
     }
@@ -144,6 +133,53 @@ fn emit_tail(e: &Expr) -> String {
 fn is_empty(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
         || matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+}
+
+/// A local `v` reassigned across an `if`/`elsif` chain where *every*
+/// branch yields it — the signal to lift the chain to `v = if … end`.
+fn chain_reassigned_var(then_branch: &Expr, else_branch: &Expr) -> Option<String> {
+    let v = reassigned_var(then_branch).or_else(|| reassigned_var(else_branch))?;
+    (branch_yields(then_branch, v) && branch_yields(else_branch, v)).then(|| v.to_string())
+}
+
+/// A branch "yields `v`" if it leaves `v` as its value: empty (unchanged),
+/// a trailing `v = …` rebind, or a nested chain whose branches all yield.
+fn branch_yields(b: &Expr, v: &str) -> bool {
+    if is_empty(b) {
+        return true;
+    }
+    match &*b.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => name.as_str() == v,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(|l| branch_yields(l, v)),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            branch_yields(then_branch, v) && branch_yields(else_branch, v)
+        }
+        _ => false,
+    }
+}
+
+/// Render a chain as `if cond do <yields v> else <yields v> end`, where
+/// each branch produces `v`'s next value (unchanged `v` for empty, the
+/// rebind's RHS for a `v = …`, a nested chain recursively).
+fn render_chain(cond: &Expr, then_branch: &Expr, else_branch: &Expr, v: &str) -> String {
+    format!(
+        "if {} do\n{}\nelse\n{}\nend",
+        emit_expr(cond),
+        indent(&branch_render(then_branch, v), 1),
+        indent(&branch_render(else_branch, v), 1),
+    )
+}
+
+fn branch_render(b: &Expr, v: &str) -> String {
+    if is_empty(b) {
+        return v.to_string();
+    }
+    match &*b.node {
+        ExprNode::If { cond, then_branch, else_branch } => {
+            render_chain(cond, then_branch, else_branch, v)
+        }
+        _ => emit_block_with_value(b),
+    }
 }
 
 /// True when the then-branch of a guard ends in a `return`.

@@ -177,12 +177,21 @@ fn append_record_return(body: Expr) -> Expr {
     match &*body.node {
         ExprNode::Seq { exprs } => {
             let mut exprs = exprs.clone();
-            match exprs.last().map(|e| &*e.node) {
-                // Drop a trailing `nil`; leave a trailing `record` (self).
-                Some(ExprNode::Lit { value: Literal::Nil }) => {
+            match exprs.last() {
+                // Already returns `record` (self) — leave it.
+                Some(e) if is_record_var(e) => return body,
+                // Drop a trailing `nil` or a bare local-var read: in a
+                // threaded mutator the method's own return value is
+                // superseded by `record` (e.g. `[]=` returns the assigned
+                // `value`, which is dead once we return the struct).
+                Some(e)
+                    if matches!(
+                        &*e.node,
+                        ExprNode::Lit { value: Literal::Nil } | ExprNode::Var { .. }
+                    ) =>
+                {
                     exprs.pop();
                 }
-                _ if exprs.last().is_some_and(is_record_var) => return body,
                 _ => {}
             }
             exprs.push(record);
@@ -451,6 +460,34 @@ mod tests {
         assert!(ex.contains("record.notice"), "getter reads field:\n{ex}");
         assert!(ex.contains("def fetch(record, key)"), "fetch threaded:\n{ex}");
         assert!(ex.contains("get(record, key)"), "self[key] → get(record, key):\n{ex}");
+    }
+
+    #[test]
+    fn if_elsif_chain_reassignment_threads() {
+        // def set(key, value)
+        //   if key == "notice" then @notice = value
+        //   elsif key == "alert" then @alert = value end
+        // end
+        let chain = if_(
+            send(Some(vr("key")), "==", vec![str_lit_helper("notice")]),
+            assign_ivar("notice", vr("value")),
+            if_(
+                send(Some(vr("key")), "==", vec![str_lit_helper("alert")]),
+                assign_ivar("alert", vr("value")),
+                nil(),
+            ),
+        );
+        let m = instance_method("set", &["key", "value"], syn(ExprNode::Seq { exprs: vec![chain] }));
+        let ex = render_via_elixir(vec![transform_method(m)]);
+        eprintln!("--- if-chain ---\n{ex}\n----------------");
+        assert!(ex.contains("record = if key == \"notice\" do"), "chain lifts to record =:\n{ex}");
+        assert!(ex.contains("%{record | notice: value}"), "then update:\n{ex}");
+        assert!(ex.contains("%{record | alert: value}"), "elsif update:\n{ex}");
+        assert!(ex.trim_end().ends_with("record\n  end\nend"), "returns record:\n{ex}");
+    }
+
+    fn str_lit_helper(s2: &str) -> Expr {
+        syn(ExprNode::Lit { value: Literal::Str { value: s2.to_string() } })
     }
 
     #[test]
