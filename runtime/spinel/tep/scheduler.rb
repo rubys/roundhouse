@@ -94,7 +94,7 @@ module Tep
       end
       Scheduler.poll_round(ms)
 
-      now  = Time.now.to_i
+      now  = Sock.sphttp_now_us
       best = -1
       i = 0
       n = Tep::APP.sched_fibers.length
@@ -143,7 +143,7 @@ module Tep
         return 0
       end
       Sock.sphttp_poll_run(timeout_ms)
-      now = Time.now.to_i
+      now = Sock.sphttp_now_us
       i = 0
       while i < n
         if slots[i] >= 0
@@ -174,17 +174,20 @@ module Tep
     # Between empty passes, blocks in poll(2) (or sleep, if no
     # I/O waits) until the next wake-up.
     def self.run_for(seconds)
-      deadline = Time.now.to_i + seconds
-      while Time.now.to_i < deadline
+      # All bookkeeping is in microseconds (Sock.sphttp_now_us), matching
+      # wake_at; poll() and sleep take ms / s respectively, so convert at
+      # the call sites.
+      deadline = Sock.sphttp_now_us + (seconds * 1000000).to_i
+      while Sock.sphttp_now_us < deadline
         if !Scheduler.tick(0)
           # Nothing ready this pass. Compute the next deadline:
           # min(next_wake, overall_deadline). If any fiber is
           # parked on I/O, block in poll() until that or the
           # timer hits.
           next_at = Scheduler.next_wake
-          gap = deadline - Time.now.to_i
+          gap = deadline - Sock.sphttp_now_us
           if next_at >= 0
-            tgap = next_at - Time.now.to_i
+            tgap = next_at - Sock.sphttp_now_us
             if tgap < gap
               gap = tgap
             end
@@ -193,12 +196,12 @@ module Tep
             gap = 0
           end
           if Scheduler.any_io_waiter
-            # Park in poll for up to `gap` seconds.
-            Scheduler.poll_round(gap * 1000)
+            # Park in poll for up to `gap` microseconds (poll wants ms).
+            Scheduler.poll_round(gap / 1000)
           elsif next_at < 0
             return 0
           elsif gap > 0
-            sleep gap
+            sleep(gap / 1000000.0)
           end
         end
       end
@@ -242,7 +245,7 @@ module Tep
     # poll timeout collapses to 0 (non-blocking peek) so we don't
     # waste wall time idling when there's runnable work.
     def self.any_time_ready
-      now = Time.now.to_i
+      now = Sock.sphttp_now_us
       i = 0
       n = Tep::APP.sched_fibers.length
       while i < n
@@ -267,7 +270,7 @@ module Tep
         sleep(seconds)
         return 0
       end
-      Tep::APP.sched_wake_at[idx] = Time.now.to_i + seconds
+      Tep::APP.sched_wake_at[idx] = Sock.sphttp_now_us + (seconds * 1000000).to_i
       Fiber.yield
       0
     end
@@ -292,9 +295,9 @@ module Tep
       if timeout_seconds < 0
         # "Wait forever for I/O": -1 would mean "ready now" to the
         # tick picker, so use a far-future wake_at as the sentinel.
-        Tep::APP.sched_wake_at[idx] = Time.now.to_i + 86400
+        Tep::APP.sched_wake_at[idx] = Sock.sphttp_now_us + 86400 * 1000000
       else
-        Tep::APP.sched_wake_at[idx] = Time.now.to_i + timeout_seconds
+        Tep::APP.sched_wake_at[idx] = Sock.sphttp_now_us + (timeout_seconds * 1000000).to_i
       end
       Fiber.yield
       ready = Tep::APP.sched_io_ready[idx]

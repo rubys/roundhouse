@@ -93,6 +93,16 @@ int sphttp_listen(int port, int reuseport) {
     return fd;
 }
 
+/* TCP_NODELAY is NOT inherited by accepted sockets, so set it on each
+ * one. Without it the accepted connection runs with Nagle's algorithm
+ * on; combined with a head-then-body two-write response that interacts
+ * with the peer's delayed-ACK to add tens of ms per response under
+ * load. Mirrors the setsockopt on the listening fd in sphttp_listen. */
+static void sphttp_set_nodelay(int fd) {
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
 int sphttp_accept(int sfd) {
     struct sockaddr_in caddr;
     socklen_t clen = sizeof(caddr);
@@ -100,6 +110,7 @@ int sphttp_accept(int sfd) {
     do {
         fd = accept(sfd, (struct sockaddr *)&caddr, &clen);
     } while (fd < 0 && errno == EINTR);
+    if (fd >= 0) sphttp_set_nodelay(fd);
     return fd;
 }
 
@@ -116,7 +127,24 @@ int sphttp_accept_nb(int sfd) {
     do {
         fd = accept(sfd, (struct sockaddr *)&caddr, &clen);
     } while (fd < 0 && errno == EINTR);
+    if (fd >= 0) sphttp_set_nodelay(fd);
     return fd;
+}
+
+/* Monotonic clock in microseconds, for the cooperative scheduler's
+ * wake_at bookkeeping. The scheduler previously timed in whole seconds
+ * (Time.now.to_i); at that granularity every fiber made I/O-ready
+ * within the same second shares an identical wake_at, and the
+ * lowest-index tiebreak lets a hot low-index connection (its next
+ * request already buffered by a pipelining client) keep being picked
+ * ahead of higher-index ready fibers until the second rolls over --
+ * starving them for up to ~1s (a fat p99 under wrk). Microsecond
+ * wake_at restores true earliest-ready-first ordering. Monotonic so
+ * it is immune to wall-clock steps. */
+long sphttp_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000000L + ts.tv_nsec / 1000L;
 }
 
 /* Read until end-of-headers ("\r\n\r\n") or the buffer fills. Subsequent

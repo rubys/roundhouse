@@ -61,6 +61,11 @@ module Sock
   ffi_func :sphttp_poll_ready,    [:int],           :int
   ffi_func :sphttp_set_nonblock,  [:int],           :int
 
+  # Monotonic clock in microseconds. The scheduler uses this for
+  # wake_at bookkeeping so ready fibers are ordered at sub-second
+  # resolution (see sphttp.c sphttp_now_us / Tep::Scheduler).
+  ffi_func :sphttp_now_us,        [],               :long
+
   # Outbound TCP for clients (Tep::Http, etc.).
   ffi_func :sphttp_connect,       [:str, :int],     :int
   ffi_func :sphttp_recv_some,     [:int, :int],     :str
