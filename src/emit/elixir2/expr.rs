@@ -22,21 +22,29 @@ use std::collections::HashMap;
 use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal};
 
 thread_local! {
-    /// Simple class name → emitted `V2.*` module name, for the unit
-    /// currently being emitted. Elixir doesn't resolve a bare sibling
-    /// reference (`MatchResult` inside `V2.ActionDispatch.Router`) the
-    /// way Ruby's lexical scoping does, so `emit_const` rewrites such
+    /// Simple class name → emitted `V2.*` module name, across ALL runtime
+    /// units in the overlay (populated up front by a pre-registration
+    /// pass). Elixir doesn't resolve a bare reference (`MatchResult`
+    /// inside `V2.ActionDispatch.Router`, or `Session` from another file)
+    /// the way Ruby's lexical scoping does, so `emit_const` rewrites such
     /// refs to the fully-qualified module name using this map.
     static MODULE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
-/// Register the `V2.*` names of the classes in the current unit (clears
-/// any prior registration — scope is one runtime file). Called from the
-/// elixir2 overlay's transform before the unit is emitted.
+/// Clear the module-name registry. Called once at the start of an
+/// overlay emit, before the cross-file pre-registration pass, so a
+/// prior emit (e.g. another app in the same test process) doesn't leak.
+pub(super) fn clear_modules() {
+    MODULE_NAMES.with(|m| m.borrow_mut().clear());
+}
+
+/// Register the `V2.*` names of `classes` into the registry, accumulating
+/// (does NOT clear — the overlay pre-registers every unit's modules up
+/// front so cross-file constant references resolve). Idempotent: the
+/// per-unit transform may re-register the same names harmlessly.
 pub(super) fn register_modules<'a>(classes: impl IntoIterator<Item = &'a crate::dialect::LibraryClass>) {
     MODULE_NAMES.with(|m| {
         let mut m = m.borrow_mut();
-        m.clear();
         for c in classes {
             let full = super::library::v2_module_name(c.name.0.as_str());
             let simple = c
@@ -928,6 +936,47 @@ mod tests {
         assert_eq!(emit_expr(&binop(var_t("a", Ty::Int), "+", var_t("b", Ty::Int))), "a + b");
         assert_eq!(emit_expr(&binop(var_t("a", arr()), "-", var_t("b", arr()))), "a -- b");
         assert_eq!(emit_expr(&binop(var_t("a", Ty::Int), "<", var_t("b", Ty::Int))), "a < b");
+    }
+
+    #[test]
+    fn cross_file_const_resolution_accumulates() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+
+        fn lib(name: &str) -> LibraryClass {
+            LibraryClass {
+                name: ClassId(Symbol::from(name)),
+                is_module: false,
+                parent: None,
+                includes: vec![],
+                methods: vec![],
+                origin: None,
+            }
+        }
+        fn const_ref(path: &[&str]) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Const {
+                path: path.iter().map(|s| Symbol::from(*s)).collect(),
+            })
+        }
+
+        // Mimic the overlay's pre-registration pass: two SEPARATE units
+        // registered in turn (no clear between them).
+        clear_modules();
+        register_modules([lib("ActionDispatch::Session")].iter());
+        register_modules([lib("ActionController::Base")].iter());
+
+        // A reference from the second unit to the first's module resolves
+        // — both bare and fully qualified, by last segment. The old
+        // clear-on-register behavior would have wiped Session here.
+        assert_eq!(emit_expr(&const_ref(&["Session"])), "V2.ActionDispatch.Session");
+        assert_eq!(
+            emit_expr(&const_ref(&["ActionDispatch", "Session"])),
+            "V2.ActionDispatch.Session"
+        );
+        assert_eq!(emit_expr(&const_ref(&["Base"])), "V2.ActionController.Base");
+        // An unregistered const passes through dotted, unchanged.
+        assert_eq!(emit_expr(&const_ref(&["SomeUnknown"])), "SomeUnknown");
+        clear_modules();
     }
 }
 

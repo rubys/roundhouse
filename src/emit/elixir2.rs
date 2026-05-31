@@ -55,15 +55,32 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 pub fn emit_overlay_files(_app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
 
+    // Cross-file constant resolution: register EVERY unit's `V2.*` module
+    // name before emitting any file, so a reference that crosses files
+    // (e.g. `ActionController::Base` referencing `ActionDispatch::Session`
+    // defined in another unit) resolves. `elixir_units` emits one file at
+    // a time, so a per-unit registration alone can't see modules it
+    // hasn't reached yet. Clear first so a prior emit doesn't leak.
+    expr::clear_modules();
+    if let Err(e) = crate::runtime_loader::elixir_library_classes(|classes| {
+        expr::register_modules(classes.iter());
+    }) {
+        out.push(EmittedFile {
+            path: output_path(OutputKind::TranspileError).path,
+            content: format!("# elixir2 transpile failed: {e}\n"),
+        });
+        return out;
+    }
+
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the
     // Elixir emitter can render directly. No-op on shapes it doesn't
     // support — those degrade via the emitter's report_unsupported
     // catch-all. Gated here: only functional emitters opt in.
     let units = match crate::runtime_loader::elixir_units(|_ns, classes| {
-        // Register the unit's module names so cross-module references
-        // (e.g. `MatchResult.new` inside `Router`) resolve to their
-        // fully-qualified `V2.*` names at emit time.
+        // Module names are already registered globally above; this
+        // re-registration is idempotent (keeps the transform self-contained
+        // for any future direct caller).
         expr::register_modules(classes.iter());
         crate::lower::functionalize::functionalize(classes)
     }) {

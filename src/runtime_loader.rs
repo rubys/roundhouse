@@ -1166,3 +1166,23 @@ where
     }
     Ok(out)
 }
+
+/// Parse every Library-mode Elixir runtime entry and hand its classes to
+/// `f`. A pre-emit pass uses this to register ALL `V2.*` module names
+/// globally before any file is emitted, so a constant reference that
+/// crosses files (`ActionController::Base` referencing
+/// `ActionDispatch::Session` from another unit) resolves — `elixir_units`
+/// emits one file at a time and can't see modules it hasn't reached yet.
+pub fn elixir_library_classes<F>(mut f: F) -> Result<(), String>
+where
+    F: FnMut(&[LibraryClass]),
+{
+    for entry in ELIXIR_RUNTIME {
+        if matches!(entry.mode, Mode::Library) {
+            let classes =
+                parse_library_with_rbs(entry.rb_src.as_bytes(), entry.rbs_src, entry.rb_path)?;
+            f(&classes);
+        }
+    }
+    Ok(())
+}
