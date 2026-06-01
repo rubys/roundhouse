@@ -38,7 +38,7 @@
 //! `break`/`next` are follow-ups.
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
-use crate::expr::{Expr, ExprNode, LValue, OpAssignOp};
+use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, OpAssignOp};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -52,6 +52,59 @@ pub fn transform_method(m: MethodDef) -> Vec<MethodDef> {
 }
 
 fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
+    // A top-level loop in the method body's statement list.
+    if let Some(pair) = try_transform_seq(m) {
+        return Some(pair);
+    }
+    // A loop nested in one branch of a top-level `if` (the has_many
+    // getter shape: `if loaded; cache; else; <hydrate drain>; end`).
+    // Transform just that branch by running the seq path on a temp method
+    // whose body IS the branch, then splice the result back into the `if`.
+    // The `if` is the whole body, or the sole statement of the body Seq.
+    let body_is_seq = matches!(&*m.body.node, ExprNode::Seq { .. });
+    let if_expr = match &*m.body.node {
+        ExprNode::If { .. } => Some(m.body.clone()),
+        ExprNode::Seq { exprs } if exprs.len() == 1 => {
+            matches!(&*exprs[0].node, ExprNode::If { .. }).then(|| exprs[0].clone())
+        }
+        _ => None,
+    }?;
+    let ExprNode::If { cond, then_branch, else_branch } = &*if_expr.node else {
+        return None;
+    };
+    for in_then in [true, false] {
+        let branch = if in_then { then_branch } else { else_branch };
+        if count_loops(branch) != 1 {
+            continue;
+        }
+        let mut temp = m.clone();
+        temp.body = branch.clone();
+        if let Some(mut pair) = try_transform_seq(&temp) {
+            let helper = pair.pop()?; // [entry, helper]
+            let entry_branch = pair.pop()?.body;
+            let (nt, ne) = if in_then {
+                (entry_branch, else_branch.clone())
+            } else {
+                (then_branch.clone(), entry_branch)
+            };
+            let new_if = syn(ExprNode::If {
+                cond: cond.clone(),
+                then_branch: nt,
+                else_branch: ne,
+            });
+            let mut entry = m.clone();
+            entry.body = if body_is_seq {
+                syn(ExprNode::Seq { exprs: vec![new_if] })
+            } else {
+                new_if
+            };
+            return Some(vec![entry, helper]);
+        }
+    }
+    None
+}
+
+fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
     let stmts = seq_stmts(&m.body)?;
 
     // Exactly one loop in the whole method, at the top level of the body.
@@ -67,12 +120,25 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     let post = &stmts[while_idx + 1..];
 
     let loop_stmts = seq_stmts(while_body)?;
-    let (last, leading) = loop_stmts.split_last()?;
 
-    // The loop body must end in a counter step (`i += 1` / `i -= 1`),
-    // lowered to a plain rebind so the recursive call passes the
-    // advanced counter by name.
-    let (counter, step_rebind) = lower_counter_step(last)?;
+    // Two loop shapes:
+    //  - COUNTER loop: ends in `i += 1` / `i -= 1`, lowered to a rebind so
+    //    the recursive call passes the advanced counter by name.
+    //  - COUNTER-LESS cursor drain: `while Db.step?(stmt); acc << f(); end`
+    //    — a self-advancing predicate condition (a non-comparison Send) +
+    //    a carried accumulator; progress comes from the condition's side
+    //    effect, so there's no counter to thread.
+    let counter_step = loop_stmts.last().and_then(lower_counter_step);
+    let (counter, step_rebind, leading): (Option<Symbol>, Option<Expr>, &[Expr]) =
+        match counter_step {
+            Some((c, step)) => (Some(c), Some(step), &loop_stmts[..loop_stmts.len() - 1]),
+            None => {
+                if !is_predicate_cond(cond) {
+                    return None;
+                }
+                (None, None, &loop_stmts[..])
+            }
+        };
 
     // Carried locals = vars bound in the pre-loop statements, in order,
     // that are referenced in the condition or loop body. (An accumulator
@@ -84,11 +150,16 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
         .filter(|name| refs_var(cond, name) || refs_var(while_body, name))
         .collect();
 
-    // The counter must be one of the carried (pre-loop-bound) locals,
-    // and every condition variable must be a param or carried — else a
-    // loop-body-introduced variable would be threaded incorrectly.
-    if !carried.iter().any(|c| c == &counter) {
-        return None;
+    // The counter (when there is one) must be a carried (pre-loop-bound)
+    // local; every condition variable must be a param or carried — else a
+    // loop-body-introduced variable would be threaded incorrectly. A
+    // counter-less drain instead requires a carried accumulator that the
+    // body reassigns (checked after accumulator rewriting below), so the
+    // recursion makes progress / carries state.
+    if let Some(ref c) = counter {
+        if !carried.contains(c) {
+            return None;
+        }
     }
     let param_names: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
     for v in referenced_vars(cond) {
@@ -108,6 +179,13 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     // break/next, yield, or a second compound assignment (the trailing
     // counter step is excluded — we scan only `leading`).
     if leading_rw.iter().any(has_unsupported) {
+        return None;
+    }
+
+    // A counter-less drain must reassign a carried accumulator in its body
+    // (the `acc = acc ++ [..]` from the `<<` rewrite) — otherwise the
+    // recursion carries no advancing state and would just spin.
+    if counter.is_none() && !leading_rw.iter().any(|s| reassigns_carried(s, &carried)) {
         return None;
     }
 
@@ -147,9 +225,12 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
     }
     let recurse_call = bareword_call(&helper_name, recurse_args);
 
-    // Loop body (accumulators threaded) with the trailing step lowered.
+    // Loop body (accumulators threaded), with the trailing counter step
+    // lowered + appended when there is one (a drain has none).
     let mut body_stmts: Vec<Expr> = leading_rw;
-    body_stmts.push(step_rebind);
+    if let Some(step) = step_rebind {
+        body_stmts.push(step);
+    }
 
     let helper = MethodDef {
         name: helper_name,
@@ -213,6 +294,25 @@ fn rewrite_accumulators(e: &Expr, carried: &[Symbol]) -> Expr {
                     return syn(ExprNode::Assign {
                         target: LValue::Var { id: VarId(0), name: name.clone() },
                         value: merged,
+                    });
+                }
+            }
+            e.clone()
+        }
+        // `acc << v` on a carried `acc` → `acc = acc ++ [v]` (the
+        // cursor-drain hydrate `results << Model.from_stmt(stmt)`).
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "<<" && args.len() == 1 =>
+        {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                if carried.contains(name) {
+                    let appended = syn(ExprNode::Array {
+                        elements: vec![args[0].clone()],
+                        style: ArrayStyle::Brackets,
+                    });
+                    return syn(ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: name.clone() },
+                        value: binop(var(name), "++", appended),
                     });
                 }
             }
@@ -327,6 +427,32 @@ fn lower_counter_step(stmt: &Expr) -> Option<(Symbol, Expr)> {
         }
     }
     None
+}
+
+/// True when a loop condition is a self-advancing predicate — a bare
+/// method call (`Db.step?(stmt)`) rather than a comparison. Such a
+/// condition makes progress via its own side effect, so a counter-less
+/// drain loop terminates without a counter step.
+fn is_predicate_cond(cond: &Expr) -> bool {
+    matches!(
+        &*cond.node,
+        ExprNode::Send { method, .. }
+            if !matches!(method.as_str(), "<" | ">" | "<=" | ">=" | "==" | "!=" | "<=>")
+    )
+}
+
+/// True when `e` reassigns one of the `carried` locals (`acc = …`) — the
+/// accumulator rebind a counter-less drain relies on for progress.
+fn reassigns_carried(e: &Expr, carried: &[Symbol]) -> bool {
+    let mut found = false;
+    walk(e, &mut |n| {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*n.node {
+            if carried.contains(name) {
+                found = true;
+            }
+        }
+    });
+    found
 }
 
 /// True if `e` (a non-trailing loop-body statement, scanned deeply)
@@ -1061,6 +1187,54 @@ mod tests {
         let out = transform_method(method("build", MethodReceiver::Class, &["table"], body));
         assert_eq!(out.len(), 2, "carried accumulator loop should transform");
         assert!(!has_while(&out[1].body));
+    }
+
+    #[test]
+    fn counterless_cursor_drain_lowers_to_recursion() {
+        use crate::dialect::LibraryClass;
+        use crate::ident::ClassId;
+        // def self.all
+        //   stmt = conn.prepare; results = []
+        //   while stmt.step?          # self-advancing predicate, no counter
+        //     results << stmt         # carried accumulator
+        //   end
+        //   results
+        // end
+        let step = syn(ExprNode::Send {
+            recv: Some(vr("stmt")),
+            method: sym("step?"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        });
+        let push = syn(ExprNode::Send {
+            recv: Some(vr("results")),
+            method: sym("<<"),
+            args: vec![vr("stmt")],
+            block: None,
+            parenthesized: false,
+        });
+        let body = seq(vec![
+            assign("stmt", binop_call(vr("conn"), "prepare")),
+            assign("results", syn(ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets })),
+            while_(step, seq(vec![push])),
+            vr("results"),
+        ]);
+        let out = transform_method(method("all", MethodReceiver::Class, &[], body));
+        assert_eq!(out.len(), 2, "counter-less drain splits into entry + helper");
+        let class = LibraryClass {
+            name: ClassId(sym("M")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: out,
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        assert!(ex.contains("all__loop(stmt, results)"), "entry calls drain helper:\n{ex}");
+        assert!(ex.contains("def all__loop(stmt, results)"), "helper carries stmt+acc:\n{ex}");
+        assert!(ex.contains("results = results ++ [stmt]"), "`<<` → append rebind:\n{ex}");
+        assert!(!ex.contains("while"), "no while:\n{ex}");
     }
 
     #[test]
