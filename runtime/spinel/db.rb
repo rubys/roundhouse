@@ -55,6 +55,12 @@ module SQL
   ffi_func :sqlite3_prepare_v2,        [:ptr, :str, :int, :ptr, :ptr],        :int
   ffi_func :sqlite3_step,              [:ptr],                                :int
   ffi_func :sqlite3_finalize,          [:ptr],                                :int
+  # Prepared-statement reuse (roundhouse#12, Path A.1). `reset` rewinds a
+  # stepped stmt so it can be re-stepped; `clear_bindings` drops any bound
+  # params. Cached `Db.finalize` calls these instead of `sqlite3_finalize`,
+  # which now runs only at pool shutdown (see DbConn#finalize_all).
+  ffi_func :sqlite3_reset,             [:ptr],                                :int
+  ffi_func :sqlite3_clear_bindings,    [:ptr],                                :int
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
   ffi_func :sqlite3_column_count,      [:ptr],                                :int
@@ -70,7 +76,146 @@ module SQL
   ffi_read_ptr :read_ptr, 0
 end
 
+# One pooled SQLite connection plus its prepared-statement cache
+# (roundhouse#12). Prepared stmts are bound to the connection they were
+# prepared on and carry their own cursor, so the cache MUST be
+# per-connection: a global SQL->stmt map would let two cooperative fibers
+# (each leasing a different pool handle) hand back the same stmt and
+# corrupt each other's cursor mid-iteration. Because the pool leases a
+# DbConn to exactly one fiber at a time, the per-connection cache is also
+# concurrency-safe without a mutex.
+#
+# Cache key is the fully-composed SQL string. Today the lowerer inlines
+# literals (`WHERE id = 1`), so id-bearing queries key per-id — fine for
+# the fixed-id benchmark, and the CAP below bounds growth until
+# placeholder-binding (the planned follow-on) makes the key the static
+# query shape.
+# One cache entry: the composed SQL and its prepared stmt ptr. A concrete
+# user class (not a raw ptr) so an Array of these types concretely the way
+# ConnectionPool's @free does — spinel infers the element type from the
+# first `push`, which lets `length`/`[]` resolve (a poly_array of bare ptrs
+# does not support them).
+class Stmt
+  def initialize(sql, ptr)
+    @sql = sql
+    @ptr = ptr
+  end
+
+  def sql
+    @sql
+  end
+
+  def ptr
+    @ptr
+  end
+end
+
+class DbConn
+  CAP = 128
+
+  def initialize(dbh)
+    @dbh = dbh
+    @entries = []
+  end
+
+  def dbh
+    @dbh
+  end
+
+  # Return a cached prepared stmt for `sql`, preparing+caching on miss.
+  # Linear scan — the query set is ~8 shapes, so a scan beats a ptr-keyed
+  # hash and avoids spinel hash-of-ptr typing.
+  def prepare_cached(sql)
+    i = 0
+    while i < @entries.length
+      e = @entries[i]
+      return e.ptr if e.sql == sql
+      i += 1
+    end
+    rc = SQL.sqlite3_prepare_v2(@dbh, sql, -1, SQL.stmt_out, nil)
+    if rc != SQL::OK
+      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
+    end
+    st = SQL.read_ptr(SQL.stmt_out)
+    @entries.push(Stmt.new(sql, st)) if @entries.length < CAP
+    st
+  end
+
+  # Real finalize of every cached stmt — pool-shutdown path only.
+  def finalize_all
+    i = 0
+    while i < @entries.length
+      SQL.sqlite3_finalize(@entries[i].ptr)
+      i += 1
+    end
+  end
+end
+
+# Dedicated SQLite connection pool (roundhouse#12). A single-use object so
+# its instance ivars type concretely: @conns is a DbConn PtrArray (objects
+# keep their tag, unlike the generic ConnectionPool's int slot), @free is
+# an IntArray stack of available indices into @conns.
+class DbPool
+  def initialize(path, n)
+    @conns = []
+    @free  = []
+    i = 0
+    while i < n
+      rc = SQL.sqlite3_open(path, SQL.db_out)
+      if rc != SQL::OK
+        # Best-effort error surface — sqlite3_errmsg requires a valid db
+        # handle, which we don't have on open failure. The numeric rc +
+        # path are the only signals we can raise pre-handle.
+        raise "Db.configure: sqlite3_open(" + path + ") failed (" + rc.to_s + ")"
+      end
+      @conns.push(DbConn.new(SQL.read_ptr(SQL.db_out)))
+      @free.push(i)
+      i += 1
+    end
+  end
+
+  def available
+    @free.length
+  end
+
+  # Pop a free connection index (LIFO).
+  def lease
+    @free.delete_at(@free.length - 1)
+  end
+
+  def release(idx)
+    @free.push(idx)
+  end
+
+  def conn(idx)
+    @conns[idx]
+  end
+
+  def first
+    @conns[0]
+  end
+
+  # Finalize every cached stmt on every connection, then close the handles.
+  def close_all
+    i = 0
+    while i < @conns.length
+      c = @conns[i]
+      c.finalize_all
+      SQL.sqlite3_close(c.dbh)
+      i += 1
+    end
+  end
+end
+
 module Db
+  # Own connection pool (roundhouse#12). Was
+  # ActiveRecord::ConnectionAdapters::ConnectionPool, but that generic
+  # stores handles in an sp_IntArray slot — a DbConn* flattens to a bare
+  # machine word there and reads back tagged INT, so a later `.dbh` call
+  # (guarded `tag == OBJ`) silently no-ops to NULL. A dedicated single-use
+  # pool object (DbPool, below) keeps its connections in an INSTANCE-ivar
+  # array, which spinel types as a concrete DbConn PtrArray (same shape as
+  # DbConn#@entries) — preserving the object tag.
   @pool = nil
   # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
   # accumulate the SQL each prepare/exec issues. Kept in parity with the
@@ -87,58 +232,47 @@ module Db
     if !ev.nil? && ev != ""
       n = ev.to_i
     end
-    @pool = ActiveRecord::ConnectionAdapters::ConnectionPool.new(n) do
-      rc = SQL.sqlite3_open(path, SQL.db_out)
-      if rc != SQL::OK
-        # Best-effort error surface — sqlite3_errmsg requires a valid
-        # db handle, which we don't have on open failure. The numeric
-        # rc + path are the only signals we can raise pre-handle.
-        raise "Db.configure: sqlite3_open(" + path + ") failed (" + rc.to_s + ")"
-      end
-      SQL.read_ptr(SQL.db_out)
-    end
+    @pool = DbPool.new(path, n)
   end
 
-  # The handle this fiber should read/write through. Set by
-  # `with_connection` (request scope) when wired; falls back to the
-  # pool's first free handle for single-fiber test/dev modes.
-  # `Fiber[:k]` is spinel's per-fiber storage indexer (#577/#578).
-  def self.current_dbh
-    h = Fiber[:db_handle]
-    return h if !h.nil?
-    @pool.free[0]
+  # The DbConn this fiber should read/write through. Set by
+  # `with_connection` (request scope); falls back to the first connection
+  # for single-fiber test/dev/boot (e.g. DDL) modes. `Fiber[:k]` is
+  # spinel's per-fiber storage indexer (#577/#578). The stored value is a
+  # real DbConn object (tag OBJ), so the `.dbh`/`.prepare_cached` calls on
+  # the result resolve — unlike the int-boxed ConnectionPool path.
+  def self.current_conn
+    c = Fiber[:db_conn]
+    return c if !c.nil?
+    @pool.first
   end
 
   # Request-scoped connection lease for the fiber-per-connection server.
-  # Checks out a handle, binds it to this fiber's storage so current_dbh
-  # resolves to it for the request, then returns it. No mutex: spinel
-  # fibers are cooperative (no preemption), so checkout/checkin on the
-  # free list is atomic between yields. On exhaustion the fiber parks via
-  # Tep::Scheduler (cooperative yield) until a checkin frees one; with
-  # pool_size >= max concurrent fibers the wait loop never trips.
+  # Leases a connection index, binds its DbConn to this fiber's storage,
+  # runs the block, then releases the index. No mutex: spinel fibers are
+  # cooperative (no preemption), so the lease/release are atomic between
+  # yields. On exhaustion the fiber parks via Tep::Scheduler until a
+  # release frees one; with pool_size >= max concurrent fibers the wait
+  # loop never trips.
   #
   # NOTE: no begin/ensure (not used elsewhere in spinel-compiled code), so
-  # a raise inside the block leaks the handle — acceptable on the happy
+  # a raise inside the block leaks the lease — acceptable on the happy
   # path; revisit if the dispatch path starts raising under load.
   def self.with_connection
-    while @pool.available_count == 0
+    while @pool.available == 0
       Tep::Scheduler.pause(0.001)
     end
-    h = @pool.checkout
-    Fiber[:db_handle] = h
+    idx = @pool.lease
+    Fiber[:db_conn] = @pool.conn(idx)
     result = yield
-    Fiber[:db_handle] = nil
-    @pool.checkin(h)
+    Fiber[:db_conn] = nil
+    @pool.release(idx)
     result
   end
 
   def self.close
     return if @pool.nil?
-    i = 0
-    while i < @pool.free.length
-      SQL.sqlite3_close(@pool.free[i])
-      i += 1
-    end
+    @pool.close_all
     @pool = nil
   end
 
@@ -147,9 +281,10 @@ module Db
   # accessors immediately after.
   def self.exec(sql)
     record_query(sql)
-    rc = SQL.sqlite3_exec(current_dbh, sql, nil, nil, nil)
+    h = current_conn.dbh
+    rc = SQL.sqlite3_exec(h, sql, nil, nil, nil)
     if rc != SQL::OK
-      raise "Db.exec failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
+      raise "Db.exec failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(h) + " — sql: " + sql
     end
   end
 
@@ -159,11 +294,7 @@ module Db
   # itself (NUL-terminated).
   def self.prepare(sql)
     record_query(sql)
-    rc = SQL.sqlite3_prepare_v2(current_dbh, sql, -1, SQL.stmt_out, nil)
-    if rc != SQL::OK
-      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(current_dbh) + " — sql: " + sql
-    end
-    SQL.read_ptr(SQL.stmt_out)
+    current_conn.prepare_cached(sql)
   end
 
   # Query-log capture — see db_cruby.rb for the full rationale (the
@@ -225,16 +356,20 @@ module Db
     end
   end
 
+  # roundhouse#12 Path A.1: with caching on, "finalize" means rewind the
+  # cached stmt (reset cursor + clear any bound params) so the next call
+  # reuses it. Real sqlite3_finalize runs only at pool close.
   def self.finalize(stmt)
-    SQL.sqlite3_finalize(stmt)
+    SQL.sqlite3_reset(stmt)
+    SQL.sqlite3_clear_bindings(stmt)
   end
 
   def self.last_insert_rowid
-    SQL.sqlite3_last_insert_rowid(current_dbh)
+    SQL.sqlite3_last_insert_rowid(current_conn.dbh)
   end
 
   def self.changes
-    SQL.sqlite3_changes(current_dbh)
+    SQL.sqlite3_changes(current_conn.dbh)
   end
 
   # Same SQL-value escaping shape as the gem-backed sibling. Single-
