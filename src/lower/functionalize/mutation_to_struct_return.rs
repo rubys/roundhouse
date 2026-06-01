@@ -31,7 +31,7 @@
 //! those compose with while→recursion and are follow-ups.
 
 use crate::dialect::{MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -222,6 +222,42 @@ fn rewrite_expr(e: &Expr) -> Expr {
             syn(ExprNode::Assign {
                 target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
                 value: struct_put(&field, rewrite_expr(&args[0])),
+            })
+        }
+        // `errors << v` — `<<` on a bareword/`self` accessor `foo()` that
+        // reads a list field → `record = %{record | foo: record.foo ++
+        // [v]}`. On mutable targets the accessor returns the @errors Array
+        // and `<<` mutates it in place; the functional equivalent threads
+        // a struct-update append (the accessor name is the field name).
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "<<" && args.len() == 1 =>
+        {
+            if let ExprNode::Send { recv: ar, method: field, args: fargs, .. } = &*r.node {
+                if fargs.is_empty()
+                    && ar.as_ref().is_none_or(|x| matches!(&*x.node, ExprNode::SelfRef))
+                {
+                    let appended = syn(ExprNode::Send {
+                        recv: Some(field_read(field)),
+                        method: Symbol::from("++"),
+                        args: vec![syn(ExprNode::Array {
+                            elements: vec![rewrite_expr(&args[0])],
+                            style: ArrayStyle::Brackets,
+                        })],
+                        block: None,
+                        parenthesized: false,
+                    });
+                    return syn(ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                        value: struct_put(field, appended),
+                    });
+                }
+            }
+            syn(ExprNode::Send {
+                recv: Some(rewrite_expr(r)),
+                method: method.clone(),
+                args: args.iter().map(rewrite_expr).collect(),
+                block: None,
+                parenthesized: true,
             })
         }
         // Recurse through the container variants the runtime bodies use.
@@ -754,6 +790,24 @@ mod tests {
         let out = transform_method(m);
         let ex = render_via_elixir(vec![out]);
         assert!(ex.contains("def resolve_status(_record, s)"), "underscore record param:\n{ex}");
+    }
+
+    #[test]
+    fn errors_shovel_threads_struct_append() {
+        // `def validate; self.errors << "oops"; end` — the `<<` on the
+        // @errors accessor threads to a struct-update append (the mutable
+        // in-place push becomes a functional rebind).
+        let push = send(
+            Some(send(Some(syn(ExprNode::SelfRef)), "errors", vec![])),
+            "<<",
+            vec![syn(ExprNode::Lit { value: Literal::Str { value: "oops".to_string() } })],
+        );
+        let m = instance_method("validate", &[], syn(ExprNode::Seq { exprs: vec![push] }));
+        let ex = render_via_elixir(vec![transform_method(m)]);
+        assert!(
+            ex.contains("%{record | errors: record.errors ++ [\"oops\"]}"),
+            "errors << → struct append:\n{ex}"
+        );
     }
 
     #[test]
