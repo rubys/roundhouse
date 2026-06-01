@@ -43,6 +43,18 @@ type StmtEntry = {
 
 let _db: Database.Database | null = null;
 const _statements: Map<number, StmtEntry> = new Map();
+// Prepared-statement cache (roundhouse#12). better-sqlite3 compiles SQL on
+// every Database#prepare and does not cache, so the blog's fixed query set
+// was re-parsed each request. Cache the compiled Statement keyed by SQL.
+// better-sqlite3 is single-connection + synchronous, so one module-level
+// map suffices — no per-connection partitioning. The cache is cleared on
+// every db swap (configure/install/close) since a Statement is bound to
+// the Database it was prepared on. Inlined literals make id-bearing
+// queries key per-id; _STMT_CACHE_CAP bounds growth (over-cap statements
+// are transient). Placeholder binding (the planned follow-on) makes the
+// key the static query shape.
+const _stmtCache: Map<string, Database.Statement> = new Map();
+const _STMT_CACHE_CAP = 128;
 let _nextId = 0;
 let _lastRunResult: { lastInsertRowid: number | bigint; changes: number } | null = null;
 
@@ -53,6 +65,7 @@ function db(): Database.Database {
 
 function configure(path: string): void {
   _db = new Database(path);
+  _stmtCache.clear();
 }
 
 // Adopt an already-opened Database. Lets the test runtime share one
@@ -64,10 +77,12 @@ function configure(path: string): void {
 // `Db.install(db)` so both paths see the same rows.
 function install(adopted: Database.Database): void {
   _db = adopted;
+  _stmtCache.clear();
 }
 
 function close(): void {
   if (_db !== null) {
+    _stmtCache.clear();
     _db.close();
     _db = null;
   }
@@ -86,9 +101,27 @@ function exec(sql: string): void {
 function prepare(sql: string): number {
   // `.raw(true)` switches Statement.iterate() to yield arrays instead
   // of objects. Index-based column reads (column_int, column_text)
-  // line up with this array form.
-  const stmt = db().prepare(sql).raw(true);
-  const iterator = stmt.iterate() as IterableIterator<unknown[]>;
+  // line up with this array form. Reuse the cached compiled Statement
+  // when present (roundhouse#12) — the parse is skipped; `.iterate()`
+  // starts a fresh run each call.
+  let stmt = _stmtCache.get(sql);
+  if (stmt === undefined) {
+    stmt = db().prepare(sql).raw(true);
+    if (_stmtCache.size < _STMT_CACHE_CAP) _stmtCache.set(sql, stmt);
+  }
+  let iterator: IterableIterator<unknown[]>;
+  try {
+    iterator = stmt.iterate() as IterableIterator<unknown[]>;
+  } catch {
+    // A cached Statement left "busy" by an abandoned prior iterator
+    // (e.g. a handler that raised before finalize) can't be re-iterated.
+    // Drop it and prepare a fresh one so this request still succeeds —
+    // self-healing rather than poisoning the query for good.
+    _stmtCache.delete(sql);
+    stmt = db().prepare(sql).raw(true);
+    if (_stmtCache.size < _STMT_CACHE_CAP) _stmtCache.set(sql, stmt);
+    iterator = stmt.iterate() as IterableIterator<unknown[]>;
+  }
   _nextId += 1;
   _statements.set(_nextId, { iterator, current: undefined });
   return _nextId;
