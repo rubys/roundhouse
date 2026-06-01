@@ -574,14 +574,25 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             if !lowered.inner_classes.is_empty() {
                 let mut companion_block = String::new();
                 for inner in &lowered.inner_classes {
+                    let inner_rb_path = PathBuf::from("test")
+                        .join(format!("{}_inner.rb", test_file_stem(inner.name.0.as_str())));
                     let inner_emitted = library::emit_library_class_decl_with_synthesized(
                         inner,
                         app,
-                        PathBuf::from("test").join(format!("{}_inner.rb", test_file_stem(inner.name.0.as_str()))),
+                        inner_rb_path.clone(),
                         &fixture_siblings,
                     );
                     companion_block.push_str(&strip_require_headers(&inner_emitted.content));
                     companion_block.push('\n');
+                    // RBS sidecar for the inner class. Its `.rb` body is
+                    // spliced into the test file above (no standalone
+                    // `.rb`), but RBS matches classes by name globally,
+                    // so a standalone `sig/test/<stem>_inner.rbs` applies
+                    // to the spliced `Article`. Without it spinel infers
+                    // the stand-in's `[]` itself and mis-compiles the
+                    // heterogeneous `Integer | String` return as one C
+                    // type (matz/spinel#1255).
+                    files.push(library::emit_rbs_sidecar(inner, &inner_rb_path));
                 }
                 // Splice companions ahead of the main class body but
                 // after the file-level `require_relative` headers

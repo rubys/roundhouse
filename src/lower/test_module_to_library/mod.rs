@@ -187,8 +187,11 @@ pub fn lower_test_modules_with_inner(
     let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
 
     // Type inner-class methods first — they may reference each other
-    // and need their bodies typed for downstream emit. Same shape as
-    // the test-class body typing below; just no fixture-call rewrite
+    // and need their bodies typed for downstream emit. `type_inner_class`
+    // infers ivar bindings and synthesizes method signatures (ingest
+    // leaves both empty for inline test stand-ins) so the per-target
+    // emit — the spinel `.rbs` sidecar especially — carries real types
+    // instead of falling back to `untyped`. No fixture-call rewrite
     // (inner classes are framework-test stand-ins, not Rails models).
     let mut typed_inner_per_module: Vec<Vec<LibraryClass>> = inner_classes_per_module
         .into_iter()
@@ -196,11 +199,7 @@ pub fn lower_test_modules_with_inner(
             inners
                 .into_iter()
                 .map(|mut inner| {
-                    for method in &mut inner.methods {
-                        crate::lower::typing::type_method_body(
-                            method, &classes, &empty_ivars,
-                        );
-                    }
+                    type_inner_class(&mut inner, &classes);
                     inner
                 })
                 .collect()
@@ -237,6 +236,171 @@ pub fn lower_test_modules_with_inner(
         });
     }
     out
+}
+
+/// Body-type an inner (test stand-in) class, inferring ivar bindings
+/// and synthesizing method signatures.
+///
+/// Inner classes (`class Article < ActiveRecord::Base` declared inside
+/// a framework test file) arrive from ingest with no method signatures
+/// and no ivar typing, so a naive single-pass `type_method_body` leaves
+/// every `@ivar` read as a fresh type variable and every method's
+/// return type unknown. Downstream that surfaces as `untyped` in the
+/// spinel `.rbs` sidecar — enough to compile, but not real type info.
+/// Three passes close the gap:
+///
+///   1. Seed a provisional signature on every signature-less method
+///      (params typed from their default expressions), then body-type
+///      with empty ivars so RHS values (`@title = title`) acquire a
+///      `ty`.
+///   2. Harvest ivar types from the typed bodies — direct `@x = v`
+///      assignments plus `self.x = v` setter calls (the latter carries
+///      the inherited AR primary-key `id`, set via `self.id = id`).
+///   3. Re-type every body with the harvested ivar bindings (so `@id`/
+///      `@title` reads resolve to Integer/String), then lift the
+///      inferred body type into each synthesized signature's return
+///      slot. `initialize` is pinned to a nil (void) return rather than
+///      the type of its last assignment.
+fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassInfo>) {
+    let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
+
+    // Pass 1 — provisional signatures (so params bind from defaults) +
+    // first typing. Track which methods we synthesized so pass 3 only
+    // refines those, never clobbering a signature ingest supplied.
+    let synthesized: Vec<bool> = inner
+        .methods
+        .iter_mut()
+        .map(|method| {
+            let was_none = method.signature.is_none();
+            if was_none {
+                method.signature =
+                    Some(signature_from_params(&method.params, classes, Ty::Untyped));
+            }
+            crate::lower::typing::type_method_body(method, classes, &empty_ivars);
+            was_none
+        })
+        .collect();
+
+    // Pass 2 — harvest ivar bindings across all method bodies, but skip
+    // writer methods (`title=`, `[]=`). A writer's `@x = value` body is
+    // definitionally circular — `value` is whatever the attribute type
+    // is — and with an unannotated param it only widens the ivar to
+    // `untyped`. The attribute's real type comes from `initialize` and
+    // direct assignments, which the non-writer methods carry.
+    let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+    for method in &inner.methods {
+        if method.name.as_str().ends_with('=') {
+            continue;
+        }
+        crate::analyze::extract_ivar_assignments(&method.body, &mut ivars);
+        collect_self_setter_ivars(&method.body, &mut ivars);
+    }
+
+    // Pass 3 — re-type with ivars, then lift return types into the
+    // signatures we synthesized in pass 1.
+    for (method, was_synthesized) in inner.methods.iter_mut().zip(synthesized) {
+        crate::lower::typing::type_method_body(method, classes, &ivars);
+        if !was_synthesized {
+            continue;
+        }
+        // An attribute writer (`title=(value)`) takes the attribute's
+        // own type and conventionally returns it. Pin its param + return
+        // to the harvested ivar type so the field isn't widened to
+        // `untyped` (which would force spinel to box it and contradict
+        // the `String` getter). `initialize` returns nil (void); every
+        // other method returns its inferred body type.
+        let writer_ivar = method
+            .name
+            .as_str()
+            .strip_suffix('=')
+            .and_then(|a| ivars.get(&Symbol::from(a)))
+            .cloned();
+        if let Some(ivar_ty) = writer_ivar {
+            if let Some(Ty::Fn { params, ret, .. }) = &mut method.signature {
+                if let Some(first) = params.first_mut() {
+                    first.ty = ivar_ty.clone();
+                }
+                *ret = Box::new(ivar_ty);
+            }
+        } else if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
+            *ret = Box::new(if method.name.as_str() == "initialize" {
+                Ty::Nil
+            } else {
+                method.body.ty.clone().unwrap_or(Ty::Untyped)
+            });
+        }
+    }
+}
+
+/// Build a `Ty::Fn` signature for a method from its positional params.
+/// Params with a default render as optional (`?T name`) and take their
+/// type from the default expression; defaultless params are required
+/// and `untyped` (the inner stand-ins don't annotate). `ret` is the
+/// caller-supplied return type.
+fn signature_from_params(
+    params: &[crate::dialect::Param],
+    classes: &HashMap<ClassId, ClassInfo>,
+    ret: Ty,
+) -> Ty {
+    use crate::ty::{Param as TyParam, ParamKind};
+    let ty_params: Vec<TyParam> = params
+        .iter()
+        .map(|p| {
+            let (ty, kind) = match &p.default {
+                Some(d) => (ty_of_expr(d, classes), ParamKind::Optional),
+                None => (Ty::Untyped, ParamKind::Required),
+            };
+            TyParam { name: p.name.clone(), ty, kind }
+        })
+        .collect();
+    Ty::Fn {
+        params: ty_params,
+        block: None,
+        ret: Box::new(ret),
+        effects: EffectSet::pure(),
+    }
+}
+
+/// Type a standalone expression (e.g. a parameter default) against the
+/// class registry, returning its inferred type.
+fn ty_of_expr(e: &Expr, classes: &HashMap<ClassId, ClassInfo>) -> Ty {
+    let typer = crate::analyze::BodyTyper::new(classes);
+    let ctx = crate::analyze::Ctx::default();
+    let mut clone = e.clone();
+    typer.analyze_expr(&mut clone, &ctx);
+    clone.ty.unwrap_or(Ty::Untyped)
+}
+
+/// Harvest `self.x = v` setter calls from a method body as ivar
+/// bindings (`@x : typeof(v)`). Complements
+/// `analyze::extract_ivar_assignments`, which only sees direct `@x = v`
+/// writes — the AR primary key is assigned via `self.id = id` in the
+/// stand-in's `initialize`, so it would otherwise stay untyped. Shallow
+/// scan of the body's top-level statements, which is where constructor
+/// setter calls live; bodies are typed before this runs so `v.ty` is
+/// populated.
+fn collect_self_setter_ivars(body: &Expr, out: &mut HashMap<Symbol, Ty>) {
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    for s in stmts {
+        if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*s.node {
+            if matches!(&*recv.node, ExprNode::SelfRef)
+                && method.as_str().ends_with('=')
+                && args.len() == 1
+            {
+                if let Some(ty) = &args[0].ty {
+                    let name = Symbol::from(method.as_str().trim_end_matches('='));
+                    let merged = match out.remove(&name) {
+                        Some(prev) => crate::analyze::union_of(prev, ty.clone()),
+                        None => ty.clone(),
+                    };
+                    out.insert(name, merged);
+                }
+            }
+        }
+    }
 }
 
 /// Single-module entry point — kept for tests/probes. For whole-app

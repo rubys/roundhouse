@@ -262,10 +262,15 @@ jobs:
   #       — only manifests against the whole runtime; deferred pending b);
   #   (b) the `[]` field-lookup returns Integer|String across branches
   #       and spinel commits to one C type instead of boxing — filed as
-  #       matz/spinel#1255 (clean minimal repro).
-  # continue-on-error until both land; drop the flag then. `ar_base` is
-  # disabled in-test (b453fcf) pending real-sqlite rewiring of the
-  # test_helper.
+  #       matz/spinel#1255 (clean minimal repro). ADDRESSED roundhouse-
+  #       side: inner test stand-ins now emit an `.rbs` sidecar
+  #       (`sig/test/<stem>_inner.rbs`) with `def []: ... -> (Integer |
+  #       String)`, the annotation the issue's own repro confirms makes
+  #       spinel box. So (b) no longer needs the spinel fix; (a) may
+  #       still block until spinel lands the optional-param boxing fix.
+  # continue-on-error until CI confirms green; drop the flag then.
+  # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
+  # rewiring of the test_helper.
   framework-tests-spinel:
     needs: build-spinel
     runs-on: ubuntu-latest

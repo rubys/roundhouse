@@ -228,7 +228,16 @@ pub(super) fn ty_to_rbs(ty: &Ty) -> String {
 fn render_union(variants: &[Ty]) -> String {
     // `T | nil` collapses to `T?` (RBS idiomatic optional form).
     let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
-    let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+    // Dedup structurally-equal members, preserving first-seen order. A
+    // `case`/branch return like `@id | @title | @body` typed
+    // `Integer | String | String` should render `(Integer | String)`,
+    // not repeat the `String`.
+    let mut non_nil: Vec<&Ty> = Vec::new();
+    for v in variants.iter().filter(|v| !matches!(v, Ty::Nil)) {
+        if !non_nil.contains(&v) {
+            non_nil.push(v);
+        }
+    }
     if has_nil && non_nil.len() == 1 {
         return format!("{}?", ty_to_rbs(non_nil[0]));
     }

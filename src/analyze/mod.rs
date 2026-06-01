@@ -29,6 +29,7 @@ pub mod block_refine;
 pub mod mutates_self;
 
 pub use body::{BodyTyper, ClassInfo, Ctx};
+pub(crate) use body::union_of;
 
 use std::collections::{BTreeSet, HashMap};
 
