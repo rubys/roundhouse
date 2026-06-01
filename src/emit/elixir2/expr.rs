@@ -463,7 +463,36 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::Cast { value, .. } => emit_expr(value),
+        ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
         other => crate::emit::diagnostics::report_unsupported("elixir2", other.kind_str(), ""),
+    }
+}
+
+/// `case scrutinee do <pat> -> <body> … end` — the per-column index
+/// dispatch (`[]`/`[]=`). Patterns are column-name atoms (`Lit::Sym`);
+/// a wildcard/bind renders `_`/name.
+fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
+    let body = arms
+        .iter()
+        .map(|arm| {
+            let pat = emit_pattern(&arm.pattern);
+            format!("{pat} ->\n{}", indent(&emit_tail(&arm.body), 1))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("case {} do\n{}\nend", emit_expr(scrutinee), indent(&body, 1))
+}
+
+fn emit_pattern(p: &crate::expr::Pattern) -> String {
+    use crate::expr::Pattern;
+    match p {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Bind { name } => name.to_string(),
+        Pattern::Lit { value } => emit_literal(value),
+        Pattern::Expr { expr } => emit_expr(expr),
+        // Array/Record destructure patterns aren't produced by the
+        // column indexer; surface a diagnostic if one ever reaches here.
+        other => crate::emit::diagnostics::report_unsupported("elixir2", "case pattern", &format!("{other:?}")),
     }
 }
 

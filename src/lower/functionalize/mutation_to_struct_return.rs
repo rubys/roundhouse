@@ -660,6 +660,37 @@ fn rewrite_expr(e: &Expr) -> Expr {
             then_branch: rewrite_expr(then_branch),
             else_branch: rewrite_expr(else_branch),
         }),
+        // `case name; when :col then @col[ = v] …` — the per-column index
+        // read/write (`[]`/`[]=`). Read arms (`@col`) thread through the
+        // `__field__` bridge like any `@ivar` read. A WRITE arm (`@col =
+        // v`) becomes the struct-update VALUE `%{record | col: v}` and the
+        // whole `case` binds back to `record` (`record = case … end`),
+        // since a rebind made inside a `case` arm doesn't leak out in
+        // Elixir — same reasoning as the `if`-branch lift.
+        ExprNode::Case { scrutinee, arms } => {
+            let is_write = arms
+                .iter()
+                .any(|a| matches!(&*a.body.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. }));
+            let arms = arms
+                .iter()
+                .map(|a| crate::expr::Arm {
+                    pattern: a.pattern.clone(),
+                    guard: a.guard.as_ref().map(rewrite_expr),
+                    body: match &*a.body.node {
+                        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                            struct_put(name, rewrite_expr(value))
+                        }
+                        _ => rewrite_expr(&a.body),
+                    },
+                })
+                .collect();
+            let case = syn(ExprNode::Case { scrutinee: rewrite_expr(scrutinee), arms });
+            if is_write {
+                syn(ExprNode::Assign { target: lvar(RECORD), value: case })
+            } else {
+                case
+            }
+        }
         ExprNode::Send { recv, method, args, block, parenthesized } => syn(ExprNode::Send {
             recv: recv.as_ref().map(rewrite_expr),
             method: method.clone(),
@@ -938,6 +969,18 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 if let crate::expr::InterpPart::Expr { expr } = p {
                     walk(expr, f);
                 }
+            }
+        }
+        // The per-column index `[]`/`[]=` body is a `Case`; detection
+        // (`touches_self`/`mutates_record`/`has_value_return`) must see the
+        // `@col` reads/writes in its arms, else the method isn't threaded.
+        ExprNode::Case { scrutinee, arms } => {
+            walk(scrutinee, f);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    walk(g, f);
+                }
+                walk(&arm.body, f);
             }
         }
         _ => {}
@@ -1346,6 +1389,50 @@ mod tests {
         eprintln!("--- save! ---\n{ex}\n-------------");
         assert!(ex.contains("{record, ok} = save(record)"), "bool-cond destructures:\n{ex}");
         assert!(ex.contains("if ok do"), "tests the captured boolean:\n{ex}");
+    }
+
+    #[test]
+    fn case_index_read_and_write_thread_record() {
+        use crate::expr::{Arm, Pattern};
+        let arm = |col: &str, body: Expr| Arm {
+            pattern: Pattern::Lit { value: Literal::Sym { value: sym(col) } },
+            guard: None,
+            body,
+        };
+        // def [](name); case name; when :id then @id; when :body then @body; end; end
+        let get = instance_method(
+            "[]",
+            &["name"],
+            syn(ExprNode::Case {
+                scrutinee: vr("name"),
+                arms: vec![
+                    arm("id", syn(ExprNode::Ivar { name: sym("id") })),
+                    arm("body", syn(ExprNode::Ivar { name: sym("body") })),
+                ],
+            }),
+        );
+        // def []=(name, value); case name; when :id then @id = value; …; end; end
+        let put = instance_method(
+            "[]=",
+            &["name", "value"],
+            syn(ExprNode::Case {
+                scrutinee: vr("name"),
+                arms: vec![
+                    arm("id", assign_ivar("id", vr("value"))),
+                    arm("body", assign_ivar("body", vr("value"))),
+                ],
+            }),
+        );
+        let ex = render_all(vec![get, put]);
+        eprintln!("--- index case ---\n{ex}\n------------------");
+        // read: arms read struct fields, no `_record`.
+        assert!(ex.contains("def get(record, name)"), "get threads record:\n{ex}");
+        assert!(ex.contains("case name do"), "read emits a case:\n{ex}");
+        assert!(ex.contains("record.id"), "read arm → field:\n{ex}");
+        // write: the whole case binds back to record, which is returned.
+        assert!(ex.contains("record = case name do"), "write case lifts to record =:\n{ex}");
+        assert!(ex.contains("%{record | id: value}"), "write arm → struct update:\n{ex}");
+        assert!(!ex.contains("Case not supported"), "case is emitted, not stubbed:\n{ex}");
     }
 
     #[test]

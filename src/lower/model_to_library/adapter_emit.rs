@@ -306,10 +306,14 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
 }
 
 /// `def _adapter_reload` — SELECT-and-assign-into-self variant of
-/// `_adapter_find_by_id`. Re-reads the row by `@id`, writes columns
-/// back into `self` (preserving identity); returns self when the row
-/// is still present, nil when it has been deleted. Backs framework
-/// Ruby's `Base#reload`.
+/// `_adapter_find_by_id`. Re-reads the row by `@id` and writes columns
+/// back into `self` (preserving identity); returns `self` — reloaded
+/// when the row is present, unchanged when it has been deleted. Backs
+/// framework Ruby's `Base#reload` ("silently no-ops when the row no
+/// longer exists"). Returns `self` rather than a `result`/nil
+/// accumulator so the functional (immutable) lowering threads the
+/// reloaded record cleanly — `record = if step? do …reloaded… else
+/// record end` — instead of leaving a dead local.
 ///
 /// Modelled as an INSTANCE method (not a class method) so callers
 /// reach it via implicit-self dispatch (`_adapter_reload`) rather
@@ -329,10 +333,8 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     use crate::span::Span;
 
     let stmt = Symbol::from("stmt");
-    let result = Symbol::from("result");
     let db = ClassId(Symbol::from("Db"));
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let nilable_owner = Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] };
 
     // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
     let cols_csv: String = table
@@ -370,13 +372,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         arel_db_call(&db, "prepare", vec![sql_concat]),
     );
 
-    // result = nil
-    let result_init = arel_assign(
-        &result,
-        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-    );
-
-    // if Db.step?(stmt) ; @<col> = Db.column_<int|text>(stmt, i) ; ... ; result = self ; end
+    // if Db.step?(stmt) ; @<col> = Db.column_<int|text>(stmt, i) ; ... ; mark_persisted! ; end
     let mut if_body: Vec<Expr> = Vec::new();
     for (i, col) in table.columns.iter().enumerate() {
         let read_method = match ty_of_column(&col.col_type) {
@@ -407,10 +403,6 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
             parenthesized: true,
         },
     ));
-    if_body.push(arel_assign(
-        &result,
-        Expr::new(Span::synthetic(), ExprNode::SelfRef),
-    ));
 
     let if_expr = Expr::new(
         Span::synthetic(),
@@ -422,10 +414,11 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     );
 
     let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
+    let self_ref = Expr::new(Span::synthetic(), ExprNode::SelfRef);
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Seq {
-            exprs: vec![stmt_assign, result_init, if_expr, finalize, var_ref(&result)],
+            exprs: vec![stmt_assign, if_expr, finalize, self_ref],
         },
     );
 
@@ -434,7 +427,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: vec![],
         body,
-        signature: Some(fn_sig(vec![], nilable_owner)),
+        signature: Some(fn_sig(vec![], owner_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
