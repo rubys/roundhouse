@@ -53,13 +53,20 @@ pub fn transform_method(m: MethodDef) -> MethodDef {
     rewrite(m)
 }
 
-/// True if the body has a `return <non-nil>` — a value the method yields
-/// in addition to mutating instance state.
+/// True if the body has a `return <value>` that's neither `nil` nor
+/// `self` — a genuine VALUE the method yields in addition to mutating
+/// instance state (so it can't thread to a single `record` return).
+/// `return self` / `return nil` are fine: `self` is the record, `nil`
+/// is superseded by the threaded record. (`destroy`'s `return self
+/// unless persisted?` is thus a normal mutator, not a value return.)
 fn has_value_return(e: &Expr) -> bool {
     let mut found = false;
     walk(e, &mut |n| {
         if let ExprNode::Return { value } = &*n.node {
-            if !matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+            if !matches!(
+                &*value.node,
+                ExprNode::Lit { value: Literal::Nil } | ExprNode::SelfRef
+            ) {
                 found = true;
             }
         }
@@ -808,6 +815,24 @@ mod tests {
             ex.contains("%{record | errors: record.errors ++ [\"oops\"]}"),
             "errors << → struct append:\n{ex}"
         );
+    }
+
+    #[test]
+    fn return_self_guard_threads_not_stubbed() {
+        // `def destroy; return self unless persisted?; @destroyed = true;
+        // self; end` — `return self` is a record return, not a value
+        // return, so the method threads (returns record), not stub-raises.
+        let guard = if_(
+            send(Some(syn(ExprNode::SelfRef)), "persisted?", vec![]),
+            nil(),
+            syn(ExprNode::Return { value: syn(ExprNode::SelfRef) }),
+        );
+        let body = syn(ExprNode::Seq {
+            exprs: vec![guard, assign_ivar("destroyed", syn(ExprNode::Lit { value: Literal::Bool { value: true } })), syn(ExprNode::SelfRef)],
+        });
+        let ex = render_via_elixir(vec![transform_method(instance_method("destroy", &[], body))]);
+        assert!(!ex.contains("mutates instance state and returns a value"), "not stubbed:\n{ex}");
+        assert!(ex.contains("%{record | destroyed: true}"), "threads the write:\n{ex}");
     }
 
     #[test]
