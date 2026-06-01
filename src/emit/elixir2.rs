@@ -244,14 +244,20 @@ fn ar_base_methods() -> Vec<crate::dialect::MethodDef> {
 /// Append the AR-baseline methods the model doesn't already override
 /// onto its LibraryClass, re-homing each to the model so self-calls and
 /// `Module#name` reflection resolve to the model. `initialize` is
-/// excluded — the model emits its own `new`.
+/// excluded — the model emits its own `new`. `find_by`/`where` are
+/// excluded too: they delegate to the legacy `ActiveRecord.adapter`
+/// (which the Elixir target doesn't model), not the per-model Arel
+/// `_adapter_*` primitives — so materializing them would reference an
+/// absent adapter. (Real-blog doesn't call them; an Arel-based find_by/
+/// where would be a model-lowering addition.)
 fn materialize_inherited(model: &mut crate::dialect::LibraryClass, base: &[crate::dialect::MethodDef]) {
     let defined: std::collections::HashSet<String> =
         model.methods.iter().map(|m| m.name.as_str().to_string()).collect();
     let owner = model.name.0.clone();
+    let skip = ["initialize", "find_by", "where"];
     let mut inherited: Vec<crate::dialect::MethodDef> = base
         .iter()
-        .filter(|m| m.name.as_str() != "initialize" && !defined.contains(m.name.as_str()))
+        .filter(|m| !skip.contains(&m.name.as_str()) && !defined.contains(m.name.as_str()))
         .cloned()
         .map(|mut m| {
             m.enclosing_class = Some(owner.clone());
