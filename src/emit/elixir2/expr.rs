@@ -167,6 +167,16 @@ pub(super) fn register_modules<'a>(classes: impl IntoIterator<Item = &'a crate::
     });
 }
 
+/// Register a single `simple → full` module-name mapping — for a
+/// hand-written module that isn't a parsed `LibraryClass` (e.g. the
+/// `V2.Db` runtime primitive, so the lowered model emit's bare `Db.…`
+/// references resolve).
+pub(super) fn register_module(simple: &str, full: &str) {
+    MODULE_NAMES.with(|m| {
+        m.borrow_mut().insert(simple.to_string(), full.to_string());
+    });
+}
+
 /// Emit a method body as Elixir (indent level 0; the caller indents).
 pub(super) fn emit_method_body(body: &Expr) -> String {
     match &*body.node {

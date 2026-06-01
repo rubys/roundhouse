@@ -175,6 +175,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         if std::env::var("RH_ELIXIR2_MODELS").is_err() {
             return out;
         }
+        // The lowered model emit references the DB primitive as bare
+        // `Db.prepare`/`Db.step?`/… — resolve those to the hand-written
+        // `V2.Db` module (db.ex above).
+        expr::register_module("Db", "V2.Db");
         let base_methods = ar_base_methods();
         let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
             std::collections::BTreeMap::new();

@@ -105,7 +105,13 @@ fn try_transform(m: &MethodDef) -> Option<Vec<MethodDef>> {
 }
 
 fn try_transform_seq(m: &MethodDef) -> Option<Vec<MethodDef>> {
-    let stmts = seq_stmts(&m.body)?;
+    // Flatten one level of nested `Seq`s so a loop the lowerer left inside
+    // a sub-block surfaces at the top level — e.g. the has_many getter's
+    // `Seq[guard, Seq[stmt; results; while; finalize; results]]`, where
+    // the inlined where-query drain sits a level down. (Sequencing is
+    // associative, so flattening is semantics-preserving.) After it, the
+    // guard rides `cps` into the entry's `if`, the drain becomes the loop.
+    let stmts = flatten_seq_stmts(&m.body)?;
 
     // Exactly one loop in the whole method, at the top level of the body.
     if count_loops(&m.body) != 1 {
@@ -391,6 +397,21 @@ fn seq_stmts(e: &Expr) -> Option<&Vec<Expr>> {
         ExprNode::Seq { exprs } => Some(exprs),
         _ => None,
     }
+}
+
+/// `seq_stmts`, but inlining any directly-nested `Seq` element one level
+/// (so a loop the lowerer buried in a sub-block surfaces at the top
+/// level). Returns `None` when `e` isn't a `Seq`.
+fn flatten_seq_stmts(e: &Expr) -> Option<Vec<Expr>> {
+    let stmts = seq_stmts(e)?;
+    let mut out = Vec::with_capacity(stmts.len());
+    for s in stmts {
+        match &*s.node {
+            ExprNode::Seq { exprs } => out.extend(exprs.iter().cloned()),
+            _ => out.push(s.clone()),
+        }
+    }
+    Some(out)
 }
 
 fn is_empty(e: &Expr) -> bool {
