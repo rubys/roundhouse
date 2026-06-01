@@ -248,14 +248,24 @@ jobs:
   # target. Same emit pipeline as framework-tests-ruby, but each
   # emitted test is compiled to a native binary via `spinel --rbs sig
   # <file>.rb -o <bin>` and executed; the autorun shim returns
-  # non-zero on any assertion failure. Was 5/5 green 2026-05-25 against
-  # `b6d7183`; currently 0/5 red against latest spinel master because
-  # of matz/spinel#915 (`return NULL` instead of `sp_box_nil()` in the
-  # dead-code fallback for `sp_RbVal`-returning methods). All 5 tests
-  # hit it via `ActiveRecord::Registry.lookup`'s emit. continue-on-
-  # error until #915 lands; drop the flag then (job will auto-flip
-  # green). `ar_base` is disabled in-test (b453fcf) pending real-sqlite
-  # rewiring of the test_helper.
+  # non-zero on any assertion failure.
+  #
+  # Status (2026-05-31, spinel master 054ebe6): 4/5 green. matz/spinel
+  # #915 (the old `return NULL` blocker named in earlier revisions of
+  # this comment) has landed, so errors/ac_base/router/inflector pass.
+  # Only `view_helpers` is red, and it's the emitted source that is
+  # correct (CRuby/framework-tests-ruby run it); spinel mis-compiles
+  # the inline `Article < ActiveRecord::Base` test stand-in two ways:
+  #   (a) the optional `?Integer id` ctor param is boxed to sp_RbVal in
+  #       the full AR::Base/ActionView context and won't assign to the
+  #       inherited non-nilable `mrb_int` id field (no minimal repro yet
+  #       — only manifests against the whole runtime; deferred pending b);
+  #   (b) the `[]` field-lookup returns Integer|String across branches
+  #       and spinel commits to one C type instead of boxing — filed as
+  #       matz/spinel#1255 (clean minimal repro).
+  # continue-on-error until both land; drop the flag then. `ar_base` is
+  # disabled in-test (b453fcf) pending real-sqlite rewiring of the
+  # test_helper.
   framework-tests-spinel:
     needs: build-spinel
     runs-on: ubuntu-latest
