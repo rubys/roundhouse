@@ -208,9 +208,33 @@ fn rewrite_expr(e: &Expr) -> Expr {
                 parenthesized: true,
             })
         }
+        // `self.x = v` write (attr writer Send, e.g. a per-column setter
+        // in a from-attrs constructor) → `record = record.__struct_put__(
+        // :x, v)`, same as `@x = v`. Excludes `[]=` (handled above) and
+        // the comparison operators that also end in `=`.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str().ends_with('=')
+                && args.len() == 1
+                && !matches!(method.as_str(), "[]=" | "==" | "!=" | ">=" | "<=" | "===")
+                && matches!(&*r.node, ExprNode::SelfRef) =>
+        {
+            let field = Symbol::from(method.as_str().trim_end_matches('='));
+            syn(ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                value: struct_put(&field, rewrite_expr(&args[0])),
+            })
+        }
         // Recurse through the container variants the runtime bodies use.
+        // A `super` call (the constructor's chain to ActiveRecord::Base#
+        // initialize) is dropped: the defstruct's field defaults +
+        // `valid?`/`mark_persisted!` cover the base state, so there's
+        // nothing to thread.
         ExprNode::Seq { exprs } => syn(ExprNode::Seq {
-            exprs: exprs.iter().map(rewrite_expr).collect(),
+            exprs: exprs
+                .iter()
+                .filter(|x| !matches!(&*x.node, ExprNode::Super { .. }))
+                .map(rewrite_expr)
+                .collect(),
         }),
         ExprNode::If { cond, then_branch, else_branch } => syn(ExprNode::If {
             cond: rewrite_expr(cond),
@@ -560,6 +584,28 @@ mod tests {
         let trimmed = ex.trim_end();
         assert!(trimmed.ends_with("record\n  end\nend"), "returns record:\n{ex}");
         assert!(!ex.contains("@"), "no raw ivars remain:\n{ex}");
+    }
+
+    #[test]
+    fn constructor_drops_super_and_threads_attr_writers() {
+        // def initialize(attrs = {}); super; self.title = attrs[:title]; end
+        // → `new` with super dropped and the attr-writer as a struct update.
+        let super_call = syn(ExprNode::Super { args: None });
+        let write = send(
+            Some(syn(ExprNode::SelfRef)),
+            "title=",
+            vec![send(Some(vr("attrs")), "[]", vec![syn(ExprNode::Lit {
+                value: Literal::Sym { value: sym("title") },
+            })])],
+        );
+        let body = syn(ExprNode::Seq { exprs: vec![super_call, write] });
+        let init = instance_method("initialize", &["attrs"], body);
+        let ex = render_via_elixir(vec![init]);
+        eprintln!("--- ctor ---\n{ex}\n------------");
+        assert!(ex.contains("def new("), "emits new:\n{ex}");
+        assert!(ex.contains("record = %{record | title: attrs[:title]}"), "attr writer → struct update:\n{ex}");
+        assert!(!ex.contains("set_title"), "no bare setter call:\n{ex}");
+        assert!(!ex.to_lowercase().contains("super"), "super dropped:\n{ex}");
     }
 
     #[test]

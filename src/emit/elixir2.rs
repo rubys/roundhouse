@@ -159,7 +159,100 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             content: include_str!("../../runtime/elixir/v2/db.ex").to_string(),
         });
 
+        // Per-model emit. Elixir has no inheritance, so each model module
+        // is standalone: the lowered model LC (defstruct + per-model
+        // _adapter_* / from_row / validate / …) gets the AR-baseline
+        // method BODIES (find/all/save/destroy/count/…) materialized in
+        // from `active_record/base.rb` — the linearization the other
+        // targets get via embedding/traits. (See "how does Phoenix"
+        // resolution: schema-module + Repo, no Base module.)
+        //
+        // Env-gated (off by default) while one gap remains: the has_many
+        // getter's `while`-in-`if`-branch hydration loop isn't yet
+        // recursion-lowered, so the model files don't all mix-compile.
+        // Gating keeps the default toolchain test green (mirrors go2's
+        // overlay env-gate); flip `RH_ELIXIR2_MODELS` to emit + iterate.
+        if std::env::var("RH_ELIXIR2_MODELS").is_err() {
+            return out;
+        }
+        let base_methods = ar_base_methods();
+        let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
+            std::collections::BTreeMap::new();
+        let (model_lcs, _registry) =
+            crate::lower::model_to_library::lower_models_with_registry_and_params(
+                &app.models,
+                &app.schema,
+                vec![],
+                &specs,
+            );
+        expr::register_modules(model_lcs.iter());
+        let model_names: std::collections::HashSet<String> =
+            app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+        for mut lc in model_lcs {
+            // Skip the abstract `ApplicationRecord` base — concrete models
+            // are self-contained after materialization, so nothing
+            // instantiates it; emitting it would surface its lowering-added
+            // `create`/`create!` (which call a `new` it lacks).
+            if lc.name.0.as_str() == "ApplicationRecord" {
+                continue;
+            }
+            // Only concrete models get the AR-baseline CRUD materialized —
+            // not the `<Model>Row` data holders, which have no `new`/table
+            // and would get a `create` calling an absent `new`.
+            if model_names.contains(lc.name.0.as_str()) {
+                materialize_inherited(&mut lc, &base_methods);
+            }
+            for class in crate::lower::functionalize::functionalize(vec![lc]) {
+                if let Ok(content) = library::emit_library_class(&class) {
+                    let file = format!(
+                        "{}.ex",
+                        class.name.0.as_str().to_lowercase().replace("::", "_")
+                    );
+                    out.push(EmittedFile {
+                        path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
+                        content,
+                    });
+                }
+            }
+        }
     }
 
     out
+}
+
+/// The AR-baseline method definitions from `active_record/base.rb` (the
+/// `ActiveRecord::Base` class body) — `find`/`all`/`save`/`destroy`/
+/// `count`/lifecycle hooks/etc. Materialized into each model module
+/// since Elixir has no inheritance to carry them.
+fn ar_base_methods() -> Vec<crate::dialect::MethodDef> {
+    crate::runtime_src::parse_library_with_rbs(
+        include_str!("../../runtime/ruby/active_record/base.rb").as_bytes(),
+        include_str!("../../runtime/ruby/active_record/base.rbs"),
+        "runtime/ruby/active_record/base.rb",
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .find(|c| c.name.0.as_str() == "ActiveRecord::Base")
+    .map(|c| c.methods)
+    .unwrap_or_default()
+}
+
+/// Append the AR-baseline methods the model doesn't already override
+/// onto its LibraryClass, re-homing each to the model so self-calls and
+/// `Module#name` reflection resolve to the model. `initialize` is
+/// excluded — the model emits its own `new`.
+fn materialize_inherited(model: &mut crate::dialect::LibraryClass, base: &[crate::dialect::MethodDef]) {
+    let defined: std::collections::HashSet<String> =
+        model.methods.iter().map(|m| m.name.as_str().to_string()).collect();
+    let owner = model.name.0.clone();
+    let mut inherited: Vec<crate::dialect::MethodDef> = base
+        .iter()
+        .filter(|m| m.name.as_str() != "initialize" && !defined.contains(m.name.as_str()))
+        .cloned()
+        .map(|mut m| {
+            m.enclosing_class = Some(owner.clone());
+            m
+        })
+        .collect();
+    model.methods.append(&mut inherited);
 }
