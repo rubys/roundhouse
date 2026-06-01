@@ -43,6 +43,11 @@ module Db
   @next_id = 0
   @mutex   = nil
   @cv      = nil
+  # Per-connection prepared-statement cache bound (roundhouse#12). Beyond
+  # this many distinct SQL strings on one connection, further statements
+  # are transient (closed on finalize) rather than cached — bounds growth
+  # when inlined literals make id-bearing queries key per-id.
+  STMT_CACHE_CAP = 128
   # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
   # accumulate the SQL each prepare/exec issues. The funnel hook
   # `record_query` is near-free (one nil check) when not capturing, so
@@ -106,7 +111,12 @@ module Db
     return if @pool.nil?
     i = 0
     while i < @pool.free.length
-      @pool.free[i].close
+      conn = @pool.free[i]
+      # Finalize cached statements before closing the connection (older
+      # sqlite3-gem builds refuse to close with unfinalized statements).
+      cache = conn.instance_variable_get(:@rh_stmt_cache)
+      cache.each_value { |st| st.close } if cache
+      conn.close
       i += 1
     end
     @pool = nil
@@ -117,10 +127,41 @@ module Db
     current_dbh.execute(sql)
   end
 
+  # Prepared-statement cache (roundhouse#12). A SQLite3::Statement is bound
+  # to the connection it was prepared on, so the cache lives ON the
+  # connection object — and since `with_connection` leases a connection to
+  # exactly one thread at a time, the per-connection cache needs no extra
+  # lock. A cache hit rewinds the stmt (`reset!`) instead of re-parsing the
+  # SQL; `finalize` resets rather than closes, so the stmt stays cached
+  # (real `close` runs at pool shutdown). Key is the composed SQL: inlined
+  # literals mean id-bearing queries key per-id (fine for the bench;
+  # STMT_CACHE_CAP bounds growth, beyond which statements are transient and
+  # closed on finalize). Placeholder binding — the planned follow-on —
+  # makes the key the static query shape.
   def self.prepare(sql)
     record_query(sql)
+    conn  = current_dbh
+    cache = conn.instance_variable_get(:@rh_stmt_cache)
+    if cache.nil?
+      cache = {}
+      conn.instance_variable_set(:@rh_stmt_cache, cache)
+    end
+    stmt   = cache[sql]
+    cached = true
+    if stmt.nil?
+      stmt = conn.prepare(sql)
+      if cache.size < STMT_CACHE_CAP
+        cache[sql] = stmt
+      else
+        cached = false
+      end
+    else
+      # Reused: rewind the cursor before re-stepping (robust even if a
+      # prior request raised before its finalize).
+      stmt.reset!
+    end
     @next_id += 1
-    @rows[@next_id] = { stmt: current_dbh.prepare(sql), row: nil }
+    @rows[@next_id] = { stmt: stmt, row: nil, cached: cached }
     @next_id
   end
 
@@ -148,9 +189,16 @@ module Db
     @rows[stmt_id][:stmt].columns[i]
   end
 
+  # Release the per-call handle. A cached stmt is reset! (rewound + read
+  # lock dropped) and kept for reuse; a transient (over-cap) stmt is closed.
   def self.finalize(stmt_id)
     entry = @rows.delete(stmt_id)
-    entry[:stmt].close if entry
+    return unless entry
+    if entry[:cached]
+      entry[:stmt].reset!
+    else
+      entry[:stmt].close
+    end
   end
 
   def self.last_insert_rowid
