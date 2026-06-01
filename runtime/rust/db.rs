@@ -45,6 +45,17 @@ thread_local! {
 /// `DATABASE_POOL_SIZE`.
 static PROD_POOL: OnceLock<Vec<Mutex<Connection>>> = OnceLock::new();
 
+/// rusqlite per-connection prepared-statement cache capacity
+/// (roundhouse#12). Each `Connection` keeps an LRU of compiled statements
+/// keyed by SQL; `prepare_cached` reuses them, skipping the re-parse the
+/// blog's fixed query set otherwise paid on every request. Inlined
+/// literals make id-bearing queries key per-id, so the LRU also bounds
+/// memory — evicted statements are finalized by rusqlite, no leak.
+/// Placeholder binding (the planned follow-on) makes the key the static
+/// query shape. Default rusqlite capacity is 16; raise it to comfortably
+/// hold the blog's working set.
+const STMT_CACHE_CAP: usize = 128;
+
 /// Initialize a fresh `:memory:` SQLite database on the current
 /// thread, run the supplied schema DDL, and install the connection
 /// so later `with_conn` calls can reach it. Replaces any connection
@@ -55,6 +66,7 @@ static PROD_POOL: OnceLock<Vec<Mutex<Connection>>> = OnceLock::new();
 /// and compile standalone in the Roundhouse repo's runtime tree.
 pub fn setup_test_db(schema_sql: &str) {
     let conn = Connection::open_in_memory().expect("open :memory: sqlite");
+    conn.set_prepared_statement_cache_capacity(STMT_CACHE_CAP);
     conn.execute_batch(schema_sql).expect("run schema SQL");
     CONN.with(|c| *c.borrow_mut() = Some(conn));
 }
@@ -135,6 +147,7 @@ pub fn open_production_pool(path: &str, schema_sql: &str, pool_size: usize) {
     let mut conns: Vec<Mutex<Connection>> = Vec::with_capacity(pool_size);
     for _ in 0..pool_size {
         let conn = Connection::open(path).expect("open sqlite db");
+        conn.set_prepared_statement_cache_capacity(STMT_CACHE_CAP);
         conn.pragma_update(None, "journal_mode", "WAL")
             .expect("enable WAL");
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -199,10 +212,13 @@ impl Db {
 
     /// Prepare a SELECT, materialize every row, return the opaque
     /// stmt id. Subsequent `step` / `column_*` / `finalize` calls take
-    /// the id by value.
+    /// the id by value. `prepare_cached` reuses the connection's compiled
+    /// statement (roundhouse#12) — the parse is skipped on a cache hit;
+    /// rusqlite resets the cached statement on checkout and returns it to
+    /// the LRU when the `CachedStatement` drops at the end of this closure.
     pub fn prepare(sql: &str) -> i64 {
         let rows: Vec<Vec<Value>> = with_conn(|conn| {
-            let mut stmt = conn.prepare(sql).expect("Db::prepare");
+            let mut stmt = conn.prepare_cached(sql).expect("Db::prepare");
             let n_cols = stmt.column_count();
             let mut out: Vec<Vec<Value>> = Vec::new();
             let mut rows = stmt.query([]).expect("Db::prepare query");
