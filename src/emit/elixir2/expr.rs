@@ -215,6 +215,21 @@ fn emit_stmts(stmts: &[Expr]) -> String {
             );
         }
 
+        // The `unless` mirror: `return X unless cond` → an `if` whose
+        // *else* returns and *then* is empty. When cond holds, fall
+        // through to the rest; otherwise return X. (`save`'s `return
+        // false unless ok`.)
+        if is_empty(then_branch) && ends_in_return(else_branch) {
+            let cond_s = emit_expr(cond);
+            let then_s = emit_stmts(rest);
+            let else_s = emit_return_value(else_branch);
+            return format!(
+                "if {cond_s} do\n{}\nelse\n{}\nend",
+                indent(&then_s, 1),
+                indent(&else_s, 1),
+            );
+        }
+
         // Conditional reassignment: an `if`/`elsif` chain where every
         // branch yields the same reassigned local `v` (reassigns it, is
         // empty, or is a nested chain yielding it). Elixir scoping
@@ -240,8 +255,24 @@ fn emit_stmt(e: &Expr) -> String {
             // work lands in a later phase).
             format!("{} = {}", name, emit_expr(value))
         }
+        ExprNode::MultiAssign { targets, value } => emit_multi_assign(targets, value),
         _ => emit_expr(e),
     }
+}
+
+/// `{t1, t2, …} = value` — the dual-return tuple destructure (a
+/// `{record, ok} = save(record)` call site). Targets render as plain
+/// local names (`_` for a discard).
+fn emit_multi_assign(targets: &[LValue], value: &Expr) -> String {
+    let lhs = targets
+        .iter()
+        .map(|t| match t {
+            LValue::Var { name, .. } | LValue::Ivar { name } => name.to_string(),
+            _ => "_".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{lhs}}} = {}", emit_expr(value))
 }
 
 /// The trailing (value-producing) position of a block. A bare `return X`
@@ -378,6 +409,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         // param (added by emit_fn when the body yields).
         ExprNode::Yield { args } => format!("block_fn.({})", emit_args(args)),
         ExprNode::Assign { target: _, value } => emit_expr(value),
+        ExprNode::MultiAssign { targets, value } => emit_multi_assign(targets, value),
         ExprNode::Seq { exprs } => emit_stmts(exprs),
         ExprNode::If { cond, then_branch, else_branch } => {
             let cond_s = emit_expr(cond);
@@ -481,6 +513,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             };
             return format!("{}.{field}", emit_expr(r));
         }
+    }
+
+    // `__tuple__(a, b)` → `{a, b}` — the dual-return bridge (a `save`/
+    // `valid?` method returning `{record, value}`; see lower::
+    // functionalize::mutation_to_struct_return).
+    if method == "__tuple__" && recv.is_none() {
+        return format!("{{{}}}", emit_args(args));
     }
 
     // `record.__struct_put__(:field, value)` → `%{record | field: value}`

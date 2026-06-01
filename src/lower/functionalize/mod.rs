@@ -49,13 +49,18 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
             // `@errors = []` → Array), so the post-pass below can route
             // reads of them to `Map.*` / `Enum.*`.
             let field_types = collect_field_types(&methods);
-            class.methods = methods
+            // while→recursion first (may split a method into entry +
+            // helper), then thread instance mutation through the results.
+            let after_while: Vec<_> =
+                methods.into_iter().flat_map(while_to_recursion::transform_method).collect();
+            // Classify methods (record-returning vs dual-return) up front
+            // so a self-call can be rebound at its call site — the body
+            // of `valid?` must rebind its `validate` call, `save` must
+            // destructure its `valid?` call, etc.
+            let registry = mutation_to_struct_return::compute_registry(&after_while);
+            class.methods = after_while
                 .into_iter()
-                // while→recursion first (may split a method into entry +
-                // helper), then thread instance mutation through the
-                // results.
-                .flat_map(while_to_recursion::transform_method)
-                .map(mutation_to_struct_return::transform_method)
+                .map(|m| mutation_to_struct_return::transform_method(m, &registry))
                 .map(local_accumulation::transform_method)
                 .map(|mut m| {
                     stamp_field_types(&mut m.body, &field_types);
