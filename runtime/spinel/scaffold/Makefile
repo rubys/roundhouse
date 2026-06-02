@@ -2,7 +2,7 @@
 #
 # Targets:
 #   make             — assets + tests + lint (default)
-#   make assets      — build static/{application,tailwind}.css and static/turbo.min.js
+#   make assets      — build static/assets/* (css + importmap JS) + root icons
 #   make build       — spinel main.rb → build/blog (requires spinel on PATH)
 #   make test        — bundle exec rake test
 #   make lint        — bundle exec rake lint (spinel-subset linter)
@@ -17,6 +17,7 @@
 
 SPINEL ?= spinel
 STATIC := static
+ASSETS := $(STATIC)/assets
 BUILD  := build
 
 # Source files that trigger a rebuild when changed. Tailwind also
@@ -28,8 +29,28 @@ RUBY_SRC := main.rb $(shell find runtime app config -type f -name '*.rb' 2>/dev/
 all: assets test lint
 
 # ── Static assets ────────────────────────────────────────────────
+#
+# Files land under static/assets/<name> to match the Propshaft-shape
+# URLs the importmap pins (config/importmap.rb) and the layout's
+# stylesheet_link_tag emit — `/assets/<name>.{css,js}`. The spinel
+# binary's Main.dispatch serves these via sphttp sendfile; the CRuby
+# overlay's config.ru serves the identical layout via Rack::Static.
+# Root icons land at static/<icon> to match the layout's /icon.* hrefs.
 
-assets: $(STATIC)/application.css $(STATIC)/tailwind.css $(STATIC)/turbo.min.js
+# App-side JS copied verbatim from app/javascript/: the importmap entry
+# `application.js` (`import "@hotwired/turbo-rails"` — this is what
+# boots Turbo, and with it the <turbo-cable-stream-source> connection
+# to /cable) plus the Stimulus controllers it pulls in.
+ASSET_JS := $(ASSETS)/turbo.min.js \
+            $(ASSETS)/stimulus.min.js \
+            $(ASSETS)/stimulus-loading.js \
+            $(ASSETS)/application.js \
+            $(ASSETS)/controllers/application.js \
+            $(ASSETS)/controllers/index.js \
+            $(ASSETS)/controllers/hello_controller.js
+
+assets: $(ASSETS)/application.css $(ASSETS)/tailwind.css $(ASSET_JS) \
+        $(STATIC)/icon.png $(STATIC)/icon.svg
 
 # Two stylesheet outputs to match Rails' Propshaft asset shape:
 #   - application.css: empty placeholder, mirrors a Rails app's
@@ -40,12 +61,12 @@ assets: $(STATIC)/application.css $(STATIC)/tailwind.css $(STATIC)/turbo.min.js
 #     and `@tailwindcss/cli` (binary) resolvable in node_modules — npx
 #     alone fetches only the CLI. Sentinel file gates the install so
 #     it runs once per checkout, not on every build.
-$(STATIC)/application.css:
-	@mkdir -p $(STATIC)
+$(ASSETS)/application.css:
+	@mkdir -p $(ASSETS)
 	@touch $@
 
-$(STATIC)/tailwind.css: app/assets/tailwind.css $(RUBY_SRC) node_modules/.installed
-	@mkdir -p $(STATIC)
+$(ASSETS)/tailwind.css: app/assets/tailwind.css $(RUBY_SRC) node_modules/.installed
+	@mkdir -p $(ASSETS)
 	npx @tailwindcss/cli \
 	  --input app/assets/tailwind.css \
 	  --output $@ \
@@ -57,12 +78,42 @@ node_modules/.installed:
 	npm install --silent --no-save tailwindcss @tailwindcss/cli
 	@touch node_modules/.installed
 
-# JS: copy out of the turbo-rails gem dir. Bundler ensures the gem
-# is installed; the path is queried at make-time so version bumps
-# don't require Makefile edits.
-$(STATIC)/turbo.min.js:
+# JS bundles copied out of the turbo-rails / stimulus-rails gem dirs
+# (Gemfile :assets group). Paths are queried at make-time so version
+# bumps don't require Makefile edits.
+$(ASSETS)/turbo.min.js:
+	@mkdir -p $(ASSETS)
+	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(turbo-rails)).gem_dir')/app/assets/javascripts/turbo.min.js" $@
+
+$(ASSETS)/stimulus.min.js:
+	@mkdir -p $(ASSETS)
+	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus.min.js" $@
+
+$(ASSETS)/stimulus-loading.js:
+	@mkdir -p $(ASSETS)
+	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(stimulus-rails)).gem_dir')/app/assets/javascripts/stimulus-loading.js" $@
+
+# App-side JS — copied verbatim from app/javascript/ (emitted into the
+# tree from the source app). controllers/ land under
+# static/assets/controllers/ to match the `controllers/*` importmap pins.
+$(ASSETS)/application.js: app/javascript/application.js
+	@mkdir -p $(ASSETS)
+	cp $< $@
+
+$(ASSETS)/controllers/%.js: app/javascript/controllers/%.js
+	@mkdir -p $(ASSETS)/controllers
+	cp $< $@
+
+# Root-level icons from the source app's public/ (when present in the
+# tree — binary PNGs are skipped by the text-only archive, so guard
+# with a file test rather than failing the build).
+$(STATIC)/icon.png:
 	@mkdir -p $(STATIC)
-	cp "$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(turbo-rails)).gem_dir + %q(/app/assets/javascripts/turbo.min.js)')" $@
+	@if [ -f public/icon.png ]; then cp public/icon.png $@; fi
+
+$(STATIC)/icon.svg:
+	@mkdir -p $(STATIC)
+	@if [ -f public/icon.svg ]; then cp public/icon.svg $@; fi
 
 # ── Spinel binary ────────────────────────────────────────────────
 

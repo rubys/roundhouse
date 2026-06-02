@@ -284,7 +284,7 @@ pub fn target_files(
 ) -> Result<Vec<(String, String)>, String> {
     match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app),
+        BuildTarget::Spinel => spinel_files(app, fixture),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
@@ -355,7 +355,7 @@ fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut files = spinel_files(app)?;
+    let mut files = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
     for (path, _) in files.iter_mut() {
@@ -376,15 +376,10 @@ fn ruby_runtime_files(
         &mut files,
     )?;
 
-    let js = fixture.join("app/javascript");
-    if js.exists() {
-        walk_dir_into(&js, "app/javascript/", &mut files)?;
-    }
-    let public = fixture.join("public");
-    if public.exists() {
-        walk_dir_into(&public, "public/", &mut files)?;
-    }
-
+    // The source app's `app/javascript/` + `public/` static assets are
+    // already folded in by `spinel_files` (both targets need them — the
+    // spinel binary now serves `/assets/*` too). Nothing CRuby-specific
+    // to add here beyond the overlay above.
     Ok(dedupe_last_wins(files))
 }
 
@@ -393,7 +388,13 @@ fn ruby_runtime_files(
 /// — scaffold first, runtime test/lib next, lowered emit on top.
 /// `dedupe_last_wins` resolves overlap (e.g. emit_spinel's
 /// `test/test_helper.rb` supersedes the scaffold's canonical version).
-fn spinel_files(app: &App) -> Result<Vec<(String, String)>, String> {
+///
+/// The source app's `app/javascript/` (the importmap JS entry +
+/// Stimulus controllers) and `public/` icons are walked in verbatim:
+/// `make assets` copies them under `static/assets/`, and the spinel
+/// binary's `Main.dispatch` serves them at `/assets/*`. Binary files
+/// (e.g. `icon.png`) are silently skipped — the archive is text-only.
+fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
     walk_dir_into(Path::new("runtime/spinel/scaffold"), "", &mut files)?;
@@ -446,6 +447,15 @@ fn spinel_files(app: &App) -> Result<Vec<(String, String)>, String> {
     }
 
     files.extend(sort_files(emit::ruby::emit_spinel(app)));
+
+    let js = fixture.join("app/javascript");
+    if js.exists() {
+        walk_dir_into(&js, "app/javascript/", &mut files)?;
+    }
+    let public = fixture.join("public");
+    if public.exists() {
+        walk_dir_into(&public, "public/", &mut files)?;
+    }
 
     Ok(dedupe_last_wins(files))
 }

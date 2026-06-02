@@ -164,6 +164,53 @@ module Main
     Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
   end
 
+  # True for request paths that map to a file under static/: the
+  # importmap-pinned assets at /assets/* plus the layout's root icons.
+  # The `..` guard blocks path-traversal escapes (`/assets/../../etc`)
+  # before the path is concatenated onto the static/ root.
+  def self.static_asset?(path)
+    if path.include?("..")
+      return false
+    end
+    path.start_with?("/assets/") || path == "/icon.png" || path == "/icon.svg"
+  end
+
+  # Resolve a (pre-validated) static URL to its on-disk path under
+  # static/ and hand it to the Tep server to sendfile. sphttp can't
+  # infer Content-Type, so set it from the extension here; a missing
+  # file 404s (Sock.sphttp_filesize returns -1 when stat fails). The
+  # working directory is the app root — where `make assets` writes
+  # static/ and `./build/blog` is launched from.
+  def self.serve_static(path, res)
+    disk = "static" + path
+    if Sock.sphttp_filesize(disk) < 0
+      res.status = 404
+      res.body = "<h1>404 Not Found</h1>"
+      return nil
+    end
+    res.headers["Content-Type"] = Main.asset_content_type(path)
+    res.send_file(disk)
+    nil
+  end
+
+  # Minimal filename-extension → MIME map for the asset kinds this app
+  # serves. Anything unrecognized falls back to octet-stream.
+  def self.asset_content_type(path)
+    if path.end_with?(".css")
+      "text/css; charset=utf-8"
+    elsif path.end_with?(".js")
+      "text/javascript; charset=utf-8"
+    elsif path.end_with?(".svg")
+      "image/svg+xml"
+    elsif path.end_with?(".png")
+      "image/png"
+    elsif path.end_with?(".json")
+      "application/json"
+    else
+      "application/octet-stream"
+    end
+  end
+
   # Tep::Server callback — MINIMAL form. Routes, runs the controller,
   # copies status/body back. Skips flash + session lifecycle for now
   # so the transport-only validation (sphttp eliminates io.write/read
@@ -183,6 +230,16 @@ module Main
     # below applies to the upgraded connection.
     if req.path == "/cable"
       Cable.upgrade(req, res)
+      return
+    end
+
+    # Static assets: the importmap-pinned JS + the stylesheets, laid
+    # out by `make assets` under static/assets/, plus the layout's root
+    # icons. The Tep server sphttp-sendfiles whatever res.send_file
+    # names; resolve the URL to its on-disk path + Content-Type here.
+    # None of the dynamic routing below applies to a served file.
+    if Main.static_asset?(req.path)
+      Main.serve_static(req.path, res)
       return
     end
 
