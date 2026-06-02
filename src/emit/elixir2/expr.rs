@@ -637,6 +637,12 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Ruby stdlib module calls (`Base64`, `JSON`) → their Elixir
+    // equivalents (`Base.encode64`, native `JSON.encode!`).
+    if let Some(s) = try_stdlib_const_call(recv, method, args) {
+        return s;
+    }
+
     // A recv-less 0-arg call whose name is an in-scope param is a local
     // read, not a call — Ruby resolves a bareword to a local before a
     // method. (A view partial's param `article` collides with the
@@ -1384,6 +1390,27 @@ fn ivar_pd_key(name: &str) -> String {
 /// modules use is a hash store).
 fn ivar_pd_get(name: &str) -> String {
     format!("Process.get({}, %{{}})", ivar_pd_key(name))
+}
+
+/// Ruby stdlib module calls → Elixir equivalents. `Base64.strict_encode64`
+/// → `Base.encode64` (same standard-alphabet, padded, single-line output);
+/// `JSON.generate`/`dump` → Elixir 1.18's native `JSON.encode!`. `None`
+/// for anything else (falls through to the default `Module.method` form).
+fn try_stdlib_const_call(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Option<String> {
+    let ExprNode::Const { path } = &*recv?.node else { return None };
+    let module = path.last()?.as_str();
+    match (module, method, args.len()) {
+        ("Base64", "strict_encode64" | "encode64", 1) => {
+            Some(format!("Base.encode64({})", emit_expr(&args[0])))
+        }
+        ("Base64", "urlsafe_encode64", 1) => {
+            Some(format!("Base.url_encode64({})", emit_expr(&args[0])))
+        }
+        ("JSON", "generate" | "dump", 1) => {
+            Some(format!("JSON.encode!({})", emit_expr(&args[0])))
+        }
+        _ => None,
+    }
 }
 
 /// Render a `Send` whose receiver is a module-state `@ivar` (hash store)
