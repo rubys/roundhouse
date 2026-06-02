@@ -85,6 +85,22 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
 /// while accumulating lowerers; the per-target collapse decisions for
 /// TS / Rust / etc. are deferred until enough lowerers exist for
 /// natural groupings to surface.
+/// Retype a model's synthesized `from_stmt(stmt)` class-method param to
+/// `Untyped`. See the call site in `emit_lowered_models` for why this is
+/// a ruby/spinel-only adapter (the stmt handle is a `void *` here, an
+/// integer cursor on the strict targets).
+fn relax_from_stmt_handle(lc: &mut LibraryClass) {
+    for m in &mut lc.methods {
+        if m.name.as_str() == "from_stmt" && m.receiver == MethodReceiver::Class {
+            if let Some(crate::ty::Ty::Fn { params, .. }) = m.signature.as_mut() {
+                if let Some(p) = params.first_mut() {
+                    p.ty = crate::ty::Ty::Untyped;
+                }
+            }
+        }
+    }
+}
+
 pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Collect controller `permit(...)` declarations so the model lowerer
     // can synthesize `from_params(p: <Resource>Params)` factories sized
@@ -104,12 +120,25 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // `emit_lowered_controllers`); we register them here as
     // synthesized siblings so model files that reference them
     // (`Article.from_params(...)` calls) get explicit requires.
-    let lcs = crate::lower::lower_models_to_library_classes_with_params(
+    let mut lcs = crate::lower::lower_models_to_library_classes_with_params(
         &app.models,
         &app.schema,
         Vec::new(),
         &params_specs,
     );
+    // The sqlite statement handle `Db.prepare` returns is a per-target
+    // `Db` primitive: an integer cursor on most adapters (the shared
+    // model lowerer's `Ty::Int` default), but an opaque FFI `void *` on
+    // the spinel shim (`runtime/spinel/db.rb`). Relax the synthesized
+    // `from_stmt(stmt)` param to `untyped` so the emitted `.rbs` doesn't
+    // pin it to `Integer` — spinel infers the pointer from the
+    // `Db.column_*(stmt, …)` FFI calls, and CRuby ignores the sig
+    // entirely. Confined here, the only emitter whose `Db` hands back a
+    // raw pointer; the strict targets keep `Ty::Int` (correct for their
+    // integer-handle `Db`). See the toolchain-spinel `from_stmt` seam.
+    for lc in &mut lcs {
+        relax_from_stmt_handle(lc);
+    }
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
