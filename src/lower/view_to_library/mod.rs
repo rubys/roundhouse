@@ -1420,6 +1420,20 @@ pub(super) fn accumulator_result_ref(name: &str) -> Expr {
 }
 
 pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
+    // Constant-fold `html_escape("literal")`. The escape is deterministic
+    // and the literal never changes, so escaping static class strings and
+    // button labels on every request is pure waste — the spinel profile
+    // showed the regex escaper (`re_exec`) running per request, mostly on
+    // compile-time constants. Emit the pre-escaped literal instead. This is
+    // byte-identical to the runtime call it replaces: the same 5-char set
+    // as `ViewHelpers::HTML_ESCAPES` (`& < > " '`), which is also Rails',
+    // so `compare` is unaffected. Only bare String literals fold; dynamic
+    // args (article.title, …) keep the runtime call.
+    if method == "html_escape" && args.len() == 1 {
+        if let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node {
+            return lit_str(html_escape_fold(value));
+        }
+    }
     let recv = Expr::new(
         Span::synthetic(),
         ExprNode::Const { path: vec![Symbol::from("ViewHelpers")] },
@@ -1478,6 +1492,24 @@ pub(super) fn lit_str(s: String) -> Expr {
         Span::synthetic(),
         ExprNode::Lit { value: Literal::Str { value: s } },
     )
+}
+
+/// Apply `ViewHelpers::HTML_ESCAPES` at compile time. Single pass over the
+/// input so an introduced `&` is never re-escaped — matching the runtime
+/// `s.gsub(/[&<>"']/, HTML_ESCAPES)` byte-for-byte (and Rails').
+fn html_escape_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 pub(super) fn lit_sym(s: Symbol) -> Expr {
