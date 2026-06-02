@@ -27,7 +27,16 @@ class Article < ActiveRecord::Base
   # omits the `value` attribute for nil OR empty).
   def initialize(id = 0, title = "", body = "")
     super()
-    self.id = id
+    # Assign the inherited `id` field via the ivar directly (`@id`)
+    # rather than the inherited attr_accessor setter (`self.id = id`).
+    # Both are equivalent here, but the setter form trips spinel's AOT
+    # backend: the positional `id` param unifies with the Hash that the
+    # inherited `ActiveRecord::Base.create(attrs={})` factory passes to
+    # `new(attrs)`, widening the param to sp_RbVal; the inlined setter
+    # then writes that poly value to the narrow `mrb_int` id field and
+    # the generated C fails to compile. The direct ivar write widens the
+    # field to match instead, so all targets agree. See matz/spinel#1275.
+    @id = id
     @title = title
     @body = body
   end

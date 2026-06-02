@@ -250,24 +250,27 @@ jobs:
   # <file>.rb -o <bin>` and executed; the autorun shim returns
   # non-zero on any assertion failure.
   #
-  # Status (2026-06-02, spinel a782696): 4/5 green. matz/spinel
-  # #915 (the old `return NULL` blocker named in earlier revisions of
-  # this comment) has landed, so errors/ac_base/router/inflector pass.
-  # Only `view_helpers` is red, and it's the emitted source that is
-  # correct (CRuby/framework-tests-ruby run it); spinel mis-compiles
-  # the inline `Article < ActiveRecord::Base` test stand-in two ways:
-  #   (a) the `Article` ctor's `id` param is widened to sp_RbVal because
+  # Status (2026-06-02, spinel a782696): all 5 expected green locally.
+  # matz/spinel #915 (the old `return NULL` blocker named in earlier
+  # revisions of this comment) has landed, so errors/ac_base/router/
+  # inflector pass. The `view_helpers` stand-in previously hit two
+  # spinel mis-compiles of the inline `Article < ActiveRecord::Base`;
+  # both are now worked around roundhouse-side:
+  #   (a) the `Article` ctor's `id` param was widened to sp_RbVal because
   #       the inherited `ActiveRecord::Base.create(attrs={})` factory
   #       calls `new(attrs)` with a Hash — spinel unifies that poly call
   #       site with `Article.new(7)` (Integer) into one C param type. The
-  #       body `self.id = id` then inlines the inherited attr_accessor
+  #       body `self.id = id` then inlined the inherited attr_accessor
   #       setter as a direct write to the narrow `mrb_int` id field, so
-  #       `mrb_int = sp_RbVal` fails to compile. Filed as matz/spinel#1275
+  #       `mrb_int = sp_RbVal` failed to compile. Filed as matz/spinel#1275
   #       with a 19-line standalone repro (no RBS; the optional default
   #       and the `?Integer` RBS are both red herrings — a required param
-  #       reproduces identically). The earlier "optional-param boxing"
-  #       framing in this comment was wrong; the trigger is cross-call-
-  #       site param unification against the inherited factory.
+  #       reproduces identically). WORKED AROUND: the stand-in now assigns
+  #       `@id = id` (direct ivar write) instead of `self.id = id`; the
+  #       direct-write path widens the field to match, so all four targets
+  #       (ruby/crystal/ts/spinel) agree. Real generated models are
+  #       unaffected — they use the Hash-`attrs` ctor shape, which doesn't
+  #       trigger the unification. The spinel-side fix still tracked in #1275.
   #   (b) the `[]` field-lookup returns Integer|String across branches
   #       and spinel commits to one C type instead of boxing — filed as
   #       matz/spinel#1255 (clean minimal repro). ADDRESSED roundhouse-
@@ -275,9 +278,10 @@ jobs:
   #       (`sig/test/<stem>_inner.rbs`) with `def []: ... -> (Integer |
   #       String)`, the annotation the issue's own repro confirms makes
   #       spinel box. So (b) no longer needs the spinel fix and no longer
-  #       appears in the log; (a) is the sole remaining blocker, pending
-  #       the spinel-side fix in #1275.
-  # continue-on-error until CI confirms green; drop the flag then.
+  #       appears in the log.
+  # continue-on-error stays ON despite the local pass: (a)/(b) are
+  # roundhouse-side workarounds for open spinel bugs, not upstream fixes,
+  # so the gate is still advisory until #1275 lands and CI confirms green.
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:
