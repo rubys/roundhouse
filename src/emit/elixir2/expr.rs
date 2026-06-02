@@ -359,12 +359,15 @@ fn emit_stmt(e: &Expr) -> String {
         return s;
     }
     match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value }
-        | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            // Elixir has no instance state; an `@ivar =` rebind at this
-            // depth is a plain local rebind (the real mutation-threading
-            // work lands in a later phase).
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             format!("{} = {}", name, emit_expr(value))
+        }
+        // A module-singleton's `@ivar = value` is mutable module state →
+        // the process dictionary (instance-method ivar mutation is already
+        // threaded to struct fields by the functionalize passes, so an
+        // Ivar target here is always module-singleton state).
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            format!("Process.put({}, {})", ivar_pd_key(name.as_str()), emit_expr(value))
         }
         ExprNode::MultiAssign { targets, value } => emit_multi_assign(targets, value),
         _ => emit_expr(e),
@@ -520,7 +523,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => emit_const(path),
         ExprNode::Var { name, .. } => name.to_string(),
-        ExprNode::Ivar { name } => name.to_string(),
+        // A bare module-state `@ivar` read → the whole process-dictionary
+        // store. (Element/method access is intercepted in `emit_send`.)
+        ExprNode::Ivar { name } => ivar_pd_get(name.as_str()),
         ExprNode::Send { recv, method, args, block, .. } => match block {
             Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
             None => emit_send(recv.as_ref(), method.as_str(), args),
@@ -619,6 +624,19 @@ fn emit_pattern(p: &crate::expr::Pattern) -> String {
 }
 
 fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // A module-singleton's mutable `@ivar` state (e.g. ViewHelpers'
+    // `@slots` content_for store) → the process dictionary. Raw `Ivar`
+    // nodes only reach emit in `def self.` methods — instance/constructor
+    // ivars are already threaded to struct fields by the functionalize
+    // passes — so an Ivar receiver here is always module state.
+    if let Some(r) = recv {
+        if let ExprNode::Ivar { name } = &*r.node {
+            if let Some(s) = emit_ivar_state_send(name.as_str(), method, args) {
+                return s;
+            }
+        }
+    }
+
     // A recv-less 0-arg call whose name is an in-scope param is a local
     // read, not a call — Ruby resolves a bareword to a local before a
     // method. (A view partial's param `article` collides with the
@@ -1348,6 +1366,50 @@ fn is_record_var(e: &Expr) -> bool {
         && matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
 }
 
+/// Process-dictionary key (an atom literal) for a module-singleton's
+/// mutable `@ivar` state. Namespaced by the current module so two
+/// modules' same-named ivars don't collide in the shared dictionary.
+fn ivar_pd_key(name: &str) -> String {
+    let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+    let prefix = class.replace("::", "_").to_lowercase();
+    if prefix.is_empty() {
+        format!(":{name}")
+    } else {
+        format!(":{prefix}_{name}")
+    }
+}
+
+/// Read a module-singleton's `@ivar` state — the whole stored value,
+/// defaulting to an empty map (the only mutable-state shape these runtime
+/// modules use is a hash store).
+fn ivar_pd_get(name: &str) -> String {
+    format!("Process.get({}, %{{}})", ivar_pd_key(name))
+}
+
+/// Render a `Send` whose receiver is a module-state `@ivar` (hash store)
+/// as the equivalent process-dictionary operation. `None` for an
+/// unrecognized shape (falls through to the generic emit).
+fn emit_ivar_state_send(name: &str, method: &str, args: &[Expr]) -> Option<String> {
+    let key = ivar_pd_key(name);
+    let get = ivar_pd_get(name);
+    match (method, args.len()) {
+        // `@h[k] = v` → put back the updated map.
+        ("[]=", 2) => Some(format!(
+            "Process.put({key}, Map.put({get}, {}, {}))",
+            emit_expr(&args[0]),
+            emit_expr(&args[1])
+        )),
+        // `@h[k]` → `Map.get(store, k)`.
+        ("[]", 1) => Some(format!("Map.get({get}, {})", emit_expr(&args[0]))),
+        // `@h.fetch(k, default)` → `Map.get(store, k, default)`.
+        ("fetch", 2) => {
+            Some(format!("Map.get({get}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1])))
+        }
+        ("fetch", 1) => Some(format!("Map.fetch!({get}, {})", emit_expr(&args[0]))),
+        _ => None,
+    }
+}
+
 /// True when `e` is structurally a String — a string literal,
 /// interpolation, a `Str`-typed node, or a `+` concatenation whose left
 /// operand is itself string-rooted. Used to recognize string concat
@@ -1570,6 +1632,45 @@ mod tests {
         set_threads_record(true);
         assert_eq!(emit_expr(&call), "dom_prefix()");
         set_threads_record(false);
+    }
+
+    #[test]
+    fn module_ivar_state_maps_to_process_dictionary() {
+        // A module-singleton's mutable `@slots` hash store → the process
+        // dictionary, keyed by the module name so it can't collide.
+        set_current_class_name("ActionView::ViewHelpers");
+        let ivar = Expr::new(crate::span::Span::synthetic(), ExprNode::Ivar {
+            name: Symbol::from("slots"),
+        });
+        let set = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(ivar.clone()),
+            method: Symbol::from("[]="),
+            args: vec![var_t("k", Ty::Untyped), var_t("v", Ty::Untyped)],
+            block: None,
+            parenthesized: false,
+        });
+        assert_eq!(
+            emit_expr(&set),
+            "Process.put(:actionview_viewhelpers_slots, \
+             Map.put(Process.get(:actionview_viewhelpers_slots, %{}), k, v))"
+        );
+        let fetch = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(ivar.clone()),
+            method: Symbol::from("fetch"),
+            args: vec![
+                var_t("k", Ty::Untyped),
+                Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            ],
+            block: None,
+            parenthesized: false,
+        });
+        assert_eq!(
+            emit_expr(&fetch),
+            "Map.get(Process.get(:actionview_viewhelpers_slots, %{}), k, nil)"
+        );
+        // Bare read → the whole store.
+        assert_eq!(emit_expr(&ivar), "Process.get(:actionview_viewhelpers_slots, %{})");
+        set_current_class_name("");
     }
 
     #[test]
