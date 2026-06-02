@@ -79,6 +79,19 @@ pub(super) fn set_threads_record(yes: bool) {
     THREADS_RECORD.with(|t| *t.borrow_mut() = yes);
 }
 
+thread_local! {
+    /// The accumulator names of the `Enum.reduce` folds currently being
+    /// emitted (a stack — folds nest). A Ruby `next` inside a fold means
+    /// "yield the accumulator unchanged for this element", so the top of
+    /// the stack is what a `Next` node (or a `next if cond` guard) emits.
+    static FOLD_ACC: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The accumulator of the innermost fold currently being emitted, if any.
+fn current_fold_acc() -> Option<String> {
+    FOLD_ACC.with(|s| s.borrow().last().cloned())
+}
+
 /// True when `name` is a param of the method currently being emitted.
 fn is_current_param(name: &str) -> bool {
     CURRENT_PARAMS.with(|p| p.borrow().contains(name))
@@ -237,6 +250,24 @@ fn emit_stmts(stmts: &[Expr]) -> String {
     };
     if rest.is_empty() {
         return emit_tail(head);
+    }
+
+    // Fold guard: `next if cond` (an `if` whose then-branch is a bare
+    // `next` and else is empty) inside a reduce → `if cond do <acc> else
+    // <rest> end` (skip the element: yield the accumulator unchanged).
+    // Only fires inside a fold (a `next` elsewhere has no accumulator).
+    if let ExprNode::If { cond, then_branch, else_branch } = &*head.node {
+        if is_empty(else_branch) && ends_in_next(then_branch) {
+            if let Some(acc) = current_fold_acc() {
+                let cond_s = emit_expr(cond);
+                let else_s = emit_stmts(rest);
+                return format!(
+                    "if {cond_s} do\n{}\nelse\n{}\nend",
+                    indent(&acc, 1),
+                    indent(&else_s, 1),
+                );
+            }
+        }
     }
 
     // Guard clause: `return X if cond` → `if cond do X else <rest> end`.
@@ -405,26 +436,45 @@ fn is_empty(e: &Expr) -> bool {
         || matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
 }
 
+/// The local a statement rebinds when emitted: a `v = …` Assign, a
+/// string-builder `v << chunk` append (renders `v = [v, chunk]`), or an
+/// accumulating block-call `coll.each { v << … }` (renders `v =
+/// Enum.reduce(…)`). Unifies the three forms for the cond-rebind lift.
+fn rebound_local(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            Some(name.as_str().to_string())
+        }
+        ExprNode::Send { block: Some(blk), .. } => match &*blk.node {
+            ExprNode::Lambda { params, body, .. } => {
+                block_accumulators(body, params).into_iter().next()
+            }
+            _ => None,
+        },
+        _ => string_builder_append_local(e).map(|s| s.to_string()),
+    }
+}
+
 /// A local `v` reassigned across an `if`/`elsif` chain where *every*
 /// branch yields it — the signal to lift the chain to `v = if … end`.
 fn chain_reassigned_var(then_branch: &Expr, else_branch: &Expr) -> Option<String> {
     let v = reassigned_var(then_branch).or_else(|| reassigned_var(else_branch))?;
-    (branch_yields(then_branch, v) && branch_yields(else_branch, v)).then(|| v.to_string())
+    (branch_yields(then_branch, &v) && branch_yields(else_branch, &v)).then_some(v)
 }
 
 /// A branch "yields `v`" if it leaves `v` as its value: empty (unchanged),
-/// a trailing `v = …` rebind, or a nested chain whose branches all yield.
+/// a trailing rebind of `v` (assign / string-builder append / accumulating
+/// block-call), or a nested chain whose branches all yield.
 fn branch_yields(b: &Expr, v: &str) -> bool {
     if is_empty(b) {
         return true;
     }
     match &*b.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => name.as_str() == v,
         ExprNode::Seq { exprs } => exprs.last().is_some_and(|l| branch_yields(l, v)),
         ExprNode::If { then_branch, else_branch, .. } => {
             branch_yields(then_branch, v) && branch_yields(else_branch, v)
         }
-        _ => string_builder_append_local(b) == Some(v),
+        _ => rebound_local(b).as_deref() == Some(v),
     }
 }
 
@@ -461,6 +511,15 @@ fn ends_in_return(e: &Expr) -> bool {
     }
 }
 
+/// True when a branch is (or ends in) a bare `next` — the fold-skip guard.
+fn ends_in_next(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Next { .. } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(ends_in_next),
+        _ => false,
+    }
+}
+
 /// Emit the value a guard's `return` yields.
 fn emit_return_value(e: &Expr) -> String {
     match &*e.node {
@@ -476,36 +535,38 @@ fn emit_return_value(e: &Expr) -> String {
 
 /// If the block's last statement reassigns an (already-bound) local
 /// variable, return its name — the signal for the cond-rebind lift.
-fn reassigned_var(e: &Expr) -> Option<&str> {
+fn reassigned_var(e: &Expr) -> Option<String> {
     let last = match &*e.node {
         ExprNode::Seq { exprs } => exprs.last()?,
         _ => e,
     };
-    match &*last.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(name.as_str()),
-        _ => string_builder_append_local(last),
-    }
+    rebound_local(last)
 }
 
-/// Emit a block whose trailing `v = X` is rewritten to yield `X`
+/// The value a trailing rebind-statement yields (the `X` of `v = X`, the
+/// `[v, chunk]` of a string-builder append, or the bare `Enum.reduce(…)`
+/// of an accumulating block-call) — used inside a cond-rebind `if` where
+/// the branch must produce `v`'s next value, not the `v = …` statement.
+fn rebound_value(e: &Expr) -> Option<String> {
+    string_builder_append_value(e)
+        .or_else(|| try_reduce_value(e))
+        .or_else(|| match &*e.node {
+            ExprNode::Assign { value, .. } => Some(emit_expr(value)),
+            _ => None,
+        })
+}
+
+/// Emit a block whose trailing rebind is rewritten to yield its value
 /// (used inside a cond-rebind `if`). Leading lets are preserved.
 fn emit_block_with_value(e: &Expr) -> String {
     match &*e.node {
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let (last, leading) = exprs.split_last().unwrap();
             let mut lines: Vec<String> = leading.iter().map(emit_stmt).collect();
-            if let Some(val) = string_builder_append_value(last) {
-                lines.push(val);
-            } else {
-                match &*last.node {
-                    ExprNode::Assign { value, .. } => lines.push(emit_expr(value)),
-                    _ => lines.push(emit_stmt(last)),
-                }
-            }
+            lines.push(rebound_value(last).unwrap_or_else(|| emit_stmt(last)));
             lines.join("\n")
         }
-        ExprNode::Assign { value, .. } => emit_expr(value),
-        _ => string_builder_append_value(e).unwrap_or_else(|| emit_tail(e)),
+        _ => rebound_value(e).unwrap_or_else(|| emit_tail(e)),
     }
 }
 
@@ -531,6 +592,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             None => emit_send(recv.as_ref(), method.as_str(), args),
         },
         ExprNode::Return { value } => emit_expr(value),
+        // `next` inside a fold yields the accumulator unchanged (`next v`
+        // yields `v`). Outside a fold there's no accumulator to yield —
+        // fall back to the value (or nil), which the surrounding emit
+        // handles. (`next` as a loop-skip is lowered earlier by
+        // while_to_recursion; what reaches here is a block `next`.)
+        ExprNode::Next { value } => match value {
+            Some(v) => emit_expr(v),
+            None => current_fold_acc().unwrap_or_else(|| "nil".to_string()),
+        },
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
         // `yield a, b` → call the block passed as the trailing `block_fn`
         // param (added by emit_fn when the body yields).
@@ -1240,29 +1310,8 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
         );
     }
     if let Some(acc) = accs.first() {
-        // Accumulating block → reduce. The fn takes the block params plus
-        // the accumulator; the body rebinds the acc and yields it (we
-        // append a trailing `acc` reference so the rebind is preserved as
-        // a statement rather than collapsing to its value). The outer
-        // rebind captures the fold's result.
-        let fn_params = format!("{element}, {acc}");
-        let acc_var = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
-            id: crate::ident::VarId(0),
-            name: crate::ident::Symbol::from(acc.as_str()),
-        });
-        let mut stmts: Vec<Expr> = match &*body.node {
-            ExprNode::Seq { exprs } => exprs.clone(),
-            _ => vec![body.clone()],
-        };
-        stmts.push(acc_var);
-        let threaded = emit_method_body(&Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::Seq { exprs: stmts },
-        ));
-        return format!(
-            "{acc} = Enum.reduce({recv_s}, {acc}, fn {fn_params} ->\n{}\nend)",
-            indent(&threaded, 1),
-        );
+        // Accumulating block → reduce, rebinding the acc at the call site.
+        return format!("{acc} = {}", emit_reduce(&recv_s, &element, body, acc));
     }
 
     // Non-accumulating: directly-mapped Enum.* with the block as a fn.
@@ -1278,11 +1327,53 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
     )
 }
 
+/// `Enum.reduce(recv, acc, fn elem, acc -> <body>; acc end)` — the bare
+/// fold expression (no outer `acc =` rebind). The body emits with `acc`
+/// pushed as the current fold accumulator (so a `next` inside yields it),
+/// and a trailing `acc` appended so the last rebind is preserved as a
+/// statement rather than collapsing to its value.
+fn emit_reduce(recv_s: &str, element: &str, body: &Expr, acc: &str) -> String {
+    let fn_params = format!("{element}, {acc}");
+    let acc_var = Expr::new(crate::span::Span::synthetic(), ExprNode::Var {
+        id: crate::ident::VarId(0),
+        name: crate::ident::Symbol::from(acc),
+    });
+    let mut stmts: Vec<Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    };
+    stmts.push(acc_var);
+    let seq = Expr::new(crate::span::Span::synthetic(), ExprNode::Seq { exprs: stmts });
+    FOLD_ACC.with(|s| s.borrow_mut().push(acc.to_string()));
+    let threaded = emit_method_body(&seq);
+    FOLD_ACC.with(|s| {
+        s.borrow_mut().pop();
+    });
+    format!("Enum.reduce({recv_s}, {acc}, fn {fn_params} ->\n{}\nend)", indent(&threaded, 1))
+}
+
+/// If `e` is an accumulating block-call (`coll.each { acc << … }`), the
+/// bare fold expression (no `acc =` rebind) — for use as a branch/return
+/// value, where the fold's *result* is what the branch yields.
+fn try_reduce_value(e: &Expr) -> Option<String> {
+    let ExprNode::Send { recv, block: Some(blk), .. } = &*e.node else { return None };
+    let ExprNode::Lambda { params, body, .. } = &*blk.node else { return None };
+    let acc = block_accumulators(body, params).into_iter().next()?;
+    let recv_s = recv.as_ref().map(emit_expr).unwrap_or_default();
+    let element = match params.len() {
+        0 => "_".to_string(),
+        1 => params[0].to_string(),
+        _ => format!("{{{}}}", params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")),
+    };
+    Some(emit_reduce(&recv_s, &element, body, &acc))
+}
+
 /// Outer locals the block reassigns to a value derived from themselves
-/// (`v = …v…`) — i.e. accumulators threaded through a fold. Block
-/// params and block-local lets (`tmp = x`) are excluded. Detection is
-/// over the block body's top-level statements (renders the RHS and
-/// checks for a self-reference token).
+/// (`v = …v…`) — i.e. accumulators threaded through a fold. Block params
+/// and block-local lets (`tmp = x`) are excluded. Recurses through `if`
+/// branches and nested accumulating block-calls (the inner fold's `acc =
+/// Enum.reduce(…)` rebinds the acc at this level), so an accumulator
+/// reassigned only inside nested control flow is still detected.
 fn block_accumulators(body: &Expr, params: &[crate::ident::Symbol]) -> Vec<String> {
     let stmts: &[Expr] = match &*body.node {
         ExprNode::Seq { exprs } => exprs,
@@ -1290,25 +1381,52 @@ fn block_accumulators(body: &Expr, params: &[crate::ident::Symbol]) -> Vec<Strin
     };
     let mut out: Vec<String> = Vec::new();
     for s in stmts {
-        // An outer local is an accumulator when the statement rebinds it
-        // to a value derived from itself: either a literal `v = …v…`
-        // Assign, or a string-builder `v << chunk` append (the emitter's
-        // `v = [v, chunk]`, where the self-reference is the receiver).
-        let n = match &*s.node {
-            ExprNode::Assign { target: LValue::Var { name, .. }, value }
-                if super::library::references_token(&emit_expr(value), name.as_str()) =>
-            {
-                Some(name.as_str())
+        collect_block_rebinds(s, params, &mut out);
+    }
+    out
+}
+
+/// Collect the locals statement `s` rebinds to a self-derived value (its
+/// accumulators), descending into `if` branches, `Seq`s, and nested
+/// accumulating block-calls. See [`block_accumulators`].
+fn collect_block_rebinds(s: &Expr, params: &[crate::ident::Symbol], out: &mut Vec<String>) {
+    let mut add = |name: &str, out: &mut Vec<String>| {
+        if !params.iter().any(|p| p.as_str() == name) && !out.iter().any(|a| a == name) {
+            out.push(name.to_string());
+        }
+    };
+    match &*s.node {
+        // `v = …v…` — a self-referential rebind (excludes a plain `tmp = x`
+        // block-local let, which doesn't reference itself).
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if super::library::references_token(&emit_expr(value), name.as_str()) =>
+        {
+            add(name.as_str(), out);
+        }
+        ExprNode::If { then_branch, else_branch, .. } => {
+            collect_block_rebinds(then_branch, params, out);
+            collect_block_rebinds(else_branch, params, out);
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_block_rebinds(e, params, out);
             }
-            _ => string_builder_append_local(s),
-        };
-        if let Some(n) = n {
-            if !params.iter().any(|p| p.as_str() == n) && !out.iter().any(|a| a == n) {
-                out.push(n.to_string());
+        }
+        // A nested accumulating block-call rebinds its accumulator HERE
+        // (it emits `acc = Enum.reduce(…)`).
+        ExprNode::Send { block: Some(blk), .. } => {
+            if let ExprNode::Lambda { params: bp, body, .. } = &*blk.node {
+                for acc in block_accumulators(body, bp) {
+                    add(&acc, out);
+                }
+            }
+        }
+        _ => {
+            if let Some(name) = string_builder_append_local(s) {
+                add(name, out);
             }
         }
     }
-    out
 }
 
 /// Map a Ruby Enumerable method to its `Enum` counterpart. Renamed
@@ -1659,6 +1777,71 @@ mod tests {
         set_threads_record(true);
         assert_eq!(emit_expr(&call), "dom_prefix()");
         set_threads_record(false);
+    }
+
+    #[test]
+    fn next_in_block_skips_to_accumulator_in_reduce() {
+        // coll.each do |x|
+        //   next if x                  # If{x, Next, nil}
+        //   acc = acc ++ [x]           # accumulator rebind (post local_accum)
+        // end
+        // → reduce where `next` yields the accumulator unchanged.
+        let sp = crate::span::Span::synthetic;
+        let next_guard = Expr::new(sp(), ExprNode::If {
+            cond: var_t("x", Ty::Untyped),
+            then_branch: Expr::new(sp(), ExprNode::Next { value: None }),
+            else_branch: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }),
+        });
+        let acc_push = Expr::new(sp(), ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("acc") },
+            value: binop(
+                var_t("acc", arr()),
+                "++",
+                Expr::new(sp(), ExprNode::Array {
+                    elements: vec![var_t("x", Ty::Untyped)],
+                    style: Default::default(),
+                }),
+            ),
+        });
+        let body = Expr::new(sp(), ExprNode::Seq { exprs: vec![next_guard, acc_push] });
+        let out = emit_expr(&block_send("coll", "each", &["x"], body));
+        assert!(out.starts_with("acc = Enum.reduce(coll, acc, fn x, acc ->"), "reduce:\n{out}");
+        assert!(out.contains("if x do\n    acc\n  else"), "next yields acc unchanged:\n{out}");
+        assert!(out.contains("acc = acc ++ [x]"), "accumulation:\n{out}");
+    }
+
+    #[test]
+    fn nested_if_accumulator_detected_and_threaded() {
+        // coll.each do |x|
+        //   if x
+        //     acc = acc ++ [x]
+        //   else
+        //     acc = acc ++ [0]
+        //   end
+        // end
+        // The accumulator is rebound only INSIDE the if (not a top-level
+        // block statement) — detection must recurse into the branches, and
+        // the if lifts to `acc = if x do acc ++ [x] else acc ++ [0] end`.
+        let sp = crate::span::Span::synthetic;
+        let push = |elem: Expr| {
+            Expr::new(sp(), ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from("acc") },
+                value: binop(
+                    var_t("acc", arr()),
+                    "++",
+                    Expr::new(sp(), ExprNode::Array { elements: vec![elem], style: Default::default() }),
+                ),
+            })
+        };
+        let inner_if = Expr::new(sp(), ExprNode::If {
+            cond: var_t("x", Ty::Untyped),
+            then_branch: push(var_t("x", Ty::Untyped)),
+            else_branch: push(Expr::new(sp(), ExprNode::Lit { value: Literal::Int { value: 0 } })),
+        });
+        let out = emit_expr(&block_send("coll", "each", &["x"], inner_if));
+        assert!(out.starts_with("acc = Enum.reduce(coll, acc, fn x, acc ->"), "outer reduce:\n{out}");
+        assert!(out.contains("acc = if x do"), "nested if lifted to acc rebind:\n{out}");
+        assert!(out.contains("acc ++ [x]") && out.contains("acc ++ [0]"), "both branches:\n{out}");
     }
 
     #[test]
