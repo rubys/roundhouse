@@ -193,7 +193,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         let base_methods = ar_base_methods();
         let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
             std::collections::BTreeMap::new();
-        let (model_lcs, _registry) =
+        let (model_lcs, model_registry) =
             crate::lower::model_to_library::lower_models_with_registry_and_params(
                 &app.models,
                 &app.schema,
@@ -223,6 +223,65 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                         "{}.ex",
                         class.name.0.as_str().to_lowercase().replace("::", "_")
                     );
+                    out.push(EmittedFile {
+                        path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
+                        content,
+                    });
+                }
+            }
+        }
+
+        // Views — the `Views::<Resource>.<partial>(record)` modules the
+        // model after_*_commit callbacks render into broadcast HTML.
+        // Lowered the same way as go2/rust2 (HTML + JBuilder merged per
+        // resource), then run through the functional pass family + the
+        // generic library emit. EXPLORATORY (env-gated separately) while
+        // the supporting-module + view-builder-emit gaps are mapped.
+        if std::env::var("RH_ELIXIR2_VIEWS").is_ok() && !app.views.is_empty() {
+            let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+                model_registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let mut raw_lcs = crate::lower::view_to_library::lower_views_to_library_classes(
+                &app.views,
+                app,
+                model_extras.clone(),
+            );
+            raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
+                &app.views,
+                app,
+                model_extras,
+            ));
+            // Merge HTML + JSON variants by struct name (one
+            // `Views::<Resource>` module per resource — go2.rs:369).
+            let mut merged: std::collections::BTreeMap<String, crate::dialect::LibraryClass> =
+                std::collections::BTreeMap::new();
+            for lc in raw_lcs {
+                let raw = lc.name.0.as_str();
+                let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                merged
+                    .entry(struct_name)
+                    .and_modify(|acc: &mut crate::dialect::LibraryClass| {
+                        let seen: std::collections::BTreeSet<String> =
+                            acc.methods.iter().map(|m| m.name.as_str().to_string()).collect();
+                        for m in lc.methods.clone() {
+                            if !seen.contains(m.name.as_str()) {
+                                acc.methods.push(m);
+                            }
+                        }
+                    })
+                    .or_insert(lc);
+            }
+            let view_lcs: Vec<_> = merged.into_values().collect();
+            expr::register_modules(view_lcs.iter());
+            for lc in view_lcs {
+                for class in crate::lower::functionalize::functionalize(vec![lc]) {
+                    let file = format!(
+                        "{}.ex",
+                        class.name.0.as_str().to_lowercase().replace("::", "_")
+                    );
+                    let content = match library::emit_library_class(&class) {
+                        Ok(c) => c,
+                        Err(e) => format!("# emit_library_class FAILED: {e}\n"),
+                    };
                     out.push(EmittedFile {
                         path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
                         content,

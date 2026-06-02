@@ -302,6 +302,39 @@ fn try_string_builder(e: &Expr) -> Option<String> {
     }
 }
 
+/// The outer local a `StringBuilderAppend`-hinted send appends to
+/// (`io << chunk` → `"io"`). The emitter renders that send as
+/// `io = [io, chunk]`, so for accumulator detection and the cond-rebind
+/// lift it counts as a rebind of `io` — even though the IR node is a
+/// `Send`, not an `Assign`. This is what lets a string-builder append
+/// inside an `each` block (`articles.each { io << render(a) }`) or an
+/// `if` branch thread `io` through `Enum.reduce` / `io = if … end`
+/// rather than emit a dead, unused-variable rebind.
+fn string_builder_append_local(e: &Expr) -> Option<&str> {
+    if e.hint != Some(IrHint::StringBuilderAppend) {
+        return None;
+    }
+    match &*e.node {
+        ExprNode::Send { recv: Some(r), args, .. } if args.len() == 1 => match &*r.node {
+            ExprNode::Var { name, .. } => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The iolist value a `StringBuilderAppend` yields (`io << chunk` →
+/// `"[io, chunk]"`) — the *next* accumulator value, used when the append
+/// is the trailing statement of a cond-rebind branch and must yield that
+/// value (not the `io = …` rebind, whose binding the branch scope drops).
+fn string_builder_append_value(e: &Expr) -> Option<String> {
+    let name = string_builder_append_local(e)?;
+    match &*e.node {
+        ExprNode::Send { args, .. } => Some(format!("[{name}, {}]", emit_expr(&args[0]))),
+        _ => None,
+    }
+}
+
 /// A single non-terminal statement (a `let` binding or a bare expr).
 fn emit_stmt(e: &Expr) -> String {
     // String-builder `Init` (`io = String.new`) → `io = []`; intercept
@@ -372,7 +405,7 @@ fn branch_yields(b: &Expr, v: &str) -> bool {
         ExprNode::If { then_branch, else_branch, .. } => {
             branch_yields(then_branch, v) && branch_yields(else_branch, v)
         }
-        _ => false,
+        _ => string_builder_append_local(b) == Some(v),
     }
 }
 
@@ -431,7 +464,7 @@ fn reassigned_var(e: &Expr) -> Option<&str> {
     };
     match &*last.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(name.as_str()),
-        _ => None,
+        _ => string_builder_append_local(last),
     }
 }
 
@@ -442,14 +475,18 @@ fn emit_block_with_value(e: &Expr) -> String {
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let (last, leading) = exprs.split_last().unwrap();
             let mut lines: Vec<String> = leading.iter().map(emit_stmt).collect();
-            match &*last.node {
-                ExprNode::Assign { value, .. } => lines.push(emit_expr(value)),
-                _ => lines.push(emit_stmt(last)),
+            if let Some(val) = string_builder_append_value(last) {
+                lines.push(val);
+            } else {
+                match &*last.node {
+                    ExprNode::Assign { value, .. } => lines.push(emit_expr(value)),
+                    _ => lines.push(emit_stmt(last)),
+                }
             }
             lines.join("\n")
         }
         ExprNode::Assign { value, .. } => emit_expr(value),
-        _ => emit_tail(e),
+        _ => string_builder_append_value(e).unwrap_or_else(|| emit_tail(e)),
     }
 }
 
@@ -1213,12 +1250,20 @@ fn block_accumulators(body: &Expr, params: &[crate::ident::Symbol]) -> Vec<Strin
     };
     let mut out: Vec<String> = Vec::new();
     for s in stmts {
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*s.node {
-            let n = name.as_str();
-            if !params.iter().any(|p| p.as_str() == n)
-                && super::library::references_token(&emit_expr(value), n)
-                && !out.iter().any(|a| a == n)
+        // An outer local is an accumulator when the statement rebinds it
+        // to a value derived from itself: either a literal `v = …v…`
+        // Assign, or a string-builder `v << chunk` append (the emitter's
+        // `v = [v, chunk]`, where the self-reference is the receiver).
+        let n = match &*s.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, value }
+                if super::library::references_token(&emit_expr(value), name.as_str()) =>
             {
+                Some(name.as_str())
+            }
+            _ => string_builder_append_local(s),
+        };
+        if let Some(n) = n {
+            if !params.iter().any(|p| p.as_str() == n) && !out.iter().any(|a| a == n) {
                 out.push(n.to_string());
             }
         }
@@ -1420,6 +1465,63 @@ mod tests {
             out,
             "total = Enum.reduce(items, total, fn x, total ->\n  total = total + x\n  total\nend)",
             "got: {out}"
+        );
+    }
+
+    #[test]
+    fn string_builder_append_in_block_threads_through_reduce() {
+        // articles.each do |a| io << render(a) end
+        // The append is hinted `StringBuilderAppend` — the emitter renders
+        // it as `io = [io, a]`, so `io` must be recognized as the block
+        // accumulator (it's a `Send`, not an `Assign`) and the `each`
+        // lowered to `Enum.reduce`, not a dead `Enum.each` rebind.
+        let mut append = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(var_t("io", Ty::Untyped)),
+            method: Symbol::from("<<"),
+            args: vec![var_t("a", Ty::Untyped)],
+            block: None,
+            parenthesized: false,
+        });
+        append.hint = Some(IrHint::StringBuilderAppend);
+        let e = block_send("articles", "each", &["a"], append);
+        let out = emit_expr(&e);
+        assert_eq!(
+            out,
+            "io = Enum.reduce(articles, io, fn a, io ->\n  io = [io, a]\n  io\nend)",
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn string_builder_append_in_if_branch_lifts_to_rebind() {
+        // `io << "x" if cond` — a hinted append as the sole then-branch
+        // statement (else empty). The cond-rebind lift must hoist it to
+        // `io = if cond do [io, "x"] else io end` so the append isn't
+        // discarded by the branch scope.
+        let mut append = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(var_t("io", Ty::Untyped)),
+            method: Symbol::from("<<"),
+            args: vec![Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: Literal::Str { value: "x".to_string() },
+            })],
+            block: None,
+            parenthesized: false,
+        });
+        append.hint = Some(IrHint::StringBuilderAppend);
+        let if_stmt = Expr::new(crate::span::Span::synthetic(), ExprNode::If {
+            cond: var_t("cond", Ty::Bool),
+            then_branch: append,
+            else_branch: Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: Literal::Nil,
+            }),
+        });
+        let body = Expr::new(crate::span::Span::synthetic(), ExprNode::Seq {
+            exprs: vec![if_stmt, var_t("io", Ty::Untyped)],
+        });
+        let out = emit_method_body(&body);
+        assert!(
+            out.contains("io = if cond do\n  [io, \"x\"]\nelse\n  io\nend"),
+            "if-branch append should lift to an `io =` rebind, got:\n{out}"
         );
     }
 
