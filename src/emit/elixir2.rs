@@ -134,12 +134,20 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         }
     };
 
+    let views_enabled = std::env::var("RH_ELIXIR2_VIEWS").is_ok();
     for unit in &units {
         let file_name = unit
             .out_path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unit.ex".to_string());
+        // `view_helpers.ex` is parsed + registered unconditionally (so the
+        // view emit's `ActionView::ViewHelpers.*` references resolve), but
+        // only EMITTED under the views gate while its transpile is being
+        // driven to a clean `mix compile` — mirrors the models/views gate.
+        if file_name == "view_helpers.ex" && !views_enabled {
+            continue;
+        }
         let dest = output_path(OutputKind::TranspiledRuntime { file_name: &file_name });
         out.push(EmittedFile {
             path: dest.path,
