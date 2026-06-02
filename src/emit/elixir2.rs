@@ -158,6 +158,15 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             path: output_path(OutputKind::HandWrittenRuntime { name: "db.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/db.ex").to_string(),
         });
+        // Turbo Streams broadcasts shim — the model after_*_commit
+        // callbacks call `Broadcasts.<action>(%{…})`. Hand-written like
+        // the sibling per-target shims (the canonical broadcasts.rb
+        // doesn't translate to Elixir's immutable model). See db.ex for
+        // the hand-written-runtime rationale.
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime { name: "broadcasts.ex" }).path,
+            content: include_str!("../../runtime/elixir/v2/broadcasts.ex").to_string(),
+        });
 
         // Per-model emit. Elixir has no inheritance, so each model module
         // is standalone: the lowered model LC (defstruct + per-model
@@ -177,8 +186,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         }
         // The lowered model emit references the DB primitive as bare
         // `Db.prepare`/`Db.step?`/… — resolve those to the hand-written
-        // `V2.Db` module (db.ex above).
+        // `V2.Db` module (db.ex above). Likewise `Broadcasts.<action>`
+        // (model after_*_commit callbacks) → the `V2.Broadcasts` shim.
         expr::register_module("Db", "V2.Db");
+        expr::register_module("Broadcasts", "V2.Broadcasts");
         let base_methods = ar_base_methods();
         let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
             std::collections::BTreeMap::new();
