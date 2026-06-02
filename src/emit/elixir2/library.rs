@@ -142,6 +142,8 @@ fn emit_constructor(out: &mut String, m: &MethodDef, v2_name: &str) {
             let threaded = crate::lower::functionalize::mutation_to_struct_return::thread_constructor_body(
                 &m.body,
             );
+            // The seeded `record` is the threaded self here.
+            expr::set_threads_record(true);
             writeln!(out, "    record = %{v2_name}{{}}").unwrap();
             out.push_str(&expr::indent(&expr::emit_method_body(&threaded), 2));
             out.push('\n');
@@ -293,6 +295,9 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
     // matching a param resolves to a local read, not a call (a view
     // partial's `article` param vs the `article` view fn).
     expr::set_current_params(m.params.iter().map(|p| p.as_str().to_string()).collect());
+    // Whether `record` in the body is the threaded self (instance method)
+    // vs. a genuine local/param — gates the self-call receiver-drop.
+    expr::set_threads_record(instance_method);
     let body = expr::emit_method_body(&m.body);
 
     let mut params: Vec<String> = Vec::new();

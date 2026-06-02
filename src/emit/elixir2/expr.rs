@@ -63,6 +63,22 @@ pub(super) fn set_current_params(names: std::collections::HashSet<String>) {
     CURRENT_PARAMS.with(|p| *p.borrow_mut() = names);
 }
 
+thread_local! {
+    /// Whether the method currently being emitted threads a `record` (an
+    /// instance method whose synthetic first arg is the renamed `self`).
+    /// `is_record_var` gates on this so a *module-singleton* function with
+    /// a genuine param named `record` (e.g. `ViewHelpers.dom_id(record,
+    /// …)`) treats `record.foo` as an ordinary method-on-local, NOT a
+    /// same-module self-call that would drop the receiver.
+    static THREADS_RECORD: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// Set whether the method being emitted threads `record` (see
+/// `THREADS_RECORD`). Called by `emit_fn` before emitting the body.
+pub(super) fn set_threads_record(yes: bool) {
+    THREADS_RECORD.with(|t| *t.borrow_mut() = yes);
+}
+
 /// True when `name` is a param of the method currently being emitted.
 fn is_current_param(name: &str) -> bool {
     CURRENT_PARAMS.with(|p| p.borrow().contains(name))
@@ -1328,7 +1344,8 @@ fn recv_is_string(e: &Expr) -> bool {
 /// True when `e` is the threaded `record` var (self) — its `[]`/`[]=`
 /// route to the same-module renamed accessor.
 fn is_record_var(e: &Expr) -> bool {
-    matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
+    THREADS_RECORD.with(|t| *t.borrow())
+        && matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
 }
 
 /// True when `e` is structurally a String — a string literal,
@@ -1523,6 +1540,36 @@ mod tests {
             out.contains("io = if cond do\n  [io, \"x\"]\nelse\n  io\nend"),
             "if-branch append should lift to an `io =` rebind, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn record_param_in_module_fn_keeps_receiver() {
+        use crate::ident::ClassId;
+        // A genuine `record` param of a module-singleton function (e.g.
+        // ViewHelpers.dom_id) is NOT the threaded self — `record.dom_prefix()`
+        // must dispatch on the value (`record.__struct__.dom_prefix(record)`),
+        // not collapse to a same-module self-call `dom_prefix()` that drops
+        // the receiver.
+        let record = var_t(
+            "record",
+            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![] },
+        );
+        let call = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv: Some(record),
+            method: Symbol::from("dom_prefix"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        });
+        set_threads_record(false);
+        assert_eq!(emit_expr(&call), "record.__struct__.dom_prefix(record)");
+        // Inside an instance method `record` is the threaded self, so the
+        // same shape collapses to a same-module self-call (receiver folded
+        // into the module), not a value dispatch — the behavior the
+        // module-fn case must NOT inherit.
+        set_threads_record(true);
+        assert_eq!(emit_expr(&call), "dom_prefix()");
+        set_threads_record(false);
     }
 
     #[test]
@@ -1866,11 +1913,14 @@ mod tests {
         // `self.class.schema_columns` → `schema_columns()` (Elixir's
         // module IS the class). Covers both the `self`- and threaded-
         // `record`-receiver forms.
+        // `record` is the threaded self only inside an instance method.
+        set_threads_record(true);
         let via_self = call(call(self_ref(), "class", vec![]), "schema_columns", vec![]);
         assert_eq!(emit_expr(&via_self), "schema_columns()");
         let via_record =
             call(call(var_t("record", Ty::Untyped), "class", vec![]), "schema_columns", vec![]);
         assert_eq!(emit_expr(&via_record), "schema_columns()");
+        set_threads_record(false);
     }
 
     #[test]
