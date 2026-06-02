@@ -1239,9 +1239,11 @@ fn lowered_index_view_rewrites_view_helpers() {
         src.contains("RouteHelpers.new_article_path"),
         "expected RouteHelpers.new_article_path rewrite; got:\n{src}",
     );
+    // html_escape of the literal label folds at lower time → plain
+    // interpolation of the (special-char-free) string.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(\"New article\")") && src.contains("</a>"),
-        "expected escaped link text + closing </a>; got:\n{src}",
+        src.contains("#{\"New article\"}") && src.contains("</a>"),
+        "expected constant-folded link text + closing </a>; got:\n{src}",
     );
 }
 
@@ -1383,10 +1385,12 @@ fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
         src.contains("ActionView::ViewHelpers.html_escape(article.title)"),
         "expected html_escape on article.title link text; got:\n{src}",
     );
-    // `link_to "Show", article, ...` — literal text.
+    // `link_to "Show", article, ...` — literal text. html_escape of a
+    // string literal with no HTML-special chars is constant-folded away
+    // at lower time, so it emits the plain literal interpolation.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(\"Show\")"),
-        "expected html_escape on Show link text; got:\n{src}",
+        src.contains("#{\"Show\"}") && !src.contains("html_escape(\"Show\")"),
+        "expected constant-folded Show link text; got:\n{src}",
     );
     // `link_to "Edit", edit_article_path(article), ...` — path-helper
     // URL with bare-local arg → article.id.
@@ -1820,9 +1824,10 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     // `form.submit "Add Comment", class: "..."` — positional label
     // wins (no default-text conditional); appears as a literal in
     // the submit input.
+    // Literal label folds at lower time (no HTML-special chars).
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(\"Add Comment\")"),
-        "expected literal Add Comment value through html_escape; got:\n{src}",
+        src.contains("#{\"Add Comment\"}") && !src.contains("html_escape(\"Add Comment\")"),
+        "expected constant-folded Add Comment value; got:\n{src}",
     );
     assert!(
         !src.contains("ActionView::ViewHelpers.html_escape(form."),
@@ -1994,8 +1999,10 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
         src.contains("ActionView::ViewHelpers.html_escape(RouteHelpers.article_path(article.id))"),
         "expected article_path URL through html_escape in inline link; got:\n{src}",
     );
+    // Literal label folds at lower time (no HTML-special chars).
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(\"Show this article\")"),
-        "expected link text through html_escape; got:\n{src}",
+        src.contains("#{\"Show this article\"}")
+            && !src.contains("html_escape(\"Show this article\")"),
+        "expected constant-folded link text; got:\n{src}",
     );
 }
