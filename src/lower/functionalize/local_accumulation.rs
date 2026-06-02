@@ -42,6 +42,20 @@ fn rewrite(e: &Expr) -> Expr {
         // a plain local it becomes the same rebind. (A non-local `<<`,
         // e.g. `errors() << msg` through an accessor, isn't a local
         // accumulator and is left for the instance-state threading path.)
+        // A string-builder append (`io << "..."`), tagged by the view /
+        // jbuilder lowerer, is left intact (hint preserved) for the
+        // functional emitter to render as its iolist/concat idiom — NOT
+        // rewritten to a list `++` append, which would be wrong for a
+        // string accumulator.
+        ExprNode::Send { recv: Some(_), method, args, .. }
+            if matches!(method.as_str(), "push" | "<<")
+                && args.len() == 1
+                && e.hint == Some(crate::expr::IrHint::StringBuilderAppend) =>
+        {
+            // `e.clone()` (not `clone_send`, which drops `.hint` via a
+            // fresh `syn`) so the emitter still sees the tag.
+            e.clone()
+        }
         ExprNode::Send { recv: Some(r), method, args, .. }
             if matches!(method.as_str(), "push" | "<<") && args.len() == 1 =>
         {
@@ -107,10 +121,17 @@ fn rewrite(e: &Expr) -> Expr {
             else_branch: rewrite(else_branch),
         }),
         ExprNode::Send { .. } => clone_send(e),
-        ExprNode::Assign { target, value } => syn(ExprNode::Assign {
-            target: target.clone(),
-            value: rewrite(value),
-        }),
+        ExprNode::Assign { target, value } => {
+            // Preserve `.hint` — the string-builder `Init`
+            // (`io = String.new`) is an `Assign` whose tag the emitter
+            // needs (`syn` would drop it).
+            let mut a = syn(ExprNode::Assign {
+                target: target.clone(),
+                value: rewrite(value),
+            });
+            a.hint = e.hint;
+            a
+        }
         ExprNode::Return { value } => syn(ExprNode::Return { value: rewrite(value) }),
         // Recurse into block bodies (`coll.each do |x| acc[k] = x end`).
         ExprNode::Lambda { params, block_param, body, block_style } => syn(ExprNode::Lambda {
@@ -305,6 +326,58 @@ mod tests {
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
+    }
+
+    #[test]
+    fn string_builder_hints_emit_iolist_and_param_resolves() {
+        use crate::expr::IrHint;
+        fn hinted(mut e: Expr, h: IrHint) -> Expr {
+            e.hint = Some(h);
+            e
+        }
+        // def article(article)            # param collides with the fn name
+        //   io = String.new               # StringBuilderInit
+        //   io << article                 # StringBuilderAppend (article = param)
+        //   io                            # StringBuilderResult
+        // end
+        // The bareword `article` arrives as a recv-less Send (method-call
+        // shape); it must resolve to the param, not a recursive `article()`.
+        let article_read =
+            syn(ExprNode::Send { recv: None, method: s("article"), args: vec![], block: None, parenthesized: false });
+        let body = syn(ExprNode::Seq {
+            exprs: vec![
+                hinted(rebind(&s("io"), str_lit("")), IrHint::StringBuilderInit),
+                hinted(send("io", "<<", vec![article_read]), IrHint::StringBuilderAppend),
+                hinted(var(&s("io")), IrHint::StringBuilderResult),
+            ],
+        });
+        let m = MethodDef {
+            name: s("article"),
+            receiver: MethodReceiver::Class,
+            params: vec![Param::positional(s("article"))],
+            block_param: None,
+            body,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let class = LibraryClass {
+            name: ClassId(s("Views::Articles")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![transform_method(m)],
+            origin: None,
+        };
+        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        eprintln!("--- string builder ---\n{ex}\n----------------------");
+        assert!(ex.contains("io = []"), "Init → empty iolist:\n{ex}");
+        assert!(ex.contains("io = [io, article]"), "Append → iodata cons + param resolves:\n{ex}");
+        assert!(ex.contains("IO.iodata_to_binary(io)"), "Result → finalize to binary:\n{ex}");
+        assert!(!ex.contains("article()"), "param read, not a recursive call:\n{ex}");
     }
 
     #[test]

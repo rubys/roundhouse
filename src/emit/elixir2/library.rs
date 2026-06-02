@@ -289,6 +289,10 @@ fn collect_struct_fields(methods: &[MethodDef]) -> Vec<String> {
 /// pure one, e.g. `resolve_status`) names it `_record` to stay
 /// warning-clean.
 fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
+    // Make the method's params visible to emit so a recv-less bareword
+    // matching a param resolves to a local read, not a call (a view
+    // partial's `article` param vs the `article` view fn).
+    expr::set_current_params(m.params.iter().map(|p| p.as_str().to_string()).collect());
     let body = expr::emit_method_body(&m.body);
 
     let mut params: Vec<String> = Vec::new();

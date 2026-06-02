@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
 
 thread_local! {
     /// Simple class name → emitted `V2.*` module name, across ALL runtime
@@ -45,6 +45,27 @@ thread_local! {
 /// class's methods.
 pub(super) fn set_record_methods(names: std::collections::HashSet<String>) {
     RECORD_METHODS.with(|m| *m.borrow_mut() = names);
+}
+
+thread_local! {
+    /// Param names of the method currently being emitted. A recv-less
+    /// 0-arg call (`article()`) whose name is in here is a *local read*
+    /// of that param (Ruby resolves a bareword to an in-scope local
+    /// before a method), not a call — emit the bare name. Needed for
+    /// view partials whose param (`article`) collides with a same-named
+    /// view function (`Views::Articles.article`). Set by `emit_fn`.
+    static CURRENT_PARAMS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Set the param names in scope for the method being emitted.
+pub(super) fn set_current_params(names: std::collections::HashSet<String>) {
+    CURRENT_PARAMS.with(|p| *p.borrow_mut() = names);
+}
+
+/// True when `name` is a param of the method currently being emitted.
+fn is_current_param(name: &str) -> bool {
+    CURRENT_PARAMS.with(|p| p.borrow().contains(name))
 }
 
 thread_local! {
@@ -245,8 +266,49 @@ fn emit_stmts(stmts: &[Expr]) -> String {
     format!("{}\n{}", emit_stmt(head), emit_stmts(rest))
 }
 
+/// String-accumulator hint consumer — the view/jbuilder lowerer's
+/// `io = String.new; io << "..."; io` triple, tagged with
+/// `IrHint::StringBuilder*`. Rendered as Elixir's iolist idiom so the
+/// inner appends stay O(1) and the function returns a proper binary:
+/// - `Init`   → `io = []` (an empty iolist; bypasses the `String.new`
+///   value emit).
+/// - `Append` → `io = [io, <chunk>]` (nested iodata — order-preserving;
+///   a chunk may itself be a sub-view binary or a string interpolation).
+/// - `Result` → `IO.iodata_to_binary(io)` (flatten to the returned
+///   binary).
+/// Safe-by-construction: every `io` reference flows through one of the
+/// three tagged sites, so nothing else observes its iolist shape.
+fn try_string_builder(e: &Expr) -> Option<String> {
+    match e.hint? {
+        IrHint::StringBuilderInit => match &*e.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(format!("{name} = []")),
+            _ => None,
+        },
+        IrHint::StringBuilderAppend => match &*e.node {
+            ExprNode::Send { recv: Some(r), args, .. } if args.len() == 1 => {
+                if let ExprNode::Var { name, .. } = &*r.node {
+                    Some(format!("{name} = [{name}, {}]", emit_expr(&args[0])))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        IrHint::StringBuilderResult => match &*e.node {
+            ExprNode::Var { name, .. } => Some(format!("IO.iodata_to_binary({name})")),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A single non-terminal statement (a `let` binding or a bare expr).
 fn emit_stmt(e: &Expr) -> String {
+    // String-builder `Init` (`io = String.new`) → `io = []`; intercept
+    // before the generic `Assign` arm renders the `String.new` value.
+    if let Some(s) = try_string_builder(e) {
+        return s;
+    }
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value }
         | ExprNode::Assign { target: LValue::Ivar { name }, value } => {
@@ -394,6 +456,13 @@ fn emit_block_with_value(e: &Expr) -> String {
 // ---- expression emit ------------------------------------------------
 
 pub(super) fn emit_expr(e: &Expr) -> String {
+    // String-builder hint sites (`io = String.new; io << "..."; io`,
+    // tagged by the view/jbuilder lowerer) → the iolist idiom. One hook
+    // covers the Append + terminal-Result sites; Init is intercepted in
+    // `emit_stmt` (an `Assign` handled before it reaches here).
+    if let Some(s) = try_string_builder(e) {
+        return s;
+    }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Const { path } => emit_const(path),
@@ -497,6 +566,14 @@ fn emit_pattern(p: &crate::expr::Pattern) -> String {
 }
 
 fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    // A recv-less 0-arg call whose name is an in-scope param is a local
+    // read, not a call — Ruby resolves a bareword to a local before a
+    // method. (A view partial's param `article` collides with the
+    // same-named view fn `Views::Articles.article`; without this, the
+    // param read emits as a recursive `article()` call.)
+    if recv.is_none() && args.is_empty() && is_current_param(method) {
+        return method.to_string();
+    }
     // A `self.foo(...)` call inside a module is just a same-module
     // bareword call in Elixir — collapse the receiver.
     let recv = match recv {
