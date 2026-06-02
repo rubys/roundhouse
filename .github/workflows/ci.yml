@@ -394,8 +394,15 @@ jobs:
   # const char* slot in the Location-header path. Comment on #634
   # (issuecomment-4503927146) tracks the consumer-side narrow.
   # Drop continue-on-error when matz lands the body-driven post-pass.
+  # Re-enabled 2026-06-02 (was `if: false`). The real-blog app now
+  # compiles under spinel and passes 9/9 model tests after the from_stmt
+  # void*/mrb_int fix (5aae416). One spinel-specific runtime assertion
+  # remains in articles_controller_test (the same emitted source passes
+  # under CRuby in toolchain-ruby — an AOT runtime divergence, not an
+  # emit bug), so the job stays advisory via continue-on-error until that
+  # closes. Running it (vs `if: false`) keeps the model-suite progress
+  # visible and catches regressions in the compile path.
   toolchain-spinel:
-    if: false  # disabled until spinel tests start passing again
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
