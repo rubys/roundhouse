@@ -434,6 +434,47 @@ jobs:
       - name: cargo test --test spinel_toolchain -- --ignored
         run: cargo test --test spinel_toolchain -- --ignored --nocapture
 
+      # On failure, capture spinel's actual generated C for the failing
+      # controller test. The failure is at RUNTIME (the C compiles under
+      # spinel's `-Wno-all`), so spinel reaps its transient out.c — we
+      # regenerate it emit-only (`spinel -c`) from the leftover emit
+      # scratch, then surface the type mismatch with a plain gcc compile
+      # (no `-Wno-all`). This is the environment-independent repro for the
+      # spinel issue: the input `.rb`/`.rbs` plus the wrong C spinel emitted
+      # here (e.g. `dispatch_request(sp_SymPolyHash*)` fed an `sp_StrIntHash*`),
+      # which other environments don't reproduce.
+      - name: Capture spinel codegen on failure
+        if: failure()
+        run: |
+          set +e
+          SC=$(find "${TMPDIR:-/tmp}" /tmp "$RUNNER_TEMP" -maxdepth 3 -type d \
+                 -name 'roundhouse-spinel-real-blog' 2>/dev/null | head -1)
+          echo "emit scratch: $SC"
+          mkdir -p ci-spinel-repro
+          cc --version > ci-spinel-repro/cc-version.txt 2>&1
+          uname -a >> ci-spinel-repro/cc-version.txt
+          spinel-dist/spinel_analyze --version >> ci-spinel-repro/cc-version.txt 2>&1 || true
+          if [ -z "$SC" ]; then echo "scratch not found"; exit 0; fi
+          T=test/controllers/articles_controller_test.rb
+          ( cd "$SC" && spinel -c --rbs sig "$T" -o /tmp/out.c ) \
+            > ci-spinel-repro/spinel-emit.log 2>&1
+          cp /tmp/out.c ci-spinel-repro/articles_controller_test.c 2>/dev/null
+          # Compiler-agnostic evidence of the mismatch (plain gcc, no -Wno-all):
+          gcc -fsyntax-only -I"$PWD/spinel-dist/lib" /tmp/out.c \
+            > ci-spinel-repro/gcc-warnings.txt 2>&1
+          # The emitted sources that reproduce it (small, self-contained).
+          for d in test sig app config runtime; do
+            [ -d "$SC/$d" ] && cp -r "$SC/$d" "ci-spinel-repro/$d"
+          done
+          echo "captured:"; ls -R ci-spinel-repro | head -40
+      - name: Upload spinel codegen repro
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-toolchain-repro
+          path: ci-spinel-repro
+          retention-days: 7
+
   toolchain-python:
     needs: generate-fixture
     runs-on: ubuntu-latest
