@@ -1,19 +1,25 @@
-# Top-level entry point for the spinel-blog application.
+# Top-level entry point for the CRuby (Puma/Rack) target.
 #
-# Reads a CGI request from ENV + $stdin, dispatches through the router
-# + controller, writes the CGI response to $stdout. The shape spinel
-# can ingest (no sockets, just env-vars + stdin + stdout) and the
-# shape any CGI-aware web server can drive.
+# Dispatch lives in `Main.dispatch_core`, which returns a response
+# descriptor; two wrappers serialize it:
+#   * `Main.run_rack(env)`         — a Rack `[status, headers, [body]]`
+#                                    tuple; the Puma serving path
+#                                    (config.ru) calls this.
+#   * `Main.run(env, stdin, stdout)` — a CGI byte stream on stdout; the
+#                                    one-shot script path (below) and the
+#                                    view/controller tests use this.
 #
 # Library usage (from tests):
 #   require_relative "main"
-#   Main.run(env_hash, body_io, response_io)
+#   Main.run(env_hash, body_io, response_io)   # CGI bytes to response_io
 #
-# Script usage:
+# Script usage (one-shot CGI):
 #   REQUEST_METHOD=GET PATH_INFO=/articles ruby main.rb
 # Or behind a CGI-aware server:
 #   AddHandler cgi-script .rb       (apache)
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
+
+require "stringio"
 
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced
@@ -64,17 +70,22 @@ end
 require_relative "app/views"
 
 module Main
-  # Dispatch one request. Pure function over (env, stdin, stdout) — no
-  # global I/O. Tests construct env hashes + StringIO and call this
-  # directly; the script path at the bottom of this file calls it
-  # with real ENV + $stdin + $stdout.
+  # Dispatch one request to a response descriptor — the single source
+  # of routing / controller / flash / redirect logic. Returns the
+  # 5-tuple `[status, body, content_type, location, set_cookies]` (the
+  # exact argument shape `CgiIo.write_response` consumes), leaving
+  # serialization to the caller. Two thin wrappers sit on top:
+  # `run` (CGI byte stream — tests + one-shot script mode) and
+  # `run_rack` (a Rack tuple — the Puma serving path), so neither the
+  # CGI string nor the Rack hash is the canonical form and the dispatch
+  # body lives exactly once.
   #
   # `ActionView::ViewHelpers` and `ActionDispatch::Router` are
   # written fully-qualified (rather than the prior `include
   # ActionView`/`include ActionDispatch` + bare names) so spinel-AOT's
   # constant resolver sees the references without walking included-
   # module namespaces — a path it doesn't currently follow.
-  def self.run(env, stdin, stdout)
+  def self.dispatch_core(env, stdin)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
 
@@ -98,8 +109,7 @@ module Main
     matched = ActionDispatch::Router.match(request[:method], request_path,
                            [Routes.root] + Routes.table)
     if matched.nil?
-      CgiIo.write_response(stdout, 404, "<h1>404 Not Found</h1>")
-      return
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
     end
 
     controller = Main.instantiate_controller(matched.controller)
@@ -124,8 +134,7 @@ module Main
     begin
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound
-      CgiIo.write_response(stdout, 404, "<h1>404 Not Found</h1>")
-      return
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to
@@ -140,10 +149,9 @@ module Main
       # request to consume.
       out_cookies[:flash_notice] = controller.flash[:notice] unless controller.flash[:notice].nil?
       out_cookies[:flash_alert]  = controller.flash[:alert]  unless controller.flash[:alert].nil?
-      CgiIo.write_response(stdout, controller.status,
-        %(<a href="#{controller.location}">Redirecting</a>),
-        location: controller.location,
-        set_cookies: out_cookies)
+      [controller.status,
+       %(<a href="#{controller.location}">Redirecting</a>),
+       "text/html; charset=utf-8", controller.location, out_cookies]
     else
       # Render: clear inbound flash cookies (the action used them for
       # display; the next request shouldn't see the same notice
@@ -155,17 +163,53 @@ module Main
       out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
       out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
       if controller.request_format == :json
-        CgiIo.write_response(stdout, controller.status, controller.body,
-          content_type: controller.content_type,
-          location: controller.location,
-          set_cookies: out_cookies)
+        [controller.status, controller.body,
+         controller.content_type, controller.location, out_cookies]
       else
         page = Views::Layouts.application(controller.body)
-        CgiIo.write_response(stdout, controller.status, page,
-          location: controller.location,
-          set_cookies: out_cookies)
+        [controller.status, page,
+         "text/html; charset=utf-8", controller.location, out_cookies]
       end
     end
+  end
+
+  # CGI entry point. Serializes the dispatch descriptor to a CGI byte
+  # stream on `stdout` — the shape the one-shot script path (bottom of
+  # this file) and the view/controller tests assert against. Output is
+  # byte-for-byte what the prior `run` produced (same `write_response`
+  # call), so those tests are unaffected by the refactor.
+  def self.run(env, stdin, stdout)
+    status, body, content_type, location, set_cookies = dispatch_core(env, stdin)
+    CgiIo.write_response(stdout, status, body,
+      content_type: content_type, location: location, set_cookies: set_cookies)
+    nil
+  end
+
+  # Rack entry point — the Puma serving path (config.ru). Returns a
+  # Rack response tuple `[status, headers, [body]]` directly, with NO
+  # CGI string in between: the prior path serialized a CGI byte stream
+  # here and re-parsed it back into this same tuple in config.ru, pure
+  # round-trip overhead (~3–5µs/request). A Rack env already carries
+  # CGI-style keys (REQUEST_METHOD / PATH_INFO / …) and `rack.input`,
+  # so `dispatch_core` reads it without a remap. Header names are
+  # lowercased per the Rack 3 convention; Set-Cookie is an Array (one
+  # entry per cookie) and reuses `CgiIo.url_encode` so values match the
+  # CGI path exactly.
+  def self.run_rack(env)
+    status, body, content_type, location, set_cookies =
+      dispatch_core(env, env["rack.input"] || StringIO.new(""))
+    headers = { "content-type" => content_type }
+    headers["location"] = location unless location.nil?
+    cookies = []
+    set_cookies.each do |name, val|
+      cookies << if val.nil?
+        "#{name}=; Path=/; Max-Age=0"
+      else
+        "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/; HttpOnly"
+      end
+    end
+    headers["set-cookie"] = cookies unless cookies.empty?
+    [status, headers, [body]]
   end
 
   # Maps the routes-table controller symbol to a literal `.new`
