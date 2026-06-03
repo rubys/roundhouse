@@ -24,6 +24,16 @@ BUILD  := build
 # rescans these to discover new utility-class references.
 RUBY_SRC := main.rb $(shell find runtime app config -type f -name '*.rb' 2>/dev/null)
 
+# Roundhouse emits a `sig/` tree of inferred RBS signatures (the same
+# whole-program types every other target consumes). Seed spinel's
+# analyzer with them via `--rbs` so the AOT compile keeps fields/params
+# concrete that spinel's own inference would otherwise re-widen to the
+# boxed `untyped` slow path. Advisory: spinel still trusts observed
+# dataflow over a hint, so this narrows what it can and no-ops the rest.
+# Guarded on `sig/` existing so emit configs without RBS still build.
+RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)
+RBS_FLAG := $(if $(wildcard sig),--rbs sig)
+
 .PHONY: all assets build test lint dev run clean
 
 all: assets test lint
@@ -119,9 +129,9 @@ $(STATIC)/icon.svg:
 
 build: $(BUILD)/blog
 
-$(BUILD)/blog: $(RUBY_SRC)
+$(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)
 	@mkdir -p $(BUILD)
-	$(SPINEL) main.rb -o $@
+	$(SPINEL) main.rb $(RBS_FLAG) -o $@
 
 # ── Tests / lint ─────────────────────────────────────────────────
 
