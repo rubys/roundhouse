@@ -638,7 +638,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 .iter()
                 .map(|(k, v)| {
                     if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
-                        format!("{value}: {}", emit_expr(v))
+                        // Atom-key shorthand `name: v`, but a symbol that
+                        // isn't a bare Elixir atom (e.g. the hyphenated
+                        // `"data-turbo-track":` HTML data attr) must use the
+                        // quoted-atom form `"name": v` — still an atom key,
+                        // so `render_attrs`'s `to_string/1` sees it uniformly.
+                        if is_bare_atom(value.as_str()) {
+                            format!("{value}: {}", emit_expr(v))
+                        } else {
+                            format!("{:?}: {}", value.as_str(), emit_expr(v))
+                        }
                     } else {
                         format!("{} => {}", emit_expr(k), emit_expr(v))
                     }
@@ -663,6 +672,22 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
         other => crate::emit::diagnostics::report_unsupported("elixir2", other.kind_str(), ""),
     }
+}
+
+/// Whether a symbol renders as a bare Elixir atom in `name: v` map
+/// shorthand. Bare atoms are identifier-like — leading letter/underscore,
+/// then word chars, with an optional trailing `?`/`!`. Anything else (a
+/// hyphenated HTML data attr like `data-turbo-track`, leading digit, etc.)
+/// needs the quoted-atom form `"name": v`.
+fn is_bare_atom(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    let body: String = chars.collect();
+    let core = body.strip_suffix(['?', '!']).unwrap_or(&body);
+    core.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// `case scrutinee do <pat> -> <body> … end` — the per-column index
@@ -1674,6 +1699,34 @@ mod tests {
         // Two-param block (`each do |k, v|`) destructures the element tuple.
         let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::Untyped));
         assert!(emit_expr(&kv).starts_with("Enum.each(h, fn {k, v} ->"));
+    }
+
+    #[test]
+    fn hash_sym_keys_quote_non_bare_atoms() {
+        fn sym(s: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: crate::expr::Literal::Sym { value: Symbol::from(s) },
+            })
+        }
+        fn str_lit(s: &str) -> Expr {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: crate::expr::Literal::Str { value: s.to_string() },
+            })
+        }
+        let hash = Expr::new(crate::span::Span::synthetic(), ExprNode::Hash {
+            entries: vec![
+                // bare atom → shorthand
+                (sym("class"), str_lit("btn")),
+                // hyphenated HTML data attr → quoted-atom form (a bare
+                // `data-turbo-track:` is a syntax error in Elixir)
+                (sym("data-turbo-track"), str_lit("reload")),
+            ],
+            kwargs: false,
+        });
+        assert_eq!(
+            emit_expr(&hash),
+            r#"%{class: "btn", "data-turbo-track": "reload"}"#
+        );
     }
 
     #[test]
