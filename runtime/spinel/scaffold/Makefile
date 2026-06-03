@@ -34,7 +34,7 @@ RUBY_SRC := main.rb $(shell find runtime app config -type f -name '*.rb' 2>/dev/
 RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)
 RBS_FLAG := $(if $(wildcard sig),--rbs sig)
 
-.PHONY: all assets build test lint dev run clean
+.PHONY: all assets build seed test lint dev run clean
 
 all: assets test lint
 
@@ -128,6 +128,15 @@ $(STATIC)/icon.svg:
 # ── Spinel binary ────────────────────────────────────────────────
 
 build: $(BUILD)/blog
+
+# Populate tmp/blog.sqlite3 with the demo blog's seed data (db/seed.sql).
+# The binary boots against an empty DB fine (Schema.load! is idempotent),
+# but a self-contained run/repro wants rows to serve — `make seed` provides
+# them with nothing but sqlite3. Override the path with BLOG_DB=… at runtime.
+seed: tmp/blog.sqlite3
+tmp/blog.sqlite3: db/seed.sql
+	@mkdir -p tmp
+	sqlite3 $@ < db/seed.sql
 
 # Tep's FFI HTTP server links a C extension (runtime/tep/sphttp.c). Its
 # `net.rb` declares `ffi_cflags "@TEP_SPHTTP_O@"` — a placeholder for the
