@@ -26,7 +26,7 @@
 use std::fmt::Write;
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
 
 use super::expr;
 
@@ -127,7 +127,12 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
 /// runs the body threaded through `record` (via
 /// `mutation_to_struct_return::thread_constructor_body`).
 fn emit_constructor(out: &mut String, m: &MethodDef, v2_name: &str) {
-    let params = m.params.iter().map(param_decl).collect::<Vec<_>>().join(", ");
+    let params = m
+        .params
+        .iter()
+        .map(|p| param_decl(p, references_var(&m.body, p.as_str())))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     writeln!(out, "  def new({params}) do").unwrap();
     match flat_field_assigns(&m.body) {
@@ -172,10 +177,18 @@ fn flat_field_assigns(body: &Expr) -> Option<Vec<String>> {
 }
 
 /// Render one param, applying Elixir default-arg syntax (`name \\ default`).
-fn param_decl(p: &crate::dialect::Param) -> String {
+/// An unused param is `_`-prefixed (`_notice \\ nil`) to stay
+/// warning-clean — view partials carry uniform `notice`/`alert` flash
+/// params that most templates never reference.
+fn param_decl(p: &crate::dialect::Param, used: bool) -> String {
+    let name = if used {
+        p.as_str().to_string()
+    } else {
+        format!("_{}", p.as_str())
+    };
     match &p.default {
-        Some(d) => format!("{} \\\\ {}", p.as_str(), expr::emit_expr(d)),
-        None => p.as_str().to_string(),
+        Some(d) => format!("{} \\\\ {}", name, expr::emit_expr(d)),
+        None => name,
     }
 }
 
@@ -305,7 +318,11 @@ fn emit_fn(out: &mut String, m: &MethodDef, instance_method: bool) {
         let name = if references_token(&body, "record") { "record" } else { "_record" };
         params.push(name.to_string());
     }
-    params.extend(m.params.iter().map(param_decl));
+    params.extend(
+        m.params
+            .iter()
+            .map(|p| param_decl(p, references_var(&m.body, p.as_str()))),
+    );
     // A body that `yield`s calls the block through a trailing `block_fn`.
     if references_token(&body, "block_fn") {
         params.push("block_fn".to_string());
@@ -331,6 +348,108 @@ pub(super) fn references_token(body: &str, tok: &str) -> bool {
         .any(|t| t == tok)
 }
 
+/// Whether `name` is read as a variable anywhere in `e`'s IR. Used to
+/// decide if a method param is unused (→ `_`-prefixed, warning-clean).
+/// This walks the IR rather than scanning the rendered string because a
+/// param name can occur inside HTML string literals (a view partial's
+/// `notice`/`alert` flash params appear in class names/text) without
+/// being a real reference. A recv-less 0-arg bareword matching a param
+/// also counts — `set_current_params` renders it as the param local.
+/// The match is exhaustive (no wildcard) so a new `ExprNode` variant
+/// forces an update rather than silently under-detecting (which would
+/// `_`-prefix a live param and emit an undefined-variable reference).
+pub(super) fn references_var(e: &Expr, name: &str) -> bool {
+    fn lvalue(lv: &LValue, name: &str) -> bool {
+        match lv {
+            LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => false,
+            LValue::Attr { recv, .. } => references_var(recv, name),
+            LValue::Index { recv, index } => {
+                references_var(recv, name) || references_var(index, name)
+            }
+        }
+    }
+    fn opt(e: &Option<Expr>, name: &str) -> bool {
+        e.as_ref().is_some_and(|x| references_var(x, name))
+    }
+    match &*e.node {
+        ExprNode::Var { name: n, .. } => n.as_str() == name,
+        ExprNode::Lit { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => false,
+        ExprNode::Send { recv, method, args, block, .. } => {
+            (recv.is_none() && args.is_empty() && method.as_str() == name)
+                || opt(recv, name)
+                || args.iter().any(|a| references_var(a, name))
+                || opt(block, name)
+        }
+        ExprNode::Apply { fun, args, block } => {
+            references_var(fun, name)
+                || args.iter().any(|a| references_var(a, name))
+                || opt(block, name)
+        }
+        ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| references_var(k, name) || references_var(v, name)),
+        ExprNode::Array { elements, .. } => elements.iter().any(|x| references_var(x, name)),
+        ExprNode::StringInterp { parts } => parts.iter().any(|p| {
+            matches!(p, InterpPart::Expr { expr } if references_var(expr, name))
+        }),
+        ExprNode::BoolOp { left, right, .. } => {
+            references_var(left, name) || references_var(right, name)
+        }
+        ExprNode::Let { value, body, .. } => {
+            references_var(value, name) || references_var(body, name)
+        }
+        ExprNode::Lambda { body, .. } => references_var(body, name),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            references_var(cond, name)
+                || references_var(then_branch, name)
+                || references_var(else_branch, name)
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            references_var(scrutinee, name)
+                || arms.iter().any(|a| {
+                    matches!(&a.pattern, Pattern::Expr { expr } if references_var(expr, name))
+                        || opt(&a.guard, name)
+                        || references_var(&a.body, name)
+                })
+        }
+        ExprNode::Seq { exprs } => exprs.iter().any(|x| references_var(x, name)),
+        ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
+            lvalue(target, name) || references_var(value, name)
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            targets.iter().any(|t| lvalue(t, name)) || references_var(value, name)
+        }
+        ExprNode::Yield { args } => args.iter().any(|a| references_var(a, name)),
+        ExprNode::Raise { value }
+        | ExprNode::Return { value }
+        | ExprNode::Splat { value }
+        | ExprNode::Cast { value, .. } => references_var(value, name),
+        ExprNode::RescueModifier { expr, fallback } => {
+            references_var(expr, name) || references_var(fallback, name)
+        }
+        ExprNode::Super { args } => {
+            args.as_ref().is_some_and(|a| a.iter().any(|x| references_var(x, name)))
+        }
+        ExprNode::Next { value } | ExprNode::Break { value } => opt(value, name),
+        ExprNode::While { cond, body, .. } => {
+            references_var(cond, name) || references_var(body, name)
+        }
+        ExprNode::Range { begin, end, .. } => opt(begin, name) || opt(end, name),
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            references_var(body, name)
+                || rescues.iter().any(|r| {
+                    r.classes.iter().any(|c| references_var(c, name))
+                        || references_var(&r.body, name)
+                })
+                || opt(else_branch, name)
+                || opt(ensure, name)
+        }
+    }
+}
+
 /// Map a Ruby method name to a legal Elixir function name. `?`/`!`
 /// suffixes are valid in Elixir and pass through. The indexing
 /// operators `[]`/`[]=` (illegal as Elixir function names) become
@@ -345,5 +464,57 @@ pub(super) fn elixir_fn_name(name: &str) -> String {
         format!("set_{base}")
     } else {
         name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+
+    // A param name that appears only inside a string-literal interpolation
+    // text (a view partial's `notice`/`alert` flash params occur in HTML
+    // class names) must NOT count as referenced — that's the whole reason
+    // `references_var` walks the IR instead of scanning the rendered text.
+    #[test]
+    fn references_var_ignores_string_literal_tokens() {
+        // `"... notice ..." #{article.id}` — "notice" is literal text,
+        // `article` is a real read.
+        let body = Expr::new(Span::synthetic(), ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Text { value: "class notice alert".to_string() },
+                InterpPart::Expr {
+                    expr: Expr::new(Span::synthetic(), ExprNode::Send {
+                        recv: Some(var("article")),
+                        method: Symbol::from("id"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    }),
+                },
+            ],
+        });
+        assert!(!references_var(&body, "notice"));
+        assert!(!references_var(&body, "alert"));
+        assert!(references_var(&body, "article"));
+    }
+
+    // A recv-less 0-arg bareword matching a param renders as the param
+    // local (via `set_current_params`), so it counts as a reference.
+    #[test]
+    fn references_var_counts_bareword_param_read() {
+        let bare = Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: None,
+            method: Symbol::from("notice"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        assert!(references_var(&bare, "notice"));
     }
 }
