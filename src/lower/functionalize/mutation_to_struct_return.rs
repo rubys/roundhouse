@@ -417,9 +417,14 @@ fn rebind_stmt(s: &Expr, reg: &Registry) -> Expr {
         }
     }
     match threaded_call(&s) {
-        // bare record-returning self-call statement → `record = m(...)`.
-        Some((recv, m)) if recv == RECORD && reg.is_record_returning(m) => {
-            syn(ExprNode::Assign { target: lvar(RECORD), value: s.clone() })
+        // bare record-returning call statement → rebind its receiver:
+        // `record = m(...)` for a self-call, `instance = instance.m(...)`
+        // for a typed local. In Elixir a record-returning call's mutated
+        // copy is otherwise discarded — e.g. `instance.mark_persisted!` in
+        // a class method's `instance = new; …; instance.mark_persisted!;
+        // instance` (the loaded record stays unpersisted without this).
+        Some((recv, m)) if reg.is_record_returning(m) => {
+            syn(ExprNode::Assign { target: lvar(&recv), value: s.clone() })
         }
         // bare dual call statement → `{recv, _} = m(...)`.
         Some((recv, m)) if reg.is_dual(m) => {
@@ -1519,6 +1524,42 @@ mod tests {
         assert!(
             ex.contains("{instance, _} = instance.save"),
             "polymorphic dual call destructures, threading the local:\n{ex}"
+        );
+    }
+
+    #[test]
+    fn class_method_captures_record_returning_call_on_local() {
+        // def self.from_stmt; instance = new; instance.mark_persisted!; instance; end
+        // `mark_persisted!` mutates the record but returns no genuine value
+        // (record-returning) — its result was previously discarded, so the
+        // loaded record stayed unpersisted. The call must rebind the local.
+        let mark = instance_method(
+            "mark_persisted!",
+            &[],
+            assign_ivar("persisted", syn(ExprNode::Lit { value: Literal::Bool { value: true } })),
+        );
+        let from_stmt = class_method(
+            "from_stmt",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    syn(ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: sym("instance") },
+                        value: send(None, "new", vec![]),
+                    }),
+                    send(Some(vr("instance")), "mark_persisted!", vec![]),
+                    vr("instance"),
+                ],
+            }),
+        );
+        let ex = render_all(vec![mark, from_stmt]);
+        eprintln!("--- from_stmt ---\n{ex}\n--------------");
+        // The bare record-returning call rebinds its receiving local
+        // (otherwise the mutated copy is discarded in immutable Elixir).
+        assert!(
+            ex.contains("instance = instance.")
+                && ex.contains("mark_persisted!(instance)"),
+            "record-returning call on a local rebinds the local:\n{ex}"
         );
     }
 }
