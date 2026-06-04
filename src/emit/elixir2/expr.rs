@@ -48,6 +48,21 @@ pub(super) fn set_record_methods(names: std::collections::HashSet<String>) {
 }
 
 thread_local! {
+    /// Elixir fn name → its declared params (name + default), for the
+    /// CURRENT class. A call site whose trailing arg is a keyword-args
+    /// hash (`render(body, status: :x)`) spreads it into the callee's
+    /// defaulted positionals by name (`render(record, body, :x)`) — Elixir
+    /// has no Ruby keyword args. Set per class by `emit_library_class`.
+    static METHOD_PARAMS: RefCell<HashMap<String, Vec<crate::dialect::Param>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Set the current class's per-method declared params (see `METHOD_PARAMS`).
+pub(super) fn set_method_params(params: HashMap<String, Vec<crate::dialect::Param>>) {
+    METHOD_PARAMS.with(|m| *m.borrow_mut() = params);
+}
+
+thread_local! {
     /// Param names of the method currently being emitted. A recv-less
     /// 0-arg call (`article()`) whose name is in here is a *local read*
     /// of that param (Ruby resolves a bareword to an in-scope local
@@ -1145,13 +1160,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             }
         }
         let fname = super::library::elixir_fn_name(method);
+        // Spread a trailing keyword-args hash into the callee's defaulted
+        // positionals (`render(body, status: :x)` → `render(record, body,
+        // :x)`) — render/redirect_to/head are reached here (self-receiver).
+        let arg_strs = unpack_kwargs(&fname, args);
         if !threads_record(&fname) {
-            return format!("{fname}({})", emit_args(args));
+            return format!("{fname}({})", arg_strs.join(", "));
         }
-        return if args.is_empty() {
+        return if arg_strs.is_empty() {
             format!("{fname}(record)")
         } else {
-            format!("{fname}(record, {})", emit_args(args))
+            format!("{fname}(record, {})", arg_strs.join(", "))
         };
     }
 
@@ -1396,14 +1415,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // already builds its entry/recurse calls with `record` as the
             // explicit first arg, so auto-threading would double it.
             let fname = super::library::elixir_fn_name(method);
+            // Spread a trailing keyword-args hash (`render(body, status:
+            // :x)`) into the callee's defaulted positionals by name; a
+            // plain per-arg render otherwise.
+            let arg_strs = unpack_kwargs(&fname, args);
             if threads_record(&fname) && !fname.ends_with("__loop") {
-                return if args.is_empty() {
+                return if arg_strs.is_empty() {
                     format!("{fname}(record)")
                 } else {
-                    format!("{fname}(record, {})", emit_args(args))
+                    format!("{fname}(record, {})", arg_strs.join(", "))
                 };
             }
-            format!("{}({})", method, emit_args(args))
+            format!("{}({})", method, arg_strs.join(", "))
         }
         Some(r) => {
             let r_s = emit_expr(r);
@@ -1437,6 +1460,61 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 
 fn emit_args(args: &[Expr]) -> String {
     args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+}
+
+/// Render a bareword call's args, spreading a trailing keyword-args hash
+/// into the callee's defaulted positionals BY NAME. Ruby keyword args
+/// (`render :new, status: :x`) reach a method whose Elixir signature
+/// makes them defaulted positionals (`render(body, status \\ :ok, …)`);
+/// the call must place `:x` in `status`'s slot, filling earlier omitted
+/// optionals with their defaults. Falls back to a plain per-arg render
+/// when the callee is unknown, the last arg isn't a kwargs hash, or a key
+/// doesn't match a param (so nothing is silently dropped).
+fn unpack_kwargs(fname: &str, args: &[Expr]) -> Vec<String> {
+    let plain = || args.iter().map(emit_expr).collect::<Vec<_>>();
+    let Some((last, head)) = args.split_last() else { return plain() };
+    let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return plain() };
+    let Some(params) = METHOD_PARAMS.with(|m| m.borrow().get(fname).cloned()) else {
+        return plain();
+    };
+    if head.len() > params.len() {
+        return plain();
+    }
+    let remaining = &params[head.len()..];
+    // Every kwarg key must name one of the remaining params — otherwise
+    // unpacking would drop it; fall back to a plain render instead.
+    let key_name = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let all_keys_known = entries.iter().all(|(k, _)| {
+        key_name(k).is_some_and(|n| remaining.iter().any(|p| p.name.as_str() == n))
+    });
+    if !all_keys_known {
+        return plain();
+    }
+    let lookup = |name: &str| -> Option<&Expr> {
+        entries.iter().find_map(|(k, v)| (key_name(k).as_deref() == Some(name)).then_some(v))
+    };
+    let mut out: Vec<String> = head.iter().map(emit_expr).collect();
+    let mut tail: Vec<String> = Vec::new();
+    let mut last_provided = 0;
+    for (i, p) in remaining.iter().enumerate() {
+        if let Some(v) = lookup(p.name.as_str()) {
+            tail.push(emit_expr(v));
+            last_provided = i + 1;
+        } else if let Some(d) = &p.default {
+            tail.push(emit_expr(d));
+        } else {
+            // A required param the hash doesn't supply — can't safely
+            // reorder; fall back.
+            return plain();
+        }
+    }
+    // Drop trailing params left at their defaults (Elixir fills them).
+    tail.truncate(last_provided);
+    out.extend(tail);
+    out
 }
 
 /// `recv.each do |x| body end` → an `Enum.*` call with the block as an
@@ -2431,6 +2509,53 @@ mod tests {
 
         set_current_class_name("");
         clear_field_names();
+    }
+
+    #[test]
+    fn kwargs_hash_spreads_into_defaulted_positionals() {
+        use crate::dialect::Param;
+        let sym_lit = |s: &str| {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
+                value: Literal::Sym { value: Symbol::from(s) },
+            })
+        };
+        let kwargs = |pairs: Vec<(&str, Expr)>| {
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Hash {
+                entries: pairs.into_iter().map(|(k, v)| (sym_lit(k), v)).collect(),
+                kwargs: true,
+            })
+        };
+        // render(body, status \\ :ok, content_type \\ nil, location \\ nil)
+        let nil = || Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+        let params = vec![
+            Param::positional(Symbol::from("body")),
+            Param::with_default(Symbol::from("status"), sym_lit("ok")),
+            Param::with_default(Symbol::from("content_type"), nil()),
+            Param::with_default(Symbol::from("location"), nil()),
+        ];
+        let mut map = HashMap::new();
+        map.insert("render".to_string(), params);
+        set_method_params(map);
+
+        // Only `status:` given → trailing defaulted params dropped.
+        let only_status =
+            vec![var_t("body", Ty::Untyped), kwargs(vec![("status", sym_lit("unprocessable_content"))])];
+        assert_eq!(unpack_kwargs("render", &only_status), vec!["body", ":unprocessable_content"]);
+
+        // `status:` + `location:` (skipping content_type) → the skipped
+        // optional is filled with its default so `location` lands right.
+        let status_and_loc = vec![
+            var_t("body", Ty::Untyped),
+            kwargs(vec![("status", sym_lit("created")), ("location", var_t("loc", Ty::Untyped))]),
+        ];
+        assert_eq!(
+            unpack_kwargs("render", &status_and_loc),
+            vec!["body", ":created", "nil", "loc"]
+        );
+
+        // An unknown callee falls back to a plain per-arg render.
+        assert_eq!(unpack_kwargs("unknown_fn", &only_status).len(), 2);
+        set_method_params(HashMap::new());
     }
 
     #[test]

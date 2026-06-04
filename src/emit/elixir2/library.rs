@@ -80,6 +80,20 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
         .collect();
     expr::set_record_methods(record_methods);
 
+    // Per-method declared params (name + default), so a call site can
+    // unpack a trailing keyword-args hash (`render(:new, status: :x)`)
+    // into the matching positional params (`render(record, body, :x)`).
+    // Elixir has no Ruby keyword args — the runtime's render/redirect_to/
+    // head take `status:`/`content_type:`/… as defaulted positionals, and
+    // a Ruby call passes them as a single trailing options hash that must
+    // be spread by name into declaration order.
+    let method_params: std::collections::HashMap<String, Vec<crate::dialect::Param>> = class
+        .methods
+        .iter()
+        .map(|m| (elixir_fn_name(m.name.as_str()), m.params.clone()))
+        .collect();
+    expr::set_method_params(method_params);
+
     let mut out = String::new();
 
     if !is_module_singleton {
