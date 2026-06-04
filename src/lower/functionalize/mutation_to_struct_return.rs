@@ -607,6 +607,25 @@ fn rewrite_expr(e: &Expr) -> Expr {
                 value: struct_put(&field, rewrite_expr(&args[0])),
             })
         }
+        // `@ivar.field = v` (nested attr write — e.g. the association
+        // `build` lowering's `@comment.article_id = @article.id`) →
+        // `record = %{record | ivar: %{record.ivar | field: v}}`. The
+        // outer struct-put rebinds the ivar field on `record`; the inner
+        // one updates `field` on the (struct-valued) `record.ivar`.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str().ends_with('=')
+                && args.len() == 1
+                && !matches!(method.as_str(), "[]=" | "==" | "!=" | ">=" | "<=" | "===")
+                && matches!(&*r.node, ExprNode::Ivar { .. }) =>
+        {
+            let ExprNode::Ivar { name: ivar } = &*r.node else { unreachable!() };
+            let field = Symbol::from(method.as_str().trim_end_matches('='));
+            let inner = struct_put_on(field_read(ivar), &field, rewrite_expr(&args[0]));
+            syn(ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                value: struct_put(ivar, inner),
+            })
+        }
         // `errors << v` — `<<` on a bareword/`self` accessor `foo()` that
         // reads a list field → `record = %{record | foo: record.foo ++
         // [v]}`. On mutable targets the accessor returns the @errors Array
@@ -917,9 +936,16 @@ fn field_read(field: &Symbol) -> Expr {
 /// `record.__struct_put__(:field, value)` — the emitter renders this as
 /// `%{record | field: value}`.
 fn struct_put(field: &Symbol, value: Expr) -> Expr {
+    struct_put_on(var(RECORD), field, value)
+}
+
+/// `recv.__struct_put__(:field, value)` — like `struct_put` but on an
+/// arbitrary receiver, so a nested update (`@comment.article_id = v` →
+/// `%{record.comment | article_id: v}`) can target a struct *field*.
+fn struct_put_on(recv: Expr, field: &Symbol, value: Expr) -> Expr {
     let field_sym = syn(ExprNode::Lit { value: Literal::Sym { value: field.clone() } });
     syn(ExprNode::Send {
-        recv: Some(var(RECORD)),
+        recv: Some(recv),
         method: Symbol::from("__struct_put__"),
         args: vec![field_sym, value],
         block: None,
@@ -1139,6 +1165,27 @@ mod tests {
             "nested @data[k]=v → struct-update with Map.put:\n{ex}"
         );
         assert!(ex.trim_end().ends_with("record\n  end\nend"), "returns record:\n{ex}");
+    }
+
+    #[test]
+    fn nested_ivar_attr_assign_threads_via_struct_update() {
+        // def link!; @comment.article_id = @article.id; end — the assoc
+        // `build` lowering's nested attr write.
+        let write = send(
+            Some(syn(ExprNode::Ivar { name: sym("comment") })),
+            "article_id=",
+            vec![send(Some(syn(ExprNode::Ivar { name: sym("article") })), "id", vec![])],
+        );
+        let m = instance_method("link!", &[], syn(ExprNode::Seq { exprs: vec![write] }));
+        let ex = render_via_elixir(vec![tx(m)]);
+        eprintln!("--- nested @ivar.field= ---\n{ex}\n--------------------------");
+        // Sole trailing write IS the return value, so it emits as the bare
+        // nested struct-update expression (no `record =` rebind needed).
+        assert!(
+            ex.contains("%{record | comment: %{record.comment | article_id: record.article.id}}"),
+            "nested @comment.article_id=@article.id → nested struct-update:\n{ex}"
+        );
+        assert!(!ex.contains("article_id=("), "no raw attr-setter call remains:\n{ex}");
     }
 
     #[test]

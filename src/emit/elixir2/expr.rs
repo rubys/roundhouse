@@ -753,6 +753,22 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         other => other,
     };
 
+    // A recv-less (or self-recv, collapsed above) 0-arg call whose name is
+    // a struct field of the current (record-threading) class is an
+    // implicit-self accessor read, not a call — `attr_accessor
+    // :request_format` reads emit as `self.request_format` in an action
+    // body, a 0-arg self-call to a method that doesn't exist (the accessor
+    // is a struct field). Route it to `record.request_format`. Gated on
+    // THREADS_RECORD so a module-singleton function isn't given a phantom
+    // `record`. (Distinct from `@ivar` reads, which
+    // mutation_to_struct_return already bridges to `record.__field__`.)
+    if recv.is_none() && args.is_empty() && is_record_threading_context() {
+        let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+        if is_struct_field(&class, method) {
+            return format!("record.{method}");
+        }
+    }
+
     // `self.class.foo(args)` → same-module `foo(args)`: Elixir has no
     // class reflection, and the defining module IS the class. (Real
     // subclass dispatch is handled by the lowerer linearizing these
@@ -1044,6 +1060,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if recv.is_some_and(is_record_var)
         && method.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     {
+        // A 0-arg call whose name is a struct field is an `attr_accessor`
+        // read, not a method — `self.request_format` → `record.request_format`
+        // (field read), not the `request_format()` self-call routing below
+        // (which would drop `record` and land on an undefined function,
+        // since the accessor has no method body). Distinct from `@ivar`
+        // reads, already bridged to `__field__` above.
+        if args.is_empty() {
+            let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+            if is_struct_field(&class, method) {
+                return format!("record.{method}");
+            }
+        }
         let fname = super::library::elixir_fn_name(method);
         if !threads_record(&fname) {
             return format!("{fname}({})", emit_args(args));
@@ -1511,8 +1539,15 @@ fn recv_is_string(e: &Expr) -> bool {
 /// True when `e` is the threaded `record` var (self) — its `[]`/`[]=`
 /// route to the same-module renamed accessor.
 fn is_record_var(e: &Expr) -> bool {
-    THREADS_RECORD.with(|t| *t.borrow())
+    is_record_threading_context()
         && matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "record")
+}
+
+/// True when the method currently being emitted threads `record` (an
+/// instance method touching self) — so an implicit-self accessor read can
+/// route to `record.<field>`.
+fn is_record_threading_context() -> bool {
+    THREADS_RECORD.with(|t| *t.borrow())
 }
 
 /// Process-dictionary key (an atom literal) for a module-singleton's
