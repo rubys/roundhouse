@@ -199,8 +199,17 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         expr::register_module("Db", "V2.Db");
         expr::register_module("Broadcasts", "V2.Broadcasts");
         let base_methods = ar_base_methods();
+        // Strong-params specs from the controllers: each `permit(...)`
+        // declares a `<Resource>Params` factory the model lowerer wires
+        // into `Model.from_params(...)` (controller `Model.new(
+        // article_params)` call sites rewrite to it). Empty when
+        // controllers aren't being emitted, but harmless to always
+        // collect. Mirrors go2.rs:260-268.
         let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-            std::collections::BTreeMap::new();
+            crate::lower::controller_to_library::params::collect_specs(&app.controllers)
+                .into_iter()
+                .map(|(r, s)| (r, s.fields))
+                .collect();
         let (model_lcs, model_registry) =
             crate::lower::model_to_library::lower_models_with_registry_and_params(
                 &app.models,
@@ -298,9 +307,117 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         for lc in view_layer_lcs {
             emit_library_lc(lc, &mut out);
         }
+
+        // ---- Controllers (Phase C / W1) -----------------------------
+        // Per-controller app modules (`V2.ArticlesController`, …) lowered
+        // from the same `controller_to_library` pipeline go2/rust2 use.
+        // Elixir has no inheritance, so the `ActionController::Base`
+        // methods (initialize/render/redirect_to/head/resolve_status) are
+        // MATERIALIZED into each concrete controller — the same
+        // linearization the model emit does with the AR baseline.
+        // Env-gated (RH_ELIXIR2_CONTROLLERS) while the controller action
+        // bodies are driven to a clean `mix compile`; requires views
+        // (action bodies render `V2.Views.*`).
+        let controllers_enabled =
+            std::env::var("RH_ELIXIR2_CONTROLLERS").is_ok() && !app.controllers.is_empty();
+        if controllers_enabled {
+            let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+                model_registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            // Drop `includes(:assoc)` eager-loads for now (pass an EMPTY
+            // association graph): the assoc-graph path inlines a second
+            // cursor-drain + a preload-grouping `each` per `includes`,
+            // which the functionalize passes don't yet lower cleanly. The
+            // lazy `comments` has_many getter already works, so dropping
+            // the eager-load is behaviorally correct (N+1, not wrong) — an
+            // optimization deferral, not a feature gap. Re-enable with
+            // `compute_association_graph(app)` once the eager-load IR
+            // (multi-drain + preload-each) is functionalized.
+            let raw_controller_lcs =
+                crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
+                    &app.controllers,
+                    model_extras,
+                    Some(&app.schema),
+                    &app.views,
+                );
+            // Materialize the AC baseline into each concrete controller
+            // FIRST — the base `initialize` is what seeds the response-state
+            // struct fields (params/session/flash/request_format/status/…),
+            // so field registration (below) must see the materialized form
+            // or `record.request_format` accessor reads mis-route to an
+            // undefined 0-arg call. Drop the abstract `ApplicationController`
+            // (class macros only; nothing instantiates it once concrete
+            // controllers are self-contained — mirrors `ApplicationRecord`).
+            let ac_base = ac_base_methods();
+            let controller_lcs: Vec<crate::dialect::LibraryClass> = raw_controller_lcs
+                .into_iter()
+                .filter(|lc| lc.name.0.as_str() != "ApplicationController")
+                .map(|mut lc| {
+                    // Concrete controllers get the AC baseline; the
+                    // synthesized `<Resource>Params` holders do not (no
+                    // actions / response state).
+                    if lc.name.0.as_str().ends_with("Controller") {
+                        materialize_controller_inherited(&mut lc, &ac_base);
+                    }
+                    lc
+                })
+                .collect();
+            // Register every controller (+ `<Resource>Params`) module name
+            // and (post-materialization, post-functionalize) struct fields
+            // BEFORE emit, so cross-refs and field-vs-method routing resolve.
+            expr::register_modules(controller_lcs.iter());
+            for class in crate::lower::functionalize::functionalize(controller_lcs.clone()) {
+                let fields = library::struct_fields(&class);
+                expr::register_field_names(class.name.0.as_str(), &fields);
+            }
+            let before = out.len();
+            for lc in controller_lcs {
+                emit_library_lc(lc, &mut out);
+            }
+            // The materialized `resolve_status` reads the `STATUS_CODES`
+            // table, which lives as a module-level constant in
+            // `action_controller/base.rb` (→ `@status_codes` in
+            // `V2.ActionController.Base`). It doesn't travel with the
+            // copied MethodDef, so inject it as a module attribute into any
+            // emitted controller that references it. (Module constants
+            // aren't carried on `LibraryClass`; this mirrors how the
+            // runtime loader injects module constants for runtime files.)
+            if let Some(attr) = status_codes_attr_line() {
+                for file in out.iter_mut().skip(before) {
+                    if file.content.contains("@status_codes")
+                        && !file.content.contains(&attr)
+                    {
+                        file.content = inject_module_attr(&file.content, &attr);
+                    }
+                }
+            }
+        }
     }
 
     out
+}
+
+/// The `@status_codes %{...}` module-attribute line, rendered from
+/// `action_controller/base.rb`'s `STATUS_CODES` constant — injected into
+/// controllers whose materialized `resolve_status` references it.
+fn status_codes_attr_line() -> Option<String> {
+    let consts = crate::runtime_src::parse_module_constant_exprs(include_str!(
+        "../../runtime/ruby/action_controller/base.rb"
+    ))
+    .ok()?;
+    let (_, value) = consts.into_iter().find(|(n, _)| n.as_str() == "STATUS_CODES")?;
+    Some(format!("  @status_codes {}", expr::emit_const_value(&value)))
+}
+
+/// Insert a module attribute line just after the `defmodule … do` header
+/// of an emitted `.ex` module.
+fn inject_module_attr(content: &str, attr_line: &str) -> String {
+    match content.find(" do\n") {
+        Some(idx) => {
+            let split = idx + " do\n".len();
+            format!("{}{attr_line}\n{}", &content[..split], &content[split..])
+        }
+        None => content.to_string(),
+    }
 }
 
 /// Functionalize a `LibraryClass` and append its emitted `.ex` file(s)
@@ -376,6 +493,26 @@ fn ar_base_methods() -> Vec<crate::dialect::MethodDef> {
     .unwrap_or_default()
 }
 
+/// The AC-baseline method definitions from `action_controller/base.rb`
+/// (the `ActionController::Base` class body) — `initialize`/`render`/
+/// `redirect_to`/`head`/`resolve_status`. Materialized into each concrete
+/// controller module since Elixir has no inheritance to carry them. (This
+/// is the same file already transpiled standalone as
+/// `V2.ActionController.Base`; materializing rather than delegating keeps
+/// each controller a self-contained struct, mirroring the model path.)
+fn ac_base_methods() -> Vec<crate::dialect::MethodDef> {
+    crate::runtime_src::parse_library_with_rbs(
+        include_str!("../../runtime/ruby/action_controller/base.rb").as_bytes(),
+        include_str!("../../runtime/ruby/action_controller/base.rbs"),
+        "runtime/ruby/action_controller/base.rb",
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .find(|c| c.name.0.as_str() == "ActionController::Base")
+    .map(|c| c.methods)
+    .unwrap_or_default()
+}
+
 /// Append the AR-baseline methods the model doesn't already override
 /// onto its LibraryClass, re-homing each to the model so self-calls and
 /// `Module#name` reflection resolve to the model. `initialize` is
@@ -385,6 +522,32 @@ fn ar_base_methods() -> Vec<crate::dialect::MethodDef> {
 /// `_adapter_*` primitives — so materializing them would reference an
 /// absent adapter. (Real-blog doesn't call them; an Arel-based find_by/
 /// where would be a model-lowering addition.)
+/// Append the AC-baseline methods a controller doesn't already define.
+/// Unlike the model variant, `initialize` IS materialized — the
+/// controller has no constructor of its own, and the base `initialize`
+/// is what seeds the response-state struct fields (params/session/flash/
+/// status/body/location/…) the `defstruct` is derived from. The lowerer
+/// synthesizes each controller's own `process_action`, so the base's
+/// abstract one is filtered by the `defined` check.
+fn materialize_controller_inherited(
+    ctrl: &mut crate::dialect::LibraryClass,
+    base: &[crate::dialect::MethodDef],
+) {
+    let defined: std::collections::HashSet<String> =
+        ctrl.methods.iter().map(|m| m.name.as_str().to_string()).collect();
+    let owner = ctrl.name.0.clone();
+    let mut inherited: Vec<crate::dialect::MethodDef> = base
+        .iter()
+        .filter(|m| !defined.contains(m.name.as_str()))
+        .cloned()
+        .map(|mut m| {
+            m.enclosing_class = Some(owner.clone());
+            m
+        })
+        .collect();
+    ctrl.methods.append(&mut inherited);
+}
+
 fn materialize_inherited(model: &mut crate::dialect::LibraryClass, base: &[crate::dialect::MethodDef]) {
     let defined: std::collections::HashSet<String> =
         model.methods.iter().map(|m| m.name.as_str().to_string()).collect();
