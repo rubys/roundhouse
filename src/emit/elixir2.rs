@@ -63,6 +63,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // hasn't reached yet. Clear first so a prior emit doesn't leak.
     expr::clear_modules();
     expr::clear_field_names();
+    expr::clear_param_types();
     if let Err(e) = crate::runtime_loader::elixir_library_classes(|classes| {
         expr::register_modules(classes.iter());
         // Register each class's struct fields (post-functionalize, since
@@ -315,6 +316,46 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // Register ALL view-layer modules before model emit so cross-
             // refs (model→Views, view→RouteHelpers/Importmap) resolve.
             expr::register_modules(view_layer_lcs.iter());
+
+            // Type each view partial's record param. A partial param named
+            // after a model's snake_case singular (`article`) is that model
+            // (`Class{Article}`); the plural (`articles`) is a list of it
+            // (`Array{Article}`). Without this the param is untyped, so
+            // `article.errors` can't resolve `errors` to `Array` and the
+            // form's `article.errors.count`/`.empty?` mis-route to a struct
+            // field/`__struct__` dispatch on a list (a runtime crash on
+            // new/edit). The view lowering knows resource→model; we mirror
+            // it here from the model registry.
+            let model_param_types: Vec<(String, crate::ty::Ty)> = model_names
+                .iter()
+                .map(|m| {
+                    let cls = crate::ty::Ty::Class {
+                        id: crate::ident::ClassId(m.clone().into()),
+                        args: vec![],
+                    };
+                    (crate::naming::snake_case(m), cls)
+                })
+                .flat_map(|(singular, cls)| {
+                    let plural = crate::naming::pluralize_snake(&singular);
+                    let list = crate::ty::Ty::Array { elem: Box::new(cls.clone()) };
+                    [(singular, cls), (plural, list)]
+                })
+                .collect();
+            for lc in &view_layer_lcs {
+                // Only register a name that is actually a param of some
+                // method in this view module — so the type lands only where
+                // a partial threads that record, not on every view module.
+                let params: Vec<(String, crate::ty::Ty)> = model_param_types
+                    .iter()
+                    .filter(|(name, _)| {
+                        lc.methods.iter().any(|mth| mth.params.iter().any(|p| p.as_str() == name))
+                    })
+                    .cloned()
+                    .collect();
+                if !params.is_empty() {
+                    expr::register_param_types(lc.name.0.as_str(), &params);
+                }
+            }
         }
 
         for mut lc in model_lcs {

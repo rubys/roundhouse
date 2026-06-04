@@ -182,6 +182,39 @@ fn field_type(class_id: &str, field: &str) -> Option<crate::ty::Ty> {
     FIELD_TYPES.with(|f| f.borrow().get(class_id).and_then(|m| m.get(field).cloned()))
 }
 
+thread_local! {
+    /// Method-param name → its `Ty`, keyed by the enclosing class name
+    /// (e.g. `Views::Articles` → {"article": Class{Article}, "articles":
+    /// Array{Article}}). A view partial's record param carries NO type in
+    /// the IR — the view lowering emits a bare positional `Param`, and the
+    /// functionalize passes drop the body-typer's annotations — so
+    /// `article.errors` can't resolve `errors` to `Array` (→ `Enum.count`/
+    /// `Enum.empty?`) without it. Registered up front from the
+    /// resource→model mapping; read by `effective_recv_ty` for a `Var`
+    /// matching a param of the method being emitted.
+    static PARAM_TYPES: RefCell<HashMap<String, HashMap<String, crate::ty::Ty>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Reset the param-type registry (start of an overlay emit).
+pub(super) fn clear_param_types() {
+    PARAM_TYPES.with(|p| p.borrow_mut().clear());
+}
+
+/// Register a class's method-param types (see `PARAM_TYPES`). Accumulates
+/// across calls so multiple resources' params land under the same view
+/// module.
+pub(super) fn register_param_types(class: &str, params: &[(String, crate::ty::Ty)]) {
+    PARAM_TYPES.with(|p| {
+        p.borrow_mut().entry(class.to_string()).or_default().extend(params.iter().cloned());
+    });
+}
+
+/// The recorded `Ty` of a `param` in class `class_id`, if registered.
+fn param_type(class_id: &str, param: &str) -> Option<crate::ty::Ty> {
+    PARAM_TYPES.with(|p| p.borrow().get(class_id).and_then(|m| m.get(param).cloned()))
+}
+
 /// True when `name` is a record-threading instance method of the current
 /// class — so a self-call to it takes a leading `record` arg.
 fn threads_record(name: &str) -> bool {
@@ -1002,6 +1035,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `arr.count` → `Enum.count(arr)` for an Array receiver (a list has
+    // no `.count` field; `Enum.count` is the size). `count(&block)` /
+    // `count(x)` aren't used by the runtime/views, so only the 0-arg form
+    // is mapped — anything else falls through.
+    if method == "count" && args.is_empty() {
+        if let Some(r) = recv {
+            if recv_is_array(r) {
+                return format!("Enum.count({})", emit_expr(r));
+            }
+        }
+    }
+
     // `arr.include?(x)` → `Enum.member?(arr, x)` for an Array receiver.
     // (Hash `include?` is key-membership — handled in the Map block.)
     if method == "include?" && args.len() == 1 {
@@ -1598,6 +1643,29 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
                 if let Some(t) = field_type(id.0.as_str(), method.as_str()).and_then(concrete) {
                     return Some(t);
                 }
+            }
+        }
+    }
+    // (c) a param reference matching a param of the method being emitted →
+    // its registered type. View partials carry no IR type on their record
+    // param (a bare positional `Param`; functionalize drops body-typer
+    // types), so `article: Class{Article}` is recorded in `PARAM_TYPES`
+    // and resolved here — letting `article.errors` reach `Array`. A
+    // bareword param reads as EITHER a `Var` (when a pass bound it) OR a
+    // recv-less 0-arg `Send` (Ruby parses an unbound bareword as a method
+    // call) — accept both, matching `set_current_params`' emit handling.
+    let param_ref = match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.as_str()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str())
+        }
+        _ => None,
+    };
+    if let Some(name) = param_ref {
+        if is_current_param(name) {
+            let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+            if let Some(t) = param_type(&class, name).and_then(concrete) {
+                return Some(t);
             }
         }
     }
@@ -2362,6 +2430,49 @@ mod tests {
         assert_eq!(emit_expr(&call(row, "id", vec![])), "row.id");
 
         set_current_class_name("");
+        clear_field_names();
+    }
+
+    #[test]
+    fn param_type_registry_types_view_partial_record() {
+        use crate::ident::ClassId;
+        // A view partial's record param (`article`) carries no IR type, so
+        // `PARAM_TYPES` records it. `article.errors` (errors: Array) then
+        // routes its container queries to `Enum.*` rather than a struct
+        // dispatch on a list. The param reads as a recv-less bareword Send
+        // (Ruby parses an unbound bareword as a method call) — the shape
+        // the view lowering actually produces.
+        fn bareword_field(param: &str, field: &str) -> Expr {
+            call(bare_call(param, vec![]), field, vec![])
+        }
+        clear_field_names();
+        clear_param_types();
+        register_field_types(
+            "Article",
+            &[("errors".to_string(), Ty::Array { elem: Box::new(Ty::Str) })],
+        );
+        register_param_types(
+            "Views::Articles",
+            &[(
+                "article".to_string(),
+                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] },
+            )],
+        );
+        set_current_class_name("Views::Articles");
+        set_current_params(["article".to_string()].into_iter().collect());
+
+        let errors = || bareword_field("article", "errors");
+        assert_eq!(emit_expr(&call(errors(), "empty?", vec![])), "Enum.empty?(article.errors)");
+        assert_eq!(emit_expr(&call(errors(), "count", vec![])), "Enum.count(article.errors)");
+
+        // A name that ISN'T a param of the current method doesn't resolve
+        // (no phantom typing of an unrelated local).
+        set_current_params(std::collections::HashSet::new());
+        assert_ne!(emit_expr(&call(errors(), "count", vec![])), "Enum.count(article.errors)");
+
+        set_current_params(std::collections::HashSet::new());
+        set_current_class_name("");
+        clear_param_types();
         clear_field_names();
     }
 
