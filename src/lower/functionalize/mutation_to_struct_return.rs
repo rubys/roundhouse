@@ -97,6 +97,21 @@ pub fn compute_registry(methods: &[MethodDef]) -> Registry {
     reg
 }
 
+/// The dual-return (`{record, value}`) method names of a method set,
+/// classified the same way [`functionalize`] does (after while→recursion
+/// normalization). Used to derive a model's dual methods (`save`/`update`/
+/// `destroy`) so a controller's field-receiver call sites
+/// (`@article.save`) destructure the tuple — see
+/// [`functionalize_with_external_duals`](super::functionalize_with_external_duals).
+pub fn dual_method_names(methods: &[MethodDef]) -> std::collections::HashSet<String> {
+    let after_while: Vec<_> = methods
+        .iter()
+        .cloned()
+        .flat_map(super::while_to_recursion::transform_method)
+        .collect();
+    compute_registry(&after_while).dual_return
+}
+
 /// Rewrite one method for struct-return threading, or return it
 /// unchanged when it isn't an applicable instance mutator.
 pub fn transform_method(mut m: MethodDef, reg: &Registry) -> MethodDef {
@@ -369,7 +384,23 @@ fn append_record_yield(branch: &Expr) -> Expr {
 fn rebind_record_calls(e: &Expr, reg: &Registry) -> Expr {
     match &*e.node {
         ExprNode::Seq { exprs } => {
-            syn(ExprNode::Seq { exprs: exprs.iter().map(|s| rebind_stmt(s, reg)).collect() })
+            // A `rebind_stmt` may EXPAND one statement into several (a dual
+            // destructure → `{recv, ok} = …; if ok …`; a field-receiver
+            // destructure → `{saved, ok} = …; record = %{…}; if ok …`).
+            // Splice those into the parent sequence rather than nesting a
+            // `Seq` inside it, so downstream passes (and the emitter's
+            // cond-rebind lift, which only lifts an `if` that's a sibling
+            // statement) see them as ordinary sequential statements.
+            let mut out = Vec::with_capacity(exprs.len());
+            for s in exprs {
+                let r = rebind_stmt(s, reg);
+                if let ExprNode::Seq { exprs: inner } = &*r.node {
+                    out.extend(inner.iter().cloned());
+                } else {
+                    out.push(r);
+                }
+            }
+            syn(ExprNode::Seq { exprs: out })
         }
         _ => rebind_stmt(e, reg),
     }
@@ -386,6 +417,46 @@ fn rebind_record_calls(e: &Expr, reg: &Registry) -> Expr {
 /// Recurses into nested branches first.
 fn rebind_stmt(s: &Expr, reg: &Registry) -> Expr {
     let s = rebind_into_children(s, reg);
+    // `if @article.save do … end` — a dual call on a record FIELD (not a
+    // self-call or a plain local), as in a controller's create/update.
+    // Destructure the `{record, ok}` tuple, write the mutated value back
+    // to the field, and test the captured boolean:
+    //   {saved, ok} = @article.save
+    //   record = %{record | article: saved}
+    //   if ok do … end
+    // Without this the `if` tests the whole tuple (always truthy → an
+    // invalid record still redirects instead of re-rendering with errors).
+    if let ExprNode::If { cond, then_branch, else_branch } = &*s.node {
+        if let Some(field) = field_dual_call(cond, reg) {
+            return syn(ExprNode::Seq {
+                exprs: vec![
+                    multi_assign(vec![lvar("saved"), lvar("ok")], cond.clone()),
+                    syn(ExprNode::Assign {
+                        target: lvar(RECORD),
+                        value: struct_put(&field, var("saved")),
+                    }),
+                    syn(ExprNode::If {
+                        cond: var("ok"),
+                        then_branch: then_branch.clone(),
+                        else_branch: else_branch.clone(),
+                    }),
+                ],
+            });
+        }
+    }
+    // bare `@article.update(p)` dual statement (value discarded) → capture
+    // the tuple and write the mutated record back to the field.
+    if let Some(field) = field_dual_call(&s, reg) {
+        return syn(ExprNode::Seq {
+            exprs: vec![
+                multi_assign(vec![lvar("saved"), lvar("_")], s.clone()),
+                syn(ExprNode::Assign {
+                    target: lvar(RECORD),
+                    value: struct_put(&field, var("saved")),
+                }),
+            ],
+        });
+    }
     // `y = dual(...)` (value capture) → `{recv, y} = dual(...)`.
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*s.node {
         if let Some((recv, m)) = threaded_call(value) {
@@ -475,6 +546,32 @@ fn threaded_call(e: &Expr) -> Option<(String, &str)> {
             },
         }?;
         return Some((recv_name, m));
+    }
+    None
+}
+
+/// For a `Send` calling a dual method on a record FIELD bridge
+/// (`record.__field__(:article).save(...)` — a controller's `@article
+/// .save`), return the field name. The receiver is a struct field, not a
+/// threaded local, so the dual destructure must write the mutated value
+/// back to the field. `None` for any other shape.
+fn field_dual_call(e: &Expr, reg: &Registry) -> Option<Symbol> {
+    if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*e.node {
+        if reg.is_dual(method.as_str()) {
+            return field_bridge_field(r);
+        }
+    }
+    None
+}
+
+/// The field name `f` of a `record.__field__(:f)` bridge, if `e` is one.
+fn field_bridge_field(e: &Expr) -> Option<Symbol> {
+    if let ExprNode::Send { method, args, .. } = &*e.node {
+        if method.as_str() == "__field__" && args.len() == 1 {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+                return Some(value.clone());
+            }
+        }
     }
     None
 }
@@ -1561,5 +1658,45 @@ mod tests {
                 && ex.contains("mark_persisted!(instance)"),
             "record-returning call on a local rebinds the local:\n{ex}"
         );
+    }
+
+    #[test]
+    fn controller_field_dual_call_destructures_and_writes_back() {
+        // A controller's `def create; @article = …; if @article.save then…
+        // else… end; end` — `save` is a cross-class dual (passed in via the
+        // external-duals registry). The field-receiver `if @article.save`
+        // must destructure the `{record, ok}` tuple, write the mutated
+        // article back to the field, and test the captured boolean —
+        // otherwise the `if` tests the whole tuple (always truthy → an
+        // invalid record redirects instead of re-rendering).
+        let create = instance_method(
+            "create",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    assign_ivar("article", send(None, "build_article", vec![])),
+                    if_(
+                        send(Some(syn(ExprNode::Ivar { name: sym("article") })), "save", vec![]),
+                        send(None, "redirect_to", vec![nil()]),
+                        send(None, "render", vec![nil()]),
+                    ),
+                ],
+            }),
+        );
+        // `save` is dual in ANOTHER class (the model) — seed it externally.
+        let mut reg = compute_registry(std::slice::from_ref(&create));
+        reg.dual_return.insert("save".to_string());
+        let out = transform_method(create, &reg);
+        let ex = render_via_elixir(vec![out]);
+        eprintln!("--- create ---\n{ex}\n--------------");
+        // tuple destructure of the field-receiver dual call
+        assert!(ex.contains("{saved, ok} ="), "destructures the dual tuple:\n{ex}");
+        // write the mutated record back to the `article` field
+        assert!(
+            ex.contains("record = %{record | article: saved}"),
+            "writes the saved record back to the field:\n{ex}"
+        );
+        // branch on the captured boolean, not the tuple
+        assert!(ex.contains("if ok do"), "tests the captured boolean:\n{ex}");
     }
 }

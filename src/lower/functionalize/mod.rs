@@ -41,6 +41,21 @@ use crate::ty::Ty;
 /// rewritten in place or expanded into several methods (e.g. a loop
 /// method → an entry + a recursive helper).
 pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
+    functionalize_with_external_duals(classes, &std::collections::HashSet::new())
+}
+
+/// Like [`functionalize`], but seeds each class's dual-return registry
+/// with `external_duals` — dual `{record, value}` methods defined in
+/// OTHER classes (e.g. a model's `save`/`update`/`destroy`) that a
+/// controller action calls on a typed field (`@article.save`). The
+/// per-class registry only sees the current class's methods, so a
+/// cross-class dual call would otherwise miss its tuple destructure and
+/// the `if @article.save` condition would test the whole `{record, bool}`
+/// tuple (always truthy → invalid records still redirect).
+pub fn functionalize_with_external_duals(
+    classes: Vec<LibraryClass>,
+    external_duals: &std::collections::HashSet<String>,
+) -> Vec<LibraryClass> {
     classes
         .into_iter()
         .map(|mut class| {
@@ -57,7 +72,11 @@ pub fn functionalize(classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
             // so a self-call can be rebound at its call site — the body
             // of `valid?` must rebind its `validate` call, `save` must
             // destructure its `valid?` call, etc.
-            let registry = mutation_to_struct_return::compute_registry(&after_while);
+            let mut registry = mutation_to_struct_return::compute_registry(&after_while);
+            // Cross-class dual methods (a controller calling a model's
+            // `save`/`update`) — merge so their field-receiver call sites
+            // destructure the tuple too.
+            registry.dual_return.extend(external_duals.iter().cloned());
             class.methods = after_while
                 .into_iter()
                 .map(|m| mutation_to_struct_return::transform_method(m, &registry))

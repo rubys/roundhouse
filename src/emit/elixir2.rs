@@ -217,6 +217,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         expr::register_module("Db", "V2.Db");
         expr::register_module("Broadcasts", "V2.Broadcasts");
         let base_methods = ar_base_methods();
+        // The AR-baseline dual `{record, value}` methods (`save`/`valid?`/
+        // `destroy`) — controllers call these on a model-typed field
+        // (`@article.save`), and their field-receiver call sites must
+        // destructure the tuple rather than test it whole (always truthy).
+        let model_duals = crate::lower::functionalize::mutation_to_struct_return::dual_method_names(
+            &base_methods,
+        );
         // Strong-params specs from the controllers: each `permit(...)`
         // declares a `<Resource>Params` factory the model lowerer wires
         // into `Model.from_params(...)` (controller `Model.new(
@@ -435,7 +442,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // and (post-materialization, post-functionalize) struct fields
             // BEFORE emit, so cross-refs and field-vs-method routing resolve.
             expr::register_modules(controller_lcs.iter());
-            for class in crate::lower::functionalize::functionalize(controller_lcs.clone()) {
+            for class in crate::lower::functionalize::functionalize_with_external_duals(
+                controller_lcs.clone(),
+                &model_duals,
+            ) {
                 // Register fields WITH types: the response-state structs
                 // (`flash`/`session`) carry their class type so a
                 // `flash[:notice]` indexer routes to the renamed accessor
@@ -470,7 +480,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             }
             let before = out.len();
             for lc in controller_lcs {
-                emit_library_lc(lc, &mut out);
+                emit_library_lc_with_duals(lc, &mut out, &model_duals);
             }
             // The materialized `resolve_status` reads the `STATUS_CODES`
             // table, which lives as a module-level constant in
@@ -681,7 +691,22 @@ fn inject_module_attr(content: &str, attr_line: &str) -> String {
 /// becomes a visible `# emit_library_class FAILED` sentinel rather than
 /// a silently-dropped file, so `mix compile` surfaces the gap.
 fn emit_library_lc(lc: crate::dialect::LibraryClass, out: &mut Vec<EmittedFile>) {
-    for class in crate::lower::functionalize::functionalize(vec![lc]) {
+    emit_library_lc_with_duals(lc, out, &std::collections::HashSet::new());
+}
+
+/// Like [`emit_library_lc`], but seeds the functionalize pass with
+/// `external_duals` — dual `{record, value}` methods from OTHER classes
+/// (a model's `save`/`destroy`) so a controller's field-receiver call
+/// sites (`@article.save`) destructure the tuple. Models/views pass an
+/// empty set (their dual methods are classified per-class).
+fn emit_library_lc_with_duals(
+    lc: crate::dialect::LibraryClass,
+    out: &mut Vec<EmittedFile>,
+    external_duals: &std::collections::HashSet<String>,
+) {
+    for class in
+        crate::lower::functionalize::functionalize_with_external_duals(vec![lc], external_duals)
+    {
         let file = format!(
             "{}.ex",
             class.name.0.as_str().to_lowercase().replace("::", "_")
