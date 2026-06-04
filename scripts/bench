@@ -300,7 +300,7 @@ build_target() {
             TARGET_GEMFILE=""  # uses fixture's own Gemfile
             if [[ ! -f "$FIXTURE/storage/development.sqlite3" ]]; then
                 step "regenerating fixtures/real-blog"
-                (cd "$REPO_ROOT" && bin/rh fixture >/dev/null)
+                (cd "$REPO_ROOT" && bin/rh fixture >/dev/null) || return 1
             fi
             ;;
         ruby|ruby-int)
@@ -308,13 +308,13 @@ build_target() {
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
             if (( SKIP_EMIT == 0 )) || [[ ! -d "$RUBY_OUT" ]]; then
                 step "regenerating ruby target (bin/rh transpile ruby)"
-                (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null)
+                (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null) || return 1
             fi
             # Assets — Tailwind compile + JS deps. Needed for full
             # response bytes; without it the index page is naked.
             if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
                 step "building ruby assets"
-                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null)
+                (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null) || return 1
             fi
             ;;
         typescript)
@@ -322,11 +322,11 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$TS_OUT/main.ts" ]]; then
                 step "regenerating typescript target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target typescript "$FIXTURE" >/dev/null 2>&1)
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target typescript "$FIXTURE" >/dev/null 2>&1) || return 1
             fi
             if [[ ! -d "$TS_OUT/node_modules" ]]; then
                 step "installing npm deps"
-                (cd "$TS_OUT" && npm install --silent --no-audit --no-fund)
+                (cd "$TS_OUT" && npm install --silent --no-audit --no-fund) || return 1
             fi
             ;;
         crystal)
@@ -334,11 +334,11 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$CR_OUT/src/main.cr" ]]; then
                 step "regenerating crystal target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target crystal "$FIXTURE" >/dev/null 2>&1)
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target crystal "$FIXTURE" >/dev/null 2>&1) || return 1
             fi
             if [[ ! -x "$CR_OUT/.bin/server" ]]; then
                 step "building crystal target (release)"
-                (cd "$CR_OUT" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server)
+                (cd "$CR_OUT" && mkdir -p .bin && shards install --quiet && crystal build --release --no-debug src/main.cr -o .bin/server) || return 1
             fi
             ;;
         rust)
@@ -346,11 +346,11 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$RS_OUT/Cargo.toml" ]]; then
                 step "regenerating rust target (emit_preview)"
-                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target rust "$FIXTURE" >/dev/null 2>&1)
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target rust "$FIXTURE" >/dev/null 2>&1) || return 1
             fi
             if [[ ! -x "$RS_OUT/target/release/app" ]]; then
                 step "building rust target (release)"
-                (cd "$RS_OUT" && cargo build --release --quiet)
+                (cd "$RS_OUT" && cargo build --release --quiet) || return 1
             fi
             ;;
         spinel)
@@ -363,11 +363,11 @@ build_target() {
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$SP_OUT/main.rb" ]]; then
                 step "regenerating spinel target (bin/rh transpile spinel)"
-                (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null)
+                (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null) || return 1
             fi
             if [[ ! -f "$SP_OUT/static/assets/tailwind.css" ]]; then
                 step "building spinel assets (tailwind + turbo.min.js)"
-                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null)
+                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null) || return 1
             fi
             # Recompile whenever we re-emitted (SKIP_EMIT==0) — the spinel
             # COMPILER may have changed under us (git pull && make), and
@@ -376,7 +376,7 @@ build_target() {
             # old binary across compiler updates.
             if (( SKIP_EMIT == 0 )) || [[ ! -x "$SP_OUT/build/blog" ]]; then
                 step "AOT-compiling main.rb → build/blog (spinel)"
-                (cd "$SP_OUT" && rm -f build/blog && make build >/dev/null)
+                (cd "$SP_OUT" && rm -f build/blog && make build >/dev/null) || return 1
             fi
             ;;
         go)
@@ -388,11 +388,11 @@ build_target() {
             TARGET_GEMFILE=""
             if (( SKIP_EMIT == 0 )) || [[ ! -f "$GO_OUT/go.mod" ]]; then
                 step "regenerating go target (bin/rh transpile go)"
-                (cd "$REPO_ROOT" && bin/rh transpile go >/dev/null)
+                (cd "$REPO_ROOT" && bin/rh transpile go >/dev/null) || return 1
             fi
             if [[ ! -x "$GO_OUT/.bin/server" ]]; then
                 step "building go target (cmd/v2/, release shape)"
-                (cd "$GO_OUT" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/)
+                (cd "$GO_OUT" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/) || return 1
             fi
             ;;
     esac
@@ -667,8 +667,19 @@ PER_RUN_JSON="$OUT_DIR/per-run.json"
 port="$BASE_PORT"
 for target in "${TARGETS[@]}"; do
     step "build_target $target"
-    build_target "$target"
-    stage_db "$target"
+    # Build/compile failures (e.g. a spinel AOT-compile error) skip just
+    # this target instead of aborting the whole run, so the remaining
+    # languages still get measured. The `if !` context suppresses set -e
+    # inside build_target — that's why each build step there ends in
+    # `|| return 1`, so the first failure propagates here.
+    if ! build_target "$target"; then
+        fail "$target failed to build; skipping target"
+        continue
+    fi
+    if ! stage_db "$target"; then
+        fail "$target DB staging failed; skipping target"
+        continue
+    fi
 
     seen_cells=""
     for workers in "${WORKERS[@]}"; do
