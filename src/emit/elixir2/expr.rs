@@ -623,9 +623,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             )
         }
         ExprNode::BoolOp { op, left, right, .. } => {
+            // Ruby `||`/`&&` (and the `or`/`and` keyword forms) are truthy
+            // operators returning an operand — Elixir `||`/`&&` match that
+            // (nil/false are falsy, anything else truthy). NOT Elixir
+            // `or`/`and`, which demand a strict boolean and raise on a
+            // `nil` left (`attrs[:id] || 0`, `content_for_get(:x) || ""`).
             let op_s = match op {
-                BoolOpKind::Or => "or",
-                BoolOpKind::And => "and",
+                BoolOpKind::Or => "||",
+                BoolOpKind::And => "&&",
             };
             format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
         }
@@ -926,6 +931,28 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // `recv.to_i` — Ruby's lenient string→int (`"12abc"` → 12, garbage →
+    // 0). Elixir's `String.to_integer/1` raises on anything non-numeric,
+    // so route through `Integer.parse/1` with a `0` fallback to preserve
+    // the Ruby semantics the params code relies on (`params["id"].to_i`).
+    if method == "to_i" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!(
+                "(case Integer.parse({}) do {{n, _}} -> n; :error -> 0 end)",
+                emit_expr(r)
+            );
+        }
+    }
+    // `recv.to_f` → lenient string→float (`0.0` on failure).
+    if method == "to_f" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!(
+                "(case Float.parse({}) do {{n, _}} -> n; :error -> 0.0 end)",
+                emit_expr(r)
+            );
+        }
+    }
+
     // Bareword `name` / `self.name` (receiver collapsed to None above) in
     // a class method is `Module#name` reflection — Elixir module
     // functions have no class-name reflection, so resolve it to the
@@ -1087,6 +1114,25 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if method == "[]" && recv.is_some() {
         let r = recv.unwrap();
         let r_s = emit_expr(r);
+        // `flash[:notice]` on a struct-typed field (Flash/Session) → the
+        // renamed accessor `<Module>.get(recv, key)`. A bare `recv[key]`
+        // is `Access.get`, which structs don't implement → a runtime
+        // raise. (The `[]` def on those modules was renamed to `get`.)
+        if args.len() == 1 {
+            // Prefer the explicitly-registered field type (the response-
+            // state `flash`/`session` structs) over the node's own ty: the
+            // body-typer infers `@flash` as `Hash` from the `[:notice]`
+            // indexing, which would route to raw `Access` and raise (a
+            // struct isn't Access). The registry knows it's a Flash struct.
+            let recv_ty = field_bridge_name(r)
+                .and_then(|f| field_type(&CURRENT_CLASS_NAME.with(|n| n.borrow().clone()), &f))
+                .filter(|t| matches!(t, crate::ty::Ty::Class { .. }))
+                .or_else(|| effective_recv_ty(r));
+            if let Some(crate::ty::Ty::Class { id, .. }) = recv_ty {
+                let module = super::library::v2_module_name(id.0.as_str());
+                return format!("{module}.get({r_s}, {})", emit_expr(&args[0]));
+            }
+        }
         // List indexing: `list[i]` raises in Elixir (lists aren't Access
         // by integer), so route through `Enum`.
         if recv_is_array(r) {
@@ -1265,7 +1311,11 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         // class const carries `Ty::Class`. Only route a value receiver
         // (local/param/expression) through the instance dispatch.
         let is_class_ref = matches!(&*r.node, ExprNode::Const { .. });
-        if let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() {
+        // `effective_recv_ty` (not just `r.ty`) so a `record.__field__(:article)`
+        // bridge whose body-typer ty was dropped by functionalize still
+        // resolves to its registered model type — `record.article.save`
+        // routes to a method call, not a `.save` field access.
+        if let Some(crate::ty::Ty::Class { id, .. }) = effective_recv_ty(r) {
             if !is_record_var(r) && !is_class_ref {
                 let r_s = emit_expr(r);
                 if args.is_empty() && is_struct_field(id.0.as_str(), method) {
