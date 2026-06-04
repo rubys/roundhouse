@@ -1362,6 +1362,25 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
         Some(r) => {
             let r_s = emit_expr(r);
+            // A predicate/bang method (`persisted?`, `save!`) is NEVER a
+            // struct field — Elixir field names can't end in `?`/`!`. So
+            // even when the receiver's type was dropped (e.g. a recv
+            // synthesized by the form lowering, untyped → not caught by the
+            // typed method-on-local dispatch above), route it through the
+            // struct's module rather than emitting a `.persisted?` field
+            // access (a runtime KeyError). A `Const` receiver is excluded:
+            // `Db.step?(stmt)` is a static `V2.Db.step?(stmt)` module call,
+            // not instance dispatch. `record`-self calls are handled above.
+            if (method.ends_with('?') || method.ends_with('!'))
+                && !matches!(&*r.node, ExprNode::Const { .. })
+            {
+                let fname = super::library::elixir_fn_name(method);
+                return if args.is_empty() {
+                    format!("{r_s}.__struct__.{fname}({r_s})")
+                } else {
+                    format!("{r_s}.__struct__.{fname}({r_s}, {})", emit_args(args))
+                };
+            }
             if args.is_empty() {
                 format!("{r_s}.{method}")
             } else {
@@ -1553,13 +1572,40 @@ fn enum_method(method: &str) -> &str {
 /// on their schema type (`record.title.empty?` → `== ""`) without the
 /// body-typer's annotations surviving lowering.
 fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
-    match e.ty.as_ref() {
-        Some(t) if !matches!(t, crate::ty::Ty::Untyped) => return Some(t.clone()),
-        _ => {}
+    // Field reads resolve via the field-type REGISTRY first — it's
+    // authoritative for struct fields, whereas the body-typer's `ty` on a
+    // field chain is unreliable (infers `Hash` for `flash`, drops `Array`
+    // for `errors`). Only fall back to the node's own `ty` when the field
+    // isn't registered.
+    // Only a CONCRETE registered type wins over the node's `ty` — a field
+    // registered `Untyped` (the default for unclassified struct fields,
+    // e.g. a controller's `params`) must fall through to the body-typer's
+    // `ty` (which knows `params: Hash`), not clobber it.
+    let concrete = |t: crate::ty::Ty| (!matches!(t, crate::ty::Ty::Untyped)).then_some(t);
+    // (a) a `record.__field__(:f)` self-bridge → the current class's field.
+    if let Some(field) = field_bridge_name(e) {
+        let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
+        if let Some(t) = field_type(&class, &field).and_then(concrete) {
+            return Some(t);
+        }
     }
-    let field = field_bridge_name(e)?;
-    let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
-    field_type(&class, &field)
+    // (b) a 0-arg field read on a typed receiver (`article.errors` where
+    // `article: Article`) → the field's registered type, so a downstream
+    // `article.errors.empty?` knows it's an Array. Recurses on the receiver.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+        if args.is_empty() {
+            if let Some(crate::ty::Ty::Class { id, .. }) = effective_recv_ty(r) {
+                if let Some(t) = field_type(id.0.as_str(), method.as_str()).and_then(concrete) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    // Fall back to the node's own ty.
+    match e.ty.as_ref() {
+        Some(t) if !matches!(t, crate::ty::Ty::Untyped) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 /// The field name of a `record.__field__(:f)` bridge (a self-record field

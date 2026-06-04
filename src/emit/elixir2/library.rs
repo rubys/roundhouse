@@ -88,12 +88,23 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
         // `__struct_put__` bridges — session's `@data` has no attr).
         let fields = struct_fields(class);
         if !fields.is_empty() {
-            let decls = fields
+            // Framework-internal list fields (the AR `errors` collection,
+            // has_many `_cache`s) must default to `[]`, not `nil`: a fresh
+            // record (`%Struct{}` from `new`) does `record.errors.empty?` /
+            // `record.errors ++ [..]`, which raise on `nil`. Elixir's
+            // `defstruct` requires the bare-atom fields (nil default) FIRST,
+            // then the keyword-default ones — so partition rather than
+            // interleave.
+            let is_list_field = |f: &str| f == "errors" || f.ends_with("_cache");
+            let mut decls: Vec<String> = fields
                 .iter()
+                .filter(|f| !is_list_field(f))
                 .map(|f| format!(":{f}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(out, "  defstruct [{decls}]").unwrap();
+                .collect();
+            decls.extend(
+                fields.iter().filter(|f| is_list_field(f)).map(|f| format!("{f}: []")),
+            );
+            writeln!(out, "  defstruct [{}]", decls.join(", ")).unwrap();
             out.push('\n');
         }
     }

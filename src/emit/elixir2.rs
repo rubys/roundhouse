@@ -96,18 +96,35 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // functionalize passes, so the schema type is recorded here instead.
     for model in &app.models {
         if let Some(table) = app.schema.tables.get(&model.table.0) {
-            let fields: Vec<(String, crate::ty::Ty)> = table
+            let mut fields: Vec<(String, crate::ty::Ty)> = table
                 .columns
                 .iter()
                 .map(|c| {
                     (c.name.to_string(), crate::lower::model_to_library::ty_of_column(&c.col_type))
                 })
                 .collect();
+            // The AR `errors` collection is a list (not a schema column) —
+            // register it as Array so `record.errors.empty?` routes to
+            // `Enum.empty?` rather than a struct-method dispatch.
+            fields.push((
+                "errors".to_string(),
+                crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) },
+            ));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
             expr::register_field_types(&format!("{name}Row"), &fields);
         }
     }
+
+    // `id` is the universal AR primary key — every model's defstruct has
+    // it. Register it on the abstract `ActiveRecord::Base` so a generic
+    // `record` (typed `ActiveRecord::Base`, e.g. `dom_id`'s param) reads
+    // `record.id` as a struct field rather than the polymorphic
+    // `record.__struct__.id(record)` dispatch (there's no `id/1` method —
+    // `id` is a field). A genuine method on the generic record
+    // (`record.dom_prefix()`) isn't a registered field, so it still
+    // dispatches through `__struct__`.
+    expr::register_field_names("ActiveRecord::Base", &["id".to_string()]);
 
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the
