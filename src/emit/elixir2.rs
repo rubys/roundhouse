@@ -211,52 +211,47 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         expr::register_modules(model_lcs.iter());
         let model_names: std::collections::HashSet<String> =
             app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-        for mut lc in model_lcs {
-            // Skip the abstract `ApplicationRecord` base — concrete models
-            // are self-contained after materialization, so nothing
-            // instantiates it; emitting it would surface its lowering-added
-            // `create`/`create!` (which call a `new` it lacks).
-            if lc.name.0.as_str() == "ApplicationRecord" {
-                continue;
-            }
-            // Only concrete models get the AR-baseline CRUD materialized —
-            // not the `<Model>Row` data holders, which have no `new`/table
-            // and would get a `create` calling an absent `new`.
-            if model_names.contains(lc.name.0.as_str()) {
-                materialize_inherited(&mut lc, &base_methods);
-            }
-            for class in crate::lower::functionalize::functionalize(vec![lc]) {
-                if let Ok(content) = library::emit_library_class(&class) {
-                    let file = format!(
-                        "{}.ex",
-                        class.name.0.as_str().to_lowercase().replace("::", "_")
-                    );
-                    out.push(EmittedFile {
-                        path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
-                        content,
-                    });
-                }
-            }
-        }
 
-        // Views — the `Views::<Resource>.<partial>(record)` modules the
-        // model after_*_commit callbacks render into broadcast HTML.
-        // Lowered the same way as go2/rust2 (HTML + JBuilder merged per
-        // resource), then run through the functional pass family + the
-        // generic library emit. EXPLORATORY (env-gated separately) while
-        // the supporting-module + view-builder-emit gaps are mapped.
-        if std::env::var("RH_ELIXIR2_VIEWS").is_ok() && !app.views.is_empty() {
-            let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        // Build the view layer (RouteHelpers + Importmap + per-resource
+        // `Views::<Resource>` modules) UP FRONT — before model emit — so a
+        // model after_*_commit broadcast ref (`Views::Articles.article(
+        // record)`) resolves to the registered `V2.Views.Articles`.
+        // Mirrors go2's lower-all → register-all → emit-all order
+        // (go2.rs:313-400). Gated on views (their only consumer today;
+        // controllers, the other RouteHelpers caller, aren't yet v2-emitted).
+        let views_enabled = std::env::var("RH_ELIXIR2_VIEWS").is_ok() && !app.views.is_empty();
+        let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+        let mut view_layer_lcs: Vec<crate::dialect::LibraryClass> = Vec::new();
+        if views_enabled {
+            // RouteHelpers (`<name>_path(args)`) + Importmap (`pins`/`entry`)
+            // — lowered into module-flavored LCs, the same library-emit
+            // pipeline as models/views (→ `V2.RouteHelpers`/`V2.Importmap`,
+            // self-contained so v1's `Roundhouse.*` can be retired).
+            if !route_helper_funcs.is_empty() {
+                view_layer_lcs
+                    .push(module_funcs_to_library_class("RouteHelpers", &route_helper_funcs));
+            }
+            let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+            if !importmap_funcs.is_empty() {
+                view_layer_lcs
+                    .push(module_funcs_to_library_class("Importmap", &importmap_funcs));
+            }
+            // Per-resource Views (HTML + JBuilder merged by struct name),
+            // typed against the model registry AND the route helpers (so a
+            // partial's `RouteHelpers.article_path(article.id)` arg types).
+            let mut view_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
                 model_registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            view_extras
+                .extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
             let mut raw_lcs = crate::lower::view_to_library::lower_views_to_library_classes(
                 &app.views,
                 app,
-                model_extras.clone(),
+                view_extras.clone(),
             );
             raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
                 &app.views,
                 app,
-                model_extras,
+                view_extras,
             ));
             // Merge HTML + JSON variants by struct name (one
             // `Views::<Resource>` module per resource — go2.rs:369).
@@ -278,28 +273,90 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                     })
                     .or_insert(lc);
             }
-            let view_lcs: Vec<_> = merged.into_values().collect();
-            expr::register_modules(view_lcs.iter());
-            for lc in view_lcs {
-                for class in crate::lower::functionalize::functionalize(vec![lc]) {
-                    let file = format!(
-                        "{}.ex",
-                        class.name.0.as_str().to_lowercase().replace("::", "_")
-                    );
-                    let content = match library::emit_library_class(&class) {
-                        Ok(c) => c,
-                        Err(e) => format!("# emit_library_class FAILED: {e}\n"),
-                    };
-                    out.push(EmittedFile {
-                        path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
-                        content,
-                    });
-                }
+            view_layer_lcs.extend(merged.into_values());
+            // Register ALL view-layer modules before model emit so cross-
+            // refs (model→Views, view→RouteHelpers/Importmap) resolve.
+            expr::register_modules(view_layer_lcs.iter());
+        }
+
+        for mut lc in model_lcs {
+            // Skip the abstract `ApplicationRecord` base — concrete models
+            // are self-contained after materialization, so nothing
+            // instantiates it; emitting it would surface its lowering-added
+            // `create`/`create!` (which call a `new` it lacks).
+            if lc.name.0.as_str() == "ApplicationRecord" {
+                continue;
             }
+            // Only concrete models get the AR-baseline CRUD materialized —
+            // not the `<Model>Row` data holders, which have no `new`/table
+            // and would get a `create` calling an absent `new`.
+            if model_names.contains(lc.name.0.as_str()) {
+                materialize_inherited(&mut lc, &base_methods);
+            }
+            emit_library_lc(lc, &mut out);
+        }
+        for lc in view_layer_lcs {
+            emit_library_lc(lc, &mut out);
         }
     }
 
     out
+}
+
+/// Functionalize a `LibraryClass` and append its emitted `.ex` file(s)
+/// to `out` (one per sibling module the LC expands to). A failed emit
+/// becomes a visible `# emit_library_class FAILED` sentinel rather than
+/// a silently-dropped file, so `mix compile` surfaces the gap.
+fn emit_library_lc(lc: crate::dialect::LibraryClass, out: &mut Vec<EmittedFile>) {
+    for class in crate::lower::functionalize::functionalize(vec![lc]) {
+        let file = format!(
+            "{}.ex",
+            class.name.0.as_str().to_lowercase().replace("::", "_")
+        );
+        let content = match library::emit_library_class(&class) {
+            Ok(c) => c,
+            Err(e) => format!("# emit_library_class FAILED: {e}\n"),
+        };
+        out.push(EmittedFile {
+            path: output_path(OutputKind::TranspiledRuntime { file_name: &file }).path,
+            content,
+        });
+    }
+}
+
+/// Bundle a set of module-level `LibraryFunction`s (route helpers,
+/// importmap) into a module-flavored `LibraryClass`, so the same
+/// `emit_library_class` pipeline produces `V2.<Name>` with bare class
+/// functions. Mirrors `go2.rs::module_funcs_to_library_class`.
+fn module_funcs_to_library_class(
+    name: &str,
+    funcs: &[crate::dialect::LibraryFunction],
+) -> crate::dialect::LibraryClass {
+    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from(name)),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
+            block_param: None,
+        })
+        .collect();
+    LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from(name)),
+        is_module: true,
+        parent: None,
+        includes: Vec::new(),
+        methods,
+        origin: None,
+    }
 }
 
 /// The AR-baseline method definitions from `active_record/base.rb` (the
