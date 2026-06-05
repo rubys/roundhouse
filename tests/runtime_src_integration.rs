@@ -73,11 +73,11 @@ fn inflector_pluralize_lives_in_runtime_rust() {
     assert_emitted_lives_in(&emitted, "runtime/rust/view_helpers.rs");
 }
 
-#[test]
-fn inflector_pluralize_lives_in_runtime_elixir() {
-    let emitted = roundhouse::emit::elixir::emit_method(&pluralize_method());
-    assert_emitted_lives_in(&emitted, "runtime/elixir/view_helpers.ex");
-}
+// Phase D3 (2026-06-05) retired runtime/elixir/view_helpers.ex — the v2
+// path transpiles `runtime/ruby/action_view/view_helpers.rb` into the emit
+// output instead of hand-writing the Elixir file, so there's no
+// hand-written destination to validate against (mirrors the go retirement
+// below). `emit::elixir::emit_method` was removed with the v1 app shell.
 
 // Phase 6 step 3 (2026-05-24) retired runtime/go/view_helpers.go —
 // the v2 path transpiles `runtime/ruby/action_view/view_helpers.rb`
