@@ -37,6 +37,7 @@ use crate::App;
 mod expr;
 mod library;
 mod paths;
+mod test_emit;
 
 use paths::{output_path, OutputKind};
 
@@ -523,6 +524,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // W5 — the boot entry (`V2.Main.run/0`): open the DB + run the
             // server. The compare/boot driver invokes it via `mix run -e`.
             out.push(emit_main_file());
+
+            // W7 (Phase D2) — the v2 ExUnit test tree: `V2.TestClient`/
+            // `V2.TestResponse` runtime, v2 fixtures, and per-controller
+            // test modules under `test/v2/`. Distinct module names + paths
+            // from the v1 tree, so both suites run under `mix test` during
+            // the strangler phase. Model tests deferred (dual-return `save`
+            // call sites need functionalize support — see test_emit docs).
+            out.extend(test_emit::emit_test_files(app));
         }
     }
 
