@@ -12,10 +12,25 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::elixir;
 use roundhouse::ingest::ingest_app;
+
+/// Serialize the heavy `mix` work. cargo runs these `#[ignore]` tests in
+/// parallel; several concurrent `mix deps.get` / `mix compile` / `mix test`
+/// runs (esp. the multiple real-blog scratches) contend on Hex fetches and
+/// CPU, causing intermittent compile failures that pass on isolated re-run
+/// (see `project_elixir_ci_intermittent`). A process-wide lock makes the
+/// suite deterministic; the per-test cost is dwarfed by the mix runs.
+static MIX_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the mix serialization lock (poison-tolerant — a panicking test
+/// shouldn't wedge the rest).
+fn mix_guard() -> std::sync::MutexGuard<'static, ()> {
+    MIX_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn scratch_dir(fixture: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-elixir-check-{fixture}"))
@@ -85,6 +100,7 @@ fn assert_mix_compile_passes(fixture: &str, scratch: &Path) {
 #[test]
 #[ignore]
 fn tiny_blog_mix_compile_passes() {
+    let _g = mix_guard();
     let fixture = Path::new("fixtures/tiny-blog");
     let scratch = scratch_dir("tiny-blog");
     generate_project(fixture, &scratch);
@@ -94,6 +110,7 @@ fn tiny_blog_mix_compile_passes() {
 #[test]
 #[ignore]
 fn real_blog_mix_compile_passes() {
+    let _g = mix_guard();
     let fixture = Path::new("fixtures/real-blog");
     let scratch = scratch_dir("real-blog-compile");
     generate_project(fixture, &scratch);
@@ -105,6 +122,7 @@ fn real_blog_mix_compile_passes() {
 fn real_blog_mix_test_passes() {
     // Phase 2 forcing function: emit real-blog, run `mix test`,
     // assert zero failures. Phase-3 tests are tagged `:skip`.
+    let _g = mix_guard();
     let fixture = Path::new("fixtures/real-blog");
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
@@ -136,6 +154,7 @@ fn real_blog_v2_mix_test_passes() {
     // zero failures. `real_blog_mix_test_passes` already runs these as
     // part of the whole suite; this names the v2 coverage as its own gate
     // (and is the test that survives v1 deletion in D3).
+    let _g = mix_guard();
     let fixture = Path::new("fixtures/real-blog");
     let scratch = scratch_dir("real-blog-v2-test");
     generate_project(fixture, &scratch);

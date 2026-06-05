@@ -573,6 +573,16 @@ fn branch_render(b: &Expr, v: &str) -> String {
         ExprNode::If { cond, then_branch, else_branch } => {
             render_chain(cond, then_branch, else_branch, v)
         }
+        // A sequence whose last statement yields `v` (a trailing rebind, or
+        // a nested chain): emit the leading statements verbatim and
+        // recurse on the last so a nested `if` is rendered as a chain that
+        // yields `v` (not emitted as-is, which would drop the rebind).
+        ExprNode::Seq { exprs } if exprs.len() > 1 => {
+            let (last, leading) = exprs.split_last().unwrap();
+            let mut lines: Vec<String> = leading.iter().map(emit_stmt).collect();
+            lines.push(branch_render(last, v));
+            lines.join("\n")
+        }
         _ => emit_block_with_value(b),
     }
 }
@@ -609,12 +619,21 @@ fn emit_return_value(e: &Expr) -> String {
 }
 
 /// If the block's last statement reassigns an (already-bound) local
-/// variable, return its name — the signal for the cond-rebind lift.
+/// variable, return its name — the signal for the cond-rebind lift. A
+/// trailing `if` whose branches all rebind the same local counts too (a
+/// nested mutating conditional, e.g. the length-validation
+/// `unless attr.nil? do len = …; if len < n do record = … end end`):
+/// delegate to `chain_reassigned_var`, which finds + validates the var
+/// across the inner branches. `branch_yields` already accepts this shape;
+/// without this, the enclosing `if` isn't lifted and the rebind is lost.
 fn reassigned_var(e: &Expr) -> Option<String> {
     let last = match &*e.node {
         ExprNode::Seq { exprs } => exprs.last()?,
         _ => e,
     };
+    if let ExprNode::If { then_branch, else_branch, .. } = &*last.node {
+        return chain_reassigned_var(then_branch, else_branch);
+    }
     rebound_local(last)
 }
 
