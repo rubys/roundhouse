@@ -30,6 +30,20 @@ thread_local! {
     /// refs to the fully-qualified module name using this map.
     static MODULE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 
+    /// `"{simple_module}#{elixir_fn}"` → that function's declared params,
+    /// across ALL registered modules in the overlay. The cross-module
+    /// analogue of `METHOD_PARAMS` (which holds only the CURRENT class):
+    /// a qualified call like `ActionView::ViewHelpers.truncate(body,
+    /// length: 100)` reaches a callee in ANOTHER module, so its params
+    /// can't come from `METHOD_PARAMS`. Lets the Const-receiver call arm
+    /// spread a trailing keyword-args hash into the callee's defaulted
+    /// positionals (`truncate(body, 100)`) instead of passing it as a
+    /// literal map (which would land in the `length` slot and silently
+    /// defeat the helper — `String.length(s) <= %{length: 100}` is always
+    /// true in Elixir term ordering). Populated by `register_modules`.
+    static MODULE_METHOD_PARAMS: RefCell<HashMap<String, Vec<crate::dialect::Param>>> =
+        RefCell::new(HashMap::new());
+
     /// Elixir function names of the CURRENT class's instance methods that
     /// thread a leading `record` param. A self-call (`record.foo(args)`)
     /// routes to `foo(record, args)` only when `foo` is in here; a pure
@@ -241,6 +255,7 @@ fn threads_record(name: &str) -> bool {
 /// prior emit (e.g. another app in the same test process) doesn't leak.
 pub(super) fn clear_modules() {
     MODULE_NAMES.with(|m| m.borrow_mut().clear());
+    MODULE_METHOD_PARAMS.with(|m| m.borrow_mut().clear());
 }
 
 /// Register the `V2.*` names of `classes` into the registry, accumulating
@@ -248,20 +263,32 @@ pub(super) fn clear_modules() {
 /// front so cross-file constant references resolve). Idempotent: the
 /// per-unit transform may re-register the same names harmlessly.
 pub(super) fn register_modules<'a>(classes: impl IntoIterator<Item = &'a crate::dialect::LibraryClass>) {
-    MODULE_NAMES.with(|m| {
-        let mut m = m.borrow_mut();
-        for c in classes {
-            let full = super::library::v2_module_name(c.name.0.as_str());
-            let simple = c
-                .name
-                .0
-                .as_str()
-                .rsplit("::")
-                .next()
-                .unwrap_or_else(|| c.name.0.as_str())
-                .to_string();
-            m.insert(simple, full);
-        }
+    MODULE_NAMES.with(|names| {
+        MODULE_METHOD_PARAMS.with(|mparams| {
+            let mut names = names.borrow_mut();
+            let mut mparams = mparams.borrow_mut();
+            for c in classes {
+                let full = super::library::v2_module_name(c.name.0.as_str());
+                let simple = c
+                    .name
+                    .0
+                    .as_str()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_else(|| c.name.0.as_str())
+                    .to_string();
+                // Record each method's params under `{simple}#{fn}` so a
+                // cross-module qualified call can spread its kwargs (see
+                // MODULE_METHOD_PARAMS). Only methods with at least one
+                // defaulted param are spread candidates, but store all —
+                // `unpack_kwargs_with` no-ops when there's no kwargs hash.
+                for method in &c.methods {
+                    let fname = super::library::elixir_fn_name(method.name.as_str());
+                    mparams.insert(format!("{simple}#{fname}"), method.params.clone());
+                }
+                names.insert(simple, full);
+            }
+        });
     });
 }
 
@@ -1450,10 +1477,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 };
             }
             if args.is_empty() {
-                format!("{r_s}.{method}")
-            } else {
-                format!("{r_s}.{method}({})", emit_args(args))
+                return format!("{r_s}.{method}");
             }
+            // A qualified cross-module call (`ActionView::ViewHelpers
+            // .truncate(body, length: 100)`) whose callee has registered
+            // params spreads a trailing keyword-args hash into the callee's
+            // defaulted positionals — Elixir has no Ruby kwargs, so passing
+            // the hash whole lands it in the first optional's slot. (See
+            // MODULE_METHOD_PARAMS; `unpack_kwargs_with` no-ops on a plain
+            // arg list, so this is a transparent pass-through otherwise.)
+            if let ExprNode::Const { path } = &*r.node {
+                if let Some(simple) = path.last() {
+                    let fname = super::library::elixir_fn_name(method);
+                    let params = module_method_params(simple.as_str(), &fname);
+                    let arg_strs = unpack_kwargs_with(params.as_deref(), args);
+                    return format!("{r_s}.{method}({})", arg_strs.join(", "));
+                }
+            }
+            format!("{r_s}.{method}({})", emit_args(args))
         }
     }
 }
@@ -1471,10 +1512,27 @@ fn emit_args(args: &[Expr]) -> String {
 /// when the callee is unknown, the last arg isn't a kwargs hash, or a key
 /// doesn't match a param (so nothing is silently dropped).
 fn unpack_kwargs(fname: &str, args: &[Expr]) -> Vec<String> {
+    let params = METHOD_PARAMS.with(|m| m.borrow().get(fname).cloned());
+    unpack_kwargs_with(params.as_deref(), args)
+}
+
+/// The params of `fname` on the module with simple name `module` (a
+/// qualified cross-module callee), if that module was registered. See
+/// `MODULE_METHOD_PARAMS`.
+fn module_method_params(module: &str, fname: &str) -> Option<Vec<crate::dialect::Param>> {
+    MODULE_METHOD_PARAMS.with(|m| m.borrow().get(&format!("{module}#{fname}")).cloned())
+}
+
+/// As `unpack_kwargs`, but with the callee's params supplied explicitly —
+/// used for qualified cross-module calls (`ViewHelpers.truncate`), whose
+/// params live in `MODULE_METHOD_PARAMS`, not the current class's
+/// `METHOD_PARAMS`. With `params: None` (callee unknown) it falls back to
+/// a plain per-arg render, so nothing is dropped.
+fn unpack_kwargs_with(params: Option<&[crate::dialect::Param]>, args: &[Expr]) -> Vec<String> {
     let plain = || args.iter().map(emit_expr).collect::<Vec<_>>();
     let Some((last, head)) = args.split_last() else { return plain() };
     let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return plain() };
-    let Some(params) = METHOD_PARAMS.with(|m| m.borrow().get(fname).cloned()) else {
+    let Some(params) = params else {
         return plain();
     };
     if head.len() > params.len() {
@@ -2556,6 +2614,68 @@ mod tests {
         // An unknown callee falls back to a plain per-arg render.
         assert_eq!(unpack_kwargs("unknown_fn", &only_status).len(), 2);
         set_method_params(HashMap::new());
+    }
+
+    #[test]
+    fn qualified_cross_module_call_spreads_kwargs() {
+        use crate::dialect::{
+            AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param,
+        };
+        use crate::effect::EffectSet;
+        use crate::ident::ClassId;
+        let sp = || crate::span::Span::synthetic();
+        let int = |n: i64| Expr::new(sp(), ExprNode::Lit { value: Literal::Int { value: n } });
+        let str_lit =
+            |s: &str| Expr::new(sp(), ExprNode::Lit { value: Literal::Str { value: s.into() } });
+        let sym_lit = |s: &str| Expr::new(sp(), ExprNode::Lit {
+            value: Literal::Sym { value: Symbol::from(s) },
+        });
+        // `def truncate(s, length = 30, omission = "...")` on ViewHelpers.
+        let truncate = MethodDef {
+            name: Symbol::from("truncate"),
+            receiver: MethodReceiver::Class,
+            params: vec![
+                Param::positional(Symbol::from("s")),
+                Param::with_default(Symbol::from("length"), int(30)),
+                Param::with_default(Symbol::from("omission"), str_lit("...")),
+            ],
+            block_param: None,
+            body: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        };
+        let vh = LibraryClass {
+            name: ClassId(Symbol::from("ActionView::ViewHelpers")),
+            is_module: true,
+            parent: None,
+            includes: vec![],
+            methods: vec![truncate],
+            origin: None,
+        };
+        clear_modules();
+        register_modules(std::iter::once(&vh));
+
+        // `ActionView::ViewHelpers.truncate(body, length: 100)` — the kwargs
+        // hash spreads into the `length` positional (`omission` trails at
+        // its default → dropped), NOT passed as a literal map.
+        let kwargs = Expr::new(sp(), ExprNode::Hash {
+            entries: vec![(sym_lit("length"), int(100))],
+            kwargs: true,
+        });
+        let call_expr = call(
+            const_path("ViewHelpers"),
+            "truncate",
+            vec![var_t("body", Ty::Untyped), kwargs],
+        );
+        assert_eq!(
+            emit_expr(&call_expr),
+            "V2.ActionView.ViewHelpers.truncate(body, 100)"
+        );
+        clear_modules();
     }
 
     #[test]

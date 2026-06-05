@@ -118,6 +118,18 @@ case "$TARGET" in
         ;;
 esac
 
+# elixir2 strangler opt-in. `ROUNDHOUSE_ELIXIR_V2=1 scripts/compare elixir`
+# emits + boots the v2 overlay (models+views+controllers+dispatch/main/
+# server) instead of the legacy `src/emit/elixir/` app shell — the analogue
+# of go2's ROUNDHOUSE_GO_V2. The gates are read with std::env::var inside
+# emit_overlay_files, so exporting them here flows through the emit_preview
+# child (the v2 files are additive — both v1 `App.Main` and v2 `V2.Main`
+# compile; the run step below boots `V2.Main.run` when this is set).
+ELIXIR_V2="${ROUNDHOUSE_ELIXIR_V2:-0}"
+if [[ "$TARGET" == elixir && "$ELIXIR_V2" == 1 ]]; then
+    export RH_ELIXIR2_MODELS=1 RH_ELIXIR2_VIEWS=1 RH_ELIXIR2_CONTROLLERS=1
+fi
+
 if [[ ${#PATHS[@]} -eq 0 ]]; then
     PATHS=(/ /articles /articles/1 /articles/new /articles/1/edit)
     # JSON paths exercise the jbuilder lowerer end-to-end. The
@@ -413,7 +425,11 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         elixir)
-            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e 'App.Main.run' >"$TARGET_LOG" 2>&1) &
+            # v2 overlay boots V2.Main.run (Plug/Cowboy → v2 stack);
+            # legacy v1 boots App.Main.run. Selected by ROUNDHOUSE_ELIXIR_V2.
+            EX_ENTRY='App.Main.run'
+            [[ "$ELIXIR_V2" == 1 ]] && EX_ENTRY='V2.Main.run'
+            (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e "$EX_ENTRY" >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         ruby)
