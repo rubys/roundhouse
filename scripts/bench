@@ -16,6 +16,8 @@
 #
 #   `go` = Roundhouse-emit Go (single AOT binary, net/http server,
 #          modernc.org/sqlite). Built from `cmd/v2/main.go`.
+#   `elixir` = Roundhouse-emit Elixir (BEAM, Plug.Cowboy + Exqlite).
+#          One node, scheduler concurrency — `--workers` is ignored.
 #
 #   `rails`     = Rails reference (Puma + YJIT, production env)
 #   `rails-int` = Rails reference (Puma, YJIT disabled, baseline)
@@ -107,8 +109,8 @@ if [[ ${#ENDPOINTS[@]} -eq 0 ]]; then
     # Mirrors scripts/compare's per-target JSON path additions (case
     # branch at scripts/compare:132); all currently-supported bench
     # targets (rails, rails-int, ruby, ruby-int, typescript, crystal,
-    # rust, spinel, go) strip the `.json` suffix before routing and
-    # dispatch on `controller.request_format`. Add `--endpoint` to
+    # rust, spinel, go, elixir) strip the `.json` suffix before routing
+    # and dispatch on `controller.request_format`. Add `--endpoint` to
     # override entirely; this default is the publication-grade mix.
     ENDPOINTS+=(/articles.json /articles/1.json)
 fi
@@ -117,13 +119,14 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go|elixir) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
         sp) NORMALIZED+=(spinel) ;;
+        ex) NORMALIZED+=(elixir) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go elixir" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -148,6 +151,10 @@ SP_OUT="$REPO_ROOT/build/transpiled-blog-spinel"
 # default path `runtime/go/v2/server.go` looks for when DATABASE_PATH
 # is unset).
 GO_OUT="$REPO_ROOT/build/transpiled-blog-go"
+# Elixir target — emit_preview writes here (matches scripts/compare's
+# BUILD_DIR for the elixir target). `Server.start` opens the staged DB at
+# `storage/development.sqlite3` relative to this dir.
+EX_OUT="/tmp/rh-ex-pass2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -395,6 +402,19 @@ build_target() {
                 (cd "$GO_OUT" && go mod tidy && mkdir -p .bin && go build -o .bin/server ./cmd/v2/) || return 1
             fi
             ;;
+        elixir)
+            # `emit_preview --target elixir` writes the lowered-IR Elixir
+            # app to $EX_OUT; `mix compile` builds it. The shared
+            # `Roundhouse.Db` connection opens the staged DB (see stage_db).
+            TARGET_BUILD_DIR="$EX_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$EX_OUT/mix.exs" ]]; then
+                step "regenerating elixir target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target elixir "$FIXTURE" >/dev/null 2>&1) || return 1
+            fi
+            step "building elixir target (mix compile)"
+            (cd "$EX_OUT" && mix deps.get >/dev/null 2>&1 && MIX_ENV=prod mix compile >/dev/null) || return 1
+            ;;
     esac
 }
 
@@ -448,6 +468,14 @@ stage_db() {
             # Default path the v2 server.go reads when DATABASE_PATH is
             # unset; mirrors scripts/compare's go DB_DEST.
             local db="$GO_OUT/storage/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        elixir)
+            # Path `Server.start` opens (relative to $EX_OUT); mirrors
+            # scripts/compare's elixir DB_DEST.
+            local db="$EX_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -579,6 +607,19 @@ start_target() {
             (cd "$GO_OUT" && \
                 PORT="$port" \
                 ./.bin/server \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        elixir)
+            # BEAM VM — one node, scheduler-level concurrency. No worker
+            # processes: `workers` is ignored and per-cell rows record
+            # workers=1 (like go). `Main.run` boots Plug.Cowboy via
+            # `Server.start`, which opens the staged DB and blocks.
+            (cd "$EX_OUT" && \
+                PORT="$port" \
+                MIX_ENV=prod \
+                mix run --no-halt -e 'Main.run' \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
