@@ -217,13 +217,15 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         expr::register_module("Db", "V2.Db");
         expr::register_module("Broadcasts", "V2.Broadcasts");
         let base_methods = ar_base_methods();
-        // The AR-baseline dual `{record, value}` methods (`save`/`valid?`/
-        // `destroy`) — controllers call these on a model-typed field
-        // (`@article.save`), and their field-receiver call sites must
-        // destructure the tuple rather than test it whole (always truthy).
-        let model_duals = crate::lower::functionalize::mutation_to_struct_return::dual_method_names(
-            &base_methods,
-        );
+        // The model dual `{record, value}` methods (`save`/`valid?`/
+        // `destroy`, and the per-model synthesized `update` whose tail
+        // `save` propagates dual) — controllers call these on a model-typed
+        // field (`@article.save`/`.update`), and their field-receiver call
+        // sites must destructure the tuple rather than test it whole
+        // (always truthy). Seeded from the AR baseline; extended below with
+        // each materialized model's methods (which carry `update`).
+        let mut model_duals =
+            crate::lower::functionalize::mutation_to_struct_return::dual_method_names(&base_methods);
         // Strong-params specs from the controllers: each `permit(...)`
         // declares a `<Resource>Params` factory the model lowerer wires
         // into `Model.from_params(...)` (controller `Model.new(
@@ -378,6 +380,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // and would get a `create` calling an absent `new`.
             if model_names.contains(lc.name.0.as_str()) {
                 materialize_inherited(&mut lc, &base_methods);
+                // Pick up per-model dual methods (the synthesized `update`,
+                // dual by tail-call propagation to `save`) for the
+                // controller field-receiver call sites (`if @article.update`).
+                model_duals.extend(
+                    crate::lower::functionalize::mutation_to_struct_return::dual_method_names(
+                        &lc.methods,
+                    ),
+                );
             }
             emit_library_lc(lc, &mut out);
         }

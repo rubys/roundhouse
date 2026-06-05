@@ -53,22 +53,35 @@ const RECORD: &str = "record";
 /// so a self-call can be rebound at the call site. Computed once per
 /// class (on the post-while-recursion method list) and threaded into
 /// every `transform_method` call.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Registry {
     /// Methods that mutate `record` and return it (no value return) —
     /// a self-call statement `m` becomes `record = m(record)`.
     pub record_returning: std::collections::HashSet<String>,
-    /// Mutate-AND-return-value methods (`save`/`valid?`) that emit a
-    /// `{record, value}` tuple — a self-call destructures the tuple
-    /// (`{record, ok} = m(record)` / `{record, _} = m(record)`).
+    /// Mutate-AND-return-value methods (`save`/`valid?`) DEFINED in this
+    /// class that emit a `{record, value}` tuple — a self-call
+    /// destructures the tuple (`{record, ok} = m(record)`).
     pub dual_return: std::collections::HashSet<String>,
+    /// Dual methods defined in OTHER classes that this class CALLS on a
+    /// typed field/local (a controller's `@article.save`/`.update`). Used
+    /// only to destructure those call sites — NOT to classify a same-named
+    /// method defined here (the controller's own `update` action is not
+    /// dual just because the model's `update` is).
+    pub external_dual: std::collections::HashSet<String>,
 }
 
 impl Registry {
     fn is_record_returning(&self, name: &str) -> bool {
         self.record_returning.contains(name)
     }
+    /// True when a CALL to `name` returns a `{record, value}` tuple to
+    /// destructure — a dual method defined here OR in a called class.
     fn is_dual(&self, name: &str) -> bool {
+        self.dual_return.contains(name) || self.external_dual.contains(name)
+    }
+    /// True when `name` is a dual method DEFINED in this class — the
+    /// signal for routing its own definition to the tuple-return rewrite.
+    fn is_own_dual(&self, name: &str) -> bool {
         self.dual_return.contains(name)
     }
 }
@@ -92,6 +105,38 @@ pub fn compute_registry(methods: &[MethodDef]) -> Registry {
             reg.dual_return.insert(m.name.to_string());
         } else {
             reg.record_returning.insert(m.name.to_string());
+        }
+    }
+    // Dual propagation: a mutating method whose tail is a self-call to a
+    // dual method is itself dual — `update`'s body ends in `save`, so it
+    // returns save's `{record, bool}` tuple, not just the record. Iterate
+    // to a fixpoint (chains: `a` tail-calls `b` tail-calls `save`).
+    let eligible: Vec<&MethodDef> = methods
+        .iter()
+        .filter(|m| {
+            m.receiver != MethodReceiver::Class
+                && m.name.as_str() != "initialize"
+                && !m.name.as_str().ends_with("__loop")
+                && mutates_record(&m.body)
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for m in &eligible {
+            let name = m.name.to_string();
+            if reg.dual_return.contains(&name) {
+                continue;
+            }
+            if let Some((recv, callee)) = threaded_call(tail(&m.body)) {
+                if recv == RECORD && reg.is_dual(callee) {
+                    reg.record_returning.remove(&name);
+                    reg.dual_return.insert(name);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
     reg
@@ -127,8 +172,12 @@ pub fn transform_method(mut m: MethodDef, reg: &Registry) -> MethodDef {
     }
     // Mutate-and-return-value (`save`/`valid?`/flash#delete) — a single
     // struct return can't carry both the mutated record and the value,
-    // so emit a `{record, value}` tuple (callers destructure it).
-    if mutates_record(&m.body) && returns_genuine_value(&m.body) {
+    // so emit a `{record, value}` tuple (callers destructure it). Also
+    // covers a method the registry classified dual by PROPAGATION (its
+    // tail is a dual self-call, e.g. `update` ending in `save`).
+    if (mutates_record(&m.body) && returns_genuine_value(&m.body))
+        || reg.is_own_dual(m.name.as_str())
+    {
         // Emit a `{record, value}` tuple: thread `record` through the
         // body, lift record-mutating `if`s so the mutations leak past
         // them, and wrap each exit value. Callers destructure the tuple.
@@ -290,11 +339,43 @@ fn rewrite(mut m: MethodDef, reg: &Registry) -> MethodDef {
 /// becomes `{record, v}`. Callers destructure the tuple.
 fn rewrite_dual_return(mut m: MethodDef, reg: &Registry) -> MethodDef {
     let body = rewrite_expr(&m.body);
+    // A method whose TAIL is itself a dual self-call (`update`'s trailing
+    // `save`) already produces the `{record, value}` tuple — thread the
+    // preceding mutations, then return that call as-is (the emitter
+    // threads `record` as its receiver), rather than destructuring it
+    // (which would discard the value) and re-wrapping a fresh tuple.
+    if let Some((init, tail_call)) = split_dual_tail_call(&body, reg) {
+        let init = rebind_record_calls(&init, reg);
+        let init = thread_branches(&init);
+        let init = wrap_returns(&init);
+        let mut stmts = match &*init.node {
+            ExprNode::Seq { exprs } => exprs.clone(),
+            _ => vec![init],
+        };
+        stmts.push(tail_call);
+        m.body = syn(ExprNode::Seq { exprs: stmts });
+        return m;
+    }
     let body = rebind_record_calls(&body, reg);
     let body = thread_branches(&body);
     let body = wrap_returns(&body);
     m.body = wrap_tail(&body);
     m
+}
+
+/// If `body` is a `Seq` whose last statement is a bare dual self-call
+/// (`update`'s trailing `save`), split it into (body-without-tail,
+/// tail-call). That tail already yields the `{record, value}` tuple, so it
+/// becomes the method's return verbatim instead of being destructured.
+fn split_dual_tail_call(body: &Expr, reg: &Registry) -> Option<(Expr, Expr)> {
+    let ExprNode::Seq { exprs } = &*body.node else { return None };
+    let last = exprs.last()?;
+    let (recv, callee) = threaded_call(last)?;
+    if recv != RECORD || !reg.is_dual(callee) {
+        return None;
+    }
+    let init = syn(ExprNode::Seq { exprs: exprs[..exprs.len() - 1].to_vec() });
+    Some((init, last.clone()))
 }
 
 /// Lift a non-tail `if` that mutates `record` in its branches into a
@@ -1698,5 +1779,46 @@ mod tests {
         );
         // branch on the captured boolean, not the tuple
         assert!(ex.contains("if ok do"), "tests the captured boolean:\n{ex}");
+    }
+
+    #[test]
+    fn tail_dual_self_call_propagates_dual_and_returns_the_tuple() {
+        // `def update(p); self.title = p.title; save; end` — its tail is the
+        // dual `save`, so `update` is itself dual and must RETURN save's
+        // `{record, value}` tuple (not destructure it, dropping the value).
+        let save = instance_method(
+            "save",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    assign_ivar("id", syn(ExprNode::Lit { value: Literal::Int { value: 1 } })),
+                    syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
+                ],
+            }),
+        );
+        let update = instance_method(
+            "update",
+            &["p"],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    send(
+                        Some(syn(ExprNode::SelfRef)),
+                        "title=",
+                        vec![send(Some(vr("p")), "title", vec![])],
+                    ),
+                    send(None, "save", vec![]),
+                ],
+            }),
+        );
+        // Registry classifies `save` dual, then propagates dual to `update`.
+        let reg = compute_registry(&[save.clone(), update.clone()]);
+        assert!(reg.dual_return.contains("save"), "save is dual");
+        assert!(reg.dual_return.contains("update"), "update propagates dual:\n{reg:?}");
+        let ex = render_all(vec![save, update]);
+        eprintln!("--- update ---\n{ex}\n--------------");
+        // `update` returns `save(record)` verbatim (the tuple) — NOT a
+        // destructure (`{record, _} = save`) that would drop the bool.
+        assert!(ex.contains("save(record)"), "returns save's tuple:\n{ex}");
+        assert!(!ex.contains("{record, _} = save"), "doesn't drop the bool:\n{ex}");
     }
 }

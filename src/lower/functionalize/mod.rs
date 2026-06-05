@@ -74,9 +74,11 @@ pub fn functionalize_with_external_duals(
             // destructure its `valid?` call, etc.
             let mut registry = mutation_to_struct_return::compute_registry(&after_while);
             // Cross-class dual methods (a controller calling a model's
-            // `save`/`update`) — merge so their field-receiver call sites
-            // destructure the tuple too.
-            registry.dual_return.extend(external_duals.iter().cloned());
+            // `save`/`update`) — recorded separately from this class's own
+            // duals so their CALL SITES destructure the tuple, WITHOUT
+            // mis-classifying a same-named method defined here (the
+            // controller's own `update` action is record-returning).
+            registry.external_dual.extend(external_duals.iter().cloned());
             class.methods = after_while
                 .into_iter()
                 .map(|m| mutation_to_struct_return::transform_method(m, &registry))
