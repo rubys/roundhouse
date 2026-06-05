@@ -39,6 +39,40 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+/// Generate the project via the `roundhouse` binary in a child process,
+/// with the elixir2 overlay gates (`RH_ELIXIR2_{MODELS,VIEWS,CONTROLLERS}`)
+/// set on that child only. The gates are read with `std::env::var` inside
+/// `emit_overlay_files`, so setting them in *this* process would leak into
+/// the parallel in-process v1 tests' `elixir::emit` calls and make them
+/// emit (and fail to compile) the v2 tree. Shelling out isolates them.
+fn generate_project_v2(fixture_path: &Path, out: &Path) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .arg("--target")
+        .arg("elixir")
+        .arg(fixture_path)
+        .arg("-o")
+        .arg(out)
+        .env("RH_ELIXIR2_MODELS", "1")
+        .env("RH_ELIXIR2_VIEWS", "1")
+        .env("RH_ELIXIR2_CONTROLLERS", "1")
+        .output()
+        .expect("run roundhouse --target elixir");
+    assert!(
+        output.status.success(),
+        "roundhouse emit (v2 gates on) failed for {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        fixture_path.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn mix_deps_get(scratch: &Path) {
     let output = Command::new("mix")
         .arg("deps.get")
@@ -97,6 +131,24 @@ fn real_blog_mix_compile_passes() {
     let scratch = scratch_dir("real-blog-compile");
     generate_project(fixture, &scratch);
     assert_mix_compile_passes("real-blog", &scratch);
+}
+
+#[test]
+#[ignore]
+fn real_blog_v2_overlay_mix_compile_passes() {
+    // elixir2 strangler forcing function: emit real-blog with the full
+    // v2 overlay on (models + views + controllers + dispatch/main/server)
+    // and assert the emitted project mix-compiles clean under
+    // `--warnings-as-errors`. This is the end-to-end gate the per-layer
+    // `emit_library_class` unit tests can't give — it proves the whole
+    // overlay links and compiles as one app, the precondition for byte
+    // parity vs Rails and the eventual v1 switchover. real-blog has no
+    // associations, so the open `has_many` recursion-lowering gap doesn't
+    // apply here — it's the first fixture expected green.
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog-v2-compile");
+    generate_project_v2(fixture, &scratch);
+    assert_mix_compile_passes("real-blog (v2 overlay)", &scratch);
 }
 
 #[test]
