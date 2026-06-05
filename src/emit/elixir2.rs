@@ -152,20 +152,12 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         }
     };
 
-    let views_enabled = std::env::var("RH_ELIXIR2_VIEWS").is_ok();
     for unit in &units {
         let file_name = unit
             .out_path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unit.ex".to_string());
-        // `view_helpers.ex` is parsed + registered unconditionally (so the
-        // view emit's `ActionView::ViewHelpers.*` references resolve), but
-        // only EMITTED under the views gate while its transpile is being
-        // driven to a clean `mix compile` — mirrors the models/views gate.
-        if file_name == "view_helpers.ex" && !views_enabled {
-            continue;
-        }
         let dest = output_path(OutputKind::TranspiledRuntime { file_name: &file_name });
         out.push(EmittedFile {
             path: dest.path,
@@ -202,14 +194,12 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // targets get via embedding/traits. (See "how does Phoenix"
         // resolution: schema-module + Repo, no Base module.)
         //
-        // Env-gated (off by default) while one gap remains: the has_many
-        // getter's `while`-in-`if`-branch hydration loop isn't yet
-        // recursion-lowered, so the model files don't all mix-compile.
-        // Gating keeps the default toolchain test green (mirrors go2's
-        // overlay env-gate); flip `RH_ELIXIR2_MODELS` to emit + iterate.
-        if std::env::var("RH_ELIXIR2_MODELS").is_err() {
-            return out;
-        }
+        // Phase D (2026-06-05): emitted unconditionally — v2 is the default
+        // elixir target. real-blog + tiny-blog (both with associations)
+        // compile clean and reach byte-parity with Rails. An app whose
+        // has_many getter hits the not-yet-recursion-lowered `while`-in-`if`
+        // hydration shape would still fail to mix-compile; no such fixture
+        // is in CI, and the gap is tracked for Phase-D follow-up.
         // The lowered model emit references the DB primitive as bare
         // `Db.prepare`/`Db.step?`/… — resolve those to the hand-written
         // `V2.Db` module (db.ex above). Likewise `Broadcasts.<action>`
@@ -267,7 +257,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // Mirrors go2's lower-all → register-all → emit-all order
         // (go2.rs:313-400). Gated on views (their only consumer today;
         // controllers, the other RouteHelpers caller, aren't yet v2-emitted).
-        let views_enabled = std::env::var("RH_ELIXIR2_VIEWS").is_ok() && !app.views.is_empty();
+        let views_enabled = !app.views.is_empty();
         let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
         let mut view_layer_lcs: Vec<crate::dialect::LibraryClass> = Vec::new();
         if views_enabled {
@@ -402,11 +392,9 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // methods (initialize/render/redirect_to/head/resolve_status) are
         // MATERIALIZED into each concrete controller — the same
         // linearization the model emit does with the AR baseline.
-        // Env-gated (RH_ELIXIR2_CONTROLLERS) while the controller action
-        // bodies are driven to a clean `mix compile`; requires views
+        // Phase D: emitted unconditionally (v2 default); requires views
         // (action bodies render `V2.Views.*`).
-        let controllers_enabled =
-            std::env::var("RH_ELIXIR2_CONTROLLERS").is_ok() && !app.controllers.is_empty();
+        let controllers_enabled = !app.controllers.is_empty();
         if controllers_enabled {
             let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
                 model_registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

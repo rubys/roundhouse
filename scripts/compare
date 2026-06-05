@@ -118,17 +118,13 @@ case "$TARGET" in
         ;;
 esac
 
-# elixir2 strangler opt-in. `ROUNDHOUSE_ELIXIR_V2=1 scripts/compare elixir`
-# emits + boots the v2 overlay (models+views+controllers+dispatch/main/
-# server) instead of the legacy `src/emit/elixir/` app shell — the analogue
-# of go2's ROUNDHOUSE_GO_V2. The gates are read with std::env::var inside
-# emit_overlay_files, so exporting them here flows through the emit_preview
-# child (the v2 files are additive — both v1 `App.Main` and v2 `V2.Main`
-# compile; the run step below boots `V2.Main.run` when this is set).
-ELIXIR_V2="${ROUNDHOUSE_ELIXIR_V2:-0}"
-if [[ "$TARGET" == elixir && "$ELIXIR_V2" == 1 ]]; then
-    export RH_ELIXIR2_MODELS=1 RH_ELIXIR2_VIEWS=1 RH_ELIXIR2_CONTROLLERS=1
-fi
+# elixir2 (the `V2.*` overlay: models+views+controllers+dispatch/main/
+# server) is the DEFAULT elixir target as of Phase D. The compiler emits
+# it unconditionally; this flag only selects which entry point the run
+# step boots — `V2.Main.run` by default, or the legacy `App.Main.run`
+# under `ROUNDHOUSE_ELIXIR_V1=1` (retained as a fallback until the v1 app
+# shell is deleted).
+ELIXIR_V1="${ROUNDHOUSE_ELIXIR_V1:-0}"
 
 if [[ ${#PATHS[@]} -eq 0 ]]; then
     PATHS=(/ /articles /articles/1 /articles/new /articles/1/edit)
@@ -147,11 +143,11 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
             PATHS+=(/articles.json /articles/1.json)
             ;;
         elixir)
-            # The legacy v1 elixir server doesn't strip `.json`; the v2
-            # overlay's server does (V2.Server detects the suffix → `:json`
-            # format, controllers dispatch on `record.request_format` into
-            # the `*_json` jbuilder views). So exercise JSON only under v2.
-            [[ "$ELIXIR_V2" == 1 ]] && PATHS+=(/articles.json /articles/1.json)
+            # The v2 overlay's server (default) strips `.json` → `:json`
+            # format and dispatches on `record.request_format` into the
+            # `*_json` jbuilder views; the legacy v1 server doesn't strip
+            # it. So exercise JSON unless the v1 fallback is selected.
+            [[ "$ELIXIR_V1" == 1 ]] || PATHS+=(/articles.json /articles/1.json)
             ;;
     esac
 fi
@@ -432,10 +428,10 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         elixir)
-            # v2 overlay boots V2.Main.run (Plug/Cowboy → v2 stack);
-            # legacy v1 boots App.Main.run. Selected by ROUNDHOUSE_ELIXIR_V2.
-            EX_ENTRY='App.Main.run'
-            [[ "$ELIXIR_V2" == 1 ]] && EX_ENTRY='V2.Main.run'
+            # v2 overlay (default) boots V2.Main.run (Plug/Cowboy → v2
+            # stack); legacy v1 boots App.Main.run under ROUNDHOUSE_ELIXIR_V1.
+            EX_ENTRY='V2.Main.run'
+            [[ "$ELIXIR_V1" == 1 ]] && EX_ENTRY='App.Main.run'
             (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e "$EX_ENTRY" >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
