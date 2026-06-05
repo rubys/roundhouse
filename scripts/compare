@@ -146,6 +146,13 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
         ruby|spinel|typescript|crystal|go|rust)
             PATHS+=(/articles.json /articles/1.json)
             ;;
+        elixir)
+            # The legacy v1 elixir server doesn't strip `.json`; the v2
+            # overlay's server does (V2.Server detects the suffix → `:json`
+            # format, controllers dispatch on `record.request_format` into
+            # the `*_json` jbuilder views). So exercise JSON only under v2.
+            [[ "$ELIXIR_V2" == 1 ]] && PATHS+=(/articles.json /articles/1.json)
+            ;;
     esac
 fi
 
