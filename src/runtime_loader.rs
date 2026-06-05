@@ -1224,3 +1224,167 @@ where
         }
     }
 }
+
+// -------- Python target (strangler scaffold) --------
+//
+// Modeled on `TS_TARGET` / `TYPESCRIPT_RUNTIME`, not Elixir: Python is
+// mutable + imperative (no functionalize), and its import/constant
+// syntax are structural twins of TS's (`from m import X`,
+// `NAME = value`). The framework files land under `app/*.py`, replacing
+// the hand-written `runtime/python/*.py` duplicates one entry at a time.
+//
+// This path is DORMANT: nothing in `emit::python::emit` consumes
+// `python_units` yet, so the shipping Python target stays green. A test
+// drives it to keep the inventory signal live; entries graduate from
+// hand-written to transpiled as the body walker is confirmed per file.
+
+const PYTHON_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::python::emit_module,
+    emit_library_class: crate::emit::python::emit_library_class,
+    format_import: py_format_import,
+    format_constant: py_format_constant,
+    // Python models module-singleton state (ViewHelpers' `@slots`) in a
+    // hand-written holder, same opt-out as TS/Crystal/Rust.
+    format_module_ivar: None,
+    wrap_namespace: py_wrap_namespace,
+};
+
+/// Python `from <module> import <name>`. The `source` is the dotted
+/// module path (`app.flash`), matching the `app/*.py` out-paths.
+fn py_format_import(name: &str, source: &str) -> String {
+    format!("from {source} import {name}\n")
+}
+
+/// Module-level constant → `NAME = value` (no keyword, no terminator),
+/// the direct analog of TS's `const NAME = value;`.
+fn py_format_constant(name: &str, value: &Expr) -> String {
+    format!("{name} = {}", crate::emit::python::emit_expr_for_runtime(value))
+}
+
+/// Python resolves cross-file refs through `from app.x import Y` (like
+/// TS through imports); bodies emit flat at module top, so namespace
+/// wrapping is a no-op.
+fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+/// Python runtime transpile table. Mirrors `TYPESCRIPT_RUNTIME` 1:1 by
+/// source file; `out_path`s land under `app/` and imports use dotted
+/// `app.<name>` module paths. `extra_roots` is empty for every entry —
+/// Python has no tree-shake pass yet, so the reachability roots TS needs
+/// don't apply.
+const PYTHON_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "app/inflector.py",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "app/json_builder.py",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
+        rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "ActiveRecord",
+        out_path: "app/errors.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "ActiveRecord",
+        out_path: "app/active_record_base.py",
+        mode: Mode::Library,
+        imports: &[("RecordNotFound, RecordInvalid", "app.errors")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "ActionDispatch",
+        out_path: "app/flash.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "ActionDispatch",
+        out_path: "app/session.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
+        rb_path: "runtime/ruby/action_controller/base.rb",
+        namespace: "ActionController",
+        out_path: "app/action_controller_base.py",
+        mode: Mode::Library,
+        imports: &[("Flash", "app.flash"), ("Session", "app.session")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "app/router.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "",
+        out_path: "app/view_helpers.py",
+        mode: Mode::Library,
+        imports: &[("Base", "app.active_record_base")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+/// Parse + emit the Python runtime files. Strangler scaffold — the
+/// `transform` hook is the tree-shake/registration seam (identity for
+/// now). Mirrors `elixir_units` / `typescript_units`.
+pub fn python_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(PYTHON_RUNTIME.len());
+    for entry in PYTHON_RUNTIME {
+        out.push(transpile_entry(entry, &PYTHON_TARGET, "#", &mut transform)?);
+    }
+    Ok(out)
+}

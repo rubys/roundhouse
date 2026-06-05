@@ -41,6 +41,7 @@ mod controller_test;
 mod expr;
 mod fixture;
 mod importmap;
+mod library;
 mod main;
 mod model;
 mod pyproject;
@@ -53,6 +54,13 @@ mod view;
 
 // External API: kept for anything that keys off `python_ty` directly.
 pub use ty::python_ty;
+
+// Framework-runtime transpile surface, consumed by
+// `runtime_loader::python_units` (the `PYTHON_TARGET` hooks). Dormant
+// until a `PYTHON_RUNTIME` entry is wired into `emit()`; exists so the
+// hand-written `runtime/python/*.py` files can be strangled one at a
+// time.
+pub use library::{emit_expr_for_runtime, emit_library_class, emit_module};
 
 /// Emit a typed `MethodDef` as a standalone Python function
 /// (trailing newline included). Requires `signature` to be populated
