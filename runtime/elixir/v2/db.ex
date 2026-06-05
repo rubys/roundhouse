@@ -15,7 +15,7 @@
 # same per-process (per-ExUnit-test) isolation as `Roundhouse.Db`'s
 # connection.
 
-defmodule V2.Db do
+defmodule Db do
   @moduledoc false
 
   # Run a SELECT, materialize every row, return an opaque stmt id.

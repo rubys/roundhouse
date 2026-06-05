@@ -4,7 +4,7 @@
 # model_to_library/broadcasts.rs`) produces calls like
 # `Broadcasts.prepend(%{stream: "x", target: "y", html: "..."})` from
 # inside model after_*_commit callbacks. elixir2 emits each as
-# `V2.Broadcasts.<action>(%{…})`, so this module provides one function
+# `Broadcasts.<action>(%{…})`, so this module provides one function
 # per Ruby `def self.<action>`.
 #
 # The log is the test-visible contract (framework Ruby's
@@ -19,7 +19,7 @@
 # State is held in a lazily-started, named `Agent` so the log survives
 # across the calls in one request and can be asserted/reset by tests.
 
-defmodule V2.Broadcasts do
+defmodule Broadcasts do
   @moduledoc false
 
   def append(attrs), do: record(:append, attrs)

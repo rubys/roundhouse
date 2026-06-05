@@ -13,10 +13,10 @@
 //! - Inheritance (`parent`) is ignored — the lowerer linearizes method
 //!   overrides onto each class (same as rust2).
 //!
-//! Each class emits its OWN `defmodule V2.<DottedName> do … end`, named
-//! from its (fully-qualified) `ClassId` with the `V2.` overlay prefix —
+//! Each class emits its OWN `defmodule <DottedName> do … end`, named
+//! from its (fully-qualified) `ClassId` with the `` overlay prefix —
 //! so a multi-class file (`action_dispatch/router.rb` →
-//! `V2.ActionDispatch.Router.Route` / `.MatchResult` / `.Router`) emits
+//! `ActionDispatch.Router.Route` / `.MatchResult` / `.Router`) emits
 //! three sibling modules. Module-level constants don't appear in
 //! `emit_library_class` (they're parsed separately); they're injected
 //! INTO their owning module by `runtime_loader::elixir_wrap_namespace`,
@@ -30,13 +30,14 @@ use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
 
 use super::expr;
 
-/// Map a `ClassId` to its emitted Elixir module name (with the `V2.`
-/// overlay prefix). `ActiveRecord::Base` → `V2.ActiveRecord.Base`.
+/// Map a `ClassId` to its emitted Elixir module name. Ruby's `::` scope
+/// separator becomes Elixir's `.` (`ActiveRecord::Base` →
+/// `ActiveRecord.Base`); plain names pass through (`Article`).
 pub(super) fn v2_module_name(class: &str) -> String {
-    format!("V2.{}", class.replace("::", "."))
+    class.replace("::", ".")
 }
 
-/// Emit a `LibraryClass` as a full Elixir `defmodule V2.<DottedName> do
+/// Emit a `LibraryClass` as a full Elixir `defmodule <DottedName> do
 /// … end` (trailing newline included).
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     let v2_name = v2_module_name(class.name.0.as_str());
@@ -146,9 +147,9 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
 }
 
 /// Emit `initialize` as a `new/n` constructor. A flat body (only
-/// `@field = value` assigns) emits a clean struct literal `%V2.Name{f:
+/// `@field = value` assigns) emits a clean struct literal `%Name{f:
 /// v, …}`. A richer body (conditionals, early returns, locals — e.g.
-/// flash's cross-request population) seeds `record = %V2.Name{}` and
+/// flash's cross-request population) seeds `record = %Name{}` and
 /// runs the body threaded through `record` (via
 /// `mutation_to_struct_return::thread_constructor_body`).
 fn emit_constructor(out: &mut String, m: &MethodDef, v2_name: &str) {

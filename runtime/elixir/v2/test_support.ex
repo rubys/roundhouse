@@ -1,30 +1,26 @@
-# Roundhouse Elixir test-support runtime — elixir2 (V2) overlay.
+# Roundhouse Elixir test-support runtime.
 #
 # Hand-written, shipped alongside generated code (copied in by the
-# elixir2 emitter as `test/support/v2_test_support.ex`). The V2
-# analogue of runtime/elixir/test_support.ex: controller tests call
-# into `V2.TestClient` for pure in-process HTTP dispatch (no real
-# server, no socket setup) and wrap responses in `V2.TestResponse`
-# for Rails-compatible assertions.
+# Elixir emitter as `test/support/test_support.ex`). Controller tests
+# call into `TestClient` for pure in-process HTTP dispatch (no real
+# server, no socket setup) and wrap responses in `TestResponse` for
+# Rails-compatible assertions.
 #
-# `V2.TestClient.dispatch/3` mirrors `V2.Server.dispatch/1`'s routing
-# path — `V2.ActionDispatch.Router.match/3` over `V2.RoutesTable
-# .table/0`, then `V2.Dispatch.call/5` — but skips Plug.Conn and
-# returns a `V2.TestResponse` directly. Assertion semantics match the
-# v1 runtime: substring-match on the response body, loose but
-# good-enough for the scaffold blog's HTML.
+# `TestClient.dispatch/3` mirrors `Server.dispatch/1`'s routing
+# path — `ActionDispatch.Router.match/3` over `RoutesTable
+# .table/0`, then `Dispatch.call/5` — but skips Plug.Conn and
+# returns a `TestResponse` directly. Assertion semantics: substring-
+# match on the response body, loose but good-enough for the blog's HTML.
 
-defmodule V2.TestResponse do
+defmodule TestResponse do
   @moduledoc """
   Wrapper around the `{body, status, content_type, location}` tuple
-  `V2.Dispatch.call/5` returns, exposing Rails-Minitest-compatible
+  `Dispatch.call/5` returns, exposing Rails-Minitest-compatible
   assertion helpers. Bodies substring-match for `assert_select`-style
   queries.
   """
 
   defstruct body: "", status: 200, location: ""
-
-  alias V2.TestResponse
 
   def from({body, status, _content_type, location}) do
     %TestResponse{body: body || "", status: status || 200, location: location || ""}
@@ -108,17 +104,15 @@ defmodule V2.TestResponse do
   end
 end
 
-defmodule V2.TestClient do
+defmodule TestClient do
   @moduledoc """
   Pure in-process HTTP client — dispatches through the same v2 stack
-  as `V2.Server` (`V2.ActionDispatch.Router.match/3` over
-  `V2.RoutesTable.table/0` → `V2.Dispatch.call/5`). No real HTTP, no
+  as `Server` (`ActionDispatch.Router.match/3` over
+  `RoutesTable.table/0` → `Dispatch.call/5`). No real HTTP, no
   socket setup. Flat bracket-notation body keys (`"article[title]"`)
   are nested to the shape the v2 controllers read, matching the
   server's `read_form_body` path.
   """
-
-  alias V2.TestResponse
 
   def get(path), do: dispatch("GET", path, %{})
   def post(path, body \\ %{}), do: dispatch("POST", path, body)
@@ -134,20 +128,20 @@ defmodule V2.TestClient do
         {raw_path, :html}
       end
 
-    case V2.ActionDispatch.Router.match(method, path, V2.RoutesTable.table()) do
+    case ActionDispatch.Router.match(method, path, RoutesTable.table()) do
       nil ->
         raise ExUnit.AssertionError, message: "no route for #{method} #{path}"
 
       mr ->
         path_params = stringify_keys(mr.path_params)
         body_params = nest_params(stringify_keys(body))
-        result = V2.Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
+        result = Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
         TestResponse.from(normalize_status(result))
     end
   end
 
   # A 0 status from the dispatch tuple means "unset" → 200, matching
-  # V2.Server.dispatch/1.
+  # Server.dispatch/1.
   defp normalize_status({body, 0, ct, loc}), do: {body, 200, ct, loc}
   defp normalize_status(other), do: other
 
@@ -157,7 +151,7 @@ defmodule V2.TestClient do
 
   # Flat `"article[title]" => v` → nested `%{"article" => %{"title" => v}}`,
   # the shape the v2 controllers read (`<Resource>Params.from_raw`).
-  # Mirrors V2.Server.nest_params/1.
+  # Mirrors Server.nest_params/1.
   defp nest_params(flat) do
     Enum.reduce(flat, %{}, fn {k, v}, acc ->
       case Regex.run(~r/^([^\[]+)\[([^\]]+)\]$/, k) do

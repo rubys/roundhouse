@@ -6,7 +6,7 @@
 //! transpiled from `runtime/ruby/`) lands.
 //!
 //! The overlay emits transpiled framework-runtime files under
-//! `lib/v2/` inside a dedicated `V2.*` Elixir module namespace, so it
+//! `lib/v2/` inside a dedicated `*` Elixir module namespace, so it
 //! can never collide with the legacy hand-written `runtime/elixir/*.ex`
 //! (which live under `Roundhouse.*`) or with legacy app-emitted modules
 //! (`Router`, `Post`, …). The legacy emit is otherwise untouched: it
@@ -56,7 +56,7 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
 
-    // Cross-file constant resolution: register EVERY unit's `V2.*` module
+    // Cross-file constant resolution: register EVERY unit's `*` module
     // name before emitting any file, so a reference that crosses files
     // (e.g. `ActionController::Base` referencing `ActionDispatch::Session`
     // defined in another unit) resolves. `elixir_units` emits one file at
@@ -167,7 +167,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     }
 
     // Model-support runtime: the portable prepared-cursor DB surface the
-    // lowered model emit targets (`V2.Db.prepare/step?/column_*/exec/…`),
+    // lowered model emit targets (`Db.prepare/step?/column_*/exec/…`),
     // a thin hand-written wrapper over `Exqlite.Sqlite3` reusing
     // `Roundhouse.Db`'s connection. Gated on models (it references
     // `Roundhouse.Db`, only emitted when the app has models). Mirrors
@@ -203,10 +203,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // is in CI, and the gap is tracked for Phase-D follow-up.
         // The lowered model emit references the DB primitive as bare
         // `Db.prepare`/`Db.step?`/… — resolve those to the hand-written
-        // `V2.Db` module (db.ex above). Likewise `Broadcasts.<action>`
-        // (model after_*_commit callbacks) → the `V2.Broadcasts` shim.
-        expr::register_module("Db", "V2.Db");
-        expr::register_module("Broadcasts", "V2.Broadcasts");
+        // `Db` module (db.ex above). Likewise `Broadcasts.<action>`
+        // (model after_*_commit callbacks) → the `Broadcasts` shim.
+        expr::register_module("Db", "Db");
+        expr::register_module("Broadcasts", "Broadcasts");
         let base_methods = ar_base_methods();
         // The model dual `{record, value}` methods (`save`/`valid?`/
         // `destroy`, and the per-model synthesized `update` whose tail
@@ -254,7 +254,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // Build the view layer (RouteHelpers + Importmap + per-resource
         // `Views::<Resource>` modules) UP FRONT — before model emit — so a
         // model after_*_commit broadcast ref (`Views::Articles.article(
-        // record)`) resolves to the registered `V2.Views.Articles`.
+        // record)`) resolves to the registered `Views.Articles`.
         // Mirrors go2's lower-all → register-all → emit-all order
         // (go2.rs:313-400). Gated on views (their only consumer today;
         // controllers, the other RouteHelpers caller, aren't yet v2-emitted).
@@ -264,7 +264,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         if views_enabled {
             // RouteHelpers (`<name>_path(args)`) + Importmap (`pins`/`entry`)
             // — lowered into module-flavored LCs, the same library-emit
-            // pipeline as models/views (→ `V2.RouteHelpers`/`V2.Importmap`,
+            // pipeline as models/views (→ `RouteHelpers`/`Importmap`,
             // self-contained so v1's `Roundhouse.*` can be retired).
             if !route_helper_funcs.is_empty() {
                 view_layer_lcs
@@ -387,14 +387,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         }
 
         // ---- Controllers (Phase C / W1) -----------------------------
-        // Per-controller app modules (`V2.ArticlesController`, …) lowered
+        // Per-controller app modules (`ArticlesController`, …) lowered
         // from the same `controller_to_library` pipeline go2/rust2 use.
         // Elixir has no inheritance, so the `ActionController::Base`
         // methods (initialize/render/redirect_to/head/resolve_status) are
         // MATERIALIZED into each concrete controller — the same
         // linearization the model emit does with the AR baseline.
         // Phase D: emitted unconditionally (v2 default); requires views
-        // (action bodies render `V2.Views.*`).
+        // (action bodies render `Views.*`).
         let controllers_enabled = !app.controllers.is_empty();
         if controllers_enabled {
             let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
@@ -448,7 +448,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 // Register fields WITH types: the response-state structs
                 // (`flash`/`session`) carry their class type so a
                 // `flash[:notice]` indexer routes to the renamed accessor
-                // (`V2.ActionDispatch.Flash.get`) rather than raw `Access`
+                // (`ActionDispatch.Flash.get`) rather than raw `Access`
                 // (which structs don't implement). The rest stay Untyped.
                 let typed: Vec<(String, crate::ty::Ty)> = library::struct_fields(&class)
                     .into_iter()
@@ -484,7 +484,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // The materialized `resolve_status` reads the `STATUS_CODES`
             // table, which lives as a module-level constant in
             // `action_controller/base.rb` (→ `@status_codes` in
-            // `V2.ActionController.Base`). It doesn't travel with the
+            // `ActionController.Base`). It doesn't travel with the
             // copied MethodDef, so inject it as a module attribute into any
             // emitted controller that references it. (Module constants
             // aren't carried on `LibraryClass`; this mirrors how the
@@ -499,34 +499,34 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 }
             }
 
-            // W2 — the route table (`V2.RoutesTable.table/0`): a list of
-            // `V2.ActionDispatch.Router.Route` structs the (stateless)
+            // W2 — the route table (`RoutesTable.table/0`): a list of
+            // `ActionDispatch.Router.Route` structs the (stateless)
             // router `match/3` scans. Controller is the string name the
-            // dispatch shim (W3) maps to `V2.<Name>Controller`; action is
+            // dispatch shim (W3) maps to `<Name>Controller`; action is
             // the atom `process_action` dispatches on.
             out.push(emit_routes_table_file(app));
 
-            // W3 — the dispatch shim (`V2.Dispatch.call/5`): build the
+            // W3 — the dispatch shim (`Dispatch.call/5`): build the
             // controller struct, thread the request params/format, run
             // `process_action`, wrap HTML in the layout, return the
             // captured response state.
             out.push(emit_dispatch_file(app));
 
-            // W6 — the Plug/Cowboy HTTP server (`V2.Server`), hand-written
+            // W6 — the Plug/Cowboy HTTP server (`Server`), hand-written
             // like db.ex/broadcasts.ex. Dispatches through the v2 router +
-            // `V2.Dispatch`. (Reuses `Roundhouse.Db`'s connection during
-            // the strangler phase — `V2.Db` already does.)
+            // `Dispatch`. (Reuses `Roundhouse.Db`'s connection during
+            // the strangler phase — `Db` already does.)
             out.push(EmittedFile {
                 path: output_path(OutputKind::HandWrittenRuntime { name: "server.ex" }).path,
                 content: include_str!("../../runtime/elixir/v2/server.ex").to_string(),
             });
 
-            // W5 — the boot entry (`V2.Main.run/0`): open the DB + run the
+            // W5 — the boot entry (`Main.run/0`): open the DB + run the
             // server. The compare/boot driver invokes it via `mix run -e`.
             out.push(emit_main_file());
 
-            // W7 (Phase D2) — the v2 ExUnit test tree: `V2.TestClient`/
-            // `V2.TestResponse` runtime, v2 fixtures, and per-controller
+            // W7 (Phase D2) — the v2 ExUnit test tree: `TestClient`/
+            // `TestResponse` runtime, v2 fixtures, and per-controller
             // test modules under `test/v2/`. Distinct module names + paths
             // from the v1 tree, so both suites run under `mix test` during
             // the strangler phase. Model tests deferred (dual-return `save`
@@ -538,15 +538,15 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     out
 }
 
-/// Emit `lib/v2/main.ex` — `V2.Main.run/0`, the boot entry. Opens the DB
+/// Emit `lib/v2/main.ex` — `Main.run/0`, the boot entry. Opens the DB
 /// (schema via the legacy `Roundhouse.SchemaSQL`, reused during the
-/// strangler phase) and runs `V2.Server` (which blocks on Plug.Cowboy).
+/// strangler phase) and runs `Server` (which blocks on Plug.Cowboy).
 fn emit_main_file() -> EmittedFile {
     let content = "# Generated by Roundhouse (elixir2 Phase C / W5).\n\
-         defmodule V2.Main do\n\
+         defmodule Main do\n\
          \x20 @moduledoc false\n\n\
          \x20 def run do\n\
-         \x20   V2.Server.start(Roundhouse.SchemaSQL.create_tables())\n\
+         \x20   Server.start(Roundhouse.SchemaSQL.create_tables())\n\
          \x20 end\nend\n"
         .to_string();
     EmittedFile {
@@ -555,7 +555,7 @@ fn emit_main_file() -> EmittedFile {
     }
 }
 
-/// Emit `lib/v2/dispatch.ex` — `V2.Dispatch.call/5`. One `case` arm per
+/// Emit `lib/v2/dispatch.ex` — `Dispatch.call/5`. One `case` arm per
 /// concrete controller (mirrors go2's `emit_dispatch_file`): construct the
 /// controller struct, set `params`/`request_format`, run `process_action`,
 /// then wrap a non-empty HTML body in the app layout (when one exists) and
@@ -563,7 +563,7 @@ fn emit_main_file() -> EmittedFile {
 fn emit_dispatch_file(app: &App) -> EmittedFile {
     // Layout wrap only when the app ships `app/views/layouts/application`
     // (real-blog does; a layout-less app would reference an undefined
-    // `V2.Views.Layouts`).
+    // `Views.Layouts`).
     let has_app_layout = app
         .views
         .iter()
@@ -573,7 +573,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         // rendered inside the per-action partial), so pass `nil`.
         "    body =\n\
          \x20     if String.starts_with?(c.content_type, \"text/html\") and c.body != \"\" do\n\
-         \x20       V2.Views.Layouts.application(c.body, nil, nil)\n\
+         \x20       Views.Layouts.application(c.body, nil, nil)\n\
          \x20     else\n\
          \x20       c.body\n\
          \x20     end\n\
@@ -601,7 +601,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     let content = format!(
         "# Generated by Roundhouse (elixir2 Phase C / W3).\n\
          # Do not edit by hand — controller list is derived from app/controllers/.\n\n\
-         defmodule V2.Dispatch do\n\
+         defmodule Dispatch do\n\
          \x20 @doc \"\"\"\n\
          \x20 Build a controller for `(controller, action)`, thread request\n\
          \x20 params + format into it, run the action, and return the captured\n\
@@ -624,8 +624,8 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     }
 }
 
-/// Emit `lib/v2/routes_table.ex` — `V2.RoutesTable.table/0` returning the
-/// flattened route list (one `V2.ActionDispatch.Router.Route` per route).
+/// Emit `lib/v2/routes_table.ex` — `RoutesTable.table/0` returning the
+/// flattened route list (one `ActionDispatch.Router.Route` per route).
 fn emit_routes_table_file(app: &App) -> EmittedFile {
     use crate::dialect::HttpMethod;
     let mut entries = String::new();
@@ -641,7 +641,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
             HttpMethod::Any => "GET",
         };
         entries.push_str(&format!(
-            "      V2.ActionDispatch.Router.Route.new({verb:?}, {path:?}, {ctrl:?}, :{action}),\n",
+            "      ActionDispatch.Router.Route.new({verb:?}, {path:?}, {ctrl:?}, :{action}),\n",
             path = r.path,
             ctrl = r.controller.0.as_str(),
             action = r.action.as_str(),
@@ -650,7 +650,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
     let content = format!(
         "# Generated by Roundhouse (elixir2 Phase C / W2).\n\
          # Do not edit by hand — edit `config/routes.rb` and re-run emit.\n\n\
-         defmodule V2.RoutesTable do\n\
+         defmodule RoutesTable do\n\
          \x20 @doc \"Every Rails-style route the app exposes, in match order.\"\n\
          \x20 def table do\n\
          \x20   [\n{entries}    ]\n  end\nend\n"
@@ -731,7 +731,7 @@ fn emit_library_lc_with_duals(
 
 /// Bundle a set of module-level `LibraryFunction`s (route helpers,
 /// importmap) into a module-flavored `LibraryClass`, so the same
-/// `emit_library_class` pipeline produces `V2.<Name>` with bare class
+/// `emit_library_class` pipeline produces `<Name>` with bare class
 /// functions. Mirrors `go2.rs::module_funcs_to_library_class`.
 fn module_funcs_to_library_class(
     name: &str,
@@ -786,7 +786,7 @@ fn ar_base_methods() -> Vec<crate::dialect::MethodDef> {
 /// `redirect_to`/`head`/`resolve_status`. Materialized into each concrete
 /// controller module since Elixir has no inheritance to carry them. (This
 /// is the same file already transpiled standalone as
-/// `V2.ActionController.Base`; materializing rather than delegating keeps
+/// `ActionController.Base`; materializing rather than delegating keeps
 /// each controller a self-contained struct, mirroring the model path.)
 fn ac_base_methods() -> Vec<crate::dialect::MethodDef> {
     crate::runtime_src::parse_library_with_rbs(

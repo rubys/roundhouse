@@ -1,7 +1,7 @@
 //! Elixir emitter smoke test.
 //!
 //! Asserts the emitter produces the expected files and their top-level
-//! shapes. As of Phase D the output is the elixir2 (`V2.*`) lowered-IR
+//! shapes. As of Phase D the output is the elixir2 (`*`) lowered-IR
 //! overlay; these assertions track the v2 module shapes. Elixir is the
 //! target that most aggressively stress-tests IR neutrality (no classes,
 //! no mutation, no method dispatch), so they also double as evidence that
@@ -40,23 +40,23 @@ fn emits_expected_files() {
     // stack depends on.
     assert!(paths.contains(&"mix.exs".to_string()), "got {paths:?}");
     assert!(paths.contains(&"lib/roundhouse/db.ex".to_string()), "got {paths:?}");
-    // One `V2.*` module per model and per controller, under lib/v2/, plus
+    // One `*` module per model and per controller, under lib/, plus
     // the routes table + dispatch shim.
-    assert!(paths.contains(&"lib/v2/post.ex".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"lib/v2/comment.ex".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"lib/v2/postscontroller.ex".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"lib/v2/routes_table.ex".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"lib/v2/dispatch.ex".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"lib/post.ex".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"lib/comment.ex".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"lib/postscontroller.ex".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"lib/routes_table.ex".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"lib/dispatch.ex".to_string()), "got {paths:?}");
 }
 
 #[test]
 fn models_define_struct_and_module_functions() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
-    let content = find(&files, "lib/v2/post.ex");
+    let content = find(&files, "lib/post.ex");
     // Elixir has no classes — a model is a module with a `defstruct`
     // payload and module functions taking the record as first arg.
-    assert!(content.contains("defmodule V2.Post do"), "got:\n{content}");
+    assert!(content.contains("defmodule Post do"), "got:\n{content}");
     assert!(content.contains("defstruct ["), "got:\n{content}");
     assert!(content.contains("def table_name() do"), "got:\n{content}");
     // Instance methods become module functions threading the record as the
@@ -73,8 +73,8 @@ fn models_define_struct_and_module_functions() {
 fn controllers_emit_as_bare_modules() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
-    let content = find(&files, "lib/v2/postscontroller.ex");
-    assert!(content.contains("defmodule V2.PostsController do"), "got:\n{content}");
+    let content = find(&files, "lib/postscontroller.ex");
+    assert!(content.contains("defmodule PostsController do"), "got:\n{content}");
     // The dispatch entry point + one action function per action.
     assert!(content.contains("def process_action("), "got:\n{content}");
     for action in &["def index(", "def show(", "def create(", "def destroy("] {
@@ -86,13 +86,13 @@ fn controllers_emit_as_bare_modules() {
 fn routes_table_lists_routes() {
     let app = analyzed_app();
     let files = elixir::emit(&app);
-    let content = find(&files, "lib/v2/routes_table.ex");
-    assert!(content.contains("defmodule V2.RoutesTable do"), "got:\n{content}");
+    let content = find(&files, "lib/routes_table.ex");
+    assert!(content.contains("defmodule RoutesTable do"), "got:\n{content}");
     // Each route is a Router.Route struct with verb / path / controller /
     // action (the controller is the string name the dispatch shim maps).
     assert!(
         content.contains(
-            "V2.ActionDispatch.Router.Route.new(\"GET\", \"/posts\", \"PostsController\", :index)"
+            "ActionDispatch.Router.Route.new(\"GET\", \"/posts\", \"PostsController\", :index)"
         ),
         "got:\n{content}"
     );

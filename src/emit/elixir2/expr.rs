@@ -22,10 +22,10 @@ use std::collections::HashMap;
 use crate::expr::{BoolOpKind, Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
 
 thread_local! {
-    /// Simple class name → emitted `V2.*` module name, across ALL runtime
+    /// Simple class name → emitted `*` module name, across ALL runtime
     /// units in the overlay (populated up front by a pre-registration
     /// pass). Elixir doesn't resolve a bare reference (`MatchResult`
-    /// inside `V2.ActionDispatch.Router`, or `Session` from another file)
+    /// inside `ActionDispatch.Router`, or `Session` from another file)
     /// the way Ruby's lexical scoping does, so `emit_const` rewrites such
     /// refs to the fully-qualified module name using this map.
     static MODULE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
@@ -258,7 +258,7 @@ pub(super) fn clear_modules() {
     MODULE_METHOD_PARAMS.with(|m| m.borrow_mut().clear());
 }
 
-/// Register the `V2.*` names of `classes` into the registry, accumulating
+/// Register the `*` names of `classes` into the registry, accumulating
 /// (does NOT clear — the overlay pre-registers every unit's modules up
 /// front so cross-file constant references resolve). Idempotent: the
 /// per-unit transform may re-register the same names harmlessly.
@@ -294,7 +294,7 @@ pub(super) fn register_modules<'a>(classes: impl IntoIterator<Item = &'a crate::
 
 /// Register a single `simple → full` module-name mapping — for a
 /// hand-written module that isn't a parsed `LibraryClass` (e.g. the
-/// `V2.Db` runtime primitive, so the lowered model emit's bare `Db.…`
+/// `Db` runtime primitive, so the lowered model emit's bare `Db.…`
 /// references resolve).
 pub(super) fn register_module(simple: &str, full: &str) {
     MODULE_NAMES.with(|m| {
@@ -1483,7 +1483,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             // typed method-on-local dispatch above), route it through the
             // struct's module rather than emitting a `.persisted?` field
             // access (a runtime KeyError). A `Const` receiver is excluded:
-            // `Db.step?(stmt)` is a static `V2.Db.step?(stmt)` module call,
+            // `Db.step?(stmt)` is a static `Db.step?(stmt)` module call,
             // not instance dispatch. `record`-self calls are handled above.
             if (method.ends_with('?') || method.ends_with('!'))
                 && !matches!(&*r.node, ExprNode::Const { .. })
@@ -2364,12 +2364,12 @@ mod tests {
         // A reference from the second unit to the first's module resolves
         // — both bare and fully qualified, by last segment. The old
         // clear-on-register behavior would have wiped Session here.
-        assert_eq!(emit_expr(&const_ref(&["Session"])), "V2.ActionDispatch.Session");
+        assert_eq!(emit_expr(&const_ref(&["Session"])), "ActionDispatch.Session");
         assert_eq!(
             emit_expr(&const_ref(&["ActionDispatch", "Session"])),
-            "V2.ActionDispatch.Session"
+            "ActionDispatch.Session"
         );
-        assert_eq!(emit_expr(&const_ref(&["Base"])), "V2.ActionController.Base");
+        assert_eq!(emit_expr(&const_ref(&["Base"])), "ActionController.Base");
         // An unregistered const passes through dotted, unchanged.
         assert_eq!(emit_expr(&const_ref(&["SomeUnknown"])), "SomeUnknown");
         clear_modules();
@@ -2692,7 +2692,7 @@ mod tests {
         );
         assert_eq!(
             emit_expr(&call_expr),
-            "V2.ActionView.ViewHelpers.truncate(body, 100)"
+            "ActionView.ViewHelpers.truncate(body, 100)"
         );
         clear_modules();
     }
@@ -2876,7 +2876,7 @@ fn emit_const(path: &[crate::ident::Symbol]) -> String {
     // A reference to a sibling module in the same unit — whether bare
     // (`MatchResult`) or fully qualified (`ActionDispatch::Router::
     // MatchResult`) — resolves by its last segment to the emitted
-    // `V2.*` name.
+    // `*` name.
     if let Some(last) = path.last() {
         if let Some(full) = MODULE_NAMES.with(|m| m.borrow().get(last.as_str()).cloned()) {
             return full;

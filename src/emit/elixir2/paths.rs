@@ -4,7 +4,7 @@
 //! `output_path`, so a future per-package cutover is a focused diff
 //! against this one function rather than scattered path literals.
 //!
-//! Phase 1 invariant: transpiled runtime lands under `lib/v2/<name>.ex`.
+//! Phase 1 invariant: transpiled runtime lands under `lib/<name>.ex`.
 
 use std::path::PathBuf;
 
@@ -20,22 +20,22 @@ pub(crate) enum OutputKind<'a> {
     /// `HandWrittenRuntime`.
     HandWrittenRuntime { name: &'a str },
 
-    /// A transpiled per-controller app module (`V2.<Name>Controller`),
+    /// A transpiled per-controller app module (`<Name>Controller`),
     /// produced from the lowered controller `LibraryClass`. Filename is
     /// the snake-cased module name (`articles_controller.ex`).
     Controller { file_name: &'a str },
 
-    /// The generated route table (`V2.RoutesTable`) — a list of
-    /// `V2.ActionDispatch.Router.Route` structs the stateless router
+    /// The generated route table (`RoutesTable`) — a list of
+    /// `ActionDispatch.Router.Route` structs the stateless router
     /// `match/3` consumes.
     RoutesTable,
 
-    /// The generated dispatch shim (`V2.Dispatch`) — one `case` arm per
+    /// The generated dispatch shim (`Dispatch`) — one `case` arm per
     /// app controller, constructing the controller struct and running
     /// `process_action`.
     Dispatch,
 
-    /// The generated boot entry (`V2.Main.run/0`).
+    /// The generated boot entry (`Main.run/0`).
     Main,
 
     /// Sentinel emitted when transpile fails — picked up by
@@ -53,13 +53,13 @@ pub(crate) struct OutputDest {
 pub(crate) fn output_path(kind: OutputKind<'_>) -> OutputDest {
     use OutputKind::*;
     let path = match kind {
-        TranspiledRuntime { file_name } => format!("lib/v2/{file_name}"),
-        HandWrittenRuntime { name } => format!("lib/v2/{name}"),
-        Controller { file_name } => format!("lib/v2/{file_name}"),
-        RoutesTable => "lib/v2/routes_table.ex".to_string(),
-        Dispatch => "lib/v2/dispatch.ex".to_string(),
-        Main => "lib/v2/main.ex".to_string(),
-        TranspileError => "lib/v2/transpile_error.txt".to_string(),
+        TranspiledRuntime { file_name } => format!("lib/{file_name}"),
+        HandWrittenRuntime { name } => format!("lib/{name}"),
+        Controller { file_name } => format!("lib/{file_name}"),
+        RoutesTable => "lib/routes_table.ex".to_string(),
+        Dispatch => "lib/dispatch.ex".to_string(),
+        Main => "lib/main.ex".to_string(),
+        TranspileError => "lib/transpile_error.txt".to_string(),
     };
     OutputDest {
         path: PathBuf::from(path),

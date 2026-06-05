@@ -1,18 +1,16 @@
-# Roundhouse Elixir server runtime — elixir2 (V2) overlay.
+# Roundhouse Elixir server runtime.
 #
 # Hand-written, shipped alongside generated code (copied in by the
-# elixir2 emitter as `lib/v2/server.ex`). The V2 analogue of
-# runtime/elixir/server.ex: runs Plug.Cowboy and dispatches through
-# the v2 stack — `V2.ActionDispatch.Router.match/3` over
-# `V2.RoutesTable.table/0`, then `V2.Dispatch.call/5` into the
-# per-controller `process_action`.
+# Elixir emitter as `lib/server.ex`). Runs Plug.Cowboy and dispatches
+# through the app stack — `ActionDispatch.Router.match/3` over
+# `RoutesTable.table/0`, then `Dispatch.call/5` into the per-controller
+# `process_action`.
 #
-# During the strangler-fig phase the DB connection + schema are still
-# owned by the legacy `Roundhouse.Db` / `Roundhouse.SchemaSQL` (which
-# `V2.Db` reuses via `Roundhouse.Db.conn()`), so `start/2` opens the DB
-# the same way the v1 server does. The HTTP path is fully v2.
+# The DB connection + schema are owned by the shared `Roundhouse.Db` /
+# `Roundhouse.SchemaSQL` target runtime (which `Db` reuses via
+# `Roundhouse.Db.conn()`), so `start/2` opens the DB through it.
 
-defmodule V2.Server do
+defmodule Server do
   require Logger
 
   alias Roundhouse.Db
@@ -42,8 +40,8 @@ defmodule V2.Server do
   @doc """
   Core dispatcher: read body, apply the `_method` override, strip a
   `.json` suffix (→ `:json` format), look up the route via the v2
-  router over `V2.RoutesTable.table/0`, run the action through
-  `V2.Dispatch.call/5`, and ship the response.
+  router over `RoutesTable.table/0`, run the action through
+  `Dispatch.call/5`, and ship the response.
   """
   def dispatch(conn) do
     raw_method = conn.method |> String.upcase()
@@ -66,7 +64,7 @@ defmodule V2.Server do
         {raw_path, :html}
       end
 
-    case V2.ActionDispatch.Router.match(method, path, V2.RoutesTable.table()) do
+    case ActionDispatch.Router.match(method, path, RoutesTable.table()) do
       nil ->
         conn
         |> Plug.Conn.put_resp_content_type("text/plain")
@@ -75,7 +73,7 @@ defmodule V2.Server do
       mr ->
         path_params = stringify_keys(mr.path_params)
         {body, status, content_type, location} =
-          V2.Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
+          Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
 
         status = if status == 0, do: 200, else: status
         send_response(conn, status, body, content_type, location)
@@ -132,7 +130,7 @@ defmodule V2.Server do
 
   defmodule Endpoint do
     @moduledoc """
-    Plug endpoint — defers everything to `V2.Server.dispatch/1`.
+    Plug endpoint — defers everything to `Server.dispatch/1`.
     """
     @behaviour Plug
 
@@ -141,7 +139,7 @@ defmodule V2.Server do
 
     @impl true
     def call(conn, _opts) do
-      V2.Server.dispatch(conn)
+      Server.dispatch(conn)
     end
   end
 end

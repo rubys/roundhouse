@@ -145,36 +145,3 @@ fn real_blog_mix_test_passes() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
-
-#[test]
-#[ignore]
-fn real_blog_v2_mix_test_passes() {
-    // Phase D2 / W7 forcing function: run ONLY the v2 ExUnit tree
-    // (`test/v2/**`, driving the V2.* stack via V2.TestClient) and assert
-    // zero failures. `real_blog_mix_test_passes` already runs these as
-    // part of the whole suite; this names the v2 coverage as its own gate
-    // (and is the test that survives v1 deletion in D3).
-    let _g = mix_guard();
-    let fixture = Path::new("fixtures/real-blog");
-    let scratch = scratch_dir("real-blog-v2-test");
-    generate_project(fixture, &scratch);
-    mix_deps_get(&scratch);
-
-    let output = Command::new("mix")
-        .arg("test")
-        .arg("test/v2")
-        .current_dir(&scratch)
-        .env("MIX_HOME", scratch.join(".mix"))
-        .output()
-        .expect("run mix test test/v2");
-
-    assert!(
-        output.status.success(),
-        "mix test test/v2 failed on emitted real-blog at {}:\n\
-         \n=== stdout ===\n{}\n\
-         \n=== stderr ===\n{}",
-        scratch.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-}

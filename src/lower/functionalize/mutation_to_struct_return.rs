@@ -1483,7 +1483,7 @@ mod tests {
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- ctor ---\n{ex}\n------------");
         assert!(ex.contains("def new(other \\\\ nil)"), "default param:\n{ex}");
-        assert!(ex.contains("record = %V2.Flash{}"), "seeds struct:\n{ex}");
+        assert!(ex.contains("record = %Flash{}"), "seeds struct:\n{ex}");
         assert!(ex.contains("record = %{record | notice: nil}"), "threaded write:\n{ex}");
         assert!(ex.contains("if is_nil(other) do"), "guard:\n{ex}");
         assert!(!ex.contains("@"), "no raw ivars:\n{ex}");

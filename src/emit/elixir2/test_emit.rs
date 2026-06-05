@@ -1,22 +1,21 @@
-//! elixir2 (V2) test emit — Phase D2 / W7.
+//! Elixir test emit (W7).
 //!
-//! Emits the v2 ExUnit test tree: the hand-written `V2.TestClient` /
-//! `V2.TestResponse` runtime, v2 fixtures (`V2.Fixtures` + per-resource
-//! loaders), and per-controller-test modules under `test/v2/`.
+//! Emits the ExUnit test tree: the hand-written `TestClient` /
+//! `TestResponse` runtime, fixtures (`Fixtures` + per-resource loaders),
+//! and one module per test file under `test/`.
 //!
-//! Controller-test bodies are emitted via the SAME `crate::lower::
-//! classify_*` helpers the legacy `src/emit/elixir/spec.rs` uses, so the
-//! body text (`TestClient.get(...)`, `TestResponse.assert_ok(resp)`,
-//! `Article.count()`, bare route helpers) is unchanged — the emitted
-//! module just `alias`es the `V2.*` names so those bare references
-//! resolve to the v2 stack. `V2.RoutesTable` is static (a function, not
-//! a registered table), so no `App.Routes.register()` is needed.
+//! Test bodies are emitted via the shared `crate::lower::classify_*`
+//! helpers; the emitted modules reference the app/runtime modules by their
+//! bare top-level names (`TestClient`, `Article`, `Fixtures`, …), which
+//! resolve directly, and `import RouteHelpers` for bareword `*_path()`
+//! calls. `RoutesTable` is static (a function, not a registered table), so
+//! no route registration is needed in `setup`.
 //!
-//! Model tests are NOT emitted here yet: their bodies call the model's
-//! dual-return `save` (`refute Article.save(record)` → `{record, bool}`)
-//! which needs functionalize support for Const-receiver dual calls
-//! (deferred to a follow-up W7 slice). Until then v1's model tests
-//! provide that coverage via `mix test`.
+//! Model tests destructure the model's dual-return `save`
+//! (`assert_not record.save` → `{_saved, ok} = ….save(rec); refute ok`),
+//! since `save` returns `{record, bool}`; the assoc `.create` helper does
+//! the same. Other model calls (`count`/`last`/`destroy`/`find`) aren't
+//! dual.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -28,8 +27,8 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::naming::{camelize, pluralize_snake, snake_case};
 
-/// The hand-written v2 test-support runtime (`V2.TestClient` /
-/// `V2.TestResponse`), shipped as `test/support/v2_test_support.ex`.
+/// The hand-written v2 test-support runtime (`TestClient` /
+/// `TestResponse`), shipped as `test/support/test_support.ex`.
 const TEST_SUPPORT_SOURCE: &str = include_str!("../../../runtime/elixir/v2/test_support.ex");
 
 /// Emit the full v2 test tree for `app`: the test-support runtime, v2
@@ -42,7 +41,7 @@ pub(super) fn emit_test_files(app: &App) -> Vec<EmittedFile> {
     }
 
     out.push(EmittedFile {
-        path: PathBuf::from("test/support/v2_test_support.ex"),
+        path: PathBuf::from("test/support/test_support.ex"),
         content: TEST_SUPPORT_SOURCE.to_string(),
     });
 
@@ -56,7 +55,7 @@ pub(super) fn emit_test_files(app: &App) -> Vec<EmittedFile> {
         }
     }
 
-    // One module per test file: controller tests drive V2.TestClient,
+    // One module per test file: controller tests drive TestClient,
     // model tests exercise the V2 model modules directly.
     for tm in &app.test_modules {
         if tm.name.0.as_str().ends_with("ControllerTest") {
@@ -69,29 +68,21 @@ pub(super) fn emit_test_files(app: &App) -> Vec<EmittedFile> {
 }
 
 /// Concrete model names (those with a schema table — abstract bases like
-/// `ApplicationRecord` emit no V2 module) and the union of their attribute
-/// names. Shared by the test-body emitters for receiver/field routing.
-fn model_lists(app: &App) -> (Vec<Symbol>, Vec<Symbol>) {
-    let known_models: Vec<Symbol> = app
-        .models
+/// `ApplicationRecord` emit no module). Used by the model-test emitter to
+/// recognize `Class.new(...)` / `Class.save(...)` receivers.
+fn known_models(app: &App) -> Vec<Symbol> {
+    app.models
         .iter()
         .filter(|m| app.schema.tables.contains_key(&m.table.0))
         .map(|m| m.name.0.clone())
-        .collect();
-    let mut attrs: std::collections::BTreeSet<Symbol> = std::collections::BTreeSet::new();
-    for m in &app.models {
-        for attr in m.attributes.fields.keys() {
-            attrs.insert(attr.clone());
-        }
-    }
-    (known_models, attrs.into_iter().collect())
+        .collect()
 }
 
 // ---- fixtures ---------------------------------------------------------
 
-/// `test/support/v2_fixtures/<name>.ex` — one `V2.Fixtures.<Ns>` module
+/// `test/support/fixtures/<name>.ex` — one `Fixtures.<Ns>` module
 /// per fixture set. Mirrors `src/emit/elixir/fixture.rs`, retargeted to
-/// `V2.*` and the model's dual-return `save` (`{record, _} = …`); the
+/// `*` and the model's dual-return `save` (`{record, _} = …`); the
 /// saved record carries its assigned id, so `register` uses `record.id`
 /// rather than `Roundhouse.Db.last_insert_rowid()`.
 fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
@@ -100,8 +91,8 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
     let ns = camelize(fixture_name);
 
     let mut s = String::new();
-    writeln!(s, "# Generated by Roundhouse (elixir2 / V2).").unwrap();
-    writeln!(s, "defmodule V2.Fixtures.{ns} do").unwrap();
+    writeln!(s, "# Generated by Roundhouse (elixir2).").unwrap();
+    writeln!(s, "defmodule Fixtures.{ns} do").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "  def _load_all do").unwrap();
     for record in &lowered.records {
@@ -115,14 +106,14 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
                     target_fixture,
                     target_label,
                 } => format!(
-                    "V2.Fixtures.fixture_id({:?}, {:?})",
+                    "Fixtures.fixture_id({:?}, {:?})",
                     target_fixture.as_str(),
                     target_label.as_str(),
                 ),
             };
             field_lines.push(format!("      {col}: {val}"));
         }
-        writeln!(s, "    record = %V2.{class_name}{{").unwrap();
+        writeln!(s, "    record = %{class_name}{{").unwrap();
         for (idx, line) in field_lines.iter().enumerate() {
             if idx < field_lines.len() - 1 {
                 writeln!(s, "{line},").unwrap();
@@ -131,13 +122,13 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
             }
         }
         writeln!(s, "    }}").unwrap();
-        writeln!(s, "    {{record, ok}} = V2.{class_name}.save(record)").unwrap();
+        writeln!(s, "    {{record, ok}} = {class_name}.save(record)").unwrap();
         writeln!(
             s,
             "    unless ok, do: raise \"fixture {fixture_name}/{label} failed to save\""
         )
         .unwrap();
-        writeln!(s, "    V2.Fixtures.register({fixture_name:?}, {label:?}, record.id)").unwrap();
+        writeln!(s, "    Fixtures.register({fixture_name:?}, {label:?}, record.id)").unwrap();
     }
     writeln!(s, "    :ok").unwrap();
     writeln!(s, "  end").unwrap();
@@ -146,26 +137,26 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
         let label = record.label.as_str();
         writeln!(s).unwrap();
         writeln!(s, "  def {label}() do").unwrap();
-        writeln!(s, "    id = V2.Fixtures.fixture_id({fixture_name:?}, {label:?})").unwrap();
-        writeln!(s, "    V2.{class_name}.find(id)").unwrap();
+        writeln!(s, "    id = Fixtures.fixture_id({fixture_name:?}, {label:?})").unwrap();
+        writeln!(s, "    {class_name}.find(id)").unwrap();
         writeln!(s, "  end").unwrap();
     }
 
     writeln!(s, "end").unwrap();
 
     EmittedFile {
-        path: PathBuf::from(format!("test/support/v2_fixtures/{fixture_name}.ex")),
+        path: PathBuf::from(format!("test/support/fixtures/{fixture_name}.ex")),
         content: s,
     }
 }
 
-/// `test/support/v2_fixtures.ex` — shared `V2.Fixtures` module (setup,
+/// `test/support/fixtures.ex` — shared `Fixtures` module (setup,
 /// fixture_id lookup, register). Reuses the shared `Roundhouse.Db` /
 /// `Roundhouse.SchemaSQL` runtime during the strangler phase.
 fn emit_fixtures_helper(lowered: &crate::lower::LoweredFixtureSet, _app: &App) -> EmittedFile {
     let mut s = String::new();
-    writeln!(s, "# Generated by Roundhouse (elixir2 / V2).").unwrap();
-    writeln!(s, "defmodule V2.Fixtures do").unwrap();
+    writeln!(s, "# Generated by Roundhouse (elixir2).").unwrap();
+    writeln!(s, "defmodule Fixtures do").unwrap();
     writeln!(s, "  @moduledoc false").unwrap();
     writeln!(s).unwrap();
     writeln!(s, "  @doc \"Per-test setup. Called from each test module's ExUnit setup.\"").unwrap();
@@ -174,7 +165,7 @@ fn emit_fixtures_helper(lowered: &crate::lower::LoweredFixtureSet, _app: &App) -
     writeln!(s, "    Process.put(:roundhouse_fixture_ids, %{{}})").unwrap();
     for f in &lowered.fixtures {
         let ns = camelize(f.name.as_str());
-        writeln!(s, "    V2.Fixtures.{ns}._load_all()").unwrap();
+        writeln!(s, "    Fixtures.{ns}._load_all()").unwrap();
     }
     writeln!(s, "    :ok").unwrap();
     writeln!(s, "  end").unwrap();
@@ -200,7 +191,7 @@ fn emit_fixtures_helper(lowered: &crate::lower::LoweredFixtureSet, _app: &App) -
     writeln!(s, "  end").unwrap();
     writeln!(s, "end").unwrap();
     EmittedFile {
-        path: PathBuf::from("test/support/v2_fixtures.ex"),
+        path: PathBuf::from("test/support/fixtures.ex"),
         content: s,
     }
 }
@@ -227,72 +218,29 @@ struct ExTestCtx<'a> {
     app: &'a App,
     fixture_names: &'a [Symbol],
     known_models: &'a [Symbol],
-    model_attrs: &'a [Symbol],
 }
 
-/// `test/v2/<name>.exs` — one ExUnit module per controller test. Distinct
-/// module name (`V2.<Name>ControllerTest`) and path from the v1 tree, so
+/// `test/<name>.exs` — one ExUnit module per controller test. Distinct
+/// module name (`<Name>ControllerTest`) and path from the v1 tree, so
 /// both run under `mix test` during the strangler phase.
 fn emit_controller_test(tm: &TestModule, app: &App) -> EmittedFile {
     let fixture_names: Vec<Symbol> = app.fixtures.iter().map(|f| f.name.clone()).collect();
-    let (known_models, model_attrs) = model_lists(app);
+    let known_models = known_models(app);
     let ctx = ExTestCtx {
         app,
         fixture_names: &fixture_names,
         known_models: &known_models,
-        model_attrs: &model_attrs,
     };
 
-    // Render the test blocks first so the header can `alias` only the
-    // modules actually referenced — Elixir warns on an unused alias, and
-    // not every controller test touches every model / `Fixtures`.
-    let mut tests_section = String::new();
-    for test in &tm.tests {
-        tests_section.push('\n');
-        writeln!(tests_section, "  test {:?} do", test.name).unwrap();
-        let body = emit_controller_test_body(test, app, ctx);
-        if body.trim().is_empty() {
-            writeln!(tests_section, "    :ok").unwrap();
-        } else {
-            for line in body.lines() {
-                if line.is_empty() {
-                    tests_section.push('\n');
-                } else {
-                    writeln!(tests_section, "    {line}").unwrap();
-                }
-            }
-        }
-        writeln!(tests_section, "  end").unwrap();
-    }
-    // A module is referenced when its bare name is used as a call receiver
-    // (`TestClient.`, `Article.`, `Fixtures.`) in the rendered body.
-    let referenced = |name: &str| tests_section.contains(&format!("{name}."));
-
     let mut s = String::new();
-    writeln!(s, "# Generated by Roundhouse (elixir2 / V2).").unwrap();
-    writeln!(s, "defmodule V2.{} do", tm.name.0).unwrap();
+    writeln!(s, "# Generated by Roundhouse (elixir2).").unwrap();
+    writeln!(s, "defmodule {} do", tm.name.0).unwrap();
     writeln!(s, "  use ExUnit.Case").unwrap();
-    if referenced("TestClient") {
-        writeln!(s, "  alias V2.TestClient").unwrap();
-    }
-    if referenced("TestResponse") {
-        writeln!(s, "  alias V2.TestResponse").unwrap();
-    }
-    // `Fixtures` is used by the `setup` block (`Fixtures.setup()`) whenever
-    // the app has fixtures, plus any body that primes a record.
-    if !app.fixtures.is_empty() || referenced("Fixtures") {
-        writeln!(s, "  alias V2.Fixtures").unwrap();
-    }
-    // Alias each concrete model referenced in the bodies so bare
-    // `Article.count()` / `Comment.last()` resolve to the v2 modules. Skip
-    // abstract bases (`ApplicationRecord`) — they have no schema table and
-    // emit no V2 module, so an alias would dangle.
-    for m in &app.models {
-        if app.schema.tables.contains_key(&m.table.0) && referenced(m.name.0.as_str()) {
-            writeln!(s, "  alias V2.{}", m.name.0).unwrap();
-        }
-    }
-    writeln!(s, "  import V2.RouteHelpers").unwrap();
+    // Bare module names (TestClient, TestResponse, Fixtures, the model
+    // modules) resolve to the top-level modules directly — no aliases
+    // needed. Route helpers are bareword calls (`articles_path()`), so
+    // import them.
+    writeln!(s, "  import RouteHelpers").unwrap();
 
     if !app.fixtures.is_empty() {
         writeln!(s).unwrap();
@@ -302,12 +250,28 @@ fn emit_controller_test(tm: &TestModule, app: &App) -> EmittedFile {
         writeln!(s, "  end").unwrap();
     }
 
-    s.push_str(&tests_section);
+    for test in &tm.tests {
+        writeln!(s).unwrap();
+        writeln!(s, "  test {:?} do", test.name).unwrap();
+        let body = emit_controller_test_body(test, app, ctx);
+        if body.trim().is_empty() {
+            writeln!(s, "    :ok").unwrap();
+        } else {
+            for line in body.lines() {
+                if line.is_empty() {
+                    s.push('\n');
+                } else {
+                    writeln!(s, "    {line}").unwrap();
+                }
+            }
+        }
+        writeln!(s, "  end").unwrap();
+    }
     writeln!(s, "end").unwrap();
 
     let filename = snake_case(tm.name.0.as_str());
     EmittedFile {
-        path: PathBuf::from(format!("test/v2/{filename}.exs")),
+        path: PathBuf::from(format!("test/{filename}.exs")),
         content: s,
     }
 }
@@ -589,54 +553,26 @@ fn flatten_params_to_form(expr: &Expr, scope: Option<&str>, app: &App, ctx: ExTe
 
 // ---- model tests ------------------------------------------------------
 
-/// `test/v2/<name>.exs` — one ExUnit module per model test (`defmodule
-/// V2.<Name>Test`). Bodies use bare names (`Article`, `Fixtures`) resolved
+/// `test/<name>.exs` — one ExUnit module per model test (`defmodule
+/// <Name>Test`). Bodies use bare names (`Article`, `Fixtures`) resolved
 /// via the header aliases — identical to v1 except the model's dual-return
 /// `save` (`{record, bool}`) is destructured at `assert/assert_not` sites
 /// (v1's save returned a bare bool).
 fn emit_model_test(tm: &TestModule, app: &App) -> EmittedFile {
     let fixture_names: Vec<Symbol> = app.fixtures.iter().map(|f| f.name.clone()).collect();
-    let (known_models, model_attrs) = model_lists(app);
+    let known_models = known_models(app);
     let ctx = ExTestCtx {
         app,
         fixture_names: &fixture_names,
         known_models: &known_models,
-        model_attrs: &model_attrs,
     };
 
-    let mut tests_section = String::new();
-    for test in &tm.tests {
-        tests_section.push('\n');
-        writeln!(tests_section, "  test {:?} do", test.name).unwrap();
-        let body = emit_model_test_body(&test.body, ctx);
-        if body.trim().is_empty() {
-            writeln!(tests_section, "    :ok").unwrap();
-        } else {
-            for line in body.lines() {
-                if line.is_empty() {
-                    tests_section.push('\n');
-                } else {
-                    writeln!(tests_section, "    {line}").unwrap();
-                }
-            }
-        }
-        writeln!(tests_section, "  end").unwrap();
-    }
-    let referenced = |name: &str| tests_section.contains(&format!("{name}."))
-        || tests_section.contains(&format!("%{name}{{"));
-
     let mut s = String::new();
-    writeln!(s, "# Generated by Roundhouse (elixir2 / V2).").unwrap();
-    writeln!(s, "defmodule V2.{} do", tm.name.0).unwrap();
+    writeln!(s, "# Generated by Roundhouse (elixir2).").unwrap();
+    writeln!(s, "defmodule {} do", tm.name.0).unwrap();
     writeln!(s, "  use ExUnit.Case").unwrap();
-    if !app.fixtures.is_empty() || referenced("Fixtures") {
-        writeln!(s, "  alias V2.Fixtures").unwrap();
-    }
-    for m in &app.models {
-        if app.schema.tables.contains_key(&m.table.0) && referenced(m.name.0.as_str()) {
-            writeln!(s, "  alias V2.{}", m.name.0).unwrap();
-        }
-    }
+    // Bare module names (the model modules, `Fixtures`) resolve to the
+    // top-level modules directly — no aliases needed.
 
     if !app.fixtures.is_empty() {
         writeln!(s).unwrap();
@@ -646,12 +582,28 @@ fn emit_model_test(tm: &TestModule, app: &App) -> EmittedFile {
         writeln!(s, "  end").unwrap();
     }
 
-    s.push_str(&tests_section);
+    for test in &tm.tests {
+        writeln!(s).unwrap();
+        writeln!(s, "  test {:?} do", test.name).unwrap();
+        let body = emit_model_test_body(&test.body, ctx);
+        if body.trim().is_empty() {
+            writeln!(s, "    :ok").unwrap();
+        } else {
+            for line in body.lines() {
+                if line.is_empty() {
+                    s.push('\n');
+                } else {
+                    writeln!(s, "    {line}").unwrap();
+                }
+            }
+        }
+        writeln!(s, "  end").unwrap();
+    }
     writeln!(s, "end").unwrap();
 
     let filename = snake_case(tm.name.0.as_str());
     EmittedFile {
-        path: PathBuf::from(format!("test/v2/{filename}.exs")),
+        path: PathBuf::from(format!("test/{filename}.exs")),
         content: s,
     }
 }
@@ -722,7 +674,7 @@ fn emit_model_test_expr(e: &Expr, ctx: ExTestCtx) -> String {
 /// If `e` is a model `save` call (`record.save` instance form, or
 /// `Model.save(record)` class form), return `(module, record_expr)` so the
 /// caller can destructure its dual `{record, bool}` return. The module is
-/// the bare aliased name (`Article`), resolving to `V2.Article`.
+/// the bare aliased name (`Article`), resolving to `Article`.
 fn dual_save_call(e: &Expr, ctx: ExTestCtx) -> Option<(String, String)> {
     let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else { return None };
     if method.as_str() != "save" {
@@ -825,7 +777,7 @@ fn emit_model_test_send(
     }
 
     // `Class.new(hash)` → `%Class{ k: v, … }` struct literal (bare class
-    // name resolves to `%V2.Class{}` via the alias).
+    // name resolves to `%Class{}` via the alias).
     if let Some(r) = recv {
         if method == "new" && args.len() == 1 {
             if let ExprNode::Const { path } = &*r.node {
@@ -933,7 +885,7 @@ fn emit_block_body(e: &Expr, ctx: ExTestCtx) -> String {
 
 /// Module name for an instance call's receiver — fixture var names follow
 /// the snake-cased class name (`article` → `Article`, aliased to
-/// `V2.Article`).
+/// `Article`).
 fn camelize_recv(recv: &Expr) -> String {
     match &*recv.node {
         ExprNode::Var { name, .. } => camelize(name.as_str()),

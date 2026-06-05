@@ -118,10 +118,10 @@ case "$TARGET" in
         ;;
 esac
 
-# elixir2 (the `V2.*` overlay: models+views+controllers+dispatch/main/
+# elixir2 (the `*` overlay: models+views+controllers+dispatch/main/
 # server) is the DEFAULT elixir target as of Phase D. The compiler emits
 # it unconditionally; this flag only selects which entry point the run
-# step boots — `V2.Main.run` by default, or the legacy `App.Main.run`
+# step boots — `Main.run` by default, or the legacy `App.Main.run`
 # under `ROUNDHOUSE_ELIXIR_V1=1` (retained as a fallback until the v1 app
 # shell is deleted).
 ELIXIR_V1="${ROUNDHOUSE_ELIXIR_V1:-0}"
@@ -428,9 +428,9 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         elixir)
-            # v2 overlay (default) boots V2.Main.run (Plug/Cowboy → v2
+            # v2 overlay (default) boots Main.run (Plug/Cowboy → v2
             # stack); legacy v1 boots App.Main.run under ROUNDHOUSE_ELIXIR_V1.
-            EX_ENTRY='V2.Main.run'
+            EX_ENTRY='Main.run'
             [[ "$ELIXIR_V1" == 1 ]] && EX_ENTRY='App.Main.run'
             (cd "$BUILD_DIR" && PORT="$TARGET_PORT" MIX_ENV=prod mix run --no-halt -e "$EX_ENTRY" >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!

@@ -509,7 +509,7 @@ mod tests {
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(
-            ex.contains("acc = V2.ActionDispatch.Flash.put(acc, k, v)"),
+            ex.contains("acc = ActionDispatch.Flash.put(acc, k, v)"),
             "struct []= → <Struct>.put:\n{ex}"
         );
     }
