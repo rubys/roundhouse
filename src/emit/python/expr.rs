@@ -47,6 +47,38 @@ pub(super) fn with_super_method<R>(method: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
+thread_local! {
+    /// True while emitting a library *class*-method body, where a bare
+    /// (receiverless) non-kernel call is an implicit-self call that the
+    /// shared self-injection lowering left unresolved (it only covers
+    /// methods defined on the class, so inherited/builtin `name`/`new`
+    /// stay barewords). When set, `emit_send` prefixes such calls with
+    /// the `SELF_REF` receiver — mirroring the TS emitter's `rewrite`.
+    /// Off for module functions (inflector/json_builder) and app-code
+    /// fallback paths, where bare calls are genuine free functions.
+    static INJECT_SELF_SENDS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `f` with implicit-self injection for bare non-kernel calls on
+/// (see `INJECT_SELF_SENDS`), restoring the previous setting after.
+pub(super) fn with_self_sends<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    let prev = INJECT_SELF_SENDS.with(|c| c.replace(on));
+    let r = f();
+    INJECT_SELF_SENDS.with(|c| c.set(prev));
+    r
+}
+
+/// Ruby Kernel/module methods that stay receiverless in a class-method
+/// body (they are not implicit-self calls). Mirrors the TS emitter's
+/// `is_kernel_call`.
+fn is_kernel_call(method: &str) -> bool {
+    matches!(
+        method,
+        "raise" | "puts" | "print" | "p" | "pp"
+            | "require" | "require_relative" | "load" | "autoload"
+    )
+}
+
 /// True if `body` contains an `ExprNode::Yield` anywhere — the library
 /// emitter uses this to decide whether to inject a `_block` parameter
 /// into the method signature. Ported from the TS emitter's
@@ -588,6 +620,19 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         }
     }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // Ruby `X.new(args)` / implicit-self `new(args)` construct an
+    // instance; Python calls the class directly. `Flash.new` → `Flash()`,
+    // `new(attrs)` (implicit self in a class method) → `cls(attrs)`. A
+    // receiverless `new` only rewrites inside a class-method body; bare
+    // `new` elsewhere falls through to the generic call.
+    if method == "new" {
+        if let Some(r) = recv {
+            return format!("{}({})", emit_expr(r), args_s.join(", "));
+        }
+        if INJECT_SELF_SENDS.with(|c| c.get()) {
+            return format!("{}({})", SELF_REF.with(|c| c.get()), args_s.join(", "));
+        }
+    }
     // Ruby reflection `x.class` → Python `type(x)`. `class` is a Python
     // keyword, so it can never surface as a `.class` attribute or call.
     if method == "class" && args.is_empty() {
@@ -697,6 +742,23 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                     "(_ for _ in ()).throw(RuntimeError())".to_string()
                 } else {
                     format!("(_ for _ in ()).throw({exc})")
+                };
+            }
+            // Implicit-self call in a class-method body that the shared
+            // self-injection lowering left a bareword (inherited/builtin
+            // `name`, etc.). Inject the `SELF_REF` receiver, mirroring the
+            // TS emit rewrite. `name` is Ruby's `Module#name` (the class
+            // name) → Python's `cls.__name__`.
+            if INJECT_SELF_SENDS.with(|c| c.get()) && !is_kernel_call(method) {
+                let recv = SELF_REF.with(|c| c.get());
+                if method == "name" && args_s.is_empty() {
+                    return format!("{recv}.__name__");
+                }
+                let m = super::shared::py_method_name(method);
+                return if args_s.is_empty() {
+                    format!("{recv}.{m}()")
+                } else {
+                    format!("{recv}.{m}({})", args_s.join(", "))
                 };
             }
             if args_s.is_empty() {

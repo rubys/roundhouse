@@ -128,7 +128,9 @@ fn emit_class_method(m: &MethodDef) -> String {
     // so a classmethod's `table_name` must reach `cls.table_name()`. A
     // `super(args)` in the body renders as `super().<py_name>(args)`.
     let body = super::expr::with_self_ref(leader, || {
-        super::expr::with_super_method(&py_name, || emit_body(&m.body, &ret_ty))
+        super::expr::with_self_sends(true, || {
+            super::expr::with_super_method(&py_name, || emit_body(&m.body, &ret_ty))
+        })
     });
     push_indented_body(&mut out, &body);
     out
