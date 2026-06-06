@@ -3,8 +3,30 @@
 //! Reused by the model-method emitter and as a fallback for the
 //! controller-action walker.
 
+use std::cell::Cell;
+
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
+
+thread_local! {
+    /// How `ExprNode::SelfRef` renders in the body currently being
+    /// emitted: `"self"` in an instance method, `"cls"` in a classmethod.
+    /// A lowering injects explicit `SelfRef` receivers for implicit-self
+    /// calls (`table_name` → `self.table_name`), so a class method full
+    /// of those needs `cls`, not `self`. Defaults to `"self"` for any
+    /// caller that doesn't set it (app-code instance methods).
+    static SELF_REF: Cell<&'static str> = const { Cell::new("self") };
+}
+
+/// Run `f` with `ExprNode::SelfRef` rendering as `name` (`"self"` or
+/// `"cls"`), restoring the previous setting after. The library emitter
+/// wraps each method body with the receiver-appropriate name.
+pub(super) fn with_self_ref<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
+    let prev = SELF_REF.with(|c| c.replace(name));
+    let r = f();
+    SELF_REF.with(|c| c.set(prev));
+    r
+}
 
 // Bodies + expressions -------------------------------------------------
 
@@ -109,6 +131,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         }
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => format!("self.{name}"),
+        ExprNode::SelfRef => SELF_REF.with(|c| c.get()).to_string(),
         ExprNode::Send { recv, method, args, .. } => {
             emit_send(recv.as_ref(), method.as_str(), args)
         }
@@ -194,6 +217,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     if method == "[]" && recv.is_some() {
         return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
+    }
+    // Ruby reflection `x.class` → Python `type(x)`. `class` is a Python
+    // keyword, so it can never surface as a `.class` attribute or call.
+    if method == "class" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("type({})", emit_expr(r));
+        }
     }
     // Ruby's binary operators ride the Send channel (`a == b` is
     // `a.==(b)`). Python needs infix; emit as `recv op arg` for the

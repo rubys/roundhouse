@@ -112,7 +112,11 @@ fn emit_class_method(m: &MethodDef) -> String {
         python_ty(&ret_ty)
     )
     .unwrap();
-    push_indented_body(&mut out, &emit_body(&m.body, &ret_ty));
+    // `SelfRef` inside the body renders as the leader (`self`/`cls`) — a
+    // lowering injects explicit self-receivers for implicit-self calls,
+    // so a classmethod's `table_name` must reach `cls.table_name()`.
+    let body = super::expr::with_self_ref(leader, || emit_body(&m.body, &ret_ty));
+    push_indented_body(&mut out, &body);
     out
 }
 
