@@ -17,6 +17,11 @@ pub(super) fn py_method_name(name: &str) -> String {
     match name {
         "[]" => "__getitem__".to_string(),
         "[]=" => "__setitem__".to_string(),
+        // Ruby's constructor hook is `initialize`; Python's is `__init__`.
+        // Mapped at both the `def` site and the `super().__init__(...)`
+        // call target (see `emit::python::expr`'s `Super` arm) so they
+        // line up.
+        "initialize" => "__init__".to_string(),
         // `?`/`!` only ever occur as a Ruby suffix, so a global replace
         // is safe (operator names like `<=>` carry neither).
         _ => name.replace('?', "_p").replace('!', "_bang"),

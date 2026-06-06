@@ -3,7 +3,7 @@
 //! Reused by the model-method emitter and as a fallback for the
 //! controller-action walker.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crate::expr::{Expr, ExprNode, LValue, Literal, OpAssignOp};
 use crate::ty::Ty;
@@ -16,6 +16,14 @@ thread_local! {
     /// of those needs `cls`, not `self`. Defaults to `"self"` for any
     /// caller that doesn't set it (app-code instance methods).
     static SELF_REF: Cell<&'static str> = const { Cell::new("self") };
+
+    /// The Python name of the method whose body is currently being
+    /// emitted (already mapped: `initialize` → `__init__`). An
+    /// `ExprNode::Super` dispatches to the *parent's* same-named method,
+    /// which Python spells `super().<method>(args)` — so the arm needs
+    /// the enclosing method's name. `None` outside a library-class method
+    /// body (app-code emit paths don't set it; they don't carry `Super`).
+    static SUPER_METHOD: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Run `f` with `ExprNode::SelfRef` rendering as `name` (`"self"` or
@@ -25,6 +33,17 @@ pub(super) fn with_self_ref<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
     let prev = SELF_REF.with(|c| c.replace(name));
     let r = f();
     SELF_REF.with(|c| c.set(prev));
+    r
+}
+
+/// Run `f` with `ExprNode::Super` dispatching to `method` (the enclosing
+/// method's already-mapped Python name), restoring the previous setting
+/// after. The library emitter wraps each method body so a `super(args)`
+/// inside it renders as `super().<method>(args)`.
+pub(super) fn with_super_method<R>(method: &str, f: impl FnOnce() -> R) -> R {
+    let prev = SUPER_METHOD.with(|c| c.borrow_mut().replace(method.to_string()));
+    let r = f();
+    SUPER_METHOD.with(|c| *c.borrow_mut() = prev);
     r
 }
 
@@ -341,6 +360,19 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             out
         }
         ExprNode::Cast { value, .. } => emit_expr(value),
+        // `super(args)` → `super().<method>(args)`, where `<method>` is the
+        // enclosing method's Python name (set by the library emitter via
+        // `with_super_method`). Bare `super` (no parens — Ruby forwards the
+        // method's own args implicitly) can't be reconstructed here without
+        // the param list, so it stays a degrade until a degrade-free target
+        // needs it.
+        ExprNode::Super { args: Some(args) } => {
+            let method = SUPER_METHOD
+                .with(|c| c.borrow().clone())
+                .unwrap_or_else(|| "__init__".to_string());
+            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            format!("super().{}({})", method, args_s.join(", "))
+        }
         other => crate::emit::diagnostics::report_unsupported("python", other.kind_str(), ""),
     }
 }

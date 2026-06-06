@@ -30,6 +30,17 @@ fn last_segment(qualified: &str) -> &str {
     qualified.rsplit("::").next().unwrap_or(qualified)
 }
 
+/// Map a Ruby parent class to its Python equivalent. Ruby's exception
+/// root for application errors is `StandardError`; Python has no such
+/// class — `Exception` is the equivalent base. Other names pass through
+/// as their last namespace segment.
+fn python_base_class(qualified: &str) -> String {
+    match last_segment(qualified) {
+        "StandardError" => "Exception".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// True for the synthetic reader/writer methods `attr_accessor` /
 /// `attr_reader` / `attr_writer` lower to. Python models these as plain
 /// instance attributes, so they emit as class-level annotated fields
@@ -102,20 +113,17 @@ fn emit_class_method(m: &MethodDef) -> String {
         }
     };
     let (params, ret_ty) = params_and_ret(m);
+    let py_name = super::shared::py_method_name(m.name.as_str());
     let mut sig = vec![leader.to_string()];
     sig.extend(params);
-    writeln!(
-        out,
-        "def {}({}) -> {}:",
-        super::shared::py_method_name(m.name.as_str()),
-        sig.join(", "),
-        python_ty(&ret_ty)
-    )
-    .unwrap();
+    writeln!(out, "def {}({}) -> {}:", py_name, sig.join(", "), python_ty(&ret_ty)).unwrap();
     // `SelfRef` inside the body renders as the leader (`self`/`cls`) — a
     // lowering injects explicit self-receivers for implicit-self calls,
-    // so a classmethod's `table_name` must reach `cls.table_name()`.
-    let body = super::expr::with_self_ref(leader, || emit_body(&m.body, &ret_ty));
+    // so a classmethod's `table_name` must reach `cls.table_name()`. A
+    // `super(args)` in the body renders as `super().<py_name>(args)`.
+    let body = super::expr::with_self_ref(leader, || {
+        super::expr::with_super_method(&py_name, || emit_body(&m.body, &ret_ty))
+    });
     push_indented_body(&mut out, &body);
     out
 }
@@ -129,7 +137,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // flattened to their last segment like the class name itself.
     let mut bases: Vec<String> = Vec::new();
     if let Some(parent) = &class.parent {
-        bases.push(last_segment(parent.0.as_str()).to_string());
+        bases.push(python_base_class(parent.0.as_str()));
     }
     for inc in &class.includes {
         bases.push(last_segment(inc.0.as_str()).to_string());
