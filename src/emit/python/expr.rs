@@ -796,6 +796,15 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                 return r#"(_ for _ in ()).throw(TypeError("roundhouse: % with incompatible operand types"))"#.to_string();
             }
         }
+        // Ruby `Array#<<` appends; Python lists have no `<<` (it's
+        // bit-shift → TypeError on a list). Map to `.append` on an Array
+        // receiver; a non-array `<<` (integer bit-shift) stays infix via
+        // `is_py_binop` below.
+        if method == "<<"
+            && matches!(strip_nullable(r.ty.as_ref()).as_ref(), Some(Ty::Array { .. }))
+        {
+            return format!("{}.append({})", emit_expr(r), emit_expr(arg));
+        }
         if is_py_binop(method) {
             return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
         }
