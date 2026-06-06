@@ -50,6 +50,9 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
             }
             lines.join("\n")
         }
+        // A whole-body loop or explicit return routes through the
+        // statement emitter (both degrade in expression position).
+        ExprNode::While { .. } | ExprNode::Return { .. } => emit_stmt(body, true, is_void),
         _ => {
             if let Some(s) = try_emit_raise_stmt(body) {
                 s
@@ -103,6 +106,47 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("self.{} = {}", name, emit_expr(value))
         }
+        // Explicit `return X` (Ruby `return foo`, incl. guard-clause
+        // tails). Python has native return — no wrapping needed.
+        ExprNode::Return { value } => format!("return {}", emit_expr(value)),
+        // Guard return: `return X if cond` → `if cond: return X`. A
+        // ternary would put the return in expression position (illegal).
+        ExprNode::If { cond, then_branch, else_branch }
+            if is_nil_or_empty(else_branch)
+                && matches!(&*then_branch.node, ExprNode::Return { .. }) =>
+        {
+            let ExprNode::Return { value } = &*then_branch.node else { unreachable!() };
+            format!("if {}: return {}", emit_expr(cond), emit_expr(value))
+        }
+        // Inverse guard: `return X unless cond` → `if not (cond): return
+        // X` (the Return sits in the else branch, then is empty).
+        ExprNode::If { cond, then_branch, else_branch }
+            if is_nil_or_empty(then_branch)
+                && matches!(&*else_branch.node, ExprNode::Return { .. }) =>
+        {
+            let ExprNode::Return { value } = &*else_branch.node else { unreachable!() };
+            format!("if not ({}): return {}", emit_expr(cond), emit_expr(value))
+        }
+        // Postfix-`if` with no else, off the value-returning tail: emit a
+        // native guard rather than a ternary, which would drop an
+        // assignment LHS or other statement side effect.
+        ExprNode::If { cond, then_branch, else_branch }
+            if is_nil_or_empty(else_branch) && (!is_last || void_return) =>
+        {
+            match &*then_branch.node {
+                ExprNode::Seq { .. } => {
+                    format!("if {}:\n{}", emit_expr(cond), emit_block_body(then_branch, void_return))
+                }
+                _ => format!("if {}: {}", emit_expr(cond), emit_stmt(then_branch, false, true)),
+            }
+        }
+        // `while/until cond; body; end` → native loop. `until` negates
+        // the condition (Python has no `until`).
+        ExprNode::While { cond, body, until_form } => {
+            let c = emit_expr(cond);
+            let c = if *until_form { format!("not ({c})") } else { c };
+            format!("while {c}:\n{}", emit_block_body(body, true))
+        }
         _ => {
             if let Some(s) = try_emit_raise_stmt(e) {
                 s
@@ -113,6 +157,32 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             }
         }
     }
+}
+
+/// True for an `If`'s absent else branch — Ruby's `x if cond` lowers to
+/// `If { else_branch = nil }` (or an empty `Seq`).
+fn is_nil_or_empty(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Seq { exprs } => exprs.is_empty(),
+        _ => false,
+    }
+}
+
+/// Emit `e` as the 4-space-indented body of a compound statement
+/// (`while`/`if`). A `Seq` becomes one statement per line; anything else
+/// is a single statement. Body statements are never the method's return
+/// value, so `is_last` is false throughout.
+fn emit_block_body(e: &Expr, void: bool) -> String {
+    let inner = match &*e.node {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .map(|s| emit_stmt(s, false, void))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_stmt(e, false, void),
+    };
+    super::shared::indent_py(&inner)
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
