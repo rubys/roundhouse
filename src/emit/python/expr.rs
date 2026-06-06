@@ -700,6 +700,7 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
     let one_arg = args_s.len() == 1;
     let is_class = matches!(ty, Some(Ty::Class { .. }));
     let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
+    let is_array = matches!(ty, Some(Ty::Array { .. }));
     let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
     Some(match method {
         // Universal Ruby conversions → Python builtins (which accept any
@@ -714,6 +715,10 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         "length" | "size" if no_args && is_seq => format!("len({recv})"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
+        // Ruby's single-element `Array#push(x)` is Python's `list.append`.
+        // (Multi-arg push falls through — it doesn't occur in framework
+        // code and Python's append takes one element.)
+        "push" if one_arg && is_array => format!("{recv}.append({})", args_s[0]),
         "upcase" if no_args && is_str => format!("{recv}.upper()"),
         "downcase" if no_args && is_str => format!("{recv}.lower()"),
         "start_with?" if one_arg && is_str => format!("{recv}.startswith({})", args_s[0]),
