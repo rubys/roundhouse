@@ -116,6 +116,12 @@ fn emit_class_method(m: &MethodDef) -> String {
     let py_name = super::shared::py_method_name(m.name.as_str());
     let mut sig = vec![leader.to_string()];
     sig.extend(params);
+    // A method that `yield`s gets an injected `_block` parameter; the
+    // body's `yield(...)` renders as `_block(...)` (see `emit::python::
+    // expr`'s Yield arm). Mirrors the TS emitter's `__block`.
+    if super::expr::body_contains_yield(&m.body) {
+        sig.push("_block".to_string());
+    }
     writeln!(out, "def {}({}) -> {}:", py_name, sig.join(", "), python_ty(&ret_ty)).unwrap();
     // `SelfRef` inside the body renders as the leader (`self`/`cls`) — a
     // lowering injects explicit self-receivers for implicit-self calls,
@@ -187,7 +193,10 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         if i > 0 {
             out.push('\n');
         }
-        let (params, ret_ty) = params_and_ret(m);
+        let (mut params, ret_ty) = params_and_ret(m);
+        if super::expr::body_contains_yield(&m.body) {
+            params.push("_block".to_string());
+        }
         writeln!(
             out,
             "def {}({}) -> {}:",

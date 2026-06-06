@@ -47,6 +47,81 @@ pub(super) fn with_super_method<R>(method: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// True if `body` contains an `ExprNode::Yield` anywhere — the library
+/// emitter uses this to decide whether to inject a `_block` parameter
+/// into the method signature. Ported from the TS emitter's
+/// `body_contains_yield`; covers every node that can nest a yield.
+pub(super) fn body_contains_yield(body: &Expr) -> bool {
+    match &*body.node {
+        ExprNode::Yield { .. } => true,
+        ExprNode::Seq { exprs } => exprs.iter().any(body_contains_yield),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            body_contains_yield(cond)
+                || body_contains_yield(then_branch)
+                || body_contains_yield(else_branch)
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            body_contains_yield(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(body_contains_yield)
+                        || body_contains_yield(&a.body)
+                })
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            recv.as_ref().is_some_and(body_contains_yield)
+                || args.iter().any(body_contains_yield)
+                || block.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Apply { fun, args, block } => {
+            body_contains_yield(fun)
+                || args.iter().any(body_contains_yield)
+                || block.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Lambda { body: lb, .. } => body_contains_yield(lb),
+        ExprNode::Assign { target, value } => {
+            (match target {
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
+                    body_contains_yield(recv)
+                }
+                _ => false,
+            }) || body_contains_yield(value)
+        }
+        ExprNode::OpAssign { target, value, .. } => {
+            (match target {
+                LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
+                    body_contains_yield(recv)
+                }
+                _ => false,
+            }) || body_contains_yield(value)
+        }
+        ExprNode::Return { value } => body_contains_yield(value),
+        ExprNode::Raise { value } => body_contains_yield(value),
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            value.as_ref().is_some_and(body_contains_yield)
+        }
+        ExprNode::Splat { value } => body_contains_yield(value),
+        ExprNode::Super { args } => args
+            .as_ref()
+            .is_some_and(|v| v.iter().any(body_contains_yield)),
+        ExprNode::BoolOp { left, right, .. } => {
+            body_contains_yield(left) || body_contains_yield(right)
+        }
+        ExprNode::While { cond, body: wb, .. } => {
+            body_contains_yield(cond) || body_contains_yield(wb)
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            body_contains_yield(expr) || body_contains_yield(fallback)
+        }
+        ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
+            body_contains_yield(inner)
+                || rescues.iter().any(|r| body_contains_yield(&r.body))
+                || else_branch.as_ref().is_some_and(body_contains_yield)
+                || ensure.as_ref().is_some_and(body_contains_yield)
+        }
+        _ => false,
+    }
+}
+
 // Bodies + expressions -------------------------------------------------
 
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
@@ -372,6 +447,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 .unwrap_or_else(|| "__init__".to_string());
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("super().{}({})", method, args_s.join(", "))
+        }
+        // `yield a, b` invokes the enclosing method's implicit block. The
+        // library emitter injects a `_block` parameter into any method
+        // whose body uses yield (see `body_contains_yield`); here we just
+        // call it. Single-underscore name (not `__block`) to dodge
+        // Python's `__name` class-private name mangling.
+        ExprNode::Yield { args } => {
+            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            format!("_block({})", args_s.join(", "))
         }
         other => crate::emit::diagnostics::report_unsupported("python", other.kind_str(), ""),
     }
