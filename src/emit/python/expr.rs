@@ -725,11 +725,36 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     }
 }
 
+/// Strip a single-non-nil `Union<T, Nil>` down to `T`; leave any other
+/// type unchanged. Lets type-gated builtin maps fire on a value whose
+/// static type is nullable (array index, pre-assignment ivar, …).
+fn strip_nullable(ty: Option<&Ty>) -> Option<Ty> {
+    match ty {
+        Some(Ty::Union { variants }) => {
+            let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+            match non_nil.as_slice() {
+                [single] => Some((*single).clone()),
+                _ => ty.cloned(),
+            }
+        }
+        _ => ty.cloned(),
+    }
+}
+
 /// Map a Ruby stdlib method call to its Python equivalent, gated on the
 /// receiver's inferred type. Returns `None` to fall through to the
 /// generic call emit (preserving user methods that share a name with a
 /// Ruby builtin, e.g. `Flash#length`, `Session#to_h`).
 fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[String]) -> Option<String> {
+    // A receiver's inferred type is often nullable: `Array#[]` is
+    // `Union<elem, Nil>` (an index can be out of bounds), an ivar's
+    // flow-sensitive type carries `Nil` until first assignment, etc. The
+    // builtin maps below should still fire on the inner type (e.g.
+    // `pattern_parts[i].start_with?(...)` → `.startswith()`), so strip a
+    // single-non-nil `Union<T, Nil>` down to `T` first. Mirrors the TS
+    // emitter's `strip_nullable`.
+    let stripped = strip_nullable(ty);
+    let ty = stripped.as_ref();
     let no_args = args_s.is_empty();
     let one_arg = args_s.len() == 1;
     let is_class = matches!(ty, Some(Ty::Class { .. }));
