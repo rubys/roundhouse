@@ -162,7 +162,11 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     let mut fields: Vec<(String, Ty)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in class.methods.iter().filter(|m| is_accessor(m)) {
-        let field = m.name.as_str().trim_end_matches('=').to_string();
+        // Legalize the attribute name for a Python identifier — a
+        // predicate accessor (`abstract?`) must become `abstract_p`, not
+        // an invalid `abstract?` field. Strip the writer `=` first so
+        // `notice`/`notice=` still share one field.
+        let field = super::shared::py_method_name(m.name.as_str().trim_end_matches('='));
         if seen.insert(field.clone()) {
             fields.push((field, accessor_field_ty(m)));
         }

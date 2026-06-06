@@ -48,8 +48,11 @@ fn models_are_classes_with_type_hints() {
     let files = python::emit(&app);
     let content = find(&files, "app/models.py");
     assert!(content.contains("from __future__ import annotations"), "got:\n{content}");
-    assert!(content.contains("class Post:"), "got:\n{content}");
-    assert!(content.contains("class Comment:"), "got:\n{content}");
+    // Models now emit through the shared model->LibraryClass lowering
+    // (same path as TS), so each is a thin subclass of ApplicationRecord
+    // (-> Base) rather than a self-contained class.
+    assert!(content.contains("class Post(ApplicationRecord):"), "got:\n{content}");
+    assert!(content.contains("class Comment(ApplicationRecord):"), "got:\n{content}");
     // Field type hints use PEP 585 built-in generics and PEP 604
     // union syntax. tiny-blog's Post has id (int) + title (str).
     assert!(content.contains("id: int"), "got:\n{content}");
@@ -61,9 +64,12 @@ fn model_methods_annotate_return_type() {
     let app = analyzed_app();
     let files = python::emit(&app);
     let content = find(&files, "app/models.py");
-    // `normalize_title` returns `title.strip()` — analyzer types it
-    // as str.
-    assert!(content.contains("def normalize_title(self) -> str:"), "got:\n{content}");
+    // Lowered models annotate return types throughout — e.g. the
+    // per-model `table_name` class method the lowering synthesizes.
+    // (The old bespoke path's `normalize_title` reader is gone: the
+    // shared lowering drops `before_save :symbol` callback methods, same
+    // as the TS path.)
+    assert!(content.contains("def table_name(cls) -> str:"), "got:\n{content}");
 }
 
 #[test]
