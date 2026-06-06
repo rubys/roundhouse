@@ -485,6 +485,12 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
                     return ruby_isinstance(&recv_s, &emit_expr(arg));
                 }
             }
+            // Ruby stdlib methods → Python builtins, gated on the
+            // receiver's inferred type so user methods of the same name
+            // (Flash#length/#to_h, a model #to_s) aren't shadowed.
+            if let Some(mapped) = map_builtin_method(&recv_s, method, r.ty.as_ref(), &args_s) {
+                return mapped;
+            }
             // Every other `?`/`!` (and `[]`/`[]=`) name is legalized the
             // same way at the definition site, so calls and defs align.
             let m = super::shared::py_method_name(method);
@@ -499,6 +505,37 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             }
         }
     }
+}
+
+/// Map a Ruby stdlib method call to its Python equivalent, gated on the
+/// receiver's inferred type. Returns `None` to fall through to the
+/// generic call emit (preserving user methods that share a name with a
+/// Ruby builtin, e.g. `Flash#length`, `Session#to_h`).
+fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[String]) -> Option<String> {
+    let no_args = args_s.is_empty();
+    let one_arg = args_s.len() == 1;
+    let is_class = matches!(ty, Some(Ty::Class { .. }));
+    let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
+    let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
+    Some(match method {
+        // Universal Ruby conversions → Python builtins (which accept any
+        // value). Skipped on known user classes, which may define their
+        // own to_s/to_i — there `str(x)` would call __str__, not the
+        // Ruby-named method.
+        "to_s" if no_args && !is_class => format!("str({recv})"),
+        "to_i" if no_args && !is_class => format!("int({recv})"),
+        "to_f" if no_args && !is_class => format!("float({recv})"),
+        // Collection/string ops → Python builtins, gated to the builtin
+        // type so user methods of the same name aren't shadowed.
+        "length" | "size" if no_args && is_seq => format!("len({recv})"),
+        "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
+        "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
+        "upcase" if no_args && is_str => format!("{recv}.upper()"),
+        "downcase" if no_args && is_str => format!("{recv}.lower()"),
+        "start_with?" if one_arg && is_str => format!("{recv}.startswith({})", args_s[0]),
+        "end_with?" if one_arg && is_str => format!("{recv}.endswith({})", args_s[0]),
+        _ => return None,
+    })
 }
 
 /// Map a Ruby `is_a?(Class)` check to a Python membership test. Builtin
