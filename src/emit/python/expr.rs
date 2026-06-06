@@ -247,6 +247,17 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 _ => format!("{lhs} {} {rhs}", op.as_ruby()),
             }
         }
+        // A nested `Seq` in statement position (e.g. the else-path of a
+        // guard-clause body: `return X if g; <stmt; stmt; …>`). Emit each
+        // element as a statement, threading is_last/void to the tail.
+        // Without this it falls to `emit_expr`, which `;`-joins the seq —
+        // dropping assignment LHSs and degrading any while/case inside.
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| emit_stmt(s, is_last && i == exprs.len() - 1, void_return))
+            .collect::<Vec<_>>()
+            .join("\n"),
         // Explicit `return X` (Ruby `return foo`, incl. guard-clause
         // tails). Python has native return — no wrapping needed.
         ExprNode::Return { value } => format!("return {}", emit_expr(value)),
