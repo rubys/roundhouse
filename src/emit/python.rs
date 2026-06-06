@@ -132,13 +132,23 @@ const CABLE_SOURCE: &str = include_str!("../../runtime/python/cable.py");
 /// Framework leaf files that have completed the strangler switchover:
 /// shipped as transpiled `runtime/ruby/*` output instead of hand-written
 /// `runtime/python/*.py`. Switchover-ready means more than `py_compile`
-/// clean — the file must be free of `report_unsupported` degrades, since
-/// those trip the transpile fail-policy.
+/// clean — the file must be free of `report_unsupported` degrades (those
+/// trip the transpile fail-policy) AND import cleanly in the project.
 ///
-/// `inflector` qualifies (one pure ternary). `json_builder` does NOT yet:
-/// its `encode_value`/`encode_datetime` carry `Return`/`While` degrades
-/// (and a `gsub` -> `re.sub` rewrite is pending), so it stays dormant.
-const LIVE_FRAMEWORK: &[&str] = &["app/inflector.py"];
+/// All eight files below transpile degrade-free after the Super / Yield /
+/// Return / runtime-ism work. `view_helpers` stays out: it still carries
+/// degrades (complex nested each-blocks, `<<`-append, `%()` literals) and
+/// a hand-written `app/view_helpers.py` is shipped in its place.
+const LIVE_FRAMEWORK: &[&str] = &[
+    "app/inflector.py",
+    "app/json_builder.py",
+    "app/errors.py",
+    "app/active_record_base.py",
+    "app/flash.py",
+    "app/session.py",
+    "app/action_controller_base.py",
+    "app/router.py",
+];
 
 /// Emit the switched-over framework leaf files (see `LIVE_FRAMEWORK`).
 fn live_framework_units() -> Vec<EmittedFile> {

@@ -65,6 +65,14 @@ pub struct TargetEmit {
     /// requires explicit `module X ... end` wrapping for refs of the
     /// form `X::Y` to resolve.
     pub wrap_namespace: fn(namespace: &str, body: &str) -> String,
+    /// Text inserted after the generated-file header comment and before
+    /// any imports. Python uses it for `from __future__ import
+    /// annotations` so cross-file type annotations (e.g. `errors.py`'s
+    /// `record: Base`) are evaluated lazily — both to avoid import cycles
+    /// and because annotations are eager before Python 3.14 (PEP 649), so
+    /// a bare forward-ref annotation would `NameError` at import on 3.12.
+    /// Empty for targets that don't need it.
+    pub module_prelude: &'static str,
 }
 
 const TS_TARGET: TargetEmit = TargetEmit {
@@ -74,6 +82,7 @@ const TS_TARGET: TargetEmit = TargetEmit {
     format_constant: ts_format_constant,
     format_module_ivar: None,
     wrap_namespace: ts_wrap_namespace,
+    module_prelude: "",
 };
 
 fn ts_wrap_namespace(_namespace: &str, body: &str) -> String {
@@ -100,6 +109,7 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
     format_constant: crystal_format_constant,
     format_module_ivar: None,
     wrap_namespace: crystal_wrap_namespace,
+    module_prelude: "",
 };
 
 /// Wrap `body` in `module Foo ... end` (or nested forms for compound
@@ -165,6 +175,7 @@ const RUST_TARGET: TargetEmit = TargetEmit {
     format_constant: crate::emit::rust2::library::format_constant,
     format_module_ivar: None,
     wrap_namespace: rust_wrap_namespace,
+    module_prelude: "",
 };
 
 /// Rust uses the file-as-module convention — `src/inflector.rs` IS
@@ -825,7 +836,10 @@ where
         cp = comment_prefix,
     );
 
-    let content = format!("{header}{import_block}{}{}", entry.prelude, emitted);
+    let content = format!(
+        "{header}{}{import_block}{}{}",
+        target.module_prelude, entry.prelude, emitted
+    );
 
     Ok(RuntimeUnit {
         out_path: PathBuf::from(entry.out_path),
@@ -855,6 +869,7 @@ const GO_TARGET: TargetEmit = TargetEmit {
     format_constant: go_format_constant_thunk,
     format_module_ivar: Some(go_format_module_ivar_thunk),
     wrap_namespace: go_wrap_namespace,
+    module_prelude: "",
 };
 
 /// Go uses path-based imports. `name` is informational (Go can't
@@ -1031,6 +1046,7 @@ const ELIXIR_TARGET: TargetEmit = TargetEmit {
     // same way TS/Crystal/Rust opt out here.
     format_module_ivar: None,
     wrap_namespace: elixir_wrap_namespace,
+    module_prelude: "",
 };
 
 /// Elixir `alias`. `name` is the module; the source path is implicit
@@ -1247,6 +1263,7 @@ const PYTHON_TARGET: TargetEmit = TargetEmit {
     // hand-written holder, same opt-out as TS/Crystal/Rust.
     format_module_ivar: None,
     wrap_namespace: py_wrap_namespace,
+    module_prelude: "from __future__ import annotations\n\n",
 };
 
 /// Python `from <module> import <name>`. The `source` is the dotted
