@@ -29,13 +29,48 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
             lines.join("\n")
         }
         _ => {
-            if is_void {
+            if let Some(s) = try_emit_raise_stmt(body) {
+                s
+            } else if is_void {
                 emit_expr(body)
             } else {
                 format!("return {}", emit_expr(body))
             }
         }
     }
+}
+
+/// Build the Python exception value for a Ruby `raise`'s arguments:
+/// `raise C, msg` → `C(msg)`; `raise "msg"` → `RuntimeError("msg")`;
+/// `raise e` / `raise C.new(...)` → the value as-is. Empty for a bare
+/// re-raise (`raise` with no args).
+fn raise_exception_expr(args: &[Expr]) -> String {
+    match args {
+        [] => String::new(),
+        [one] => match &*one.node {
+            ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. } => {
+                format!("RuntimeError({})", emit_expr(one))
+            }
+            _ => emit_expr(one),
+        },
+        [klass, msg, ..] => format!("{}({})", emit_expr(klass), emit_expr(msg)),
+    }
+}
+
+/// If `e` is a Ruby `raise …` (a no-receiver `raise` Send), render it as
+/// a Python `raise` *statement*. Ruby's `raise` is an expression, so it
+/// reaches a method's tail where `emit_body`/`emit_stmt` would otherwise
+/// wrap it in `return` — but a `raise` statement must stand alone.
+fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+        if method.as_str() == "raise" {
+            return Some(match raise_exception_expr(args).as_str() {
+                "" => "raise".to_string(),
+                exc => format!("raise {exc}"),
+            });
+        }
+    }
+    None
 }
 
 pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
@@ -47,7 +82,9 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             format!("self.{} = {}", name, emit_expr(value))
         }
         _ => {
-            if is_last && !void_return {
+            if let Some(s) = try_emit_raise_stmt(e) {
+                s
+            } else if is_last && !void_return {
                 format!("return {}", emit_expr(e))
             } else {
                 emit_expr(e)
@@ -250,6 +287,18 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     }
     match recv {
         None => {
+            // Expression-position `raise` — statement contexts intercept
+            // this earlier via `try_emit_raise_stmt`. `raise` is a Python
+            // statement, so stay expression-valued with the generator
+            // `.throw` trick (same device as the incompatible-`+` path).
+            if method == "raise" {
+                let exc = raise_exception_expr(args);
+                return if exc.is_empty() {
+                    "(_ for _ in ()).throw(RuntimeError())".to_string()
+                } else {
+                    format!("(_ for _ in ()).throw({exc})")
+                };
+            }
             if args_s.is_empty() {
                 method.to_string()
             } else {

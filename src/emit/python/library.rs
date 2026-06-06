@@ -71,8 +71,15 @@ fn params_and_ret(m: &MethodDef) -> (Vec<String>, Ty) {
     }
 }
 
-/// Append `body`, indented one Python level (4 spaces), to `out`.
+/// Append `body`, indented one Python level (4 spaces), to `out`. An
+/// empty body (intentional in the framework — e.g. `def assign_from_row;
+/// end`, whose override is supplied per-model) becomes `pass` so the
+/// `def` isn't a syntax error.
 fn push_indented_body(out: &mut String, body: &str) {
+    if body.trim().is_empty() {
+        out.push_str("    pass\n");
+        return;
+    }
     for line in body.lines() {
         if line.is_empty() {
             out.push('\n');
