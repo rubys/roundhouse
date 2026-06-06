@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal, OpAssignOp};
 use crate::ty::Ty;
 
 thread_local! {
@@ -106,6 +106,19 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("self.{} = {}", name, emit_expr(value))
         }
+        // Compound assignment. Python's arithmetic/bitwise compound ops
+        // are spelled identically to Ruby's (`+=`, `**=`, `<<=`, …), so
+        // they pass through `as_ruby`. The short-circuit forms have no
+        // Python compound operator: `x ||= y` → `x = x or y`.
+        ExprNode::OpAssign { target, op, value } => {
+            let lhs = lvalue_str(target);
+            let rhs = emit_expr(value);
+            match op {
+                OpAssignOp::OrOr => format!("{lhs} = {lhs} or {rhs}"),
+                OpAssignOp::AndAnd => format!("{lhs} = {lhs} and {rhs}"),
+                _ => format!("{lhs} {} {rhs}", op.as_ruby()),
+            }
+        }
         // Explicit `return X` (Ruby `return foo`, incl. guard-clause
         // tails). Python has native return — no wrapping needed.
         ExprNode::Return { value } => format!("return {}", emit_expr(value)),
@@ -155,6 +168,20 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             } else {
                 emit_expr(e)
             }
+        }
+    }
+}
+
+/// Render an assignment target as its Python left-hand side. Mirrors the
+/// `Assign` arms in `emit_stmt` for the in-place compound-assign forms.
+fn lvalue_str(t: &LValue) -> String {
+    match t {
+        LValue::Var { name, .. } => name.to_string(),
+        LValue::Ivar { name } => format!("self.{name}"),
+        LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
+        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Const { path } => {
+            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
     }
 }
