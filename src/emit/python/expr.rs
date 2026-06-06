@@ -387,11 +387,11 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
             let s = value.to_string();
             if s.contains('.') { s } else { format!("{s}.0") }
         }
-        Literal::Str { value } => format!("{value:?}"),
+        Literal::Str { value } => super::shared::py_string_literal(value),
         // Symbols have no direct Python equivalent; emit as string
         // literals. Enum detection would refine this into a typed
         // Enum subclass later.
-        Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Sym { value } => super::shared::py_string_literal(value.as_str()),
         Literal::Regex { pattern, flags } => {
             let flag_expr = python_regex_flag_expr(flags);
             if flag_expr.is_empty() {

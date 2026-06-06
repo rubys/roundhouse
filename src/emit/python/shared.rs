@@ -38,13 +38,28 @@ pub(super) fn controller_class_name(short: &str) -> String {
 }
 
 pub(super) fn py_string_literal(s: &str) -> String {
-    // Python's repr() gives a safely-escaped string literal.
-    // Prefer double-quoted form when the string has no embedded
-    // double-quote.
-    if !s.contains('"') && !s.contains('\\') && !s.contains('\n') {
-        return format!("\"{}\"", s);
+    // A correct, double-quoted Python literal. Rust's `{:?}` is NOT a
+    // valid Python escaper — it renders control chars in Rust's own
+    // `\u{8}` form, which Python rejects ("truncated \uXXXX escape").
+    // Escape char-by-char to Python's grammar instead; non-ASCII
+    // printables pass through (Python source is UTF-8 by default).
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
     }
-    format!("{:?}", s)
+    out.push('"');
+    out
 }
 
 /// Build a comma-separated Python parameter list, prepending the
