@@ -517,6 +517,28 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             return emit_index(&emit_expr(r), args);
         }
     }
+    // Logical not. Ruby's `!x` rides the Send channel as `x.!()`; two
+    // surface forms reach here — `Send { recv: Some(x), args: [] }` and
+    // view_to_library's `Send { recv: None, args: [x] }`. Python spells
+    // it `not`. `!x.nil?` collapses to the idiomatic `x is not None` (the
+    // negation of the `nil?` → `is None` rewrite below); everything else
+    // is `not (inner)` — parens are always safe since `not` binds looser
+    // than comparison but tighter than `and`/`or`.
+    if method == "!" {
+        let inner = match (recv, args) {
+            (Some(r), []) => Some(r),
+            (None, [a]) => Some(a),
+            _ => None,
+        };
+        if let Some(inner) = inner {
+            if let ExprNode::Send { recv: Some(r), method: m, args: a, .. } = &*inner.node {
+                if m.as_str() == "nil?" && a.is_empty() {
+                    return format!("{} is not None", emit_expr(r));
+                }
+            }
+            return format!("not ({})", emit_expr(inner));
+        }
+    }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Ruby reflection `x.class` → Python `type(x)`. `class` is a Python
     // keyword, so it can never surface as a `.class` attribute or call.
