@@ -18,7 +18,7 @@ use std::fmt::Write;
 use super::expr::{emit_body, emit_expr};
 use super::shared::indent_py;
 use super::ty::python_ty;
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ty::Ty;
 
@@ -28,6 +28,42 @@ use crate::ty::Ty;
 /// Mirrors TS's `rsplit("::")` at the class-decl site.
 fn last_segment(qualified: &str) -> &str {
     qualified.rsplit("::").next().unwrap_or(qualified)
+}
+
+/// Legalize a method-definition name. Ruby's index operators back the
+/// native subscript syntax `emit_send` already produces at call sites
+/// (`flash["notice"]` → `flash["notice"]`), so their *definitions* map
+/// to the Python dunders that implement that syntax. Other names pass
+/// through unchanged (the `?`/`!` predicate/bang family is the next
+/// slice — it tangles builtins like `nil?` with user methods and needs
+/// receiver type info to resolve, so it's handled at call+def sites
+/// together, not here).
+fn py_def_name(name: &str) -> &str {
+    match name {
+        "[]" => "__getitem__",
+        "[]=" => "__setitem__",
+        other => other,
+    }
+}
+
+/// True for the synthetic reader/writer methods `attr_accessor` /
+/// `attr_reader` / `attr_writer` lower to. Python models these as plain
+/// instance attributes, so they emit as class-level annotated fields
+/// rather than `def`s (`def notice=` isn't valid Python anyway).
+fn is_accessor(m: &MethodDef) -> bool {
+    matches!(m.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter)
+}
+
+/// The field type for an accessor: a reader's return type or a writer's
+/// sole-parameter type, falling back to the body's inferred type.
+fn accessor_field_ty(m: &MethodDef) -> Ty {
+    match (&m.kind, &m.signature) {
+        (AccessorKind::AttributeReader, Some(Ty::Fn { ret, .. })) => (**ret).clone(),
+        (AccessorKind::AttributeWriter, Some(Ty::Fn { params, .. })) if !params.is_empty() => {
+            params[0].ty.clone()
+        }
+        _ => m.body.ty.clone().unwrap_or(Ty::Untyped),
+    }
 }
 
 /// Render a method's parameter list and return type. Prefers the
@@ -77,7 +113,14 @@ fn emit_class_method(m: &MethodDef) -> String {
     let (params, ret_ty) = params_and_ret(m);
     let mut sig = vec![leader.to_string()];
     sig.extend(params);
-    writeln!(out, "def {}({}) -> {}:", m.name, sig.join(", "), python_ty(&ret_ty)).unwrap();
+    writeln!(
+        out,
+        "def {}({}) -> {}:",
+        py_def_name(m.name.as_str()),
+        sig.join(", "),
+        python_ty(&ret_ty)
+    )
+    .unwrap();
     push_indented_body(&mut out, &emit_body(&m.body, &ret_ty));
     out
 }
@@ -102,12 +145,28 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         writeln!(out, "class {name}({}):", bases.join(", ")).unwrap();
     }
 
-    if class.methods.is_empty() {
+    // Accessor reader/writer methods collapse into class-level annotated
+    // fields (deduped by attribute name, `notice=` and `notice` sharing
+    // one `notice` field). Everything else emits as a method.
+    let mut fields: Vec<(String, Ty)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in class.methods.iter().filter(|m| is_accessor(m)) {
+        let field = m.name.as_str().trim_end_matches('=').to_string();
+        if seen.insert(field.clone()) {
+            fields.push((field, accessor_field_ty(m)));
+        }
+    }
+    let methods: Vec<&MethodDef> = class.methods.iter().filter(|m| !is_accessor(m)).collect();
+
+    if fields.is_empty() && methods.is_empty() {
         writeln!(out, "    pass").unwrap();
         return Ok(out);
     }
-    for (i, m) in class.methods.iter().enumerate() {
-        if i > 0 {
+    for (name, ty) in &fields {
+        writeln!(out, "    {name}: {}", python_ty(ty)).unwrap();
+    }
+    for (i, m) in methods.iter().enumerate() {
+        if i > 0 || !fields.is_empty() {
             out.push('\n');
         }
         out.push_str(&indent_py(&emit_class_method(m)));
