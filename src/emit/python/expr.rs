@@ -258,16 +258,50 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
         }
         Some(r) => {
             let recv_s = emit_expr(r);
+            // Ruby type predicates map to Python builtins on the
+            // receiver, not to a name-legalized method call.
+            if method == "nil?" && args.is_empty() {
+                return format!("{recv_s} is None");
+            }
+            if matches!(method, "is_a?" | "kind_of?" | "instance_of?") {
+                if let [arg] = args {
+                    return ruby_isinstance(&recv_s, &emit_expr(arg));
+                }
+            }
+            // Every other `?`/`!` (and `[]`/`[]=`) name is legalized the
+            // same way at the definition site, so calls and defs align.
+            let m = super::shared::py_method_name(method);
             if args_s.is_empty() {
                 // Bare `recv.method` (no parens) is how Python accesses
                 // attributes. For method calls with no args we emit
                 // `recv.method()` — matches Python idiom and avoids
                 // confusing a 0-arity call with an attribute read.
-                format!("{recv_s}.{method}()")
+                format!("{recv_s}.{m}()")
             } else {
-                format!("{recv_s}.{method}({})", args_s.join(", "))
+                format!("{recv_s}.{m}({})", args_s.join(", "))
             }
         }
+    }
+}
+
+/// Map a Ruby `is_a?(Class)` check to a Python membership test. Builtin
+/// classes become `isinstance` against the Python type (or `is True/False/
+/// None` for the singleton classes); user classes fall through to
+/// `isinstance` on the last name segment.
+fn ruby_isinstance(recv: &str, cls: &str) -> String {
+    let base = cls.rsplit("::").next().unwrap_or(cls);
+    let base = base.rsplit('.').next().unwrap_or(base);
+    match base {
+        "Integer" => format!("isinstance({recv}, int)"),
+        "Float" => format!("isinstance({recv}, float)"),
+        "Numeric" => format!("isinstance({recv}, (int, float))"),
+        "String" | "Symbol" => format!("isinstance({recv}, str)"),
+        "Array" => format!("isinstance({recv}, list)"),
+        "Hash" => format!("isinstance({recv}, dict)"),
+        "TrueClass" => format!("{recv} is True"),
+        "FalseClass" => format!("{recv} is False"),
+        "NilClass" => format!("{recv} is None"),
+        other => format!("isinstance({recv}, {other})"),
     }
 }
 

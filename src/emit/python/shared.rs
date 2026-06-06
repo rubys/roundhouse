@@ -7,6 +7,22 @@ pub(super) fn indent_py(s: &str) -> String {
         .join("\n")
 }
 
+/// Legalize a Ruby method name for Python, at both definition and call
+/// sites so the two line up. Index operators map to the dunders that
+/// back native subscript syntax (`flash["k"]`); `?`/`!` suffixes
+/// (predicate / bang) become `_p` / `_bang`, mirroring go2's convention.
+/// Builtin predicates with Python semantics (`nil?`, `is_a?`) are
+/// intercepted by `emit_send` *before* this and never reach it.
+pub(super) fn py_method_name(name: &str) -> String {
+    match name {
+        "[]" => "__getitem__".to_string(),
+        "[]=" => "__setitem__".to_string(),
+        // `?`/`!` only ever occur as a Ruby suffix, so a global replace
+        // is safe (operator names like `<=>` carry neither).
+        _ => name.replace('?', "_p").replace('!', "_bang"),
+    }
+}
+
 pub(super) fn is_bare_py_ident(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() { return false; }

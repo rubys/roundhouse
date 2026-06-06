@@ -30,22 +30,6 @@ fn last_segment(qualified: &str) -> &str {
     qualified.rsplit("::").next().unwrap_or(qualified)
 }
 
-/// Legalize a method-definition name. Ruby's index operators back the
-/// native subscript syntax `emit_send` already produces at call sites
-/// (`flash["notice"]` → `flash["notice"]`), so their *definitions* map
-/// to the Python dunders that implement that syntax. Other names pass
-/// through unchanged (the `?`/`!` predicate/bang family is the next
-/// slice — it tangles builtins like `nil?` with user methods and needs
-/// receiver type info to resolve, so it's handled at call+def sites
-/// together, not here).
-fn py_def_name(name: &str) -> &str {
-    match name {
-        "[]" => "__getitem__",
-        "[]=" => "__setitem__",
-        other => other,
-    }
-}
-
 /// True for the synthetic reader/writer methods `attr_accessor` /
 /// `attr_reader` / `attr_writer` lower to. Python models these as plain
 /// instance attributes, so they emit as class-level annotated fields
@@ -116,7 +100,7 @@ fn emit_class_method(m: &MethodDef) -> String {
     writeln!(
         out,
         "def {}({}) -> {}:",
-        py_def_name(m.name.as_str()),
+        super::shared::py_method_name(m.name.as_str()),
         sig.join(", "),
         python_ty(&ret_ty)
     )
@@ -185,7 +169,14 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
             out.push('\n');
         }
         let (params, ret_ty) = params_and_ret(m);
-        writeln!(out, "def {}({}) -> {}:", m.name, params.join(", "), python_ty(&ret_ty)).unwrap();
+        writeln!(
+            out,
+            "def {}({}) -> {}:",
+            super::shared::py_method_name(m.name.as_str()),
+            params.join(", "),
+            python_ty(&ret_ty)
+        )
+        .unwrap();
         push_indented_body(&mut out, &emit_body(&m.body, &ret_ty));
     }
     Ok(out)
