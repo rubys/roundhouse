@@ -23,6 +23,6 @@ module ActionDispatch
     def values: () -> Array[untyped]
     def each: () { (String, untyped) -> void } -> Session
     def to_h: () -> Hash[String, untyped]
-    def merge: (untyped other) -> Session
+    def merge: (Hash[String, untyped] other) -> Session
   end
 end

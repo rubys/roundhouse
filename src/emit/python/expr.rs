@@ -257,6 +257,23 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::If { cond, then_branch, else_branch } if !is_last || void_return => {
             emit_if_stmt(cond, then_branch, else_branch, void_return)
         }
+        // Iteration with a block in statement position: `recv.each do |k,
+        // v| BODY end`. Python has no block-passing, so emit a native
+        // `for` loop. A Hash receiver iterates `(k, v)` pairs via
+        // `.items()`; an Array iterates elements directly. Unknown
+        // receiver types degrade honestly rather than silently dropping
+        // the block.
+        ExprNode::Send { recv: Some(r), method, args, block: Some(block), .. }
+            if method.as_str() == "each"
+                && args.is_empty()
+                && matches!(&*block.node, ExprNode::Lambda { .. }) =>
+        {
+            let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+            let pnames: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+            emit_for_each(r, &pnames, body).unwrap_or_else(|| {
+                crate::emit::diagnostics::report_unsupported("python", "each-block", "")
+            })
+        }
         // `while/until cond; body; end` → native loop. `until` negates
         // the condition (Python has no `until`).
         ExprNode::While { cond, body, until_form } => {
@@ -358,6 +375,23 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr, void: bool)
         }
     }
     out
+}
+
+/// Emit a `recv.each do |params| body end` call as a native Python `for`
+/// loop. A 2-param block over a Hash iterates `(k, v)` via `.items()`; a
+/// 1-param block over an Array iterates elements directly. Returns `None`
+/// for shapes outside that (so the caller can degrade rather than emit a
+/// wrong loop) — the block body would otherwise be silently dropped.
+fn emit_for_each(recv: &Expr, params: &[String], body: &Expr) -> Option<String> {
+    let recv_s = emit_expr(recv);
+    let (vars, iter) = match (params.len(), recv.ty.as_ref()) {
+        (2, Some(Ty::Hash { .. })) => {
+            (format!("{}, {}", params[0], params[1]), format!("{recv_s}.items()"))
+        }
+        (1, Some(Ty::Array { .. })) => (params[0].clone(), recv_s),
+        _ => return None,
+    };
+    Some(format!("for {vars} in {iter}:\n{}", block_or_pass(body, true)))
 }
 
 /// `emit_block_body`, but an empty body becomes `pass` so the compound
