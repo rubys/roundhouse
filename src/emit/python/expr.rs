@@ -848,6 +848,10 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // Collection/string ops → Python builtins, gated to the builtin
         // type so user methods of the same name aren't shadowed.
         "length" | "size" if no_args && is_seq => format!("len({recv})"),
+        // `empty?` on a builtin collection/string → `len(x) == 0`. Gated
+        // to seq types so Flash#empty?/Session#empty? (user methods) keep
+        // their own definitions.
+        "empty?" if no_args && is_seq => format!("len({recv}) == 0"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
         // Ruby's single-element `Array#push(x)` is Python's `list.append`.
