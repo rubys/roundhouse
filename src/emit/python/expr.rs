@@ -176,9 +176,11 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
             }
             lines.join("\n")
         }
-        // A whole-body loop or explicit return routes through the
-        // statement emitter (both degrade in expression position).
-        ExprNode::While { .. } | ExprNode::Return { .. } => emit_stmt(body, true, is_void),
+        // A whole-body loop, explicit return, or case routes through the
+        // statement emitter (all degrade in expression position).
+        ExprNode::While { .. } | ExprNode::Return { .. } | ExprNode::Case { .. } => {
+            emit_stmt(body, true, is_void)
+        }
         _ => {
             if let Some(s) = try_emit_raise_stmt(body) {
                 s
@@ -306,6 +308,12 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 crate::emit::diagnostics::report_unsupported("python", "each-block", "")
             })
         }
+        // `case scrutinee; when X then …; else …; end` → an `if/elif/else`
+        // chain comparing the scrutinee against each `when` literal (the
+        // per-column `[]`/`[]=` indexer the model lowering emits). Arm
+        // bodies inherit this statement's `is_last`/`void` so a value-
+        // returning case (`__getitem__`) `return`s from each branch.
+        ExprNode::Case { scrutinee, arms } => emit_case_stmt(scrutinee, arms, is_last, void_return),
         // `while/until cond; body; end` → native loop. `until` negates
         // the condition (Python has no `until`).
         ExprNode::While { cond, body, until_form } => {
@@ -424,6 +432,57 @@ fn emit_for_each(recv: &Expr, params: &[String], body: &Expr) -> Option<String> 
         _ => return None,
     };
     Some(format!("for {vars} in {iter}:\n{}", block_or_pass(body, true)))
+}
+
+/// Emit a `case scrutinee; when LIT then …; else …; end` as a native
+/// `if/elif/else` chain (`scrutinee == LIT`). Only literal `when`
+/// patterns with no guard, plus a wildcard `else`, are handled — the
+/// model lowering's per-column indexer is exactly this shape; anything
+/// else degrades. Arm bodies are emitted with the case's `is_last`/`void`
+/// so a value-returning case `return`s from each branch.
+fn emit_case_stmt(scrutinee: &Expr, arms: &[crate::expr::Arm], is_last: bool, void: bool) -> String {
+    use crate::expr::Pattern;
+    let scr = emit_expr(scrutinee);
+    let mut branches: Vec<String> = Vec::new();
+    let mut else_body: Option<&Expr> = None;
+    for arm in arms {
+        if arm.guard.is_some() {
+            return crate::emit::diagnostics::report_unsupported("python", "Case", "");
+        }
+        match &arm.pattern {
+            Pattern::Wildcard => else_body = Some(&arm.body),
+            Pattern::Lit { value } => {
+                let kw = if branches.is_empty() { "if" } else { "elif" };
+                branches.push(format!(
+                    "{kw} {scr} == {}:\n{}",
+                    emit_literal(value),
+                    stmt_block(&arm.body, is_last, void)
+                ));
+            }
+            _ => return crate::emit::diagnostics::report_unsupported("python", "Case", ""),
+        }
+    }
+    if let Some(eb) = else_body {
+        branches.push(format!("else:\n{}", stmt_block(eb, is_last, void)));
+    }
+    branches.join("\n")
+}
+
+/// Emit `e` as a 4-space-indented statement block, threading `is_last`/
+/// `void` to the final statement (so a value-position branch `return`s).
+/// A `Seq` becomes one statement per line; an empty body is `pass`.
+fn stmt_block(e: &Expr, is_last: bool, void: bool) -> String {
+    let inner = match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| emit_stmt(s, is_last && i == exprs.len() - 1, void))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ExprNode::Seq { .. } => "pass".to_string(),
+        _ => emit_stmt(e, is_last, void),
+    };
+    super::shared::indent_py(&inner)
 }
 
 /// `emit_block_body`, but an empty body becomes `pass` so the compound
