@@ -247,6 +247,16 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 _ => format!("if {}: {}", emit_expr(cond), emit_stmt(then_branch, false, true)),
             }
         }
+        // General `if / elsif / else` in statement position (a non-empty
+        // else, so the guard arms above didn't match). Emit native
+        // `if/elif/else:` blocks so a `return`/assignment in any branch
+        // stays a statement — a ternary (`emit_expr`'s `If` arm) would
+        // force it into expression position, which Python forbids. Only
+        // off the value-returning tail; a value-position `If` stays a
+        // ternary.
+        ExprNode::If { cond, then_branch, else_branch } if !is_last || void_return => {
+            emit_if_stmt(cond, then_branch, else_branch, void_return)
+        }
         // `while/until cond; body; end` → native loop. `until` negates
         // the condition (Python has no `until`).
         ExprNode::While { cond, body, until_form } => {
@@ -322,6 +332,42 @@ fn is_nil_or_empty(e: &Expr) -> bool {
         ExprNode::Lit { value: Literal::Nil } => true,
         ExprNode::Seq { exprs } => exprs.is_empty(),
         _ => false,
+    }
+}
+
+/// Emit a general `if / elif / else` chain as native Python statements.
+/// The `else` branch is rendered as `elif` when it's itself an `If` (an
+/// `elsif` chain lowers to a nested `If` in the else slot) and as `else:`
+/// otherwise; an empty else is omitted. Recurses for the `elif` case by
+/// rewriting the child's leading `if ` to `elif `.
+fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr, void: bool) -> String {
+    let mut out = format!("if {}:\n{}", emit_expr(cond), block_or_pass(then_branch, void));
+    match &*else_branch.node {
+        // Empty else (`x if c` / explicit nil tail) — nothing to emit.
+        _ if is_nil_or_empty(else_branch) => {}
+        // `elsif`: the else slot is another `If`. Recurse and splice the
+        // child's `if …` onto an `el` to form `elif …`.
+        ExprNode::If { cond: c2, then_branch: t2, else_branch: e2 } => {
+            out.push('\n');
+            out.push_str(&format!("el{}", emit_if_stmt(c2, t2, e2, void)));
+        }
+        // Plain `else` block.
+        _ => {
+            out.push('\n');
+            out.push_str(&format!("else:\n{}", block_or_pass(else_branch, void)));
+        }
+    }
+    out
+}
+
+/// `emit_block_body`, but an empty body becomes `pass` so the compound
+/// statement isn't a syntax error.
+fn block_or_pass(e: &Expr, void: bool) -> String {
+    let b = emit_block_body(e, void);
+    if b.trim().is_empty() {
+        "    pass".to_string()
+    } else {
+        b
     }
 }
 
