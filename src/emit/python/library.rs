@@ -22,6 +22,14 @@ use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ty::Ty;
 
+/// Python is a flat-module target: a `Foo::Bar` library class emits as a
+/// top-level `Bar`, with cross-file references wired through
+/// `from app.x import Bar`. Drop any namespace to the last segment.
+/// Mirrors TS's `rsplit("::")` at the class-decl site.
+fn last_segment(qualified: &str) -> &str {
+    qualified.rsplit("::").next().unwrap_or(qualified)
+}
+
 /// Render a method's parameter list and return type. Prefers the
 /// RBS-derived signature (populated by `parse_library_with_rbs`);
 /// falls back to bare, un-annotated names when a method carries none.
@@ -76,16 +84,17 @@ fn emit_class_method(m: &MethodDef) -> String {
 
 /// Emit a lowered `LibraryClass` as a Python class declaration.
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
-    let name = class.name.0.as_str();
+    let name = last_segment(class.name.0.as_str());
     let mut out = String::new();
 
-    // Parent + `include`d mixins both become Python base classes.
+    // Parent + `include`d mixins both become Python base classes,
+    // flattened to their last segment like the class name itself.
     let mut bases: Vec<String> = Vec::new();
     if let Some(parent) = &class.parent {
-        bases.push(parent.0.as_str().to_string());
+        bases.push(last_segment(parent.0.as_str()).to_string());
     }
     for inc in &class.includes {
-        bases.push(inc.0.as_str().to_string());
+        bases.push(last_segment(inc.0.as_str()).to_string());
     }
     if bases.is_empty() {
         writeln!(out, "class {name}:").unwrap();

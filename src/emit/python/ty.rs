@@ -25,7 +25,10 @@ pub fn python_ty(ty: &Ty) -> String {
         }
         Ty::Class { id, .. } => match id.0.as_str() {
             "Time" => "str".to_string(),
-            other => other.to_string(),
+            // Flatten a qualified `Foo::Bar` nominal type to its last
+            // segment — `::` is never valid in a Python annotation, and
+            // flat-module emit imports each class by its bare name.
+            other => other.rsplit("::").next().unwrap_or(other).to_string(),
         },
         Ty::Fn { .. } => "object".to_string(),
         Ty::Var { .. } => "object".to_string(),
