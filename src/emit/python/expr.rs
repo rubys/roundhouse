@@ -438,6 +438,20 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Var { name, .. } => name.to_string(),
         ExprNode::Ivar { name } => format!("self.{name}"),
         ExprNode::SelfRef => SELF_REF.with(|c| c.get()).to_string(),
+        // `recv.map { |x| EXPR }` / `.collect` → Python list comprehension
+        // `[EXPR for x in recv]`. Expression-position iteration (the
+        // statement-position `.each` case lives in `emit_stmt`); without
+        // this the block is silently dropped, leaving a broken `.map()`.
+        ExprNode::Send { recv: Some(recv), method, block: Some(block), .. }
+            if matches!(method.as_str(), "map" | "collect")
+                && matches!(&*block.node, ExprNode::Lambda { .. }) =>
+        {
+            let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+            match params.as_slice() {
+                [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
+                _ => crate::emit::diagnostics::report_unsupported("python", "map-block", ""),
+            }
+        }
         ExprNode::Send { recv, method, args, .. } => {
             emit_send(recv.as_ref(), method.as_str(), args)
         }
