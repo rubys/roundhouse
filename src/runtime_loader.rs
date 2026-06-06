@@ -1293,7 +1293,11 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         out_path: "app/json_builder.py",
         mode: Mode::Module,
         imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
+        // Module-level `ESCAPE_PATTERN = re.compile(...)` runs at import
+        // time, so `re` must be in scope. (The `gsub` -> `re.sub` body
+        // rewrite is a separate follow-up; it only fires when the
+        // encoder is actually called.)
+        prelude: "import re\n\n",
         extra_roots: NO_EXTRA_ROOTS,
     },
     RuntimeEntry {
@@ -1385,6 +1389,25 @@ where
     let mut out = Vec::with_capacity(PYTHON_RUNTIME.len());
     for entry in PYTHON_RUNTIME {
         out.push(transpile_entry(entry, &PYTHON_TARGET, "#", &mut transform)?);
+    }
+    Ok(out)
+}
+
+/// Parse + emit only the Python runtime entries whose `out_path` is in
+/// `keep`. Used by the strangler switchover: emitting a degrade-heavy
+/// dormant entry (e.g. `active_record_base`) would fire its
+/// `report_unsupported` diagnostics into the shared sink and trip the
+/// transpile fail-policy, even if its output were later dropped. Filter
+/// at the source so only switched-over leaves are ever emitted.
+pub fn python_units_subset<F>(keep: &[&str], mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::new();
+    for entry in PYTHON_RUNTIME {
+        if keep.contains(&entry.out_path) {
+            out.push(transpile_entry(entry, &PYTHON_TARGET, "#", &mut transform)?);
+        }
     }
     Ok(out)
 }

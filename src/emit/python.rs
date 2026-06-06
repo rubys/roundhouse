@@ -129,6 +129,33 @@ const SERVER_SOURCE: &str = include_str!("../../runtime/python/server.py");
 /// save/destroy methods.
 const CABLE_SOURCE: &str = include_str!("../../runtime/python/cable.py");
 
+/// Framework leaf files that have completed the strangler switchover:
+/// shipped as transpiled `runtime/ruby/*` output instead of hand-written
+/// `runtime/python/*.py`. Switchover-ready means more than `py_compile`
+/// clean — the file must be free of `report_unsupported` degrades, since
+/// those trip the transpile fail-policy.
+///
+/// `inflector` qualifies (one pure ternary). `json_builder` does NOT yet:
+/// its `encode_value`/`encode_datetime` carry `Return`/`While` degrades
+/// (and a `gsub` -> `re.sub` rewrite is pending), so it stays dormant.
+const LIVE_FRAMEWORK: &[&str] = &["app/inflector.py"];
+
+/// Emit the switched-over framework leaf files (see `LIVE_FRAMEWORK`).
+fn live_framework_units() -> Vec<EmittedFile> {
+    // Filter at the source: emitting a dormant degrade-heavy entry would
+    // fire its diagnostics into the shared sink and fail the transpile
+    // policy even if its output were dropped. The identity transform is
+    // the tree-shake seam (unused — Python has no tree-shake yet).
+    crate::runtime_loader::python_units_subset(LIVE_FRAMEWORK, |_, classes| classes)
+        .map(|units| {
+            units
+                .into_iter()
+                .map(|u| EmittedFile { path: u.out_path, content: u.content })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.models.is_empty() {
@@ -146,6 +173,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             path: PathBuf::from("app/__init__.py"),
             content: String::new(),
         });
+        files.extend(live_framework_units());
     }
     if !app.controllers.is_empty() {
         files.push(EmittedFile {
