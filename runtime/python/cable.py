@@ -242,3 +242,30 @@ def _decode_channel(identifier: str) -> str | None:
     except Exception:
         return None
     return value if isinstance(value, str) else None
+
+
+class Broadcasts:
+    """Turbo Stream broadcast API the transpiled models call. The lowered
+    `after_*_commit` callbacks render the partial themselves and hand a
+    `{"stream", "target", "html"}` dict here (the `remove` action omits
+    "html"); each method wraps it in a `<turbo-stream>` frame and pushes
+    it to the stream's subscribers. The hand-written `broadcast_*_to`
+    functions above are the older API that renders internally — this is
+    the structured shape the shared model lowering emits (matches the
+    go/rust/ts `Broadcasts` twins)."""
+
+    @staticmethod
+    def prepend(opts: dict) -> None:
+        _dispatch(opts["stream"], turbo_stream_html("prepend", opts["target"], opts["html"]))
+
+    @staticmethod
+    def append(opts: dict) -> None:
+        _dispatch(opts["stream"], turbo_stream_html("append", opts["target"], opts["html"]))
+
+    @staticmethod
+    def replace(opts: dict) -> None:
+        _dispatch(opts["stream"], turbo_stream_html("replace", opts["target"], opts["html"]))
+
+    @staticmethod
+    def remove(opts: dict) -> None:
+        _dispatch(opts["stream"], turbo_stream_html("remove", opts["target"], ""))

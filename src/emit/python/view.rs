@@ -54,9 +54,17 @@ pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
 
     let mut emitted_names: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
+    // `Views.<Resource>.<partial>` facade entries: Resource (camelized
+    // dir) -> { partial/action -> flat render-fn name }. The lowered
+    // model broadcast callbacks call this structured form.
+    let mut facade: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        std::collections::BTreeMap::new();
 
     for v in app.views.iter().filter(|v| v.format.as_str() == "html") {
         let fn_name = py_view_function_name(v.name.as_str());
+        if let Some((res, meth)) = view_resource_method(v.name.as_str()) {
+            facade.entry(res).or_default().insert(meth, fn_name.clone());
+        }
         if !emitted_names.insert(fn_name.clone()) {
             continue;
         }
@@ -87,6 +95,10 @@ pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
         ] {
             let view_name = format!("{plural}/{suffix}");
             let fn_name = py_view_function_name(&view_name);
+            facade
+                .entry(crate::naming::camelize(&plural))
+                .or_default()
+                .insert(suffix.to_string(), fn_name.clone());
             if emitted_names.insert(fn_name.clone()) {
                 writeln!(s, "def {fn_name}(_record: Any) -> str:").unwrap();
                 writeln!(s, "    return \"\"").unwrap();
@@ -95,10 +107,34 @@ pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
         }
     }
 
+    // `Views` facade — nested classes mapping `Views.<Resource>.<partial>`
+    // to the flat render functions above (mirrors the TS `Views`
+    // namespace). `staticmethod` so `Views.Articles.article(x)` calls
+    // `render_articles_article(x)` without binding the class.
+    if !facade.is_empty() {
+        writeln!(s, "\nclass Views:").unwrap();
+        for (resource, methods) in &facade {
+            writeln!(s, "    class {resource}:").unwrap();
+            for (method, fn_name) in methods {
+                writeln!(s, "        {method} = staticmethod({fn_name})").unwrap();
+            }
+        }
+    }
+
     vec![EmittedFile {
         path: PathBuf::from("app/views.py"),
         content: s,
     }]
+}
+
+/// Split a view name (`articles/_article`, `articles/index`) into its
+/// camelized resource and partial/action method for the `Views` facade.
+/// `None` for names without a `/` (no resource grouping).
+fn view_resource_method(name: &str) -> Option<(String, String)> {
+    let (dir, file) = name.rsplit_once('/')?;
+    let dir = dir.rsplit_once('/').map(|(_, d)| d).unwrap_or(dir);
+    let method = file.strip_prefix('_').unwrap_or(file);
+    Some((crate::naming::camelize(dir), method.to_string()))
 }
 
 /// `articles/index` → `render_articles_index`. Slash → underscore;
