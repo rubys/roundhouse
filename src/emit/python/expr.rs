@@ -172,6 +172,41 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
     }
 }
 
+/// Render Ruby `recv[...]` as a Python subscript. A single Range arg
+/// becomes slice syntax; the two-arg `recv[start, length]` form becomes
+/// `recv[start:start+length]`; otherwise a plain `recv[idx]`.
+fn emit_index(recv_s: &str, args: &[Expr]) -> String {
+    if let [idx] = args {
+        if let ExprNode::Range { begin, end, exclusive } = &*idx.node {
+            return format!("{recv_s}[{}]", range_slice(begin, end, *exclusive));
+        }
+    }
+    if let [start, len] = args {
+        let s = emit_expr(start);
+        return format!("{recv_s}[{s}:{s}+{}]", emit_expr(len));
+    }
+    let parts: Vec<String> = args.iter().map(emit_expr).collect();
+    format!("{recv_s}[{}]", parts.join(", "))
+}
+
+/// Render a Ruby range used as a slice index. Inclusive `a..b` maps to
+/// Python's exclusive `a:b+1` (literal-folded, so `..-1` → `:` — to end
+/// — and `..-2` → `:-1`); exclusive `a...b` → `a:b`; open ends omit the
+/// bound (`a..` → `a:`).
+fn range_slice(begin: &Option<Expr>, end: &Option<Expr>, exclusive: bool) -> String {
+    let start = begin.as_ref().map(|e| emit_expr(e)).unwrap_or_default();
+    let stop = match end {
+        None => String::new(),
+        Some(e) if exclusive => emit_expr(e),
+        Some(e) => match &*e.node {
+            ExprNode::Lit { value: Literal::Int { value: -1 } } => String::new(),
+            ExprNode::Lit { value: Literal::Int { value } } => (value + 1).to_string(),
+            _ => format!("{}+1", emit_expr(e)),
+        },
+    };
+    format!("{start}:{stop}")
+}
+
 /// Render an assignment target as its Python left-hand side. Mirrors the
 /// `Assign` arms in `emit_stmt` for the in-place compound-assign forms.
 fn lvalue_str(t: &LValue) -> String {
@@ -311,10 +346,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 }
 
 pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-    if method == "[]" && recv.is_some() {
-        return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
+    // Index / slice. Handle before computing `args_s`: a Range arg
+    // (`x[a..b]`) must be destructured into slice syntax, and the eager
+    // `args_s` below would emit the Range node — firing a degrade — as a
+    // side effect even though the result would be discarded here.
+    if method == "[]" {
+        if let Some(r) = recv {
+            return emit_index(&emit_expr(r), args);
+        }
     }
+    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Ruby reflection `x.class` → Python `type(x)`. `class` is a Python
     // keyword, so it can never surface as a `.class` attribute or call.
     if method == "class" && args.is_empty() {
