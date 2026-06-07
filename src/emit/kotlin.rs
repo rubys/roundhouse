@@ -24,11 +24,23 @@ mod naming;
 mod package;
 mod ty;
 
+// Entry points consumed by `runtime_loader::kotlin_units`.
+pub use expr::emit_expr_for_runtime;
+pub use library::{emit_library_class_result, emit_module};
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
     // Gradle scaffold (build.gradle.kts, settings.gradle.kts, .gitignore).
     files.extend(package::scaffold());
+
+    // Transpiled framework runtime — `runtime/ruby/*.rb` → Kotlin under
+    // `src/main/kotlin/`. Grown one file at a time (Phase 3).
+    let runtime_units = crate::runtime_loader::kotlin_units(|_path, classes| classes)
+        .expect("kotlin runtime transpile failed (Ruby source error)");
+    for unit in runtime_units {
+        files.push(EmittedFile { path: unit.out_path, content: unit.content });
+    }
 
     // Models → src/main/kotlin/app/models/<Name>.kt. Same lowering recipe
     // as crystal/dump_ir: a preliminary view pass seeds the class-info

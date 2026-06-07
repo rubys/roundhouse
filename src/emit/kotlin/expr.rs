@@ -200,9 +200,11 @@ fn emit_literal(lit: &Literal) -> String {
     match lit {
         Literal::Nil => "null".to_string(),
         Literal::Bool { value } => value.to_string(),
-        // Plain int literal: Kotlin adapts the literal to the expected
-        // type (Long property, Int arg), so no `L` suffix.
-        Literal::Int { value } => value.to_string(),
+        // `Ty::Int → Long`, and Kotlin won't compare/assign across
+        // numeric types, so integer literals carry the `L` suffix. (The
+        // hand-written `Db` primitive correspondingly takes `Long`
+        // indices.)
+        Literal::Int { value } => format!("{value}L"),
         Literal::Float { value } => {
             if value.fract() == 0.0 {
                 format!("{value:.1}")

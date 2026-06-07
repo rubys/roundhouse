@@ -853,6 +853,67 @@ where
     })
 }
 
+// -------- Kotlin target --------
+//
+// Transpiles the framework runtime (`runtime/ruby/*.rb`) to Kotlin under
+// the emitted project's `src/main/kotlin/`. All runtime files live in a
+// single `roundhouse` package, so imports are unnecessary (same-package
+// resolution) and namespaces collapse — `wrap_namespace` is a no-op like
+// TypeScript's. The runtime is grown one file at a time (inflector →
+// json_builder → … → action_controller/base), mirroring elixir2/go2.
+
+const KOTLIN_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::kotlin::emit_module,
+    emit_library_class: crate::emit::kotlin::emit_library_class_result,
+    format_import: kotlin_format_import,
+    format_constant: kotlin_format_constant,
+    format_module_ivar: None,
+    wrap_namespace: kotlin_wrap_namespace,
+    // Every runtime file declares the shared package up front.
+    module_prelude: "package roundhouse\n\n",
+};
+
+/// Same-package resolution → no per-symbol imports needed.
+fn kotlin_format_import(_name: &str, _source: &str) -> String {
+    String::new()
+}
+
+/// Top-level `val NAME = VALUE` (Kotlin allows file-level properties).
+fn kotlin_format_constant(name: &str, value: &Expr) -> String {
+    format!("val {name} = {}", crate::emit::kotlin::emit_expr_for_runtime(value))
+}
+
+/// Kotlin uses packages, not nested namespace blocks; the package decl in
+/// `module_prelude` covers it, so this is a no-op.
+fn kotlin_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "src/main/kotlin/Inflector.kt",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(KOTLIN_RUNTIME.len());
+    for entry in KOTLIN_RUNTIME {
+        out.push(transpile_entry(entry, &KOTLIN_TARGET, "//", &mut transform)?);
+    }
+    Ok(out)
+}
+
 // -------- Go target (Phase 1: scaffolded, stubs only) --------
 //
 // Mirrors the Rust target wiring above. The `GO_TARGET` callbacks

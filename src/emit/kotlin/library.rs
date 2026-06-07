@@ -35,6 +35,30 @@ pub fn emit_class_file(lc: &LibraryClass) -> EmittedFile {
     }
 }
 
+/// `Result`-returning wrapper for the `runtime_loader::TargetEmit` slot.
+pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
+    Ok(emit_library_class(lc))
+}
+
+/// Render a Ruby `module X` (parsed as a set of class methods) as a
+/// Kotlin `object X { ... }`. Used for `Mode::Module` runtime entries
+/// (e.g. `inflector.rb`). The module name comes from the methods'
+/// `enclosing_class`.
+pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    let name = methods
+        .first()
+        .and_then(|m| m.enclosing_class.as_ref())
+        .map(|s| s.as_str().rsplit("::").next().unwrap_or(s.as_str()).to_string())
+        .unwrap_or_default();
+    let mut out = format!("object {name} {{\n");
+    for m in methods {
+        out.push_str(&indent_method(&emit_method(m)));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
 pub fn emit_library_class(lc: &LibraryClass) -> String {
     let name = lc.name.0.as_str();
     let class_name = name.rsplit("::").next().unwrap_or(name).to_string();
