@@ -20,7 +20,7 @@ use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
-use super::expr::{begin_method, emit_expr};
+use super::expr::{begin_method, emit_expr, set_return_label};
 use super::naming::camel;
 use super::ty::kotlin_ty;
 
@@ -144,11 +144,23 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         out.push('\n');
     }
 
-    // init block (initialize body, no return wrapping).
+    // init block (initialize body). Kotlin `init` can't `return`, so when
+    // the body has a guard `return`, wrap it in `run { }` and emit
+    // `return@run`.
     if let Some(m) = init {
         begin_method(&m.body);
+        let has_return = body_has_return(&m.body);
+        if has_return {
+            set_return_label(Some("run"));
+        }
         let body = emit_body(&m.body, false);
-        out.push_str(&format!("    init {{\n{}\n    }}\n\n", indent4(&indent4(&body))));
+        set_return_label(None);
+        let inner = if has_return {
+            format!("run {{\n{}\n}}", indent4(&body))
+        } else {
+            body
+        };
+        out.push_str(&format!("    init {{\n{}\n    }}\n\n", indent4(&indent4(&inner))));
     }
 
     // Instance methods (skip accessors and the initialize we just used).
@@ -197,7 +209,17 @@ fn emit_method(m: &MethodDef) -> String {
         _ => ("fun", camel(m.name.as_str()), false),
     };
 
-    let params = method_params(m);
+    let mut params = method_params(m);
+    // A method that `yield`s takes a `block` parameter in Kotlin (there's
+    // no implicit block); `yield` calls it. Type from the signature's
+    // block slot.
+    if body_has_yield(&m.body) {
+        let bt = match m.signature.as_ref() {
+            Some(Ty::Fn { block: Some(b), .. }) => kotlin_ty(b),
+            _ => "(Any?) -> Unit".to_string(),
+        };
+        params.push(format!("block: {bt}"));
+    }
 
     // Return type.
     let ret_ty = match m.signature.as_ref() {
@@ -286,6 +308,15 @@ fn wrap_return(e: &Expr) -> String {
     } else {
         format!("return {s}")
     }
+}
+
+fn body_has_yield(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Yield { .. }) || expr_children(e).iter().any(|c| body_has_yield(c))
+}
+
+fn body_has_return(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Return { .. })
+        || expr_children(e).iter().any(|c| body_has_return(c))
 }
 
 fn collect_ivars(e: &Expr, out: &mut BTreeMap<String, ()>) {

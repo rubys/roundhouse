@@ -923,6 +923,11 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
+    // flash.rb / session.rb deferred: they need non-accessor ivar types
+    // (rbs `@data: Hash[...]`) plumbed to emit, Map shim methods
+    // (delete→remove), and `!!` for mutable-property smart-casts. The
+    // emitter groundwork (yield→block, init-block run-wrapper, `!`/push)
+    // is in place; wiring the entries is the next step.
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

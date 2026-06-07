@@ -33,6 +33,14 @@ thread_local! {
     /// inferred from later `map[k]=v` / `list << x` — so the empty literal
     /// gets a precise declared type instead of `<Any?>`.
     static CONTAINER_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// When set, `return` emits `return@<label>` — used for `initialize`
+    /// bodies wrapped in `run { }` (Kotlin `init` blocks can't `return`).
+    static RETURN_LABEL: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+}
+
+/// Set the active labeled-return target (`None` = plain `return`).
+pub(super) fn set_return_label(label: Option<&'static str>) {
+    RETURN_LABEL.with(|r| *r.borrow_mut() = label);
 }
 
 /// Reset per-method local-decl tracking and pre-scan the body for
@@ -53,6 +61,7 @@ pub(super) fn begin_method(body: &Expr) {
         }
     });
     NIL_TYPES.with(|t| *t.borrow_mut() = nil_types);
+    set_return_label(None);
 
     let mut container_types: HashMap<String, String> = HashMap::new();
     scan_container_types(body, &mut container_types);
@@ -88,7 +97,7 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
             }
         }
         ExprNode::Send { recv: Some(r), method, args, .. }
-            if (method.as_str() == "<<" || method.as_str() == "add") && args.len() == 1 =>
+            if matches!(method.as_str(), "<<" | "add" | "push") && args.len() == 1 =>
         {
             if let ExprNode::Var { name, .. } = &*r.node {
                 out.entry(camel(name.as_str()))
@@ -236,9 +245,13 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
         ExprNode::Return { value } => {
-            // `return nil` → `return null` (functions here are value-typed;
-            // a bare `return` would only be valid in a Unit function).
-            format!("return {}", emit_expr(value))
+            // `return nil` → `return null`. Inside an `init`-block `run {}`
+            // wrapper the return is labeled (`return@run`).
+            let v = emit_expr(value);
+            match RETURN_LABEL.with(|r| *r.borrow()) {
+                Some(label) => format!("return@{label} {v}"),
+                None => format!("return {v}"),
+            }
         }
         ExprNode::While { cond, body, until_form } => {
             let c = emit_expr(cond);
@@ -251,7 +264,12 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // emits a placeholder; Phase 3 wires the base properly.
         ExprNode::Super { .. } => "/* super() */".to_string(),
         ExprNode::Cast { value, target_ty } => emit_cast(value, target_ty),
-        ExprNode::Lambda { params, body, .. } => emit_lambda(params, body),
+        ExprNode::Lambda { params, body, .. } => emit_lambda(params, body, false),
+        // `yield a, b` → invoke the synthesized `block` parameter (see
+        // `library::emit_method`, which adds it to yielding methods).
+        ExprNode::Yield { args } => {
+            format!("block({})", args.iter().map(emit_expr).collect::<Vec<_>>().join(", "))
+        }
         ExprNode::RescueModifier { expr, fallback } => format!(
             "try {{ {} }} catch (e: Exception) {{ {} }}",
             emit_expr(expr),
@@ -520,13 +538,19 @@ fn emit_slice_range(
     }
 }
 
-fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
+fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr, destructure: bool) -> String {
     let body_s = emit_expr(body);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
         let ps: Vec<String> = params.iter().map(|p| camel(p.as_str())).collect();
-        format!("{{ {} -> {body_s} }}", ps.join(", "))
+        // Kotlin `Map.forEach` yields a single `Map.Entry`; destructure it.
+        let head = if destructure {
+            format!("({})", ps.join(", "))
+        } else {
+            ps.join(", ")
+        };
+        format!("{{ {head} -> {body_s} }}")
     }
 }
 
@@ -636,8 +660,8 @@ fn emit_send(
         ) {
             return format!("{} {} {}", emit_expr(r), method, args_s[0]);
         }
-        // `<<` push → MutableList.add.
-        if method == "<<" {
+        // `<<` / `push` → MutableList.add.
+        if method == "<<" || method == "push" {
             return format!("{}.add({})", emit_expr(r), args_s[0]);
         }
         // Hash key test.
@@ -656,6 +680,7 @@ fn emit_send(
         let rs = emit_expr(r);
         match method {
             "nil?" => return format!("({rs} == null)"),
+            "!" => return format!("!({rs})"),
             "to_s" => return format!("{rs}.toString()"),
             "to_i" => return format!("{rs}.toString().toLong()"),
             "to_f" => return format!("{rs}.toString().toDouble()"),
@@ -687,10 +712,24 @@ fn emit_send(
         }
     }
 
-    // Block → Kotlin trailing lambda (`.each` → `.forEach`).
+    // Block → Kotlin trailing lambda. `.each` maps to `.forEach` on
+    // Kotlin collections (List: 1 param; Map: destructured `(k, v)`); on
+    // a user type (e.g. Flash/Session, whose `each` takes a block param)
+    // it stays `each`.
     if let Some(b) = block {
-        let kt_method = if method == "each" { "forEach".to_string() } else { camel(method) };
-        let lam = emit_expr(b);
+        let recv_arr =
+            recv.is_some_and(|r| matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })));
+        let recv_hash =
+            recv.is_some_and(|r| matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })));
+        let kt_method = if method == "each" && (recv_arr || recv_hash) {
+            "forEach".to_string()
+        } else {
+            camel(method)
+        };
+        let lam = match &*b.node {
+            ExprNode::Lambda { params, body, .. } => emit_lambda(params, body, recv_hash),
+            _ => emit_expr(b),
+        };
         let base = match recv {
             Some(r) => format!("{}.{kt_method}", emit_expr(r)),
             None => kt_method,
