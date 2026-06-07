@@ -530,7 +530,9 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         out_path: "src/view_helpers.cr",
         mode: Mode::Library,
         imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
+        // `html_escape` emits Crystal's stdlib `HTML.escape` (see
+        // src/emit/crystal/expr.rs); pull in the `html` module.
+        prelude: "require \"html\"\n\n",
         extra_roots: NO_EXTRA_ROOTS,
     },
 ];

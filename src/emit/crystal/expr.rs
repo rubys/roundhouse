@@ -386,6 +386,23 @@ fn emit_node(n: &ExprNode) -> String {
                     }
                 }
             }
+            // HTML escaper: `s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)` →
+            // Crystal's stdlib `HTML.escape(s)` — a single-pass,
+            // purpose-built escaper. Byte-identical to the framework map
+            // (`&quot;`/`&#39;`) and to Rails. Keyed on the `HTML_ESCAPES`
+            // constant, so json_builder's escaper (`ESCAPES`, a different
+            // character set) keeps the generic gsub form below. The
+            // `require "html"` it needs is injected via the view_helpers
+            // runtime entry's `prelude` in src/runtime_loader.rs.
+            if method.as_str() == "gsub" && args.len() == 2 {
+                if let ExprNode::Const { path } = &*args[1].node {
+                    if path.last().map(|s| s.as_str()) == Some("HTML_ESCAPES") {
+                        if let Some(r) = recv {
+                            return format!("HTML.escape({})", emit_expr(r));
+                        }
+                    }
+                }
+            }
             // `@ivar.nil?` — suppress the auto-`.not_nil!` that the
             // Ivar narrowing rule (above) inserts on non-nilable
             // concrete-typed ivar reads. Schema-derived column

@@ -2348,6 +2348,26 @@ fn emit_send_with_parens_inner(
                 // Hash replacements (`s.gsub(re, MAP)`) wrap in a
                 // lookup callback `m => MAP[m]`.
                 "gsub" if args.len() == 2 => {
+                    // HTML escaper fast path: `s.gsub(HTML_ESCAPE_PATTERN,
+                    // HTML_ESCAPES)`. The generic Const-pattern branch below
+                    // can't see the named constant's type, so it builds
+                    // `new RegExp(pat.source, pat.flags + "g")` from the
+                    // source string on *every call* — recompiling the regex
+                    // per request. Emit an inline literal `/[&<>"']/g`
+                    // instead: a regex literal is compiled and cached once by
+                    // the engine, so the per-call recompilation goes away.
+                    // Same five-character class and `HTML_ESCAPES` lookup —
+                    // identical output and DOM. Keyed on the `HTML_ESCAPES`
+                    // constant so json_builder's escaper (different set)
+                    // keeps the generic form.
+                    if let ExprNode::Const { path } = &*args[1].node {
+                        if path.last().map(|s| s.as_str()) == Some("HTML_ESCAPES") {
+                            return format!(
+                                "{}.replace(/[&<>\"']/g, (__m: string) => ({})[__m])",
+                                emit_expr(r), args_s[1],
+                            );
+                        }
+                    }
                     let pat_s = if let ExprNode::Lit {
                         value: Literal::Regex { pattern, flags },
                     } = &*args[0].node
