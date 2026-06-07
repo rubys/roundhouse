@@ -474,8 +474,9 @@ if [[ -z "$TARGET_CMD" ]]; then
         jruby)
             # Same as ruby but on the JVM via jruby. Single-process
             # (WEB_CONCURRENCY=0 — Puma cluster mode forks, unsupported on
-            # the JVM); its own tree Gemfile drives the JRuby bundle.
-            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" WEB_CONCURRENCY=0 PORT="$TARGET_PORT" jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+            # the JVM); its own tree Gemfile drives the JRuby bundle. Heap
+            # pinned to 512 MB to match the bench harness (-Xmx==-Xms).
+            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" WEB_CONCURRENCY=0 PORT="$TARGET_PORT" JRUBY_OPTS="-J-Xmx512m -J-Xms512m" jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         typescript)
