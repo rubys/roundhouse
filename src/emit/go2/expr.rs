@@ -1515,6 +1515,28 @@ pub(super) fn emit_send(
     if method == "gsub" && args.len() == 2 {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            // The framework HTML escaper — `s.gsub(HTML_ESCAPE_PATTERN,
+            // HTML_ESCAPES)` — lowers here. Go's
+            // `regexp.ReplaceAllStringFunc` for a five-character class
+            // runs the full regex engine plus a per-match closure and map
+            // lookup, allocating on every call. The published bench had
+            // Go's HTML endpoints anomalously slow (a compiled target below
+            // TypeScript on the DB-less /articles/new render), and a
+            // cross-target sweep showed Go alone routing this escaper
+            // through the regex engine. `html.EscapeString` is
+            // the stdlib single-pass `strings.Replacer` (no regex, built
+            // once). It emits `&#34;` for `"` where the framework map uses
+            // `&quot;`, but the two are DOM-equivalent — html5ever decodes
+            // both to `"`, and that DOM equivalence (not byte identity) is
+            // exactly what `compare` asserts. Same five characters escaped,
+            // same rendered DOM, native speed. Keyed on the `HTML_ESCAPES`
+            // constant so the json_builder escaper (`ESCAPES`, a different
+            // character set) keeps the generic form below.
+            if let ExprNode::Const { path } = &*args[1].node {
+                if path.last().map(|s| s.as_str()) == Some("HTML_ESCAPES") {
+                    return format!("html.EscapeString({recv_s})");
+                }
+            }
             let pattern = emit_expr(ctx, &args[0]);
             let replacement = emit_expr(ctx, &args[1]);
             let is_string_repl = matches!(

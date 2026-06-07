@@ -1284,6 +1284,7 @@ fn scan_stdlib_imports(content: &str) -> Vec<&'static str> {
         (&["base64."], "encoding/base64"),
         (&["cmp."], "cmp"),
         (&["fmt."], "fmt"),
+        (&["html.EscapeString("], "html"),
         (&["json."], "encoding/json"),
         (&["regexp."], "regexp"),
         (&["slices."], "slices"),
