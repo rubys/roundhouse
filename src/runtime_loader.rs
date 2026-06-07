@@ -928,6 +928,16 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // (delete→remove), and `!!` for mutable-property smart-casts. The
     // emitter groundwork (yield→block, init-block run-wrapper, `!`/push)
     // is in place; wiring the entries is the next step.
+    // active_record/errors.rb + base.rb deferred (coupled: RecordInvalid
+    // references Base). base.rb is large (~399 LOC) and generated to a
+    // ~107-error punch-list spanning: `raise Class, msg` → throw;
+    // empty-body methods with non-Unit returns → synthesized default
+    // return; non-accessor ivar typing from rbs (@persisted: bool,
+    // @errors: Array[String], …); `self.class.X` dispatch; `Time.now`
+    // shim; negative indexing (`records[-1]`); the module-level
+    // `adapter` accessor + AdapterInterface. Emitter groundwork
+    // (super-constructor delegation, StandardError→RuntimeException,
+    // join→joinToString, ctor-param properties) is in place.
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

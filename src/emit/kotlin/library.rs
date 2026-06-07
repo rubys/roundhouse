@@ -117,12 +117,21 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .iter()
         .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize");
 
-    let parent_clause = match &lc.parent {
-        Some(p) => {
-            let pn = p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str());
-            format!(" : {pn}()")
+    // Parent class. Ruby's StandardError/RuntimeError → Kotlin
+    // RuntimeException. A `super(args)` inside `initialize` becomes the
+    // supertype constructor call in the header.
+    let parent_name = lc.parent.as_ref().map(|p| {
+        let last = p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str());
+        match last {
+            "StandardError" | "RuntimeError" => "RuntimeException".to_string(),
+            other => other.to_string(),
         }
-        None => String::new(),
+    });
+    let super_args = init.and_then(|m| find_super_args(&m.body));
+    let parent_clause = match (&parent_name, &super_args) {
+        (Some(pn), Some(args)) => format!(" : {pn}({})", args.join(", ")),
+        (Some(pn), None) => format!(" : {pn}()"),
+        (None, _) => String::new(),
     };
     let header = match init {
         Some(m) => format!("class {class_name}({}){parent_clause}", method_params(m).join(", ")),
@@ -131,9 +140,18 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     out.push_str(&header);
     out.push_str(" {\n");
 
-    // Properties.
+    // Properties. Constructor-param-backed properties are assigned in the
+    // `init` block, so they need no initializer (and a non-null type like
+    // `Base` can't be defaulted to null anyway).
+    let ctor_param_names: std::collections::HashSet<String> = init
+        .map(|m| m.params.iter().map(|p| camel(p.name.as_str())).collect())
+        .unwrap_or_default();
     for (n, ty) in &prop_types {
-        out.push_str(&format!("    var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
+        if ctor_param_names.contains(n) {
+            out.push_str(&format!("    var {n}: {}\n", kotlin_ty(ty)));
+        } else {
+            out.push_str(&format!("    var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
+        }
     }
     for n in body_ivars.keys() {
         if !prop_types.contains_key(n) {
@@ -312,6 +330,25 @@ fn wrap_return(e: &Expr) -> String {
 
 fn body_has_yield(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Yield { .. }) || expr_children(e).iter().any(|c| body_has_yield(c))
+}
+
+/// Find a `super(args)` call (delegated to the parent constructor in the
+/// class header). Returns the emitted arg strings, or `None` if there's
+/// no `super` (or it's `super()` with no args returns `Some(vec![])`).
+fn find_super_args(e: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Super { args } = &*e.node {
+        return Some(
+            args.as_ref()
+                .map(|a| a.iter().map(emit_expr).collect())
+                .unwrap_or_default(),
+        );
+    }
+    for c in expr_children(e) {
+        if let Some(r) = find_super_args(c) {
+            return Some(r);
+        }
+    }
+    None
 }
 
 fn body_has_return(e: &Expr) -> bool {

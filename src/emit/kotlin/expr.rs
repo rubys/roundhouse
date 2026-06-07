@@ -622,6 +622,7 @@ fn emit_send(
             "start_with?" => return format!("{}.startsWith({})", emit_expr(r), args_s[0]),
             "end_with?" => return format!("{}.endsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.contains({})", emit_expr(r), args_s[0]),
+            "join" => return format!("{}.joinToString({})", emit_expr(r), args_s[0]),
             _ => {}
         }
     }
