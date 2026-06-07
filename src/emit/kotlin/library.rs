@@ -63,6 +63,18 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let name = lc.name.0.as_str();
     let class_name = name.rsplit("::").next().unwrap_or(name).to_string();
 
+    // A Ruby `module` (only module-functions, no instance state) → a
+    // Kotlin `object`. All methods render as plain `fun`.
+    if lc.is_module {
+        let mut out = format!("object {class_name} {{\n");
+        for m in &lc.methods {
+            out.push_str(&indent_method(&emit_method(m)));
+            out.push('\n');
+        }
+        out.push_str("}\n");
+        return out;
+    }
+
     // 1. Accessor-derived properties (name → type), and the set of method
     //    names to drop (the synthesized getters/setters).
     let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
@@ -97,13 +109,24 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 
     let mut out = String::new();
 
-    // Class header + parent.
-    let header = match &lc.parent {
+    // Ruby `initialize` → Kotlin primary constructor + `init` block. The
+    // constructor params shadow the same-named properties inside `init`,
+    // where ivar writes are `this.`-qualified.
+    let init = lc
+        .methods
+        .iter()
+        .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize");
+
+    let parent_clause = match &lc.parent {
         Some(p) => {
             let pn = p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str());
-            format!("class {class_name} : {pn}()")
+            format!(" : {pn}()")
         }
-        None => format!("class {class_name}"),
+        None => String::new(),
+    };
+    let header = match init {
+        Some(m) => format!("class {class_name}({}){parent_clause}", method_params(m).join(", ")),
+        None => format!("class {class_name}{parent_clause}"),
     };
     out.push_str(&header);
     out.push_str(" {\n");
@@ -121,9 +144,19 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         out.push('\n');
     }
 
-    // Instance methods (skip accessors).
+    // init block (initialize body, no return wrapping).
+    if let Some(m) = init {
+        begin_method(&m.body);
+        let body = emit_body(&m.body, false);
+        out.push_str(&format!("    init {{\n{}\n    }}\n\n", indent4(&indent4(&body))));
+    }
+
+    // Instance methods (skip accessors and the initialize we just used).
     for m in &lc.methods {
-        if m.receiver == MethodReceiver::Instance && m.kind == AccessorKind::Method {
+        if m.receiver == MethodReceiver::Instance
+            && m.kind == AccessorKind::Method
+            && m.name.as_str() != "initialize"
+        {
             out.push_str(&indent_method(&emit_method(m)));
             out.push('\n');
         }
@@ -164,27 +197,7 @@ fn emit_method(m: &MethodDef) -> String {
         _ => ("fun", camel(m.name.as_str()), false),
     };
 
-    // Params — always typed (Kotlin requirement).
-    let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => Some(params),
-        _ => None,
-    };
-    let params: Vec<String> = m
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let pn = camel(p.name.as_str());
-            let ty = sig_params
-                .and_then(|sp| sp.get(i))
-                .map(|sp| kotlin_ty(&sp.ty))
-                .unwrap_or_else(|| "Any?".to_string());
-            match &p.default {
-                Some(d) => format!("{pn}: {ty} = {}", emit_expr(d)),
-                None => format!("{pn}: {ty}"),
-            }
-        })
-        .collect();
+    let params = method_params(m);
 
     // Return type.
     let ret_ty = match m.signature.as_ref() {
@@ -205,6 +218,30 @@ fn emit_method(m: &MethodDef) -> String {
     let body = emit_body(&m.body, returns_value);
 
     format!("{decl_kw} {name}({}){ret_clause} {{\n{}\n}}\n", params.join(", "), indent4(&body))
+}
+
+/// Render a method's params, always typed (Kotlin requirement); falls
+/// back to `Any?` where the signature is missing.
+fn method_params(m: &MethodDef) -> Vec<String> {
+    let sig_params = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) => Some(params),
+        _ => None,
+    };
+    m.params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let pn = camel(p.name.as_str());
+            let ty = sig_params
+                .and_then(|sp| sp.get(i))
+                .map(|sp| kotlin_ty(&sp.ty))
+                .unwrap_or_else(|| "Any?".to_string());
+            match &p.default {
+                Some(d) => format!("{pn}: {ty} = {}", emit_expr(d)),
+                None => format!("{pn}: {ty}"),
+            }
+        })
+        .collect()
 }
 
 fn indent4(s: &str) -> String {

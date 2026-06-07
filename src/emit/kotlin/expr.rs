@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::expr::{Arm, BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
+use crate::expr::{Arm, BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal, OpAssignOp, Pattern};
 
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -29,6 +29,10 @@ thread_local! {
     /// from a later non-nil assignment — so `var x = null` (which Kotlin
     /// infers as `Nothing?`) becomes `var x: T? = null`.
     static NIL_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// For locals first assigned an empty `{}`/`[]`, the element type
+    /// inferred from later `map[k]=v` / `list << x` — so the empty literal
+    /// gets a precise declared type instead of `<Any?>`.
+    static CONTAINER_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Reset per-method local-decl tracking and pre-scan the body for
@@ -49,6 +53,62 @@ pub(super) fn begin_method(body: &Expr) {
         }
     });
     NIL_TYPES.with(|t| *t.borrow_mut() = nil_types);
+
+    let mut container_types: HashMap<String, String> = HashMap::new();
+    scan_container_types(body, &mut container_types);
+    CONTAINER_TYPES.with(|t| *t.borrow_mut() = container_types);
+}
+
+/// Infer element types for empty-container locals from how they're later
+/// populated: `map[k] = v` → `MutableMap<K, V>`; `list << x` → `MutableList<E>`.
+fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
+    // Element/key/value types from writes. The IR types array-index reads
+    // conservatively as nilable (Ruby OOB → nil), but Kotlin's list/map
+    // operators return non-null, so strip the top-level nullability.
+    let nn = |ty: Option<&crate::ty::Ty>| -> String {
+        match ty {
+            Some(crate::ty::Ty::Union { variants }) => {
+                let nn: Vec<&crate::ty::Ty> =
+                    variants.iter().filter(|t| !matches!(t, crate::ty::Ty::Nil)).collect();
+                if nn.len() == 1 {
+                    kotlin_ty(nn[0])
+                } else {
+                    "Any?".to_string()
+                }
+            }
+            Some(t) => kotlin_ty(t),
+            None => "Any?".to_string(),
+        }
+    };
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Index { recv, index }, value } => {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                out.entry(camel(name.as_str()))
+                    .or_insert(format!("MutableMap<{}, {}>", nn(index.ty.as_ref()), nn(value.ty.as_ref())));
+            }
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if (method.as_str() == "<<" || method.as_str() == "add") && args.len() == 1 =>
+        {
+            if let ExprNode::Var { name, .. } = &*r.node {
+                out.entry(camel(name.as_str()))
+                    .or_insert(format!("MutableList<{}>", nn(args[0].ty.as_ref())));
+            }
+        }
+        // `map[k] = v` lowered as a Send `[]=`.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Var { name, .. } = &*r.node {
+                out.entry(camel(name.as_str()))
+                    .or_insert(format!("MutableMap<{}, {}>", nn(args[0].ty.as_ref()), nn(args[1].ty.as_ref())));
+            }
+        }
+        _ => {}
+    }
+    for child in children(e) {
+        scan_container_types(child, out);
+    }
 }
 
 fn count_assigns(
@@ -56,6 +116,10 @@ fn count_assigns(
     counts: &mut HashMap<String, usize>,
     nil_types: &mut HashMap<String, String>,
 ) {
+    // A compound assignment always mutates → force `var`.
+    if let ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*e.node {
+        *counts.entry(camel(name.as_str())).or_insert(0) += 2;
+    }
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
         let cn = camel(name.as_str());
         *counts.entry(cn.clone()).or_insert(0) += 1;
@@ -92,7 +156,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v.push(cond);
             v.push(body);
         }
-        ExprNode::Assign { value, .. } => v.push(value),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => v.push(value),
         ExprNode::Case { scrutinee, arms } => {
             v.push(scrutinee);
             for a in arms {
@@ -146,12 +210,14 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // Instance variable → property reference.
         ExprNode::Ivar { name } => camel(name.as_str()),
         ExprNode::SelfRef => "this".to_string(),
+        // Classes/modules are emitted flat in `package roundhouse`, so a
+        // qualified ref (`ActionDispatch::Router::MatchResult`) resolves
+        // by its last segment.
         ExprNode::Const { path } => path
-            .iter()
+            .last()
             .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .join("."),
-        ExprNode::Hash { entries, .. } => emit_hash(entries),
+            .unwrap_or_default(),
+        ExprNode::Hash { entries, .. } => emit_hash(entries, e),
         ExprNode::Array { elements, .. } => emit_array(elements, e),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(*op, left, right, e),
@@ -168,12 +234,11 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         ExprNode::Assign { target, value } => emit_assign(target, value),
+        ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
         ExprNode::Return { value } => {
-            if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
-                "return".to_string()
-            } else {
-                format!("return {}", emit_expr(value))
-            }
+            // `return nil` → `return null` (functions here are value-typed;
+            // a bare `return` would only be valid in a Unit function).
+            format!("return {}", emit_expr(value))
         }
         ExprNode::While { cond, body, until_form } => {
             let c = emit_expr(cond);
@@ -239,8 +304,11 @@ fn escape_str(s: &str) -> String {
     out
 }
 
-fn emit_hash(entries: &[(Expr, Expr)]) -> String {
+fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
     if entries.is_empty() {
+        if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
+            return format!("mutableMapOf<{}, {}>()", kotlin_ty(key), kotlin_ty(value));
+        }
         return "mutableMapOf<String, Any?>()".to_string();
     }
     let pairs: Vec<String> = entries
@@ -350,6 +418,16 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                     d.borrow_mut().insert(n.clone());
                 });
                 let kw = if is_var { "var" } else { "val" };
+                // Empty container with an inferred element type → annotate
+                // the declaration and let the bare ctor adopt it.
+                let empty_hash = matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty());
+                let empty_arr = matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty());
+                if empty_hash || empty_arr {
+                    if let Some(t) = CONTAINER_TYPES.with(|c| c.borrow().get(&n).cloned()) {
+                        let ctor = if empty_hash { "mutableMapOf()" } else { "mutableListOf()" };
+                        return format!("{kw} {n}: {t} = {ctor}");
+                    }
+                }
                 // `var x = null` infers `Nothing?`; annotate from a later
                 // non-nil assignment when we have one.
                 let is_nil = matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
@@ -362,17 +440,35 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                 format!("{kw} {n} = {val}")
             }
         }
-        LValue::Ivar { name } => format!("{} = {val}", camel(name.as_str())),
-        LValue::Attr { recv, name } => {
-            format!("{}.{} = {val}", emit_expr(recv), camel(name.as_str()))
-        }
-        LValue::Index { recv, index } => {
-            format!("{}[{}] = {val}", emit_expr(recv), emit_expr(index))
-        }
-        LValue::Const { path } => {
-            let p = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".");
-            format!("{p} = {val}")
-        }
+        _ => format!("{} = {val}", lvalue_ref(target)),
+    }
+}
+
+/// Reference form of an LValue (no declaration), shared by assignment and
+/// compound-assignment. Ivar writes are `this.`-qualified so they work
+/// inside `init` blocks where a constructor param shadows the property.
+fn lvalue_ref(target: &LValue) -> String {
+    match target {
+        LValue::Var { name, .. } => camel(name.as_str()),
+        LValue::Ivar { name } => format!("this.{}", camel(name.as_str())),
+        LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), camel(name.as_str())),
+        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
+    }
+}
+
+fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
+    let lhs = lvalue_ref(target);
+    let v = emit_expr(value);
+    match op {
+        OpAssignOp::OrOr => format!("{lhs} = {lhs} ?: {v}"),
+        OpAssignOp::AndAnd => format!("if ({lhs} != null) {{ {lhs} = {v} }}"),
+        OpAssignOp::Add => format!("{lhs} += {v}"),
+        OpAssignOp::Sub => format!("{lhs} -= {v}"),
+        OpAssignOp::Mul => format!("{lhs} *= {v}"),
+        OpAssignOp::Div => format!("{lhs} /= {v}"),
+        OpAssignOp::Mod => format!("{lhs} %= {v}"),
+        _ => format!("{lhs} = {lhs} /* TODO op-assign */ {v}"),
     }
 }
 
@@ -496,6 +592,16 @@ fn emit_send(
         }
     }
 
+    // String predicates with one arg.
+    if let (Some(r), 1) = (recv, args.len()) {
+        match method {
+            "start_with?" => return format!("{}.startsWith({})", emit_expr(r), args_s[0]),
+            "end_with?" => return format!("{}.endsWith({})", emit_expr(r), args_s[0]),
+            "include?" => return format!("{}.contains({})", emit_expr(r), args_s[0]),
+            _ => {}
+        }
+    }
+
     // Indexing / slicing.
     if method == "[]" {
         if let Some(r) = recv {
@@ -504,6 +610,10 @@ fn emit_send(
                 // `str[a..]` / `str[a..b]` slice.
                 if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
                     return emit_slice_range(&rs, begin.as_ref(), end.as_ref(), *exclusive);
+                }
+                // List/Array index needs an Int (indices are `Long`).
+                if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
+                    return format!("{rs}[({}).toInt()]", args_s[0]);
                 }
                 return format!("{rs}[{}]", args_s[0]);
             }
@@ -551,8 +661,17 @@ fn emit_send(
             "to_f" => return format!("{rs}.toString().toDouble()"),
             "empty?" => return format!("{rs}.isEmpty()"),
             "any?" => return format!("{rs}.isNotEmpty()"),
-            "length" => return format!("{rs}.length"),
-            "size" => return format!("{rs}.size"),
+            "upcase" => return format!("{rs}.uppercase()"),
+            "downcase" => return format!("{rs}.lowercase()"),
+            "strip" => return format!("{rs}.trim()"),
+            // `.length`/`.size`: collections use `.size`, strings `.length`.
+            "length" | "size" => {
+                let coll = matches!(
+                    r.ty.as_ref(),
+                    Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
+                );
+                return if coll { format!("{rs}.size") } else { format!("{rs}.length") };
+            }
             // No-ops in Kotlin — drop, keep the receiver.
             "freeze" | "dup" | "to_a" => return rs,
             _ => {}

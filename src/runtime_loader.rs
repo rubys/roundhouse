@@ -912,6 +912,17 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "src/main/kotlin/Router.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
+    },
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
