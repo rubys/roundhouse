@@ -19,7 +19,7 @@ cells = JSON.parse(File.read(input))
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go spinel elixir typescript ruby ruby-int rails rails-int]
+TARGET_ORDER = %w[rust crystal go spinel elixir typescript python ruby ruby-int rails rails-int]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # Brand-ish but muted; enough contrast in greyscale.
@@ -30,6 +30,7 @@ COLOR = {
   'spinel'     => '#7d4cdb',
   'elixir'     => '#4b275f',
   'typescript' => '#3178c6',
+  'python'     => '#3776ab',
   'ruby'       => '#cc342d',
   'ruby-int'   => '#e89c93',
   'rails'      => '#666666',

@@ -18,6 +18,8 @@
 #          modernc.org/sqlite). Built from `cmd/v2/main.go`.
 #   `elixir` = Roundhouse-emit Elixir (BEAM, Plug.Cowboy + Exqlite).
 #          One node, scheduler concurrency — `--workers` is ignored.
+#   `python` = Roundhouse-emit Python (single-process aiohttp, stdlib
+#          sqlite3). Async event loop — `--workers` is ignored.
 #
 #   `rails`     = Rails reference (Puma + YJIT, production env)
 #   `rails-int` = Rails reference (Puma, YJIT disabled, baseline)
@@ -119,14 +121,15 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go|elixir) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go|elixir|python) NORMALIZED+=("$t") ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
         sp) NORMALIZED+=(spinel) ;;
         ex) NORMALIZED+=(elixir) ;;
+        py) NORMALIZED+=(python) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go elixir" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go elixir python" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -155,6 +158,11 @@ GO_OUT="$REPO_ROOT/build/transpiled-blog-go"
 # BUILD_DIR for the elixir target). `Server.start` opens the staged DB at
 # `storage/development.sqlite3` relative to this dir.
 EX_OUT="/tmp/rh-ex-pass2"
+# Python target — emit_preview writes here (matches scripts/compare's
+# BUILD_DIR for the python target). aiohttp server lives in a uv-managed
+# venv; `python3 -m app` boots `Server.start`, which opens the staged DB
+# at `storage/development.sqlite3` relative to this dir.
+PY_OUT="/tmp/rh-py-pass2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
@@ -415,6 +423,22 @@ build_target() {
             step "building elixir target (mix compile)"
             (cd "$EX_OUT" && mix deps.get >/dev/null 2>&1 && MIX_ENV=prod mix compile >/dev/null) || return 1
             ;;
+        python)
+            # `emit_preview --target python` writes the lowered-IR Python
+            # app to $PY_OUT; aiohttp lives in a uv-managed venv declared by
+            # the emitted pyproject.toml. Wipe pycache so emitter changes
+            # aren't masked by stale bytecode, sync the venv, and validate
+            # imports so a startup failure surfaces here, not as HTTP diffs.
+            # Mirrors scripts/compare's python branch.
+            TARGET_BUILD_DIR="$PY_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$PY_OUT/pyproject.toml" ]]; then
+                step "regenerating python target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target python "$FIXTURE" >/dev/null 2>&1) || return 1
+            fi
+            step "syncing python venv (uv) + validating imports"
+            (cd "$PY_OUT" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes") || return 1
+            ;;
     esac
 }
 
@@ -476,6 +500,14 @@ stage_db() {
             # Path `Server.start` opens (relative to $EX_OUT); mirrors
             # scripts/compare's elixir DB_DEST.
             local db="$EX_OUT/storage/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        python)
+            # Default path `server.start` opens (relative to $PY_OUT);
+            # mirrors scripts/compare's python DB_DEST.
+            local db="$PY_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -620,6 +652,20 @@ start_target() {
                 PORT="$port" \
                 MIX_ENV=prod \
                 mix run --no-halt -e 'Main.run' \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        python)
+            # Single-process aiohttp (async event loop) — no worker /
+            # preload concept, so `workers` is ignored and the per-cell row
+            # records workers=1 (like node/go/elixir). `python3 -m app`
+            # boots `server.start`, which opens the staged DB and blocks.
+            # The RSS sampler + teardown walk the process tree, so the
+            # `uv run` → python child is accounted for.
+            (cd "$PY_OUT" && \
+                PORT="$port" \
+                uv run python3 -m app \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
