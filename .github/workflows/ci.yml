@@ -476,12 +476,12 @@ jobs:
           retention-days: 7
 
   toolchain-python:
-    # Disabled during the framework-runtime rip-and-replace: the Python
-    # target is being rebuilt to mirror TypeScript (transpile the full
-    # runtime/ruby/ framework set instead of shipping hand-written
-    # runtime/python/*.py). Re-enable once the transpiled framework set is
-    # degrade-free and `compare python` is green again.
-    if: false
+    # Re-enabled 2026-06-06: the transpiled framework set is degrade-free,
+    # the emitted real-blog unittest is green (21/21), and `compare python`
+    # matches Rails 5/5. Python version tracks the local dev environment
+    # (system `python3`, which the `python_toolchain` test shells out to);
+    # `from __future__ import annotations` keeps the emit version-agnostic
+    # back to 3.11 (the emitted `requires-python`).
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
@@ -496,7 +496,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - name: cargo test --test python_toolchain -- --ignored
         run: cargo test --test python_toolchain -- --ignored --nocapture
 
@@ -626,9 +626,8 @@ jobs:
         run: scripts/compare elixir
 
   compare-python:
-    # Disabled during the framework-runtime rip-and-replace (see
-    # toolchain-python above). Re-enable with that job.
-    if: false
+    # Re-enabled 2026-06-06 with toolchain-python above (compare 5/5 vs
+    # Rails). Python version tracks the local dev environment.
     needs: generate-fixture
     runs-on: ubuntu-latest
     steps:
@@ -648,7 +647,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: scripts/compare python
