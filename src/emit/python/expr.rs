@@ -181,6 +181,22 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         ExprNode::While { .. } | ExprNode::Return { .. } | ExprNode::Case { .. } => {
             emit_stmt(body, true, is_void)
         }
+        // A value-returning tail `If` whose branches are statement-shaped
+        // (a multi-statement `Seq`, an assignment, a loop, …) cannot be a
+        // ternary: `emit_expr` would drop assignment LHSs (`stmt = …` →
+        // bare `…`) and `; `-join the Seq, so the method would return the
+        // wrong sub-expression. Emit native `if/elif/else` blocks instead,
+        // recursing `emit_body` per branch so each branch's tail returns.
+        // The belongs_to accessor (`return nil if fk == 0; …; record`) is
+        // exactly this shape — its else-branch is the prepared-statement
+        // Seq. (Void bodies and value-tail Ifs with plain-expression
+        // branches still fall through to the ternary below.)
+        ExprNode::If { cond, then_branch, else_branch }
+            if !is_void
+                && (is_stmt_shaped(then_branch) || is_stmt_shaped(else_branch)) =>
+        {
+            emit_if_value_body(cond, then_branch, else_branch, return_ty)
+        }
         _ => {
             if let Some(s) = try_emit_raise_stmt(body) {
                 s
@@ -191,6 +207,53 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
             }
         }
     }
+}
+
+/// True if `e` must be rendered as Python *statements* rather than a
+/// single expression — a multi-statement `Seq`, an assignment (whose LHS
+/// `emit_expr` would silently drop), a loop, an explicit return, a case,
+/// or an `If` with any statement-shaped branch. Used by `emit_body` to
+/// decide whether a value-tail `If` can be a ternary or needs `if/else`
+/// blocks.
+fn is_stmt_shaped(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Seq { exprs } => exprs.len() > 1 || exprs.iter().any(is_stmt_shaped),
+        ExprNode::While { .. }
+        | ExprNode::Return { .. }
+        | ExprNode::Case { .. }
+        | ExprNode::Assign { .. } => true,
+        ExprNode::If { then_branch, else_branch, .. } => {
+            is_stmt_shaped(then_branch) || is_stmt_shaped(else_branch)
+        }
+        _ => false,
+    }
+}
+
+/// Emit a value-returning `If` as native `if/elif/else` blocks, recursing
+/// `emit_body` on each branch so the branch's tail expression becomes a
+/// `return`. An `elsif` (else slot is another `If`) chains as `elif`; an
+/// empty else is left implicit (Python returns `None`, matching Ruby nil).
+fn emit_if_value_body(cond: &Expr, then_branch: &Expr, else_branch: &Expr, ret_ty: &Ty) -> String {
+    let mut out = format!(
+        "if {}:\n{}",
+        emit_expr(cond),
+        super::shared::indent_py(&emit_body(then_branch, ret_ty)),
+    );
+    match &*else_branch.node {
+        _ if is_nil_or_empty(else_branch) => {}
+        ExprNode::If { cond: c2, then_branch: t2, else_branch: e2 } => {
+            out.push('\n');
+            out.push_str(&format!("el{}", emit_if_value_body(c2, t2, e2, ret_ty)));
+        }
+        _ => {
+            out.push('\n');
+            out.push_str(&format!(
+                "else:\n{}",
+                super::shared::indent_py(&emit_body(else_branch, ret_ty)),
+            ));
+        }
+    }
+    out
 }
 
 /// Build the Python exception value for a Ruby `raise`'s arguments:
@@ -229,7 +292,7 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
 pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            format!("{} = {}", name, emit_expr(value))
+            format!("{} = {}", super::shared::py_ident(name.as_str()), emit_expr(value))
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("self.{} = {}", name, emit_expr(value))
@@ -383,7 +446,7 @@ fn range_slice(begin: &Option<Expr>, end: &Option<Expr>, exclusive: bool) -> Str
 /// `Assign` arms in `emit_stmt` for the in-place compound-assign forms.
 fn lvalue_str(t: &LValue) -> String {
     match t {
-        LValue::Var { name, .. } => name.to_string(),
+        LValue::Var { name, .. } => super::shared::py_ident(name.as_str()),
         LValue::Ivar { name } => format!("self.{name}"),
         LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
@@ -537,7 +600,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::Const { path } => {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
-        ExprNode::Var { name, .. } => name.to_string(),
+        ExprNode::Var { name, .. } => super::shared::py_ident(name.as_str()),
         ExprNode::Ivar { name } => format!("self.{name}"),
         ExprNode::SelfRef => SELF_REF.with(|c| c.get()).to_string(),
         // `recv.map { |x| EXPR }` / `.collect` → Python list comprehension
@@ -554,8 +617,8 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 _ => crate::emit::diagnostics::report_unsupported("python", "map-block", ""),
             }
         }
-        ExprNode::Send { recv, method, args, .. } => {
-            emit_send(recv.as_ref(), method.as_str(), args)
+        ExprNode::Send { recv, method, args, parenthesized, .. } => {
+            emit_send(recv.as_ref(), method.as_str(), args, *parenthesized)
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
         ExprNode::Seq { exprs } => {
@@ -657,13 +720,28 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     }
 }
 
-pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parenthesized: bool) -> String {
     // Index / slice. Handle before computing `args_s`: a Range arg
     // (`x[a..b]`) must be destructured into slice syntax, and the eager
     // `args_s` below would emit the Range node — firing a degrade — as a
     // side effect even though the result would be discarded here.
     if method == "[]" {
         if let Some(r) = recv {
+            // Ruby `Hash#[]` returns nil for a missing key; Python
+            // `dict[k]` raises `KeyError`. Emit `.get(k)` for Hash
+            // receivers so the nil-on-missing semantics survive — the
+            // synthesized constructor reads `attrs["id"] || 0` for keys
+            // the caller may omit (`Article({"title": …})` from a
+            // fixture, or `Article()` no-args from `from_row`). Single
+            // scalar key only; ranges/slices/multi-arg keep `[]`.
+            if let [idx] = args {
+                let is_scalar = !matches!(&*idx.node, ExprNode::Range { .. });
+                if is_scalar
+                    && matches!(strip_nullable(r.ty.as_ref()).as_ref(), Some(Ty::Hash { .. }))
+                {
+                    return format!("{}.get({})", emit_expr(r), emit_expr(idx));
+                }
+            }
             return emit_index(&emit_expr(r), args);
         }
     }
@@ -708,6 +786,32 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
     if method == "class" && args.is_empty() {
         if let Some(r) = recv {
             return format!("type({})", emit_expr(r));
+        }
+    }
+    // `Time.now` → an aware UTC `datetime` (mirrors TS's `new Date()`).
+    // The framework runtime's only use is `Time.now.utc.iso8601` for
+    // timestamp columns; `.utc` is then a no-op (the value is already
+    // UTC) and `.iso8601` becomes `.isoformat()`. `import datetime` is
+    // injected for active_record_base via the runtime-loader import list.
+    if method == "now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.len() == 1 && path[0].as_str() == "Time" {
+                    return "datetime.datetime.now(datetime.timezone.utc)".to_string();
+                }
+            }
+        }
+    }
+    // `<time>.utc` → no-op: the `Time.now` mapping is already UTC-aware.
+    if method == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            return emit_expr(r);
+        }
+    }
+    // `<time>.iso8601` → `.isoformat()` (ISO-8601 timestamp string).
+    if method == "iso8601" && args.is_empty() {
+        if let Some(r) = recv {
+            return format!("{}.isoformat()", emit_expr(r));
         }
     }
     // Ruby's binary operators ride the Send channel (`a == b` is
@@ -868,11 +972,22 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Str
             // same way at the definition site, so calls and defs align.
             let m = super::shared::py_method_name(method);
             if args_s.is_empty() {
-                // Bare `recv.method` (no parens) is how Python accesses
-                // attributes. For method calls with no args we emit
-                // `recv.method()` — matches Python idiom and avoids
-                // confusing a 0-arity call with an attribute read.
-                format!("{recv_s}.{m}()")
+                // A zero-arg send is either an attribute read (`parent.id`,
+                // `article.title`) or a real method call (`instance.save`).
+                // Python spells them differently — `x.id` vs `x.save()` —
+                // and calling a field (`parent.id()`) raises. The analyzer
+                // sets `parenthesized` to true exactly when dispatch
+                // resolved the name to a `Method`-kind (not an
+                // attr_reader); a `Const` receiver (`Db`, `Inflector`)
+                // names a module of callable functions, so always call
+                // there too. Otherwise emit attribute access — the Ruby
+                // reader convention TS mirrors with property access.
+                let is_const_recv = matches!(&*r.node, ExprNode::Const { .. });
+                if parenthesized || is_const_recv {
+                    format!("{recv_s}.{m}()")
+                } else {
+                    format!("{recv_s}.{m}")
+                }
             } else {
                 format!("{recv_s}.{m}({})", args_s.join(", "))
             }
@@ -941,6 +1056,11 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         "downcase" if no_args && is_str => format!("{recv}.lower()"),
         "start_with?" if one_arg && is_str => format!("{recv}.startswith({})", args_s[0]),
         "end_with?" if one_arg && is_str => format!("{recv}.endswith({})", args_s[0]),
+        // Ruby `coll.include?(x)` → Python membership `x in coll`. Works
+        // for Array (element), Hash (key), and String (substring). Wrapped
+        // in parens since `in` is a comparison-precedence operator and may
+        // sit inside a larger boolean expression.
+        "include?" if one_arg && is_seq => format!("({} in {recv})", args_s[0]),
         _ => return None,
     })
 }

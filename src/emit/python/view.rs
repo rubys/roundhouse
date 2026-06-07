@@ -48,7 +48,17 @@ pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
     writeln!(s, "from app import importmap").unwrap();
     writeln!(s, "from app.route_helpers import *  # noqa: F401, F403").unwrap();
     if !known_models.is_empty() {
-        writeln!(s, "from app.models import *  # noqa: F401, F403").unwrap();
+        // `from app import models` (not `import *`): models.py imports the
+        // `Views` facade for its broadcast callbacks, so models↔views is an
+        // import cycle. A `from app.models import *` snapshots whatever
+        // names exist at import time — when models.py is imported first, it
+        // triggers views.py while models is only half-initialized, so the
+        // model classes aren't bound yet and render-time `Comment.all()`
+        // raises NameError. Importing the *module* binds the (possibly
+        // partial) module object, and the `models.Comment` attribute access
+        // the view bodies emit resolves late, at render time, when models is
+        // fully loaded — robust to either import order.
+        writeln!(s, "from app import models  # noqa: F401").unwrap();
     }
     writeln!(s).unwrap();
 
@@ -662,7 +672,9 @@ fn emit_py_captured_helper(
 fn emit_py_nested_form_record(el: &Expr) -> String {
     match crate::lower::classify_nested_form_child(el) {
         Some(crate::lower::NestedFormChild::ClassNew { class }) => {
-            format!("{class}()")
+            // Qualify through the imported module — see the `from app
+            // import models` rationale in `emit_py_views`.
+            format!("models.{class}()")
         }
         Some(crate::lower::NestedFormChild::Local { name }) => name.to_string(),
         None => "None".to_string(),
@@ -1085,8 +1097,12 @@ fn emit_py_render_partial(
                 ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.to_string(),
                 _ => return "_buf += \"\"  # TODO ERB: render".to_string(),
             };
+            // `{method}` is a has_many association — a real model method,
+            // so call it (`article.comments()`) to get the list, mirroring
+            // TS's `article.comments().forEach(...)`. A bare `.{method}`
+            // would iterate the bound-method object and raise.
             format!(
-                "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{method})"
+                "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{method}())"
             )
         }
         RenderPartial::Named { partial, arg } => {
@@ -1232,7 +1248,7 @@ fn emit_py_view_expr_raw(expr: &Expr, ctx: &PyViewCtx) -> String {
                             ctx.resolve_has_many_on_local(owner, method_s)
                         {
                             return format!(
-                                "[__r for __r in {target_class}.all() if __r.{fk} == {owner}.id]",
+                                "[__r for __r in models.{target_class}.all() if __r.{fk} == {owner}.id]",
                             );
                         }
                     }
@@ -1251,8 +1267,13 @@ fn emit_py_view_expr_raw(expr: &Expr, ctx: &PyViewCtx) -> String {
                             return format!("len({recv_s})");
                         }
                         "full_message" => {
-                            let recv_s = emit_py_view_expr_raw(r, ctx);
-                            return format!("{recv_s}.full_message");
+                            // The framework's `errors` accumulator holds
+                            // plain message strings (`errors << "title can't
+                            // be blank"`), so `error.full_message` is just
+                            // the string itself — mirrors TS emitting the
+                            // bare `error`. Calling `.full_message` on a str
+                            // would raise AttributeError.
+                            return emit_py_view_expr_raw(r, ctx);
                         }
                         _ => {}
                     }

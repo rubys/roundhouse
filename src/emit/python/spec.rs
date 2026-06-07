@@ -269,7 +269,9 @@ fn emit_py_test_send(
         }
     }
 
-    // `Class.new(hash)` → `Class(**{...})` or `Class(field=val, ...)`
+    // `Class.new(hash)` → `Class({"field": val, ...})`. The lowered
+    // model constructor takes a single positional attrs dict (mirroring
+    // TS `constructor(attrs)`), not **kwargs — see `emit_py_fixtures`.
     if let Some(r) = recv {
         if method == "new" && args.len() == 1 {
             if let ExprNode::Const { path } = &*r.node {
@@ -284,7 +286,7 @@ fn emit_py_test_send(
                                     } = &*k.node
                                     {
                                         Some(format!(
-                                            "{}={}",
+                                            "{:?}: {}",
                                             f.as_str(),
                                             emit_py_test_expr(v, ctx)
                                         ))
@@ -293,7 +295,7 @@ fn emit_py_test_send(
                                     }
                                 })
                                 .collect();
-                            return format!("{class_name}({})", pairs.join(", "));
+                            return format!("{class_name}({{{}}})", pairs.join(", "));
                         }
                     }
                 }
@@ -392,17 +394,18 @@ fn try_emit_assoc_create_py(
         _ => return None,
     };
 
-    let mut kwargs: Vec<String> = vec![format!("{foreign_key}={owner_s}.id")];
+    // Single positional attrs dict, not **kwargs (see `emit_py_fixtures`).
+    let mut pairs: Vec<String> = vec![format!("{foreign_key:?}: {owner_s}.id")];
     for (k, v) in &hash_entries {
         if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
-            kwargs.push(format!(
-                "{}={}",
+            pairs.push(format!(
+                "{:?}: {}",
                 field_name.as_str(),
                 emit_py_test_expr(v, ctx),
             ));
         }
     }
-    let ctor = format!("{target_class}({})", kwargs.join(", "));
+    let ctor = format!("{target_class}({{{}}})", pairs.join(", "));
     // Python expression-form sequence: walrus operator in a tuple
     // evaluates both and yields the record. `.create` runs save;
     // `.build` doesn't.

@@ -71,12 +71,23 @@ fn params_and_ret(m: &MethodDef) -> (Vec<String>, Ty) {
                 .params
                 .iter()
                 .zip(params.iter())
-                .map(|(name, p)| format!("{}: {}", name, python_ty(&p.ty)))
+                .map(|(name, p)| {
+                    let base = format!("{}: {}", super::shared::py_ident(name.as_str()), python_ty(&p.ty));
+                    // Carry through a source-supplied default (`def
+                    // initialize(attrs = {})`) so no-args call sites
+                    // (`Article()` from `from_row`) bind the empty hash
+                    // instead of erroring on a missing positional —
+                    // mirrors the TS emitter's `name: T = <default>`.
+                    match &name.default {
+                        Some(d) => format!("{base} = {}", emit_expr(d)),
+                        None => base,
+                    }
+                })
                 .collect();
             (ps, (**ret).clone())
         }
         _ => (
-            m.params.iter().map(|p| p.to_string()).collect(),
+            m.params.iter().map(|p| super::shared::py_ident(p.as_str())).collect(),
             Ty::Untyped,
         ),
     }

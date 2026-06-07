@@ -28,6 +28,40 @@ pub(super) fn py_method_name(name: &str) -> String {
     }
 }
 
+/// Legalize a local variable / parameter name for Python. Lowerers and
+/// the TS-shared IR pick identifiers that are fine in Ruby/JS but shadow
+/// a Python builtin the *emitter itself* generates as a call — most
+/// visibly `len` (the lowered `length`-validation temp is named `len`,
+/// and `.length`/`.size`/`.empty?` all lower to `len(...)`, so a local
+/// `len` makes the builtin call later in the same scope raise
+/// `UnboundLocalError`). Rename those to a trailing-underscore form at
+/// every def/assign/read site so they stay consistent. Names that don't
+/// collide (the overwhelming majority — `id`, `record`, `i`, …) pass
+/// through untouched to keep the emit close to the source.
+pub(super) fn py_ident(name: &str) -> String {
+    // Builtins this emitter can emit as a *call* (so shadowing them with
+    // a local is destructive), plus Python keywords (shadowing those is a
+    // syntax error). Builtins like `id` that the emitter never calls are
+    // deliberately omitted — renaming them would be churn with no payoff.
+    const RESERVED: &[&str] = &[
+        // builtins the emitter generates
+        "len", "list", "dict", "set", "str", "int", "float", "bool", "type",
+        "range", "sum", "min", "max", "sorted", "map", "filter", "next",
+        "iter", "tuple", "bytes",
+        // Python keywords
+        "and", "as", "assert", "async", "await", "break", "class", "continue",
+        "def", "del", "elif", "else", "except", "finally", "for", "from",
+        "global", "if", "import", "in", "is", "lambda", "nonlocal", "not",
+        "or", "pass", "raise", "return", "try", "while", "with", "yield",
+        "None", "True", "False",
+    ];
+    if RESERVED.contains(&name) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
+}
+
 pub(super) fn is_bare_py_ident(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() { return false; }

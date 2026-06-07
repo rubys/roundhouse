@@ -1269,7 +1269,14 @@ const PYTHON_TARGET: TargetEmit = TargetEmit {
 /// Python `from <module> import <name>`. The `source` is the dotted
 /// module path (`app.flash`), matching the `app/*.py` out-paths.
 fn py_format_import(name: &str, source: &str) -> String {
-    format!("from {source} import {name}\n")
+    // An empty source means a plain top-level `import <name>` (stdlib
+    // modules like `datetime`, which the transpiled `Time.now` mapping
+    // reaches into) rather than the cross-file `from app.x import Y` form.
+    if source.is_empty() {
+        format!("import {name}\n")
+    } else {
+        format!("from {source} import {name}\n")
+    }
 }
 
 /// Module-level constant → `NAME = value` (no keyword, no terminator),
@@ -1335,7 +1342,10 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActiveRecord",
         out_path: "app/active_record_base.py",
         mode: Mode::Library,
-        imports: &[("RecordNotFound, RecordInvalid", "app.errors")],
+        imports: &[
+            ("RecordNotFound, RecordInvalid", "app.errors"),
+            ("datetime", ""),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },

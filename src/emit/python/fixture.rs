@@ -74,12 +74,15 @@ pub(super) fn emit_py_fixtures(app: &App) -> EmittedFile {
                             target_label.as_str(),
                         ),
                     };
-                    format!("        {col}={val}")
+                    format!("        {col:?}: {val}")
                 })
                 .collect();
-            writeln!(s, "    r = {class_name}(").unwrap();
+            // The lowered constructor takes a single positional attrs
+            // dict (`__init__(self, attrs)`, mirroring TS
+            // `constructor(attrs)`), not **kwargs — pass a dict literal.
+            writeln!(s, "    r = {class_name}({{").unwrap();
             writeln!(s, "{}", kwargs.join(",\n")).unwrap();
-            writeln!(s, "    )").unwrap();
+            writeln!(s, "    }})").unwrap();
             writeln!(
                 s,
                 "    if not r.save():\n        raise RuntimeError(\"fixture {ns}/{label} failed to save\")"
