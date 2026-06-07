@@ -30,6 +30,9 @@ class ActionResponse:
     body: str = ""
     status: int = 200
     location: str = ""
+    # Set by the json-format controller branch; the server ships the
+    # body verbatim under this Content-Type and skips the html layout.
+    content_type: str = ""
 
 
 @dataclass
@@ -38,6 +41,9 @@ class ActionContext:
     params (from the URL pattern) with form body fields."""
 
     params: dict[str, Any] = field(default_factory=dict)
+    # "html" or "json" — inferred from a `.json` path suffix. The
+    # controller's implicit-render branch reads it to pick the view.
+    request_format: str = "html"
 
 
 class Params(dict):

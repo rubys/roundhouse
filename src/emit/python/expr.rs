@@ -5,7 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::expr::{Expr, ExprNode, LValue, Literal, OpAssignOp};
+use crate::expr::{Expr, ExprNode, IrHint, LValue, Literal, OpAssignOp};
 use crate::ty::Ty;
 
 thread_local! {
@@ -289,7 +289,47 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
     None
 }
 
+/// The lowerer tags the jbuilder/ERB string-accumulator pattern with
+/// `IrHint::StringBuilder{Init,Append,Result}`. Python renders it as a
+/// list of fragments joined once at the end (mirrors TS's array
+/// `.push`/`.join("")`): `io = String.new` → `io = []`, `io << x` →
+/// `io.append(x)`, terminal `io` → `"".join(io)`. Returns the statement
+/// form for Init/Append; Result is expr-position (the function's return
+/// tail) and is handled in `emit_expr`.
+fn try_string_builder_stmt(e: &Expr) -> Option<String> {
+    match e.hint? {
+        IrHint::StringBuilderInit => {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
+                return Some(format!("{} = []", super::shared::py_ident(name.as_str())));
+            }
+            None
+        }
+        IrHint::StringBuilderAppend => string_builder_append(e),
+        IrHint::StringBuilderResult => None,
+    }
+}
+
+/// `io << x` (a `StringBuilderAppend`-tagged Send) → `io.append(x)`.
+fn string_builder_append(e: &Expr) -> Option<String> {
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
+        if method.as_str() == "<<" && args.len() == 1 {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                return Some(format!(
+                    "{}.append({})",
+                    super::shared::py_ident(name.as_str()),
+                    emit_expr(&args[0]),
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
+    // String-accumulator hints (Init/Append) are statement-position.
+    if let Some(s) = try_string_builder_stmt(e) {
+        return s;
+    }
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             format!("{} = {}", super::shared::py_ident(name.as_str()), emit_expr(value))
@@ -594,6 +634,22 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     if let Some(kind) = &e.diagnostic {
         return crate::emit::diagnostics::StubStyle::PythonThrow
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
+    }
+    // String-accumulator hints in expression position: an Append inside a
+    // lambda (the partial collection-render shape) and the terminal Result
+    // read at the function's return tail.
+    match e.hint {
+        Some(IrHint::StringBuilderAppend) => {
+            if let Some(s) = string_builder_append(e) {
+                return s;
+            }
+        }
+        Some(IrHint::StringBuilderResult) => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                return format!("\"\".join({})", super::shared::py_ident(name.as_str()));
+            }
+        }
+        _ => {}
     }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
@@ -962,6 +1018,29 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                     return ruby_isinstance(&recv_s, &emit_expr(arg));
                 }
             }
+            // Ruby `String#gsub`/`#sub(pattern, replacement)` → Python
+            // `re.sub` (gsub = all matches; sub = first, via `count=1`).
+            // A Hash replacement (`gsub(re, {"\\" => "\\\\", …})`, the
+            // json_builder escaper) becomes a lookup callback; a string
+            // replacement passes through. The pattern may be a compiled
+            // regex (regex literals lower to `re.compile`) — `re.sub`
+            // accepts either. Requires `import re` in the emitted module
+            // (regex-literal use already injects it; json_builder relies
+            // on that).
+            if matches!(method, "gsub" | "sub") {
+                if let [pat, repl] = args {
+                    let count = if method == "sub" { ", count=1" } else { "" };
+                    let repl_s = if matches!(
+                        strip_nullable(repl.ty.as_ref()).as_ref(),
+                        Some(Ty::Hash { .. })
+                    ) {
+                        format!("lambda __m: {}.get(__m.group(0), \"\")", emit_expr(repl))
+                    } else {
+                        emit_expr(repl)
+                    };
+                    return format!("re.sub({}, {repl_s}, {recv_s}{count})", emit_expr(pat));
+                }
+            }
             // Ruby stdlib methods → Python builtins, gated on the
             // receiver's inferred type so user methods of the same name
             // (Flash#length/#to_h, a model #to_s) aren't shadowed.
@@ -1061,6 +1140,14 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // in parens since `in` is a comparison-precedence operator and may
         // sit inside a larger boolean expression.
         "include?" if one_arg && is_seq => format!("({} in {recv})", args_s[0]),
+        // Ruby `Array#join(sep)` → Python `sep.join(list)` (the receiver
+        // and argument swap). No-arg join uses the empty separator (Ruby's
+        // `$,` default is nil → ""). Gated to Array so a user `join`
+        // method on another type isn't shadowed.
+        "join" if is_array => match args_s.first() {
+            Some(sep) => format!("{sep}.join({recv})"),
+            None => format!("\"\".join({recv})"),
+        },
         _ => return None,
     })
 }

@@ -83,6 +83,15 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     method = request.method.upper()
     path = request.rel_url.path
 
+    # Per-request format inference: strip a `.json` suffix before route
+    # matching so `/articles/1.json` and `/articles/1` share one route
+    # entry, and remember the format so the controller's implicit-render
+    # branch picks the json view + Content-Type. Mirrors the TS server.
+    request_format = "html"
+    if path.endswith(".json"):
+        request_format = "json"
+        path = path[:-5]
+
     body_text, body_params = await _read_form_body(request)
 
     # Rails scaffold forms submit POST with `_method=patch|put|delete`
@@ -109,7 +118,7 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     params.update(path_params)
     params.update(body_params)
 
-    ctx = _http.ActionContext(params=params)
+    ctx = _http.ActionContext(params=params, request_format=request_format)
     try:
         result = handler(ctx)
         if inspect.isawaitable(result):
@@ -137,6 +146,17 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
             text=body,
             headers={"Location": result.location or ""},
             content_type="text/html",
+            charset="utf-8",
+        )
+
+    # JSON responses ship the controller body verbatim under the
+    # controller-supplied Content-Type and skip the html layout wrap.
+    # Mirrors the TS server's `request_format === "json"` branch.
+    if request_format == "json" or result.content_type:
+        return web.Response(
+            status=status,
+            text=body,
+            content_type=result.content_type or "application/json",
             charset="utf-8",
         )
 

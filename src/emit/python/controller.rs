@@ -78,7 +78,17 @@ fn emit_controller_file_pass2(
             parent.as_ref(),
             &permitted,
         );
-        emit_py_action(&mut s, &la, &action.body, known_models, c);
+        // A json variant exists when the resource has a
+        // `<plural>/<action>.json.jbuilder` view (lowered to a `_json`
+        // render function) — view dirs are the plural controller name
+        // (`articles/index`), not the singular `resource`. Drives the
+        // implicit-render's `if request_format == "json"` branch.
+        let view_dir = crate::naming::snake_case(name.strip_suffix("Controller").unwrap_or(name));
+        let has_json_variant = app.views.iter().any(|v| {
+            v.format.as_str() == "json"
+                && v.name.as_str() == format!("{view_dir}/{}", action.name.as_str())
+        });
+        emit_py_action(&mut s, &la, &action.body, known_models, c, has_json_variant);
         writeln!(s).unwrap();
     }
 
@@ -99,6 +109,7 @@ fn emit_py_action(
     body: &Expr,
     known_models: &[Symbol],
     controller: &Controller,
+    has_json_variant: bool,
 ) {
     let name = if la.name == "new" { "new_" } else { la.name.as_str() };
 
@@ -113,7 +124,17 @@ fn emit_py_action(
     }
 
     use crate::lower::CtrlWalker;
-    let normalized = crate::lower::normalize_action_body(controller, la.name.as_str(), body);
+    // Mirror `normalize_action_body` but thread `has_json_variant` into
+    // the implicit-render synthesis so GET actions with a json view get
+    // the `if request_format == "json"` dispatch branch.
+    let with_callbacks =
+        crate::lower::resolve_before_actions(controller, la.name.as_str(), body);
+    let flattened = crate::lower::unwrap_respond_to(&with_callbacks);
+    let normalized = crate::lower::synthesize_implicit_render(
+        &flattened,
+        la.name.as_str(),
+        has_json_variant,
+    );
     let mut emitter = PyEmitter {
         ctx: crate::lower::WalkCtx {
             known_models,
@@ -242,6 +263,29 @@ impl<'a> crate::lower::CtrlWalker<'a> for PyEmitter<'a> {
     }
 
     fn render_expr(&mut self, expr: &Expr) -> String {
+        // `self.request_format` (the implicit-render json-dispatch cond)
+        // reads off the request context, not a controller instance —
+        // there is no `self` in the functional action shape.
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
+            if method.as_str() == "request_format"
+                && args.is_empty()
+                && matches!(&*r.node, ExprNode::SelfRef)
+            {
+                self.state.uses_context = true;
+                return "context.request_format".to_string();
+            }
+            // Comparison operators ride the Send channel (`a == b` is
+            // `a.==(b)`); Python needs infix. Only `==`/`!=` occur in the
+            // synthesized cond — other operators fall through.
+            if matches!(method.as_str(), "==" | "!=") && args.len() == 1 {
+                return format!(
+                    "{} {} {}",
+                    self.render_expr(r),
+                    method.as_str(),
+                    self.render_expr(&args[0]),
+                );
+            }
+        }
         if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
             if let Some(stmt) = self.render_send_stmt(
                 recv.as_ref(), method.as_str(), args, block.as_ref(), "",
@@ -362,12 +406,34 @@ impl<'a> crate::lower::CtrlWalker<'a> for PyEmitter<'a> {
     }
 }
 
+/// True when a render's trailing kwargs carry `format: :json` (the
+/// marker `synthesize_implicit_render` stamps on the json branch).
+fn render_has_json_format(args: &[Expr]) -> bool {
+    args.iter().any(|a| {
+        let ExprNode::Hash { entries, .. } = &*a.node else { return false };
+        entries.iter().any(|(k, v)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "format")
+                && matches!(&*v.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json")
+        })
+    })
+}
+
 impl<'a> PyEmitter<'a> {
     fn render_py_render(&mut self, args: &[Expr]) -> String {
         if let Some(first) = args.first() {
             if let ExprNode::Lit { value: Literal::Sym { value: sym } } = &*first.node {
-                let view_fn = py_view_fn(self.ctx.model_class, sym.as_str());
                 let arg = self.state.last_local.clone().unwrap_or_else(|| "None".to_string());
+                // A json-format render (the `format: :json` marker the
+                // implicit-render synthesis injects) calls the jbuilder
+                // `<action>_json` function and ships an
+                // `application/json` body verbatim (no layout wrap).
+                if render_has_json_format(&args[1..]) {
+                    let json_fn = format!("{}_json", sym.as_str());
+                    return format!(
+                        "return http.ActionResponse(content_type=\"application/json\", body=views.{json_fn}({arg}))"
+                    );
+                }
+                let view_fn = py_view_fn(self.ctx.model_class, sym.as_str());
                 let body_part = format!("body=views.{view_fn}({arg})");
                 return match crate::lower::extract_status_from_kwargs(&args[1..]) {
                     Some(status) => format!("return http.ActionResponse(status={status}, {body_part})"),
