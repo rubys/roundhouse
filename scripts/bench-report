@@ -19,7 +19,7 @@ cells = JSON.parse(File.read(input))
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go spinel elixir typescript python ruby ruby-int rails rails-int]
+TARGET_ORDER = %w[rust crystal go spinel elixir typescript python ruby ruby-int jruby rails rails-int]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # Brand-ish but muted; enough contrast in greyscale.
@@ -33,6 +33,7 @@ COLOR = {
   'python'     => '#3776ab',
   'ruby'       => '#cc342d',
   'ruby-int'   => '#e89c93',
+  'jruby'      => '#5382a1',
   'rails'      => '#666666',
   'rails-int'  => '#aaaaaa',
 }
@@ -250,7 +251,7 @@ html << %(<div class="meta">Run <code>#{run_dir}</code> · #{total} cells × #{r
 
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 23, Crystal 1.16, Elixir 1.18/OTP 28, Python 3.14. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port).
+    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 23, Crystal 1.16, Elixir 1.18/OTP 28, Python 3.14, JRuby 10/OpenJDK 21. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port). The <code>jruby</code> cell runs under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): its RSS is a deliberate budget, not the JVM's default share of host RAM, so it stays comparable to the other cells' working sets.
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
   </div>
 METHOD
@@ -392,6 +393,9 @@ mem_rows.each_with_index do |row, i|
   html << t(110 + bar + 6, y + 14, "#{fmt_int(v)} MB", fill: '#444')
 end
 html << svg_close
+if targets.include?('jruby')
+  html << %(<p class="caveat">The <code>jruby</code> bar is the JVM running the same emitted Ruby as the <code>ruby</code> cell, under a fixed <code>-Xmx512m</code> heap. It tops the chart by design — the JVM trades memory for warm-JIT throughput — so read it as "the cost of the JVM's throughput at a 512&nbsp;MB budget," not an organically-grown working set like the other cells.</p>\n)
+end
 
 # ── Section: latency ─────────────────────────────────────────────────
 

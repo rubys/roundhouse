@@ -636,6 +636,12 @@ start_target() {
             # (that's an MRI flag); JRuby's JIT warms during the harness's
             # warmup window. The RSS sampler walks the process tree, so the
             # JVM child is accounted for.
+            #
+            # Heap is pinned to 512 MB (-Xmx == -Xms) so the RSS column is a
+            # deliberate budget, comparable to the other cells' working
+            # sets. Uncapped, the JVM grabs ~25% of host RAM and its RSS
+            # climbs with cumulative load across the sequential endpoint
+            # measurements — a host-dependent artifact, not a footprint.
             (cd "$JRUBY_OUT" && \
                 BUNDLE_GEMFILE="$JRUBY_OUT/Gemfile" \
                 BLOG_DB=tmp/blog.sqlite3 \
@@ -643,6 +649,7 @@ start_target() {
                 WEB_CONCURRENCY=0 \
                 RAILS_ENV=production \
                 PORT="$port" \
+                JRUBY_OPTS="-J-Xmx512m -J-Xms512m" \
                 jruby -S bundle exec puma -C config/puma.rb config.ru \
                 >"$log" 2>&1) &
             TARGET_PID=$!
