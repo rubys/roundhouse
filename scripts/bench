@@ -121,7 +121,8 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|typescript|crystal|rust|spinel|go|elixir|python) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|typescript|crystal|rust|spinel|go|elixir|python) NORMALIZED+=("$t") ;;
+        jr) NORMALIZED+=(jruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
         rs) NORMALIZED+=(rust) ;;
@@ -129,7 +130,7 @@ for t in "${TARGETS[@]}"; do
         ex) NORMALIZED+=(elixir) ;;
         py) NORMALIZED+=(python) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int typescript crystal rust spinel go elixir python" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby typescript crystal rust spinel go elixir python" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -139,6 +140,11 @@ TARGETS=("${NORMALIZED[@]}")
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
 RUBY_OUT="$REPO_ROOT/build/transpiled-blog-ruby"
+# JRuby target — byte-identical emit to the ruby tree but the JDBC db
+# backend (runtime/db.rb = db_jruby.rb) and a JRuby-resolved bundle.
+# `bin/rh transpile jruby` writes here; matches scripts/compare's
+# BUILD_DIR for the jruby target.
+JRUBY_OUT="$REPO_ROOT/build/transpiled-blog-jruby"
 # scripts/compare's typescript path — emit_preview always writes here,
 # so we reuse it to share the npm-install cache across compare runs.
 TS_OUT="/tmp/rh-ts-pass2"
@@ -193,14 +199,17 @@ fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 wait_for_port() {
     local url="$1"
     local label="$2"
-    local deadline=$(( $(date +%s) + 30 ))
+    # Optional readiness budget (seconds); defaults to 30. JRuby needs a
+    # larger one — JVM boot + JRuby startup is slower than an MRI boot.
+    local budget="${3:-30}"
+    local deadline=$(( $(date +%s) + budget ))
     while (( $(date +%s) < deadline )); do
         if curl --silent --fail --output /dev/null "$url" 2>/dev/null; then
             return 0
         fi
         sleep 0.3
     done
-    fail "$label did not come up within 30s ($url)"
+    fail "$label did not come up within ${budget}s ($url)"
     return 1
 }
 
@@ -330,6 +339,37 @@ build_target() {
             if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
                 step "building ruby assets"
                 (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle exec rake assets >/dev/null) || return 1
+            fi
+            ;;
+        jruby)
+            TARGET_BUILD_DIR="$JRUBY_OUT"
+            # The transpiled tree's own Gemfile — its Gemfile.lock and
+            # vendored gems live in $JRUBY_OUT, isolated from the CRuby
+            # ruby tree's bundle (they resolve different platform gems).
+            TARGET_GEMFILE="$JRUBY_OUT/Gemfile"
+            if (( SKIP_EMIT == 0 )) || [[ ! -d "$JRUBY_OUT" ]]; then
+                step "regenerating jruby target (bin/rh transpile jruby)"
+                (cd "$REPO_ROOT" && bin/rh transpile jruby >/dev/null) || return 1
+            fi
+            # JRuby resolves the jdbc-sqlite3 driver (and JRuby builds of
+            # puma/rack/etc.) into this tree. Slow under the JVM, so only
+            # run when the emit is fresh or the lock is missing.
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$JRUBY_OUT/Gemfile.lock" ]]; then
+                step "installing jruby bundle"
+                (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle install >/dev/null) || return 1
+            fi
+            # Assets — Tailwind + JS deps. The output is byte-identical to
+            # the ruby tree, so reuse those when present (avoids a second
+            # asset build under the JVM); otherwise build under JRuby.
+            if [[ ! -f "$JRUBY_OUT/static/assets/tailwind.css" ]]; then
+                if [[ -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
+                    step "copying ruby assets into jruby tree"
+                    mkdir -p "$JRUBY_OUT/static"
+                    cp -R "$RUBY_OUT/static/assets" "$JRUBY_OUT/static/assets"
+                else
+                    step "building jruby assets"
+                    (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle exec rake assets >/dev/null) || return 1
+                fi
             fi
             ;;
         typescript)
@@ -464,6 +504,12 @@ stage_db() {
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
+        jruby)
+            local db="$JRUBY_OUT/tmp/blog.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
         typescript)
             local db="$TS_OUT/db/development.sqlite3"
             mkdir -p "$(dirname "$db")"
@@ -581,6 +627,27 @@ start_target() {
             TARGET_PID=$!
             disown 2>/dev/null || true
             ;;
+        jruby)
+            # JRuby on the JVM. Single-process, multi-threaded: Puma
+            # cluster mode forks, which the JVM can't, so force
+            # WEB_CONCURRENCY=0 (`workers` is ignored, the per-cell row
+            # records workers=1) and lean on RAILS_MAX_THREADS — JRuby has
+            # no GVL, so threads run truly parallel. No RUBYOPT=--yjit
+            # (that's an MRI flag); JRuby's JIT warms during the harness's
+            # warmup window. The RSS sampler walks the process tree, so the
+            # JVM child is accounted for.
+            (cd "$JRUBY_OUT" && \
+                BUNDLE_GEMFILE="$JRUBY_OUT/Gemfile" \
+                BLOG_DB=tmp/blog.sqlite3 \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY=0 \
+                RAILS_ENV=production \
+                PORT="$port" \
+                jruby -S bundle exec puma -C config/puma.rb config.ru \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
         typescript)
             # Single-process node (no worker / preload concept) —
             # `workers` is ignored and the per-cell row records workers=1.
@@ -671,7 +738,11 @@ start_target() {
             disown 2>/dev/null || true
             ;;
     esac
-    wait_for_port "http://localhost:$port/articles" "$target" || {
+    # JRuby boots the JVM before serving — give it a larger readiness
+    # budget than the 30s default the other targets use.
+    local ready_budget=30
+    [[ "$target" == jruby ]] && ready_budget=90
+    wait_for_port "http://localhost:$port/articles" "$target" "$ready_budget" || {
         echo "--- $target log ---" >&2
         tail -40 "$log" >&2
         kill_tree "$TARGET_PID"

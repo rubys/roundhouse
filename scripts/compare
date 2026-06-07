@@ -111,9 +111,10 @@ case "$TARGET" in
     crystal|cr)    TARGET=crystal ;;
     elixir|ex)     TARGET=elixir ;;
     ruby|rb)       TARGET=ruby ;;
+    jruby|jr)      TARGET=jruby ;;
     spinel|sp)     TARGET=spinel ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, or spinel)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, jruby, or spinel)" >&2
         exit 2
         ;;
 esac
@@ -139,7 +140,7 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
     # glue (see runtime/typescript/server.ts:149-160 and
     # runtime/spinel/scaffold/main.rb:82-93 for the pattern).
     case "$TARGET" in
-        ruby|spinel|typescript|crystal|go|rust)
+        ruby|jruby|spinel|typescript|crystal|go|rust)
             PATHS+=(/articles.json /articles/1.json)
             ;;
         elixir)
@@ -195,6 +196,13 @@ case "$TARGET" in
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog-ruby"
         DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
         ;;
+    jruby)
+        # JRuby reuses `bin/rh transpile jruby` — byte-identical emit to
+        # the ruby tree but with the JDBC db backend. Same DB layout
+        # (BLOG_DB → tmp/blog.sqlite3) inside its own build dir.
+        BUILD_DIR="$REPO_ROOT/build/transpiled-blog-jruby"
+        DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
+        ;;
     spinel)
         # Spinel uses `bin/rh transpile spinel`, which mirrors the
         # ruby path but additionally vendors the Tep transport
@@ -223,14 +231,17 @@ fail() {
 wait_for_port() {
     local url="$1"
     local label="$2"
-    local deadline=$(( $(date +%s) + 30 ))
+    # Optional readiness budget (seconds); defaults to 30. JRuby needs
+    # more — JVM boot + JRuby startup is slower than an MRI boot.
+    local budget="${3:-30}"
+    local deadline=$(( $(date +%s) + budget ))
     while (( $(date +%s) < deadline )); do
         if curl --silent --fail --output /dev/null "$url" 2>/dev/null; then
             return 0
         fi
         sleep 0.3
     done
-    fail "$label did not come up within 30s ($url)"
+    fail "$label did not come up within ${budget}s ($url)"
     return 1
 }
 
@@ -303,6 +314,11 @@ if (( SKIP_EMIT == 0 )); then
             # stamp tracking needed.
             (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null)
             ;;
+        jruby)
+            # Same path as ruby but `bin/rh transpile jruby` — swaps in
+            # the JDBC db backend (runtime/db.rb = db_jruby.rb).
+            (cd "$REPO_ROOT" && bin/rh transpile jruby >/dev/null)
+            ;;
         spinel)
             # Spinel mirrors the ruby path but uses `bin/rh transpile
             # spinel`, which additionally vendors Tep transport
@@ -366,6 +382,18 @@ case "$TARGET" in
         # both: tailwindcss CLI for app.css, gem-dir copy for turbo JS.
         step "building ruby assets (tailwind + turbo.min.js)"
         (cd "$BUILD_DIR" && BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" make assets >/dev/null)
+        ;;
+    jruby)
+        # Resolve the JRuby runtime bundle (jdbc-sqlite3 + JRuby builds of
+        # puma/rack) into the tree. Assets are intentionally NOT built
+        # here: the emitted HTML is byte-identical to the ruby target
+        # (whose asset parity compare-ruby already gates), and the DOM
+        # diff compares the asset <link>/<script> tags, not the files they
+        # reference — so a missing static/assets dir doesn't change the
+        # /articles DOM. Keeping it out lets compare-jruby run JRuby-only
+        # (no node/tailwind toolchain needed in that CI job).
+        step "installing jruby bundle"
+        (cd "$BUILD_DIR" && BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" jruby -S bundle install >/dev/null)
         ;;
     spinel)
         # Assets (same scaffold Makefile as ruby) + AOT-compile main.rb.
@@ -443,6 +471,13 @@ if [[ -z "$TARGET_CMD" ]]; then
             (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" PORT="$TARGET_PORT" bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
+        jruby)
+            # Same as ruby but on the JVM via jruby. Single-process
+            # (WEB_CONCURRENCY=0 — Puma cluster mode forks, unsupported on
+            # the JVM); its own tree Gemfile drives the JRuby bundle.
+            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" WEB_CONCURRENCY=0 PORT="$TARGET_PORT" jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
         typescript)
             (cd "$BUILD_DIR" && PORT="$TARGET_PORT" npm start >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
@@ -456,7 +491,9 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
     esac
-    wait_for_port "http://localhost:$TARGET_PORT/articles" "$TARGET" || {
+    target_ready_budget=30
+    [[ "$TARGET" == jruby ]] && target_ready_budget=90
+    wait_for_port "http://localhost:$TARGET_PORT/articles" "$TARGET" "$target_ready_budget" || {
         echo "--- $TARGET log ---" >&2
         tail -20 "$TARGET_LOG" >&2
         exit 1

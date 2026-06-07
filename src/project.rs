@@ -45,6 +45,11 @@ pub enum BuildTarget {
     /// CRuby-target emit: spinel files + ruby_overlay + gem db.rb +
     /// fixture's app/javascript + public assets.
     Ruby,
+    /// JRuby-target emit: byte-identical to the Ruby target except the
+    /// SQLite backend — ships the JDBC `db_jruby.rb` (the `sqlite3` gem
+    /// is a C extension with no JRuby build) so the same emitted source
+    /// runs on the JVM.
+    Jruby,
     Crystal,
     Elixir,
     Go,
@@ -63,6 +68,7 @@ impl BuildTarget {
         BuildTarget::Blog,
         BuildTarget::Spinel,
         BuildTarget::Ruby,
+        BuildTarget::Jruby,
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
@@ -79,6 +85,7 @@ impl BuildTarget {
     pub const TRANSPILE: &'static [BuildTarget] = &[
         BuildTarget::Spinel,
         BuildTarget::Ruby,
+        BuildTarget::Jruby,
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
@@ -95,6 +102,7 @@ impl BuildTarget {
             BuildTarget::Blog => "blog",
             BuildTarget::Spinel => "spinel",
             BuildTarget::Ruby => "ruby",
+            BuildTarget::Jruby => "jruby",
             BuildTarget::Crystal => "crystal",
             BuildTarget::Elixir => "elixir",
             BuildTarget::Go => "go",
@@ -134,7 +142,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              build commands apply. This archive exists so consumers can \
              download the input that Roundhouse transpiles.\n"
         }
-        BuildTarget::Spinel | BuildTarget::Ruby => {
+        BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby => {
             // Should not reach: these targets ship a scaffold README
             // and `--target` mode skips generation when one is present.
             "See the scaffold-provided README.md for build/run/test \
@@ -286,6 +294,7 @@ pub fn target_files(
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
+        BuildTarget::Jruby => jruby_runtime_files(app, fixture),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
         BuildTarget::Go => Ok(sort_files(emit::go::emit(app))),
@@ -383,6 +392,44 @@ fn ruby_runtime_files(
     Ok(dedupe_last_wins(files))
 }
 
+/// "jruby" archive: byte-identical to the "ruby" tree except the SQLite
+/// backend. Same layering as `ruby_runtime_files` — spinel files +
+/// ruby_overlay (Puma + Rack `config.ru`, all of which run unchanged on
+/// the JVM) — but the Db shim swap installs the JDBC-backed
+/// `runtime/db_jruby.rb` as `runtime/db.rb` instead of the CRuby
+/// gem-backed `db_cruby.rb`. The `sqlite3` gem is a C extension with no
+/// JRuby build, so JRuby reaches SQLite over JDBC. The emitted app/,
+/// config/, and framework runtime are identical to the CRuby target —
+/// JRuby is a deployment (VM) variant, not a source variant.
+fn jruby_runtime_files(
+    app: &App,
+    fixture: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let mut files = spinel_files(app, fixture)?;
+
+    // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
+    // backend, then promote the JDBC backend into `runtime/db.rb`.
+    // `db_jruby.rb` is excluded from `spinel_files`' base set, so read
+    // it from disk and inject it here (mirrors the gem swap the CRuby
+    // target does to `db_cruby.rb`).
+    files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/db_cruby.rb");
+    let db_jruby = fs::read_to_string("runtime/spinel/db_jruby.rb")
+        .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
+    files.push(("runtime/db.rb".to_string(), db_jruby));
+
+    // Tep is a spinel-only transport (FFI HTTP server); JRuby uses Puma
+    // + Rack via the ruby_overlay, same as the CRuby target.
+    files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
+
+    walk_dir_into(
+        Path::new("runtime/spinel/scaffold/ruby_overlay"),
+        "",
+        &mut files,
+    )?;
+
+    Ok(dedupe_last_wins(files))
+}
+
 /// Spinel-target files: lowered emit (app/, config/, test/) plus
 /// scaffold + runtime overlays. Order matches `make spinel-transpile`
 /// — scaffold first, runtime test/lib next, lowered emit on top.
@@ -407,6 +454,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     )?;
 
     walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
+
+    // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
+    // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
+    // the spinel-subset compliance gate) must never see. It is injected
+    // only by `jruby_runtime_files`, so keep it out of the shared base.
+    files.retain(|(p, _)| p != "runtime/db_jruby.rb");
 
     // Vendored Tep transport (FFI HTTP server). Both .rb files and
     // sphttp.c (precompiled to sphttp.o at transpile-post time).

@@ -38,7 +38,7 @@ the multi-target Pages site.
 Options:
   -t, --target LANG    Transpile target. One of:
                          crystal, elixir, go, python, rust,
-                         typescript, typescript-worker, ruby, spinel
+                         typescript, typescript-worker, ruby, jruby, spinel
                        Default INPUT=.  Default OUT=./out/<lang>/
       --site           Build all targets + landing-page assets.
                        Default INPUT=fixtures/real-blog  Default OUT=./_site/

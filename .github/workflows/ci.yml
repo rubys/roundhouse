@@ -687,6 +687,46 @@ jobs:
       - name: scripts/compare ruby
         run: scripts/compare ruby
 
+  # compare-jruby: same emitted tree as compare-ruby but served by Puma
+  # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
+  # db_jruby.rb). The Rails reference runs under CRuby 3.4 (the default
+  # `ruby`); the target is launched with an explicit `jruby`, so the two
+  # setup-ruby steps are ordered jruby-first / CRuby-last to leave 3.4 as
+  # the default. JRuby must be >= 10 — the runtime uses Fiber[:k] storage
+  # (Ruby 3.2+), which JRuby 9.4 (Ruby 3.1) lacks. No node/tailwind:
+  # assets aren't built (the DOM diff compares asset tags, not files —
+  # see scripts/compare's jruby branch).
+  compare-jruby:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      # JRuby 10 requires Java 21+ (it refuses to boot on older JDKs).
+      # setup-ruby provisions JRuby but not the JDK, so pin Java first.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 'jruby-10.0'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: scripts/compare jruby
+        run: scripts/compare jruby
+
   # compare-spinel: DOM-diff against a live AOT-compiled binary served
   # over Tep::Server (FFI HTTP/1.1). The spinel-transpile Makefile
   # target vendors the Tep transport (precompiles sphttp.o + sed-

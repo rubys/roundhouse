@@ -132,6 +132,7 @@ env['clock'] = clk.compact unless clk.compact.empty?
 
 TOOLCHAINS = {
   'ruby'    => '--version',
+  'jruby'   => '--version',
   'rustc'   => '--version',
   'cargo'   => '--version',
   'go'      => 'version',

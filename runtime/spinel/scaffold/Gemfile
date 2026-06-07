@@ -1,6 +1,13 @@
 source "https://rubygems.org"
 
-gem "sqlite3"
+# SQLite backend per Ruby engine. CRuby/Spinel use the `sqlite3` C-ext
+# gem (swapped in as runtime/db.rb at transpile time); JRuby has no build
+# of it, so the JRuby target (runtime/db_jruby.rb) reaches SQLite through
+# the Xerial sqlite-jdbc driver. The platform guards let one Gemfile
+# serve both trees — each tree's `bundle install` resolves the gem for
+# its own interpreter.
+gem "sqlite3", platform: :mri
+gem "jdbc-sqlite3", platform: :jruby
 gem "minitest"
 gem "rake"
 
