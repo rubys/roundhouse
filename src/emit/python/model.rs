@@ -57,6 +57,17 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
         }
     }
 
+    // Break the models<->views import cycle: reach the `Views` facade
+    // through the views *module* (`views.Views.X`) rather than importing
+    // the `Views` name. `from app.views import Views` binds a name that
+    // doesn't exist yet when views.py is imported first (the server path)
+    // — views.py imports models at its top, so models runs while views is
+    // only partially initialized and its `Views` class isn't defined.
+    // `from app import views` binds the (possibly partial) module object,
+    // and the attribute access resolves late at broadcast time. Mirrors
+    // the `from app import models` qualification on the views side.
+    let body = body.replace("Views.", "views.Views.");
+
     // External module references the rendered bodies use (intra-file refs
     // — ApplicationRecord, <Model>Row/Params, sibling models — resolve
     // within this single file and need no import). Each line emits only
@@ -69,7 +80,7 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
     };
     want("(Base)", "from app.active_record_base import Base");
     want("Db.", "from app.db import Db");
-    want("Views", "from app.views import Views");
+    want("views.Views", "from app import views");
     want("Broadcasts", "from app.cable import Broadcasts");
     want("ValidationError", "from app.runtime import ValidationError");
 
