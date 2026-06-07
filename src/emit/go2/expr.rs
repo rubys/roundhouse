@@ -2,10 +2,9 @@
 //! emitter and by other modules that need a fallback for arbitrary
 //! `Expr` rendering.
 //!
-//! Forked 2026-05-21 from `src/emit/go/expr.rs` so go2 can evolve
-//! the walker independently (Phase 2+ type-aware emit, lowered-IR
-//! coverage, transpiled-runtime call shapes) without dragging
-//! legacy go regressions.
+//! Forked 2026-05-21 from the original go expr emitter so go2 can
+//! evolve the walker independently (Phase 2+ type-aware emit,
+//! lowered-IR coverage, transpiled-runtime call shapes).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -14,8 +13,7 @@ use std::rc::Rc;
 use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, Literal};
 use crate::ty::Ty;
 
-// Reused verbatim from legacy go until go2 needs its own dispatch.
-use crate::emit::go::shared::{go_field_name, go_method_name};
+use super::shared::{go_field_name, go_method_name};
 
 /// Context threaded through the walker. Carries everything that's
 /// context-sensitive — i.e. whose Go emit depends on the enclosing

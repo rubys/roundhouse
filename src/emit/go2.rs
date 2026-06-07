@@ -1,37 +1,33 @@
-//! Go target — `go2` parallel emit (Phase 1 scaffold).
+//! Go target — `go2` emit.
 //!
-//! Mirrors the `rust2` migration pattern. Strangler-fig orchestrator
-//! that runs alongside the legacy `src/emit/go.rs` while the migration
-//! to Group 1 (lowered IR + transpiled `runtime/ruby/`) lands.
+//! Built via the `rust2` migration pattern. As of the go→go2
+//! switchover (Phase 6 step 3) this is the sole Go emit path: the
+//! legacy per-target tree was deleted and `src/emit/go.rs` shrank to
+//! a `pub fn emit` shim that delegates here (plus a self-contained
+//! `emit_method` runtime-extraction helper). The post-cleanup move
+//! also pulled the remaining shared helpers (`shared` naming +
+//! `emit_literal`) and the test emitters (`fixture`, `spec`,
+//! `controller_test`) into this module, so go2 no longer reaches back
+//! into a `go/` directory.
 //!
-//! Selected at runtime via `ROUNDHOUSE_GO_V2=1`. Without the env var,
-//! `super::go::emit` runs unchanged and emits the same output it
-//! always has. With the env var, this module's overlay runs after
-//! the legacy emit and writes transpiled framework runtime files
-//! into the output project under `app/v2/` (separate Go package, so
-//! emission can't conflict with the hand-written runtime types).
-//!
-//! Phase 1 scope: scaffold + minimal transpile via stub
-//! `library::emit_library_class` (see `library.rs` for the contract).
-//! Transpiled files are emitted but their method bodies are
-//! `panic("go2 stub")` — `go build ./app/v2/...` produces a real
-//! error inventory we can drive future sessions against.
-//!
-//! Out of scope for Phase 1: replacing the hand-written
-//! `runtime/go/*.go` files (cable, http, server, view_helpers,
-//! runtime, test_support, db) with transpiled equivalents. Those
-//! land once the per-method body emit is real enough that calls
-//! through them survive `go build`.
+//! Output is the lowered-IR + transpiled `runtime/ruby/` framework
+//! set, emitted under `app/v2/` (its own Go package) alongside the
+//! hand-written primitive runtime copied verbatim from
+//! `runtime/go/v2/` (cable, server, db, …).
 
 use super::EmittedFile;
 use crate::App;
 
+mod controller_test;
 mod expr;
+mod fixture;
 mod imports;
 mod library;
 pub mod lower;
 mod paths;
-mod ty;
+mod shared;
+mod spec;
+pub(crate) mod ty;
 
 use imports::FileImports;
 use paths::{output_path, OutputKind};
@@ -667,8 +663,8 @@ func main() {\n\
     out
 }
 
-/// Run the legacy go test emitters (fixture + spec) and re-anchor
-/// each emitted file under `app/v2/` with `package v2`. The bodies
+/// Run the go test emitters (fixture + spec) and re-anchor each
+/// emitted file under `app/v2/` with `package v2`. The bodies
 /// are produced unchanged; compat shims (`emit_v2_test_compat`) bridge
 /// the legacy-shape symbol references to the v2 names.
 fn emit_v2_test_files(app: &App) -> Vec<EmittedFile> {
@@ -680,12 +676,12 @@ fn emit_v2_test_files(app: &App) -> Vec<EmittedFile> {
         .map(|m| m.name.0.as_str().to_string())
         .collect();
     if !app.fixtures.is_empty() {
-        let f = super::go::fixture::emit_go_fixtures(app);
+        let f = fixture::emit_go_fixtures(app);
         out.push(rewrite_test_file_to_v2(f, &model_names));
     }
     if !app.test_modules.is_empty() {
         for tm in &app.test_modules {
-            let f = super::go::spec::emit_go_tests(tm, app);
+            let f = spec::emit_go_tests(tm, app);
             out.push(rewrite_test_file_to_v2(f, &model_names));
         }
         // test_support + compat shim — only ship when there are

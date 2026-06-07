@@ -1,42 +1,31 @@
 //! Go emit entry. Phase 6 step 3 (2026-05-24) collapsed the per-target
 //! tree (`controller`/`gomod`/`importmap`/`main`/`model`/`route`/
 //! `schema_sql`/`view`) into a thin `pub fn emit` shim that delegates
-//! to `super::go2::emit_overlay_files`. Mirrors rust2's Phase 7.3
-//! shape (src/emit/rust.rs, 2026-05-20).
+//! to `super::go2::emit_overlay_files`. The follow-up go→go2 cleanup
+//! moved the last retained submodules (`shared`, `fixture`, `spec`,
+//! `controller_test`, the `emit_literal` half of `expr`, and the
+//! committed `go_ty` renderer) into `src/emit/go2/`, deleting the
+//! `src/emit/go/` directory entirely. Mirrors rust2's Phase 7.3 shape
+//! (src/emit/rust.rs, 2026-05-20), which likewise keeps a shim plus a
+//! self-contained `emit_method`.
 //!
 //! Why keep `go.rs` at all? Public callers — `src/project.rs::go_target`,
 //! `tests/runtime_src_integration.rs::emit_method` — reach this through
 //! `crate::emit::go::emit` / `::emit_method`. Renaming would ripple
 //! across the call sites + the user-facing `--target go` CLI surface.
 //! The shim keeps identity stable while the implementation lives in
-//! `go2.rs`.
-//!
-//! Retained submodules:
-//! - `shared` — go_field_name / go_method_name / pascalize_word, used
-//!   by go2 emit
-//! - `fixture` — emits `app/v2/fixtures_test.go` via go2's
-//!   rewrite_test_file_to_v2
-//! - `spec` — emits `app/v2/<model>_test.go` / `<controller>_test.go`
-//! - `controller_test` — controller-test body classifier, used by spec
-//! - `expr` — emit_literal helper, used by spec + controller_test
-//! - `ty` — go_ty renderer, used by emit_method below
+//! `go2.rs`. `emit_method` is the one piece of real codegen left here:
+//! a self-contained walker for the runtime-extraction pipeline that
+//! borrows only `go2::ty::go_ty` and has no other go2 dependency.
 
 use std::fmt::Write;
 
 use super::EmittedFile;
+use super::go2::ty::go_ty;
 use crate::App;
 use crate::dialect::MethodDef;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ty::Ty;
-
-mod expr;
-pub(crate) mod fixture;
-pub(crate) mod shared;
-pub(crate) mod spec;
-mod controller_test;
-mod ty;
-
-pub use ty::go_ty;
 
 /// Emit a typed `MethodDef` as a standalone Go function for the
 /// runtime-extraction pipeline. Uses Go's idiomatic early-return form

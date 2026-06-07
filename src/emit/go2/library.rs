@@ -25,7 +25,7 @@ use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ty::{ParamKind, Ty};
 
-use crate::emit::go::shared::go_field_name;
+use super::shared::go_field_name;
 
 use super::expr::{emit_return_body, EmitCtx};
 use super::ty::go_ty_stub;
@@ -856,14 +856,14 @@ fn pascalize_instance_method_name(name: &str) -> String {
     // `recv.OpGet(...)` / `recv.OpSet(...)` (PascalCase, matches
     // here).
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=') {
-        return crate::emit::go::shared::go_method_name(&sanitize_method_name(name));
+        return super::shared::go_method_name(&sanitize_method_name(name));
     }
     // Mirror go2_method_ident: strip `?`, `!` → `_bang`, then
     // pascalize via go_method_name (`_`-split, per-segment Pascal,
     // `id` → `ID`).
     let stripped = name.strip_suffix('?').unwrap_or(name);
     let normalized = stripped.replace('!', "_bang");
-    crate::emit::go::shared::go_method_name(&normalized)
+    super::shared::go_method_name(&normalized)
 }
 
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {

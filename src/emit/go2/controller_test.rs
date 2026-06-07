@@ -11,8 +11,7 @@ use crate::App;
 use crate::dialect::Test;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 
-use super::expr::emit_literal;
-use super::shared::{go_field_name, go_method_name, pascalize_word};
+use super::shared::{emit_literal, go_field_name, go_method_name, pascalize_word};
 
 #[derive(Clone, Copy)]
 pub(super) struct GoTestCtx<'a> {

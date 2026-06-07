@@ -13,8 +13,7 @@ use crate::naming::snake_case;
 
 use super::super::EmittedFile;
 use super::controller_test::{emit_go_controller_test_body, GoTestCtx};
-use super::expr::emit_literal;
-use super::shared::go_field_name;
+use super::shared::{emit_literal, go_field_name};
 
 pub(crate) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
     let fixture_names: Vec<crate::ident::Symbol> =

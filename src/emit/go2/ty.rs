@@ -1,10 +1,11 @@
 //! Phase 1 Go type renderer for go2's library emit.
 //!
 //! `go_ty_stub` is the permissive variant — returns `interface{}` for
-//! any Ty whose mapping isn't trivially obvious. The real Go type
-//! renderer (`crate::emit::go::go_ty`) works from a Rails-domain
-//! position; go2's stub emit needs a renderer that never crashes on
-//! an unknown Ty.
+//! any Ty whose mapping isn't trivially obvious. The committed Go type
+//! renderer (`go_ty`, below) works from a Rails-domain position and is
+//! used by the runtime-extraction `emit_method` in `src/emit/go.rs`;
+//! go2's stub emit needs a renderer that never crashes on an unknown
+//! Ty, which `go_ty_stub` provides.
 //!
 //! When go2's per-class emit gets sharper, this file grows into the
 //! analog of `src/emit/rust2/ty.rs`. For now it returns `interface{}`
@@ -87,6 +88,64 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             }
         }
         _ => "interface{}".to_string(),
+    }
+}
+
+/// Committed `Ty` → Go type renderer (was `crate::emit::go::go_ty`).
+/// Unlike `go_ty_stub`, this commits every Ty to a concrete Go type;
+/// used by `src/emit/go.rs::emit_method` for the runtime-extraction
+/// pipeline.
+pub fn go_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Int => "int64".to_string(),
+        Ty::Float => "float64".to_string(),
+        Ty::Bool => "bool".to_string(),
+        Ty::Str | Ty::Sym => "string".to_string(),
+        Ty::Nil => "struct{}".to_string(),
+        Ty::Array { elem } => format!("[]{}", go_ty(elem)),
+        Ty::Hash { key, value } => format!("map[{}]{}", go_ty(key), go_ty(value)),
+        Ty::Tuple { elems } => {
+            // Go has no tuple; collapse to interface{} for now.
+            let _ = elems;
+            "interface{}".to_string()
+        }
+        Ty::Record { .. } => "map[string]interface{}".to_string(),
+        Ty::Union { variants } => option_shape(variants).unwrap_or_else(|| {
+            // Arbitrary union -> empty interface; would be a sum type emit later.
+            "interface{}".to_string()
+        }),
+        Ty::Class { id, .. } => match id.0.as_str() {
+            // Schema DateTime/Date/Time columns carry Ty::Class(Time); Go
+            // has a time package (`time.Time`) but wiring that import
+            // into emit adds complexity. String is the same pragmatic
+            // stand-in Rust uses; real timestamps arrive when a DB
+            // adapter does.
+            "Time" => "string".to_string(),
+            other => other.to_string(),
+        },
+        Ty::Fn { .. } => "func()".to_string(),
+        Ty::Var { .. } => "interface{}".to_string(),
+        // Go has no syntactic distinction between "must narrow" and
+        // "gradual" — both collapse to `interface{}`. The Var/Untyped
+        // distinction survives in the IR and via diagnostics; Go-side
+        // codegen renders both identically.
+        Ty::Untyped => "interface{}".to_string(),
+        // Go has no native bottom type. Functions that always
+        // panic/exit return no value (or `interface{}` if the
+        // surrounding context demands a value). Render as
+        // `interface{}` — same shape as Untyped — and rely on Go's
+        // unreachable-code analysis to catch missing returns.
+        Ty::Bottom => "interface{}".to_string(),
+    }
+}
+
+fn option_shape(variants: &[Ty]) -> Option<String> {
+    if variants.len() != 2 {
+        return None;
+    }
+    match (&variants[0], &variants[1]) {
+        (Ty::Nil, other) | (other, Ty::Nil) => Some(format!("*{}", go_ty(other))),
+        _ => None,
     }
 }
 
