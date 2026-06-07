@@ -22,3 +22,8 @@
 # harness in git, drop the measurement artifacts.
 /bench/results/
 /storage
+
+# Python bytecode cache from the python target's runtime, and the
+# scratch dir used for ad-hoc emit/transpile output during dev.
+/runtime/python/__pycache__/
+/tmp/
