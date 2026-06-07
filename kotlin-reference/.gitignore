@@ -1,0 +1,4 @@
+# Gradle build output and the staged (regenerable) sqlite copy.
+/build/
+/.gradle/
+/storage/
