@@ -928,16 +928,23 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // (delete→remove), and `!!` for mutable-property smart-casts. The
     // emitter groundwork (yield→block, init-block run-wrapper, `!`/push)
     // is in place; wiring the entries is the next step.
-    // active_record/errors.rb + base.rb deferred (coupled: RecordInvalid
-    // references Base). base.rb is large (~399 LOC) and generated to a
-    // ~107-error punch-list spanning: `raise Class, msg` → throw;
-    // empty-body methods with non-Unit returns → synthesized default
-    // return; non-accessor ivar typing from rbs (@persisted: bool,
-    // @errors: Array[String], …); `self.class.X` dispatch; `Time.now`
-    // shim; negative indexing (`records[-1]`); the module-level
-    // `adapter` accessor + AdapterInterface. Emitter groundwork
-    // (super-constructor delegation, StandardError→RuntimeException,
-    // join→joinToString, ctor-param properties) is in place.
+    // active_record/errors.rb + base.rb deferred (coupled: errors'
+    // RecordInvalid references Base, so neither wires until base compiles).
+    // base.rb punch-list — DONE this pass (emitter groundwork, verified by
+    // wiring locally + `roundhouse --target kotlin`): `raise Class, msg` →
+    // `throw Class(msg)`; empty-body value-returning methods (the load-
+    // bearing-empty `_adapter_*` overrides) → `return <type-default>`;
+    // body-only ivar typing (`@persisted`/`@destroyed`/`@errors`) inferred
+    // from pure-reader return types + literal assigns (no `Any?`-soup).
+    // STILL OPEN before base.kt is kotlinc-clean: zero-arg implicit-self
+    // sends emit as property reads (`this._adapterAll`, `this.tableName`)
+    // — must be `()` calls (the keystone gap; the property heuristic in
+    // `emit_send` is inverted); `self.class.X` → companion dispatch;
+    // `new(attrs)` → `Base(attrs)`; `save!`/`create!` collide on the
+    // `!`-stripped name (dup `fun create`); `class << self; attr_accessor
+    // :adapter` → `fun adapter=` (invalid Kotlin) instead of an `object`
+    // `var`; `Time.now.utc.iso8601` java.time shim; negative index
+    // `records[-1]`. Then hand-written Db.kt/Server.kt/ParamValue.kt.
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

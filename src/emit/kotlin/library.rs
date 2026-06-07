@@ -153,9 +153,17 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             out.push_str(&format!("    var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
         }
     }
+    let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
         if !prop_types.contains_key(n) {
-            out.push_str(&format!("    var {n}: Any? = null\n"));
+            match inferred_ivar_types.get(n) {
+                Some(ty) => out.push_str(&format!(
+                    "    var {n}: {} = {}\n",
+                    kotlin_ty(ty),
+                    default_for(ty)
+                )),
+                None => out.push_str(&format!("    var {n}: Any? = null\n")),
+            }
         }
     }
     if !prop_types.is_empty() || !body_ivars.is_empty() {
@@ -255,7 +263,18 @@ fn emit_method(m: &MethodDef) -> String {
     };
 
     begin_method(&m.body);
-    let body = emit_body(&m.body, returns_value);
+    // A value-returning method with an empty body (Ruby `def x; end` →
+    // implicit `nil`) can't emit a bare `return` in Kotlin — a non-Unit
+    // function must yield a value. These are the load-bearing-empty AR
+    // overrides (`_adapter_insert`, `_adapter_reload`, …); subclasses
+    // override, so the base body never runs. Synthesize the type's default
+    // (`0` for `Long`, `null` for nullable returns) to keep it a no-op.
+    let body = if returns_value && is_empty_body(&m.body) {
+        let ret = ret_ty.clone().unwrap_or(Ty::Untyped);
+        format!("return {}", default_for(&ret))
+    } else {
+        emit_body(&m.body, returns_value)
+    };
 
     format!("{decl_kw} {name}({}){ret_clause} {{\n{}\n}}\n", params.join(", "), indent4(&body))
 }
@@ -311,16 +330,23 @@ fn emit_body(body: &Expr, returns_value: bool) -> String {
 /// statement that has no value (assignment, loop).
 fn wrap_return(e: &Expr) -> String {
     let s = emit_expr(e);
-    let no_return = matches!(
+    // A `raise Class, msg` send emits as a `throw` (type `Nothing`); like a
+    // `Raise` node it needs no `return` prefix.
+    let is_raise_send = matches!(
         &*e.node,
-        ExprNode::Return { .. }
-            | ExprNode::Raise { .. }
-            | ExprNode::While { .. }
-            | ExprNode::Assign { .. }
-            | ExprNode::Super { .. }
-            | ExprNode::Next { .. }
-            | ExprNode::Break { .. }
+        ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise"
     );
+    let no_return = is_raise_send
+        || matches!(
+            &*e.node,
+            ExprNode::Return { .. }
+                | ExprNode::Raise { .. }
+                | ExprNode::While { .. }
+                | ExprNode::Assign { .. }
+                | ExprNode::Super { .. }
+                | ExprNode::Next { .. }
+                | ExprNode::Break { .. }
+        );
     if no_return {
         s
     } else {
@@ -424,6 +450,77 @@ fn expr_children(e: &Expr) -> Vec<&Expr> {
         _ => {}
     }
     v
+}
+
+/// True when a method body is empty (`def x; end` → an empty `Seq`).
+fn is_empty_body(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+}
+
+/// Infer types for body-only ivars (those without an `attr_*` accessor) so
+/// they don't all collapse to `Any?`. Two signals, strongest first:
+///   1. A pure reader method whose body *is* the ivar (`def errors;
+///      @errors; end`) donates its declared return type — this is how
+///      `@errors`/`@persisted`/`@destroyed` get `Array[String]`/`bool`
+///      from `base.rbs` without an ivar-declaration syntax in RBS.
+///   2. Otherwise, the literal an ivar is assigned (`@persisted = false`).
+/// Same shape works for flash/session's `@data` once they're wired.
+fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
+    let mut out: BTreeMap<String, Ty> = BTreeMap::new();
+
+    // Signal 1: reader methods returning exactly an ivar.
+    for m in methods {
+        if let (Some(ivar), Some(Ty::Fn { ret, .. })) =
+            (body_returns_ivar(&m.body), m.signature.as_ref())
+        {
+            if !matches!(&**ret, Ty::Nil) {
+                out.entry(ivar).or_insert_with(|| (**ret).clone());
+            }
+        }
+    }
+
+    // Signal 2: literal assignments, only for ivars not already inferred.
+    for m in methods {
+        collect_ivar_literal_types(&m.body, &mut out);
+    }
+
+    out
+}
+
+/// If a method body is (or ends in) a bare ivar read, return that ivar's
+/// camel-cased name. Covers `@x`, `return @x`, and a `Seq` ending in `@x`.
+fn body_returns_ivar(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Ivar { name } => Some(camel(name.as_str())),
+        ExprNode::Return { value } => body_returns_ivar(value),
+        ExprNode::Seq { exprs } => exprs.last().and_then(body_returns_ivar),
+        _ => None,
+    }
+}
+
+/// Record `@ivar = <literal>` types as a fallback, never overwriting a
+/// type already established by a reader (signal 1 is stronger).
+fn collect_ivar_literal_types(e: &Expr, out: &mut BTreeMap<String, Ty>) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
+        if let Some(ty) = literal_ty(value) {
+            out.entry(camel(name.as_str())).or_insert(ty);
+        }
+    }
+    for child in expr_children(e) {
+        collect_ivar_literal_types(child, out);
+    }
+}
+
+/// The `Ty` of a literal expression, when it's unambiguous from the node.
+fn literal_ty(e: &Expr) -> Option<Ty> {
+    use crate::expr::Literal;
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Bool { .. } } => Some(Ty::Bool),
+        ExprNode::Lit { value: Literal::Int { .. } } => Some(Ty::Int),
+        ExprNode::Lit { value: Literal::Float { .. } } => Some(Ty::Float),
+        ExprNode::Lit { value: Literal::Str { .. } } => Some(Ty::Str),
+        _ => None,
+    }
 }
 
 /// Default initializer for a property type (Kotlin requires properties

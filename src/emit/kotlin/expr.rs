@@ -579,6 +579,21 @@ fn emit_send(
         }
     }
 
+    // `raise Class, msg` → `throw Class(msg)`; `raise Class` → `throw
+    // Class()`; `raise Class, obj` → `throw Class(obj)`. The exception
+    // classes (`NotImplementedError` is Kotlin stdlib; `RecordNotFound` /
+    // `RecordInvalid` live in `Errors.kt`) take the message/record as a
+    // constructor arg. Bare `raise "str"` arrives as a `Raise` node and is
+    // handled by `emit_raise`.
+    if method == "raise" && recv.is_none() && !args.is_empty() {
+        if let ExprNode::Const { path } = &*args[0].node {
+            let cls = path.last().map(|s| s.as_str()).unwrap_or("RuntimeException");
+            let cls = cls.rsplit("::").next().unwrap_or(cls);
+            return format!("throw {cls}({})", args_s[1..].join(", "));
+        }
+        return format!("throw RuntimeException({})", args_s.join(", "));
+    }
+
     // Attribute setter: `recv.foo = v` arrives as a Send named `foo=`.
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
