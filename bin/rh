@@ -136,6 +136,19 @@ def version_of(output, re = /(\d+\.\d+(?:\.\d+)?)/)
   m ? m[1] : nil
 end
 
+# Highest installed `rails` gem version satisfying a requirement string
+# (e.g. "~> 8.0.0"), as a concrete version usable with the `rails _X_`
+# selector. nil if none installed matches or the requirement is malformed.
+def resolve_rails_version(req)
+  requirement = Gem::Requirement.new(req)
+  Gem::Specification.find_all_by_name('rails')
+                    .map(&:version)
+                    .select { |v| requirement.satisfied_by?(v) }
+                    .max&.to_s
+rescue Gem::Requirement::BadRequirementError, ArgumentError
+  nil
+end
+
 # ---------------------------------------------------------------------
 # Subcommand: doctor
 
@@ -300,6 +313,7 @@ end
 
 def cmd_fixture(argv)
   force = false
+  rails_req = nil
   parser = OptionParser.new do |o|
     o.banner = 'Usage: bin/rh fixture [path]'
     o.separator ''
@@ -307,11 +321,30 @@ def cmd_fixture(argv)
     o.separator 'Default path: fixtures/real-blog'
     o.separator ''
     o.on('-f', '--force', 'Remove path first if it exists') { force = true }
+    o.on('--rails REQ', 'Pin the Rails version (e.g. "~> 8.0.0") for a',
+         'sibling fixture. Installs a matching rails gem if absent.') { |v| rails_req = v }
   end
   parser.parse!(argv)
   path = argv.shift || 'fixtures/real-blog'
 
-  unless version_of(probe('rails', '--version'))
+  # `--rails REQ` pins the generator version (for an older-Rails sibling
+  # fixture, e.g. the JRuby baseline on Rails 8.0). Resolve REQ to a
+  # concrete installed version, installing one if none matches, and hand
+  # it to create-blog via RAILS_NEW_VERSION.
+  rails_env = {}
+  if rails_req
+    ver = resolve_rails_version(rails_req)
+    unless ver
+      warn "rh fixture: no installed Rails matches '#{rails_req}' — installing"
+      return 1 unless system('gem', 'install', 'rails', '-v', rails_req, '--no-document')
+      ver = resolve_rails_version(rails_req)
+    end
+    unless ver
+      warn "rh fixture: could not resolve a Rails version for '#{rails_req}'"
+      return 1
+    end
+    rails_env['RAILS_NEW_VERSION'] = ver
+  elsif version_of(probe('rails', '--version')).nil?
     warn 'rh fixture: Rails gem not installed.'
     warn '  Install: gem install rails'
     warn '  (or run `bin/rh doctor` to see all prerequisites)'
@@ -336,8 +369,9 @@ def cmd_fixture(argv)
 
   # `rails new <path>` creates parent dirs as needed, and create-blog
   # does `cd "$APP_NAME"` so subsequent rails-generate steps run in
-  # the new app dir. Pass `path` straight through.
-  ok = system(script, path)
+  # the new app dir. Pass `path` straight through; `rails_env` carries
+  # RAILS_NEW_VERSION when `--rails` pinned the generator.
+  ok = system(rails_env, script, path)
   return 1 unless ok
 
   # Match the legacy `make real-blog` post-create steps: ensure gems

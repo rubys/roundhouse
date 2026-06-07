@@ -14,8 +14,15 @@ APP_NAME="${1:-blog}"
 echo "Creating Ruby2JS blog: $APP_NAME"
 echo ""
 
-# Create Rails app (minimal, with Tailwind for nice styling)
-rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
+# Create Rails app (minimal, with Tailwind for nice styling).
+# RAILS_NEW_VERSION pins the generator (e.g. 8.0.5) for sibling fixtures
+# on an older Rails line; the app's Gemfile then locks that version, so
+# the scaffold/db/test commands below inherit it via the app bundle.
+if [ -n "${RAILS_NEW_VERSION:-}" ]; then
+  rails "_${RAILS_NEW_VERSION}_" new "$APP_NAME" --skip-git --skip-docker --css tailwind
+else
+  rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
+fi
 cd "$APP_NAME"
 
 # Generate Article scaffold

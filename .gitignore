@@ -16,6 +16,9 @@
 # output would mean the repo carries a ~50MB Rails scaffold that
 # drifts whenever Rails versions bump — easier to produce it fresh.
 /fixtures/real-blog
+# Rails 8.0 sibling fixture for the rails-jruby baseline (scripts/bench
+# generates it on demand; same regenerate-don't-commit rationale).
+/fixtures/real-blog-rails80
 /.claude/
 
 # scripts/bench output — per-run timestamps + summaries. Keep the

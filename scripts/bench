@@ -121,7 +121,7 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|jruby|typescript|crystal|rust|spinel|go|elixir|python) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python) NORMALIZED+=("$t") ;;
         jr) NORMALIZED+=(jruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
@@ -130,7 +130,7 @@ for t in "${TARGETS[@]}"; do
         ex) NORMALIZED+=(elixir) ;;
         py) NORMALIZED+=(python) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int jruby typescript crystal rust spinel go elixir python" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -139,6 +139,11 @@ TARGETS=("${NORMALIZED[@]}")
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$REPO_ROOT/fixtures/real-blog"
+# Rails 8.0 sibling fixture for the `rails-jruby` baseline — stock Rails
+# on the JVM. Separate from real-blog (8.1) because the only AR-JDBC that
+# runs on JRuby 10 (80.0.pre1) pins activerecord ~> 8.0.0; see the
+# rails-jruby build_target branch.
+FIXTURE80="$REPO_ROOT/fixtures/real-blog-rails80"
 RUBY_OUT="$REPO_ROOT/build/transpiled-blog-ruby"
 # JRuby target — byte-identical emit to the ruby tree but the JDBC db
 # backend (runtime/db.rb = db_jruby.rb) and a JRuby-resolved bundle.
@@ -327,6 +332,36 @@ build_target() {
                 (cd "$REPO_ROOT" && bin/rh fixture >/dev/null) || return 1
             fi
             ;;
+        rails-jruby)
+            TARGET_BUILD_DIR="$FIXTURE80"
+            TARGET_GEMFILE=""  # uses the sibling fixture's own Gemfile
+            # Stock Rails on the JVM. Same blog app as real-blog, pinned to
+            # Rails 8.0 (the only line AR-JDBC drives on JRuby 10 today:
+            # 80.0.pre1 requires activerecord ~> 8.0.0). bin/rh fixture
+            # generates + migrates + seeds under CRuby.
+            if [[ ! -f "$FIXTURE80/storage/development.sqlite3" ]]; then
+                step "generating rails 8.0 fixture (bin/rh fixture --rails)"
+                (cd "$REPO_ROOT" && bin/rh fixture --rails '~> 8.0.0' "$FIXTURE80" >/dev/null) || return 1
+            fi
+            # Swap the SQLite stack for JRuby: the sqlite3 C-ext gem has no
+            # JRuby build → JDBC adapter; kamal/thruster pull C-ext deps
+            # (bcrypt_pbkdf) that don't build on JRuby → MRI-only.
+            if ! grep -q 'activerecord-jdbcsqlite3-adapter' "$FIXTURE80/Gemfile"; then
+                step "patching rails 8.0 Gemfile for jruby (jdbc adapter)"
+                perl -0pi -e 's/^gem "sqlite3"([^\n]*)/gem "sqlite3"$1, platform: :mri\ngem "activerecord-jdbcsqlite3-adapter", "80.0.pre1", platform: :jruby/m' "$FIXTURE80/Gemfile" || return 1
+                perl -0pi -e 's/^gem "kamal", require: false/gem "kamal", require: false, platform: :mri/m; s/^gem "thruster", require: false/gem "thruster", require: false, platform: :mri/m' "$FIXTURE80/Gemfile" || return 1
+            fi
+            # JRuby bundle (JDBC adapter + JRuby puma/rack), isolated under
+            # the fixture's own gem dir so it doesn't collide with the
+            # CRuby bundle bin/rh fixture installed for migrate/seed.
+            if [[ ! -d "$FIXTURE80/.bundle-jruby" ]]; then
+                step "installing jruby bundle (rails 8.0)"
+                (cd "$FIXTURE80" && \
+                    BUNDLE_PATH="$FIXTURE80/.bundle-jruby" \
+                    BUNDLE_WITHOUT="development:test" \
+                    jruby -S bundle install >/dev/null) || return 1
+            fi
+            ;;
         ruby|ruby-int)
             TARGET_BUILD_DIR="$RUBY_OUT"
             TARGET_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile"
@@ -498,6 +533,13 @@ stage_db() {
             rm -f "$prod" "$prod-wal" "$prod-shm"
             sqlite3 "$dev" ".backup $prod"
             ;;
+        rails-jruby)
+            # Same production-DB staging as rails, in the 8.0 sibling.
+            local prod="$FIXTURE80/storage/production.sqlite3"
+            local dev="$FIXTURE80/storage/development.sqlite3"
+            rm -f "$prod" "$prod-wal" "$prod-shm"
+            sqlite3 "$dev" ".backup $prod"
+            ;;
         ruby|ruby-int)
             local db="$RUBY_OUT/tmp/blog.sqlite3"
             mkdir -p "$(dirname "$db")"
@@ -596,6 +638,27 @@ start_target() {
                 RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
                 SECRET_KEY_BASE=bench-secret-key \
                 bin/rails server -p "$port" -e production \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        rails-jruby)
+            # Stock Rails on the JVM via jruby (no YJIT — that's an MRI
+            # flag). Single-process (WEB_CONCURRENCY=0 — Puma cluster mode
+            # forks, unsupported on the JVM); concurrency is RAILS_MAX_THREADS
+            # (JRuby has no GVL). Heap pinned to 512 MB so RSS is a budget,
+            # like the emitted jruby cell. Boots `bin/rails server` through
+            # jruby's bundle (JDBC adapter), reading the staged production DB.
+            (cd "$FIXTURE80" && \
+                RAILS_ENV=production \
+                RAILS_MAX_THREADS="$THREADS" \
+                WEB_CONCURRENCY=0 \
+                RAILS_LOG_LEVEL="${BENCH_RAILS_LOG_LEVEL:-info}" \
+                SECRET_KEY_BASE=bench-secret-key \
+                BUNDLE_PATH="$FIXTURE80/.bundle-jruby" \
+                BUNDLE_WITHOUT="development:test" \
+                JRUBY_OPTS="-J-Xmx512m -J-Xms512m" \
+                jruby -S bundle exec rails server -p "$port" -e production \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
@@ -748,7 +811,7 @@ start_target() {
     # JRuby boots the JVM before serving — give it a larger readiness
     # budget than the 30s default the other targets use.
     local ready_budget=30
-    [[ "$target" == jruby ]] && ready_budget=90
+    [[ "$target" == jruby || "$target" == rails-jruby ]] && ready_budget=90
     wait_for_port "http://localhost:$port/articles" "$target" "$ready_budget" || {
         echo "--- $target log ---" >&2
         tail -40 "$log" >&2
