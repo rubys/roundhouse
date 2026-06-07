@@ -229,6 +229,10 @@ fn escape_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            // Kotlin has no `\f` escape; use the unicode form.
+            '\u{0C}' => out.push_str("\\u000C"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
             _ => out.push(c),
         }
     }
@@ -397,6 +401,29 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     }
 }
 
+/// `recv[begin..]` / `recv[begin..end]` → Kotlin `substring`. Indices are
+/// `Long` (Ty::Int → Long), so `.toInt()` for the String API.
+fn emit_slice_range(
+    rs: &str,
+    begin: Option<&Expr>,
+    end: Option<&Expr>,
+    exclusive: bool,
+) -> String {
+    let b = begin.map(emit_expr).unwrap_or_else(|| "0L".to_string());
+    match end {
+        None => format!("{rs}.substring(({b}).toInt())"),
+        Some(e) => {
+            let e = emit_expr(e);
+            let end_idx = if exclusive {
+                format!("({e}).toInt()")
+            } else {
+                format!("(({e}) + 1).toInt()")
+            };
+            format!("{rs}.substring(({b}).toInt(), {end_idx})")
+        }
+    }
+}
+
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
     let body_s = emit_expr(body);
     if params.is_empty() {
@@ -440,6 +467,57 @@ fn emit_send(
         }
     }
 
+    // `is_a?(Class)` → Kotlin `is` / boolean compare.
+    if method == "is_a?" && args.len() == 1 {
+        if let (Some(r), ExprNode::Const { path }) = (recv, &*args[0].node) {
+            let rs = emit_expr(r);
+            let last = path.last().map(|s| s.as_str()).unwrap_or("");
+            return match last {
+                "TrueClass" => format!("({rs} == true)"),
+                "FalseClass" => format!("({rs} == false)"),
+                "Integer" => format!("{rs} is Long"),
+                "Float" => format!("{rs} is Double"),
+                "String" => format!("{rs} is String"),
+                "Numeric" => format!("{rs} is Number"),
+                other => format!("{rs} is {}", other.rsplit("::").next().unwrap_or(other)),
+            };
+        }
+    }
+
+    // `recv.gsub(pattern, hash)` → regex replace with a map lookup.
+    if method == "gsub" && args.len() == 2 {
+        if let Some(r) = recv {
+            return format!(
+                "{}.replace({}) {{ (({})[it.value] ?: it.value).toString() }}",
+                args_s[0],
+                emit_expr(r),
+                args_s[1]
+            );
+        }
+    }
+
+    // Indexing / slicing.
+    if method == "[]" {
+        if let Some(r) = recv {
+            let rs = emit_expr(r);
+            if args.len() == 1 {
+                // `str[a..]` / `str[a..b]` slice.
+                if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                    return emit_slice_range(&rs, begin.as_ref(), end.as_ref(), *exclusive);
+                }
+                return format!("{rs}[{}]", args_s[0]);
+            }
+            if args.len() == 2 {
+                // Ruby `str[start, len]` → `substring(start, start + len)`.
+                let start = &args_s[0];
+                let len = &args_s[1];
+                return format!(
+                    "{rs}.substring(({start}).toInt(), (({start}) + ({len})).toInt())"
+                );
+            }
+        }
+    }
+
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
         if matches!(
@@ -451,10 +529,6 @@ fn emit_send(
         // `<<` push → MutableList.add.
         if method == "<<" {
             return format!("{}.add({})", emit_expr(r), args_s[0]);
-        }
-        // Index read `recv[k]`.
-        if method == "[]" {
-            return format!("{}[{}]", emit_expr(r), args_s[0]);
         }
         // Hash key test.
         if method == "key?" || method == "has_key?" {
@@ -479,6 +553,8 @@ fn emit_send(
             "any?" => return format!("{rs}.isNotEmpty()"),
             "length" => return format!("{rs}.length"),
             "size" => return format!("{rs}.size"),
+            // No-ops in Kotlin — drop, keep the receiver.
+            "freeze" | "dup" | "to_a" => return rs,
             _ => {}
         }
         // A `Const` receiver (a class / object like `Db`, `Broadcasts`)
