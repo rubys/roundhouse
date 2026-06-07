@@ -20,6 +20,7 @@ use crate::App;
 
 mod expr;
 mod library;
+mod naming;
 mod package;
 mod ty;
 
@@ -29,10 +30,23 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // Gradle scaffold (build.gradle.kts, settings.gradle.kts, .gitignore).
     files.extend(package::scaffold());
 
-    // Phase 2+: transpiled framework runtime + hand-written primitives +
-    // models/controllers/views lowered to Kotlin source under
-    // `src/main/kotlin/`. Not yet wired — the app is unused for now.
-    let _ = app;
+    // Models → src/main/kotlin/app/models/<Name>.kt. Same lowering recipe
+    // as crystal/dump_ir: a preliminary view pass seeds the class-info
+    // registry, then models lower to LibraryClasses (including synthesized
+    // `<Model>Row` siblings).
+    let preliminary_views: Vec<crate::dialect::LibraryClass> = app
+        .views
+        .iter()
+        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .collect();
+    let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
+    let (model_lcs, _registry) =
+        crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
+    for lc in &model_lcs {
+        files.push(library::emit_class_file(lc));
+    }
 
+    // Phase 3+: transpiled framework runtime + hand-written primitives +
+    // controllers/views.
     files
 }
