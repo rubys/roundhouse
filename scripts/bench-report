@@ -300,6 +300,19 @@ if (%w[ruby rails] - targets).empty?
     }
   end
   html << grouped_bars(groups, series: %w[ruby rails])
+
+  # The same swap on the JVM, when both JRuby cells ran — the dividend is
+  # larger there because the JIT rewards the emitted code's monomorphic
+  # call shapes far more than Rails' reflection-heavy ones.
+  if (%w[jruby rails-jruby] - targets).empty?
+    jr   = by['/articles']['jruby']&.dig('req_sec').to_f
+    rjr  = by['/articles']['rails-jruby']&.dig('req_sec').to_f
+    rb   = by['/articles']['ruby']&.dig('req_sec').to_f
+    rl   = by['/articles']['rails']&.dig('req_sec').to_f
+    if rjr > 0 && rl > 0
+      html << %(<p>The same comparison <em>on the JVM</em> is far more lopsided: emitted <code>jruby</code> beats stock <code>rails-jruby</code> by <strong>#{fmt_dec(jr / rjr, 0)}×</strong> on <code>/articles</code>, against <strong>#{fmt_dec(rb / rl, 0)}×</strong> for <code>ruby</code> over <code>rails</code> on CRuby. Roundhouse doesn't make the JVM faster — it emits code in the monomorphic shape the JIT can optimize, which Rails' autoload/reflection/metaprogramming never takes, so the lowerer pays off roughly twice as much for the same VM.</p>\n)
+    end
+  end
 end
 
 # ── Section: YJIT contribution ───────────────────────────────────────
@@ -326,7 +339,7 @@ end
 
 html << "<h2>4. Cost economics (req/sec per GB of RSS)</h2>\n"
 html << <<~P
-  <p>Throughput normalized by memory footprint. Reorders the table — rust and crystal pull further ahead; high-RSS targets (typescript, rails) move down. Applicability varies by deployment shape: matters most for metered/serverless surfaces, least for bare-metal-with-headroom.</p>
+  <p>Throughput normalized by memory footprint. Reorders the table — rust and crystal pull further ahead; high-RSS targets (typescript, rails) move down, and the JVM cells move down hardest. <code>jruby</code>'s top-tier raw throughput (section 1) is dragged to mid-pack — roughly level with CRuby <code>ruby</code> — by its ~960 MB, so the JVM's speed win is almost exactly cancelled by its memory cost. <code>rails-jruby</code> lands at or near the bottom of every endpoint: ~1.5 GB sinks even respectable throughput, leaving it less cost-efficient than CRuby <code>rails</code> despite winning on raw req/sec. Applicability varies by deployment shape: matters most for metered/serverless surfaces, least for bare-metal-with-headroom.</p>
 P
 endpoints.each do |ep|
   rows = targets.map { |t| by[ep][t] }.compact
@@ -341,6 +354,12 @@ html << <<~P
   <p>Per-target lift going from <code>/articles</code> (HTML) to <code>/articles.json</code> (JSON). The asymmetry isn't JSON-escape vs HTML-escape — both paths concatenate and escape strings. What JSON skips is the <em>layout chain</em> (csrf_meta_tag, importmap, asset-manifest scan, content_for slots) and the <em>per-row view helpers</em> (link_to, button_to, dom_id, tag.*) that the HTML index template invokes for every record.</p>
   <p>Interpreter-bound targets get the least lift because per-call dispatch overhead dominates whether the work is helpers or serialization — ruby is the flattest of the whole field at just 1.1×, and rails only 1.8×. Compiled and BEAM targets show the helper-chain cost more clearly because their serialization is fast: elixir (2.8×) and go (2.2×) lead the multiplier, with python at 1.9× and rust/crystal/typescript in the 1.2–1.6× band. Go's gap is the largest of the AOT-compiled set even after the IR string-builder annotation pass closed part of it.</p>
 P
+
+if (%w[jruby rails-jruby] - targets).empty?
+  html << <<~P
+    <p><strong>On the JVM the multiplier exposes which render path JITs.</strong> Emitted <code>jruby</code> behaves normally (~1.3×). But <code>rails-jruby</code> is the one target in the whole field where JSON is <em>slower</em> than HTML (~0.8×). Stock Rails' jbuilder is a <code>method_missing</code> DSL — every <code>json.extract!</code>/<code>json.url</code> is dynamic dispatch, plus a per-row <code>article_url(…, format: :json)</code> route synthesis — which the JIT can't inline-cache, so the JSON path gets almost no JVM lift while ERB's compiled, monomorphic template methods get 2×+. (Cross-VM: HTML rendering lifts ~2.2× from CRuby to JRuby; jbuilder JSON lifts ~1.0×.) Emitted JSON shows no such dip because the lowerer compiles the jbuilder view into a plain method of direct <code>io &lt;&lt; …</code> string appends and a non-reflective path helper — exactly the shape the JIT optimizes. The "slow JSON" isn't a serialization cost; it's stock Rails leaving JIT headroom on the table that the transpile collects.</p>
+  P
+end
 
 mult_targets = targets - %w[ruby-int rails-int]  # collapse JIT/non-JIT variants
 mult_groups = [{
@@ -375,7 +394,7 @@ SVG
 # ── Section: memory footprint ────────────────────────────────────────
 
 html << "<h2>6. Memory footprint (RSS)</h2>\n"
-html << "<p>Max RSS observed across all endpoints, per target. The field spreads across four tiers: rust and crystal sit under 30 MB; go lands near 36 MB; python around 80 MB; elixir and ruby cluster at 135–160 MB; and typescript, rails-int, and rails top out at 360–420 MB. Note typescript (≈367 MB) now edges past rails-int — high RAM is no longer a Rails-only trait. The cost-economics chart above (section 4) compounds these into req/sec/GB, which spans three orders of magnitude end-to-end.</p>\n"
+html << "<p>Max RSS observed across all endpoints, per target. The native + CRuby + Node field spreads across four tiers: rust and crystal sit under 30 MB; go lands near 36 MB; python around 80 MB; elixir, ruby, and ruby-int cluster at 135–170 MB; and typescript, rails-int, and rails top that group out at 369–389 MB. The two JVM cells sit a full order of magnitude higher, in a tier of their own: emitted <code>jruby</code> at ~960 MB (a pinned 512 MB heap plus ~450 MB of JVM metaspace and code-cache) and <code>rails-jruby</code> at ~1.5 GB — stock Rails' enormous class footprint on top of the same heap budget. That's the JVM's trade: warm-JIT throughput (section 1) bought with memory, which the cost-economics chart (section 4) compounds into req/sec/GB.</p>\n"
 
 mem_rows = targets.map do |tgt|
   max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
@@ -396,13 +415,13 @@ mem_rows.each_with_index do |row, i|
 end
 html << svg_close
 if targets.include?('jruby')
-  html << %(<p class="caveat">The <code>jruby</code> bar is the JVM running the same emitted Ruby as the <code>ruby</code> cell, under a fixed <code>-Xmx512m</code> heap. It tops the chart by design — the JVM trades memory for warm-JIT throughput — so read it as "the cost of the JVM's throughput at a 512&nbsp;MB budget," not an organically-grown working set like the other cells.</p>\n)
+  html << %(<p class="caveat">The two JVM bars run under a fixed <code>-Xmx512m</code> heap, so the heap can't grab a host-dependent share of RAM; the rest is metaspace/code-cache, which is bounded by the app's class count, not the box. <code>jruby</code> (~960&nbsp;MB) is the same emitted Ruby as the <code>ruby</code> cell; <code>rails-jruby</code> (~1.5&nbsp;GB, the tallest bar) is stock Rails' far larger class footprint. Read both as "the cost of the JVM's warm-JIT throughput," not organically-grown working sets like the other cells.</p>\n)
 end
 
 # ── Section: latency ─────────────────────────────────────────────────
 
 html << "<h2>7. Latency (p50 / p99 at c=64)</h2>\n"
-html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Only rust hits sub-millisecond on any endpoint; crystal and elixir land 1–5 ms (elixir's 1.18 ms on <code>/articles/new</code> actually edges out crystal there), go 2–8 ms, typescript and python 3–13 ms, ruby 8–16 ms, rails 46–135 ms. The order roughly matches the throughput chart inversely. One tail outlier stands out: go's p99 on <code>/articles/new</code> is 45.95 ms against a 3.17 ms p50 — a 14× spread that the others don't show, pointing at allocation/GC churn in the render path rather than steady-state cost.</p>\n"
+html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Warm <code>jruby</code> joins the front of the field — p50 ~1.3–2.3 ms, in the crystal/elixir band, with only rust consistently lower. Then go 2–8 ms, typescript and python 3–13 ms, ruby 8–16 ms. The Rails baselines trail: <code>rails-jruby</code> at 37–76 ms (the JVM does shave the CRuby <code>rails</code> 47–131 ms), with <code>rails</code> the slowest. The order roughly matches the throughput chart inversely. Tail behaviour: go's p99 on <code>/articles/new</code> (~43 ms against a ~3 ms p50, a ~13× spread the others don't show) points at allocation/GC churn in the render path; <code>rails-jruby</code>'s p99 runs ~1.3–2× its p50 across endpoints — the JVM's GC tail under a pinned heap.</p>\n"
 
 html << "<table>\n<thead><tr><th>target</th>"
 endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
