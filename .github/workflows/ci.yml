@@ -714,11 +714,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # JRuby provisioning only — no bundler-cache. The committed scaffold
+      # Gemfile is MRI-only (`gem "sqlite3"`), so it can't be bundled under
+      # JRuby; `scripts/compare jruby` resolves the JRuby bundle
+      # (jdbc-sqlite3) against the emitted tree's own Gemfile instead.
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: 'jruby-10.0'
-          bundler-cache: true
-          working-directory: ./runtime/spinel/scaffold
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'

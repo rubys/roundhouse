@@ -417,6 +417,33 @@ fn jruby_runtime_files(
         .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
     files.push(("runtime/db.rb".to_string(), db_jruby));
 
+    // Gemfile gem swap: the committed scaffold Gemfile is MRI-only
+    // (`gem "sqlite3"`, a C extension with no JRuby build), so its frozen
+    // lock stays valid for the CRuby/Spinel toolchain jobs. The JRuby
+    // tree reaches SQLite over JDBC, so rewrite that one line to the
+    // Xerial driver here — the emitted tree's `bundle install` then
+    // resolves a fresh JRuby lock (mirrors the `db_cruby.rb` swap above).
+    let gemfile = files
+        .iter_mut()
+        .find(|(p, _)| p == "Gemfile")
+        .ok_or("jruby_runtime_files: scaffold Gemfile not found")?;
+    if !gemfile.1.contains("gem \"sqlite3\"") {
+        return Err(
+            "jruby_runtime_files: expected `gem \"sqlite3\"` in scaffold Gemfile to swap for \
+             jdbc-sqlite3"
+                .to_string(),
+        );
+    }
+    gemfile.1 = gemfile
+        .1
+        .replace("gem \"sqlite3\"", "gem \"jdbc-sqlite3\"");
+
+    // Drop the committed MRI `Gemfile.lock` from the JRuby tree: it pins
+    // the C-ext `sqlite3` and omits `jdbc-sqlite3`, so shipping it would
+    // make the tree's `jruby -S bundle install` a frozen-mode mismatch.
+    // The JRuby bundle resolves its own platform-correct lock fresh.
+    files.retain(|(p, _)| p != "Gemfile.lock");
+
     // Tep is a spinel-only transport (FFI HTTP server); JRuby uses Puma
     // + Rack via the ruby_overlay, same as the CRuby target.
     files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
