@@ -250,7 +250,7 @@ html << %(<div class="meta">Run <code>#{run_dir}</code> · #{total} cells × #{r
 
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 23, Crystal 1.16, Elixir 1.18/OTP 28. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port).
+    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 23, Crystal 1.16, Elixir 1.18/OTP 28, Python 3.14. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port).
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
   </div>
 METHOD
@@ -336,7 +336,7 @@ end
 html << "<h2>5. HTML → JSON multiplier</h2>\n"
 html << <<~P
   <p>Per-target lift going from <code>/articles</code> (HTML) to <code>/articles.json</code> (JSON). The asymmetry isn't JSON-escape vs HTML-escape — both paths concatenate and escape strings. What JSON skips is the <em>layout chain</em> (csrf_meta_tag, importmap, asset-manifest scan, content_for slots) and the <em>per-row view helpers</em> (link_to, button_to, dom_id, tag.*) that the HTML index template invokes for every record.</p>
-  <p>Interpreter-bound targets (ruby, rails) get only 1.5–1.8× because per-call dispatch overhead dominates whether the work is helpers or serialization. Compiled targets show the helper-chain cost more clearly because their serialization is fast — Go's gap is the largest of the compiled set even after the IR string-builder annotation pass closed part of it.</p>
+  <p>Interpreter-bound targets get the least lift because per-call dispatch overhead dominates whether the work is helpers or serialization — ruby is the flattest of the whole field at just 1.1×, and rails only 1.8×. Compiled and BEAM targets show the helper-chain cost more clearly because their serialization is fast: elixir (2.8×) and go (2.2×) lead the multiplier, with python at 1.9× and rust/crystal/typescript in the 1.2–1.6× band. Go's gap is the largest of the AOT-compiled set even after the IR string-builder annotation pass closed part of it.</p>
 P
 
 mult_targets = targets - %w[ruby-int rails-int]  # collapse JIT/non-JIT variants
@@ -372,7 +372,7 @@ SVG
 # ── Section: memory footprint ────────────────────────────────────────
 
 html << "<h2>6. Memory footprint (RSS)</h2>\n"
-html << "<p>Max RSS observed across all endpoints, per target. Rust and crystal sit under 30 MB; ruby and go are an order of magnitude higher; rails and typescript carry roughly another order on top of that. The cost-economics chart above (section 4) compounds these into req/sec/GB, which spans three orders of magnitude end-to-end.</p>\n"
+html << "<p>Max RSS observed across all endpoints, per target. The field spreads across four tiers: rust and crystal sit under 30 MB; go lands near 36 MB; python around 80 MB; elixir and ruby cluster at 135–160 MB; and typescript, rails-int, and rails top out at 360–420 MB. Note typescript (≈367 MB) now edges past rails-int — high RAM is no longer a Rails-only trait. The cost-economics chart above (section 4) compounds these into req/sec/GB, which spans three orders of magnitude end-to-end.</p>\n"
 
 mem_rows = targets.map do |tgt|
   max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
@@ -396,7 +396,7 @@ html << svg_close
 # ── Section: latency ─────────────────────────────────────────────────
 
 html << "<h2>7. Latency (p50 / p99 at c=64)</h2>\n"
-html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Only rust hits sub-millisecond on any endpoint; crystal lands 1–4 ms, go and typescript 3–17 ms, ruby 9–22 ms, rails 45–135 ms. The order matches the throughput chart inversely, as expected.</p>\n"
+html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Only rust hits sub-millisecond on any endpoint; crystal and elixir land 1–5 ms (elixir's 1.18 ms on <code>/articles/new</code> actually edges out crystal there), go 2–8 ms, typescript and python 3–13 ms, ruby 8–16 ms, rails 46–135 ms. The order roughly matches the throughput chart inversely. One tail outlier stands out: go's p99 on <code>/articles/new</code> is 45.95 ms against a 3.17 ms p50 — a 14× spread that the others don't show, pointing at allocation/GC churn in the render path rather than steady-state cost.</p>\n"
 
 html << "<table>\n<thead><tr><th>target</th>"
 endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
