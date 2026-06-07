@@ -53,6 +53,10 @@ pub enum BuildTarget {
     Crystal,
     Elixir,
     Go,
+    /// Kotlin/JVM emit (backend-only). Transpile-only and intentionally
+    /// excluded from `ALL` (the `--site` archive matrix) while the target
+    /// is under construction — see `docs/kotlin-migration-plan.md`.
+    Kotlin,
     Python,
     Rust,
     Typescript,
@@ -89,6 +93,7 @@ impl BuildTarget {
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
+        BuildTarget::Kotlin,
         BuildTarget::Python,
         BuildTarget::Rust,
         BuildTarget::Typescript,
@@ -106,6 +111,7 @@ impl BuildTarget {
             BuildTarget::Crystal => "crystal",
             BuildTarget::Elixir => "elixir",
             BuildTarget::Go => "go",
+            BuildTarget::Kotlin => "kotlin",
             BuildTarget::Python => "python",
             BuildTarget::Rust => "rust",
             BuildTarget::Typescript => "typescript",
@@ -113,9 +119,11 @@ impl BuildTarget {
         }
     }
 
-    /// Parse a CLI string. Returns `None` for unknown names.
+    /// Parse a CLI string. Returns `None` for unknown names. Chains
+    /// `TRANSPILE` after `ALL` so transpile-only targets not in the
+    /// `--site` matrix (e.g. `kotlin`) still parse for `--target`.
     pub fn from_str(s: &str) -> Option<BuildTarget> {
-        for t in BuildTarget::ALL {
+        for t in BuildTarget::ALL.iter().chain(BuildTarget::TRANSPILE.iter()) {
             if t.as_str() == s {
                 return Some(*t);
             }
@@ -196,6 +204,19 @@ pub fn target_readme(target: BuildTarget) -> String {
              ## Test\n\
              ```sh\n\
              go test ./...\n\
+             ```\n"
+        }
+        BuildTarget::Kotlin => {
+            "## Prerequisites\n\
+             - JDK 17+\n\
+             - Gradle 8+ (or the bundled wrapper)\n\n\
+             ## Run\n\
+             ```sh\n\
+             gradle run\n\
+             ```\n\n\
+             ## Test\n\
+             ```sh\n\
+             gradle test\n\
              ```\n"
         }
         BuildTarget::Python => {
@@ -298,6 +319,7 @@ pub fn target_files(
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
         BuildTarget::Go => Ok(sort_files(emit::go::emit(app))),
+        BuildTarget::Kotlin => Ok(sort_files(emit::kotlin::emit(app))),
         BuildTarget::Python => Ok(sort_files(emit::python::emit(app))),
         BuildTarget::Rust => Ok(sort_files(emit::rust::emit(app))),
         BuildTarget::Typescript => Ok(sort_files(emit::typescript::emit(app))),

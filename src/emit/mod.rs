@@ -9,6 +9,7 @@ pub mod elixir;
 pub mod elixir2;
 pub mod go;
 pub mod go2;
+pub mod kotlin;
 pub mod python;
 pub mod ruby;
 pub mod rust;
