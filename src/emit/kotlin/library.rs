@@ -12,7 +12,7 @@
 //!   - Kotlin requires every parameter typed, so params take their
 //!     signature type, falling back to `Any?`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
@@ -20,7 +20,7 @@ use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
-use super::expr::{begin_method, emit_expr, set_return_label};
+use super::expr::{begin_method, emit_expr, set_instance_props, set_return_label};
 use super::naming::camel;
 use super::ty::kotlin_ty;
 
@@ -45,6 +45,9 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
 /// (e.g. `inflector.rb`). The module name comes from the methods'
 /// `enclosing_class`.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    // A module is an `object` with only functions — no instance props, so
+    // every `self.x` send is a method call.
+    set_instance_props(HashSet::new());
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
@@ -66,6 +69,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // A Ruby `module` (only module-functions, no instance state) → a
     // Kotlin `object`. All methods render as plain `fun`.
     if lc.is_module {
+        set_instance_props(HashSet::new());
         let mut out = format!("object {class_name} {{\n");
         for m in &lc.methods {
             out.push_str(&indent_method(&emit_method(m)));
@@ -169,6 +173,13 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     if !prop_types.is_empty() || !body_ivars.is_empty() {
         out.push('\n');
     }
+
+    // The class's property names (accessor-backed + body ivars), so a
+    // `self.x` zero-arg send in a body emits as a property read; everything
+    // else gets `()`. Active for the rest of this function's method emit.
+    let instance_props: HashSet<String> =
+        prop_types.keys().chain(body_ivars.keys()).cloned().collect();
+    set_instance_props(instance_props);
 
     // init block (initialize body). Kotlin `init` can't `return`, so when
     // the body has a guard `return`, wrap it in `run { }` and emit

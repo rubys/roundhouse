@@ -936,14 +936,18 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // bearing-empty `_adapter_*` overrides) → `return <type-default>`;
     // body-only ivar typing (`@persisted`/`@destroyed`/`@errors`) inferred
     // from pure-reader return types + literal assigns (no `Any?`-soup).
-    // STILL OPEN before base.kt is kotlinc-clean: zero-arg implicit-self
-    // sends emit as property reads (`this._adapterAll`, `this.tableName`)
-    // — must be `()` calls (the keystone gap; the property heuristic in
-    // `emit_send` is inverted); `self.class.X` → companion dispatch;
-    // `new(attrs)` → `Base(attrs)`; `save!`/`create!` collide on the
-    // `!`-stripped name (dup `fun create`); `class << self; attr_accessor
-    // :adapter` → `fun adapter=` (invalid Kotlin) instead of an `object`
-    // `var`; `Time.now.utc.iso8601` java.time shim; negative index
+    // Keystone DONE: zero-arg `self`-receiver sends now emit `()` calls
+    // (`this._adapterInsert()`, `this.tableName()`), dropping parens only
+    // for known accessor-backed props (`this.persisted`); the per-class
+    // prop set is threaded via `INSTANCE_PROPS`. base.kt residual ~48
+    // errors (from ~107), all the documented later items: `class << self;
+    // attr_accessor :adapter` → `fun adapter=` (invalid Kotlin syntax —
+    // must become an `object` `var`; cascades to ~10 adapter-typed errors);
+    // `self.name` (class-name reflection) → shim; `self.class.X` → companion
+    // dispatch; `new(attrs)` → `Base(attrs)`; `save!`/`create!` collide on
+    // the `!`-stripped name (dup `fun create`/`save`); `conditions.to_h`
+    // drop; `Time.now.utc.iso8601` java.time shim; empty `{}` return →
+    // `mutableMapOf<Any?,Any?>` vs declared key type; negative index
     // `records[-1]`. Then hand-written Db.kt/Server.kt/ParamValue.kt.
 ];
 

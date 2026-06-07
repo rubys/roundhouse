@@ -36,6 +36,23 @@ thread_local! {
     /// When set, `return` emits `return@<label>` — used for `initialize`
     /// bodies wrapped in `run { }` (Kotlin `init` blocks can't `return`).
     static RETURN_LABEL: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    /// camelCased names of the current class's accessor-backed properties
+    /// (`attr_*` + body ivars). A zero-arg `self`-receiver send resolves to
+    /// a Kotlin property read only when its name is in here; everything else
+    /// is a method call needing `()`. Empty for `object`s (modules), whose
+    /// self-sends are always method calls.
+    static INSTANCE_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Install the current class's property-name set (see `INSTANCE_PROPS`).
+/// Called by `library::emit_library_class` before emitting method bodies;
+/// reset to empty for `object`/module emission.
+pub(super) fn set_instance_props(props: HashSet<String>) {
+    INSTANCE_PROPS.with(|p| *p.borrow_mut() = props);
+}
+
+fn is_instance_prop(method: &str) -> bool {
+    INSTANCE_PROPS.with(|p| p.borrow().contains(&camel(method)))
 }
 
 /// Set the active labeled-return target (`None` = plain `return`).
@@ -722,8 +739,22 @@ fn emit_send(
         if matches!(&*r.node, ExprNode::Const { .. }) {
             return format!("{rs}.{}()", camel(method));
         }
+        // A `self` receiver: a 0-arg send is a Kotlin method call (`()`)
+        // unless it names an accessor-backed property of this class. In
+        // Ruby every `self.x` is a method call; the only ones that became
+        // Kotlin properties are the `attr_*` / body-ivar fields. This is
+        // why `self.before_validation` / `self._adapter_insert` /
+        // `self.table_name` (companion) must keep their parens.
+        if matches!(&*r.node, ExprNode::SelfRef) {
+            return if is_instance_prop(method) {
+                format!("{rs}.{}", camel(method))
+            } else {
+                format!("{rs}.{}()", camel(method))
+            };
+        }
         if !forces_parens(method) && !method.ends_with('?') && !method.ends_with('!') {
-            // Attribute read on an instance.
+            // Attribute read on a non-self instance receiver (its concrete
+            // property set isn't known here; default to the read form).
             return format!("{rs}.{}", camel(method));
         }
     }
