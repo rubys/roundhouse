@@ -43,6 +43,22 @@ fn is_kotlin_keyword(s: &str) -> bool {
     )
 }
 
+/// A qualified Ruby class name → its Kotlin class name. Normally the last
+/// `::` segment (the flat `roundhouse` package has no namespaces), but
+/// framework classes whose last segment is `Base` — `ActiveRecord::Base` and
+/// `ActionController::Base` — would collide in the flat package, so they
+/// concatenate all segments (`ActiveRecordBase`, `ActionControllerBase`).
+/// Applied at every class-name site (decl, parent, `Ty::Class` render,
+/// `Const` reference) so the disambiguation stays consistent.
+pub fn type_name(qualified: &str) -> String {
+    let last = qualified.rsplit("::").next().unwrap_or(qualified);
+    if last == "Base" && qualified.contains("::") {
+        qualified.split("::").collect::<String>()
+    } else {
+        last.to_string()
+    }
+}
+
 /// snake_case (with optional trailing `?`/`!` and leading underscores) →
 /// camelCase, keyword-escaped. `created_at` → `createdAt`, `from_stmt` →
 /// `fromStmt`, `step?` → `step`, `_adapter_insert` → `_adapterInsert`.

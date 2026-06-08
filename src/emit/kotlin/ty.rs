@@ -93,9 +93,9 @@ fn render_class(full: &str, args: &[Ty]) -> String {
         }
         _ => {}
     }
-    let base = full.rsplit("::").next().unwrap_or(full);
+    let base = super::naming::type_name(full);
     if args.is_empty() {
-        base.to_string()
+        base
     } else {
         let parts: Vec<String> = args.iter().map(kotlin_ty).collect();
         format!("{base}<{}>", parts.join(", "))

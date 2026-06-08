@@ -25,7 +25,7 @@ use super::expr::{
     set_instance_prop_types, set_instance_props, set_param_names, set_return_label,
     set_returns_unit,
 };
-use super::naming::camel;
+use super::naming::{camel, type_name};
 use super::ty::kotlin_ty;
 
 /// Emit a `LibraryClass` as a standalone Kotlin file under
@@ -90,7 +90,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
-        .map(|s| s.as_str().rsplit("::").next().unwrap_or(s.as_str()).to_string())
+        .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
     register_params_for(&name, methods);
     let mut out = format!("object {name} {{\n");
@@ -142,7 +142,7 @@ fn emit_object_body_ivars(
 
 pub fn emit_library_class(lc: &LibraryClass) -> String {
     let name = lc.name.0.as_str();
-    let class_name = name.rsplit("::").next().unwrap_or(name).to_string();
+    let class_name = type_name(name);
     register_params_for(&class_name, &lc.methods);
 
     // A Ruby `module` (only module-functions, no instance state) → a
@@ -222,8 +222,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // RuntimeException. A `super(args)` inside `initialize` becomes the
     // supertype constructor call in the header.
     let parent_name = lc.parent.as_ref().map(|p| {
-        let last = p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str());
-        match last {
+        let last = type_name(p.0.as_str());
+        match last.as_str() {
             "StandardError" | "RuntimeError" => "RuntimeException".to_string(),
             other => other.to_string(),
         }
@@ -243,8 +243,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let inherited: HashSet<String> = lc
         .parent
         .as_ref()
-        .map(|p| p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str()))
-        .map(super::expr::ancestor_members)
+        .map(|p| type_name(p.0.as_str()))
+        .map(|p| super::expr::ancestor_members(&p))
         .unwrap_or_default();
     let member_modifier = |name: &str| -> &'static str {
         if inherited.contains(name) {
@@ -307,8 +307,15 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         prop_types.keys().chain(body_ivars.keys()).cloned().collect();
     set_instance_props(instance_props);
     // Column scalar types, so a `self.<col> = row[k]`/`attrs[k]` write
-    // coerces the untyped value to the property's type.
-    set_instance_prop_types(prop_types.iter().map(|(n, t)| (n.clone(), t.clone())).collect());
+    // coerces the untyped value to the property's type — plus inferred
+    // body-ivar types (e.g. `@data: Hash[...]`) so a `data.keys`/`.length`
+    // call dispatches as a Map even though `data` is a body ivar.
+    let mut prop_ty_map: std::collections::HashMap<String, Ty> =
+        prop_types.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+    for (n, t) in &inferred_ivar_types {
+        prop_ty_map.entry(n.clone()).or_insert_with(|| t.clone());
+    }
+    set_instance_prop_types(prop_ty_map);
     // Implicit-self `new(...)` in a companion factory → this class's ctor.
     set_current_class(&class_name);
 
@@ -511,13 +518,10 @@ pub fn register_class_hierarchy(classes: &[LibraryClass]) {
         if lc.is_module {
             continue;
         }
-        let name = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
-        let parent = lc
-            .parent
-            .as_ref()
-            .map(|p| p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str()).to_string());
-        super::expr::register_class_hierarchy(name, parent.as_deref(), instance_member_names(lc));
-        super::expr::register_instance_methods(name, instance_method_names(lc));
+        let name = type_name(lc.name.0.as_str());
+        let parent = lc.parent.as_ref().map(|p| type_name(p.0.as_str()));
+        super::expr::register_class_hierarchy(&name, parent.as_deref(), instance_member_names(lc));
+        super::expr::register_instance_methods(&name, instance_method_names(lc));
     }
 }
 

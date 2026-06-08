@@ -18,7 +18,7 @@ use crate::expr::{
     Arm, BoolOpKind, Expr, ExprNode, InterpPart, IrHint, LValue, Literal, OpAssignOp, Pattern,
 };
 
-use super::naming::camel;
+use super::naming::{camel, type_name};
 use super::ty::kotlin_ty;
 
 thread_local! {
@@ -144,6 +144,35 @@ pub(super) fn register_instance_methods(name: &str, methods: HashSet<String>) {
 
 /// True when `method` (camelCased) is a known zero-arg instance method of
 /// `class_name` or any ancestor.
+/// The declared `Ty` of an instance property by camelCased name (incl.
+/// body-ivar types plumbed in by `emit_library_class`); `None` if unknown.
+fn instance_prop_ty(name: &str) -> Option<crate::ty::Ty> {
+    INSTANCE_PROP_TYPES.with(|t| t.borrow().get(&camel(name)).cloned())
+}
+
+/// A receiver's effective element-container kind: its own `Ty` (through a
+/// nullable `Union`), or — for a bare `@ivar`/local read — the declared type
+/// of the same-named instance property. Lets `data.keys`/`data.length`
+/// dispatch as a Map when `data` is a `Hash`-typed body ivar whose read node
+/// carries no precise type.
+fn recv_is_hash(r: &Expr) -> bool {
+    if ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Hash { .. })) {
+        return true;
+    }
+    matches!(&*r.node,
+        ExprNode::Ivar { name } | ExprNode::Var { name, .. }
+            if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Hash { .. })))
+}
+
+fn recv_is_array(r: &Expr) -> bool {
+    if ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Array { .. })) {
+        return true;
+    }
+    matches!(&*r.node,
+        ExprNode::Ivar { name } | ExprNode::Var { name, .. }
+            if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Array { .. })))
+}
+
 fn is_instance_method_of(class_name: &str, method: &str) -> bool {
     let cm = camel(method);
     let mut cur = Some(class_name.to_string());
@@ -170,10 +199,7 @@ fn is_instance_method_of(class_name: &str, method: &str) -> bool {
 /// registry for the call-vs-property decision.
 fn receiver_class_name(r: &Expr) -> Option<String> {
     match r.ty.as_ref()? {
-        crate::ty::Ty::Class { id, .. } => {
-            let raw = id.0.as_str();
-            Some(raw.rsplit("::").next().unwrap_or(raw).to_string())
-        }
+        crate::ty::Ty::Class { id, .. } => Some(type_name(id.0.as_str())),
         _ => None,
     }
 }
@@ -605,11 +631,12 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::SelfRef => "this".to_string(),
         // Classes/modules are emitted flat in `package roundhouse`, so a
         // qualified ref (`ActionDispatch::Router::MatchResult`) resolves
-        // by its last segment.
-        ExprNode::Const { path } => path
-            .last()
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
+        // by its last segment — except colliding framework bases, which
+        // `type_name` disambiguates (`ActiveRecord::Base` → `ActiveRecordBase`).
+        ExprNode::Const { path } => {
+            let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            type_name(&joined)
+        }
         ExprNode::Hash { entries, .. } => emit_hash(entries, e),
         ExprNode::Array { elements, .. } => emit_array(elements, e),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
@@ -1062,8 +1089,8 @@ fn emit_send(
     // handled by `emit_raise`.
     if method == "raise" && recv.is_none() && !args.is_empty() {
         if let ExprNode::Const { path } = &*args[0].node {
-            let cls = path.last().map(|s| s.as_str()).unwrap_or("RuntimeException");
-            let cls = cls.rsplit("::").next().unwrap_or(cls);
+            let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            let cls = if joined.is_empty() { "RuntimeException".to_string() } else { type_name(&joined) };
             return format!("throw {cls}({})", args_s[1..].join(", "));
         }
         return format!("throw RuntimeException({})", args_s.join(", "));
@@ -1103,7 +1130,7 @@ fn emit_send(
                 "Numeric" => format!("{rs} is Number"),
                 "Hash" => format!("{rs} is Map<*, *>"),
                 "Array" => format!("{rs} is List<*>"),
-                other => format!("{rs} is {}", other.rsplit("::").next().unwrap_or(other)),
+                other => format!("{rs} is {}", type_name(other)),
             };
         }
     }
@@ -1169,8 +1196,9 @@ fn emit_send(
         if method == "<<" || method == "push" {
             return format!("{}.add({})", emit_expr(r), args_s[0]);
         }
-        // Hash key test.
-        if method == "key?" || method == "has_key?" {
+        // Hash key test — only on an actual Map receiver. On a user type
+        // (Flash's `has_key?` delegating to its own `key?`) it stays a call.
+        if (method == "key?" || method == "has_key?") && recv_is_hash(r) {
             return format!("{}.containsKey({})", emit_expr(r), args_s[0]);
         }
         // `Hash#delete(k)` → `MutableMap.remove(k)`.
@@ -1222,11 +1250,7 @@ fn emit_send(
             // Long literal works (`<`/`>` already cross Int/Long, but `==`
             // does not).
             "length" | "size" => {
-                let coll = matches!(
-                    r.ty.as_ref(),
-                    Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
-                );
-                return if coll {
+                return if recv_is_array(r) || recv_is_hash(r) {
                     format!("{rs}.size.toLong()")
                 } else {
                     format!("{rs}.length.toLong()")
@@ -1234,14 +1258,13 @@ fn emit_send(
             }
             // `count` with no args on a collection is `size` (Kotlin's
             // `.count()` extension also works but `.size` avoids a call).
-            "count"
-                if matches!(
-                    r.ty.as_ref(),
-                    Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
-                ) =>
-            {
+            "count" if recv_is_array(r) || recv_is_hash(r) => {
                 return format!("{rs}.size.toLong()");
             }
+            // Ruby `Hash#keys`/`#values` return Arrays (ordered, indexable);
+            // Kotlin's are a Set/Collection, so materialize a MutableList.
+            "keys" if recv_is_hash(r) => return format!("{rs}.keys.toMutableList()"),
+            "values" if recv_is_hash(r) => return format!("{rs}.values.toMutableList()"),
             // No-ops in Kotlin — drop, keep the receiver. `to_h` is a no-op
             // on a Hash (the only receiver the runtime calls it on).
             "freeze" | "dup" | "to_a" | "to_h" => return rs,
