@@ -110,6 +110,23 @@ thread_local! {
     /// non-null position (it won't smart-cast a mutable property). Scoped to
     /// the guarded branch by `emit_if`.
     static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// camelCased `@ivar` names of the current `object`/module that hold
+    /// mutable singleton state (e.g. ViewHelpers' `@slots` content_for store).
+    /// In a concurrent server (Javalin dispatches each request on its own
+    /// thread) such process-global state would bleed across requests, so it's
+    /// emitted as a `ThreadLocal`: reads become `name.get()`, whole-reassigns
+    /// `name.set(…)`. Empty for instance classes (their ivars are per-object).
+    static OBJECT_TL_FIELDS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Install the current object's thread-local field names (see
+/// `OBJECT_TL_FIELDS`); empty for instance-class emit.
+pub(super) fn set_object_tl_fields(names: HashSet<String>) {
+    OBJECT_TL_FIELDS.with(|f| *f.borrow_mut() = names);
+}
+
+fn is_object_tl_field(name: &str) -> bool {
+    OBJECT_TL_FIELDS.with(|f| f.borrow().contains(name))
 }
 
 /// Append `!!` to a property read proven non-null by an enclosing guard.
@@ -778,8 +795,16 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => nonnull_read(camel(name.as_str())),
-        // Instance variable → property reference.
-        ExprNode::Ivar { name } => nonnull_read(camel(name.as_str())),
+        // Instance variable → property reference. A thread-local singleton
+        // field reads through `.get()`.
+        ExprNode::Ivar { name } => {
+            let n = camel(name.as_str());
+            if is_object_tl_field(&n) {
+                format!("{n}.get()")
+            } else {
+                nonnull_read(n)
+            }
+        }
         ExprNode::SelfRef => "this".to_string(),
         // Classes/modules are emitted flat in `package roundhouse`, so a
         // qualified ref (`ActionDispatch::Router::MatchResult`) resolves
@@ -1080,6 +1105,11 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                 }
                 format!("{kw} {n} = {val}")
             }
+        }
+        // Whole-reassign of a thread-local singleton field (`@slots = {}`) →
+        // `slots.set(...)` (sets the current thread's value).
+        LValue::Ivar { name } if is_object_tl_field(&camel(name.as_str())) => {
+            format!("{}.set({val})", camel(name.as_str()))
         }
         _ => format!("{} = {val}", lvalue_ref(target)),
     }

@@ -110,11 +110,14 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     Ok(out)
 }
 
-/// Emit `private var <ivar>: T = <default>` declarations for module-level
-/// `@ivar`s referenced in `methods`, skipping any already covered by
-/// `accessor_props`. Also registers the ivar names as `INSTANCE_PROPS` so
-/// body references read as properties (not method calls). Returns the
-/// declaration block (each line indented), empty when there are none.
+/// Emit declarations for module-level `@ivar`s referenced in `methods`,
+/// skipping any already covered by `accessor_props`. Object (singleton)
+/// mutable state is process-global, so it's emitted as a `ThreadLocal` (a
+/// concurrent server would otherwise bleed it across requests — e.g.
+/// ViewHelpers' `@slots` content_for store); reads/writes route through
+/// `.get()`/`.set()` via `OBJECT_TL_FIELDS`. Also registers the ivar names as
+/// `INSTANCE_PROPS` so body references resolve as fields, not method calls.
+/// Returns the declaration block (each line indented), empty when none.
 fn emit_object_body_ivars(
     methods: &[MethodDef],
     accessor_props: &BTreeMap<String, Ty>,
@@ -124,18 +127,22 @@ fn emit_object_body_ivars(
         collect_ivars(&m.body, &mut body_ivars);
     }
     set_instance_props(body_ivars.keys().cloned().collect());
+    let tl_fields: HashSet<String> =
+        body_ivars.keys().filter(|n| !accessor_props.contains_key(*n)).cloned().collect();
+    super::expr::set_object_tl_fields(tl_fields);
     let inferred = infer_body_ivar_types(methods);
     let mut out = String::new();
     for n in body_ivars.keys() {
         if accessor_props.contains_key(n) {
             continue;
         }
-        match inferred.get(n) {
-            Some(ty) => {
-                out.push_str(&format!("    private var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)))
-            }
-            None => out.push_str(&format!("    private var {n}: Any? = null\n")),
-        }
+        let (ty, default) = match inferred.get(n) {
+            Some(ty) => (kotlin_ty(ty), default_for(ty)),
+            None => ("Any?".to_string(), "null".to_string()),
+        };
+        out.push_str(&format!(
+            "    private val {n}: ThreadLocal<{ty}> = ThreadLocal.withInitial {{ {default} }}\n"
+        ));
     }
     out
 }
@@ -175,6 +182,11 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         out.push_str("}\n");
         return out;
     }
+
+    // Instance classes have no thread-local singleton state — their `@ivar`s
+    // are per-object (Flash/Session are instantiated per request). Clear any
+    // registry left from a preceding object emit.
+    super::expr::set_object_tl_fields(HashSet::new());
 
     // 1. Accessor-derived properties (name → type), and the set of method
     //    names to drop (the synthesized getters/setters).
