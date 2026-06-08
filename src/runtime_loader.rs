@@ -944,17 +944,18 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // ActiveRecord { lateinit var adapter: AdapterInterface }`, and
     // `ActiveRecord.adapter` reads drop their parens (object-accessor
     // registry, pre-scanned via the kotlin_units transform) — that cleared
-    // the adapter cascade. Bang-name DONE: `save!`/`create!` camel to
-    // `saveBang`/`createBang` (trailing `!` → `Bang`, mirroring TS's
-    // `_bang` stem), no longer colliding with `save`/`create`. base.kt
-    // residual now ~14 errors (from ~107).
-    // Remaining, all documented later items: `self.name`
-    // class-name reflection → shim; `self.class.X` → companion dispatch;
-    // `new(attrs)` → `Base(attrs)`; `conditions.to_h` drop;
-    // `Time.now.utc.iso8601` java.time shim; empty `{}` return →
-    // `mutableMapOf<Any?,Any?>` vs declared key type; `.map{}` yields `List`
-    // not the declared `MutableList` (need `.toMutableList()`); `rows.size
-    // == 0L` (List.size is `Int`, literal `Long`); negative index
+    // the adapter cascade. Bang-name DONE: `save!`/`create!` → `saveBang`/
+    // `createBang`. Mechanical cluster DONE: implicit-self `new(attrs)` →
+    // `Base(attrs)` (CURRENT_CLASS thread-local); `conditions.to_h` dropped
+    // (no-op on a Map); `.map{}` → `.map{}.toMutableList()` (Kotlin map
+    // yields read-only List); `.size`/`.length` → `.toLong()` (so `==` vs a
+    // Long literal works — `<`/`>` already cross Int/Long). base.kt residual
+    // now ~7 errors (from ~107).
+    // Remaining, all documented later items: `self.name` class-name
+    // reflection (4×) → shim; `self.class.X` → companion dispatch;
+    // `Time.now.utc.iso8601` java.time shim; empty `{}` return literal →
+    // `mutableMapOf<Any?,Any?>` vs declared `MutableMap<String,Any?>` (emit
+    // bare `mutableMapOf()` in return position); negative index
     // `records[-1]`. Then hand-written Db.kt/Server.kt/ParamValue.kt.
 ];
 

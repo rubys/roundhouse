@@ -49,6 +49,16 @@ thread_local! {
     /// of all runtime classes before rendering (see
     /// `library::register_object_accessors`).
     static OBJECT_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Name of the class currently being emitted, so an implicit-self
+    /// `new(attrs)` (a companion factory like `Base.create`) resolves to
+    /// the Kotlin constructor `Base(attrs)`. Empty for object/module emit.
+    static CURRENT_CLASS: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set the class name used to resolve implicit-self `new` (see
+/// `CURRENT_CLASS`); `""` disables the rewrite.
+pub(super) fn set_current_class(name: &str) {
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = name.to_string());
 }
 
 /// Clear the object-accessor registry (start of an `emit` run).
@@ -610,10 +620,15 @@ fn emit_send(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
-    // Constructor: `X.new(...)` → `X(...)`.
+    // Constructor: `X.new(...)` → `X(...)`. Implicit-self `new(...)` (a
+    // companion factory) resolves to the current class's constructor.
     if method == "new" {
         if let Some(r) = recv {
             return format!("{}({})", emit_expr(r), args_s.join(", "));
+        }
+        let cls = CURRENT_CLASS.with(|c| c.borrow().clone());
+        if !cls.is_empty() {
+            return format!("{cls}({})", args_s.join(", "));
         }
     }
 
@@ -744,15 +759,24 @@ fn emit_send(
             "downcase" => return format!("{rs}.lowercase()"),
             "strip" => return format!("{rs}.trim()"),
             // `.length`/`.size`: collections use `.size`, strings `.length`.
+            // Both are Kotlin `Int`; `.toLong()` keeps them in the
+            // Long-everywhere world (Ruby Integer → Long) so `==` against a
+            // Long literal works (`<`/`>` already cross Int/Long, but `==`
+            // does not).
             "length" | "size" => {
                 let coll = matches!(
                     r.ty.as_ref(),
                     Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
                 );
-                return if coll { format!("{rs}.size") } else { format!("{rs}.length") };
+                return if coll {
+                    format!("{rs}.size.toLong()")
+                } else {
+                    format!("{rs}.length.toLong()")
+                };
             }
-            // No-ops in Kotlin — drop, keep the receiver.
-            "freeze" | "dup" | "to_a" => return rs,
+            // No-ops in Kotlin — drop, keep the receiver. `to_h` is a no-op
+            // on a Hash (the only receiver the runtime calls it on).
+            "freeze" | "dup" | "to_a" | "to_h" => return rs,
             _ => {}
         }
         // A `Const` receiver (a class / object like `Db`, `Broadcasts`)
@@ -807,10 +831,13 @@ fn emit_send(
             Some(r) => format!("{}.{kt_method}", emit_expr(r)),
             None => kt_method,
         };
+        // Kotlin `.map` yields a read-only `List`; roundhouse models arrays
+        // as `MutableList`, so coerce back to match declared types.
+        let tail = if method == "map" { ".toMutableList()" } else { "" };
         if args_s.is_empty() {
-            return format!("{base} {lam}");
+            return format!("{base} {lam}{tail}");
         }
-        return format!("{base}({}) {lam}", args_s.join(", "));
+        return format!("{base}({}) {lam}{tail}", args_s.join(", "));
     }
 
     // General call.

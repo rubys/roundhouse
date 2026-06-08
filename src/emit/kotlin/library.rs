@@ -20,7 +20,7 @@ use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
-use super::expr::{begin_method, emit_expr, set_instance_props, set_return_label};
+use super::expr::{begin_method, emit_expr, set_current_class, set_instance_props, set_return_label};
 use super::naming::camel;
 use super::ty::kotlin_ty;
 
@@ -48,6 +48,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     // A module is an `object` with only functions — no instance props, so
     // every `self.x` send is a method call.
     set_instance_props(HashSet::new());
+    set_current_class("");
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
@@ -71,6 +72,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // collapses to an object `var` property; everything else is a `fun`.
     if lc.is_module {
         set_instance_props(HashSet::new());
+        set_current_class("");
         let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("object {class_name} {{\n");
         for (n, ty) in &accessor_props {
@@ -192,6 +194,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let instance_props: HashSet<String> =
         prop_types.keys().chain(body_ivars.keys()).cloned().collect();
     set_instance_props(instance_props);
+    // Implicit-self `new(...)` in a companion factory → this class's ctor.
+    set_current_class(&class_name);
 
     // init block (initialize body). Kotlin `init` can't `return`, so when
     // the body has a guard `return`, wrap it in `run { }` and emit
