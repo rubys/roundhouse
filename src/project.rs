@@ -311,7 +311,7 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
-    match target {
+    let files = match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
@@ -327,6 +327,18 @@ pub fn target_files(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
+    }?;
+
+    // Blog is the verbatim Rails source — it ships `db/seeds.rb` and is
+    // seeded by Rails, so it needs no SQL seed. Every transpile target
+    // gets a language-agnostic `db/seed.sql` so the published archive is
+    // self-contained-seedable (`sqlite3 <db> < db/seed.sql`) with no Ruby
+    // — see e2e harness (scripts/e2e). spinel/ruby/jruby already carry it
+    // via the scaffold walk; inject-if-absent is a no-op there.
+    if target == BuildTarget::Blog {
+        Ok(files)
+    } else {
+        Ok(ensure_seed_sql(files)?)
     }
 }
 
@@ -560,6 +572,27 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     }
 
     Ok(dedupe_last_wins(files))
+}
+
+/// Canonical path of the language-agnostic SQL seed. Single source of
+/// truth — spinel/ruby/jruby ship it via the scaffold walk, every other
+/// target gets it injected by `ensure_seed_sql`.
+const SEED_SQL_SRC: &str = "runtime/spinel/scaffold/db/seed.sql";
+
+/// Ensure the file set carries `db/seed.sql` (the self-contained,
+/// Ruby-free seed applied with `sqlite3 <db> < db/seed.sql`). No-op when
+/// the set already includes it (spinel/ruby/jruby, via the scaffold);
+/// otherwise reads the canonical file and inserts it in sorted position.
+fn ensure_seed_sql(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
+    if files.iter().any(|(p, _)| p == "db/seed.sql") {
+        return Ok(files);
+    }
+    let content = fs::read_to_string(SEED_SQL_SRC)
+        .map_err(|e| format!("read {SEED_SQL_SRC}: {e}"))?;
+    let mut files = files;
+    files.push(("db/seed.sql".to_string(), content));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
 }
 
 /// Resolve duplicate paths by keeping the last-inserted entry, then
@@ -887,4 +920,33 @@ fn walk_ruby(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_seed_sql_injects_when_absent() {
+        let files = vec![("app/main.go".to_string(), "package main".to_string())];
+        let out = ensure_seed_sql(files).unwrap();
+        let seed = out.iter().find(|(p, _)| p == "db/seed.sql");
+        assert!(seed.is_some(), "db/seed.sql should be injected");
+        // Content is the canonical file — sanity-check it carries the seed rows.
+        assert!(seed.unwrap().1.contains("INSERT INTO articles"));
+        // Result stays sorted by path.
+        assert!(out.windows(2).all(|w| w[0].0 <= w[1].0));
+    }
+
+    #[test]
+    fn ensure_seed_sql_is_idempotent_when_present() {
+        let files = vec![
+            ("db/seed.sql".to_string(), "-- already here".to_string()),
+            ("app/main.go".to_string(), "package main".to_string()),
+        ];
+        let out = ensure_seed_sql(files).unwrap();
+        let seeds: Vec<_> = out.iter().filter(|(p, _)| p == "db/seed.sql").collect();
+        assert_eq!(seeds.len(), 1, "no duplicate db/seed.sql");
+        assert_eq!(seeds[0].1, "-- already here", "existing content preserved");
+    }
 }

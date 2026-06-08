@@ -293,7 +293,7 @@ fn article_lowers_validate_method() {
     );
 
     // First stmt: presence-if for title. Shape: `If { cond: BoolOp(Or, …),
-    // then: Send(errors << "title can't be blank"), else: Nil }`.
+    // then: Send(errors << "Title can't be blank"), else: Nil }`.
     let first = exprs.first().unwrap();
     match &*first.node {
         roundhouse::ExprNode::If { cond, .. } => {

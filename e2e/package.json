@@ -1,0 +1,11 @@
+{
+  "name": "roundhouse-e2e",
+  "private": true,
+  "description": "Playwright end-to-end smoke tests run against each target server",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

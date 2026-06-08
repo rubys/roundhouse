@@ -113,17 +113,21 @@ fn article_renders_validate_with_inline_checks() {
     // The Ruby emitter uses postfix-modifier form for single-line
     // if's, so the assertion matches the natural output shape.
     assert!(
-        src.contains(r#"errors << "title can't be blank" if @title.nil?"#),
+        src.contains(r#"errors << "Title can't be blank" if @title.nil?"#),
         "{src}",
     );
     assert!(
-        src.contains(r#"errors << "body can't be blank" if @body.nil?"#),
+        src.contains(r#"errors << "Body can't be blank" if @body.nil?"#),
         "{src}",
     );
     // Length is now also inline (third slice of Phase 2.5(a)).
     // Expansion: `unless @body.nil?; len = ...; errors << "..." if len < N; end`.
+    // Message matches Rails' full_messages: humanized attribute +
+    // "characters" suffix (see model_to_library::validations::humanize).
     assert!(
-        src.contains(r#"errors << "body is too short (minimum is 10)" if len < 10"#),
+        src.contains(
+            r#"errors << "Body is too short (minimum is 10 characters)" if len < 10"#
+        ),
         "{src}",
     );
 }

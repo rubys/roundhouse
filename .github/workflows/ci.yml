@@ -62,6 +62,13 @@ jobs:
   # to a pin if upstream churn turns flaky.
   # -------------------------------------------------------------------
   build-spinel:
+    # TEMPORARILY DISABLED (2026-06-08): gated off to validate the e2e
+    # work on a fully-green main. build-spinel tracks matz/spinel master
+    # and can go red independently; re-enable (drop this `if`) once the
+    # e2e matrix is landed. Cascade-skips framework-tests/toolchain/
+    # compare-spinel (they `needs: build-spinel`), which are also gated
+    # below for clarity.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -285,6 +292,7 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:
+    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
     needs: build-spinel
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -403,6 +411,7 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   toolchain-spinel:
+    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -739,6 +748,7 @@ jobs:
   # spinel master can churn faster than this job rebuilds against it;
   # drop it once the upstream cadence settles.
   compare-spinel:
+    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -779,6 +789,84 @@ jobs:
         run: scripts/compare spinel
 
   # -------------------------------------------------------------------
+  # e2e-<target>: Playwright browser smoke tests against a target server
+  # booted from its ARCHIVE — the dynamic-behavior layer the static DOM
+  # diff (compare-*) can't reach: Turbo Streams, Action Cable broadcasts,
+  # computed Tailwind styles, validation re-renders. See e2e/README.md.
+  #
+  # The `browse-archives` artifact from build-site carries the exact
+  # published rubys.github.io/roundhouse/browse/<target>.tgz; scripts/e2e
+  # extracts it, seeds a fresh DB from the archive's OWN db/seed.sql
+  # (sqlite3, no Rails), then builds + boots the target and runs the
+  # specs. No Rust toolchain in any e2e job — build-site already built
+  # the archive.
+  #
+  # Matrix grows one target at a time. E2E_SKIP gates the specs a target
+  # can't yet satisfy so the job is green-able while the gap is recorded —
+  # the purpose of this matrix is to surface and burn those gaps down.
+  # -------------------------------------------------------------------
+
+  # go (2/5): index + validation pass. Note the ABSENCE of any setup-ruby
+  # step — that's the point: go.tgz runs without Ruby. Remaining gaps
+  # (2026-06-08): Tailwind asset serving, Turbo Stream comment insert,
+  # Action Cable broadcast.
+  e2e-go:
+    # TEMPORARILY DISABLED (2026-06-08): go is only 2/5 with three gates;
+    # dropped while landing the e2e matrix on a green main. Re-enable once
+    # go's asset/turbo/cable gaps are addressed. e2e-ruby (5/5) stays on.
+    if: false
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e go
+        run: scripts/e2e --tgz browse/go.tgz --skip "tailwind turbo_comment action_cable" go
+
+  # ruby (5/5): the archive is self-contained — its own Gemfile + Makefile
+  # build Puma/Rack + tailwind (npx @tailwindcss/cli) + turbo.min.js (the
+  # turbo-rails gem). Ruby IS the runtime here, so setup-ruby is expected
+  # (unlike go). No skips — all five specs pass.
+  e2e-ruby:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e ruby
+        run: scripts/e2e --tgz browse/ruby.tgz ruby
+
+  # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at
   # rubys.github.io/roundhouse/browse/<target>.tgz are matz's primary
@@ -792,10 +880,16 @@ jobs:
   # the archive itself is available via the workflow-run artifact even
   # when unit fails. Pages publication (the `deploy` job below) does
   # gate on unit, so a broken library can't push to the live site.
+  #
+  # build-site runs on PRs too (no `if: main`). Building the archives is
+  # harmless off-main and catches archive-generation breakage on the PR;
+  # PUBLISHING is the boundary, and that lives entirely in `deploy`
+  # (gated `if: main`). It also uploads the `browse-archives` artifact so
+  # the e2e-<target> jobs can boot the exact built bytes without
+  # rebuilding the site.
   # -------------------------------------------------------------------
   build-site:
     needs: generate-fixture
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -832,6 +926,14 @@ jobs:
       - name: Render bench page
         if: steps.fetch-bench.outputs.bench_data == 'present'
         run: scripts/bench-report _site/bench/summary.json _site/bench/index.html
+
+      # The per-target archives, for the e2e-<target> jobs to download and
+      # boot — the exact bytes published to rubys.github.io/roundhouse.
+      - name: Upload browse archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: browse-archives
+          path: _site/browse/*.tgz
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

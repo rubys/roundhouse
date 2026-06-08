@@ -149,7 +149,7 @@ fn inline_belongs_to_check(
         bool_op(BoolOpKind::Or, nil_check, zero_check),
         not_exists,
     );
-    let push_err = errors_push(format!("{} must exist", assoc_name.as_str()));
+    let push_err = errors_push(format!("{} must exist", humanize(assoc_name.as_str())));
     if_with_nil_else(cond, push_err)
 }
 
@@ -216,7 +216,7 @@ fn inline_presence_check(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
         }
     };
     // `errors << "attr can't be blank"`
-    let push_err = errors_push(format!("{} can't be blank", attr.as_str()));
+    let push_err = errors_push(format!("{} can't be blank", humanize(attr.as_str())));
     // The wrapping `if cond then push_err end` (Nil else).
     if_with_nil_else(cond, push_err)
 }
@@ -255,7 +255,7 @@ fn inline_absence_check(attr: &Symbol) -> Expr {
             parenthesized: false,
         },
     );
-    let push_err = errors_push(format!("{} must be blank", attr.as_str()));
+    let push_err = errors_push(format!("{} must be blank", humanize(attr.as_str())));
     if_with_nil_else(not_blank, push_err)
 }
 
@@ -288,7 +288,8 @@ fn inline_inclusion_check(attr: &Symbol, values: &[Literal]) -> Expr {
             parenthesized: false,
         },
     );
-    let push_err = errors_push(format!("{} is not included in the list", attr.as_str()));
+    let push_err =
+        errors_push(format!("{} is not included in the list", humanize(attr.as_str())));
     if_with_nil_else(not_included, push_err)
 }
 
@@ -319,7 +320,7 @@ fn inline_format_check(attr: &Symbol, pattern: &str) -> Expr {
             parenthesized: false,
         },
     );
-    let push_err = errors_push(format!("{} is invalid", attr.as_str()));
+    let push_err = errors_push(format!("{} is invalid", humanize(attr.as_str())));
     if_with_nil_else(invalid, push_err)
 }
 
@@ -327,8 +328,8 @@ fn inline_format_check(attr: &Symbol, pattern: &str) -> Expr {
 /// Produces a single outer `unless @attr.nil?` guard wrapping a Seq:
 ///   unless @attr.nil?
 ///     len = if @attr.is_a?(String) then @attr.length elsif @attr.is_a?(Array) then @attr.length else 0 end
-///     errors << "attr is too short (minimum is M)" if len < M     # if min set
-///     errors << "attr is too long (maximum is N)"  if len > N     # if max set
+///     errors << "Attr is too short (minimum is M characters)" if len < M  # if min set
+///     errors << "Attr is too long (maximum is N characters)"  if len > N  # if max set
 ///     errors << "attr is the wrong length (should be K)" if len != K  # if is set
 ///   end
 /// The `is` (exact length) option isn't in the current ValidationRule
@@ -397,7 +398,11 @@ fn inline_length_check(
                 ExprNode::Lit { value: Literal::Int { value: n as i64 } },
             )],
         );
-        let msg = format!("{} is too short (minimum is {})", attr.as_str(), n);
+        let msg = format!(
+            "{} is too short (minimum is {} characters)",
+            humanize(attr.as_str()),
+            n
+        );
         inner_stmts.push(if_with_nil_else(lt, errors_push(msg)));
     }
     if let Some(n) = max {
@@ -409,7 +414,11 @@ fn inline_length_check(
                 ExprNode::Lit { value: Literal::Int { value: n as i64 } },
             )],
         );
-        let msg = format!("{} is too long (maximum is {})", attr.as_str(), n);
+        let msg = format!(
+            "{} is too long (maximum is {} characters)",
+            humanize(attr.as_str()),
+            n
+        );
         inner_stmts.push(if_with_nil_else(gt, errors_push(msg)));
     }
     let body_seq = seq(inner_stmts);
@@ -460,7 +469,7 @@ fn inline_numericality_check(
         },
     );
     let bad_cond = bool_op(BoolOpKind::Or, nil_check, not_numeric);
-    let nan_msg = errors_push(format!("{} is not a number", attr.as_str()));
+    let nan_msg = errors_push(format!("{} is not a number", humanize(attr.as_str())));
 
     // Build the else-branch Seq of per-option checks.
     let mut else_stmts: Vec<Expr> = Vec::new();
@@ -473,7 +482,11 @@ fn inline_numericality_check(
                 ExprNode::Lit { value: Literal::Float { value: n } },
             )],
         );
-        let msg = format!("{} must be greater than {}", attr.as_str(), format_float(n));
+        let msg = format!(
+            "{} must be greater than {}",
+            humanize(attr.as_str()),
+            format_float(n)
+        );
         else_stmts.push(if_with_nil_else(le, errors_push(msg)));
     }
     if let Some(n) = lt {
@@ -485,7 +498,11 @@ fn inline_numericality_check(
                 ExprNode::Lit { value: Literal::Float { value: n } },
             )],
         );
-        let msg = format!("{} must be less than {}", attr.as_str(), format_float(n));
+        let msg = format!(
+            "{} must be less than {}",
+            humanize(attr.as_str()),
+            format_float(n)
+        );
         else_stmts.push(if_with_nil_else(ge, errors_push(msg)));
     }
     if only_integer {
@@ -500,7 +517,7 @@ fn inline_numericality_check(
                 parenthesized: false,
             },
         );
-        let msg = format!("{} must be an integer", attr.as_str());
+        let msg = format!("{} must be an integer", humanize(attr.as_str()));
         else_stmts.push(if_with_nil_else(not_int, errors_push(msg)));
     }
     // If the else has no stmts, just use the if-form (the rule has
@@ -525,6 +542,24 @@ fn format_float(n: f64) -> String {
         format!("{}", n as i64)
     } else {
         format!("{n}")
+    }
+}
+
+/// Humanize an attribute name for an error message, matching Rails'
+/// `errors.full_messages` (`String#humanize` + the `"%{attribute}
+/// %{message}"` format): drop a trailing `_id`, turn `_` into spaces,
+/// and upcase the first letter. So `body` → `Body`, `author_id` →
+/// `Author`, `first_name` → `First name`. The full message is baked
+/// here (this lowerer inlines literal strings, not runtime
+/// interpolation — see the module header), so the humanization has to
+/// happen at lower time rather than in an errors object.
+fn humanize(attr: &str) -> String {
+    let trimmed = attr.strip_suffix("_id").unwrap_or(attr);
+    let spaced = trimmed.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -668,7 +703,7 @@ mod tests {
     #[test]
     fn presence_emits_blank_error() {
         let expr = inline_presence_check(&attr(), None);
-        assert_eq!(collect_error_messages(&expr), vec!["title can't be blank"]);
+        assert_eq!(collect_error_messages(&expr), vec!["Title can't be blank"]);
     }
 
     #[test]
@@ -697,7 +732,7 @@ mod tests {
     #[test]
     fn absence_emits_must_be_blank_error() {
         let expr = inline_absence_check(&attr());
-        assert_eq!(collect_error_messages(&expr), vec!["title must be blank"]);
+        assert_eq!(collect_error_messages(&expr), vec!["Title must be blank"]);
     }
 
     #[test]
@@ -705,14 +740,14 @@ mod tests {
         let exprs = inline_length_check(&attr(), Some(5), None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
-        assert_eq!(msgs, vec!["title is too short (minimum is 5)"]);
+        assert_eq!(msgs, vec!["Title is too short (minimum is 5 characters)"]);
     }
 
     #[test]
     fn length_max_only_emits_too_long() {
         let exprs = inline_length_check(&attr(), None, Some(100), None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
-        assert_eq!(msgs, vec!["title is too long (maximum is 100)"]);
+        assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
     }
 
     #[test]
@@ -722,8 +757,8 @@ mod tests {
         assert_eq!(
             msgs,
             vec![
-                "title is too short (minimum is 5)",
-                "title is too long (maximum is 100)",
+                "Title is too short (minimum is 5 characters)",
+                "Title is too long (maximum is 100 characters)",
             ],
         );
     }
@@ -731,7 +766,7 @@ mod tests {
     #[test]
     fn format_emits_invalid_error() {
         let expr = inline_format_check(&attr(), "[A-Z]+");
-        assert_eq!(collect_error_messages(&expr), vec!["title is invalid"]);
+        assert_eq!(collect_error_messages(&expr), vec!["Title is invalid"]);
     }
 
     #[test]
@@ -743,7 +778,7 @@ mod tests {
         let expr = inline_inclusion_check(&attr(), &values);
         assert_eq!(
             collect_error_messages(&expr),
-            vec!["title is not included in the list"],
+            vec!["Title is not included in the list"],
         );
     }
 
@@ -751,7 +786,7 @@ mod tests {
     fn numericality_bare_emits_nan_only() {
         let exprs = inline_numericality_check(&attr(), false, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
-        assert_eq!(msgs, vec!["title is not a number"]);
+        assert_eq!(msgs, vec!["Title is not a number"]);
     }
 
     #[test]
@@ -763,10 +798,10 @@ mod tests {
         assert_eq!(
             msgs,
             vec![
-                "title is not a number",
-                "title must be greater than 0",
-                "title must be less than 100",
-                "title must be an integer",
+                "Title is not a number",
+                "Title must be greater than 0",
+                "Title must be less than 100",
+                "Title must be an integer",
             ],
         );
     }
@@ -779,7 +814,7 @@ mod tests {
         let exprs = inline_numericality_check(&attr(), false, Some(0.5), None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert!(
-            msgs.iter().any(|m| m == "title must be greater than 0.5"),
+            msgs.iter().any(|m| m == "Title must be greater than 0.5"),
             "expected decimal preserved; got {msgs:?}",
         );
     }
@@ -790,6 +825,6 @@ mod tests {
         let foreign_key = Symbol::from("article_id");
         let target = ClassId(Symbol::from("Article"));
         let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target);
-        assert_eq!(collect_error_messages(&expr), vec!["article must exist"]);
+        assert_eq!(collect_error_messages(&expr), vec!["Article must exist"]);
     }
 }

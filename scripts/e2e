@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# scripts/e2e — Playwright end-to-end smoke tests against a target server.
+#
+# Unlike scripts/compare (server-to-server DOM diff vs a live Rails
+# reference), this drives a real browser against a *single* target server
+# booted from its PUBLISHED ARCHIVE — proving the shipped `<target>.tgz`
+# is self-contained: extract → seed (Ruby-free, via db/seed.sql) → build →
+# boot → run e2e/*.spec.js.
+#
+# Usage:  scripts/e2e [options] TARGET
+#
+#   TARGET ∈ { go }   (more added one at a time as the matrix grows)
+#
+# Options:
+#   --site-dir DIR   Use a prebuilt site dir; the archive is taken from
+#                    DIR/browse/<target>.tgz. Default: build the site into
+#                    a temp dir via `cargo run --bin build-site`.
+#   --tgz PATH       Use a specific archive tarball (overrides --site-dir).
+#   --port N         Target port (default 3000).
+#   --skip LIST      Space/comma list of spec basenames to skip; sets
+#                    E2E_SKIP (e.g. --skip "tailwind action_cable").
+#   --keep           Don't tear down the server / build dir (debug).
+#
+# Environment: the per-target toolchain (e.g. Go) plus Node + a Playwright
+# browser (`npx playwright install chromium`) must be available.
+
+set -euo pipefail
+
+# -------- arg parsing --------
+
+TARGET=""
+SITE_DIR=""
+TGZ=""
+PORT=3000
+SKIP="${E2E_SKIP:-}"
+KEEP=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --site-dir) SITE_DIR="$2"; shift 2 ;;
+        --tgz)      TGZ="$2";      shift 2 ;;
+        --port)     PORT="$2";     shift 2 ;;
+        --skip)     SKIP="$2";     shift 2 ;;
+        --keep)     KEEP=1;        shift ;;
+        -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)         echo "unknown flag: $1" >&2; exit 2 ;;
+        *)
+            if [[ -z "$TARGET" ]]; then TARGET="$1"
+            else echo "unexpected positional arg: $1" >&2; exit 2; fi
+            shift ;;
+    esac
+done
+
+[[ -z "$TARGET" ]] && { echo "usage: scripts/e2e [options] TARGET" >&2; exit 2; }
+
+case "$TARGET" in
+    go|ruby|spinel) ;;
+    *)  echo "unsupported target: $TARGET (currently: go, ruby, spinel)" >&2; exit 2 ;;
+esac
+
+# -------- paths --------
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+E2E_DIR="$REPO_ROOT/e2e"
+BUILD_DIR="$(mktemp -d -t roundhouse-e2e.XXXXXX)"
+LOG_DIR="$(mktemp -d -t roundhouse-e2e-logs.XXXXXX)"
+TARGET_LOG="$LOG_DIR/target.log"
+SITE_TMP=""
+
+# -------- helpers --------
+
+step() { printf '\033[36m→\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+wait_for_port() {
+    local url="$1" label="$2" budget="${3:-30}"
+    local deadline=$(( $(date +%s) + budget ))
+    while (( $(date +%s) < deadline )); do
+        curl --silent --fail --output /dev/null "$url" 2>/dev/null && return 0
+        sleep 0.3
+    done
+    fail "$label did not come up within ${budget}s ($url)"
+    return 1
+}
+
+TARGET_PID=""
+
+# Kill the whole process tree (the server forks children that don't get
+# signals sent to the subshell). Mirrors scripts/compare's kill_tree.
+kill_tree() {
+    local pid="$1"; [[ -z "$pid" ]] && return
+    local children; children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    kill "$pid" 2>/dev/null || true
+    for child in $children; do kill_tree "$child"; done
+}
+
+cleanup() {
+    local code=$?
+    if (( KEEP == 0 )); then
+        kill_tree "$TARGET_PID"
+        sleep 0.3
+        wait 2>/dev/null || true
+        rm -rf "$BUILD_DIR" "$SITE_TMP"
+    else
+        echo
+        step "--keep: server still running"
+        [[ -n "$TARGET_PID" ]] && echo "  target PID=$TARGET_PID port=$PORT"
+        echo "  build $BUILD_DIR"
+        echo "  logs  $LOG_DIR"
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+# -------- 1. resolve archive --------
+
+if [[ -z "$TGZ" ]]; then
+    if [[ -z "$SITE_DIR" ]]; then
+        SITE_TMP="$(mktemp -d -t roundhouse-e2e-site.XXXXXX)"
+        step "building site (build-site) → $SITE_TMP"
+        (cd "$REPO_ROOT" && cargo run --release --quiet --bin build-site -- \
+            fixtures/real-blog "$SITE_TMP" >/dev/null)
+        SITE_DIR="$SITE_TMP"
+    fi
+    TGZ="$SITE_DIR/browse/$TARGET.tgz"
+fi
+[[ -f "$TGZ" ]] || { fail "archive not found: $TGZ"; exit 1; }
+ok "archive: $TGZ"
+
+# -------- 2. extract --------
+
+step "extracting $TARGET.tgz → $BUILD_DIR"
+tar xzf "$TGZ" -C "$BUILD_DIR"
+# Archives carry a top-level `<target>/` prefix.
+APP_DIR="$BUILD_DIR/$TARGET"
+[[ -d "$APP_DIR" ]] || APP_DIR="$BUILD_DIR"
+[[ -f "$APP_DIR/db/seed.sql" ]] || { fail "db/seed.sql missing from archive"; exit 1; }
+ok "extracted ($APP_DIR)"
+
+# -------- 3. seed (Ruby-free) --------
+
+# Per-target DB path. Each target creates its schema on boot
+# (idempotent), and db/seed.sql's CREATE TABLE IF NOT EXISTS makes the
+# seed self-sufficient against a fresh empty file.
+case "$TARGET" in
+    go)           DB_REL="storage/development.sqlite3" ;;
+    ruby|spinel)  DB_REL="tmp/blog.sqlite3" ;;
+esac
+step "seeding $DB_REL from db/seed.sql"
+mkdir -p "$APP_DIR/$(dirname "$DB_REL")"
+rm -f "$APP_DIR/$DB_REL" "$APP_DIR/$DB_REL-wal" "$APP_DIR/$DB_REL-shm"
+sqlite3 "$APP_DIR/$DB_REL" < "$APP_DIR/db/seed.sql"
+ok "seeded ($(sqlite3 "$APP_DIR/$DB_REL" 'SELECT COUNT(*) FROM articles') articles)"
+
+# -------- 4. build target --------
+
+step "building $TARGET"
+case "$TARGET" in
+    go)
+        (cd "$APP_DIR" && go mod tidy && mkdir -p .bin && \
+            go build -o .bin/server ./cmd/v2/) >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -20 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    ruby)
+        # Self-contained: the archive ships its own Gemfile + Makefile.
+        # bundle install resolves Puma/Rack/turbo-rails; `make assets`
+        # builds tailwind.css (npx @tailwindcss/cli) + turbo.min.js (from
+        # the turbo-rails gem) — the assets the tailwind/turbo/cable
+        # specs exercise.
+        (cd "$APP_DIR" && bundle install && make assets) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    spinel)
+        # AOT-compile the native binary (requires `spinel` on PATH, same
+        # as compare-spinel). `make assets` first for the same tailwind +
+        # turbo bundle as the ruby target; `make build` runs `spinel
+        # main.rb -o build/blog`.
+        command -v spinel >/dev/null || { fail "spinel not on PATH"; exit 1; }
+        (cd "$APP_DIR" && bundle install && make assets && make build) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+esac
+ok "built"
+
+# -------- 5. boot target --------
+
+step "starting $TARGET on :$PORT"
+case "$TARGET" in
+    go)
+        (cd "$APP_DIR" && PORT="$PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    ruby)
+        (cd "$APP_DIR" && BLOG_DB="$DB_REL" PORT="$PORT" \
+            bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    spinel)
+        (cd "$APP_DIR" && BLOG_DB="$DB_REL" PORT="$PORT" \
+            ./build/blog >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+esac
+wait_for_port "http://localhost:$PORT/articles" "$TARGET" || {
+    echo "--- $TARGET log ---" >&2; tail -20 "$TARGET_LOG" >&2; exit 1; }
+ok "$TARGET up"
+
+# -------- 6. run playwright --------
+
+if [[ ! -d "$E2E_DIR/node_modules" ]]; then
+    step "installing e2e npm deps"
+    (cd "$E2E_DIR" && npm install --silent --no-audit --no-fund)
+fi
+
+echo
+step "playwright (baseURL=http://localhost:$PORT${SKIP:+  skip=$SKIP})"
+echo
+
+set +e
+(cd "$E2E_DIR" && E2E_BASE_URL="http://localhost:$PORT" E2E_SKIP="$SKIP" \
+    npx playwright test)
+e2e_exit=$?
+set -e
+
+exit "$e2e_exit"
