@@ -629,11 +629,6 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -641,6 +636,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
+      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
+      # Rails boots — setup-java/setup-gradle prepend to PATH and otherwise
+      # leave `bin/rails` resolving to system Ruby 3.2 (Bundler::GemNotFound,
+      # Rails never comes up). Same ordering as the passing compare-jruby job.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
       - name: scripts/compare kotlin
         run: scripts/compare kotlin
 
