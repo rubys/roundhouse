@@ -36,6 +36,10 @@ thread_local! {
     /// When set, `return` emits `return@<label>` — used for `initialize`
     /// bodies wrapped in `run { }` (Kotlin `init` blocks can't `return`).
     static RETURN_LABEL: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    /// Whether the method currently being emitted returns `Unit`. A guard
+    /// `return nil` in a void method must emit a bare `return` — Kotlin's
+    /// `Unit` can't carry a `null` value (`return null` is a type error).
+    static RETURNS_UNIT: RefCell<bool> = const { RefCell::new(false) };
     /// camelCased names of the current class's accessor-backed properties
     /// (`attr_*` + body ivars). A zero-arg `self`-receiver send resolves to
     /// a Kotlin property read only when its name is in here; everything else
@@ -163,6 +167,12 @@ fn is_instance_prop(method: &str) -> bool {
 /// Set the active labeled-return target (`None` = plain `return`).
 pub(super) fn set_return_label(label: Option<&'static str>) {
     RETURN_LABEL.with(|r| *r.borrow_mut() = label);
+}
+
+/// Record whether the method being emitted returns `Unit` (see
+/// `RETURNS_UNIT`).
+pub(super) fn set_returns_unit(b: bool) {
+    RETURNS_UNIT.with(|r| *r.borrow_mut() = b);
 }
 
 /// Reset per-method local-decl tracking and pre-scan the body for
@@ -367,10 +377,21 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
         ExprNode::Return { value } => {
-            // `return nil` → `return null`. Inside an `init`-block `run {}`
-            // wrapper the return is labeled (`return@run`).
+            // `return nil` → `return null`, except in a `Unit` method where
+            // it's a bare `return` (Kotlin `Unit` can't carry `null`).
+            // Inside an `init`-block `run {}` wrapper the return is labeled
+            // (`return@run`).
+            let label = RETURN_LABEL.with(|r| *r.borrow());
+            let nil_in_unit = RETURNS_UNIT.with(|r| *r.borrow())
+                && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
+            if nil_in_unit {
+                return match label {
+                    Some(label) => format!("return@{label}"),
+                    None => "return".to_string(),
+                };
+            }
             let v = emit_expr(value);
-            match RETURN_LABEL.with(|r| *r.borrow()) {
+            match label {
                 Some(label) => format!("return@{label} {v}"),
                 None => format!("return {v}"),
             }

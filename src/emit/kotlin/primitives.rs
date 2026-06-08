@@ -227,6 +227,29 @@ interface AdapterInterface {
 }
 "#;
 
+/// Turbo Streams broadcast sink — the object the model `after_*_commit`
+/// callbacks dispatch to (`Broadcasts.append`/`prepend`/`replace`/`remove`,
+/// each taking a kwargs bag lowered to a `MutableMap<String, Any?>`). A
+/// backend-only Kotlin target doesn't hold the websocket fan-out a full
+/// Action Cable would, so these are no-ops (the lowered model still
+/// *computes* the stream/target/html, it just isn't pushed anywhere) —
+/// the analog of go2/rust2's Broadcasts shim. Wiring a real cable transport
+/// is a later concern.
+const BROADCASTS_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
+// Turbo Streams broadcast sink. A backend-only target has no Action Cable
+// fan-out, so the model after_*_commit callbacks' broadcasts are no-ops
+// here (mirrors go2/rust2's Broadcasts shim).
+
+package roundhouse
+
+object Broadcasts {
+    fun append(opts: MutableMap<String, Any?>) {}
+    fun prepend(opts: MutableMap<String, Any?>) {}
+    fun replace(opts: MutableMap<String, Any?>) {}
+    fun remove(opts: MutableMap<String, Any?>) {}
+}
+"#;
+
 /// The hand-written runtime primitives, emitted under `src/main/kotlin/`.
 pub fn primitives() -> Vec<EmittedFile> {
     vec![
@@ -245,6 +268,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/AdapterInterface.kt"),
             content: ADAPTER_INTERFACE_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Broadcasts.kt"),
+            content: BROADCASTS_KT.to_string(),
         },
     ]
 }

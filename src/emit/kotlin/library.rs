@@ -22,7 +22,7 @@ use crate::ty::Ty;
 
 use super::expr::{
     begin_method, emit_expr, set_current_class, set_instance_prop_types, set_instance_props,
-    set_return_label,
+    set_return_label, set_returns_unit,
 };
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -239,6 +239,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // `return@run`.
     if let Some(m) = init {
         begin_method(&m.body);
+        set_returns_unit(true);
         let has_return = body_has_return(&m.body);
         if has_return {
             set_return_label(Some("run"));
@@ -276,7 +277,16 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // `name`. Per-model subclasses get their own when emitted.
     let needs_name = references_class_name(&lc.methods)
         && !lc.methods.iter().any(|m| m.name.as_str() == "name");
-    if !class_methods.is_empty() || needs_name {
+    // Kotlin companions aren't inherited, so a model's `Article.find` /
+    // `Article.exists` (the public AR finders Base defines) don't resolve
+    // through the `: Base()` extends. Synthesize per-model copies that
+    // delegate to the model's own `_adapter_*` companion methods (Db-direct
+    // Level-3). Gated on the model marker `_adapterAll`; each emitted only
+    // when not already defined (so Base, which defines them itself, and
+    // ApplicationRecord, which has no `_adapter_*`, synthesize nothing).
+    let present: HashSet<String> = class_methods.iter().map(|m| member_name(m)).collect();
+    let synth_finders = synth_inherited_finders(&class_name, &present);
+    if !class_methods.is_empty() || needs_name || !synth_finders.is_empty() {
         out.push_str("    companion object {\n");
         if needs_name {
             out.push_str(&format!(
@@ -288,10 +298,70 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             out.push_str(&indent_method(&indent_method(&emit_method(m, ""))));
             out.push('\n');
         }
+        out.push_str(&synth_finders);
         out.push_str("    }\n");
     }
 
     out.push_str("}\n");
+    out
+}
+
+/// Per-model copies of the public AR class methods Base defines, delegating
+/// to the model's own `_adapter_*` companion members (Kotlin companions
+/// aren't inherited). Emitted (indented for a companion body) only for a
+/// Base-subclass model — detected by the `_adapterAll` marker — and only
+/// for finders the class doesn't already define. `where`/`find_by` are
+/// intentionally omitted (they route through the dropped adapter and
+/// real-blog never calls them on a model). The bodies mirror
+/// `active_record/base.rb`, specialized to `T` and using `size - 1` for
+/// `last` (no negative index).
+fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
+    if !present.contains("_adapterAll") {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut emit = |name: &str, body: String| {
+        if !present.contains(name) {
+            out.push_str(&indent_method(&indent_method(&body)));
+            out.push('\n');
+        }
+    };
+    emit("all", format!("fun all(): MutableList<{t}> {{\n    return _adapterAll()\n}}\n"));
+    emit(
+        "find",
+        format!(
+            "fun find(id: Long): {t} {{\n    val result = _adapterFindById(id)\n    if (result == null) {{\n        throw RecordNotFound(\"Couldn't find {t} with id=${{id}}\")\n    }}\n    return result\n}}\n"
+        ),
+    );
+    emit("count", "fun count(): Long {\n    return _adapterCount()\n}\n".to_string());
+    emit(
+        "exists",
+        "fun exists(id: Long): Boolean {\n    return _adapterExistsById(id)\n}\n".to_string(),
+    );
+    emit(
+        "last",
+        format!(
+            "fun last(): {t}? {{\n    val records = all()\n    return if (records.isEmpty()) null else records[records.size - 1]\n}}\n"
+        ),
+    );
+    emit(
+        "destroyAll",
+        format!(
+            "fun destroyAll(): MutableList<{t}> {{\n    val records = all()\n    records.forEach {{ it.destroy() }}\n    return records\n}}\n"
+        ),
+    );
+    emit(
+        "create",
+        format!(
+            "fun create(attrs: MutableMap<String, Any?> = mutableMapOf<String, Any?>()): {t} {{\n    val instance = {t}(attrs)\n    instance.save()\n    return instance\n}}\n"
+        ),
+    );
+    emit(
+        "createBang",
+        format!(
+            "fun createBang(attrs: MutableMap<String, Any?> = mutableMapOf<String, Any?>()): {t} {{\n    val instance = {t}(attrs)\n    if (!instance.save()) {{\n        throw RecordInvalid(instance)\n    }}\n    return instance\n}}\n"
+        ),
+    );
     out
 }
 
@@ -396,6 +466,8 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     };
 
     begin_method(&m.body);
+    // A `Unit` method's guard `return nil` emits a bare `return`.
+    set_returns_unit(!returns_value);
     // A value-returning method with an empty body (Ruby `def x; end` →
     // implicit `nil`) can't emit a bare `return` in Kotlin — a non-Unit
     // function must yield a value. These are the load-bearing-empty AR
