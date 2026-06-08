@@ -207,15 +207,44 @@ pub(super) fn register_method_params(receiver: &str, method: &str, params: HashS
     });
 }
 
-/// True when `Receiver.method` is registered and every `key` (camelCased)
-/// names one of its parameters — i.e. a kwargs hash can splat to named args.
-fn kwargs_match_params(receiver: &str, method: &str, keys: &[String]) -> bool {
-    METHOD_PARAMS.with(|m| {
-        m.borrow()
-            .get(&format!("{receiver}.{}", camel(method)))
-            .map(|params| keys.iter().all(|k| params.contains(k)))
-            .unwrap_or(false)
-    })
+fn method_params_lookup(receiver: &str, method: &str) -> Option<HashSet<String>> {
+    METHOD_PARAMS.with(|m| m.borrow().get(&format!("{receiver}.{}", camel(method))).cloned())
+}
+
+/// Resolve the callee's parameter names for a `recv.method` (or self-send)
+/// call: a `Const` receiver keys directly; a `self`/implicit receiver walks
+/// the current class up its ancestor chain (so a controller's `this.render`
+/// finds `ActionControllerBase.render`). `None` if unregistered.
+fn method_params_for(recv: Option<&Expr>, method: &str) -> Option<HashSet<String>> {
+    match recv.map(|r| &*r.node) {
+        Some(ExprNode::Const { path }) => {
+            let name = type_name(&path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"));
+            method_params_lookup(&name, method)
+        }
+        None | Some(ExprNode::SelfRef) => {
+            let mut cur = Some(CURRENT_CLASS.with(|c| c.borrow().clone()));
+            let mut guard = 0;
+            while let Some(c) = cur {
+                guard += 1;
+                if c.is_empty() || guard > 32 {
+                    break;
+                }
+                if let Some(p) = method_params_lookup(&c, method) {
+                    return Some(p);
+                }
+                cur = CLASS_HIERARCHY
+                    .with(|h| h.borrow().get(&c).and_then(|(parent, _)| parent.clone()));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// True when the resolved callee has every `key` (camelCased) among its
+/// parameters — i.e. a kwargs hash can splat to named args.
+fn kwargs_match_params(recv: Option<&Expr>, method: &str, keys: &[String]) -> bool {
+    method_params_for(recv, method).map(|p| keys.iter().all(|k| p.contains(k))).unwrap_or(false)
 }
 
 /// Register a class's zero-arg instance-method names (camelCased) for the
@@ -1199,9 +1228,16 @@ fn emit_send(
     }
 
     // Constructor: `X.new(...)` → `X(...)`. Implicit-self `new(...)` (a
-    // companion factory) resolves to the current class's constructor.
+    // companion factory) resolves to the current class's constructor. But a
+    // view module with an actual `new` method (the `new.html.erb` render,
+    // `Views::Articles.new`) is a method call — keep it, backtick-escaping
+    // the keyword.
     if method == "new" {
+        let is_method = method_params_for(recv, "new").is_some();
         if let Some(r) = recv {
+            if is_method {
+                return format!("{}.`new`({})", emit_expr(r), emit_call_args(recv, "new", args));
+            }
             return format!("{}({})", emit_expr(r), args_s.join(", "));
         }
         let cls = CURRENT_CLASS.with(|c| c.borrow().clone());
@@ -1470,11 +1506,7 @@ fn emit_send(
     // arguments (`truncate(body, length = 100)`) when the callee is known to
     // have matching named params; otherwise it stays a map literal.
     let name = camel(method);
-    let recv_name = recv.and_then(|r| match &*r.node {
-        ExprNode::Const { path } => path.last().map(|s| s.as_str().to_string()),
-        _ => None,
-    });
-    let call_args = emit_call_args(recv_name.as_deref(), method, args);
+    let call_args = emit_call_args(recv, method, args);
     match recv {
         Some(r) => format!("{}.{name}({call_args})", emit_expr(r)),
         None => format!("{name}({call_args})"),
@@ -1488,8 +1520,8 @@ fn emit_send(
 /// params; otherwise (Map-param callees like `Broadcasts.append`, or
 /// unregistered receivers) the hash stays a map literal. The `kwargs` flag
 /// is set by ingest, so it never misfires on a sym-keyed map arg.
-fn emit_call_args(receiver: Option<&str>, method: &str, args: &[Expr]) -> String {
-    if let (Some(recv), Some((last, head))) = (receiver, args.split_last()) {
+fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    if let Some((last, head)) = args.split_last() {
         if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
             if !entries.is_empty() {
                 let keys: Option<Vec<String>> = entries
