@@ -42,6 +42,27 @@ thread_local! {
     /// is a method call needing `()`. Empty for `object`s (modules), whose
     /// self-sends are always method calls.
     static INSTANCE_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// `"Object.prop"` keys for module/object-level accessor properties
+    /// (`class << self; attr_accessor :adapter` → `ActiveRecord.adapter`).
+    /// A `Const`-receiver zero-arg send keyed here reads as a property
+    /// (`ActiveRecord.adapter`) instead of a call. Populated by a pre-scan
+    /// of all runtime classes before rendering (see
+    /// `library::register_object_accessors`).
+    static OBJECT_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Clear the object-accessor registry (start of an `emit` run).
+pub(super) fn reset_object_accessors() {
+    OBJECT_PROPS.with(|p| p.borrow_mut().clear());
+}
+
+/// Register `Object.prop` as a module/object-level property read.
+pub(super) fn register_object_accessor(object: &str, prop: &str) {
+    OBJECT_PROPS.with(|p| p.borrow_mut().insert(format!("{object}.{}", camel(prop))));
+}
+
+fn is_object_prop(object: &str, method: &str) -> bool {
+    OBJECT_PROPS.with(|p| p.borrow().contains(&format!("{object}.{}", camel(method))))
 }
 
 /// Install the current class's property-name set (see `INSTANCE_PROPS`).
@@ -735,8 +756,13 @@ fn emit_send(
             _ => {}
         }
         // A `Const` receiver (a class / object like `Db`, `Broadcasts`)
-        // means a 0-arg *method* call, not a property read.
+        // means a 0-arg *method* call — unless it names a module/object
+        // accessor property (`ActiveRecord.adapter`), which reads as a
+        // Kotlin property.
         if matches!(&*r.node, ExprNode::Const { .. }) {
+            if is_object_prop(&rs, method) {
+                return format!("{rs}.{}", camel(method));
+            }
             return format!("{rs}.{}()", camel(method));
         }
         // A `self` receiver: a 0-arg send is a Kotlin method call (`()`)

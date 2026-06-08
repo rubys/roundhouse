@@ -67,13 +67,25 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let class_name = name.rsplit("::").next().unwrap_or(name).to_string();
 
     // A Ruby `module` (only module-functions, no instance state) → a
-    // Kotlin `object`. All methods render as plain `fun`.
+    // Kotlin `object`. Class-level `attr_accessor` (from `class << self`)
+    // collapses to an object `var` property; everything else is a `fun`.
     if lc.is_module {
         set_instance_props(HashSet::new());
+        let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("object {class_name} {{\n");
-        for m in &lc.methods {
-            out.push_str(&indent_method(&emit_method(m)));
+        for (n, ty) in &accessor_props {
+            out.push_str(&format!("    {}\n", object_property_decl(n, ty)));
+        }
+        if !accessor_props.is_empty() {
             out.push('\n');
+        }
+        for m in &lc.methods {
+            // Skip the synthetic getter/setter funs — the `var` is the
+            // accessor.
+            if m.kind == AccessorKind::Method {
+                out.push_str(&indent_method(&emit_method(m)));
+                out.push('\n');
+            }
         }
         out.push_str("}\n");
         return out;
@@ -461,6 +473,75 @@ fn expr_children(e: &Expr) -> Vec<&Expr> {
         _ => {}
     }
     v
+}
+
+/// Pre-scan hook (runs before rendering, via the `kotlin_units` transform):
+/// register every module/object-level accessor property so a
+/// `Const`-receiver read of it (`ActiveRecord.adapter`) drops its parens.
+/// Order-independent — the registry is populated for all classes in an
+/// entry before any of them render.
+pub fn register_object_accessors(classes: &[LibraryClass]) {
+    for lc in classes {
+        if !lc.is_module {
+            continue;
+        }
+        let object = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        for prop in class_accessor_props(&lc.methods).keys() {
+            super::expr::register_object_accessor(object, prop);
+        }
+    }
+}
+
+/// Collect class-level (`receiver == Class`) accessor properties — the
+/// `class << self; attr_accessor :x` pairs — as camelCased name → type
+/// (from the reader's RBS return / the writer's param). Instance accessors
+/// are handled separately (they collapse to instance `var`s).
+fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
+    let mut props: BTreeMap<String, Ty> = BTreeMap::new();
+    for m in methods {
+        if m.receiver != MethodReceiver::Class {
+            continue;
+        }
+        match m.kind {
+            AccessorKind::AttributeReader => {
+                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                    props.entry(camel(m.name.as_str())).or_insert_with(|| (**ret).clone());
+                }
+            }
+            AccessorKind::AttributeWriter => {
+                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                    if let Some(p) = params.first() {
+                        let base = m.name.as_str().trim_end_matches('=');
+                        props.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                    }
+                }
+            }
+            AccessorKind::Method => {}
+        }
+    }
+    props
+}
+
+/// Declaration for an object-level accessor property. A non-null reference
+/// type (the global adapter slot) is `lateinit var` — set once at boot, so
+/// a nullable default would force `!!` at every read; primitives/nullables
+/// fall back to a defaulted `var`.
+fn object_property_decl(name: &str, ty: &Ty) -> String {
+    let kt = kotlin_ty(ty);
+    if can_lateinit(ty) {
+        format!("lateinit var {name}: {kt}")
+    } else {
+        format!("var {name}: {kt} = {}", default_for(ty))
+    }
+}
+
+/// `lateinit` is legal only for non-null, non-primitive types.
+fn can_lateinit(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => false,
+        _ => true,
+    }
 }
 
 /// True when a method body is empty (`def x; end` → an empty `Seq`).

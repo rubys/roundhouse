@@ -35,9 +35,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.extend(package::scaffold());
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` → Kotlin under
-    // `src/main/kotlin/`. Grown one file at a time (Phase 3).
-    let runtime_units = crate::runtime_loader::kotlin_units(|_path, classes| classes)
-        .expect("kotlin runtime transpile failed (Ruby source error)");
+    // `src/main/kotlin/`. Grown one file at a time (Phase 3). The transform
+    // runs as a pre-scan before each entry renders: it registers
+    // module/object-level accessors (e.g. `ActiveRecord.adapter`) so reads
+    // of them drop their call parens.
+    expr::reset_object_accessors();
+    let runtime_units = crate::runtime_loader::kotlin_units(|_path, classes| {
+        library::register_object_accessors(&classes);
+        classes
+    })
+    .expect("kotlin runtime transpile failed (Ruby source error)");
     for unit in runtime_units {
         files.push(EmittedFile { path: unit.out_path, content: unit.content });
     }
