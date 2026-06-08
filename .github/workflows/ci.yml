@@ -154,6 +154,33 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
+  # toolchain-kotlin: emit the real-blog Kotlin/Gradle project and
+  # `gradle compileKotlin` it (full type-check against the real Javalin +
+  # sqlite-jdbc classpath — the analog of crystal's --no-codegen). setup-java
+  # provides the JDK (the test reads JAVA_HOME); setup-gradle provides a
+  # `gradle` on PATH (the emitted project ships no wrapper).
+  toolchain-kotlin:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: cargo test --test kotlin_toolchain -- --ignored
+        run: cargo test --test kotlin_toolchain -- --ignored --nocapture
+
   # toolchain-typescript: tsc parity + node:test on real-blog,
   # under both the default (`node-sync`, better-sqlite3) profile
   # AND the `node-async` libsql profile that exercises async
@@ -559,6 +586,37 @@ jobs:
           crystal: latest
       - name: scripts/compare crystal
         run: scripts/compare crystal
+
+  # compare-kotlin: DOM-diff the live Javalin server against Rails. Needs Ruby
+  # (Rails reference) + a JDK & Gradle (target build/boot via scripts/compare's
+  # `gradle installDist` + launcher). scripts/compare resolves the JDK from
+  # JAVA_HOME (set by setup-java) via its KOTLIN_JAVA_HOME fallback.
+  compare-kotlin:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: scripts/compare kotlin
+        run: scripts/compare kotlin
 
   compare-typescript:
     needs: generate-fixture
