@@ -105,6 +105,88 @@ thread_local! {
     /// hoist to the method top (emitted by `library::emit_method`); the
     /// names are pre-seeded into `DECLARED` so every assignment is a bare `=`.
     static HOISTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// camelCased instance-property names proven non-null by an enclosing
+    /// `if (!prop.nil?)` guard — read with a `!!` so Kotlin accepts them in a
+    /// non-null position (it won't smart-cast a mutable property). Scoped to
+    /// the guarded branch by `emit_if`.
+    static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Append `!!` to a property read proven non-null by an enclosing guard.
+fn nonnull_read(name: String) -> String {
+    if NONNULL_PROPS.with(|p| p.borrow().contains(&name)) {
+        format!("{name}!!")
+    } else {
+        name
+    }
+}
+
+/// camelCased name of a property/local read expression (`@x` or `x`), when
+/// it names a known instance property — else `None`.
+fn read_prop_name(e: &Expr) -> Option<String> {
+    let name = match &*e.node {
+        ExprNode::Ivar { name } => camel(name.as_str()),
+        ExprNode::Var { name, .. } => camel(name.as_str()),
+        // An accessor read lowers to a zero-arg (implicit-)self send.
+        ExprNode::Send { recv, method, args, .. }
+            if args.is_empty()
+                && matches!(recv.as_ref().map(|r| &*r.node), None | Some(ExprNode::SelfRef)) =>
+        {
+            camel(method.as_str())
+        }
+        _ => return None,
+    };
+    is_instance_prop(&name).then_some(name)
+}
+
+/// Properties a `<prop>.nil?` test names, when `prop` is a known instance
+/// property. A bare nil-test proves the prop non-null in the *else* branch;
+/// negated (`!prop.nil?`) proves it in the *then* branch.
+fn nil_test_prop(e: &Expr) -> Option<String> {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+        if method.as_str() == "nil?" && args.is_empty() {
+            return read_prop_name(r);
+        }
+    }
+    None
+}
+
+/// Collect the props an `if` condition proves non-null in each branch:
+/// `then_nn` (the cond holds) and `else_nn` (it doesn't). Handles
+/// `!prop.nil?` (→ then), `prop.nil?` (→ else), and `&&` of such.
+fn guarded_nonnull(cond: &Expr, then_nn: &mut Vec<String>, else_nn: &mut Vec<String>) {
+    // Logical-not has two IR shapes: `Send{recv:None, "!", [x]}` and the
+    // postfix `Send{recv:Some(x), "!", []}`. Extract the negated operand.
+    let negated = match &*cond.node {
+        ExprNode::Send { recv: None, method, args, .. }
+            if method.as_str() == "!" && args.len() == 1 =>
+        {
+            Some(&args[0])
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "!" && args.is_empty() =>
+        {
+            Some(r)
+        }
+        _ => None,
+    };
+    if let Some(inner) = negated {
+        if let Some(n) = nil_test_prop(inner) {
+            then_nn.push(n);
+        }
+        return;
+    }
+    match &*cond.node {
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            guarded_nonnull(left, then_nn, else_nn);
+            guarded_nonnull(right, then_nn, else_nn);
+        }
+        _ => {
+            if let Some(n) = nil_test_prop(cond) {
+                else_nn.push(n);
+            }
+        }
+    }
 }
 
 /// The hoisted-var declaration lines computed for the current method (see
@@ -625,9 +707,9 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn emit_node(n: &ExprNode, e: &Expr) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => camel(name.as_str()),
+        ExprNode::Var { name, .. } => nonnull_read(camel(name.as_str())),
         // Instance variable → property reference.
-        ExprNode::Ivar { name } => camel(name.as_str()),
+        ExprNode::Ivar { name } => nonnull_read(camel(name.as_str())),
         ExprNode::SelfRef => "this".to_string(),
         // Classes/modules are emitted flat in `package roundhouse`, so a
         // qualified ref (`ActionDispatch::Router::MatchResult`) resolves
@@ -804,13 +886,34 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
 
 fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     let c = emit_expr(cond);
-    let then = indent(&emit_expr(then_branch));
+    // Properties the condition proves non-null are read with `!!` in the
+    // branch where they hold (Kotlin won't smart-cast a mutable property).
+    let (mut then_nn, mut else_nn) = (Vec::new(), Vec::new());
+    guarded_nonnull(cond, &mut then_nn, &mut else_nn);
+    let then = with_nonnull(&then_nn, || indent(&emit_expr(then_branch)));
     if is_empty_branch(else_branch) {
         format!("if ({c}) {{\n{then}\n}}")
     } else {
-        let els = indent(&emit_expr(else_branch));
+        let els = with_nonnull(&else_nn, || indent(&emit_expr(else_branch)));
         format!("if ({c}) {{\n{then}\n}} else {{\n{els}\n}}")
     }
+}
+
+/// Run `f` with `props` added to `NONNULL_PROPS` (restoring afterward), so
+/// reads of those properties inside `f` get a `!!`.
+fn with_nonnull<F: FnOnce() -> String>(props: &[String], f: F) -> String {
+    let added: Vec<String> = NONNULL_PROPS.with(|p| {
+        let mut set = p.borrow_mut();
+        props.iter().filter(|n| set.insert((*n).clone())).cloned().collect()
+    });
+    let out = f();
+    NONNULL_PROPS.with(|p| {
+        let mut set = p.borrow_mut();
+        for n in &added {
+            set.remove(n);
+        }
+    });
+    out
 }
 
 fn emit_case(scrutinee: &Expr, arms: &[Arm]) -> String {
