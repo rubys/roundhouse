@@ -21,8 +21,8 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
 use super::expr::{
-    begin_method, emit_expr, set_current_class, set_instance_prop_types, set_instance_props,
-    set_param_names, set_return_label, set_returns_unit,
+    begin_method, emit_expr, register_method_params, set_current_class, set_instance_prop_types,
+    set_instance_props, set_param_names, set_return_label, set_returns_unit,
 };
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -91,6 +91,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .and_then(|m| m.enclosing_class.as_ref())
         .map(|s| s.as_str().rsplit("::").next().unwrap_or(s.as_str()).to_string())
         .unwrap_or_default();
+    register_params_for(&name, methods);
     let mut out = format!("object {name} {{\n");
     // Module-level `@ivar` state (e.g. ViewHelpers' `@slots = {}`) → private
     // object properties; reads of them in method bodies resolve as property
@@ -141,6 +142,7 @@ fn emit_object_body_ivars(
 pub fn emit_library_class(lc: &LibraryClass) -> String {
     let name = lc.name.0.as_str();
     let class_name = name.rsplit("::").next().unwrap_or(name).to_string();
+    register_params_for(&class_name, &lc.methods);
 
     // A Ruby `module` (only module-functions, no instance state) → a
     // Kotlin `object`. Class-level `attr_accessor` (from `class << self`)
@@ -439,6 +441,18 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
         ),
     );
     out
+}
+
+/// Register every method's parameter names under `receiver.method` for the
+/// kwargs-vs-map call-site decision (see `expr::METHOD_PARAMS`).
+fn register_params_for(receiver: &str, methods: &[MethodDef]) {
+    for m in methods {
+        register_method_params(
+            receiver,
+            m.name.as_str(),
+            m.params.iter().map(|p| camel(p.name.as_str())).collect(),
+        );
+    }
 }
 
 fn indent_method(s: &str) -> String {

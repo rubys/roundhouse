@@ -46,6 +46,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // of them drop their call parens.
     expr::reset_object_accessors();
     expr::reset_class_hierarchy();
+    expr::reset_method_params();
     let runtime_units = crate::runtime_loader::kotlin_units(|_path, classes| {
         library::register_object_accessors(&classes);
         // Register the runtime classes (Base, …) for override resolution

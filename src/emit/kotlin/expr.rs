@@ -89,6 +89,38 @@ thread_local! {
     /// `article.title` (column property) stays `article.title`.
     static CLASS_INSTANCE_METHODS: RefCell<HashMap<String, HashSet<String>>> =
         RefCell::new(HashMap::new());
+    /// `"Receiver.method"` → the callee's camelCased parameter names. Used
+    /// to decide whether a call-site `kwargs:true` hash splats into Kotlin
+    /// named arguments (`truncate(body, length = 100)`, when the keys are a
+    /// subset of these params) or stays a map literal (`Broadcasts.append`,
+    /// whose lone param is a `Map`). An unregistered receiver (e.g. the
+    /// hand-written `Broadcasts` primitive) falls back to the map literal —
+    /// the safe default.
+    static METHOD_PARAMS: RefCell<HashMap<String, HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Clear the method-param registry (start of an `emit` run).
+pub(super) fn reset_method_params() {
+    METHOD_PARAMS.with(|m| m.borrow_mut().clear());
+}
+
+/// Register `Receiver.method` → its camelCased parameter names.
+pub(super) fn register_method_params(receiver: &str, method: &str, params: HashSet<String>) {
+    METHOD_PARAMS.with(|m| {
+        m.borrow_mut().insert(format!("{receiver}.{}", camel(method)), params);
+    });
+}
+
+/// True when `Receiver.method` is registered and every `key` (camelCased)
+/// names one of its parameters — i.e. a kwargs hash can splat to named args.
+fn kwargs_match_params(receiver: &str, method: &str, keys: &[String]) -> bool {
+    METHOD_PARAMS.with(|m| {
+        m.borrow()
+            .get(&format!("{receiver}.{}", camel(method)))
+            .map(|params| keys.iter().all(|k| params.contains(k)))
+            .unwrap_or(false)
+    })
 }
 
 /// Register a class's zero-arg instance-method names (camelCased) for the
@@ -1143,10 +1175,52 @@ fn emit_send(
         return format!("{base}({}) {lam}{tail}", args_s.join(", "));
     }
 
-    // General call.
+    // General call. A trailing `kwargs: true` hash splats into Kotlin named
+    // arguments (`truncate(body, length = 100)`) when the callee is known to
+    // have matching named params; otherwise it stays a map literal.
     let name = camel(method);
+    let recv_name = recv.and_then(|r| match &*r.node {
+        ExprNode::Const { path } => path.last().map(|s| s.as_str().to_string()),
+        _ => None,
+    });
+    let call_args = emit_call_args(recv_name.as_deref(), method, args);
     match recv {
-        Some(r) => format!("{}.{name}({})", emit_expr(r), args_s.join(", ")),
-        None => format!("{name}({})", args_s.join(", ")),
+        Some(r) => format!("{}.{name}({call_args})", emit_expr(r)),
+        None => format!("{name}({call_args})"),
     }
+}
+
+/// Render a call's argument list, splatting a trailing keyword-args hash
+/// (`Hash { kwargs: true }`) into Kotlin named arguments — `key = value` per
+/// entry, the `key` camelCased to match the parameter. Only splats when the
+/// callee (`receiver.method`) is registered and the keys are a subset of its
+/// params; otherwise (Map-param callees like `Broadcasts.append`, or
+/// unregistered receivers) the hash stays a map literal. The `kwargs` flag
+/// is set by ingest, so it never misfires on a sym-keyed map arg.
+fn emit_call_args(receiver: Option<&str>, method: &str, args: &[Expr]) -> String {
+    if let (Some(recv), Some((last, head))) = (receiver, args.split_last()) {
+        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+            if !entries.is_empty() {
+                let keys: Option<Vec<String>> = entries
+                    .iter()
+                    .map(|(k, _)| match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            Some(camel(value.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(keys) = keys {
+                    if kwargs_match_params(recv, method, &keys) {
+                        let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
+                        for (k, (_, v)) in keys.iter().zip(entries.iter()) {
+                            parts.push(format!("{k} = {}", emit_expr(v)));
+                        }
+                        return parts.join(", ");
+                    }
+                }
+            }
+        }
+    }
+    args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
 }
