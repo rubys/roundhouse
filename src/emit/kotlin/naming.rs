@@ -46,7 +46,15 @@ fn is_kotlin_keyword(s: &str) -> bool {
 /// snake_case (with optional trailing `?`/`!` and leading underscores) →
 /// camelCase, keyword-escaped. `created_at` → `createdAt`, `from_stmt` →
 /// `fromStmt`, `step?` → `step`, `_adapter_insert` → `_adapterInsert`.
+///
+/// A trailing `!` (bang method) gets a `Bang` suffix so `save!` becomes
+/// `saveBang` and doesn't collide with `save` once the punctuation is
+/// dropped — the same disambiguation the TypeScript emitter does with its
+/// `_bang` stem. Predicates (`?`) just drop the suffix; two methods that
+/// differ only by `?` don't arise (and `valid?`/`persisted?` happily
+/// coexist with same-named properties in Kotlin).
 pub fn camel(raw: &str) -> String {
+    let bang = raw.ends_with('!');
     let trimmed = raw.trim_end_matches(['?', '!']);
     let leading_us = trimmed.len() - trimmed.trim_start_matches('_').len();
     let core = &trimmed[leading_us..];
@@ -73,6 +81,8 @@ pub fn camel(raw: &str) -> String {
 
     if out.is_empty() || out.chars().all(|c| c == '_') {
         out = trimmed.to_string();
+    } else if bang {
+        out.push_str("Bang");
     }
 
     if is_kotlin_keyword(&out) {

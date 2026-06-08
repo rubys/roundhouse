@@ -944,9 +944,11 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // ActiveRecord { lateinit var adapter: AdapterInterface }`, and
     // `ActiveRecord.adapter` reads drop their parens (object-accessor
     // registry, pre-scanned via the kotlin_units transform) — that cleared
-    // the adapter cascade. base.kt residual now ~19 errors (from ~107).
-    // Remaining, all documented later items: `save!`/`create!` collide on
-    // the `!`-stripped name (dup `fun create`/`save`); `self.name`
+    // the adapter cascade. Bang-name DONE: `save!`/`create!` camel to
+    // `saveBang`/`createBang` (trailing `!` → `Bang`, mirroring TS's
+    // `_bang` stem), no longer colliding with `save`/`create`. base.kt
+    // residual now ~14 errors (from ~107).
+    // Remaining, all documented later items: `self.name`
     // class-name reflection → shim; `self.class.X` → companion dispatch;
     // `new(attrs)` → `Base(attrs)`; `conditions.to_h` drop;
     // `Time.now.utc.iso8601` java.time shim; empty `{}` return →
