@@ -9,7 +9,16 @@
 //!
 //! Grown one primitive at a time, mirroring the runtime-transpile order:
 //! Time first (the only thing standing between `ActiveRecordBase.kt` and a
-//! clean compile), then Db / Server / ParamValue / the adapter.
+//! clean compile), then Db / ParamValue (both self-contained and added
+//! here), then Server / the adapter once controllers + a `Main` entry
+//! exist (Server is coupled to `ArticlesController`, so it's held back to
+//! keep every emitted primitive independently compileable).
+//!
+//! Each primitive is ported from the hand-written Phase R reference under
+//! `kotlin-reference/src/main/kotlin/runtime/`, adapted where the emitter's
+//! rendering differs from the reference's hand-written call sites (notably:
+//! the emitter renders `Ty::Int` literals with an `L` suffix, so `Db`'s
+//! column-index params are `Long` here, not the reference's `Int`).
 
 use std::path::PathBuf;
 
@@ -47,10 +56,153 @@ class TimeInstant(private val dt: OffsetDateTime) {
 }
 "#;
 
+/// The sqlite primitive layer the lowered model IR dispatches against
+/// (`Db.prepare` / `Db.step` / `Db.columnInt` / `Db.columnText` /
+/// `Db.finalize` / `Db.exec` / `Db.escape*`). Ported from
+/// `kotlin-reference/runtime/Db.kt`, with one adaptation: the emitter
+/// renders `Ty::Int` literals with an `L` suffix (`Db.columnInt(stmt, 0L)`),
+/// so the column-index params are `Long` and shifted to JDBC's 1-based,
+/// `Int`-typed column index internally.
+const DB_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
+// The sqlite primitive layer the lowered model IR dispatches against.
+// Mirrors `runtime/crystal/db.cr` and `runtime/typescript/db.ts`: an opaque
+// Long stmt id indexes a table of open JDBC ResultSets, and `step` /
+// `columnInt` / `columnText` read the cursor. The lowered `_adapter_*` model
+// emit calls exactly this surface.
+//
+// xerial `sqlite-jdbc` is the locked driver. JDBC columns are 1-based, and
+// the emitter passes a zero-based `Long` index (Int literals carry an `L`
+// suffix), so the index is shifted and narrowed to `Int` here.
+
+package roundhouse
+
+import java.io.File
+import java.sql.Connection
+import java.sql.DriverManager
+import java.sql.PreparedStatement
+import java.sql.ResultSet
+
+object Db {
+    private var db: Connection? = null
+    private val statements = HashMap<Long, ResultSet>()
+    private val owners = HashMap<Long, PreparedStatement>()
+    private var nextId: Long = 0
+    private var lastInsertRowid: Long = 0
+    private var changes: Long = 0
+
+    private fun conn(): Connection = db ?: error("Db not opened")
+
+    fun openProductionDb(path: String) {
+        resetStatements()
+        db?.close()
+        File(path).parentFile?.mkdirs()
+        db = DriverManager.getConnection("jdbc:sqlite:$path")
+    }
+
+    // Run one-shot DDL/INSERT/UPDATE/DELETE; capture rowid + changes.
+    fun exec(sql: String) {
+        conn().createStatement().use { st ->
+            st.executeUpdate(sql)
+            conn().createStatement().use { c ->
+                c.executeQuery("SELECT last_insert_rowid(), changes()").use { rs ->
+                    if (rs.next()) {
+                        lastInsertRowid = rs.getLong(1)
+                        changes = rs.getLong(2)
+                    }
+                }
+            }
+        }
+    }
+
+    // Prepare a SELECT, returning an opaque integer handle.
+    fun prepare(sql: String): Long {
+        val ps = conn().prepareStatement(sql)
+        val rs = ps.executeQuery()
+        nextId += 1
+        statements[nextId] = rs
+        owners[nextId] = ps
+        return nextId
+    }
+
+    // Advance the cursor; false (snapshot cleared) when exhausted.
+    fun step(stmtId: Long): Boolean {
+        val rs = statements[stmtId] ?: return false
+        return rs.next()
+    }
+
+    // Read an integer column at a zero-based index. NULL coerces to 0.
+    fun columnInt(stmtId: Long, i: Long): Long {
+        val rs = statements[stmtId]!!
+        val v = rs.getLong((i + 1).toInt())
+        return if (rs.wasNull()) 0L else v
+    }
+
+    // Read a text column at a zero-based index. NULL coerces to "".
+    fun columnText(stmtId: Long, i: Long): String {
+        val rs = statements[stmtId]!!
+        return rs.getString((i + 1).toInt()) ?: ""
+    }
+
+    // Release the ResultSet + statement. Idempotent.
+    fun finalize(stmtId: Long) {
+        statements.remove(stmtId)?.close()
+        owners.remove(stmtId)?.close()
+    }
+
+    fun lastInsertRowid(): Long = lastInsertRowid
+    fun changes(): Long = changes
+
+    // SQL-quote helpers the lowered adapter emit inlines.
+    fun escapeString(s: String): String = "'" + s.replace("'", "''") + "'"
+    fun escapeInt(n: Long): String = n.toString()
+    fun escapeBool(b: Boolean): String = if (b) "1" else "0"
+
+    private fun resetStatements() {
+        statements.values.forEach { runCatching { it.close() } }
+        owners.values.forEach { runCatching { it.close() } }
+        statements.clear()
+        owners.clear()
+        nextId = 0
+        lastInsertRowid = 0
+        changes = 0
+    }
+}
+"#;
+
+/// The recursive params value type — the closed union Ruby's untyped nested
+/// params Hash lowers to. Ported verbatim from
+/// `kotlin-reference/runtime/ParamValue.kt`; self-contained (no consumers
+/// emitted yet, but it locks the shape the params layer targets).
+const PARAM_VALUE_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
+// The recursive params value type — the Kotlin analog of
+// `runtime/crystal/param_value.cr` (`String | Hash | Array`) and
+// `runtime/typescript/param_value.ts`. Ruby's untyped nested params Hash
+// lowers to this closed union; `<Resource>Params.from_raw` narrows via
+// `is Str` / `is Dict` at access sites.
+
+package roundhouse
+
+sealed interface ParamValue {
+    @JvmInline value class Str(val value: String) : ParamValue
+    @JvmInline value class Dict(val value: MutableMap<String, ParamValue>) : ParamValue
+    @JvmInline value class Arr(val value: MutableList<ParamValue>) : ParamValue
+}
+"#;
+
 /// The hand-written runtime primitives, emitted under `src/main/kotlin/`.
 pub fn primitives() -> Vec<EmittedFile> {
-    vec![EmittedFile {
-        path: PathBuf::from("src/main/kotlin/Time.kt"),
-        content: TIME_KT.to_string(),
-    }]
+    vec![
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Time.kt"),
+            content: TIME_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Db.kt"),
+            content: DB_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/ParamValue.kt"),
+            content: PARAM_VALUE_KT.to_string(),
+        },
+    ]
 }
