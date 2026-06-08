@@ -105,9 +105,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if let Some(f) = library::emit_function_module(&importmap_funcs) {
         files.push(f);
     }
-    let view_lcs =
-        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras);
-    for lc in merge_by_module(view_lcs) {
+    let view_lcs = crate::lower::lower_views_to_library_classes(
+        &app.views,
+        app,
+        view_lower_extras.clone(),
+    );
+    for lc in merge_by_module(view_lcs.clone()) {
         let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
         files.push(EmittedFile {
             path: std::path::PathBuf::from(format!("src/main/kotlin/app/views/{last}.kt")),
@@ -115,8 +118,48 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // Phase 4+: hand-written ViewHelpers/RouteHelpers + controllers +
-    // Server.kt (Javalin) + Main.kt.
+    // Controllers → src/main/kotlin/app/controllers/<Name>.kt. Lowered with
+    // the full registry (models + routes + importmap + views) so action
+    // bodies dispatch `Article.all`, `Views::Articles.index(...)`, route
+    // helpers, etc. Synthesized `<Resource>Params` siblings (origin-tagged)
+    // route to app/models alongside the model classes.
+    let mut controller_extras = view_lower_extras;
+    controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
+    let assocs = crate::lower::model_associations::compute_association_graph(app);
+    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
+        &app.controllers,
+        controller_extras,
+        Some(&app.schema),
+        &app.views,
+        &assocs,
+    );
+    // Synthesize `ApplicationController` when a controller extends it but the
+    // app doesn't define one (Rails scaffolds assume it; minimal fixtures
+    // skip it).
+    let needs_app_controller = app
+        .controllers
+        .iter()
+        .any(|c| matches!(c.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationController"))
+        && !app.controllers.iter().any(|c| c.name.0.as_str() == "ApplicationController");
+    if needs_app_controller {
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(
+                "src/main/kotlin/app/controllers/ApplicationController.kt",
+            ),
+            content: "package roundhouse\n\nopen class ApplicationController\n".to_string(),
+        });
+    }
+    library::register_class_hierarchy(&controller_lcs);
+    for lc in &controller_lcs {
+        let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        let dir = if lc.origin.is_some() { "models" } else { "controllers" };
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(format!("src/main/kotlin/app/{dir}/{last}.kt")),
+            content: format!("package roundhouse\n\n{}", library::emit_library_class(lc)),
+        });
+    }
+
+    // Phase 5+: hand-written Server.kt (Javalin) + Main.kt entrypoint.
     files
 }
 
