@@ -185,6 +185,48 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // map (app-specific) and hands them to the Server primitive.
     files.push(emit_main(app));
 
+    // Test modules → src/test/kotlin/<Stem>.kt — one JUnit-5 class per
+    // ingested TestModule. Emitted only when the App carries tests (the
+    // framework_tests_kotlin gate; production builds skip the directory).
+    // The body-typer needs the framework RBS + app/runtime ClassInfo to
+    // dispatch precisely against framework methods (`Inflector.pluralize`,
+    // `Article.find`, …); without it `Ty::Untyped → Any?` collapse loses
+    // the typed dispatch. Same recipe as the Crystal/TS test-emit branch.
+    if !app.test_modules.is_empty() {
+        let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = Vec::new();
+        for (class_id, methods) in &app.rbs_signatures {
+            let mut info = crate::analyze::ClassInfo::default();
+            for (m_name, m_ty) in methods {
+                info.instance_methods.insert(m_name.clone(), m_ty.clone());
+            }
+            test_extras.push((class_id.clone(), info));
+        }
+        // App-side classes (models, views, controllers) so test bodies
+        // dispatch on real receivers. Empty for the inflector slice, but
+        // threaded through for the controller/model test slices to come.
+        test_extras.extend(crate::lower::extras_from_lcs(&model_lcs));
+        test_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
+        test_extras.extend(crate::lower::extras_from_lcs(&controller_lcs));
+
+        let test_lowered = crate::lower::lower_test_modules_with_inner(
+            &app.test_modules,
+            &app.fixtures,
+            &app.models,
+            test_extras,
+        );
+        for lowered in &test_lowered {
+            let name = lowered.test_class.name.0.as_str();
+            let last = name.rsplit("::").next().unwrap_or(name);
+            files.push(EmittedFile {
+                path: std::path::PathBuf::from(format!("src/test/kotlin/{last}.kt")),
+                content: format!(
+                    "package roundhouse\n\n{}",
+                    library::emit_test_class(&lowered.test_class, &lowered.constants)
+                ),
+            });
+        }
+    }
+
     files
 }
 
@@ -240,7 +282,7 @@ fn emit_main(app: &App) -> EmittedFile {
          \nfun main() {{\n\
          \x20\x20\x20\x20val dbPath = System.getenv(\"BLOG_DB\") ?: System.getenv(\"DATABASE_PATH\") ?: \"storage/development.sqlite3\"\n\
          \x20\x20\x20\x20val port = (System.getenv(\"PORT\") ?: \"9000\").toInt()\n\
-         \x20\x20\x20\x20val routes = mutableListOf(\n{}\n    )\n\
+         \x20\x20\x20\x20val routes = mutableListOf<Route>(\n{}\n    )\n\
          \x20\x20\x20\x20val controllers: Map<String, () -> ActionControllerBase> = mapOf(\n{}\n    )\n\
          \x20\x20\x20\x20Server.start(dbPath, port, routes, controllers, {})\n\
          }}\n",

@@ -416,6 +416,86 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     out
 }
 
+/// Render a lowered test class (`InflectorTest`, …) as a JUnit-5 test file
+/// body. Mirrors the instance-class path of `emit_library_class` but drops
+/// the AR machinery (no companion finders, no `open`/inheritance modifiers):
+/// a test class is a leaf. Each `test_*` instance method gets an `@Test`
+/// annotation so JUnit's platform discovers it; setup/helper methods emit
+/// plain. Assertion bodies were already rewritten to inline `throw` by the
+/// `inline_assertions` lowerer, so a failing assertion surfaces as a JUnit
+/// failure with no per-target assertion shim needed.
+///
+/// `constants` (class-body `TABLE = [...]`) hoist to file scope above the
+/// class — same lift as the Crystal/Ruby test emit. Body-only ivars (`@article`
+/// set in `setup`) become `var` properties so cross-method reads resolve.
+pub fn emit_test_class(
+    lc: &LibraryClass,
+    constants: &[(crate::ident::Symbol, Expr)],
+) -> String {
+    let class_name = type_name(lc.name.0.as_str());
+    register_params_for(&class_name, &lc.methods);
+    super::expr::set_object_tl_fields(HashSet::new());
+
+    let mut out = String::new();
+
+    // File-scope constants (hoisted above the class).
+    for (name, value) in constants {
+        out.push_str(&format!("val {} = {}\n", name.as_str(), emit_expr(value)));
+    }
+    if !constants.is_empty() {
+        out.push('\n');
+    }
+
+    // Body-only ivars (e.g. `@article` assigned in `setup`) → `var`
+    // properties so reads in other test methods resolve.
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
+
+    out.push_str(&format!("class {class_name} {{\n"));
+    for n in body_ivars.keys() {
+        match inferred_ivar_types.get(n) {
+            Some(ty) => out.push_str(&format!("    {}\n", render_member("", n, ty))),
+            None => out.push_str(&format!("    var {n}: Any? = null\n")),
+        }
+    }
+    if !body_ivars.is_empty() {
+        out.push('\n');
+    }
+
+    // Property registry so `self.@article` reads emit as a property name.
+    let instance_props: HashSet<String> = body_ivars.keys().cloned().collect();
+    set_instance_props(instance_props);
+    let prop_ty_map: std::collections::HashMap<String, Ty> = inferred_ivar_types
+        .iter()
+        .map(|(n, t)| (n.clone(), t.clone()))
+        .collect();
+    set_instance_prop_types(prop_ty_map);
+    set_current_class(&class_name);
+
+    for m in &lc.methods {
+        if m.receiver != MethodReceiver::Instance || m.kind != AccessorKind::Method {
+            continue;
+        }
+        if m.name.as_str() == "initialize" {
+            continue;
+        }
+        // JUnit discovery: annotate the `test_*` methods. `setup`/helpers
+        // stay plain (called by the test body, not the platform).
+        let rendered = if m.name.as_str().starts_with("test_") {
+            format!("@org.junit.jupiter.api.Test\n{}", emit_method(m, ""))
+        } else {
+            emit_method(m, "")
+        };
+        out.push_str(&indent_method(&rendered));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// Per-model copies of the public AR class methods Base defines, delegating
 /// to the model's own `_adapter_*` companion members (Kotlin companions
 /// aren't inherited). Emitted (indented for a companion body) only for a

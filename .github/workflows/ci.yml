@@ -255,6 +255,32 @@ jobs:
       - name: cargo test --test framework_tests_crystal -- --ignored
         run: cargo test --test framework_tests_crystal -- --ignored --nocapture
 
+  framework-tests-kotlin:
+    # Per-target framework-test conformance gate for the Kotlin target.
+    # Transpiles runtime/ruby/test/**/*_test.rb through kotlin::emit and
+    # runs the emitted JUnit-5 spec under `gradle test`. Independent of the
+    # real-blog fixture (each test builds a minimal in-process App with a
+    # single TestModule), so this parallelizes freely against
+    # generate-fixture / toolchain-* jobs. Complements toolchain-kotlin
+    # (which only compiles real-blog): this one actually *runs* assertions,
+    # catching Kotlin-runtime adapter drift compile-clean can't see. Same
+    # JDK + Gradle setup as toolchain-kotlin. Sibling of
+    # framework-tests-typescript / framework-tests-crystal.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: cargo test --test framework_tests_kotlin -- --ignored
+        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
+
   framework-tests-ruby:
     # Per-target framework-test conformance gate for the Ruby target
     # (CRuby/MRI). Transpiles runtime/ruby/test/**/*_test.rb through
