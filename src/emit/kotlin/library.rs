@@ -246,6 +246,16 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .map(|p| type_name(p.0.as_str()))
         .map(|p| super::expr::ancestor_members(&p))
         .unwrap_or_default();
+    // Properties already declared by an ancestor (e.g. a controller's
+    // `params`/`flash`/`status` from `ActionController::Base`). The subclass
+    // must NOT redeclare them (that would be an override with a possibly
+    // different type) — it inherits the slot.
+    let inherited_props: HashSet<String> = lc
+        .parent
+        .as_ref()
+        .map(|p| type_name(p.0.as_str()))
+        .map(|p| super::expr::ancestor_props(&p))
+        .unwrap_or_default();
     let member_modifier = |name: &str| -> &'static str {
         if inherited.contains(name) {
             "override "
@@ -270,6 +280,9 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .map(|m| m.params.iter().map(|p| camel(p.name.as_str())).collect())
         .unwrap_or_default();
     for (n, ty) in &prop_types {
+        if inherited_props.contains(n) && !ctor_param_names.contains(n) {
+            continue; // inherited slot — don't redeclare
+        }
         if ctor_param_names.contains(n) {
             // Constructor-param-backed: assigned in the `init` block, no
             // declaration initializer. Kotlin forbids `open` on a
@@ -283,7 +296,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
-        if !prop_types.contains_key(n) {
+        if !prop_types.contains_key(n) && !inherited_props.contains(n) {
             let m = member_modifier(n);
             match inferred_ivar_types.get(n) {
                 Some(ty) => out.push_str(&format!("    {}\n", render_member(m, n, ty))),
@@ -298,8 +311,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // The class's property names (accessor-backed + body ivars), so a
     // `self.x` zero-arg send in a body emits as a property read; everything
     // else gets `()`. Active for the rest of this function's method emit.
-    let instance_props: HashSet<String> =
-        prop_types.keys().chain(body_ivars.keys()).cloned().collect();
+    let instance_props: HashSet<String> = prop_types
+        .keys()
+        .chain(body_ivars.keys())
+        .chain(inherited_props.iter())
+        .cloned()
+        .collect();
     set_instance_props(instance_props);
     // Column scalar types, so a `self.<col> = row[k]`/`attrs[k]` write
     // coerces the untyped value to the property's type — plus inferred

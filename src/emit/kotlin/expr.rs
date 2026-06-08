@@ -326,6 +326,32 @@ pub(super) fn ancestor_members(class_name: &str) -> HashSet<String> {
     out
 }
 
+/// The instance *property* names visible from `class_name` upward — each
+/// ancestor's members minus its methods. A controller's `self.request_format`
+/// (a property defined on `ActionController::Base`) must read as a property,
+/// not a `()` call, even though it isn't in the subclass's own prop set.
+pub(super) fn ancestor_props(class_name: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let (members, parent) = CLASS_HIERARCHY.with(|h| {
+            h.borrow()
+                .get(&name)
+                .map(|(p, m)| (m.clone(), p.clone()))
+                .unwrap_or_default()
+        });
+        let methods = CLASS_INSTANCE_METHODS.with(|m| m.borrow().get(&name).cloned().unwrap_or_default());
+        out.extend(members.into_iter().filter(|m| !methods.contains(m)));
+        cur = parent;
+    }
+    out
+}
+
 /// Set the class name used to resolve implicit-self `new` (see
 /// `CURRENT_CLASS`); `""` disables the rewrite.
 pub(super) fn set_current_class(name: &str) {
