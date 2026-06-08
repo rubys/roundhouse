@@ -21,8 +21,9 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
 use super::expr::{
-    begin_method, emit_expr, register_method_params, set_current_class, set_instance_prop_types,
-    set_instance_props, set_param_names, set_return_label, set_returns_unit,
+    begin_method, emit_expr, hoisted_decls, register_method_params, set_current_class,
+    set_instance_prop_types, set_instance_props, set_param_names, set_return_label,
+    set_returns_unit,
 };
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -43,38 +44,38 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
     Ok(emit_library_class(lc))
 }
 
-/// Emit the app's route helpers (`new_article_path`, `article_path(id)`, …)
-/// — lowered to `LibraryFunction`s sharing the `RouteHelpers` module path —
-/// as a Kotlin `object RouteHelpers`. Returns `None` when the app has no
-/// routes. The functions are class-method-shaped (no instance state), so
-/// they reuse the `object` (module) emit path.
-pub fn emit_route_helpers(funcs: &[crate::dialect::LibraryFunction]) -> Option<EmittedFile> {
-    if funcs.is_empty() {
-        return None;
-    }
+/// Emit a module of free functions (sharing one `module_path`, e.g.
+/// `RouteHelpers`' `article_path(id)` or `Importmap`'s `pins`/`entry`) as a
+/// Kotlin `object <Name>` under `src/main/kotlin/<Name>.kt`. Returns `None`
+/// when there are no functions. They're class-method-shaped (no instance
+/// state), so they reuse the `object` (module) emit path.
+pub fn emit_function_module(funcs: &[crate::dialect::LibraryFunction]) -> Option<EmittedFile> {
+    let first = funcs.first()?;
+    let name = first
+        .module_path
+        .last()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    let enclosing = first.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
     let methods: Vec<MethodDef> = funcs
         .iter()
-        .map(|f| {
-            let enclosing =
-                f.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            MethodDef {
-                name: f.name.clone(),
-                receiver: MethodReceiver::Class,
-                params: f.params.clone(),
-                block_param: None,
-                body: f.body.clone(),
-                signature: f.signature.clone(),
-                effects: f.effects.clone(),
-                enclosing_class: Some(crate::ident::Symbol::from(enclosing)),
-                kind: AccessorKind::Method,
-                is_async: f.is_async,
-                mutates_self: false,
-            }
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            block_param: None,
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from(enclosing.clone())),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
         })
         .collect();
     let content = emit_module(&methods).ok()?;
     Some(EmittedFile {
-        path: PathBuf::from("src/main/kotlin/RouteHelpers.kt"),
+        path: PathBuf::from(format!("src/main/kotlin/{name}.kt")),
         content: format!("package roundhouse\n\n{content}"),
     })
 }
@@ -589,6 +590,14 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
         format!("return {}", default_for(&ret))
     } else {
         emit_body(&m.body, returns_value)
+    };
+    // Prepend any hoisted `var` declarations (locals first assigned in a
+    // nested scope but used at an outer level) computed by `begin_method`.
+    let hoist = hoisted_decls();
+    let body = if hoist.is_empty() {
+        body
+    } else {
+        format!("{}\n{}", hoist.join("\n"), body)
     };
 
     format!(

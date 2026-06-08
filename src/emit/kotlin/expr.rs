@@ -98,6 +98,19 @@ thread_local! {
     /// the safe default.
     static METHOD_PARAMS: RefCell<HashMap<String, HashSet<String>>> =
         RefCell::new(HashMap::new());
+    /// Full `var <name>: <T> = <default>` declarations for locals whose
+    /// first assignment is inside a nested scope (an `if`/loop/block) yet are
+    /// also assigned at an outer level — Kotlin would scope the in-branch
+    /// `var` to that branch, leaving the outer assignment unresolved. These
+    /// hoist to the method top (emitted by `library::emit_method`); the
+    /// names are pre-seeded into `DECLARED` so every assignment is a bare `=`.
+    static HOISTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The hoisted-var declaration lines computed for the current method (see
+/// `HOISTED`), to be emitted at the top of the body.
+pub(super) fn hoisted_decls() -> Vec<String> {
+    HOISTED.with(|h| h.borrow().clone())
 }
 
 /// Clear the method-param registry (start of an `emit` run).
@@ -301,6 +314,100 @@ pub(super) fn begin_method(body: &Expr) {
     let mut container_types: HashMap<String, String> = HashMap::new();
     scan_container_types(body, &mut container_types);
     CONTAINER_TYPES.with(|t| *t.borrow_mut() = container_types);
+
+    // Locals first assigned in a nested scope but also assigned higher up
+    // must hoist to the method top (else the in-branch `var` is out of scope
+    // for the outer assignment). Pre-seed `DECLARED` so all their writes are
+    // bare, and stash the declaration lines for `emit_method` to prepend.
+    let hoist = scan_hoist(body);
+    DECLARED.with(|d| {
+        let mut set = d.borrow_mut();
+        for (n, _) in &hoist {
+            set.insert(n.clone());
+        }
+    });
+    HOISTED.with(|h| {
+        *h.borrow_mut() =
+            hoist.iter().map(|(n, ty)| format!("var {n}: {ty} = {}", kt_default(ty))).collect();
+    });
+}
+
+/// Default initializer for a Kotlin type *name* (string form), for hoisted
+/// `var` declarations. Nullable types and unknowns default to `null`.
+fn kt_default(ty: &str) -> &'static str {
+    match ty {
+        "Long" | "Int" => "0L",
+        "Double" => "0.0",
+        "Boolean" => "false",
+        "String" => "\"\"",
+        _ if ty.ends_with('?') => "null",
+        _ if ty.starts_with("MutableList") => "mutableListOf()",
+        _ if ty.starts_with("MutableMap") => "mutableMapOf()",
+        _ => "null",
+    }
+}
+
+/// Find locals needing top-of-method hoisting: first assigned at a nested
+/// scope depth (>0) yet assigned more than once. Returns `(name, kotlin_ty)`
+/// pairs, the type taken from the first assignment's value.
+fn scan_hoist(body: &Expr) -> Vec<(String, String)> {
+    // name → (first-assignment depth, total assignment count, type)
+    let mut info: std::collections::BTreeMap<String, (usize, usize, String)> =
+        std::collections::BTreeMap::new();
+    walk_hoist(body, 0, &mut info);
+    info.into_iter()
+        .filter(|(_, (depth, count, _))| *depth > 0 && *count > 1)
+        .map(|(n, (_, _, ty))| (n, ty))
+        .collect()
+}
+
+fn walk_hoist(
+    e: &Expr,
+    depth: usize,
+    info: &mut std::collections::BTreeMap<String, (usize, usize, String)>,
+) {
+    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+        let n = camel(name.as_str());
+        let ty = match value.ty.as_ref() {
+            Some(t) if !matches!(t, crate::ty::Ty::Nil) => kotlin_ty(t),
+            _ => "Any?".to_string(),
+        };
+        let entry = info.entry(n).or_insert((depth, 0, ty));
+        entry.1 += 1;
+    }
+    // Recurse, deepening only into genuinely nested scopes (branch/loop/block
+    // bodies); a `Seq` and an `if` condition stay at the current depth.
+    match &*e.node {
+        ExprNode::Seq { exprs } => {
+            for c in exprs {
+                walk_hoist(c, depth, info);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_hoist(cond, depth, info);
+            walk_hoist(then_branch, depth + 1, info);
+            walk_hoist(else_branch, depth + 1, info);
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_hoist(cond, depth, info);
+            walk_hoist(body, depth + 1, info);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            walk_hoist(scrutinee, depth, info);
+            for a in arms {
+                walk_hoist(&a.body, depth + 1, info);
+            }
+        }
+        ExprNode::Lambda { body, .. } => walk_hoist(body, depth + 1, info),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
+            walk_hoist(value, depth, info)
+        }
+        _ => {
+            for c in children(e) {
+                walk_hoist(c, depth, info);
+            }
+        }
+    }
 }
 
 /// Infer element types for empty-container locals from how they're later
@@ -863,6 +970,20 @@ fn forces_parens(method: &str) -> bool {
     )
 }
 
+/// Test a receiver's type with `pred`, looking through a nullable
+/// `Union{T, Nil}` to the underlying `T`. A `pins: Array[…]?` receiver still
+/// dispatches as an Array (the call site has already null-guarded it).
+fn ty_is(ty: Option<&crate::ty::Ty>, pred: impl Fn(&crate::ty::Ty) -> bool) -> bool {
+    match ty {
+        Some(crate::ty::Ty::Union { variants }) => variants
+            .iter()
+            .filter(|t| !matches!(t, crate::ty::Ty::Nil))
+            .any(|t| pred(t)),
+        Some(t) => pred(t),
+        None => false,
+    }
+}
+
 fn emit_send(
     recv: Option<&Expr>,
     method: &str,
@@ -897,6 +1018,26 @@ fn emit_send(
                 && matches!(&*inner.node, ExprNode::SelfRef)
             {
                 return format!("{}({})", camel(method), args_s.join(", "));
+            }
+        }
+    }
+
+    // Stdlib module calls with no roundhouse runtime object: map directly
+    // to the JVM. `Base64.strict_encode64(x)` → java.util.Base64;
+    // `JSON.generate(x)` → the transpiled `JsonBuilder.encodeValue`.
+    if let Some(r) = recv {
+        if let ExprNode::Const { path } = &*r.node {
+            match (path.last().map(|s| s.as_str()), method) {
+                (Some("Base64"), "strict_encode64") => {
+                    return format!(
+                        "java.util.Base64.getEncoder().encodeToString(({}).toByteArray())",
+                        args_s[0]
+                    );
+                }
+                (Some("JSON"), "generate") => {
+                    return format!("JsonBuilder.encodeValue({})", args_s[0]);
+                }
+                _ => {}
             }
         }
     }
@@ -1149,10 +1290,8 @@ fn emit_send(
     // a user type (e.g. Flash/Session, whose `each` takes a block param)
     // it stays `each`.
     if let Some(b) = block {
-        let recv_arr =
-            recv.is_some_and(|r| matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })));
-        let recv_hash =
-            recv.is_some_and(|r| matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })));
+        let recv_arr = recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Array { .. })));
+        let recv_hash = recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Hash { .. })));
         let kt_method = if method == "each" && (recv_arr || recv_hash) {
             "forEach".to_string()
         } else {

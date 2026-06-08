@@ -1009,13 +1009,22 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // keeps parens vs article.title property), collection `count`→size, map
     // fetch/delete/merge + tr/join + is_a?(Hash/Array), object-level @ivar
     // decls (ViewHelpers @slots → `private var slots: MutableMap<String,String>`).
-    // REMAINING 11: ViewHelpers.kt 8 (javascript_importmap_tags var-hoist of
-    // `json` across a returning branch + p[:name] element cast + .each on
-    // nullable list; turbo_stream_from Base64/JSON primitives — both
-    // LAYOUT-only, off the GET /articles render path), Articles.kt 1
-    // (`truncate(body, length: 100)` trailing kwarg Hash{Sym→Int} → named arg,
-    // must not catch string-keyed Broadcasts map calls), Layouts.kt 2
-    // (`Importmap` const). THEN Server.kt (Javalin) + Main.kt + controllers.
+    // PHASE 4 NOW kotlinc-CLEAN (0 errors across all 21 emitted .kt). Closed
+    // 48→0 via: kwarg→named-arg (trailing IR-flagged `kwargs:true` hash splats
+    // to Kotlin named args ONLY when the callee is registered (Receiver.method
+    // → param-names, METHOD_PARAMS) and keys ⊆ params — so `truncate(body,
+    // length=100)` but `Broadcasts.append(map)` stays a map; gated so it never
+    // catches a genuine sym-keyed map arg); Importmap emitted as a function
+    // module (library::emit_function_module, shared w/ RouteHelpers; resolves
+    // the layout's `Importmap.pins()/.entry()`); Base64.strict_encode64→
+    // java.util.Base64, JSON.generate→JsonBuilder.encodeValue; Ty::Record→
+    // MutableMap<String,Any?> (importmap pins; Router uses a named class not
+    // Record so unaffected); `.each` on a nullable Array (ty_is peers through
+    // Union{T,Nil}); and a var-HOIST pass (scan_hoist: a local first assigned
+    // in a nested scope but assigned again at an outer level hoists a typed
+    // `var x = default` to the method top so the outer write resolves —
+    // `json` in javascript_importmap_tags). THEN Server.kt (Javalin) + Main.kt
+    // + controllers (lower_controllers_with_arel_and_views) → boot + serve.
     // (Emit-polish later: the guard-return lowering emits `if (cond) { null }
     // else { return X }`, which warns "expression is unused" — correct, ugly.)
 ];

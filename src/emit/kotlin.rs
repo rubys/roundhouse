@@ -95,7 +95,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         model_registry.into_iter().collect();
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     view_lower_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
-    if let Some(f) = library::emit_route_helpers(&route_helper_funcs) {
+    if let Some(f) = library::emit_function_module(&route_helper_funcs) {
+        files.push(f);
+    }
+    // Importmap pins/entry → `object Importmap` (the layout's
+    // `javascript_importmap_tags` lowers to `Importmap.pins()`/`.entry()`).
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&importmap_funcs));
+    if let Some(f) = library::emit_function_module(&importmap_funcs) {
         files.push(f);
     }
     let view_lcs =

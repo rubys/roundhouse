@@ -55,10 +55,13 @@ pub fn kotlin_ty(t: &Ty) -> String {
 
         Ty::Class { id, args } => render_class(id.0.as_str(), args),
 
-        // RBS record literal (e.g. Router.match's typed return). Kotlin
-        // has no anonymous record type — Phase 2 generates a named
-        // `data class`; until then this is a permissive placeholder.
-        Ty::Record { .. } => "Any?".to_string(),
+        // RBS record literal (e.g. an importmap pin `{name:, path:}`).
+        // Kotlin has no anonymous record type — render it as a string-keyed
+        // map, which is what the lowerer emits for these (`mutableMapOf(...)`)
+        // and lets field reads work via `record["name"]`. (Genuinely typed
+        // records like `Router.match`'s result are modeled as named classes,
+        // not `Ty::Record`.)
+        Ty::Record { .. } => "MutableMap<String, Any?>".to_string(),
 
         // Function type → Kotlin lambda type `(P1, P2) -> R`.
         Ty::Fn { params, ret, .. } => {
