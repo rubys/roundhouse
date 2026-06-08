@@ -70,7 +70,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .map(|v| crate::lower::lower_view_to_library_class(v, app))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
-    let (model_lcs, _registry) =
+    let (model_lcs, model_registry) =
         crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
     // Register the model classes (ApplicationRecord, Article, …) before
     // rendering any of them, so a model that extends another model
@@ -81,7 +81,50 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc));
     }
 
-    // Phase 3+: transpiled framework runtime + hand-written primitives +
-    // controllers/views.
+    // Views → src/main/kotlin/app/views/<Name>.kt. Each ERB template lowers
+    // to its own `Views::<Plural>` LibraryClass carrying one render method;
+    // re-lower here with the model registry (+ route-helper stubs) so view
+    // bodies dispatch model attributes (`article.title`) and route helpers
+    // type. Kotlin `object`s can't be reopened, so templates sharing a
+    // module (`Views::Articles#index` + `#article` + …) merge into one
+    // `object Articles { ... }` — the name the broadcast callbacks and
+    // controllers call (`Articles.article(this)`, last-segment of
+    // `Views::Articles`).
+    let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
+    if let Some(f) = library::emit_route_helpers(&route_helper_funcs) {
+        files.push(f);
+    }
+    let view_lcs =
+        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras);
+    for lc in merge_by_module(view_lcs) {
+        let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(format!("src/main/kotlin/app/views/{last}.kt")),
+            content: format!("package roundhouse\n\n{}", library::emit_library_class(&lc)),
+        });
+    }
+
+    // Phase 4+: hand-written ViewHelpers/RouteHelpers + controllers +
+    // Server.kt (Javalin) + Main.kt.
     files
+}
+
+/// Merge `LibraryClass`es that share a module name into one (concatenating
+/// their methods), preserving first-seen order. The view lowerer produces
+/// one LC per template, several sharing a `Views::<Plural>` name; Kotlin
+/// `object`s are closed (not reopenable across declarations) so they must
+/// collapse into a single object before emit.
+fn merge_by_module(lcs: Vec<crate::dialect::LibraryClass>) -> Vec<crate::dialect::LibraryClass> {
+    let mut merged: Vec<crate::dialect::LibraryClass> = Vec::new();
+    for lc in lcs {
+        if let Some(existing) = merged.iter_mut().find(|m| m.name == lc.name) {
+            existing.methods.extend(lc.methods);
+        } else {
+            merged.push(lc);
+        }
+    }
+    merged
 }

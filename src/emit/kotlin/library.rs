@@ -22,7 +22,7 @@ use crate::ty::Ty;
 
 use super::expr::{
     begin_method, emit_expr, set_current_class, set_instance_prop_types, set_instance_props,
-    set_return_label, set_returns_unit,
+    set_param_names, set_return_label, set_returns_unit,
 };
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -43,14 +43,47 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
     Ok(emit_library_class(lc))
 }
 
+/// Emit the app's route helpers (`new_article_path`, `article_path(id)`, …)
+/// — lowered to `LibraryFunction`s sharing the `RouteHelpers` module path —
+/// as a Kotlin `object RouteHelpers`. Returns `None` when the app has no
+/// routes. The functions are class-method-shaped (no instance state), so
+/// they reuse the `object` (module) emit path.
+pub fn emit_route_helpers(funcs: &[crate::dialect::LibraryFunction]) -> Option<EmittedFile> {
+    if funcs.is_empty() {
+        return None;
+    }
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| {
+            let enclosing =
+                f.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            MethodDef {
+                name: f.name.clone(),
+                receiver: MethodReceiver::Class,
+                params: f.params.clone(),
+                block_param: None,
+                body: f.body.clone(),
+                signature: f.signature.clone(),
+                effects: f.effects.clone(),
+                enclosing_class: Some(crate::ident::Symbol::from(enclosing)),
+                kind: AccessorKind::Method,
+                is_async: f.is_async,
+                mutates_self: false,
+            }
+        })
+        .collect();
+    let content = emit_module(&methods).ok()?;
+    Some(EmittedFile {
+        path: PathBuf::from("src/main/kotlin/RouteHelpers.kt"),
+        content: format!("package roundhouse\n\n{content}"),
+    })
+}
+
 /// Render a Ruby `module X` (parsed as a set of class methods) as a
 /// Kotlin `object X { ... }`. Used for `Mode::Module` runtime entries
 /// (e.g. `inflector.rb`). The module name comes from the methods'
 /// `enclosing_class`.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
-    // A module is an `object` with only functions — no instance props, so
-    // every `self.x` send is a method call.
-    set_instance_props(HashSet::new());
     set_instance_prop_types(std::collections::HashMap::new());
     set_current_class("");
     let name = methods
@@ -59,12 +92,50 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .map(|s| s.as_str().rsplit("::").next().unwrap_or(s.as_str()).to_string())
         .unwrap_or_default();
     let mut out = format!("object {name} {{\n");
+    // Module-level `@ivar` state (e.g. ViewHelpers' `@slots = {}`) → private
+    // object properties; reads of them in method bodies resolve as property
+    // names (set via `INSTANCE_PROPS`).
+    let ivars = emit_object_body_ivars(methods, &BTreeMap::new());
+    out.push_str(&ivars);
+    if !ivars.is_empty() {
+        out.push('\n');
+    }
     for m in methods {
         out.push_str(&indent_method(&emit_method(m, "")));
         out.push('\n');
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+/// Emit `private var <ivar>: T = <default>` declarations for module-level
+/// `@ivar`s referenced in `methods`, skipping any already covered by
+/// `accessor_props`. Also registers the ivar names as `INSTANCE_PROPS` so
+/// body references read as properties (not method calls). Returns the
+/// declaration block (each line indented), empty when there are none.
+fn emit_object_body_ivars(
+    methods: &[MethodDef],
+    accessor_props: &BTreeMap<String, Ty>,
+) -> String {
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    set_instance_props(body_ivars.keys().cloned().collect());
+    let inferred = infer_body_ivar_types(methods);
+    let mut out = String::new();
+    for n in body_ivars.keys() {
+        if accessor_props.contains_key(n) {
+            continue;
+        }
+        match inferred.get(n) {
+            Some(ty) => {
+                out.push_str(&format!("    private var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)))
+            }
+            None => out.push_str(&format!("    private var {n}: Any? = null\n")),
+        }
+    }
+    out
 }
 
 pub fn emit_library_class(lc: &LibraryClass) -> String {
@@ -75,7 +146,6 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // Kotlin `object`. Class-level `attr_accessor` (from `class << self`)
     // collapses to an object `var` property; everything else is a `fun`.
     if lc.is_module {
-        set_instance_props(HashSet::new());
         set_instance_prop_types(std::collections::HashMap::new());
         set_current_class("");
         let accessor_props = class_accessor_props(&lc.methods);
@@ -83,7 +153,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         for (n, ty) in &accessor_props {
             out.push_str(&format!("    {}\n", object_property_decl(n, ty)));
         }
-        if !accessor_props.is_empty() {
+        // Module-level `@ivar`s (e.g. ViewHelpers' `@slots = {}`) become
+        // private object properties; this also registers them as
+        // `INSTANCE_PROPS` so body references read as properties.
+        let ivars = emit_object_body_ivars(&lc.methods, &accessor_props);
+        out.push_str(&ivars);
+        if !accessor_props.is_empty() || !ivars.is_empty() {
             out.push('\n');
         }
         for m in &lc.methods {
@@ -239,6 +314,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // `return@run`.
     if let Some(m) = init {
         begin_method(&m.body);
+        set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
         set_returns_unit(true);
         let has_return = body_has_return(&m.body);
         if has_return {
@@ -426,7 +502,26 @@ pub fn register_class_hierarchy(classes: &[LibraryClass]) {
             .as_ref()
             .map(|p| p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str()).to_string());
         super::expr::register_class_hierarchy(name, parent.as_deref(), instance_member_names(lc));
+        super::expr::register_instance_methods(name, instance_method_names(lc));
     }
+}
+
+/// The camelCased names of a class's zero-arg instance *methods* (kind
+/// `Method`, excluding `initialize` and any that take parameters) — the set
+/// a typed-receiver send consults to keep its `()` (vs reading a property).
+/// Distinct from `instance_member_names`, which also includes accessor
+/// properties (used for `override` resolution).
+fn instance_method_names(lc: &LibraryClass) -> HashSet<String> {
+    lc.methods
+        .iter()
+        .filter(|m| {
+            m.receiver == MethodReceiver::Instance
+                && m.kind == AccessorKind::Method
+                && m.name.as_str() != "initialize"
+                && m.params.is_empty()
+        })
+        .map(member_name)
+        .collect()
 }
 
 fn emit_method(m: &MethodDef, modifier: &str) -> String {
@@ -466,6 +561,7 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     };
 
     begin_method(&m.body);
+    set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
     // A `Unit` method's guard `return nil` emits a bare `return`.
     set_returns_unit(!returns_value);
     // A value-returning method with an empty body (Ruby `def x; end` →

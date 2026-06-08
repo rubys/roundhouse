@@ -14,7 +14,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::expr::{Arm, BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal, OpAssignOp, Pattern};
+use crate::expr::{
+    Arm, BoolOpKind, Expr, ExprNode, InterpPart, IrHint, LValue, Literal, OpAssignOp, Pattern,
+};
 
 use super::naming::camel;
 use super::ty::kotlin_ty;
@@ -46,6 +48,13 @@ thread_local! {
     /// is a method call needing `()`. Empty for `object`s (modules), whose
     /// self-sends are always method calls.
     static INSTANCE_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// camelCased parameter names of the method currently being emitted. A
+    /// zero-arg, no-receiver `Send` whose name is in here is a reference to
+    /// the parameter, not a self-method call — emit the bare identifier
+    /// without `()`. (The view lowerer represents a partial local like
+    /// `article` as a bare implicit-self `Send` in argument position but as
+    /// a `Var` in receiver position; this reconciles the two.)
+    static PARAM_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Instance property name → declared `Ty`, so a `self.col = <Any?>`
     /// write (the `assign_from_row`/`initialize`/`update` column shape,
     /// where the RHS is an untyped `row[k]`/`attrs[k]` lookup) can coerce
@@ -71,6 +80,57 @@ thread_local! {
     /// TS/Crystal). See `library::register_class_hierarchy`.
     static CLASS_HIERARCHY: RefCell<HashMap<String, (Option<String>, HashSet<String>)>> =
         RefCell::new(HashMap::new());
+    /// Class simple name → camelCased names of its *zero-arg instance
+    /// methods* (excludes `attr_*` / body-ivar properties). A zero-arg send
+    /// to a typed-`Class` receiver whose member is in this set (walking
+    /// ancestors) is a Kotlin method call and keeps its `()`; members not
+    /// listed default to property-read form. Lets `article.comments`
+    /// (has-many loader method) emit `article.comments()` while
+    /// `article.title` (column property) stays `article.title`.
+    static CLASS_INSTANCE_METHODS: RefCell<HashMap<String, HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Register a class's zero-arg instance-method names (camelCased) for the
+/// typed-receiver call-vs-property decision. See `CLASS_INSTANCE_METHODS`.
+pub(super) fn register_instance_methods(name: &str, methods: HashSet<String>) {
+    CLASS_INSTANCE_METHODS.with(|m| m.borrow_mut().insert(name.to_string(), methods));
+}
+
+/// True when `method` (camelCased) is a known zero-arg instance method of
+/// `class_name` or any ancestor.
+fn is_instance_method_of(class_name: &str, method: &str) -> bool {
+    let cm = camel(method);
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let found = CLASS_INSTANCE_METHODS.with(|m| {
+            m.borrow().get(&name).map(|set| set.contains(&cm)).unwrap_or(false)
+        });
+        if found {
+            return true;
+        }
+        cur = CLASS_HIERARCHY
+            .with(|h| h.borrow().get(&name).and_then(|(parent, _)| parent.clone()));
+    }
+    false
+}
+
+/// The simple class name of a receiver expression's type, when it's a
+/// `Ty::Class` (its last `::` segment). Used to consult the instance-method
+/// registry for the call-vs-property decision.
+fn receiver_class_name(r: &Expr) -> Option<String> {
+    match r.ty.as_ref()? {
+        crate::ty::Ty::Class { id, .. } => {
+            let raw = id.0.as_str();
+            Some(raw.rsplit("::").next().unwrap_or(raw).to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Clear the class-hierarchy registry (start of an `emit` run).
@@ -162,6 +222,17 @@ fn instance_prop_scalar_ty(method: &str) -> Option<crate::ty::Ty> {
 
 fn is_instance_prop(method: &str) -> bool {
     INSTANCE_PROPS.with(|p| p.borrow().contains(&camel(method)))
+}
+
+/// Install the current method's parameter-name set (see `PARAM_NAMES`).
+/// Called by `library::emit_method` (and the `init`-block path) before the
+/// body renders.
+pub(super) fn set_param_names(names: HashSet<String>) {
+    PARAM_NAMES.with(|p| *p.borrow_mut() = names);
+}
+
+fn is_param(method: &str) -> bool {
+    PARAM_NAMES.with(|p| p.borrow().contains(&camel(method)))
 }
 
 /// Set the active labeled-return target (`None` = plain `return`).
@@ -325,7 +396,49 @@ fn children(e: &Expr) -> Vec<&Expr> {
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = try_string_builder(e) {
+        return s;
+    }
     emit_node(&e.node, e)
+}
+
+/// The view lowerer builds HTML by accumulating into a string buffer
+/// (`io = String.new; io << chunk; …; io`), tagging the three sites with
+/// `IrHint`s. Kotlin uses a `StringBuilder`:
+///   - `Init`   `io = String.new`  → `val io = StringBuilder()`
+///   - `Append` `io << chunk`      → `io.append(chunk)`
+///   - `Result` terminal `io`      → `io.toString()`
+/// Mirrors `crystal::expr::try_string_builder`. Non-hinted sites fall
+/// through to the normal node emit.
+fn try_string_builder(e: &Expr) -> Option<String> {
+    match e.hint? {
+        IrHint::StringBuilderInit => {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
+                return Some(format!("val {} = StringBuilder()", camel(name.as_str())));
+            }
+            None
+        }
+        IrHint::StringBuilderAppend => {
+            if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*r.node {
+                        return Some(format!(
+                            "{}.append({})",
+                            camel(name.as_str()),
+                            emit_expr(&args[0])
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        IrHint::StringBuilderResult => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                return Some(format!("{}.toString()", camel(name.as_str())));
+            }
+            None
+        }
+    }
 }
 
 pub fn emit_expr_for_runtime(e: &Expr) -> String {
@@ -724,6 +837,20 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    // A bare implicit-self zero-arg send that names a parameter is a
+    // reference to that local, not a method call — emit the identifier
+    // without `()`. (See `PARAM_NAMES`: the view lowerer renders a partial
+    // local in argument position as a `Send`.)
+    if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
+        return camel(method);
+    }
+
+    // Ruby logical-not `!x` lowers to a no-receiver `!` send with one arg
+    // (e.g. `any?`/`present?` normalize to `! …empty?` / `! …nil?`).
+    if recv.is_none() && method == "!" && args.len() == 1 {
+        return format!("!({})", emit_expr(&args[0]));
+    }
+
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
     // `self.class.METHOD(...)` → unqualified `METHOD(...)`. Ruby's
@@ -801,6 +928,8 @@ fn emit_send(
                 "Float" => format!("{rs} is Double"),
                 "String" => format!("{rs} is String"),
                 "Numeric" => format!("{rs} is Number"),
+                "Hash" => format!("{rs} is Map<*, *>"),
+                "Array" => format!("{rs} is List<*>"),
                 other => format!("{rs} is {}", other.rsplit("::").next().unwrap_or(other)),
             };
         }
@@ -871,10 +1000,30 @@ fn emit_send(
         if method == "key?" || method == "has_key?" {
             return format!("{}.containsKey({})", emit_expr(r), args_s[0]);
         }
+        // `Hash#delete(k)` → `MutableMap.remove(k)`.
+        if method == "delete" {
+            return format!("{}.remove({})", emit_expr(r), args_s[0]);
+        }
+        // `Hash#merge(other)` → a new map (`+` yields a read-only Map; the
+        // runtime treats it mutably, so re-wrap). Used by the form/link
+        // helpers (`{href: …}.merge(opts)`).
+        if method == "merge" {
+            return format!("({} + {}).toMutableMap()", emit_expr(r), args_s[0]);
+        }
     }
     if let (Some(r), 2) = (recv, args.len()) {
         if method == "[]=" {
             return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
+        }
+        // `Hash#fetch(k, default)` → `(recv[k] ?: default)` (Ruby returns
+        // the value or the default; Kotlin map-get is null for missing).
+        if method == "fetch" {
+            return format!("({}[{}] ?: {})", emit_expr(r), args_s[0], args_s[1]);
+        }
+        // `String#tr(from, to)` → `replace` (single-char translation, the
+        // only shape the runtime uses: `key.tr("_", "-")`).
+        if method == "tr" {
+            return format!("{}.replace({}, {})", emit_expr(r), args_s[0], args_s[1]);
         }
     }
 
@@ -892,6 +1041,8 @@ fn emit_send(
             "upcase" => return format!("{rs}.uppercase()"),
             "downcase" => return format!("{rs}.lowercase()"),
             "strip" => return format!("{rs}.trim()"),
+            // `Array#join` with no separator → `joinToString("")`.
+            "join" => return format!("{rs}.joinToString(\"\")"),
             // `.length`/`.size`: collections use `.size`, strings `.length`.
             // Both are Kotlin `Int`; `.toLong()` keeps them in the
             // Long-everywhere world (Ruby Integer → Long) so `==` against a
@@ -907,6 +1058,16 @@ fn emit_send(
                 } else {
                     format!("{rs}.length.toLong()")
                 };
+            }
+            // `count` with no args on a collection is `size` (Kotlin's
+            // `.count()` extension also works but `.size` avoids a call).
+            "count"
+                if matches!(
+                    r.ty.as_ref(),
+                    Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
+                ) =>
+            {
+                return format!("{rs}.size.toLong()");
             }
             // No-ops in Kotlin — drop, keep the receiver. `to_h` is a no-op
             // on a Hash (the only receiver the runtime calls it on).
@@ -935,6 +1096,14 @@ fn emit_send(
             } else {
                 format!("{rs}.{}()", camel(method))
             };
+        }
+        // A typed-`Class` receiver whose member is a known zero-arg
+        // instance *method* (not a column/accessor property) keeps its
+        // `()` — `article.comments` (has-many loader) → `article.comments()`.
+        if let Some(cls) = receiver_class_name(r) {
+            if is_instance_method_of(&cls, method) {
+                return format!("{rs}.{}()", camel(method));
+            }
         }
         if !forces_parens(method) && !method.ends_with('?') && !method.ends_with('!') {
             // Attribute read on a non-self instance receiver (its concrete

@@ -945,6 +945,17 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "",
+        out_path: "src/main/kotlin/ViewHelpers.kt",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb + base.rb WIRED above (this pass). The transpiled
     // Errors.kt + ActiveRecordBase.kt compile clean kotlinc alongside the
     // primitives (Time/Db/ParamValue/AdapterInterface) + the rest of the
@@ -982,13 +993,29 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     //  (5) Broadcasts no-op primitive (primitives.rs); `return nil` in a
     //      Unit callback → bare `return` (RETURNS_UNIT).
     //
-    // REMAINING 6 = `Views::Articles.article` / `Views::Comments.comment`
-    // partial refs from the after_*_commit broadcast callbacks — the
-    // model↔view coupling. The view LCs are lowered (dump_ir shows
-    // `Views::Articles#article` etc) but not yet emitted. NEXT = Phase 4
-    // view emit (HTML-string render methods → `object Articles { fun
-    // article(a: Article): String }`), which resolves these + serves real
-    // GET /articles HTML. Then Server.kt (Javalin) + Main.kt + controllers.
+    // PHASE 4 VIEW EMIT — STARTED (48→11 kotlinc errors). The model↔view 6
+    // are CLOSED: each `Views::<Plural>` template-LC is now lowered with the
+    // model registry and emitted as a merged `object` (app/views/*.kt) —
+    // Kotlin objects can't be reopened, so templates sharing a module
+    // collapse into one object named for the call site (`Articles.article`,
+    // last-segment of `Views::Articles`). RouteHelpers emits clean (object
+    // from lower_routes_to_library_functions). view_helpers.rb WIRED above →
+    // ViewHelpers.kt. Emit support added (all in src/emit/kotlin/): StringBuilder
+    // IrHints (io=StringBuilder/append/toString), param-as-local (a bare
+    // no-recv 0-arg send naming a param → identifier, since the view lowerer
+    // renders a partial local as a Send in arg position but a Var as a
+    // receiver), `!x` not (Send{None,"!",[x]} was dropped — inverted
+    // any?/present?), typed-receiver instance-method registry (article.comments()
+    // keeps parens vs article.title property), collection `count`→size, map
+    // fetch/delete/merge + tr/join + is_a?(Hash/Array), object-level @ivar
+    // decls (ViewHelpers @slots → `private var slots: MutableMap<String,String>`).
+    // REMAINING 11: ViewHelpers.kt 8 (javascript_importmap_tags var-hoist of
+    // `json` across a returning branch + p[:name] element cast + .each on
+    // nullable list; turbo_stream_from Base64/JSON primitives — both
+    // LAYOUT-only, off the GET /articles render path), Articles.kt 1
+    // (`truncate(body, length: 100)` trailing kwarg Hash{Sym→Int} → named arg,
+    // must not catch string-keyed Broadcasts map calls), Layouts.kt 2
+    // (`Importmap` const). THEN Server.kt (Javalin) + Main.kt + controllers.
     // (Emit-polish later: the guard-return lowering emits `if (cond) { null }
     // else { return X }`, which warns "expression is unused" — correct, ugly.)
 ];
