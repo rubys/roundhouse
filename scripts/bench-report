@@ -428,7 +428,16 @@ endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
 html << "</tr>\n<tr><th></th>"
 endpoints.each { html << "<th>p50</th><th>p99</th>" }
 html << "</tr></thead>\n<tbody>\n"
-targets.each do |tgt|
+# Order rows by latency (median p50 across endpoints, ascending) so the
+# table reads as a ranking like the sorted bar charts — and so warm
+# jruby lands at the front where the prose puts it, rather than buried
+# mid-table by canonical TARGET_ORDER. Median is robust to single-endpoint
+# outliers (e.g. go's /articles render-path spike).
+lat_order = targets.sort_by do |tgt|
+  ps = endpoints.map { |ep| by[ep][tgt]&.dig('p50_ms') }.compact.sort
+  ps.empty? ? Float::INFINITY : ps[ps.size / 2]
+end
+lat_order.each do |tgt|
   html << "<tr><td><strong>#{tgt}</strong></td>"
   endpoints.each do |ep|
     c = by[ep][tgt]
