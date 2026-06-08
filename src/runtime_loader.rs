@@ -964,30 +964,33 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // emitter groundwork (yield→block, init-block run-wrapper, `!`/push)
     // is in place; wiring the entries is the next step.
     //
-    // NEXT = drive MODEL emit to kotlinc-clean. With base wired, the
-    // emitted models (Article/Comment/ApplicationRecord) now compile
-    // against Base but surface ~83 errors, a well-bounded punch-list:
-    //  (1) `open class Base` — Kotlin classes are final by default, so
-    //      Base/ApplicationRecord must be `open` to be extended.
-    //  (2) `override` modifiers — per-model methods/props that override a
-    //      Base member (id, assignFromRow, attributes, get/set, _adapter_*,
-    //      validate, dom_prefix, the *_commit callbacks) need `override`.
-    //  (3) untyped-Map→typed-property Cast insertion — `assign_from_row` /
-    //      `initialize` / `update` assign `row[k]` (Any?) to a typed column
-    //      property; the lowerer skips the Cast for dynamic targets, so
-    //      Kotlin needs `as Long`/`as String` (or the Cast lowering wired).
-    //  (4) the `comments` has_many lazy loader emits `return val stmt = …`
-    //      (invalid Kotlin — a `return` of a `val` decl); the block-bodied
-    //      reader needs proper statement emit.
-    //  (5) `Broadcasts.Articles…` unresolved — the after_*_commit callbacks
-    //      need a Broadcasts companion shim (cf. go2/rust2 module shims).
-    //  (6) per-model companion copies of inherited class methods
-    //      (find/all/name) — companions aren't inherited.
-    // (Latent, compiles but wrong: negative index `records[-1]` in Base#last
-    // → runtime OOB; needs `.lastOrNull()`/`records[size-1]`. And the
-    // guard-return lowering emits `if (cond) { null } else { return X }`,
-    // which warns "expression is unused" — functionally correct, emit-polish
-    // later.)
+    // MODEL emit punch-list — LANDED (83→6). With base wired, the emitted
+    // models (Article/Comment/ApplicationRecord) surfaced ~83 errors;
+    // resolved across these clusters (all in src/emit/kotlin/):
+    //  (1) `open class` + `override` modifiers — class-hierarchy registry
+    //      (expr CLASS_HIERARCHY) drives `open`/`override` per member.
+    //  (2) untyped-Map→typed-property Cast — `self.<col> = row[k]`/`attrs[k]`
+    //      coerced to the column scalar (INSTANCE_PROP_TYPES + emit_cast),
+    //      self-receiver-gated so `from_row` (already Cast) is untouched.
+    //  (3) has_many lazy loader — wrap_return recurses into a nested Seq
+    //      (fixing `return val stmt = …`); body-ivar typing now reads the
+    //      `Ty` on ivar nodes (`@comments_cache` → `MutableList<Comment>`).
+    //  (4) per-model companion finders (all/find/count/exists/last/
+    //      destroyAll/create/createBang) synthesized delegating to the
+    //      model's `_adapter_*` (companions aren't inherited); `last` uses
+    //      `size-1` (fixes the negative-index latent bug).
+    //  (5) Broadcasts no-op primitive (primitives.rs); `return nil` in a
+    //      Unit callback → bare `return` (RETURNS_UNIT).
+    //
+    // REMAINING 6 = `Views::Articles.article` / `Views::Comments.comment`
+    // partial refs from the after_*_commit broadcast callbacks — the
+    // model↔view coupling. The view LCs are lowered (dump_ir shows
+    // `Views::Articles#article` etc) but not yet emitted. NEXT = Phase 4
+    // view emit (HTML-string render methods → `object Articles { fun
+    // article(a: Article): String }`), which resolves these + serves real
+    // GET /articles HTML. Then Server.kt (Javalin) + Main.kt + controllers.
+    // (Emit-polish later: the guard-return lowering emits `if (cond) { null }
+    // else { return X }`, which warns "expression is unused" — correct, ugly.)
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
