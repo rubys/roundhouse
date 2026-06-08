@@ -22,6 +22,7 @@ mod expr;
 mod library;
 mod naming;
 mod package;
+mod primitives;
 mod ty;
 
 // Entry points consumed by `runtime_loader::kotlin_units`.
@@ -33,6 +34,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     // Gradle scaffold (build.gradle.kts, settings.gradle.kts, .gitignore).
     files.extend(package::scaffold());
+
+    // Hand-written runtime primitives (Time, … — the JVM-bridging bottom
+    // layer the transpiled runtime calls into).
+    files.extend(primitives::primitives());
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` → Kotlin under
     // `src/main/kotlin/`. Grown one file at a time (Phase 3). The transform
