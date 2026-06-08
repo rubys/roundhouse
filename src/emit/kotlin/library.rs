@@ -20,7 +20,10 @@ use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
-use super::expr::{begin_method, emit_expr, set_current_class, set_instance_props, set_return_label};
+use super::expr::{
+    begin_method, emit_expr, set_current_class, set_instance_prop_types, set_instance_props,
+    set_return_label,
+};
 use super::naming::camel;
 use super::ty::kotlin_ty;
 
@@ -48,6 +51,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     // A module is an `object` with only functions — no instance props, so
     // every `self.x` send is a method call.
     set_instance_props(HashSet::new());
+    set_instance_prop_types(std::collections::HashMap::new());
     set_current_class("");
     let name = methods
         .first()
@@ -72,6 +76,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // collapses to an object `var` property; everything else is a `fun`.
     if lc.is_module {
         set_instance_props(HashSet::new());
+        set_instance_prop_types(std::collections::HashMap::new());
         set_current_class("");
         let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("object {class_name} {{\n");
@@ -223,6 +228,9 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let instance_props: HashSet<String> =
         prop_types.keys().chain(body_ivars.keys()).cloned().collect();
     set_instance_props(instance_props);
+    // Column scalar types, so a `self.<col> = row[k]`/`attrs[k]` write
+    // coerces the untyped value to the property's type.
+    set_instance_prop_types(prop_types.iter().map(|(n, t)| (n.clone(), t.clone())).collect());
     // Implicit-self `new(...)` in a companion factory → this class's ctor.
     set_current_class(&class_name);
 
@@ -458,6 +466,15 @@ fn emit_body(body: &Expr, returns_value: bool) -> String {
 /// Prefix `return` unless the expression is already terminal or is a
 /// statement that has no value (assignment, loop).
 fn wrap_return(e: &Expr) -> String {
+    // A nested `Seq` (e.g. the `else` block of a guard-return method) has
+    // its *last* statement as its value — recurse so `return` lands there,
+    // not on the whole block. Without this, a multi-statement tail emits
+    // `return <stmt1>\n<stmt2>…` (the `return val stmt = …` bug).
+    if let ExprNode::Seq { exprs } = &*e.node {
+        if !exprs.is_empty() {
+            return emit_body(e, true);
+        }
+    }
     // An empty `{}` / `[]` literal in return position: emit the
     // type-argument-free constructor so the method's declared return type
     // drives inference (`attributes()` → `MutableMap<String, Any?>`),
@@ -708,12 +725,43 @@ fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
         }
     }
 
+    // Signal 1.5: a concrete `Ty` carried on an ivar read/assign node (the
+    // typer often knows it — e.g. `@comments_cache` reads as
+    // `Array[Comment]` from the has_many association) — for ivars not
+    // already fixed by a reader.
+    for m in methods {
+        collect_ivar_node_types(&m.body, &mut out);
+    }
+
     // Signal 2: literal assignments, only for ivars not already inferred.
     for m in methods {
         collect_ivar_literal_types(&m.body, &mut out);
     }
 
     out
+}
+
+/// Record the `Ty` the typer attached to an ivar read (`@x`) or to the
+/// value of `@x = …`, when it's concrete (not `Untyped`/`Var`). Never
+/// overwrites a stronger signal already present.
+fn collect_ivar_node_types(e: &Expr, out: &mut BTreeMap<String, Ty>) {
+    let useful = |ty: &Ty| !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil);
+    match &*e.node {
+        ExprNode::Ivar { name } => {
+            if let Some(ty) = e.ty.as_ref().filter(|t| useful(t)) {
+                out.entry(camel(name.as_str())).or_insert_with(|| ty.clone());
+            }
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if let Some(ty) = value.ty.as_ref().filter(|t| useful(t)) {
+                out.entry(camel(name.as_str())).or_insert_with(|| ty.clone());
+            }
+        }
+        _ => {}
+    }
+    for child in expr_children(e) {
+        collect_ivar_node_types(child, out);
+    }
 }
 
 /// If a method body is (or ends in) a bare ivar read, return that ivar's

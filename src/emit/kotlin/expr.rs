@@ -42,6 +42,13 @@ thread_local! {
     /// is a method call needing `()`. Empty for `object`s (modules), whose
     /// self-sends are always method calls.
     static INSTANCE_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Instance property name → declared `Ty`, so a `self.col = <Any?>`
+    /// write (the `assign_from_row`/`initialize`/`update` column shape,
+    /// where the RHS is an untyped `row[k]`/`attrs[k]` lookup) can coerce
+    /// the value to the column's scalar type. Kotlin won't assign `Any?`
+    /// to a `Long`/`String` slot. Set per class beside `INSTANCE_PROPS`.
+    static INSTANCE_PROP_TYPES: RefCell<HashMap<String, crate::ty::Ty>> =
+        RefCell::new(HashMap::new());
     /// `"Object.prop"` keys for module/object-level accessor properties
     /// (`class << self; attr_accessor :adapter` → `ActiveRecord.adapter`).
     /// A `Const`-receiver zero-arg send keyed here reads as a property
@@ -127,6 +134,26 @@ fn is_object_prop(object: &str, method: &str) -> bool {
 /// reset to empty for `object`/module emission.
 pub(super) fn set_instance_props(props: HashSet<String>) {
     INSTANCE_PROPS.with(|p| *p.borrow_mut() = props);
+}
+
+/// Install the current class's property name → `Ty` map (see
+/// `INSTANCE_PROP_TYPES`); empty for object/module emission.
+pub(super) fn set_instance_prop_types(types: HashMap<String, crate::ty::Ty>) {
+    INSTANCE_PROP_TYPES.with(|t| *t.borrow_mut() = types);
+}
+
+/// The coercion target for a `self.<prop> = …` write: the prop's declared
+/// `Ty` when it's a scalar column type (`Long`/`String`/…) the emitter can
+/// convert an `Any?` value into. Returns `None` for `Any?`/object props (no
+/// coercion) and unknown props.
+fn instance_prop_scalar_ty(method: &str) -> Option<crate::ty::Ty> {
+    use crate::ty::Ty;
+    INSTANCE_PROP_TYPES.with(|t| {
+        t.borrow().get(&camel(method)).and_then(|ty| match ty {
+            Ty::Int | Ty::Float | Ty::Str | Ty::Sym | Ty::Bool => Some(ty.clone()),
+            _ => None,
+        })
+    })
 }
 
 fn is_instance_prop(method: &str) -> bool {
@@ -599,6 +626,17 @@ fn emit_raise(value: &Expr) -> String {
 /// untyped-row boundaries to mean "coerce to this column type", so map
 /// numeric/string targets to the conversion functions; reference targets
 /// keep `as`.
+/// True when `arg` is already the target scalar type, so a `self.<col> =`
+/// coercion would be redundant: either the IR already typed it (the value
+/// carries `target_ty`) or it's an explicit `Cast` to that type (the
+/// `from_row` shape). Guards against double-coercion.
+fn arg_already_ty(arg: &Expr, target_ty: &crate::ty::Ty) -> bool {
+    if let ExprNode::Cast { target_ty: t, .. } = &*arg.node {
+        return t == target_ty;
+    }
+    arg.ty.as_ref() == Some(target_ty)
+}
+
 fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
     let v = emit_expr(value);
@@ -714,6 +752,18 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
+            // `self.<col> = <untyped>` (assign_from_row / initialize /
+            // update read `row[k]`/`attrs[k]` as `Any?`) — coerce to the
+            // column's scalar type. Only for a `self` receiver: `from_row`
+            // writes to an `instance.` local and already carries the Cast,
+            // and other-receiver setters target a different class's props.
+            if matches!(&*r.node, ExprNode::SelfRef) {
+                if let Some(ty) = instance_prop_scalar_ty(base) {
+                    if !arg_already_ty(&args[0], &ty) {
+                        return format!("this.{} = {}", camel(base), emit_cast(&args[0], &ty));
+                    }
+                }
+            }
             return format!("{}.{} = {}", emit_expr(r), camel(base), args_s[0]);
         }
     }
