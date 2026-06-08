@@ -71,8 +71,19 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .map(|v| crate::lower::lower_view_to_library_class(v, app))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
-    let (model_lcs, model_registry) =
-        crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
+    // Permitted-params specs (resource → fields) collected from the
+    // controllers, so each model gains a typed `from_params(p: <Model>Params)`
+    // factory the controllers call.
+    let params_specs_full =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
+        params_specs_full.iter().map(|(r, s)| (r.clone(), s.fields.clone())).collect();
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+        &app.models,
+        &app.schema,
+        view_extras,
+        &params_specs,
+    );
     // Register the model classes (ApplicationRecord, Article, …) before
     // rendering any of them, so a model that extends another model
     // (Article → ApplicationRecord) sees the parent's members for override
@@ -110,7 +121,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         app,
         view_lower_extras.clone(),
     );
-    for lc in merge_by_module(view_lcs.clone()) {
+    // Jbuilder (json-format) views lower to `<name>_json` methods on the same
+    // `Views::<Plural>` module; merge them into the html view objects (Kotlin
+    // objects can't be reopened) so a controller's JSON branch resolves
+    // `Articles.indexJson(...)`.
+    let jbuilder_lcs = crate::lower::lower_jbuilder_to_library_classes(
+        &app.views,
+        app,
+        view_lower_extras.clone(),
+    );
+    let mut all_view_lcs = view_lcs.clone();
+    all_view_lcs.extend(jbuilder_lcs);
+    for lc in merge_by_module(all_view_lcs) {
         let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
         files.push(EmittedFile {
             path: std::path::PathBuf::from(format!("src/main/kotlin/app/views/{last}.kt")),
