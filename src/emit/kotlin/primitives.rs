@@ -189,6 +189,44 @@ sealed interface ParamValue {
 }
 "#;
 
+/// The adapter contract `ActiveRecord::Base`'s class-level CRUD defaults
+/// (`_adapter_all` / `_adapter_find_by_id` / `where` / `find_by` / …)
+/// dispatch against — the Kotlin analog of the per-target adapter primitive
+/// every other backend ships (crystal `db.cr`, go `adapter_interface.go`,
+/// rust `adapter_interface.rs`, ts `juntos.ts`). Surface mirrors
+/// `runtime/ruby/active_record/base.rbs`'s `AdapterInterface`.
+///
+/// The legacy *functional* adapter path is DROPPED for Kotlin: there is no
+/// Db-backed implementation and `ActiveRecord.adapter` is never assigned.
+/// All real CRUD goes Db-direct through the Level-3 per-model overrides
+/// (each model's companion re-emits `_adapter_*` calling `Db` itself —
+/// Kotlin companions aren't inherited, so Base's defaults are never
+/// reached). This interface exists purely as the compile-time contract for
+/// those (dead, for real-blog) Base defaults; the only callers without a
+/// per-model override are `where`/`find_by`, which real-blog never invokes
+/// and which therefore throw `UninitializedPropertyAccessException` if hit
+/// — the correct "this path is unsupported" behavior.
+const ADAPTER_INTERFACE_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
+// The adapter contract ActiveRecord::Base's class-level CRUD defaults
+// type-check against. Surface mirrors active_record/base.rbs's
+// AdapterInterface. The legacy functional adapter path is dropped for
+// Kotlin — no implementation is provided and `ActiveRecord.adapter` is
+// never wired; all real CRUD is Db-direct via the Level-3 per-model
+// `_adapter_*` overrides. This interface only lets Base's (unreached)
+// defaults compile.
+
+package roundhouse
+
+interface AdapterInterface {
+    fun all(tableName: String): MutableList<MutableMap<String, Any?>>
+    fun find(tableName: String, id: Long): MutableMap<String, Any?>?
+    fun where(tableName: String, conditions: MutableMap<String, Any?>): MutableList<MutableMap<String, Any?>>
+    fun count(tableName: String): Long
+    fun exists(tableName: String, id: Long): Boolean
+    fun truncate(tableName: String)
+}
+"#;
+
 /// The hand-written runtime primitives, emitted under `src/main/kotlin/`.
 pub fn primitives() -> Vec<EmittedFile> {
     vec![
@@ -203,6 +241,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/ParamValue.kt"),
             content: PARAM_VALUE_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/AdapterInterface.kt"),
+            content: ADAPTER_INTERFACE_KT.to_string(),
         },
     ]
 }

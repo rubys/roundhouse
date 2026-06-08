@@ -923,46 +923,71 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
+        rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "",
+        out_path: "src/main/kotlin/Errors.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "",
+        out_path: "src/main/kotlin/ActiveRecordBase.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    // errors.rb + base.rb WIRED above (this pass). The transpiled
+    // Errors.kt + ActiveRecordBase.kt compile clean kotlinc alongside the
+    // primitives (Time/Db/ParamValue/AdapterInterface) + the rest of the
+    // runtime (Inflector/JsonBuilder/Router). The legacy *functional*
+    // adapter path is DROPPED for Kotlin: AdapterInterface.kt (a hand-
+    // written primitive) is the compile-time contract Base's class-level
+    // CRUD defaults type-check against, but no implementation is provided
+    // and `ActiveRecord.adapter` is never assigned — all real CRUD is
+    // Db-direct via the Level-3 per-model `_adapter_*` overrides (Kotlin
+    // companions aren't inherited, so Base's defaults are unreached). The
+    // only callers without a per-model override are `where`/`find_by`,
+    // which real-blog never invokes.
+    //
     // flash.rb / session.rb deferred: they need non-accessor ivar types
     // (rbs `@data: Hash[...]`) plumbed to emit, Map shim methods
     // (delete→remove), and `!!` for mutable-property smart-casts. The
     // emitter groundwork (yield→block, init-block run-wrapper, `!`/push)
     // is in place; wiring the entries is the next step.
-    // active_record/errors.rb + base.rb deferred (coupled: errors'
-    // RecordInvalid references Base, so neither wires until base compiles).
-    // base.rb punch-list — DONE this pass (emitter groundwork, verified by
-    // wiring locally + `roundhouse --target kotlin`): `raise Class, msg` →
-    // `throw Class(msg)`; empty-body value-returning methods (the load-
-    // bearing-empty `_adapter_*` overrides) → `return <type-default>`;
-    // body-only ivar typing (`@persisted`/`@destroyed`/`@errors`) inferred
-    // from pure-reader return types + literal assigns (no `Any?`-soup).
-    // Keystone DONE: zero-arg `self`-receiver sends now emit `()` calls
-    // (`this._adapterInsert()`, `this.tableName()`), dropping parens only
-    // for known accessor-backed props (`this.persisted`); the per-class
-    // prop set is threaded via `INSTANCE_PROPS`. Adapter accessor DONE:
-    // `class << self; attr_accessor :adapter` collapses to `object
-    // ActiveRecord { lateinit var adapter: AdapterInterface }`, and
-    // `ActiveRecord.adapter` reads drop their parens (object-accessor
-    // registry, pre-scanned via the kotlin_units transform) — that cleared
-    // the adapter cascade. Bang-name DONE: `save!`/`create!` → `saveBang`/
-    // `createBang`. Mechanical cluster DONE: implicit-self `new(attrs)` →
-    // `Base(attrs)` (CURRENT_CLASS thread-local); `conditions.to_h` dropped
-    // (no-op on a Map); `.map{}` → `.map{}.toMutableList()` (Kotlin map
-    // yields read-only List); `.size`/`.length` → `.toLong()`. Reflection
-    // DONE: `self.name` (class-name) → a synthesized companion `fun name()`
-    // returning the Ruby-qualified class name; `self.class.X(...)` →
-    // unqualified `X(...)` companion call (Kotlin instance methods reach
-    // companion members by simple name). Empty-`{}` return DONE: a bare
-    // `{}`/`[]` in return position emits `mutableMapOf()`/`mutableListOf()`
-    // so the declared return type drives inference. **base.kt residual now
-    // 1 error (from ~107): `Time.now.utc.iso8601` only** — a hand-written
-    // runtime PRIMITIVE (Time.kt, like Db.kt), not an emit gap. The
-    // transpiled ActiveRecordBase.kt otherwise compiles clean.
-    // Remaining before base.kt fully links: the hand-written primitives
-    // Time.kt + Db.kt(Long indices)/Server.kt(Javalin)/ParamValue.kt +
-    // AdapterInterface impl; then wire base.rb+errors.rb in for real.
-    // (Latent, not erroring under the stub: negative index `records[-1]` in
-    // `last` → runtime OOB; needs `.lastOrNull()`/`records[size-1]`.)
+    //
+    // NEXT = drive MODEL emit to kotlinc-clean. With base wired, the
+    // emitted models (Article/Comment/ApplicationRecord) now compile
+    // against Base but surface ~83 errors, a well-bounded punch-list:
+    //  (1) `open class Base` — Kotlin classes are final by default, so
+    //      Base/ApplicationRecord must be `open` to be extended.
+    //  (2) `override` modifiers — per-model methods/props that override a
+    //      Base member (id, assignFromRow, attributes, get/set, _adapter_*,
+    //      validate, dom_prefix, the *_commit callbacks) need `override`.
+    //  (3) untyped-Map→typed-property Cast insertion — `assign_from_row` /
+    //      `initialize` / `update` assign `row[k]` (Any?) to a typed column
+    //      property; the lowerer skips the Cast for dynamic targets, so
+    //      Kotlin needs `as Long`/`as String` (or the Cast lowering wired).
+    //  (4) the `comments` has_many lazy loader emits `return val stmt = …`
+    //      (invalid Kotlin — a `return` of a `val` decl); the block-bodied
+    //      reader needs proper statement emit.
+    //  (5) `Broadcasts.Articles…` unresolved — the after_*_commit callbacks
+    //      need a Broadcasts companion shim (cf. go2/rust2 module shims).
+    //  (6) per-model companion copies of inherited class methods
+    //      (find/all/name) — companions aren't inherited.
+    // (Latent, compiles but wrong: negative index `records[-1]` in Base#last
+    // → runtime OOB; needs `.lastOrNull()`/`records[size-1]`. And the
+    // guard-return lowering emits `if (cond) { null } else { return X }`,
+    // which warns "expression is unused" — functionally correct, emit-polish
+    // later.)
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
