@@ -54,7 +54,7 @@ done
 [[ -z "$TARGET" ]] && { echo "usage: scripts/e2e [options] TARGET" >&2; exit 2; }
 
 case "$TARGET" in
-    go|ruby|spinel|typescript|rust|python|crystal|elixir|jruby) ;;
+    go|ruby|spinel|typescript|rust|python|crystal|elixir|jruby|kotlin) ;;
     *)  echo "unsupported target: $TARGET" >&2; exit 2 ;;
 esac
 
@@ -144,7 +144,7 @@ ok "extracted ($APP_DIR)"
 # (idempotent), and db/seed.sql's CREATE TABLE IF NOT EXISTS makes the
 # seed self-sufficient against a fresh empty file.
 case "$TARGET" in
-    go|rust|python|elixir)  DB_REL="storage/development.sqlite3" ;;
+    go|rust|python|elixir|kotlin)  DB_REL="storage/development.sqlite3" ;;
     typescript|crystal)     DB_REL="db/development.sqlite3" ;;
     ruby|jruby|spinel)      DB_REL="tmp/blog.sqlite3" ;;
 esac
@@ -218,6 +218,17 @@ case "$TARGET" in
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;
+    kotlin)
+        # `gradle installDist` produces a self-contained launcher at
+        # build/install/<rootProject.name>/bin/<name>. JAVA_HOME pins the
+        # JDK (jvmTarget 17, Javalin's floor). Mirrors `scripts/compare kotlin`.
+        (cd "$APP_DIR" && \
+            JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" \
+            PATH="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}/bin:$PATH" \
+            gradle installDist --console=plain -q) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
 esac
 ok "built"
 
@@ -266,10 +277,21 @@ case "$TARGET" in
             jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
+    kotlin)
+        # installDist launcher reads BLOG_DB + PORT (Main.kt). JAVA_HOME
+        # pins the JDK for the bundled `java` invocation.
+        (cd "$APP_DIR" && \
+            JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" \
+            BLOG_DB="$DB_REL" PORT="$PORT" \
+            ./build/install/roundhouse-app/bin/roundhouse-app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
 esac
-# JRuby's JVM boot is slow; everything else is up in a few seconds.
+# JVM-backed targets (jruby, kotlin) boot slower; everything else is up in
+# a few seconds.
 boot_budget=30
 [[ "$TARGET" == jruby ]] && boot_budget=120
+[[ "$TARGET" == kotlin ]] && boot_budget=60
 wait_for_port "http://localhost:$PORT/articles" "$TARGET" "$boot_budget" || {
     echo "--- $TARGET log ---" >&2; tail -20 "$TARGET_LOG" >&2; exit 1; }
 ok "$TARGET up"

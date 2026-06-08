@@ -53,9 +53,11 @@ pub enum BuildTarget {
     Crystal,
     Elixir,
     Go,
-    /// Kotlin/JVM emit (backend-only). Transpile-only and intentionally
-    /// excluded from `ALL` (the `--site` archive matrix) while the target
-    /// is under construction — see `docs/kotlin-migration-plan.md`.
+    /// Kotlin/JVM emit (backend-only). In the `ALL` `--site` archive
+    /// matrix as of the e2e-kotlin gate (the emitted archive builds via
+    /// `gradle installDist` and boots — see `scripts/e2e kotlin`).
+    /// Still incomplete (partial e2e/compare coverage), like several
+    /// published targets — see `docs/kotlin-migration-plan.md`.
     Kotlin,
     Python,
     Rust,
@@ -76,6 +78,7 @@ impl BuildTarget {
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
+        BuildTarget::Kotlin,
         BuildTarget::Python,
         BuildTarget::Rust,
         BuildTarget::Typescript,
