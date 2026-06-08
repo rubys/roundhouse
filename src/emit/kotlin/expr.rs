@@ -892,7 +892,35 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
         .iter()
         .map(|(k, v)| format!("{} to {}", emit_expr(k), emit_expr(v)))
         .collect();
+    // Heterogeneous `<String, Any?>` so a mixed map (Broadcasts payloads,
+    // render options) type-checks against `Any?` params. A homogeneous map in
+    // return position is re-typed by `wrap_return` (where map invariance is a
+    // non-issue) to match its declared return type.
     format!("mutableMapOf<String, Any?>({})", pairs.join(", "))
+}
+
+/// Emit a non-empty hash literal with no explicit type arguments, so the
+/// surrounding context (a method's declared `MutableMap<K, V>` return type)
+/// drives inference. Safe only where invariance can't bite — i.e. `return`
+/// position, not an argument.
+fn emit_hash_inferred(entries: &[(Expr, Expr)]) -> String {
+    let pairs: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| format!("{} to {}", emit_expr(k), emit_expr(v)))
+        .collect();
+    format!("mutableMapOf({})", pairs.join(", "))
+}
+
+/// Public entry for `wrap_return` (library.rs): render an expression for a
+/// `return`, re-typing a non-empty hash literal so the declared return type
+/// is inferred rather than the literal's heterogeneous `<String, Any?>`.
+pub(super) fn emit_return_value(e: &Expr) -> String {
+    if let ExprNode::Hash { entries, .. } = &*e.node {
+        if !entries.is_empty() {
+            return emit_hash_inferred(entries);
+        }
+    }
+    emit_expr(e)
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {

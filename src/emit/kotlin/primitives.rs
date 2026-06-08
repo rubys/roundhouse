@@ -156,6 +156,8 @@ object Db {
     fun escapeString(s: String): String = "'" + s.replace("'", "''") + "'"
     fun escapeInt(n: Long): String = n.toString()
     fun escapeBool(b: Boolean): String = if (b) "1" else "0"
+    // `IN (...)` list for a preload query: comma-joined integer ids.
+    fun escapeIntList(ids: MutableList<Long>): String = ids.joinToString(", ") { it.toString() }
 
     private fun resetStatements() {
         statements.values.forEach { runCatching { it.close() } }

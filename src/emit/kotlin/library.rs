@@ -693,6 +693,13 @@ fn wrap_return(e: &Expr) -> String {
         ExprNode::Array { elements, .. } if elements.is_empty() => {
             return "return mutableListOf()".to_string();
         }
+        // A non-empty hash in return position drops its explicit type args so
+        // the declared return type drives inference (a permitted-params
+        // `to_h` returns `MutableMap<String, String>`); invariance is a
+        // non-issue for a return value.
+        ExprNode::Hash { .. } => {
+            return format!("return {}", super::expr::emit_return_value(e));
+        }
         _ => {}
     }
     let s = emit_expr(e);
