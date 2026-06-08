@@ -772,9 +772,12 @@ start_target() {
             # JVM (Javalin) — single process, scheduler-level concurrency,
             # no worker concept (`workers` ignored, per-cell row records
             # workers=1 like go/elixir). The installDist launcher reads
-            # BLOG_DB + PORT.
+            # BLOG_DB + PORT, and honors JAVA_OPTS — heap pinned to 512 MB
+            # (-Xmx==-Xms) to match the jruby cell's methodology so the RSS
+            # comparison is apples-to-apples across the two JVM targets.
             (cd "$KT_OUT" && \
                 JAVA_HOME="$KOTLIN_JAVA_HOME" \
+                JAVA_OPTS="-Xmx512m -Xms512m" \
                 BLOG_DB="storage/development.sqlite3" \
                 PORT="$port" \
                 ./build/install/roundhouse-app/bin/roundhouse-app \
