@@ -180,8 +180,9 @@ PY_OUT="/tmp/rh-py-pass2"
 # reads BLOG_DB + PORT and serves via Javalin on the JVM.
 KT_OUT="/tmp/rh-kt-pass2"
 # JDK for the kotlin build/run (non-interactive shells otherwise resolve an
-# older `java` via PATH); overridable, default matches scripts/compare.
-KOTLIN_JAVA_HOME="${KOTLIN_JAVA_HOME:-/opt/homebrew/opt/openjdk}"
+# older `java` via PATH). Honors $KOTLIN_JAVA_HOME, then an existing
+# $JAVA_HOME (e.g. mise's `mise where java`), then the macOS Homebrew path.
+KOTLIN_JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/$TIMESTAMP"
 mkdir -p "$OUT_DIR"

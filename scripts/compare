@@ -383,7 +383,7 @@ case "$TARGET" in
         # JAVA_HOME pins the JDK (non-interactive shells otherwise resolve
         # an older `java` via PATH); jvmTarget is 17 (Javalin's floor).
         step "building kotlin target (gradle installDist)"
-        (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-/opt/homebrew/opt/openjdk}" PATH="${KOTLIN_JAVA_HOME:-/opt/homebrew/opt/openjdk}/bin:$PATH" gradle installDist --console=plain -q)
+        (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" PATH="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}/bin:$PATH" gradle installDist --console=plain -q)
         ;;
     elixir)
         step "building elixir target"
@@ -471,7 +471,7 @@ if [[ -z "$TARGET_CMD" ]]; then
         kotlin)
             # The installDist launcher reads BLOG_DB + PORT (Main.kt). JAVA_HOME
             # pins the JDK for the bundled `java` invocation.
-            (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-/opt/homebrew/opt/openjdk}" BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./build/install/roundhouse-app/bin/roundhouse-app >"$TARGET_LOG" 2>&1) &
+            (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./build/install/roundhouse-app/bin/roundhouse-app >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         elixir)
