@@ -278,8 +278,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             let m = if inherited.contains(n) { "override " } else { "" };
             out.push_str(&format!("    {m}var {n}: {}\n", kotlin_ty(ty)));
         } else {
-            let m = member_modifier(n);
-            out.push_str(&format!("    {m}var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
+            out.push_str(&format!("    {}\n", render_member(member_modifier(n), n, ty)));
         }
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
@@ -287,11 +286,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         if !prop_types.contains_key(n) {
             let m = member_modifier(n);
             match inferred_ivar_types.get(n) {
-                Some(ty) => out.push_str(&format!(
-                    "    {m}var {n}: {} = {}\n",
-                    kotlin_ty(ty),
-                    default_for(ty)
-                )),
+                Some(ty) => out.push_str(&format!("    {}\n", render_member(m, n, ty))),
                 None => out.push_str(&format!("    {m}var {n}: Any? = null\n")),
             }
         }
@@ -992,6 +987,20 @@ fn literal_ty(e: &Expr) -> Option<Ty> {
         ExprNode::Lit { value: Literal::Float { .. } } => Some(Ty::Float),
         ExprNode::Lit { value: Literal::Str { .. } } => Some(Ty::Str),
         _ => None,
+    }
+}
+
+/// Render a mutable property declaration. A non-null reference type whose
+/// default would be `null` (a lazily-assigned slot like a controller's
+/// `@flash`/`@session`, set before the action runs) becomes `lateinit var`
+/// with no initializer; everything else takes its default initializer.
+fn render_member(modifier: &str, name: &str, ty: &Ty) -> String {
+    let kt = kotlin_ty(ty);
+    let def = default_for(ty);
+    if def == "null" && can_lateinit(ty) {
+        format!("{modifier}lateinit var {name}: {kt}")
+    } else {
+        format!("{modifier}var {name}: {kt} = {def}")
     }
 }
 
