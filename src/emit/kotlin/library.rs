@@ -56,7 +56,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .unwrap_or_default();
     let mut out = format!("object {name} {{\n");
     for m in methods {
-        out.push_str(&indent_method(&emit_method(m)));
+        out.push_str(&indent_method(&emit_method(m, "")));
         out.push('\n');
     }
     out.push_str("}\n");
@@ -85,7 +85,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             // Skip the synthetic getter/setter funs — the `var` is the
             // accessor.
             if m.kind == AccessorKind::Method {
-                out.push_str(&indent_method(&emit_method(m)));
+                out.push_str(&indent_method(&emit_method(m, "")));
                 out.push('\n');
             }
         }
@@ -151,9 +151,31 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         (Some(pn), None) => format!(" : {pn}()"),
         (None, _) => String::new(),
     };
+    // Every emitted class is `open` — Kotlin classes are final by default,
+    // and the model chain (Article → ApplicationRecord → Base) needs each
+    // link extendable. The instance members a subclass inherits get an
+    // explicit `override`; the rest are `open` so a further subclass could
+    // override them (harmless on leaf classes). `inherited` is the union of
+    // member names visible from the parent upward.
+    let inherited: HashSet<String> = lc
+        .parent
+        .as_ref()
+        .map(|p| p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str()))
+        .map(super::expr::ancestor_members)
+        .unwrap_or_default();
+    let member_modifier = |name: &str| -> &'static str {
+        if inherited.contains(name) {
+            "override "
+        } else {
+            "open "
+        }
+    };
+
     let header = match init {
-        Some(m) => format!("class {class_name}({}){parent_clause}", method_params(m).join(", ")),
-        None => format!("class {class_name}{parent_clause}"),
+        Some(m) => {
+            format!("open class {class_name}({}){parent_clause}", method_params(m).join(", "))
+        }
+        None => format!("open class {class_name}{parent_clause}"),
     };
     out.push_str(&header);
     out.push_str(" {\n");
@@ -166,21 +188,28 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .unwrap_or_default();
     for (n, ty) in &prop_types {
         if ctor_param_names.contains(n) {
-            out.push_str(&format!("    var {n}: {}\n", kotlin_ty(ty)));
+            // Constructor-param-backed: assigned in the `init` block, no
+            // declaration initializer. Kotlin forbids `open` on a
+            // backing-field property without an initializer, so these stay
+            // final (only the rare inherited case takes `override`).
+            let m = if inherited.contains(n) { "override " } else { "" };
+            out.push_str(&format!("    {m}var {n}: {}\n", kotlin_ty(ty)));
         } else {
-            out.push_str(&format!("    var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
+            let m = member_modifier(n);
+            out.push_str(&format!("    {m}var {n}: {} = {}\n", kotlin_ty(ty), default_for(ty)));
         }
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
         if !prop_types.contains_key(n) {
+            let m = member_modifier(n);
             match inferred_ivar_types.get(n) {
                 Some(ty) => out.push_str(&format!(
-                    "    var {n}: {} = {}\n",
+                    "    {m}var {n}: {} = {}\n",
                     kotlin_ty(ty),
                     default_for(ty)
                 )),
-                None => out.push_str(&format!("    var {n}: Any? = null\n")),
+                None => out.push_str(&format!("    {m}var {n}: Any? = null\n")),
             }
         }
     }
@@ -222,7 +251,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             && m.kind == AccessorKind::Method
             && m.name.as_str() != "initialize"
         {
-            out.push_str(&indent_method(&emit_method(m)));
+            out.push_str(&indent_method(&emit_method(m, member_modifier(&member_name(m)))));
             out.push('\n');
         }
     }
@@ -248,7 +277,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             ));
         }
         for m in class_methods {
-            out.push_str(&indent_method(&indent_method(&emit_method(m))));
+            out.push_str(&indent_method(&indent_method(&emit_method(m, ""))));
             out.push('\n');
         }
         out.push_str("    }\n");
@@ -265,7 +294,64 @@ fn indent_method(s: &str) -> String {
         .join("\n")
 }
 
-fn emit_method(m: &MethodDef) -> String {
+/// The Kotlin member name a method emits under (`[]`→`get`, `[]=`→`set`,
+/// else camelCased) — the key used for override resolution.
+fn member_name(m: &MethodDef) -> String {
+    match m.name.as_str() {
+        "[]" => "get".to_string(),
+        "[]=" => "set".to_string(),
+        _ => camel(m.name.as_str()),
+    }
+}
+
+/// The camelCased instance-member names a class defines (accessor props +
+/// body ivars + instance methods, excluding `initialize`). Used both to
+/// register the class for override resolution and — via the ancestor union
+/// — to decide which members of a subclass need `override`.
+fn instance_member_names(lc: &LibraryClass) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in &lc.methods {
+        if m.receiver != MethodReceiver::Instance {
+            continue;
+        }
+        match m.kind {
+            AccessorKind::AttributeReader | AccessorKind::AttributeWriter => {
+                out.insert(camel(m.name.as_str().trim_end_matches('=')));
+            }
+            AccessorKind::Method if m.name.as_str() != "initialize" => {
+                out.insert(member_name(m));
+            }
+            AccessorKind::Method => {}
+        }
+    }
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    out.extend(body_ivars.into_keys());
+    out
+}
+
+/// Pre-scan hook: register each class's parent + instance members so that,
+/// when a subclass renders, members it inherits get an `override` modifier
+/// (Kotlin requires it explicitly). Skips modules (`object`s never
+/// participate in inheritance). Called for the runtime classes (via the
+/// `kotlin_units` transform) and the model classes (before they render).
+pub fn register_class_hierarchy(classes: &[LibraryClass]) {
+    for lc in classes {
+        if lc.is_module {
+            continue;
+        }
+        let name = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        let parent = lc
+            .parent
+            .as_ref()
+            .map(|p| p.0.as_str().rsplit("::").next().unwrap_or(p.0.as_str()).to_string());
+        super::expr::register_class_hierarchy(name, parent.as_deref(), instance_member_names(lc));
+    }
+}
+
+fn emit_method(m: &MethodDef, modifier: &str) -> String {
     // Ruby `[]` / `[]=` → Kotlin indexing operators. `set` is always
     // Unit-returning (the source RBS union return is dropped).
     let (decl_kw, name, force_unit) = match m.name.as_str() {
@@ -315,7 +401,11 @@ fn emit_method(m: &MethodDef) -> String {
         emit_body(&m.body, returns_value)
     };
 
-    format!("{decl_kw} {name}({}){ret_clause} {{\n{}\n}}\n", params.join(", "), indent4(&body))
+    format!(
+        "{modifier}{decl_kw} {name}({}){ret_clause} {{\n{}\n}}\n",
+        params.join(", "),
+        indent4(&body)
+    )
 }
 
 /// Render a method's params, always typed (Kotlin requirement); falls

@@ -45,8 +45,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // module/object-level accessors (e.g. `ActiveRecord.adapter`) so reads
     // of them drop their call parens.
     expr::reset_object_accessors();
+    expr::reset_class_hierarchy();
     let runtime_units = crate::runtime_loader::kotlin_units(|_path, classes| {
         library::register_object_accessors(&classes);
+        // Register the runtime classes (Base, …) for override resolution
+        // before any model renders. Base has no parent, so its members are
+        // all `open` regardless of order; subclasses look up its members
+        // here when deciding which to mark `override`.
+        library::register_class_hierarchy(&classes);
         classes
     })
     .expect("kotlin runtime transpile failed (Ruby source error)");
@@ -66,6 +72,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
     let (model_lcs, _registry) =
         crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
+    // Register the model classes (ApplicationRecord, Article, …) before
+    // rendering any of them, so a model that extends another model
+    // (Article → ApplicationRecord) sees the parent's members for override
+    // resolution regardless of emit order.
+    library::register_class_hierarchy(&model_lcs);
     for lc in &model_lcs {
         files.push(library::emit_class_file(lc));
     }

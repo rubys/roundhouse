@@ -53,6 +53,53 @@ thread_local! {
     /// `new(attrs)` (a companion factory like `Base.create`) resolves to
     /// the Kotlin constructor `Base(attrs)`. Empty for object/module emit.
     static CURRENT_CLASS: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Class hierarchy: simple class name → (parent simple name, instance
+    /// member names). Populated by a pre-scan of every runtime + model class
+    /// before any model renders, so a subclass can mark `override` on the
+    /// members it inherits (Kotlin requires explicit `override`, unlike
+    /// TS/Crystal). See `library::register_class_hierarchy`.
+    static CLASS_HIERARCHY: RefCell<HashMap<String, (Option<String>, HashSet<String>)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Clear the class-hierarchy registry (start of an `emit` run).
+pub(super) fn reset_class_hierarchy() {
+    CLASS_HIERARCHY.with(|h| h.borrow_mut().clear());
+}
+
+/// Register a class's parent + instance-member-name set for override
+/// resolution. `members` are the camelCased instance member names
+/// (`[]`→`get`, `[]=`→`set`).
+pub(super) fn register_class_hierarchy(name: &str, parent: Option<&str>, members: HashSet<String>) {
+    CLASS_HIERARCHY
+        .with(|h| h.borrow_mut().insert(name.to_string(), (parent.map(str::to_string), members)));
+}
+
+/// The instance member names visible from `class_name` upward — its own
+/// members unioned with all ancestors'. Call with a class's *parent* name
+/// to get the set a member must be in to need an `override` modifier.
+/// Unknown classes (e.g. `RuntimeException`) contribute nothing.
+pub(super) fn ancestor_members(class_name: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break; // cycle guard
+        }
+        let next = CLASS_HIERARCHY.with(|h| {
+            h.borrow().get(&name).map(|(parent, members)| {
+                out.extend(members.iter().cloned());
+                parent.clone()
+            })
+        });
+        match next {
+            Some(parent) => cur = parent,
+            None => break,
+        }
+    }
+    out
 }
 
 /// Set the class name used to resolve implicit-self `new` (see
