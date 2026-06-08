@@ -747,6 +747,21 @@ pub fn emit_expr_for_runtime(e: &Expr) -> String {
     emit_expr(e)
 }
 
+/// Emit a top-level constant's value. A non-empty hash/array literal drops
+/// its explicit type args so Kotlin infers the precise element type (e.g.
+/// `STATUS_CODES` is `MutableMap<String, Long>`). Safe for a constant — it's
+/// never passed where map/list invariance against `Any?` would bite.
+pub fn emit_constant_for_runtime(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Hash { entries, .. } if !entries.is_empty() => emit_hash_inferred(entries),
+        ExprNode::Array { elements, .. } if !elements.is_empty() => {
+            let els: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("mutableListOf({})", els.join(", "))
+        }
+        _ => emit_expr(e),
+    }
+}
+
 fn indent(s: &str) -> String {
     s.lines()
         .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
@@ -1458,9 +1473,11 @@ fn emit_send(
             // Kotlin's are a Set/Collection, so materialize a MutableList.
             "keys" if recv_is_hash(r) => return format!("{rs}.keys.toMutableList()"),
             "values" if recv_is_hash(r) => return format!("{rs}.values.toMutableList()"),
-            // No-ops in Kotlin — drop, keep the receiver. `to_h` is a no-op
-            // on a Hash (the only receiver the runtime calls it on).
-            "freeze" | "dup" | "to_a" | "to_h" => return rs,
+            // No-ops in Kotlin — drop, keep the receiver.
+            "freeze" | "dup" | "to_a" => return rs,
+            // `to_h` is a no-op on a Hash; on a user type (e.g. `Session`,
+            // `Flash`) it's a real `toH()` method — fall through to the call.
+            "to_h" if recv_is_hash(r) => return rs,
             _ => {}
         }
         // A `Const` receiver (a class / object like `Db`, `Broadcasts`)

@@ -880,7 +880,7 @@ fn kotlin_format_import(_name: &str, _source: &str) -> String {
 
 /// Top-level `val NAME = VALUE` (Kotlin allows file-level properties).
 fn kotlin_format_constant(name: &str, value: &Expr) -> String {
-    format!("val {name} = {}", crate::emit::kotlin::emit_expr_for_runtime(value))
+    format!("val {name} = {}", crate::emit::kotlin::emit_constant_for_runtime(value))
 }
 
 /// Kotlin uses packages, not nested namespace blocks; the package decl in

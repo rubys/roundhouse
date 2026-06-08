@@ -26,7 +26,7 @@ mod primitives;
 mod ty;
 
 // Entry points consumed by `runtime_loader::kotlin_units`.
-pub use expr::emit_expr_for_runtime;
+pub use expr::{emit_constant_for_runtime, emit_expr_for_runtime};
 pub use library::{emit_library_class_result, emit_module};
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
