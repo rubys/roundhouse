@@ -869,10 +869,6 @@ jobs:
   # (2026-06-08): Tailwind asset serving, Turbo Stream comment insert,
   # Action Cable broadcast.
   e2e-go:
-    # TEMPORARILY DISABLED (2026-06-08): go is only 2/5 with three gates;
-    # dropped while landing the e2e matrix on a green main. Re-enable once
-    # go's asset/turbo/cable gaps are addressed. e2e-ruby (5/5) stays on.
-    if: false
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -923,6 +919,165 @@ jobs:
           npx playwright install --with-deps chromium
       - name: scripts/e2e ruby
         run: scripts/e2e --tgz browse/ruby.tgz ruby
+
+  # The next six targets are each 2/5: index + validation pass, and the
+  # three asset-dependent specs (tailwind, turbo_comment, action_cable) are
+  # gated — the archive build doesn't serve compiled CSS / turbo.min.js, so
+  # Turbo Drive and the cable stream-source never activate. (elixir
+  # additionally has no cable runtime.) Closing the shared asset-serving gap
+  # is the next lever to move several of these toward green at once.
+
+  # typescript (2/5): tsx server via npm. No setup-ruby — runs without Ruby.
+  e2e-typescript:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e typescript
+        run: scripts/e2e --tgz browse/typescript.tgz --skip "tailwind turbo_comment action_cable" typescript
+
+  # rust (2/5): cargo build --release on the standalone archive (axum).
+  e2e-rust:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e rust
+        run: scripts/e2e --tgz browse/rust.tgz --skip "tailwind turbo_comment action_cable" rust
+
+  # python (2/5): aiohttp via uv.
+  e2e-python:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e python
+        run: scripts/e2e --tgz browse/python.tgz --skip "tailwind turbo_comment action_cable" python
+
+  # crystal (2/5): crystal build --release of the archive.
+  e2e-crystal:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e crystal
+        run: scripts/e2e --tgz browse/crystal.tgz --skip "tailwind turbo_comment action_cable" crystal
+
+  # elixir (2/5): mix/Plug v2 overlay (Main.run). No cable runtime yet, so
+  # action_cable would fail even with assets — gated like the rest for now.
+  e2e-elixir:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - name: Install Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e elixir
+        run: scripts/e2e --tgz browse/elixir.tgz --skip "tailwind turbo_comment action_cable" elixir
+
+  # jruby (2/5): byte-identical emit to ruby on the JVM. Assets NOT built
+  # (the Makefile turbo.min.js step collides MRI vs JRuby bundler — same as
+  # compare-jruby), so the three asset specs are gated. Java 21 for JRuby 10.
+  e2e-jruby:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 'jruby-10.0'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e jruby
+        run: scripts/e2e --tgz browse/jruby.tgz --skip "tailwind turbo_comment action_cable" jruby
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

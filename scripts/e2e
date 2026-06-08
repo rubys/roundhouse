@@ -54,8 +54,8 @@ done
 [[ -z "$TARGET" ]] && { echo "usage: scripts/e2e [options] TARGET" >&2; exit 2; }
 
 case "$TARGET" in
-    go|ruby|spinel) ;;
-    *)  echo "unsupported target: $TARGET (currently: go, ruby, spinel)" >&2; exit 2 ;;
+    go|ruby|spinel|typescript|rust|python|crystal|elixir|jruby) ;;
+    *)  echo "unsupported target: $TARGET" >&2; exit 2 ;;
 esac
 
 # -------- paths --------
@@ -144,8 +144,9 @@ ok "extracted ($APP_DIR)"
 # (idempotent), and db/seed.sql's CREATE TABLE IF NOT EXISTS makes the
 # seed self-sufficient against a fresh empty file.
 case "$TARGET" in
-    go)           DB_REL="storage/development.sqlite3" ;;
-    ruby|spinel)  DB_REL="tmp/blog.sqlite3" ;;
+    go|rust|python|elixir)  DB_REL="storage/development.sqlite3" ;;
+    typescript|crystal)     DB_REL="db/development.sqlite3" ;;
+    ruby|jruby|spinel)      DB_REL="tmp/blog.sqlite3" ;;
 esac
 step "seeding $DB_REL from db/seed.sql"
 mkdir -p "$APP_DIR/$(dirname "$DB_REL")"
@@ -182,6 +183,41 @@ case "$TARGET" in
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;
+    typescript)
+        (cd "$APP_DIR" && npm install --no-audit --no-fund) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    rust)
+        (cd "$APP_DIR" && cargo build --release) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    python)
+        (cd "$APP_DIR" && uv sync) >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    crystal)
+        (cd "$APP_DIR" && mkdir -p .bin && shards install && \
+            crystal build --release --no-debug src/main.cr -o .bin/server) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    elixir)
+        (cd "$APP_DIR" && mix deps.get && MIX_ENV=prod mix compile) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
+    jruby)
+        # Byte-identical emit to ruby, but assets are NOT built: the
+        # Makefile's turbo.min.js step shells `bundle exec ruby`, which
+        # under a JRuby bundle collides with MRI's bundler. Same reason
+        # compare-jruby skips assets. So jruby gates the asset-dependent
+        # specs (tailwind/turbo/cable) — index + validation still run.
+        (cd "$APP_DIR" && jruby -S bundle install) \
+            >"$LOG_DIR/build.log" 2>&1 || {
+            fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
+        ;;
 esac
 ok "built"
 
@@ -203,8 +239,38 @@ case "$TARGET" in
             ./build/blog >"$TARGET_LOG" 2>&1) &
         TARGET_PID=$!
         ;;
+    typescript)
+        (cd "$APP_DIR" && PORT="$PORT" npm start >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    rust)
+        (cd "$APP_DIR" && PORT="$PORT" ./target/release/app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    python)
+        (cd "$APP_DIR" && PORT="$PORT" uv run python3 -m app >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    crystal)
+        (cd "$APP_DIR" && PORT="$PORT" ./.bin/server >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    elixir)
+        (cd "$APP_DIR" && PORT="$PORT" MIX_ENV=prod \
+            mix run --no-halt -e "Main.run" >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
+    jruby)
+        (cd "$APP_DIR" && BLOG_DB="$DB_REL" WEB_CONCURRENCY=0 PORT="$PORT" \
+            JRUBY_OPTS="-J-Xmx512m -J-Xms512m" \
+            jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+        TARGET_PID=$!
+        ;;
 esac
-wait_for_port "http://localhost:$PORT/articles" "$TARGET" || {
+# JRuby's JVM boot is slow; everything else is up in a few seconds.
+boot_budget=30
+[[ "$TARGET" == jruby ]] && boot_budget=120
+wait_for_port "http://localhost:$PORT/articles" "$TARGET" "$boot_budget" || {
     echo "--- $TARGET log ---" >&2; tail -20 "$TARGET_LOG" >&2; exit 1; }
 ok "$TARGET up"
 
