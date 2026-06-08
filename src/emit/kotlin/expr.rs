@@ -620,6 +620,22 @@ fn emit_send(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
+    // `self.class.METHOD(...)` → unqualified `METHOD(...)`. Ruby's
+    // `self.class` reflection has no Kotlin analog, but a per-model class
+    // method lives on the companion, and Kotlin lets an instance method
+    // call companion members by simple name. (`self.class.schema_columns`
+    // in `fill_timestamps` → `schemaColumns()`.)
+    if let Some(r) = recv {
+        if let ExprNode::Send { recv: Some(inner), method: m2, args: a2, .. } = &*r.node {
+            if m2.as_str() == "class"
+                && a2.is_empty()
+                && matches!(&*inner.node, ExprNode::SelfRef)
+            {
+                return format!("{}({})", camel(method), args_s.join(", "));
+            }
+        }
+    }
+
     // Constructor: `X.new(...)` → `X(...)`. Implicit-self `new(...)` (a
     // companion factory) resolves to the current class's constructor.
     if method == "new" {

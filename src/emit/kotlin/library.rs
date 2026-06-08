@@ -233,8 +233,20 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .iter()
         .filter(|m| m.receiver == MethodReceiver::Class)
         .collect();
-    if !class_methods.is_empty() {
+    // Ruby's class-name reflection (`self.name`, emitted as a `name()`
+    // call) has no Kotlin analog; synthesize a companion `name()` returning
+    // this class's (Ruby-qualified) name. Skip if the class defines its own
+    // `name`. Per-model subclasses get their own when emitted.
+    let needs_name = references_class_name(&lc.methods)
+        && !lc.methods.iter().any(|m| m.name.as_str() == "name");
+    if !class_methods.is_empty() || needs_name {
         out.push_str("    companion object {\n");
+        if needs_name {
+            out.push_str(&format!(
+                "        fun name(): String {{\n            return {:?}\n        }}\n",
+                lc.name.0.as_str()
+            ));
+        }
         for m in class_methods {
             out.push_str(&indent_method(&indent_method(&emit_method(m))));
             out.push('\n');
@@ -356,6 +368,19 @@ fn emit_body(body: &Expr, returns_value: bool) -> String {
 /// Prefix `return` unless the expression is already terminal or is a
 /// statement that has no value (assignment, loop).
 fn wrap_return(e: &Expr) -> String {
+    // An empty `{}` / `[]` literal in return position: emit the
+    // type-argument-free constructor so the method's declared return type
+    // drives inference (`attributes()` → `MutableMap<String, Any?>`),
+    // rather than the literal's own `<Any?, Any?>` guess.
+    match &*e.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            return "return mutableMapOf()".to_string();
+        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            return "return mutableListOf()".to_string();
+        }
+        _ => {}
+    }
     let s = emit_expr(e);
     // A `raise Class, msg` send emits as a `throw` (type `Nothing`); like a
     // `Raise` node it needs no `return` prefix.
@@ -546,6 +571,24 @@ fn can_lateinit(ty: &Ty) -> bool {
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => false,
         _ => true,
     }
+}
+
+/// True when any method references Ruby's class-name reflection — a bare
+/// (implicit-self) `name` send with no args, as in `"#{name}.table_name
+/// must be overridden"`.
+fn references_class_name(methods: &[MethodDef]) -> bool {
+    methods.iter().any(|m| sends_class_name(&m.body))
+}
+
+fn sends_class_name(e: &Expr) -> bool {
+    let hit = matches!(
+        &*e.node,
+        ExprNode::Send { recv, method, args, .. }
+            if method.as_str() == "name"
+                && args.is_empty()
+                && matches!(recv.as_ref().map(|r| &*r.node), None | Some(ExprNode::SelfRef))
+    );
+    hit || expr_children(e).iter().any(|c| sends_class_name(c))
 }
 
 /// True when a method body is empty (`def x; end` → an empty `Seq`).

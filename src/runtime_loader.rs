@@ -948,15 +948,21 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     // `createBang`. Mechanical cluster DONE: implicit-self `new(attrs)` →
     // `Base(attrs)` (CURRENT_CLASS thread-local); `conditions.to_h` dropped
     // (no-op on a Map); `.map{}` → `.map{}.toMutableList()` (Kotlin map
-    // yields read-only List); `.size`/`.length` → `.toLong()` (so `==` vs a
-    // Long literal works — `<`/`>` already cross Int/Long). base.kt residual
-    // now ~7 errors (from ~107).
-    // Remaining, all documented later items: `self.name` class-name
-    // reflection (4×) → shim; `self.class.X` → companion dispatch;
-    // `Time.now.utc.iso8601` java.time shim; empty `{}` return literal →
-    // `mutableMapOf<Any?,Any?>` vs declared `MutableMap<String,Any?>` (emit
-    // bare `mutableMapOf()` in return position); negative index
-    // `records[-1]`. Then hand-written Db.kt/Server.kt/ParamValue.kt.
+    // yields read-only List); `.size`/`.length` → `.toLong()`. Reflection
+    // DONE: `self.name` (class-name) → a synthesized companion `fun name()`
+    // returning the Ruby-qualified class name; `self.class.X(...)` →
+    // unqualified `X(...)` companion call (Kotlin instance methods reach
+    // companion members by simple name). Empty-`{}` return DONE: a bare
+    // `{}`/`[]` in return position emits `mutableMapOf()`/`mutableListOf()`
+    // so the declared return type drives inference. **base.kt residual now
+    // 1 error (from ~107): `Time.now.utc.iso8601` only** — a hand-written
+    // runtime PRIMITIVE (Time.kt, like Db.kt), not an emit gap. The
+    // transpiled ActiveRecordBase.kt otherwise compiles clean.
+    // Remaining before base.kt fully links: the hand-written primitives
+    // Time.kt + Db.kt(Long indices)/Server.kt(Javalin)/ParamValue.kt +
+    // AdapterInterface impl; then wire base.rb+errors.rb in for real.
+    // (Latent, not erroring under the stub: negative index `records[-1]` in
+    // `last` → runtime OOB; needs `.lastOrNull()`/`records[size-1]`.)
 ];
 
 pub fn kotlin_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
