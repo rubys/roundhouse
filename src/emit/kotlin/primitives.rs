@@ -185,11 +185,135 @@ const PARAM_VALUE_KT: &str = r#"// Hand-written roundhouse runtime primitive (no
 package roundhouse
 
 sealed interface ParamValue {
-    @JvmInline value class Str(val value: String) : ParamValue
+    // `to_s` on a scalar param (`params[:id].to_s`) must yield the inner
+    // string, not the value-class wrapper's default `Str(value=…)`.
+    @JvmInline value class Str(val value: String) : ParamValue {
+        override fun toString(): String = value
+    }
     @JvmInline value class Dict(val value: MutableMap<String, ParamValue>) : ParamValue
     @JvmInline value class Arr(val value: MutableList<ParamValue>) : ParamValue
 }
 "#;
+
+/// The Javalin HTTP listener — the per-target server primitive (cf.
+/// `runtime/crystal/server.cr`, `runtime/go/v2/server.go`). Parses the
+/// request, dispatches through the transpiled `Router.match` against the
+/// app's routes table, instantiates the matched controller, populates its
+/// request state (params/flash/session/format), runs `process_action`, and
+/// formats the response (redirect, html-with-layout, or json). The routes
+/// table, controller factory map, and layout function are passed in by the
+/// emitted `Main.kt` (they're app-specific).
+const SERVER_KT: &str = r##"// Hand-written roundhouse runtime primitive (no Ruby source).
+// Javalin HTTP listener — parse request -> Router.match -> instantiate
+// controller -> process_action -> format response. Mirrors
+// runtime/crystal/server.cr.
+
+package roundhouse
+
+import io.javalin.Javalin
+import io.javalin.http.Context
+import io.javalin.http.Handler
+
+object Server {
+    fun start(
+        dbPath: String,
+        port: Int,
+        routes: MutableList<Route>,
+        controllers: Map<String, () -> ActionControllerBase>,
+        layout: (String, String?, String?) -> String,
+    ) {
+        Db.openProductionDb(dbPath)
+        val app = Javalin.create()
+        val handler = Handler { ctx -> dispatch(ctx, routes, controllers, layout) }
+        for (p in listOf("/", "/<path>")) {
+            app.get(p, handler)
+            app.post(p, handler)
+            app.put(p, handler)
+            app.patch(p, handler)
+            app.delete(p, handler)
+        }
+        app.start("127.0.0.1", port)
+        println("Roundhouse Kotlin server listening on http://127.0.0.1:$port")
+    }
+
+    private fun dispatch(
+        ctx: Context,
+        routes: MutableList<Route>,
+        controllers: Map<String, () -> ActionControllerBase>,
+        layout: (String, String?, String?) -> String,
+    ) {
+        ViewHelpers.resetSlotsBang()
+
+        // Rails' `_method` override (button_to delete/patch forms POST).
+        var method = ctx.method().name
+        if (method == "POST") {
+            ctx.formParam("_method")?.let { method = it.uppercase() }
+        }
+
+        // A `.json` extension selects the JSON variant.
+        var path = ctx.path()
+        var format = "html"
+        if (path.endsWith(".json")) {
+            format = "json"
+            path = path.substring(0, path.length - 5)
+        }
+
+        val match = Router.match(method, path, routes)
+        val factory = match?.let { controllers[it.controller] }
+        if (match == null || factory == null) {
+            ctx.status(404).result("Not Found")
+            return
+        }
+
+        val params: MutableMap<String, ParamValue> = mutableMapOf()
+        for ((k, v) in match.pathParams) {
+            params[k] = ParamValue.Str(v)
+        }
+        for ((k, vals) in ctx.queryParamMap()) {
+            vals.firstOrNull()?.let { setParam(params, k, it) }
+        }
+        for ((k, vals) in ctx.formParamMap()) {
+            vals.firstOrNull()?.let { setParam(params, k, it) }
+        }
+
+        val controller = factory()
+        controller.params = params
+        controller.requestFormat = format
+        controller.requestMethod = method
+        controller.requestPath = path
+        controller.flash = Flash()
+        controller.session = Session()
+        controller.processAction(match.action)
+
+        val code = controller.status.toInt()
+        val location = controller.location
+        if (location != null) {
+            ctx.status(code)
+            ctx.header("Location", location)
+        } else if (controller.requestFormat == "json") {
+            ctx.status(code).contentType("application/json").result(controller.body)
+        } else {
+            ctx.status(code)
+                .html(layout(controller.body, controller.flash.notice, controller.flash.alert))
+        }
+    }
+
+    // `article[title]=Foo` -> a nested `Dict`; a bare key -> a scalar `Str`.
+    private fun setParam(params: MutableMap<String, ParamValue>, key: String, value: String) {
+        val open = key.indexOf('[')
+        if (open >= 0 && key.endsWith("]")) {
+            val outer = key.substring(0, open)
+            val inner = key.substring(open + 1, key.length - 1)
+            val existing = params[outer]
+            val dict = if (existing is ParamValue.Dict) existing.value else mutableMapOf()
+            dict[inner] = ParamValue.Str(value)
+            params[outer] = ParamValue.Dict(dict)
+        } else {
+            params[key] = ParamValue.Str(value)
+        }
+    }
+}
+"##;
 
 /// The adapter contract `ActiveRecord::Base`'s class-level CRUD defaults
 /// (`_adapter_all` / `_adapter_find_by_id` / `where` / `find_by` / …)
@@ -274,6 +398,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Broadcasts.kt"),
             content: BROADCASTS_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Server.kt"),
+            content: SERVER_KT.to_string(),
         },
     ]
 }
