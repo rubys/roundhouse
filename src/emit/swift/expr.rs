@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::expr::{Arm, BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
+use crate::expr::{Arm, BoolOpKind, Expr, ExprNode, InterpPart, LValue, Literal, OpAssignOp, Pattern};
 
 use super::naming::camel;
 use super::ty::swift_ty;
@@ -48,6 +48,13 @@ thread_local! {
     /// CLASS_INSTANCE_METHODS registry.
     static CLASS_INSTANCE_METHODS: RefCell<HashMap<String, HashSet<String>>> =
         RefCell::new(HashMap::new());
+    /// Whether the method being emitted returns a value — decides
+    /// `return nil` vs bare `return` for Ruby's `return nil`.
+    static RETURNS_VALUE: RefCell<bool> = const { RefCell::new(false) };
+    /// Empty-container locals' inferred declaration types, from how
+    /// they're later populated (`map[k] = v`, `list << x`) — Kotlin's
+    /// CONTAINER_TYPES scan.
+    static CONTAINER_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Reset cross-class emit state. Called once at `swift::emit` start.
@@ -136,7 +143,11 @@ fn is_map_read_shape(e: &Expr) -> bool {
 /// Reset per-method local-decl tracking and pre-scan the body for
 /// reassignment counts. Called by `library::emit_method` before the body
 /// is rendered.
-pub(super) fn begin_method(body: &Expr) {
+pub(super) fn begin_method(body: &Expr, returns_value: bool) {
+    RETURNS_VALUE.with(|r| *r.borrow_mut() = returns_value);
+    let mut container_types: HashMap<String, String> = HashMap::new();
+    scan_container_types(body, &mut container_types);
+    CONTAINER_TYPES.with(|t| *t.borrow_mut() = container_types);
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut nil_types: HashMap<String, String> = HashMap::new();
     let mut mutated: HashSet<String> = HashSet::new();
@@ -158,6 +169,64 @@ pub(super) fn begin_method(body: &Expr) {
         set.extend(mutated);
     });
     NIL_TYPES.with(|t| *t.borrow_mut() = nil_types);
+}
+
+/// Infer declaration types for empty-container locals from how they're
+/// later populated: `map[k] = v` → `[K: V]`, `list << x` → `[E]` —
+/// Kotlin's CONTAINER_TYPES scan. Index reads are typed nilable by the
+/// IR (Ruby OOB → nil), so the top-level nullability strips.
+fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
+    let nn = |ty: Option<&crate::ty::Ty>| -> String {
+        match ty {
+            Some(crate::ty::Ty::Union { variants }) => {
+                let non_nil: Vec<&crate::ty::Ty> =
+                    variants.iter().filter(|t| !matches!(t, crate::ty::Ty::Nil)).collect();
+                if non_nil.len() == 1 {
+                    swift_ty(non_nil[0])
+                } else {
+                    "Any?".to_string()
+                }
+            }
+            Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. }) | None => {
+                "Any?".to_string()
+            }
+            Some(t) => swift_ty(t),
+        }
+    };
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Index { recv, index }, value } => {
+            if let ExprNode::Var { name, .. } = &*recv.node {
+                out.entry(camel(name.as_str())).or_insert(format!(
+                    "[{}: {}]",
+                    nn(index.ty.as_ref()),
+                    nn(value.ty.as_ref())
+                ));
+            }
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "[]=" && args.len() == 2 =>
+        {
+            if let ExprNode::Var { name, .. } = &*r.node {
+                out.entry(camel(name.as_str())).or_insert(format!(
+                    "[{}: {}]",
+                    nn(args[0].ty.as_ref()),
+                    nn(args[1].ty.as_ref())
+                ));
+            }
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if matches!(method.as_str(), "<<" | "push" | "append") && args.len() == 1 =>
+        {
+            if let ExprNode::Var { name, .. } = &*r.node {
+                out.entry(camel(name.as_str()))
+                    .or_insert(format!("[{}]", nn(args[0].ty.as_ref())));
+            }
+        }
+        _ => {}
+    }
+    for child in children(e) {
+        scan_container_types(child, out);
+    }
 }
 
 /// Ruby methods that lower to mutating Swift members on value types.
@@ -210,6 +279,10 @@ fn count_assigns(
                 mutated.insert(camel(name.as_str()));
             }
         }
+        // A compound assignment both mutates and (for the count) reassigns.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
+            mutated.insert(camel(name.as_str()));
+        }
         ExprNode::Send { recv: Some(r), method, .. } if is_mutating_method(method.as_str()) => {
             if let ExprNode::Var { name, .. } = &*r.node {
                 mutated.insert(camel(name.as_str()));
@@ -219,6 +292,36 @@ fn count_assigns(
     }
     for child in children(e) {
         count_assigns(child, counts, nil_types, mutated);
+    }
+}
+
+fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
+    let t = match target {
+        LValue::Var { name, .. } => camel(name.as_str()),
+        LValue::Ivar { name } => format!("self.{}", camel(name.as_str())),
+        LValue::Attr { recv, name } => {
+            format!("{}.{}", emit_expr(recv), camel(name.as_str()))
+        }
+        LValue::Index { recv, index } => {
+            format!("{}[{}]", emit_expr(recv), emit_expr(index))
+        }
+        LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
+    };
+    let v = emit_expr(value);
+    match op {
+        OpAssignOp::OrOr => format!("{t} = {t} ?? {v}"),
+        OpAssignOp::AndAnd => format!("if {t} != nil {{ {t} = {v} }}"),
+        OpAssignOp::Add => format!("{t} += {v}"),
+        OpAssignOp::Sub => format!("{t} -= {v}"),
+        OpAssignOp::Mul => format!("{t} *= {v}"),
+        OpAssignOp::Div => format!("{t} /= {v}"),
+        OpAssignOp::Mod => format!("{t} %= {v}"),
+        OpAssignOp::Pow => format!("{t} = pow({t}, {v})"),
+        OpAssignOp::BitAnd => format!("{t} &= {v}"),
+        OpAssignOp::BitOr => format!("{t} |= {v}"),
+        OpAssignOp::BitXor => format!("{t} ^= {v}"),
+        OpAssignOp::Shl => format!("{t} <<= {v}"),
+        OpAssignOp::Shr => format!("{t} >>= {v}"),
     }
 }
 
@@ -267,6 +370,27 @@ pub fn emit_expr(e: &Expr) -> String {
     emit_node(&e.node, e)
 }
 
+/// Render a top-level runtime constant's value. Non-empty hash/array
+/// literals drop the `as [String: Any?]` pin so Swift infers the
+/// homogeneous element type (`STATUS_CODES`-style tables become
+/// `[String: Int]`, not `[String: Any?]`).
+pub fn emit_constant_for_runtime(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Hash { entries, .. } if !entries.is_empty() => {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            format!("[{}]", pairs.join(", "))
+        }
+        ExprNode::Array { elements, .. } if !elements.is_empty() => {
+            let els: Vec<String> = elements.iter().map(emit_expr).collect();
+            format!("[{}]", els.join(", "))
+        }
+        _ => emit_expr(e),
+    }
+}
+
 fn indent(s: &str) -> String {
     s.lines()
         .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
@@ -303,9 +427,16 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, false),
         ExprNode::Seq { exprs } => emit_stmts(exprs, false),
         ExprNode::Assign { target, value } => emit_assign(target, value),
+        ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
         ExprNode::Return { value } => {
+            // `return nil` is a bare `return` only in a Void method; a
+            // value-returning (Optional) method needs the literal.
             if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
-                "return".to_string()
+                if RETURNS_VALUE.with(|r| *r.borrow()) {
+                    "return nil".to_string()
+                } else {
+                    "return".to_string()
+                }
             } else {
                 format!("return {}", emit_expr(value))
             }
@@ -364,6 +495,12 @@ fn escape_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // Swift has no \b/\f escapes and rejects raw control bytes
+            // in source — render them (and any other control char) as
+            // the universal \u{XX} escape.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{{{:X}}}", c as u32));
+            }
             _ => out.push(c),
         }
     }
@@ -428,14 +565,66 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
 }
 
 fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
-    let c = emit_expr(cond);
+    // `if x.is_a?(T)` narrows via shadow-rebinding: `if let x = x as? T`.
+    // Swift's `is` does NOT smart-cast (unlike Kotlin), so the branch
+    // body's uses of `x` at type T only compile with the rebind.
+    let c = match isa_narrow_cond(cond) {
+        Some(narrowed) => narrowed,
+        None => emit_expr(cond),
+    };
+    let then_empty = is_empty_branch(then_branch);
+    let else_empty = is_empty_branch(else_branch);
+    // An empty then-branch with a real else (the lowered guard shape
+    // `if c then nil else X`) inverts — Swift rejects a bare `nil`
+    // statement. (Not reachable for the narrowing cond shape: a `nil?`
+    // cond with a real else fuses to if-let upstream.)
+    if then_empty && !else_empty {
+        let els = indent(&emit_expr(else_branch));
+        return format!("if !({c}) {{\n{els}\n}}");
+    }
     let then = indent(&emit_expr(then_branch));
-    if is_empty_branch(else_branch) {
+    if else_empty {
         format!("if {c} {{\n{then}\n}}")
     } else {
         let els = indent(&emit_expr(else_branch));
         format!("if {c} {{\n{then}\n}} else {{\n{els}\n}}")
     }
+}
+
+/// Ruby classes with a direct Swift `as?` target in the runtime's value
+/// world.
+fn isa_swift_type(class_name: &str) -> Option<&'static str> {
+    Some(match class_name {
+        "Integer" => "Int",
+        "Float" => "Double",
+        "String" | "Symbol" => "String",
+        "Hash" => "[String: Any?]",
+        "Array" => "[Any?]",
+        _ => return None,
+    })
+}
+
+/// `x.is_a?(T)` as an if-condition over a Var → `let x = x as? T`.
+fn isa_narrow_cond(cond: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "is_a?" && method.as_str() != "kind_of?" {
+        return None;
+    }
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    let ExprNode::Const { path } = &*arg.node else {
+        return None;
+    };
+    let cls = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+    let swift = isa_swift_type(&cls)?;
+    let n = camel(name.as_str());
+    Some(format!("let {n} = {n} as? {swift}"))
 }
 
 /// `case` → `switch`. Swift `switch` is a statement, not an expression
@@ -482,12 +671,28 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
     let mut i = 0;
     while i < exprs.len() {
         let is_last = i == exprs.len() - 1;
+        // A bare `nil` statement (a lowered no-op branch filler) has no
+        // contextual type in Swift — drop it.
+        if !(returning && is_last)
+            && matches!(&*exprs[i].node, ExprNode::Lit { value: Literal::Nil })
+        {
+            i += 1;
+            continue;
+        }
         // guard-let fusion: Assign(Var x, v) followed by
         // `if x.nil? { <terminal> }` (empty else).
         if i + 1 < exprs.len() {
             if let Some(fused) = try_guard_let(&exprs[i], &exprs[i + 1]) {
                 lines.push(fused);
                 i += 2;
+                continue;
+            }
+        }
+        // Standalone optional-param nil-guard → `guard let x = x`.
+        if !(returning && is_last) {
+            if let Some(guard) = try_param_guard(&exprs[i]) {
+                lines.push(guard);
+                i += 1;
                 continue;
             }
         }
@@ -506,16 +711,13 @@ fn try_guard_let(assign: &Expr, guard: &Expr) -> Option<String> {
         return None;
     };
     let n = camel(name.as_str());
-    // A reassigned local can't become a `guard let` constant.
+    // A reassigned local can't become a binding constant.
     if REASSIGNED.with(|r| r.borrow().contains(&n)) {
         return None;
     }
     let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
         return None;
     };
-    if !is_empty_branch(else_branch) {
-        return None;
-    }
     // cond must be `x.nil?` (either IR spelling).
     let nil_check = match &*cond.node {
         ExprNode::Send { recv: Some(r), method, args, .. }
@@ -528,15 +730,108 @@ fn try_guard_let(assign: &Expr, guard: &Expr) -> Option<String> {
     if !nil_check {
         return None;
     }
-    // The guard body must leave the scope.
-    if !branch_is_terminal(then_branch) {
+    // Three shapes:
+    //   nil-branch terminal, no else      → guard let x = v else { … }
+    //   nil-branch empty, else present    → if let x = v { else-branch }
+    //   both present                      → if let x = v { else } else { then }
+    let then_empty = is_empty_branch(then_branch);
+    let else_empty = is_empty_branch(else_branch);
+    if else_empty && branch_is_terminal(then_branch) {
+        DECLARED.with(|d| {
+            d.borrow_mut().insert(n.clone());
+        });
+        let body = emit_expr(then_branch);
+        return Some(format!(
+            "guard let {n} = {} else {{\n{}\n}}",
+            emit_expr(value),
+            indent(&body)
+        ));
+    }
+    if !else_empty {
+        DECLARED.with(|d| {
+            d.borrow_mut().insert(n.clone());
+        });
+        let val = emit_expr(value);
+        let some_body = indent(&emit_expr(else_branch));
+        if then_empty {
+            return Some(format!("if let {n} = {val} {{\n{some_body}\n}}"));
+        }
+        let nil_body = indent(&emit_expr(then_branch));
+        return Some(format!(
+            "if let {n} = {val} {{\n{some_body}\n}} else {{\n{nil_body}\n}}"
+        ));
+    }
+    None
+}
+
+/// Ruby string slice with a Range: `str[b..]` → dropFirst, `str[..e]` →
+/// prefix (inclusive end keeps e+1 chars), both-ended → the combination.
+fn emit_slice_range(
+    rs: &str,
+    begin: Option<&Expr>,
+    end: Option<&Expr>,
+    exclusive: bool,
+) -> String {
+    match (begin, end) {
+        (Some(b), None) => format!("String({rs}.dropFirst({}))", emit_expr(b)),
+        (None, Some(e)) => {
+            let e_s = emit_expr(e);
+            if exclusive {
+                format!("String({rs}.prefix({e_s}))")
+            } else {
+                format!("String({rs}.prefix(({e_s}) + 1))")
+            }
+        }
+        (Some(b), Some(e)) => {
+            let b_s = emit_expr(b);
+            let e_s = emit_expr(e);
+            let len = if exclusive {
+                format!("({e_s}) - ({b_s})")
+            } else {
+                format!("({e_s}) - ({b_s}) + 1")
+            };
+            format!("String({rs}.dropFirst({b_s}).prefix({len}))")
+        }
+        (None, None) => format!("String({rs})"),
+    }
+}
+
+/// A standalone `if x.nil? { <terminal> }` over an Optional-typed
+/// binding rewrites to `guard let x = x else { … }`, shadow-rebinding
+/// the name non-optional for the rest of the scope — Swift's spelling
+/// of the narrowing Kotlin gets from smart casts.
+fn try_param_guard(stmt: &Expr) -> Option<String> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else {
+        return None;
+    };
+    if !is_empty_branch(else_branch) || !branch_is_terminal(then_branch) {
         return None;
     }
-    DECLARED.with(|d| {
-        d.borrow_mut().insert(n.clone());
-    });
-    let body = emit_expr(then_branch);
-    Some(format!("guard let {n} = {} else {{\n{}\n}}", emit_expr(value), indent(&body)))
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    // Only when the binding is provably Optional — `guard let` over a
+    // non-optional is a compile error, while the plain `if` is merely a
+    // tautology warning.
+    let optionalish = matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    if !optionalish {
+        return None;
+    }
+    let n = camel(name.as_str());
+    Some(format!(
+        "guard let {n} = {n} else {{\n{}\n}}",
+        indent(&emit_expr(then_branch))
+    ))
 }
 
 fn branch_is_terminal(e: &Expr) -> bool {
@@ -602,12 +897,30 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                     }
                     return format!("{kw} {n}: Any? = {val}");
                 }
+                // An empty-container initializer takes its declared type
+                // from the population scan (`params = {}` later written
+                // string→string becomes `var params: [String: String]`).
+                let is_empty_container = matches!(
+                    &*value.node,
+                    ExprNode::Hash { entries, .. } if entries.is_empty()
+                ) || matches!(
+                    &*value.node,
+                    ExprNode::Array { elements, .. } if elements.is_empty()
+                );
+                if is_empty_container {
+                    if let Some(ct) = CONTAINER_TYPES.with(|t| t.borrow().get(&n).cloned()) {
+                        let lit = if ct.contains(':') { "[:]" } else { "[]" };
+                        return format!("{kw} {n}: {ct} = {lit}");
+                    }
+                }
                 format!("{kw} {n} = {val}")
             }
         }
+        // `self.`-qualified so constructor params can shadow properties
+        // (`init(_ verb: String)` assigning the `verb` property).
         LValue::Ivar { name } => {
             let val = coerce_for_prop(name.as_str(), value, val);
-            format!("{} = {val}", camel(name.as_str()))
+            format!("self.{} = {val}", camel(name.as_str()))
         }
         LValue::Attr { recv, name } => {
             let val = coerce_for_prop_assign(recv, name.as_str(), value, val);
@@ -661,8 +974,10 @@ fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
+        // Parenthesized param list: required for the `(k, v)` tuple
+        // destructure Dictionary.forEach needs, harmless elsewhere.
         let ps: Vec<String> = params.iter().map(|p| camel(p.as_str())).collect();
-        format!("{{ {} in {body_s} }}", ps.join(", "))
+        format!("{{ ({}) in {body_s} }}", ps.join(", "))
     }
 }
 
@@ -712,6 +1027,46 @@ fn emit_send(
         }
     }
 
+    // `is_a?` outside an if-condition (no narrowing needed): TrueClass/
+    // FalseClass become Bool-value tests, mapped classes an `as?`-test.
+    if (method == "is_a?" || method == "kind_of?") && args.len() == 1 {
+        if let (Some(r), ExprNode::Const { path }) = (recv, &*args[0].node) {
+            let rs = emit_expr(r);
+            let cls = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            return match cls.as_str() {
+                "TrueClass" => format!("({rs} as? Bool) == true"),
+                "FalseClass" => format!("({rs} as? Bool) == false"),
+                _ => match isa_swift_type(&cls) {
+                    Some(t) => format!("({rs} as? {t}) != nil"),
+                    None => format!("({rs} is {})", super::naming::type_name(&cls)),
+                },
+            };
+        }
+    }
+
+    // `gsub(regex, map)` — regex replace with a lookup table; no clean
+    // inline Swift idiom (NSRegularExpression is verbose, native Regex
+    // closures are generic-fiddly), so it dispatches to the hand-written
+    // RhString primitive. The two-string form is a plain
+    // replacingOccurrences.
+    if method == "gsub" && args.len() == 2 {
+        if let Some(r) = recv {
+            let rs = emit_expr(r);
+            if matches!(&*args[1].node, ExprNode::Hash { .. })
+                || matches!(args[1].ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+            {
+                return format!("RhString.gsubMap({rs}, {}, {})", args_s[0], args_s[1]);
+            }
+            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                return format!(
+                    "{rs}.replacingOccurrences(of: {}, with: {})",
+                    args_s[0], args_s[1]
+                );
+            }
+            return format!("RhString.gsub({rs}, {}, {})", args_s[0], args_s[1]);
+        }
+    }
+
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
         if matches!(
@@ -724,8 +1079,18 @@ fn emit_send(
         if method == "<<" {
             return format!("{}.append({})", emit_expr(r), args_s[0]);
         }
-        // Index read `recv[k]`.
+        // Index read `recv[k]` — or a Range arg, the Ruby string-slice
+        // `str[b..]` / `str[..e]` (Swift's String index API has no
+        // integer subscripts; dropFirst/prefix is the idiom).
         if method == "[]" {
+            if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                return emit_slice_range(
+                    &emit_expr(r),
+                    begin.as_ref(),
+                    end.as_ref(),
+                    *exclusive,
+                );
+            }
             return format!("{}[{}]", emit_expr(r), args_s[0]);
         }
         // Hash key test (Swift dictionaries have no containsKey; the
@@ -733,10 +1098,34 @@ fn emit_send(
         if method == "key?" || method == "has_key?" {
             return format!("({}[{}] != nil)", emit_expr(r), args_s[0]);
         }
+        // String split — components(separatedBy:) keeps Ruby's leading
+        // empty field ("/a".split("/") → ["", "a"]), which
+        // split(separator:) would drop.
+        if method == "split" {
+            return format!("{}.components(separatedBy: {})", emit_expr(r), args_s[0]);
+        }
+        if method == "start_with?" {
+            return format!("{}.hasPrefix({})", emit_expr(r), args_s[0]);
+        }
+        if method == "end_with?" {
+            return format!("{}.hasSuffix({})", emit_expr(r), args_s[0]);
+        }
+        if method == "include?" {
+            return format!("{}.contains({})", emit_expr(r), args_s[0]);
+        }
     }
     if let (Some(r), 2) = (recv, args.len()) {
         if method == "[]=" {
             return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
+        }
+        // Ruby `str[start, len]` positional slice.
+        if method == "[]" {
+            return format!(
+                "String({}.dropFirst({}).prefix({}))",
+                emit_expr(r),
+                args_s[0],
+                args_s[1]
+            );
         }
     }
 
@@ -751,6 +1140,11 @@ fn emit_send(
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
             "length" | "size" => return format!("{rs}.count"),
+            "upcase" => return format!("{rs}.uppercased()"),
+            "downcase" => return format!("{rs}.lowercased()"),
+            "strip" => {
+                return format!("{rs}.trimmingCharacters(in: .whitespacesAndNewlines)")
+            }
             _ => {}
         }
         // A `Const` receiver (a class / namespace like `Db`) means a

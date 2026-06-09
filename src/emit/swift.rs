@@ -23,7 +23,12 @@ mod expr;
 mod library;
 mod naming;
 mod package;
+mod primitives;
 mod ty;
+
+// Entry points consumed by `runtime_loader::swift_units`.
+pub use expr::emit_constant_for_runtime;
+pub use library::{emit_library_class_result, emit_module};
 
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
@@ -31,6 +36,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // SPM scaffold (Package.swift, the CSQLite systemLibrary target,
     // .gitignore).
     files.extend(package::scaffold());
+
+    // Hand-written primitives (`Sources/App/runtime/`).
+    files.extend(primitives::primitives());
+
+    // Transpiled framework runtime — `runtime/ruby/*.rb` → Swift under
+    // `Sources/App/`. Grown one file at a time (Phase 3).
+    let runtime_units = crate::runtime_loader::swift_units(|_path, classes| classes)
+        .expect("swift runtime transpile failed (Ruby source error)");
+    for unit in runtime_units {
+        files.push(EmittedFile { path: unit.out_path, content: unit.content });
+    }
 
     // Models → Sources/App/app/models/<Name>.swift. Same lowering recipe
     // as crystal/kotlin: a preliminary view pass seeds the class-info

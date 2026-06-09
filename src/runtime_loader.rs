@@ -1073,6 +1073,89 @@ where
     Ok(out)
 }
 
+// -------- Swift target --------
+//
+// Transpiles the framework runtime (`runtime/ruby/*.rb`) to Swift under
+// the emitted project's `Sources/App/`. The whole emit is a single Swift
+// module, so imports are unnecessary (same-module resolution) and
+// namespaces collapse — `wrap_namespace` is a no-op like Kotlin's. The
+// runtime is grown one file at a time (inflector → json_builder → …),
+// mirroring the Kotlin arc (see `docs/swift-migration-plan.md`).
+
+const SWIFT_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::swift::emit_module,
+    emit_library_class: crate::emit::swift::emit_library_class_result,
+    format_import: swift_format_import,
+    format_constant: swift_format_constant,
+    format_module_ivar: None,
+    wrap_namespace: swift_wrap_namespace,
+    // No package decl in Swift; Foundation covers the string/format APIs
+    // the transpiled runtime leans on (replacingOccurrences, …).
+    module_prelude: "import Foundation\n\n",
+};
+
+/// Same-module resolution → no per-symbol imports needed.
+fn swift_format_import(_name: &str, _source: &str) -> String {
+    String::new()
+}
+
+/// Top-level `let NAME = VALUE` (Swift allows file-level constants).
+fn swift_format_constant(name: &str, value: &Expr) -> String {
+    format!("let {name} = {}", crate::emit::swift::emit_constant_for_runtime(value))
+}
+
+/// Single flat module; no namespace blocks.
+fn swift_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+const SWIFT_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "Sources/App/Inflector.swift",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "Sources/App/JsonBuilder.swift",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "Sources/App/Router.swift",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
+    },
+];
+
+pub fn swift_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(SWIFT_RUNTIME.len());
+    for entry in SWIFT_RUNTIME {
+        out.push(transpile_entry(entry, &SWIFT_TARGET, "//", &mut transform)?);
+    }
+    Ok(out)
+}
+
 // -------- Go target (Phase 1: scaffolded, stubs only) --------
 //
 // Mirrors the Rust target wiring above. The `GO_TARGET` callbacks

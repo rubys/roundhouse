@@ -30,6 +30,33 @@ use super::expr::{begin_method, emit_expr, wrap_return};
 use super::naming::{camel, type_name};
 use super::ty::swift_ty;
 
+/// Render a Ruby module (bare functions, no instances) as a Swift
+/// caseless `enum` namespace of static funcs — the idiomatic spelling;
+/// Swift has no `object` keyword (plan delta 2). The enum name comes
+/// from the methods' enclosing class. Consumed by
+/// `runtime_loader::swift_units` for `Mode::Module` entries.
+pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    super::expr::set_instance_prop_types(std::collections::HashMap::new());
+    let name = methods
+        .first()
+        .and_then(|m| m.enclosing_class.as_ref())
+        .map(|s| type_name(s.as_str()))
+        .unwrap_or_default();
+    let mut out = format!("enum {name} {{\n");
+    for m in methods {
+        out.push_str(&indent_method(&emit_method(m, true)));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+/// `Result`-shaped wrapper over `emit_library_class`, the signature the
+/// runtime loader's `TargetEmit` expects for `Mode::Library` entries.
+pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
+    Ok(emit_library_class(lc))
+}
+
 /// Pre-register every class's instance-method names so zero-arg call
 /// sites resolve property-vs-method regardless of render order. Called
 /// once by `swift::emit` before the render loop (also resets the
@@ -197,13 +224,19 @@ fn emit_method(m: &MethodDef, is_static: bool) -> String {
         })
         .collect();
 
+    // Ruby `initialize` → a real Swift `init` (no func keyword, no
+    // return clause; `self.`-qualified property assigns let ctor params
+    // shadow the properties).
+    let is_init = !is_static && m.name.as_str() == "initialize";
+
     // Return type.
     let ret_ty = match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,
     };
-    let returns_value = !force_unit && matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
-    let ret_clause = if force_unit {
+    let returns_value =
+        !is_init && !force_unit && matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
+    let ret_clause = if force_unit || is_init {
         String::new()
     } else {
         match &ret_ty {
@@ -212,9 +245,12 @@ fn emit_method(m: &MethodDef, is_static: bool) -> String {
         }
     };
 
-    begin_method(&m.body);
+    begin_method(&m.body, returns_value);
     let body = emit_body(&m.body, returns_value, ret_ty.as_ref());
 
+    if is_init {
+        return format!("init({}) {{\n{}\n}}\n", params.join(", "), indent4(&body));
+    }
     let static_kw = if is_static { "static " } else { "" };
     format!(
         "{static_kw}func {name}({}){ret_clause} {{\n{}\n}}\n",
