@@ -24,6 +24,7 @@ defmodule Server do
     port = Keyword.get(opts, :port, resolve_port())
 
     Db.open_production_db(db_path, schema_sql)
+    Cable.start_registry()
 
     {:ok, _} = Plug.Cowboy.http(__MODULE__.Endpoint, [], port: port, ip: {127, 0, 0, 1})
     Logger.info("Roundhouse Elixir (v2) server listening on http://127.0.0.1:#{port}")
@@ -43,6 +44,16 @@ defmodule Server do
   router over `RoutesTable.table/0`, run the action through
   `Dispatch.call/5`, and ship the response.
   """
+  def dispatch(%{path_info: ["cable"]} = conn) do
+    # Action Cable WebSocket. Echo the `actioncable-v1-json` subprotocol the
+    # `@rails/actioncable` client requires (it closes the socket otherwise),
+    # then hand the connection to the Cowboy WebSocket handler via
+    # `upgrade_adapter` — stays inside the Plug pipeline, no custom Cowboy
+    # dispatch. CableHandler runs the actioncable-v1-json flow from there.
+    conn = Plug.Conn.put_resp_header(conn, "sec-websocket-protocol", "actioncable-v1-json")
+    WebSockAdapter.upgrade(conn, CableHandler, %{channels: []}, [])
+  end
+
   def dispatch(conn) do
     raw_method = conn.method |> String.upcase()
     raw_path = "/" <> Enum.join(conn.path_info, "/")
@@ -130,16 +141,138 @@ defmodule Server do
 
   defmodule Endpoint do
     @moduledoc """
-    Plug endpoint — defers everything to `Server.dispatch/1`.
+    Plug endpoint. Serves compiled assets (tailwind.css, turbo.min.js, the
+    importmap JS) from `static/assets/` at `/assets/*` — the URLs the emitted
+    layout's `stylesheet_link_tag` / importmap reference — then defers
+    everything else to `Server.dispatch/1`. `Plug.Static` passes through
+    (doesn't halt) on a miss, so a non-asset path falls to the dispatcher.
     """
-    @behaviour Plug
+    use Plug.Builder
 
-    @impl true
-    def init(opts), do: opts
+    plug Plug.Static, at: "/assets", from: "static/assets", gzip: false
+    plug :dispatch
 
-    @impl true
-    def call(conn, _opts) do
-      Server.dispatch(conn)
+    def dispatch(conn, _opts), do: Server.dispatch(conn)
+  end
+end
+
+# ── Action Cable WebSocket + Turbo Streams broadcaster ───────────────
+#
+# Per-target transport primitive (cf. runtime/{go/v2,crystal,rust}/cable +
+# the ts CableServer). Subscribers are held in an Elixir `Registry` keyed by
+# channel; each /cable connection is its own process that registers under the
+# decoded stream name and receives `{:cable_msg, …}` on every broadcast. Same
+# wire format (actioncable-v1-json) and per-channel fan-out as the other
+# targets. `Broadcasts.record` calls `Cable.dispatch`.
+defmodule Cable do
+  @registry Cable.Registry
+
+  @doc "Start the subscriber registry (idempotent; called from Server.start)."
+  def start_registry do
+    case Registry.start_link(keys: :duplicate, name: @registry) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
     end
   end
+
+  @doc "Register the calling (WebSocket) process as a subscriber of `channel`."
+  def subscribe(channel, identifier) do
+    Registry.register(@registry, channel, identifier)
+  end
+
+  @doc """
+  Fan `html` out to every subscriber of `channel`, wrapped in the Action
+  Cable message envelope (the subscribe `identifier` is echoed so Turbo
+  routes the frame to the right stream-source). Registry auto-drops a
+  subscriber when its process dies, so no explicit unsubscribe is needed.
+  """
+  def dispatch(channel, html) do
+    # No-op when the registry isn't started (test runs / CLI invocations that
+    # never boot the server but still exercise model callbacks via Broadcasts).
+    if Process.whereis(@registry) do
+      Registry.dispatch(@registry, channel, fn entries ->
+        for {pid, identifier} <- entries, do: send(pid, {:cable_msg, identifier, html})
+      end)
+    end
+
+    :ok
+  end
+
+  def turbo_stream_html(action, target, content) do
+    if content == "" do
+      ~s(<turbo-stream action="#{action}" target="#{target}"></turbo-stream>)
+    else
+      ~s(<turbo-stream action="#{action}" target="#{target}"><template>#{content}</template></turbo-stream>)
+    end
+  end
+
+  @doc """
+  Recover the channel name from Turbo's signed_stream_name. The identifier is
+  `{"channel":"Turbo::StreamsChannel","signed_stream_name":"<b64>--<digest>"}`;
+  the base64 prefix decodes to a JSON-encoded stream name (the same string a
+  broadcast's `stream` carries). Returns nil on malformed input.
+  """
+  def decode_channel(identifier) do
+    with {:ok, %{"signed_stream_name" => signed}} <- Jason.decode(identifier),
+         [b64 | _] <- String.split(signed, "--"),
+         {:ok, decoded} <- Base.decode64(b64),
+         {:ok, channel} when is_binary(channel) <- Jason.decode(decoded) do
+      channel
+    else
+      _ -> nil
+    end
+  end
+end
+
+# WebSock handler for /cable, reached via `Plug.Conn.upgrade_adapter(conn,
+# :websocket, {CableHandler, state, opts})`. Plug.Cowboy bridges the WebSock
+# spec to Cowboy via the bundled websock_adapter. Sends the welcome frame,
+# pings every 3s (ActionCable treats a ~6s gap as a dead connection), confirms
+# subscribe commands, and pushes broadcasts forwarded by Cable.dispatch as
+# `{:cable_msg, …}` messages to this process.
+defmodule CableHandler do
+  @behaviour WebSock
+
+  @impl true
+  def init(state) do
+    # WebSock `init/1` can't push frames, so queue a self-message to send the
+    # Action Cable welcome (the client waits for it before subscribing) and
+    # kick off the ping heartbeat.
+    send(self(), :welcome)
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_in({msg, [opcode: :text]}, state) do
+    with {:ok, %{"command" => "subscribe", "identifier" => identifier}} <- Jason.decode(msg),
+         channel when is_binary(channel) <- Cable.decode_channel(identifier) do
+      Cable.subscribe(channel, identifier)
+      confirm = Jason.encode!(%{type: "confirm_subscription", identifier: identifier})
+      {:push, {:text, confirm}, state}
+    else
+      _ -> {:ok, state}
+    end
+  end
+
+  def handle_in(_frame, state), do: {:ok, state}
+
+  @impl true
+  def handle_info(:welcome, state) do
+    Process.send_after(self(), :ping, 3000)
+    {:push, {:text, Jason.encode!(%{type: "welcome"})}, state}
+  end
+
+  def handle_info(:ping, state) do
+    Process.send_after(self(), :ping, 3000)
+    {:push, {:text, Jason.encode!(%{type: "ping", message: System.system_time(:second)})}, state}
+  end
+
+  def handle_info({:cable_msg, identifier, html}, state) do
+    {:push, {:text, Jason.encode!(%{type: "message", identifier: identifier, message: html})}, state}
+  end
+
+  def handle_info(_info, state), do: {:ok, state}
+
+  @impl true
+  def terminate(_reason, _state), do: :ok
 end

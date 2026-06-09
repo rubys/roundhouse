@@ -40,6 +40,19 @@ defmodule Broadcasts do
   defp record(action, attrs) do
     entry = Map.put(attrs, :action, action)
     Agent.update(ensure_started(), fn log -> [entry | log] end)
+
+    # Live fan-out: compose the <turbo-stream> fragment and push it to every
+    # /cable subscriber of this stream. The Agent log above is the test-visible
+    # contract; this is the live-server contract (no-op when nothing's
+    # subscribed, e.g. test runs).
+    stream = Map.get(attrs, :stream)
+
+    if is_binary(stream) do
+      target = Map.get(attrs, :target, "")
+      html = Map.get(attrs, :html, "")
+      Cable.dispatch(stream, Cable.turbo_stream_html(action, to_string(target), to_string(html)))
+    end
+
     nil
   end
 

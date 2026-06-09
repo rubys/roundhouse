@@ -950,13 +950,11 @@ jobs:
       - name: scripts/e2e ruby
         run: scripts/e2e --tgz browse/ruby.tgz ruby
 
-  # SEVEN targets now run the full 5/5 suite: ruby, go, python, crystal, rust,
-  # kotlin, typescript, jruby. build-site bakes the tailwind.css + JS importmap
-  # graph into every archive (ROUNDHOUSE_ASSETS_DIR), so Turbo boots and the
-  # cable stream-source connects; each target ships a /cable websocket + cable
-  # broadcaster. ELIXIR remains gated (--skip tailwind turbo_comment
-  # action_cable): no cable runtime, and its server doesn't yet serve
-  # static/assets/ for tailwind.
+  # ALL NINE targets now run the full 5/5 suite: ruby, go, python, crystal,
+  # rust, kotlin, typescript, jruby, elixir. build-site bakes the tailwind.css
+  # + JS importmap graph into every archive (ROUNDHOUSE_ASSETS_DIR), so Turbo
+  # boots and the cable stream-source connects; each target's server serves
+  # static/assets/ and ships a /cable websocket + cable broadcaster.
 
   # typescript (5/5): tsx server via npm (src/server.ts has the /cable ws +
   # CableServer). No setup-ruby — runs without Ruby.
@@ -1054,8 +1052,9 @@ jobs:
       - name: scripts/e2e crystal
         run: scripts/e2e --tgz browse/crystal.tgz crystal
 
-  # elixir (2/5): mix/Plug v2 overlay (Main.run). No cable runtime yet, so
-  # action_cable would fail even with assets — gated like the rest for now.
+  # elixir (5/5): mix/Plug.Cowboy v2 overlay (Main.run). Plug.Static serves
+  # static/assets/; /cable upgrades to a WebSock handler (via websock_adapter)
+  # backed by an Elixir Registry, with Broadcasts fanning out turbo-streams.
   e2e-elixir:
     needs: build-site
     runs-on: ubuntu-latest
@@ -1079,7 +1078,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e elixir
-        run: scripts/e2e --tgz browse/elixir.tgz --skip "tailwind turbo_comment action_cable" elixir
+        run: scripts/e2e --tgz browse/elixir.tgz elixir
 
   # jruby (2/5): byte-identical emit to ruby on the JVM. Assets NOT built
   # (the Makefile turbo.min.js step collides MRI vs JRuby bundler — same as
