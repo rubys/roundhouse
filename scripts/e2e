@@ -209,11 +209,15 @@ case "$TARGET" in
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }
         ;;
     jruby)
-        # Byte-identical emit to ruby, but assets are NOT built: the
-        # Makefile's turbo.min.js step shells `bundle exec ruby`, which
-        # under a JRuby bundle collides with MRI's bundler. Same reason
-        # compare-jruby skips assets. So jruby gates the asset-dependent
-        # specs (tailwind/turbo/cable) — index + validation still run.
+        # Byte-identical emit to ruby (Puma + Rack + websocket-driver cable
+        # via the ruby_overlay). We DON'T run `make assets` here: its
+        # turbo.min.js step shells `bundle exec ruby`, which under a JRuby
+        # bundle collides with MRI's bundler (same reason compare-jruby skips
+        # assets). Instead the published archive already ships static/assets/
+        # (tailwind.css + the importmap JS), baked in by build-site via
+        # ROUNDHOUSE_ASSETS_DIR — jruby is the one scaffold target that gets
+        # the injected assets (see src/project.rs::ensure_static_assets), so
+        # Rack::Static serves them and all 5 specs run.
         (cd "$APP_DIR" && jruby -S bundle install) \
             >"$LOG_DIR/build.log" 2>&1 || {
             fail "build failed"; tail -30 "$LOG_DIR/build.log" >&2; exit 1; }

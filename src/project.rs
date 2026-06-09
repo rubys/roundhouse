@@ -356,9 +356,15 @@ pub fn target_files(
 /// is missing, this is a no-op — `roundhouse --site` keeps working with no
 /// Node/Tailwind toolchain, and the e2e harness builds the CSS as a fallback.
 ///
-/// Only the emit targets get assets injected. The scaffold targets
-/// (spinel/ruby/jruby) ship their own `Makefile` that builds + serves assets,
-/// so injecting here would just be overwritten by `make assets`.
+/// The emit targets get assets injected. The scaffold targets ruby/spinel
+/// build + serve their own via the Makefile's `make assets` (so injecting
+/// would just be overwritten), and are excluded. JRUBY IS THE EXCEPTION: it's
+/// a scaffold target (Puma + Rack, ruby_overlay's `Rack::Static` serves
+/// `static/assets/`), but it CANNOT run `make assets` — the turbo.min.js step
+/// shells `bundle exec ruby`, which collides MRI-vs-JRuby bundler (same reason
+/// compare-jruby / e2e-jruby skip assets). So jruby is the one scaffold target
+/// that needs the baked assets injected here; without them it serves no
+/// tailwind.css / turbo.min.js and Turbo never boots.
 fn ensure_static_assets(
     mut files: Vec<(String, String)>,
     target: BuildTarget,
@@ -368,6 +374,7 @@ fn ensure_static_assets(
         BuildTarget::Crystal
             | BuildTarget::Elixir
             | BuildTarget::Go
+            | BuildTarget::Jruby
             | BuildTarget::Kotlin
             | BuildTarget::Python
             | BuildTarget::Rust

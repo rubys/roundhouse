@@ -1109,7 +1109,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e jruby
-        run: scripts/e2e --tgz browse/jruby.tgz --skip "tailwind turbo_comment action_cable" jruby
+        run: scripts/e2e --tgz browse/jruby.tgz jruby
 
   # kotlin (3/5): boots the published kotlin.tgz via `gradle installDist` +
   # the bundled launcher (Main.kt reads BLOG_DB + PORT). index + validation +
