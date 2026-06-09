@@ -950,16 +950,16 @@ jobs:
       - name: scripts/e2e ruby
         run: scripts/e2e --tgz browse/ruby.tgz ruby
 
-  # The next six targets range 2/5–3/5: index + validation always pass.
-  # tailwind now passes on the targets whose server serves static/assets/
-  # (typescript/rust/crystal = 3/5) — scripts/e2e builds the compiled CSS the
-  # emitted layout references (Tailwind v4 CLI scanning the emitted templates,
-  # railcar-style). turbo_comment + action_cable remain gated (need the JS
-  # importmap graph served + a cable runtime). go/python/kotlin/elixir stay
-  # 2/5 until their servers learn to serve static/assets/. (elixir
-  # additionally has no cable runtime.)
+  # SEVEN targets now run the full 5/5 suite: ruby, go, python, crystal, rust,
+  # kotlin, typescript, jruby. build-site bakes the tailwind.css + JS importmap
+  # graph into every archive (ROUNDHOUSE_ASSETS_DIR), so Turbo boots and the
+  # cable stream-source connects; each target ships a /cable websocket + cable
+  # broadcaster. ELIXIR remains gated (--skip tailwind turbo_comment
+  # action_cable): no cable runtime, and its server doesn't yet serve
+  # static/assets/ for tailwind.
 
-  # typescript (3/5): tsx server via npm. No setup-ruby — runs without Ruby.
+  # typescript (5/5): tsx server via npm (src/server.ts has the /cable ws +
+  # CableServer). No setup-ruby — runs without Ruby.
   e2e-typescript:
     needs: build-site
     runs-on: ubuntu-latest
@@ -978,7 +978,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e typescript
-        run: scripts/e2e --tgz browse/typescript.tgz --skip "turbo_comment action_cable" typescript
+        run: scripts/e2e --tgz browse/typescript.tgz typescript
 
   # rust (3/5): cargo build --release on the standalone archive (axum).
   e2e-rust:
