@@ -221,7 +221,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 path: std::path::PathBuf::from(format!("src/test/kotlin/{last}.kt")),
                 content: format!(
                     "package roundhouse\n\n{}",
-                    library::emit_test_class(&lowered.test_class, &lowered.constants)
+                    library::emit_test_class(
+                        &lowered.test_class,
+                        &lowered.inner_classes,
+                        &lowered.constants,
+                    )
                 ),
             });
         }

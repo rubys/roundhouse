@@ -278,15 +278,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      # Scoped to the green subset (inflector + router). The other three
-      # canonical gates (errors / ac_base / view_helpers) are wired in the
-      # test file but currently fail on a kotlin inner-test-class emit gap
-      # (StandardError subclass / TestController / Article not emitted in
-      # test scope) — same filter convention as toolchain-typescript's
-      # tiny_blog exclusion. Drop the filter as that emit gap closes.
-      # Tracked in #34.
-      - name: cargo test --test framework_tests_kotlin (inflector + router)
-        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture inflector router
+      # Scoped to the green subset (inflector + router + view_helpers). The
+      # remaining two canonical gates (errors / ac_base) are wired in the
+      # test file but still fail on deeper kotlin emit gaps (class-reflection
+      # `< StandardError`; controller-body typing) — see the comment there.
+      # Same filter convention as toolchain-typescript's tiny_blog exclusion;
+      # drop names as those gaps close. Tracked in #34.
+      - name: cargo test --test framework_tests_kotlin (green subset)
+        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture inflector router view_helpers
 
   framework-tests-ruby:
     # Per-target framework-test conformance gate for the Ruby target

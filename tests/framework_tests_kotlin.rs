@@ -186,19 +186,35 @@ fn router_test_passes_under_kotlin() {
     );
 }
 
-// The three gates below currently FAIL — they surface a real kotlin emit
-// gap, not a wiring gap: each test file declares an inline helper class
-// (a `StandardError` subclass, `TestController < ActionController::Base`,
-// `Article < ActiveRecord::Base`) in test scope, and the kotlin emitter
-// doesn't emit those inner test-module classes, so the JUnit spec hits
-// `Unresolved reference 'StandardError' / 'TestController' / 'Article'`.
-// The typescript/crystal gates pass the same three (their emitters do
-// handle inner test-scope class decls), so there's a reference shape to
-// port. Until then the CI job runs only `inflector` + `router` (the green
-// subset) — same convention as toolchain-typescript's tiny_blog filter.
-// Tracked in roundhouse#34. Run all five locally with:
-//   cargo test --test framework_tests_kotlin -- --ignored
+// view_helpers exercises an inline `Article < ActiveRecord::Base` helper
+// declared in test scope. Greened by emitting the test module's
+// `inner_classes` above the test body (the companion-hoist the
+// typescript/crystal gates already do) plus pinning the `[]`/`[]=`
+// override key param to String so it resolves against the AR base indexer.
+#[test]
+#[ignore]
+fn view_helpers_test_passes_under_kotlin() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
+        "view_helpers",
+    );
+}
 
+// The two gates below still FAIL on deeper kotlin emit gaps (NOT wiring —
+// the inner helper classes now emit, but their bodies hit target-specific
+// gaps the inflector/router/view_helpers slices don't):
+//   - errors:  `RecordNotFound < StandardError` is Ruby class-reflection
+//     (emitted as a `<` / `compareTo` over unresolved `StandardError`), and
+//     the file's second top-level `*Test` class is dropped by ingest's
+//     single-test-class pick.
+//   - ac_base: the inline `TestController < ActionController::Base` body
+//     surfaces several gaps at once — `processAction` override signature,
+//     `toSym`, params `Map`-vs-`String` typing, String method mapping.
+// Both pass under the typescript/crystal gates, so there's a reference
+// shape to port. Until then CI runs the green subset (inflector + router +
+// view_helpers) — same convention as toolchain-typescript's tiny_blog
+// filter. Tracked in roundhouse#34. Run all five locally with:
+//   cargo test --test framework_tests_kotlin -- --ignored
 #[test]
 #[ignore]
 fn errors_test_passes_under_kotlin() {
@@ -214,14 +230,5 @@ fn ac_base_test_passes_under_kotlin() {
     build_and_run(
         Path::new("runtime/ruby/test/action_controller/base_test.rb"),
         "ac_base",
-    );
-}
-
-#[test]
-#[ignore]
-fn view_helpers_test_passes_under_kotlin() {
-    build_and_run(
-        Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
-        "view_helpers",
     );
 }

@@ -459,6 +459,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 /// set in `setup`) become `var` properties so cross-method reads resolve.
 pub fn emit_test_class(
     lc: &LibraryClass,
+    inner_classes: &[LibraryClass],
     constants: &[(crate::ident::Symbol, Expr)],
 ) -> String {
     let class_name = type_name(lc.name.0.as_str());
@@ -472,6 +473,19 @@ pub fn emit_test_class(
         out.push_str(&format!("val {} = {}\n", name.as_str(), emit_expr(value)));
     }
     if !constants.is_empty() {
+        out.push('\n');
+    }
+
+    // Inner helper classes declared inline in the test file (a non-test
+    // model/controller paired with the `*Test` class — e.g.
+    // `Article < ActiveRecord::Base` in view_helpers_test, `TestController <
+    // ActionController::Base` in base_test). Ingest lifts them onto the
+    // module's `inner_classes`; hoist them to file scope above the test
+    // class so the test body's references resolve. Same companion-hoist the
+    // TypeScript/Crystal gates do. `emit_library_class` sets its own emit
+    // context, which the test-class setup below then overrides.
+    for inner in inner_classes {
+        out.push_str(&emit_library_class(inner));
         out.push('\n');
     }
 
@@ -686,6 +700,21 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     };
 
     let mut params = method_params(m);
+    // The Kotlin AR base declares the indexer over String keys
+    // (`operator fun get(_name: String)` / `set(_name: String, …)`). A
+    // subclass `[]`/`[]=` whose key param infers `Any?` (common when the
+    // source `def [](field)` carries no signature) would emit a different
+    // parameter type and thus override nothing. Pin the key param to String
+    // so the override resolves against the base. Scoped to `override`
+    // members only — a class that *defines* its own indexer (e.g. Flash,
+    // keyed over `Any?` and called as such by its own `fetch`/`key`) keeps
+    // its inferred key type.
+    if matches!(m.name.as_str(), "[]" | "[]=") && modifier.contains("override") {
+        if let Some(first) = params.first_mut() {
+            let pn = first.split(':').next().unwrap_or("").trim().to_string();
+            *first = format!("{pn}: String");
+        }
+    }
     // A method that `yield`s takes a `block` parameter in Kotlin (there's
     // no implicit block); `yield` calls it. Type from the signature's
     // block slot.
