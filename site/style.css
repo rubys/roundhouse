@@ -293,3 +293,123 @@ footer a:hover {
   text-align: center;
   color: var(--text-dim);
 }
+
+/* --------- Doc / prose page (demo) --------- */
+
+.doc-main {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  line-height: 1.6;
+}
+
+.doc-main h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 2.5rem 0 0.85rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.doc-main h2:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.doc-main h3 {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 1.6rem 0 0.5rem;
+}
+
+.doc-main .lead {
+  font-size: 1.05rem;
+  color: var(--text);
+  margin-bottom: 1.5rem;
+}
+
+.doc-main p {
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+.doc-main ul {
+  margin: 0 0 1rem 1.25rem;
+  color: var(--text);
+}
+
+.doc-main li {
+  margin-bottom: 0.4rem;
+}
+
+.doc-main a {
+  color: var(--accent-python);
+  text-decoration: none;
+}
+
+.doc-main a:hover {
+  text-decoration: underline;
+}
+
+.doc-main code {
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 0.85em;
+  background: var(--bg-lighter);
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.25rem;
+  color: var(--accent-go);
+}
+
+.doc-main pre {
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.9rem 1.1rem;
+  overflow-x: auto;
+  margin: 0 0 1.25rem;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.doc-main pre code {
+  background: none;
+  padding: 0;
+  color: var(--text);
+  font-size: inherit;
+}
+
+.doc-main .note {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.doc-main table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.5rem;
+  font-size: 0.88rem;
+}
+
+.doc-main th, .doc-main td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.doc-main th {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.doc-main .pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  color: var(--text-dim);
+  margin: 0 0.35rem 0.35rem 0;
+}

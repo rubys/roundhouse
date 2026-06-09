@@ -9,8 +9,9 @@
 Roundhouse reads Ruby source — specifically, Rails applications — and
 produces standalone projects in other target languages. The deployment
 target (Rust binary, TypeScript bundle, Crystal or Go service, Elixir
-OTP app, Python project, browser bundle, or Spinel-compiled Ruby)
-becomes a compiler flag rather than a runtime choice.
+OTP app, Kotlin/JVM service, Python project, browser bundle, or
+Spinel-compiled Ruby) becomes a compiler flag rather than a runtime
+choice.
 
 A roundhouse is the circular hub in a rail yard where engines rotate and
 route onto different tracks. That's the pipeline shape: one Ruby source
@@ -62,13 +63,14 @@ runtime (`runtime/ruby/`) is held to the same bar via
 `every_runtime_method_body_is_fully_typed` — no inference gaps in any
 method body.
 
-Seven target emitters are live and DOM-equivalent against Rails on
+Eight target emitters are live and DOM-equivalent against Rails on
 real-blog as a CI invariant — Rust, TypeScript, Crystal, Elixir, Go,
-Python, and Spinel-shape Ruby. Each boots an HTTP + Action Cable
-server, serves the generated blog with working forms, validation
-error display, Turbo streams, and Tailwind styling. The compare-X
-jobs in `.github/workflows/ci.yml` gate the Pages deploy, so any
-drift fails the build.
+Kotlin, Python, and Spinel-shape Ruby. Each boots an HTTP + Action
+Cable server, serves the generated blog with working forms, validation
+error display, Turbo streams, and Tailwind styling. A
+`compare-<target>` job in `.github/workflows/ci.yml` runs on every push
+to `main` (JRuby is compared too, serving the same emit on the JVM), so
+any drift turns CI red.
 
 Cross-runtime correctness is enforced by `tools/compare/`, which
 fetches the same URL from Rails and from any roundhouse-emitted runtime
@@ -77,10 +79,17 @@ differently between Rails and a target is a bug.
 
 ## See it for yourself
 
+**Meet the fixture.** [rubys.github.io/roundhouse/demo](https://rubys.github.io/roundhouse/demo/)
+describes the `fixtures/real-blog` app every target is built and tested
+against — how `scripts/create-blog` scaffolds it, which Rails features
+it exercises (associations, nested routes, Turbo Streams, Action
+Cable, Tailwind), and the three test layers (per-target model/controller
+tests, DOM-equivalence compare, and Playwright E2E).
+
 **Browse the emitted outputs.** [rubys.github.io/roundhouse/browse](https://rubys.github.io/roundhouse/browse/)
 shows what every target emitter produces from `fixtures/real-blog`,
 updated on each push to `main` — Rust, TypeScript, Crystal, Elixir,
-Go, Python, plus Ruby (the original source) and Spinel (the lowered
+Go, Kotlin, Python, plus Ruby and JRuby, and Spinel (the lowered
 output that runs as the demo below).
 
 **Compare performance.** [rubys.github.io/roundhouse/bench](https://rubys.github.io/roundhouse/bench/)
@@ -128,8 +137,8 @@ Build (requires Rust):
 
 Cleanup: `bin/rh clean <target | fixture>`.
 
-Targets: `spinel`, `ruby`, `crystal`, `elixir`, `go`, `python`, `rust`,
-`typescript`, `typescript-worker`.
+Targets: `spinel`, `ruby`, `jruby`, `crystal`, `elixir`, `go`,
+`kotlin`, `python`, `rust`, `typescript`, `typescript-worker`.
 
 ## Supporting pieces worth knowing
 

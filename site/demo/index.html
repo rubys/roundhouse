@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — The demo blog</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/tokyo-night-dark.min.css">
+</head>
+<body>
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">The <code>real-blog</code> fixture — what every target is built and tested against</p>
+  </header>
+
+  <main class="doc-main">
+    <p class="lead">
+      Every emitted project on this site comes from a single Rails
+      application: <code>fixtures/real-blog</code>. It is a blog — the
+      quintessential Rails demo — deliberately kept small but stretched
+      to touch the framework features that make a transpiler interesting:
+      associations, validations, nested routes, strong parameters, ERB
+      partials and collection rendering, JBuilder, flash, and real-time
+      updates over WebSocket.
+    </p>
+
+    <p>
+      The fixture is not hand-written and checked in. It is
+      <em>generated</em> by a script — <a href="../create-blog"><code>create-blog</code></a>
+      (<a href="../create-blog">download</a>) — that runs the standard Rails
+      generators and then applies a handful of edits. Starting from
+      <code>rails new</code> + <code>rails generate scaffold</code> keeps the
+      app honest: it is recognizably the output a Rails developer would
+      produce, not a shape contrived to be easy to transpile.
+    </p>
+
+    <h2>How it's built</h2>
+
+    <p>
+      <code>create-blog</code> scaffolds two resources and wires them
+      together. The skeleton:
+    </p>
+
+    <pre><code class="language-bash"># A fresh Rails app with Tailwind for styling
+rails new blog --skip-git --skip-docker --css tailwind
+cd blog
+
+# Two scaffolds: articles, and comments nested under them
+rails generate scaffold Article title:string body:text
+rails generate scaffold Comment article:references commenter:string body:text
+
+rails db:create</code></pre>
+
+    <p>
+      From there the script edits the generated files into a coherent
+      app — the parts a transpiler has to understand:
+    </p>
+
+    <ul>
+      <li><strong>Models</strong> gain associations
+        (<code>has_many :comments, dependent: :destroy</code>,
+        <code>belongs_to :article</code>), validations
+        (<code>presence</code>, <code>length: { minimum: 10 }</code>), and
+        broadcasting declarations.</li>
+      <li><strong>Nested routes</strong> — <code>resources :articles do resources :comments, only: [:create, :destroy] end</code>, with <code>root "articles#index"</code>.</li>
+      <li><strong>Strong parameters</strong> using the modern
+        <code>params.expect(...)</code> form.</li>
+      <li><strong>Views and partials</strong> — the index renders the
+        <code>_article</code> partial as a collection; the show page renders
+        <code>@article.comments</code> and a <code>form_with</code> comment
+        form. View helpers like <code>dom_id</code>, <code>pluralize</code>,
+        <code>truncate</code>, <code>link_to</code>, and <code>button_to</code>
+        all appear.</li>
+      <li><strong>Seeds and fixtures</strong> — three articles
+        (with 2, 1, and 0 comments) so every emitted target starts from
+        identical data, used by both the demo and the tests.</li>
+    </ul>
+
+    <p class="note">
+      The full script is the source of truth — read or download it at
+      <a href="../create-blog"><code>create-blog</code></a>. In the repo,
+      <code>bin/rh fixture</code> runs it and materializes the result under
+      <code>fixtures/real-blog/</code>.
+    </p>
+
+    <h2>Modernized Rails</h2>
+
+    <p>
+      The blog is not a 2010-era CRUD demo. It uses the current Rails
+      front-end stack, which is exactly the part that is hardest to carry
+      across languages:
+    </p>
+
+    <h3>Tailwind CSS</h3>
+    <p>
+      Generated with <code>--css tailwind</code>. The published archives
+      ship a compiled <code>static/assets/tailwind.css</code>, so a
+      downloaded target serves a fully styled app with no build step.
+    </p>
+
+    <h3>Turbo Streams</h3>
+    <p>
+      Models declare <code>broadcasts_to</code>, and views subscribe with
+      <code>turbo_stream_from</code>. Creating a comment inserts a row into
+      the page without a full reload; creating or destroying an article
+      prepends/removes it on the index — all driven by server-rendered
+      stream fragments.
+    </p>
+
+    <h3>Action Cable</h3>
+    <p>
+      Those broadcasts ride a WebSocket. A comment added in one browser
+      appears live in another viewer's tab. Every target boots an Action
+      Cable-compatible server alongside HTTP, so the real-time behavior is
+      preserved, not stubbed.
+    </p>
+
+    <h2>How it's tested</h2>
+
+    <p>
+      The same fixture is verified three different ways. Together they
+      pin down that an emitted target is not just well-typed, but
+      behaves like Rails.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Layer</th><th>What it checks</th><th>Against</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Model &amp; controller tests</strong></td>
+          <td>Minitest model and controller tests (validations,
+            associations, CRUD actions, redirects, 422 on invalid params)
+            are <em>emitted alongside the app</em> and run in each target
+            language.</td>
+          <td>Fixed expected values</td>
+        </tr>
+        <tr>
+          <td><strong>Compare tests</strong></td>
+          <td><code>tools/compare/</code> fetches the same URL from Rails and
+            from a roundhouse target, canonicalizes both DOM trees, and
+            diffs them. A page that renders differently is a bug.</td>
+          <td>Live Rails reference</td>
+        </tr>
+        <tr>
+          <td><strong>E2E tests</strong></td>
+          <td>Playwright specs drive a real browser through the dynamic
+            behavior a static DOM diff can't reach: Turbo Stream comment
+            inserts, Action Cable broadcasts, validation re-renders, and
+            computed Tailwind styles.</td>
+          <td>Fixed expected values</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      The model and controller tests travel <em>with</em> the source — they
+      are part of what <code>create-blog</code> writes, so each target
+      compiles and runs its own translated test suite. The compare and
+      E2E layers are CI invariants: the <code>compare-*</code> jobs gate the
+      Pages deploy, so any drift between a target and Rails fails the
+      build before it can ship to this site.
+    </p>
+
+    <h2>See it</h2>
+    <p>
+      <a href="../browse/">Browse the generated output</a> for every target ·
+      <a href="../bench/">benchmark results</a> across the live targets ·
+      <a href="../create-blog">download the generator script</a> ·
+      <a href="https://github.com/rubys/roundhouse">source on GitHub</a>.
+    </p>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="../browse/">Browse</a>
+    <a href="../bench/">Benchmark</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
+</body>
+</html>
