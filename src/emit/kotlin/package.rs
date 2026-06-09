@@ -26,6 +26,10 @@ dependencies {
     implementation("io.javalin:javalin:6.4.0")
     implementation("org.xerial:sqlite-jdbc:3.46.1.3")
     implementation("org.slf4j:slf4j-simple:2.0.13")
+    // Action Cable: parse the subscribe frame + signed-stream-name blob in
+    // Cable.kt. The Jetty WebSocket API is already on the classpath via
+    // Javalin's own ws support; only a small JSON reader is missing.
+    implementation("org.json:json:20240303")
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

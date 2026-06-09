@@ -228,7 +228,12 @@ object Server {
         layout: (String, String?, String?) -> String,
     ) {
         Db.openProductionDb(dbPath)
-        val app = Javalin.create()
+        // Mount the Action Cable /cable WebSocket on Jetty's servlet context.
+        // Done at config time (not via app.ws) so the upgrade can negotiate
+        // the actioncable-v1-json subprotocol — see Cable / CableServlet.
+        val app = Javalin.create { config ->
+            config.jetty.modifyServletContextHandler { handler -> Cable.mount(handler) }
+        }
         val handler = Handler { ctx -> dispatch(ctx, routes, controllers, layout) }
         for (p in listOf("/", "/<path>")) {
             app.get(p, handler)
@@ -394,26 +399,203 @@ interface AdapterInterface {
 
 /// Turbo Streams broadcast sink — the object the model `after_*_commit`
 /// callbacks dispatch to (`Broadcasts.append`/`prepend`/`replace`/`remove`,
-/// each taking a kwargs bag lowered to a `MutableMap<String, Any?>`). A
-/// backend-only Kotlin target doesn't hold the websocket fan-out a full
-/// Action Cable would, so these are no-ops (the lowered model still
-/// *computes* the stream/target/html, it just isn't pushed anywhere) —
-/// the analog of go2/rust2's Broadcasts shim. Wiring a real cable transport
-/// is a later concern.
+/// each taking a kwargs bag lowered to a `MutableMap<String, Any?>` carrying
+/// `stream`/`target`/`html`). Composes the `<turbo-stream>` fragment and
+/// hands it to the cable fan-out (`Cable.dispatch`). Mirrors the
+/// go2/rust2/crystal Broadcasts shim.
 const BROADCASTS_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
-// Turbo Streams broadcast sink. A backend-only target has no Action Cable
-// fan-out, so the model after_*_commit callbacks' broadcasts are no-ops
-// here (mirrors go2/rust2's Broadcasts shim).
+// Turbo Streams broadcast sink. The model after_*_commit callbacks pass a
+// {stream, target, html} bag; compose the <turbo-stream> wrapper and fan it
+// out to /cable subscribers via Cable. Mirrors go/rust/crystal's Broadcasts.
 
 package roundhouse
 
 object Broadcasts {
-    fun append(opts: MutableMap<String, Any?>) {}
-    fun prepend(opts: MutableMap<String, Any?>) {}
-    fun replace(opts: MutableMap<String, Any?>) {}
-    fun remove(opts: MutableMap<String, Any?>) {}
+    fun append(opts: MutableMap<String, Any?>) = record("append", opts)
+    fun prepend(opts: MutableMap<String, Any?>) = record("prepend", opts)
+    fun replace(opts: MutableMap<String, Any?>) = record("replace", opts)
+    fun remove(opts: MutableMap<String, Any?>) = record("remove", opts)
+
+    private fun record(action: String, opts: MutableMap<String, Any?>) {
+        val stream = opts["stream"] as? String ?: return
+        val target = opts["target"] as? String ?: ""
+        val html = opts["html"] as? String ?: ""
+        Cable.dispatch(stream, Cable.turboStreamHtml(action, target, html))
+    }
 }
 "#;
+
+/// Action Cable WebSocket + Turbo Streams broadcaster — the per-target
+/// transport primitive (cf. `runtime/go/v2/cable.go`,
+/// `runtime/crystal/cable.cr`, `runtime/rust/cable.rs`). Same wire format
+/// (actioncable-v1-json), same per-channel subscriber map.
+///
+/// Mounted as a RAW Jetty 11 WebSocket servlet (not Javalin's `app.ws`):
+/// Javalin's `onConnect` fires after the upgrade response is already sent, so
+/// it can't echo the `Sec-WebSocket-Protocol: actioncable-v1-json` header
+/// ActionCable requires (javalin#957) — and the client closes the socket
+/// without it. The servlet's creator sets the accepted subprotocol DURING the
+/// upgrade. Server.kt mounts it via `config.jetty.modifyServletContextHandler`.
+const CABLE_KT: &str = r##"// Hand-written roundhouse runtime primitive (no Ruby source).
+// Action Cable WebSocket + Turbo Streams broadcaster (actioncable-v1-json).
+// Raw Jetty 11 WebSocket servlet so the upgrade can negotiate the
+// `actioncable-v1-json` subprotocol — Javalin's app.ws upgrades before its
+// onConnect runs, too late to set the header ActionCable requires. Mirrors
+// runtime/{go/v2,crystal,rust}/cable.
+
+package roundhouse
+
+import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import org.eclipse.jetty.servlet.ServletContextHandler
+import org.eclipse.jetty.servlet.ServletHolder
+import org.eclipse.jetty.websocket.api.Session
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketClose
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketConnect
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketMessage
+import org.eclipse.jetty.websocket.api.annotations.WebSocket
+import org.eclipse.jetty.websocket.server.JettyWebSocketServlet
+import org.eclipse.jetty.websocket.server.JettyWebSocketServletFactory
+import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer
+import org.json.JSONObject
+import org.json.JSONTokener
+
+object Cable {
+    private data class Sub(val session: Session, val identifier: String)
+
+    // channel name -> live subscriptions. The identifier (the raw subscribe
+    // frame's `identifier` string) is echoed on every broadcast so Turbo
+    // routes the frame to the right <turbo-cable-stream-source>.
+    private val subscribers = ConcurrentHashMap<String, CopyOnWriteArrayList<Sub>>()
+    private val sessions = CopyOnWriteArrayList<Session>()
+    private val pinger = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "cable-ping").apply { isDaemon = true }
+    }
+    @Volatile private var pingerStarted = false
+
+    // Mount the /cable servlet on Javalin's Jetty context. An exact servlet
+    // mapping takes precedence over Javalin's greedy "/<path>" route.
+    fun mount(handler: ServletContextHandler) {
+        JettyWebSocketServletContainerInitializer.configure(handler, null)
+        handler.addServlet(ServletHolder(CableServlet()), "/cable")
+        synchronized(this) {
+            if (!pingerStarted) {
+                pingerStarted = true
+                // ActionCable clients treat a ping gap (~6s) as a dead
+                // connection and reconnect, so heartbeat every 3s.
+                pinger.scheduleAtFixedRate({ pingAll() }, 3, 3, TimeUnit.SECONDS)
+            }
+        }
+    }
+
+    fun onConnect(session: Session) {
+        sessions.add(session)
+        safeSend(session, JSONObject().put("type", "welcome").toString())
+    }
+
+    fun onMessage(session: Session, message: String) {
+        val frame = try { JSONObject(message) } catch (e: Exception) { return }
+        if (frame.optString("command") != "subscribe") return
+        val identifier = frame.optString("identifier")
+        if (identifier.isEmpty()) return
+        val channel = decodeChannel(identifier) ?: return
+        subscribers.computeIfAbsent(channel) { CopyOnWriteArrayList() }.add(Sub(session, identifier))
+        safeSend(
+            session,
+            JSONObject().put("type", "confirm_subscription").put("identifier", identifier).toString(),
+        )
+    }
+
+    fun onClose(session: Session) {
+        sessions.remove(session)
+        for ((channel, subs) in subscribers) {
+            subs.removeAll { it.session === session }
+            if (subs.isEmpty()) subscribers.remove(channel, subs)
+        }
+    }
+
+    // Fan `html` out to every subscriber of `channel`, wrapped in the Action
+    // Cable message envelope Turbo expects. Called from Broadcasts on each
+    // model after-commit hook.
+    fun dispatch(channel: String, html: String) {
+        val subs = subscribers[channel] ?: return
+        for (sub in subs) {
+            val msg = JSONObject()
+                .put("type", "message")
+                .put("identifier", sub.identifier)
+                .put("message", html)
+                .toString()
+            safeSend(sub.session, msg)
+        }
+    }
+
+    fun turboStreamHtml(action: String, target: String, content: String): String =
+        if (content.isEmpty())
+            "<turbo-stream action=\"$action\" target=\"$target\"></turbo-stream>"
+        else
+            "<turbo-stream action=\"$action\" target=\"$target\"><template>$content</template></turbo-stream>"
+
+    private fun pingAll() {
+        val now = System.currentTimeMillis() / 1000
+        val frame = JSONObject().put("type", "ping").put("message", now).toString()
+        for (session in sessions) safeSend(session, frame)
+    }
+
+    // Jetty's blocking sendString throws on concurrent sends to one socket
+    // (a broadcast fiber racing the ping thread, or two creates fanning out
+    // to a shared subscriber), so serialize per session.
+    private fun safeSend(session: Session, msg: String) {
+        if (!session.isOpen) return
+        try {
+            synchronized(session) { session.remote.sendString(msg) }
+        } catch (e: Exception) {
+            // socket closed between the snapshot and the write — onClose cleans up
+        }
+    }
+
+    // Recover the channel name from Turbo's signed_stream_name. The identifier
+    // is `{"channel":"Turbo::StreamsChannel","signed_stream_name":"<b64>--<digest>"}`;
+    // the base64 prefix decodes to a JSON-encoded stream name (the same string
+    // a broadcast's `stream` carries). Returns null on malformed input.
+    private fun decodeChannel(identifier: String): String? = try {
+        val signed = JSONObject(identifier).optString("signed_stream_name")
+        val b64 = signed.substringBefore("--")
+        val decoded = String(Base64.getDecoder().decode(b64))
+        JSONTokener(decoded).nextValue() as? String
+    } catch (e: Exception) {
+        null
+    }
+}
+
+// The Jetty WebSocket servlet for /cable. Its creator sets the accepted
+// subprotocol during the upgrade handshake — the one thing Javalin's ws API
+// can't do.
+class CableServlet : JettyWebSocketServlet() {
+    override fun configure(factory: JettyWebSocketServletFactory) {
+        factory.setCreator { req, resp ->
+            if (req.subProtocols.contains("actioncable-v1-json")) {
+                resp.acceptedSubProtocol = "actioncable-v1-json"
+            }
+            CableEndpoint()
+        }
+    }
+}
+
+@WebSocket
+class CableEndpoint {
+    @OnWebSocketConnect
+    fun onConnect(session: Session) = Cable.onConnect(session)
+
+    @OnWebSocketMessage
+    fun onMessage(session: Session, message: String) = Cable.onMessage(session, message)
+
+    @OnWebSocketClose
+    fun onClose(session: Session, statusCode: Int, reason: String?) = Cable.onClose(session)
+}
+"##;
 
 /// The hand-written runtime primitives, emitted under `src/main/kotlin/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -433,6 +615,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Broadcasts.kt"),
             content: BROADCASTS_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Cable.kt"),
+            content: CABLE_KT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Server.kt"),

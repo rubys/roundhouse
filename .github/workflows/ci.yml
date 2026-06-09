@@ -1141,7 +1141,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e kotlin
-        run: scripts/e2e --tgz browse/kotlin.tgz --skip "turbo_comment action_cable" kotlin
+        run: scripts/e2e --tgz browse/kotlin.tgz kotlin
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
