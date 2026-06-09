@@ -950,14 +950,16 @@ jobs:
       - name: scripts/e2e ruby
         run: scripts/e2e --tgz browse/ruby.tgz ruby
 
-  # The next six targets are each 2/5: index + validation pass, and the
-  # three asset-dependent specs (tailwind, turbo_comment, action_cable) are
-  # gated — the archive build doesn't serve compiled CSS / turbo.min.js, so
-  # Turbo Drive and the cable stream-source never activate. (elixir
-  # additionally has no cable runtime.) Closing the shared asset-serving gap
-  # is the next lever to move several of these toward green at once.
+  # The next six targets range 2/5–3/5: index + validation always pass.
+  # tailwind now passes on the targets whose server serves static/assets/
+  # (typescript/rust/crystal = 3/5) — scripts/e2e builds the compiled CSS the
+  # emitted layout references (Tailwind v4 CLI scanning the emitted templates,
+  # railcar-style). turbo_comment + action_cable remain gated (need the JS
+  # importmap graph served + a cable runtime). go/python/kotlin/elixir stay
+  # 2/5 until their servers learn to serve static/assets/. (elixir
+  # additionally has no cable runtime.)
 
-  # typescript (2/5): tsx server via npm. No setup-ruby — runs without Ruby.
+  # typescript (3/5): tsx server via npm. No setup-ruby — runs without Ruby.
   e2e-typescript:
     needs: build-site
     runs-on: ubuntu-latest
@@ -976,9 +978,9 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e typescript
-        run: scripts/e2e --tgz browse/typescript.tgz --skip "tailwind turbo_comment action_cable" typescript
+        run: scripts/e2e --tgz browse/typescript.tgz --skip "turbo_comment action_cable" typescript
 
-  # rust (2/5): cargo build --release on the standalone archive (axum).
+  # rust (3/5): cargo build --release on the standalone archive (axum).
   e2e-rust:
     needs: build-site
     runs-on: ubuntu-latest
@@ -998,7 +1000,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e rust
-        run: scripts/e2e --tgz browse/rust.tgz --skip "tailwind turbo_comment action_cable" rust
+        run: scripts/e2e --tgz browse/rust.tgz --skip "turbo_comment action_cable" rust
 
   # python (2/5): aiohttp via uv.
   e2e-python:
@@ -1027,7 +1029,7 @@ jobs:
       - name: scripts/e2e python
         run: scripts/e2e --tgz browse/python.tgz --skip "tailwind turbo_comment action_cable" python
 
-  # crystal (2/5): crystal build --release of the archive.
+  # crystal (3/5): crystal build --release of the archive.
   e2e-crystal:
     needs: build-site
     runs-on: ubuntu-latest
@@ -1050,7 +1052,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e crystal
-        run: scripts/e2e --tgz browse/crystal.tgz --skip "tailwind turbo_comment action_cable" crystal
+        run: scripts/e2e --tgz browse/crystal.tgz --skip "turbo_comment action_cable" crystal
 
   # elixir (2/5): mix/Plug v2 overlay (Main.run). No cable runtime yet, so
   # action_cable would fail even with assets — gated like the rest for now.
