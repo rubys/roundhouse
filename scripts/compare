@@ -136,12 +136,12 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
     # canonicalized) — see tools/compare/src/json_diff.rs. Gated
     # per-target: only targets whose server entry point strips the
     # `.json` suffix before routing and dispatches on
-    # `controller.request_format` are exercised. Other targets
-    # would 404/500 on the JSON paths until they grow the same
-    # glue (see runtime/typescript/server.ts:149-160 and
-    # runtime/spinel/scaffold/main.rb:82-93 for the pattern).
+    # `controller.request_format` are exercised. A target without that
+    # glue would 404/500 on the JSON paths (see
+    # runtime/typescript/server.ts:206-217, runtime/python/server.py:95-102,
+    # and runtime/spinel/scaffold/main.rb:82-93 for the pattern).
     case "$TARGET" in
-        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin)
+        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin|python)
             PATHS+=(/articles.json /articles/1.json)
             ;;
         elixir)
