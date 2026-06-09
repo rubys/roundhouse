@@ -17,7 +17,7 @@ require 'open3'
 require 'shellwords'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
-TARGETS = %w[spinel ruby jruby crystal elixir go kotlin python rust typescript typescript-worker].freeze
+TARGETS = %w[spinel ruby jruby crystal elixir go kotlin python rust swift typescript typescript-worker].freeze
 SITE_BASE = 'https://rubys.github.io/roundhouse'
 
 def main(argv)

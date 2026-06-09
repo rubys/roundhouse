@@ -61,6 +61,10 @@ pub enum BuildTarget {
     Kotlin,
     Python,
     Rust,
+    /// Swift emit (backend-only). Transpile-only and intentionally
+    /// excluded from `ALL` (the `--site` archive matrix) while the target
+    /// is under construction — see `docs/swift-migration-plan.md`.
+    Swift,
     Typescript,
     /// TypeScript emit under the `worker` deployment profile
     /// (SharedWorker browser deployment).
@@ -99,6 +103,7 @@ impl BuildTarget {
         BuildTarget::Kotlin,
         BuildTarget::Python,
         BuildTarget::Rust,
+        BuildTarget::Swift,
         BuildTarget::Typescript,
         BuildTarget::TypescriptWorker,
     ];
@@ -117,6 +122,7 @@ impl BuildTarget {
             BuildTarget::Kotlin => "kotlin",
             BuildTarget::Python => "python",
             BuildTarget::Rust => "rust",
+            BuildTarget::Swift => "swift",
             BuildTarget::Typescript => "typescript",
             BuildTarget::TypescriptWorker => "typescript-worker",
         }
@@ -222,6 +228,19 @@ pub fn target_readme(target: BuildTarget) -> String {
              gradle test\n\
              ```\n"
         }
+        BuildTarget::Swift => {
+            "## Prerequisites\n\
+             - Swift 6+ (swift.org toolchain or Xcode CLT)\n\
+             - Linux: `libsqlite3-dev`\n\n\
+             ## Run\n\
+             ```sh\n\
+             swift run\n\
+             ```\n\n\
+             ## Test\n\
+             ```sh\n\
+             swift test\n\
+             ```\n"
+        }
         BuildTarget::Python => {
             "## Prerequisites\n\
              - Python 3.11+\n\
@@ -325,6 +344,7 @@ pub fn target_files(
         BuildTarget::Kotlin => Ok(sort_files(emit::kotlin::emit(app))),
         BuildTarget::Python => Ok(sort_files(emit::python::emit(app))),
         BuildTarget::Rust => Ok(sort_files(emit::rust::emit(app))),
+        BuildTarget::Swift => Ok(sort_files(emit::swift::emit(app))),
         BuildTarget::Typescript => Ok(sort_files(emit::typescript::emit(app))),
         BuildTarget::TypescriptWorker => Ok(sort_files(emit::typescript::emit_with_profile(
             app,

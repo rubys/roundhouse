@@ -15,6 +15,7 @@ pub mod ruby;
 pub mod rust;
 pub mod rust2;
 pub mod shared;
+pub mod swift;
 pub mod typescript;
 
 use std::path::PathBuf;
