@@ -921,7 +921,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e go
-        run: scripts/e2e --tgz browse/go.tgz --skip "turbo_comment action_cable" go
+        run: scripts/e2e --tgz browse/go.tgz go
 
   # ruby (5/5): the archive is self-contained — its own Gemfile + Makefile
   # build Puma/Rack + tailwind (npx @tailwindcss/cli) + turbo.min.js (the
@@ -1000,7 +1000,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e rust
-        run: scripts/e2e --tgz browse/rust.tgz --skip "turbo_comment action_cable" rust
+        run: scripts/e2e --tgz browse/rust.tgz rust
 
   # python (3/5): aiohttp via uv. Serves static/assets/ (add_static).
   e2e-python:
@@ -1027,7 +1027,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e python
-        run: scripts/e2e --tgz browse/python.tgz --skip "turbo_comment action_cable" python
+        run: scripts/e2e --tgz browse/python.tgz python
 
   # crystal (3/5): crystal build --release of the archive.
   e2e-crystal:
@@ -1052,7 +1052,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e crystal
-        run: scripts/e2e --tgz browse/crystal.tgz --skip "turbo_comment action_cable" crystal
+        run: scripts/e2e --tgz browse/crystal.tgz crystal
 
   # elixir (2/5): mix/Plug v2 overlay (Main.run). No cable runtime yet, so
   # action_cable would fail even with assets — gated like the rest for now.
@@ -1177,24 +1177,58 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
-      # Compile the Tailwind CSS once and inject it into every emit archive's
-      # static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published archives are
-      # self-contained-styled — no build step required by a downloader. The
-      # class set is identical across targets, so one build from the fixture
-      # serves all. Node-only (no Ruby); railcar-style.
+      # Compile the static asset graph once and inject it into every emit
+      # archive's static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published
+      # archives are self-contained — no build step required by a downloader.
+      # The asset set is identical across targets (same Rails-derived HTML +
+      # same importmap pins), so one build from the fixture serves all.
+      #
+      # Two halves, both landing in build/assets/:
+      #   - tailwind.css  — compiled by the Tailwind v4 CLI (Node).
+      #   - the JS importmap graph — turbo.min.js / stimulus.min.js /
+      #     stimulus-loading.js (copied out of the turbo-rails / stimulus-rails
+      #     gem dirs) plus the fixture's own app/javascript (application.js +
+      #     controllers/*). These are the modules the emitted layout's
+      #     `javascript_importmap_tags` references at /assets/*; without them
+      #     the ES-module graph 404s and Turbo never boots (so turbo_comment +
+      #     action_cable can't pass). Mirrors the scaffold Makefile's `assets`
+      #     rule, which ruby/spinel/jruby run in-archive.
+      # collect_asset_files (src/project.rs) walks build/assets/ recursively
+      # and preserves subdirs, so controllers/*.js land at
+      # static/assets/controllers/*.js — matching the `controllers/*` pins.
       - name: Install Node
         uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Build Tailwind CSS for archives
+      - name: Install Ruby (for the turbo-rails / stimulus-rails JS bundles)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - name: Build static asset graph for archives
         run: |
+          mkdir -p build/assets/controllers
+          # Tailwind CSS.
           (cd e2e && npm install --no-audit --no-fund)
-          mkdir -p build/assets
           printf '@import "tailwindcss";\n@source "%s/fixtures/real-blog/app";\n' "$PWD" \
             > e2e/.tailwind-input.css
           (cd e2e && npx @tailwindcss/cli --input .tailwind-input.css \
             --output "$GITHUB_WORKSPACE/build/assets/tailwind.css" --minify)
           rm -f e2e/.tailwind-input.css
+          # Gem-bundled JS (turbo-rails + stimulus-rails). Gem dirs are
+          # queried at build time so a version bump needs no edit here.
+          turbo_dir=$(cd runtime/spinel/scaffold && bundle exec ruby -e \
+            'puts Gem::Specification.find_by_name("turbo-rails").gem_dir')
+          stimulus_dir=$(cd runtime/spinel/scaffold && bundle exec ruby -e \
+            'puts Gem::Specification.find_by_name("stimulus-rails").gem_dir')
+          cp "$turbo_dir/app/assets/javascripts/turbo.min.js"          build/assets/
+          cp "$stimulus_dir/app/assets/javascripts/stimulus.min.js"    build/assets/
+          cp "$stimulus_dir/app/assets/javascripts/stimulus-loading.js" build/assets/
+          # App JS from the fixture (the importmap entry + Stimulus controllers).
+          cp fixtures/real-blog/app/javascript/application.js          build/assets/
+          cp fixtures/real-blog/app/javascript/controllers/*.js        build/assets/controllers/
+          echo "baked asset graph:"; (cd build/assets && find . -type f | sort)
       - name: cargo run --bin build-site
         env:
           ROUNDHOUSE_ASSETS_DIR: build/assets
