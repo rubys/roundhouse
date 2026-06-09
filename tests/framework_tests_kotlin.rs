@@ -176,3 +176,52 @@ fn parse_testsuite_count(xml: &str) -> usize {
 fn inflector_test_passes_under_kotlin() {
     build_and_run(Path::new("runtime/ruby/test/inflector_test.rb"), "inflector");
 }
+
+#[test]
+#[ignore]
+fn router_test_passes_under_kotlin() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_dispatch/router_test.rb"),
+        "router",
+    );
+}
+
+// The three gates below currently FAIL — they surface a real kotlin emit
+// gap, not a wiring gap: each test file declares an inline helper class
+// (a `StandardError` subclass, `TestController < ActionController::Base`,
+// `Article < ActiveRecord::Base`) in test scope, and the kotlin emitter
+// doesn't emit those inner test-module classes, so the JUnit spec hits
+// `Unresolved reference 'StandardError' / 'TestController' / 'Article'`.
+// The typescript/crystal gates pass the same three (their emitters do
+// handle inner test-scope class decls), so there's a reference shape to
+// port. Until then the CI job runs only `inflector` + `router` (the green
+// subset) — same convention as toolchain-typescript's tiny_blog filter.
+// Tracked in roundhouse#34. Run all five locally with:
+//   cargo test --test framework_tests_kotlin -- --ignored
+
+#[test]
+#[ignore]
+fn errors_test_passes_under_kotlin() {
+    build_and_run(
+        Path::new("runtime/ruby/test/active_record/errors_test.rb"),
+        "errors",
+    );
+}
+
+#[test]
+#[ignore]
+fn ac_base_test_passes_under_kotlin() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/base_test.rb"),
+        "ac_base",
+    );
+}
+
+#[test]
+#[ignore]
+fn view_helpers_test_passes_under_kotlin() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
+        "view_helpers",
+    );
+}
