@@ -375,6 +375,35 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         }
     }
 
+    // Polymorphic `schema_columns`. The base `fill_timestamps` calls
+    // `self.class.schema_columns`, which kotlin emits as a bare
+    // `schemaColumns()`. As a COMPANION method that resolves statically to
+    // the enclosing class's companion — i.e. always the base stub, never the
+    // runtime subclass (Kotlin companions aren't virtual) — so create 500s
+    // with `schema_columns must be overridden`. Synthesize a virtual INSTANCE
+    // `schemaColumns()` that shadows the companion in instance context: the
+    // root base's is the `open` stub; each model's `override` delegates to its
+    // own companion (the real column list). `self.class.schema_columns` →
+    // `schemaColumns()` then dispatches through the instance vtable to the
+    // record's actual class. Only classes that define a companion
+    // `schema_columns` get one (so abstract ApplicationRecord, with none, is
+    // skipped and inherits the base's open stub).
+    if lc.methods.iter().any(|m| {
+        m.receiver == MethodReceiver::Class && m.name.as_str() == "schema_columns"
+    }) {
+        let (modifier, body) = if lc.parent.is_none() {
+            (
+                "open",
+                "throw NotImplementedError(\"ActiveRecord::Base.schema_columns must be overridden\")".to_string(),
+            )
+        } else {
+            ("override", format!("return {class_name}.schemaColumns()"))
+        };
+        out.push_str(&format!(
+            "    {modifier} fun schemaColumns(): MutableList<String> {{ {body} }}\n\n"
+        ));
+    }
+
     // Class methods → companion object.
     let class_methods: Vec<&MethodDef> = lc
         .methods
