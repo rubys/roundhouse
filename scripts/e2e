@@ -234,41 +234,46 @@ ok "built"
 
 # -------- 4.5 build static assets (transpile targets) --------
 
-# The ruby/spinel/jruby archives build their own assets via the scaffold
-# Makefile (step 4). For the transpile targets, build the Tailwind CSS the
-# emitted layout references at /assets/tailwind.css. Mirrors railcar's CI
-# asset step: scan the emitted templates for utility classes — target-
-# agnostic, since the class strings are the same Rails-derived HTML in every
-# target's emitted source — and minify into static/assets/. The servers that
-# serve static/assets/ (typescript/rust/crystal/go/python/kotlin; elixir
-# pending static-serving support) then return 200 for the stylesheet link.
-# Node-only (no Ruby): the Tailwind v4 CLI resolves `tailwindcss` from
-# e2e/node_modules, and the v4 `@source` directive points it at the extracted
-# app tree. Targets are added here as their servers learn to serve static/assets/.
+# The published archive normally already ships static/assets/tailwind.css
+# (baked by build-site's ROUNDHOUSE_ASSETS_DIR injection). This step is the
+# FALLBACK for archives without it — e.g. a locally built site with no
+# Node/Tailwind toolchain at build-site time. Build the Tailwind CSS the
+# emitted layout references at /assets/tailwind.css, railcar-style: scan the
+# emitted templates for utility classes (target-agnostic — the class strings
+# are the same Rails-derived HTML in every target's source) and minify into
+# static/assets/. The servers that serve static/assets/ (typescript/rust/
+# crystal/go/python/kotlin; elixir pending) then return 200 for the link.
+# Node-only (no Ruby): the v4 CLI resolves `tailwindcss` from e2e/node_modules,
+# and the `@source` directive points it at the extracted app tree.
+# ruby/spinel/jruby build their own assets via the scaffold Makefile (step 4).
 case "$TARGET" in
     typescript|rust|crystal|go|python|kotlin)
-        step "building static assets (tailwind)"
-        if [[ ! -d "$E2E_DIR/node_modules/@tailwindcss" ]]; then
-            (cd "$E2E_DIR" && npm install --silent --no-audit --no-fund) \
-                >"$LOG_DIR/npm.log" 2>&1
+        if [[ -f "$APP_DIR/static/assets/tailwind.css" ]]; then
+            ok "assets prebuilt in archive ($(wc -c <"$APP_DIR/static/assets/tailwind.css" | tr -d ' ') bytes tailwind.css)"
+        else
+            step "building static assets (tailwind)"
+            if [[ ! -d "$E2E_DIR/node_modules/@tailwindcss" ]]; then
+                (cd "$E2E_DIR" && npm install --silent --no-audit --no-fund) \
+                    >"$LOG_DIR/npm.log" 2>&1
+            fi
+            mkdir -p "$APP_DIR/static/assets"
+            # The v4 CLI resolves `@import "tailwindcss"` relative to the INPUT
+            # file's directory, so the input must live in e2e/ (where
+            # node_modules/tailwindcss is). `@source` (absolute) points it at
+            # the extracted app tree.
+            tw_input="$E2E_DIR/.tailwind-input.css"
+            printf '@import "tailwindcss";\n@source "%s";\n' "$APP_DIR" > "$tw_input"
+            (cd "$E2E_DIR" && npx @tailwindcss/cli \
+                --input "$tw_input" \
+                --output "$APP_DIR/static/assets/tailwind.css" --minify) \
+                >"$LOG_DIR/assets.log" 2>&1
+            asset_rc=$?
+            rm -f "$tw_input"
+            if (( asset_rc != 0 )); then
+                fail "asset build failed"; tail -20 "$LOG_DIR/assets.log" >&2; exit 1
+            fi
+            ok "assets built ($(wc -c <"$APP_DIR/static/assets/tailwind.css" | tr -d ' ') bytes tailwind.css)"
         fi
-        mkdir -p "$APP_DIR/static/assets"
-        # The v4 CLI resolves `@import "tailwindcss"` relative to the INPUT
-        # file's directory, so the input must live in e2e/ (where
-        # node_modules/tailwindcss is). `@source` (absolute) points it at the
-        # extracted app tree.
-        tw_input="$E2E_DIR/.tailwind-input.css"
-        printf '@import "tailwindcss";\n@source "%s";\n' "$APP_DIR" > "$tw_input"
-        (cd "$E2E_DIR" && npx @tailwindcss/cli \
-            --input "$tw_input" \
-            --output "$APP_DIR/static/assets/tailwind.css" --minify) \
-            >"$LOG_DIR/assets.log" 2>&1
-        asset_rc=$?
-        rm -f "$tw_input"
-        if (( asset_rc != 0 )); then
-            fail "asset build failed"; tail -20 "$LOG_DIR/assets.log" >&2; exit 1
-        fi
-        ok "assets built ($(wc -c <"$APP_DIR/static/assets/tailwind.css" | tr -d ' ') bytes tailwind.css)"
         ;;
 esac
 

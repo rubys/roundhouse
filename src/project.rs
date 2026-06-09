@@ -341,7 +341,80 @@ pub fn target_files(
     if target == BuildTarget::Blog {
         Ok(files)
     } else {
-        Ok(ensure_seed_sql(files)?)
+        let files = ensure_seed_sql(files)?;
+        Ok(ensure_static_assets(files, target))
+    }
+}
+
+/// Inject prebuilt static assets (the compiled `tailwind.css`, and later
+/// `turbo.min.js` etc.) into an emit target's `static/assets/` so the
+/// published archive is self-contained-styled — no build step required by a
+/// downloader. The assets are read from the directory named by
+/// `ROUNDHOUSE_ASSETS_DIR`; the build-site CI job compiles them once (the
+/// Tailwind class set is identical across targets, so one build serves all)
+/// and points the env at the output. When the env is unset or the directory
+/// is missing, this is a no-op — `roundhouse --site` keeps working with no
+/// Node/Tailwind toolchain, and the e2e harness builds the CSS as a fallback.
+///
+/// Only the emit targets get assets injected. The scaffold targets
+/// (spinel/ruby/jruby) ship their own `Makefile` that builds + serves assets,
+/// so injecting here would just be overwritten by `make assets`.
+fn ensure_static_assets(
+    mut files: Vec<(String, String)>,
+    target: BuildTarget,
+) -> Vec<(String, String)> {
+    let emit_target = matches!(
+        target,
+        BuildTarget::Crystal
+            | BuildTarget::Elixir
+            | BuildTarget::Go
+            | BuildTarget::Kotlin
+            | BuildTarget::Python
+            | BuildTarget::Rust
+            | BuildTarget::Typescript
+            | BuildTarget::TypescriptWorker
+    );
+    if !emit_target {
+        return files;
+    }
+    let Ok(dir) = std::env::var("ROUNDHOUSE_ASSETS_DIR") else {
+        return files;
+    };
+    let dir = PathBuf::from(dir);
+    if !dir.is_dir() {
+        return files;
+    }
+    let mut injected: Vec<(String, String)> = Vec::new();
+    collect_asset_files(&dir, &dir, &mut injected);
+    for (rel, content) in injected {
+        let path = format!("static/assets/{rel}");
+        if !files.iter().any(|(p, _)| p == &path) {
+            files.push((path, content));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+/// Recursively gather UTF-8 files under `dir` as `(relpath_from_root, content)`.
+/// Binary/unreadable files are skipped (the archive is text-only, same as the
+/// emit walk). `root` is the base the relative path is computed against.
+fn collect_asset_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_asset_files(root, &path, out);
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue; // skip binary / non-UTF-8
+        };
+        if let Ok(rel) = path.strip_prefix(root) {
+            out.push((rel.to_string_lossy().replace('\\', "/"), content));
+        }
     }
 }
 

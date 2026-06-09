@@ -1177,7 +1177,27 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      # Compile the Tailwind CSS once and inject it into every emit archive's
+      # static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published archives are
+      # self-contained-styled — no build step required by a downloader. The
+      # class set is identical across targets, so one build from the fixture
+      # serves all. Node-only (no Ruby); railcar-style.
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Build Tailwind CSS for archives
+        run: |
+          (cd e2e && npm install --no-audit --no-fund)
+          mkdir -p build/assets
+          printf '@import "tailwindcss";\n@source "%s/fixtures/real-blog/app";\n' "$PWD" \
+            > e2e/.tailwind-input.css
+          (cd e2e && npx @tailwindcss/cli --input .tailwind-input.css \
+            --output "$GITHUB_WORKSPACE/build/assets/tailwind.css" --minify)
+          rm -f e2e/.tailwind-input.css
       - name: cargo run --bin build-site
+        env:
+          ROUNDHOUSE_ASSETS_DIR: build/assets
         run: cargo run --release --bin build-site
 
       # Bench results page — fetched from the Hetzner publishing endpoint
