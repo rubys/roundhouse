@@ -1102,9 +1102,11 @@ fn each_array_block_shape() {
     );
 }
 
-/// Hash variant: `h.each { |k, v| body }` → `for k, v := range h`
-/// — the 2-param shape that drives Hash iteration. Same IIFE
-/// wrap as the array case.
+/// Hash variant: `h.each { |k, v| body }` — the 2-param shape that
+/// drives Hash iteration. Emits a deterministic sorted-keys range
+/// (collect keys → `sort.Strings` → range over the sorted slice,
+/// reloading each value as `v := _m[k]`) so iteration order is stable
+/// across runs. Same IIFE wrap as the array case.
 #[test]
 fn each_hash_block_shape() {
     let h_param = Symbol::from("h");
@@ -1158,10 +1160,19 @@ fn each_hash_block_shape() {
     let emitted = go2::emit_library_class(&class).expect("emit each hash-block class");
 
     // h is param-typed `interface{}` (no RBS), 2-param block ⇒ Hash;
-    // each peephole injects a `.(map[string]any)` type assertion.
+    // each peephole injects a `.(map[string]any)` type assertion, then
+    // ranges over keys sorted for deterministic iteration order.
     assert!(
-        emitted.contains("for k, v := range h.(map[string]any) {"),
-        "hash each missing for-range shape:\n{emitted}",
+        emitted.contains("_m := h.(map[string]any)"),
+        "hash each missing map type assertion:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("sort.Strings(_ks)") && emitted.contains("for _, k := range _ks {"),
+        "hash each missing sorted-keys range shape:\n{emitted}",
+    );
+    assert!(
+        emitted.contains("v := _m[k]"),
+        "hash each missing per-key value reload:\n{emitted}",
     );
 }
 
