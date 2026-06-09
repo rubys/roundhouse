@@ -184,29 +184,14 @@ object Db {
 }
 "#;
 
-/// The recursive params value type — the closed union Ruby's untyped nested
-/// params Hash lowers to. Ported verbatim from
-/// `kotlin-reference/runtime/ParamValue.kt`; self-contained (no consumers
-/// emitted yet, but it locks the shape the params layer targets).
-const PARAM_VALUE_KT: &str = r#"// Hand-written roundhouse runtime primitive (no Ruby source).
-// The recursive params value type — the Kotlin analog of
-// `runtime/crystal/param_value.cr` (`String | Hash | Array`) and
-// `runtime/typescript/param_value.ts`. Ruby's untyped nested params Hash
-// lowers to this closed union; `<Resource>Params.from_raw` narrows via
-// `is Str` / `is Dict` at access sites.
-
-package roundhouse
-
-sealed interface ParamValue {
-    // `to_s` on a scalar param (`params[:id].to_s`) must yield the inner
-    // string, not the value-class wrapper's default `Str(value=…)`.
-    @JvmInline value class Str(val value: String) : ParamValue {
-        override fun toString(): String = value
-    }
-    @JvmInline value class Dict(val value: MutableMap<String, ParamValue>) : ParamValue
-    @JvmInline value class Arr(val value: MutableList<ParamValue>) : ParamValue
-}
-"#;
+// The previous `ParamValue` sealed-union primitive was removed: the params
+// layer now holds untyped values as Kotlin's top type `Any?` (nested Hash →
+// `MutableMap<String, Any?>`, scalar → `String`), which is what
+// `<Resource>Params.from_raw`'s lowered `is_a?(Hash)` / `is_a?(String)` checks
+// (emitted as `is Map<*,*>` / `is String`) actually match against. A typed
+// wrapper failed every check, silently dropping create params. See the
+// `Roundhouse::ParamValue` → `Any?` mapping in `ty.rs::render_class` and
+// `setParam` in `Server.kt`.
 
 /// The Javalin HTTP listener — the per-target server primitive (cf.
 /// `runtime/crystal/server.cr`, `runtime/go/v2/server.go`). Parses the
@@ -313,9 +298,9 @@ object Server {
             return
         }
 
-        val params: MutableMap<String, ParamValue> = mutableMapOf()
+        val params: MutableMap<String, Any?> = mutableMapOf()
         for ((k, v) in match.pathParams) {
-            params[k] = ParamValue.Str(v)
+            params[k] = v
         }
         for ((k, vals) in ctx.queryParamMap()) {
             vals.firstOrNull()?.let { setParam(params, k, it) }
@@ -346,18 +331,24 @@ object Server {
         }
     }
 
-    // `article[title]=Foo` -> a nested `Dict`; a bare key -> a scalar `Str`.
-    private fun setParam(params: MutableMap<String, ParamValue>, key: String, value: String) {
+    // `article[title]=Foo` -> a nested `MutableMap<String, Any?>`; a bare
+    // key -> a scalar `String`. Untyped params are held as `Any?` (the
+    // Kotlin top type) so `<Resource>Params.from_raw`'s `is_a?(Hash)` /
+    // `is_a?(String)` narrowing — emitted as `is Map<*,*>` / `is String` —
+    // matches against real Map/String values rather than a wrapper that
+    // would fail every check.
+    private fun setParam(params: MutableMap<String, Any?>, key: String, value: String) {
         val open = key.indexOf('[')
         if (open >= 0 && key.endsWith("]")) {
             val outer = key.substring(0, open)
             val inner = key.substring(open + 1, key.length - 1)
             val existing = params[outer]
-            val dict = if (existing is ParamValue.Dict) existing.value else mutableMapOf()
-            dict[inner] = ParamValue.Str(value)
-            params[outer] = ParamValue.Dict(dict)
+            @Suppress("UNCHECKED_CAST")
+            val dict = if (existing is MutableMap<*, *>) existing as MutableMap<String, Any?> else mutableMapOf()
+            dict[inner] = value
+            params[outer] = dict
         } else {
-            params[key] = ParamValue.Str(value)
+            params[key] = value
         }
     }
 }
@@ -434,10 +425,6 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Db.kt"),
             content: DB_KT.to_string(),
-        },
-        EmittedFile {
-            path: PathBuf::from("src/main/kotlin/ParamValue.kt"),
-            content: PARAM_VALUE_KT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/AdapterInterface.kt"),

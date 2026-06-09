@@ -84,6 +84,17 @@ fn render_class(full: &str, args: &[Ty]) -> String {
             return "String".to_string();
         }
         "Regexp" => return "Regex".to_string(),
+        // The untyped-params value type. The from_raw lowering (and any
+        // `@params[...]` access) treats a params value as a bare nested
+        // Hash / String — `raw.is_a?(Hash) ? raw : {}`, `raw.is_a?(String)
+        // ? raw : ""`. Rendering ParamValue as Kotlin's top type `Any?`
+        // (Dict → MutableMap, Str → String at the value sites) makes those
+        // `is Map<*,*>` / `is String` / `as MutableMap` checks hold as
+        // emitted — a typed sealed wrapper would fail every check (a
+        // ParamValue.Dict is not a Map), which silently dropped every
+        // create's params (the e2e turbo/cable specs). Server.kt builds the
+        // matching plain Map/String values.
+        "Roundhouse::ParamValue" | "ParamValue" => return "Any?".to_string(),
         "Hash" => {
             return if args.len() == 2 {
                 format!("MutableMap<{}, {}>", kotlin_ty(&args[0]), kotlin_ty(&args[1]))
