@@ -894,10 +894,10 @@ jobs:
   # the purpose of this matrix is to surface and burn those gaps down.
   # -------------------------------------------------------------------
 
-  # go (2/5): index + validation pass. Note the ABSENCE of any setup-ruby
-  # step — that's the point: go.tgz runs without Ruby. Remaining gaps
-  # (2026-06-08): Tailwind asset serving, Turbo Stream comment insert,
-  # Action Cable broadcast.
+  # go (3/5): index + validation + tailwind. Note the ABSENCE of any
+  # setup-ruby step — that's the point: go.tgz runs without Ruby. The server
+  # now serves static/assets/ (server.go) and scripts/e2e builds the Tailwind
+  # CSS. Remaining gaps: Turbo Stream comment insert, Action Cable broadcast.
   e2e-go:
     needs: build-site
     runs-on: ubuntu-latest
@@ -921,7 +921,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e go
-        run: scripts/e2e --tgz browse/go.tgz --skip "tailwind turbo_comment action_cable" go
+        run: scripts/e2e --tgz browse/go.tgz --skip "turbo_comment action_cable" go
 
   # ruby (5/5): the archive is self-contained — its own Gemfile + Makefile
   # build Puma/Rack + tailwind (npx @tailwindcss/cli) + turbo.min.js (the
@@ -1002,7 +1002,7 @@ jobs:
       - name: scripts/e2e rust
         run: scripts/e2e --tgz browse/rust.tgz --skip "turbo_comment action_cable" rust
 
-  # python (2/5): aiohttp via uv.
+  # python (3/5): aiohttp via uv. Serves static/assets/ (add_static).
   e2e-python:
     needs: build-site
     runs-on: ubuntu-latest
@@ -1027,7 +1027,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e python
-        run: scripts/e2e --tgz browse/python.tgz --skip "tailwind turbo_comment action_cable" python
+        run: scripts/e2e --tgz browse/python.tgz --skip "turbo_comment action_cable" python
 
   # crystal (3/5): crystal build --release of the archive.
   e2e-crystal:
@@ -1111,11 +1111,11 @@ jobs:
       - name: scripts/e2e jruby
         run: scripts/e2e --tgz browse/jruby.tgz --skip "tailwind turbo_comment action_cable" jruby
 
-  # kotlin (2/5): boots the published kotlin.tgz via `gradle installDist` +
-  # the bundled launcher (Main.kt reads BLOG_DB + PORT). index + validation
-  # pass; the asset/turbo/cable specs are gated like the other backend-only
-  # targets (go/rust/python/crystal/typescript). Needs a JDK + Gradle (the
-  # archive ships no wrapper); Ruby-free, so no setup-ruby.
+  # kotlin (3/5): boots the published kotlin.tgz via `gradle installDist` +
+  # the bundled launcher (Main.kt reads BLOG_DB + PORT). index + validation +
+  # tailwind pass; the Javalin server serves /assets/* in-dispatch (Server.kt).
+  # turbo/cable specs gated like the other backend-only targets. Needs a JDK +
+  # Gradle (the archive ships no wrapper); Ruby-free, so no setup-ruby.
   e2e-kotlin:
     needs: build-site
     runs-on: ubuntu-latest
@@ -1141,7 +1141,7 @@ jobs:
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: scripts/e2e kotlin
-        run: scripts/e2e --tgz browse/kotlin.tgz --skip "tailwind turbo_comment action_cable" kotlin
+        run: scripts/e2e --tgz browse/kotlin.tgz --skip "turbo_comment action_cable" kotlin
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

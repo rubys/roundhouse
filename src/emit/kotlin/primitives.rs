@@ -228,6 +228,13 @@ import io.javalin.http.Context
 import io.javalin.http.Handler
 
 object Server {
+    // Compiled assets (tailwind.css, turbo.min.js, …) live under
+    // static/assets/ and are served at /assets/* by `serveAsset` (called
+    // from `dispatch`). Served in-handler rather than via Javalin's
+    // staticFiles because the greedy "/<path>" app route shadows Javalin's
+    // static handler. Absolute so it's independent of any cwd surprises.
+    private val assetsRoot: java.io.File = java.io.File("static/assets").absoluteFile
+
     fun start(
         dbPath: String,
         port: Int,
@@ -249,6 +256,27 @@ object Server {
         println("Roundhouse Kotlin server listening on http://127.0.0.1:$port")
     }
 
+    // Serve a file from static/assets/, content-typed by extension.
+    // Path-traversal guarded (the canonical target must stay under the
+    // assets root). 404 when missing, so a fresh archive with no built
+    // assets still boots and the layout's asset links simply 404.
+    private fun serveAsset(ctx: Context, rel: String) {
+        val file = java.io.File(assetsRoot, rel).canonicalFile
+        if (!file.path.startsWith(assetsRoot.canonicalFile.path) || !file.isFile) {
+            ctx.status(404).result("Not Found")
+            return
+        }
+        val contentType = when (file.extension.lowercase()) {
+            "css" -> "text/css"
+            "js", "mjs" -> "application/javascript"
+            "json", "map" -> "application/json"
+            "svg" -> "image/svg+xml"
+            "png" -> "image/png"
+            else -> "application/octet-stream"
+        }
+        ctx.contentType(contentType).result(file.readBytes())
+    }
+
     private fun dispatch(
         ctx: Context,
         routes: MutableList<Route>,
@@ -256,6 +284,13 @@ object Server {
         layout: (String, String?, String?) -> String,
     ) {
         ViewHelpers.resetSlotsBang()
+
+        // Compiled assets (/assets/tailwind.css, …) — served before route
+        // dispatch so the greedy app router doesn't 404 them.
+        if (ctx.method().name == "GET" && ctx.path().startsWith("/assets/")) {
+            serveAsset(ctx, ctx.path().removePrefix("/assets/"))
+            return
+        }
 
         // Rails' `_method` override (button_to delete/patch forms POST).
         var method = ctx.method().name

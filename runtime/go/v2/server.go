@@ -56,6 +56,12 @@ func Server_start(handler http.Handler, opts StartOptions) {
 	// other path falls through to the transpiled router. Turbo's
 	// default cable URL is `/cable`, matching CableHandler.
 	mux := http.NewServeMux()
+	// Serve compiled assets (tailwind.css, turbo.min.js, …) from
+	// static/assets/ at /assets/* — the URLs the emitted layout's
+	// stylesheet_link_tag / importmap reference. http.Dir blocks `..`
+	// traversal. Mirrors runtime/rust/server.rs's ServeDir mount.
+	mux.Handle("/assets/", http.StripPrefix("/assets/",
+		http.FileServer(http.Dir("static/assets"))))
 	mux.HandleFunc("/cable", CableHandler)
 	mux.Handle("/", handler)
 

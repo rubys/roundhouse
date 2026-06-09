@@ -68,6 +68,15 @@ def _build_app(layout: Callable[[], str] | None) -> web.Application:
     application = web.Application()
     application["roundhouse.layout"] = layout
     application.router.add_get("/cable", _cable.cable_handler)
+    # Serve compiled assets (tailwind.css, turbo.min.js, …) from
+    # static/assets/ at /assets/* — the URLs the emitted layout's
+    # stylesheet_link_tag / importmap reference. Registered before the
+    # catch-all so /assets/* doesn't fall through to the router. aiohttp's
+    # add_static raises if the dir is missing, so ensure it exists (a fresh
+    # archive with no built assets still boots; the links just 404).
+    _assets_dir = "static/assets"
+    os.makedirs(_assets_dir, exist_ok=True)
+    application.router.add_static("/assets", _assets_dir, show_index=False)
     application.router.add_route("*", "/{path:.*}", _dispatch_request)
     return application
 

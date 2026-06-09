@@ -240,13 +240,13 @@ ok "built"
 # asset step: scan the emitted templates for utility classes — target-
 # agnostic, since the class strings are the same Rails-derived HTML in every
 # target's emitted source — and minify into static/assets/. The servers that
-# serve static/assets/ (typescript/rust/crystal today; go/python/kotlin/elixir
+# serve static/assets/ (typescript/rust/crystal/go/python/kotlin; elixir
 # pending static-serving support) then return 200 for the stylesheet link.
 # Node-only (no Ruby): the Tailwind v4 CLI resolves `tailwindcss` from
 # e2e/node_modules, and the v4 `@source` directive points it at the extracted
 # app tree. Targets are added here as their servers learn to serve static/assets/.
 case "$TARGET" in
-    typescript|rust|crystal)
+    typescript|rust|crystal|go|python|kotlin)
         step "building static assets (tailwind)"
         if [[ ! -d "$E2E_DIR/node_modules/@tailwindcss" ]]; then
             (cd "$E2E_DIR" && npm install --silent --no-audit --no-fund) \
