@@ -75,16 +75,31 @@ module Roundhouse
     @@subscribers : Hash(String, Array(Tuple(HTTP::WebSocket, String))) = {} of String => Array(Tuple(HTTP::WebSocket, String))
     @@subscribers_mutex = Mutex.new
 
+    # `HTTP::WebSocket#send` writes + flushes to the socket and may yield
+    # the fiber mid-write (a blocked write syscall). Two fibers sending
+    # to the SAME socket — e.g. a broadcast from a create-request fiber
+    # racing the per-socket ping fiber, or two near-simultaneous comment
+    # creates both fanning out to a shared subscriber — can then
+    # interleave their bytes and corrupt a frame, so the client silently
+    # drops the broadcast (an intermittent e2e action_cable failure under
+    # parallel load). Serialize all sends through one mutex. go's
+    # coder/websocket and python's asyncio loop get this serialization for
+    # free; Crystal's stdlib socket does not. Global (not per-socket) is
+    # ample for the demo's volume.
+    @@send_mutex = Mutex.new
+
+    private def self.safe_send(ws : HTTP::WebSocket, msg : String) : Nil
+      @@send_mutex.synchronize { ws.send(msg) }
+    rescue
+      # socket may have closed between our snapshot and the write —
+      # cleanup happens on the handler side.
+    end
+
     private def self.dispatch(channel : String, html : String) : Nil
       subs = @@subscribers_mutex.synchronize { (@@subscribers[channel]? || ([] of Tuple(HTTP::WebSocket, String))).dup }
       subs.each do |(ws, identifier)|
         msg = {"type" => "message", "identifier" => identifier, "message" => html}.to_json
-        begin
-          ws.send(msg)
-        rescue
-          # socket may have closed between our snapshot and now —
-          # cleanup happens on the handler side.
-        end
+        safe_send(ws, msg)
       end
     end
 
@@ -111,18 +126,14 @@ module Roundhouse
     private def self.run_socket(ws : HTTP::WebSocket) : Nil
       sub_entries = [] of Tuple(String, Tuple(HTTP::WebSocket, String))
 
-      ws.send({"type" => "welcome"}.to_json)
+      safe_send(ws, {"type" => "welcome"}.to_json)
 
       # Ping every 3 seconds on a background fiber.
       ping_fiber = spawn do
         loop do
           sleep 3.seconds
           break if ws.closed?
-          begin
-            ws.send({"type" => "ping", "message" => Time.utc.to_unix}.to_json)
-          rescue
-            break
-          end
+          safe_send(ws, {"type" => "ping", "message" => Time.utc.to_unix}.to_json)
         end
       end
 
@@ -138,7 +149,7 @@ module Roundhouse
           (@@subscribers[channel] ||= [] of Tuple(HTTP::WebSocket, String)) << entry
         end
         sub_entries << {channel, entry}
-        ws.send({"type" => "confirm_subscription", "identifier" => identifier}.to_json)
+        safe_send(ws, {"type" => "confirm_subscription", "identifier" => identifier}.to_json)
       rescue
         # malformed JSON etc — silently drop
       end

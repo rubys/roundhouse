@@ -54,6 +54,18 @@ module Roundhouse
       Roundhouse::Db.open_production_db(resolved_path, schema_sql)
       ActiveRecord.adapter = Roundhouse::SqliteAdapter.new
 
+      # Bridge the model-callback broadcast shim (`Broadcasts.append`/
+      # `replace`/`remove`, emitted from `broadcasts_to`) to the live
+      # WebSocket fan-out. Without this the broadcaster stays nil and
+      # `Broadcasts.record` only logs — the create/destroy turbo-stream
+      # never reaches subscribed `<turbo-cable-stream-source>` viewers
+      # (the e2e action_cable spec). `Broadcasts.record` passes the
+      # already-rendered `<turbo-stream>` fragment as the second arg, so
+      # this forwards (stream, fragment) straight to `Cable.dispatch`.
+      Broadcasts.install_broadcaster(
+        ->(stream : String, html : String) { Roundhouse::Cable.broadcast(stream, html) }
+      )
+
       @@routes = if root_route
                    [root_route] + routes
                  else

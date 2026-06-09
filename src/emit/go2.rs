@@ -1288,6 +1288,7 @@ fn scan_stdlib_imports(content: &str) -> Vec<&'static str> {
         (&["json."], "encoding/json"),
         (&["regexp."], "regexp"),
         (&["slices."], "slices"),
+        (&["sort."], "sort"),
         (&["strconv."], "strconv"),
         (&["strings."], "strings"),
         (&["sync."], "sync"),

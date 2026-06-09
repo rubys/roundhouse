@@ -92,7 +92,17 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
     let app = router
         .nest_service("/assets", ServeDir::new("static/assets"))
         .route("/cable", get(cable::cable_handler))
-        .layer(middleware::from_fn(layout_wrap))
+        .layer(middleware::from_fn(layout_wrap));
+    // `method_override` must run BEFORE path+method routing. Applied as a
+    // `Router::layer` it would wrap the *matched* per-route service — but
+    // axum decides a POST to a delete-only path is a 405 during routing,
+    // so the layer (which does run) is already bound to the 405 service
+    // and rewriting the verb there can't re-route (the e2e turbo/cable
+    // DELETE cleanup 405s). Wrapping the whole router as the fallback of
+    // an outer, route-less Router puts the override ahead of all real
+    // routing, so `next.run()` re-enters routing with the corrected verb.
+    let app = Router::new()
+        .fallback_service(app)
         .layer(middleware::from_fn(method_override));
 
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();

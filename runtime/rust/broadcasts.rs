@@ -68,6 +68,24 @@ impl Broadcasts {
         let stream = attrs.get("stream").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let target = attrs.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let html = attrs.get("html").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        LOG.with(|c| c.borrow_mut().push((action.to_string(), stream, target, html)));
+        LOG.with(|c| {
+            c.borrow_mut().push((
+                action.to_string(),
+                stream.clone(),
+                target.clone(),
+                html.clone(),
+            ))
+        });
+        // Forward to the live Action Cable fan-out. The model callbacks
+        // (`broadcasts_to` lowering) hand us the already-rendered partial
+        // as `html`; compose the `<turbo-stream>` wrapper and fan it out to
+        // every subscriber of `stream`. Without this the production path is
+        // a no-op (only the in-memory LOG is populated) and a subscribed
+        // `<turbo-cable-stream-source>` never sees the create/destroy
+        // broadcast — the e2e action_cable spec. The cable server fans out
+        // via per-subscriber mpsc channels, so this is safe to call from
+        // any axum worker thread.
+        let fragment = crate::cable::turbo_stream_html(action, &target, &html);
+        crate::cable::CABLE.broadcast(&stream, &fragment);
     }
 }

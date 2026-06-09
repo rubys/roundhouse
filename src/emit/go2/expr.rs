@@ -922,6 +922,42 @@ pub(super) fn emit_send(
                     }
                 };
                 let body_s = emit_block_body(&body_ctx, body);
+                // 2-param `each` iterates a Hash. Go map iteration order is
+                // undefined per-run, but several runtime-Ruby surfaces
+                // render observable output from it — notably `render_attrs`,
+                // whose HTML attribute order feeds Turbo's
+                // `data-turbo-track="reload"` element comparison. An
+                // unstable order makes Turbo think tracked assets changed on
+                // every navigation and forces a full page reload, defeating
+                // Drive (and breaking the e2e turbo/cable specs). Iterate
+                // sorted keys for a stable order. Sorted (not insertion)
+                // order differs from Rails, but `compare`'s DOM diff stores
+                // attrs in a BTreeMap and is attribute-order-insensitive, so
+                // byte-parity is unaffected. Only string-keyed maps take this
+                // path (the common case); other key types keep the unordered
+                // range. Binding `_m` also avoids the double-eval of a
+                // non-trivial `recv_s` the unordered form has.
+                if params.len() == 2 {
+                    let (k_ty, _v_ty) = hash_kv_go_tys(recv_e.ty.as_ref());
+                    if k_ty == "string" {
+                        let k = params[0].as_str();
+                        let v = params[1].as_str();
+                        return format!(
+                            "func() interface{{}} {{\n\
+                             \t_m := {recv_s}\n\
+                             \t_ks := make([]string, 0, len(_m))\n\
+                             \tfor _k := range _m {{ _ks = append(_ks, _k) }}\n\
+                             \tsort.Strings(_ks)\n\
+                             \tfor _, {k} := range _ks {{\n\
+                             \t\t{v} := _m[{k}]\n\
+                             \t\t_ = {v}\n\
+                             {body_s}\n\
+                             \t}}\n\
+                             \treturn _m\n\
+                             }}()",
+                        );
+                    }
+                }
                 return format!(
                     "func() interface{{}} {{\n\
                      \tfor {range_vars} := range {recv_s} {{\n\

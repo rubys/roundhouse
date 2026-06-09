@@ -52,7 +52,22 @@ func Router() http.Handler {
 		// (e.g. `/articles.json` matches `/articles`), then the
 		// dispatcher inspects the suffix to set RequestFormat.
 		matchPath := strings.TrimSuffix(r.URL.Path, ".json")
-		m := ActionDispatchRouter_match(r.Method, matchPath, RoutesTable)
+		// Rack::MethodOverride: Rails' `button_to ..., method: :delete`
+		// (and `form_with method: :patch`) render a POST form carrying a
+		// `_method` hidden field, since browsers only natively issue
+		// GET/POST. Honor it so the POST routes as the intended verb —
+		// without this, `DELETE /articles/:id/comments/:id` never matches
+		// and the destroy 404s. Only POST is overridable (matching Rack),
+		// and only to a non-empty verb. `r.PostFormValue` calls
+		// `ParseForm` internally; it is idempotent, so the later
+		// `ParseFormParams` re-parse is a no-op.
+		method := r.Method
+		if method == http.MethodPost {
+			if override := r.PostFormValue("_method"); override != "" {
+				method = strings.ToUpper(override)
+			}
+		}
+		m := ActionDispatchRouter_match(method, matchPath, RoutesTable)
 		if m == nil {
 			http.NotFound(w, r)
 			return

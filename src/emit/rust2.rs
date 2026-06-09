@@ -690,11 +690,38 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 .methods
                 .iter()
                 .any(|m| m.name.as_str() == "before_destroy");
-            let destroy_body = if has_before_destroy {
-                "self.before_destroy(); self._adapter_delete();"
+            // After-commit lifecycle hooks emitted by the lowerer when the
+            // model declares `broadcasts_to` / `after_*_commit` (Comment in
+            // real-blog broadcasts comment + parent-article changes over
+            // Action Cable). The shim's save/destroy must FIRE them, or the
+            // Turbo Stream broadcast never goes out — a subscribed
+            // `<turbo-cable-stream-source>` sees nothing (the e2e
+            // action_cable spec). Conditional, same as `before_destroy`:
+            // a bare call to a hook a model doesn't define would E0599.
+            // The hooks are `&self` methods; calling them on `&mut self`
+            // auto-reborrows. Fired after the adapter write so `self.id`
+            // (and the persisted row) are in place.
+            let has_method = |n: &str| lc.methods.iter().any(|m| m.name.as_str() == n);
+            let after_create_commit = if has_method("after_create_commit") {
+                " self.after_create_commit();"
             } else {
-                "self._adapter_delete();"
+                ""
             };
+            let after_update_commit = if has_method("after_update_commit") {
+                " self.after_update_commit();"
+            } else {
+                ""
+            };
+            let after_destroy_commit = if has_method("after_destroy_commit") {
+                " self.after_destroy_commit();"
+            } else {
+                ""
+            };
+            let destroy_body = format!(
+                "{before}self._adapter_delete();{after}",
+                before = if has_before_destroy { "self.before_destroy(); " } else { "" },
+                after = after_destroy_commit,
+            );
             let ar_shim = if needs_ar_shim {
                 // `destroy` and `exists` are paired in:
                 //   - Article#dependent_destroy: `c.destroy()` over the
@@ -749,9 +776,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\
                             if !crate::errors_ext::validation_errors_is_empty() {{ return false; }}\n\
-                            if self.id == 0 {{ self.id = self._adapter_insert(); }}\n\
-                            else if Self::_adapter_exists_by_id(self.id) {{ self._adapter_update(); }}\n\
-                            else {{ let _ = self._adapter_insert(); }}\n\
+                            if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
+                            else if Self::_adapter_exists_by_id(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
+                            else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
                             true\n\
                         }}\n\
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
@@ -766,6 +793,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     }}\n",
                     name = lc.name.0.as_str(),
                     destroy_body = destroy_body,
+                    after_create_commit = after_create_commit,
+                    after_update_commit = after_update_commit,
                 )
             } else {
                 String::new()

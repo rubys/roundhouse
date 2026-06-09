@@ -858,8 +858,38 @@ fn emit_expr_inner(e: &Expr) -> String {
                                     && matches!(**value, crate::ty::Ty::Untyped)
                         );
                         if value_shaped {
+                            // `.as_object()` yields a serde_json `Map`,
+                            // which is a BTreeMap — iteration is already
+                            // key-sorted (deterministic).
                             return format!(
                                 "{recv_s}.as_object().unwrap().iter().for_each({closure})"
+                            );
+                        }
+                        // String-keyed `HashMap` iterates in a random
+                        // per-run order. Several runtime-Ruby surfaces
+                        // render observable output from a `Hash#each` —
+                        // notably `render_attrs`, whose HTML attribute
+                        // order feeds Turbo's `data-turbo-track="reload"`
+                        // element comparison; an unstable order makes
+                        // Turbo force a full page reload after every form
+                        // submit, defeating Drive (the e2e turbo/cable
+                        // specs). Iterate sorted keys for a stable order.
+                        // Sorted≠Rails insertion order, but compare's DOM
+                        // diff is attribute-order-insensitive (BTreeMap),
+                        // so byte-parity is unaffected. Bind `_m` so the
+                        // collected borrow outlives the (possibly cloned)
+                        // temporary receiver. Mirrors the go2 fix.
+                        let key_is_str = matches!(
+                            r.ty.as_ref(),
+                            Some(crate::ty::Ty::Hash { key, .. })
+                                if matches!(**key, crate::ty::Ty::Str)
+                        );
+                        if key_is_str {
+                            return format!(
+                                "{{ let _m = {recv_s}; \
+                                 let mut _items: Vec<_> = _m.iter().collect(); \
+                                 _items.sort_by(|a, b| a.0.cmp(b.0)); \
+                                 _items.into_iter().for_each({closure}); }}"
                             );
                         }
                         return format!("{recv_s}.iter().for_each({closure})");
