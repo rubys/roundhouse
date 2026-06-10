@@ -121,6 +121,27 @@ object Db {
         tlConn.get()
     }
 
+    // Per-test in-memory database: drop this thread's connection (a fresh
+    // jdbc:sqlite::memory: connection IS a fresh database) and replay the
+    // schema DDL. Tests dispatch synchronously on the JUnit thread, so the
+    // thread-local scope matches the test scope.
+    fun setupTestDb(schema: String) {
+        if (path != null) {
+            runCatching { tlConn.get().close() }
+        }
+        path = ":memory:"
+        tlStatements.remove()
+        tlOwners.remove()
+        tlConn.remove()
+        if (schema.isNotEmpty()) {
+            for (stmt in schema.split(";\n")) {
+                if (stmt.isNotBlank()) {
+                    exec(stmt)
+                }
+            }
+        }
+    }
+
     // Run one-shot DDL/INSERT/UPDATE/DELETE; capture rowid + changes.
     fun exec(sql: String) {
         conn().createStatement().use { st ->

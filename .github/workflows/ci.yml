@@ -154,11 +154,13 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  # toolchain-kotlin: emit the real-blog Kotlin/Gradle project and
+  # toolchain-kotlin: emit the real-blog Kotlin/Gradle project,
   # `gradle compileKotlin` it (full type-check against the real Javalin +
-  # sqlite-jdbc classpath — the analog of crystal's --no-codegen). setup-java
-  # provides the JDK (the test reads JAVA_HOME); setup-gradle provides a
-  # `gradle` on PATH (the emitted project ships no wrapper).
+  # sqlite-jdbc classpath — the analog of crystal's --no-codegen), and
+  # `gradle test` it — the execution leg running the transpiled real-blog
+  # model + controller suite under JUnit 5. setup-java provides the JDK
+  # (the test reads JAVA_HOME); setup-gradle provides a `gradle` on PATH
+  # (the emitted project ships no wrapper).
   toolchain-kotlin:
     needs: generate-fixture
     runs-on: ubuntu-latest

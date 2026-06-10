@@ -819,7 +819,8 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(*op, left, right, e),
         ExprNode::Send { recv, method, args, block, .. } => {
-            emit_send(recv.as_ref(), method.as_str(), args, block.as_ref())
+            let rendered = emit_send(recv.as_ref(), method.as_str(), args, block.as_ref());
+            coerce_nullable_finder(rendered, recv.as_ref(), method.as_str(), e.ty.as_ref())
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             emit_if(cond, then_branch, else_branch)
@@ -1143,6 +1144,55 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
     }
 }
 
+/// Call-site nullability coercion for the nullable model finders: the
+/// synthesized companion `last()`/`findBy()` return `T?`, but the IR
+/// stamps a call like `Article.last` with the non-nil model type when
+/// the typed registry proves the context expects an instance (member
+/// chains: `Article.last().title`). Append `!!` so the Kotlin surface
+/// matches the stamp — the Ruby contract is "nil only when the table is
+/// empty", and a wrong assumption fails the test with an NPE rather
+/// than a compile error, same as Ruby's NoMethodError on nil.
+fn coerce_nullable_finder(
+    rendered: String,
+    recv: Option<&Expr>,
+    method: &str,
+    result_ty: Option<&crate::ty::Ty>,
+) -> String {
+    use crate::ty::Ty;
+    if !matches!(method, "last" | "find_by") {
+        return rendered;
+    }
+    let Some(r) = recv else { return rendered };
+    if !matches!(&*r.node, ExprNode::Const { .. }) {
+        return rendered;
+    }
+    // Class stamp, the Union{Class,Nil} the registry stamps on
+    // `Article.last`, or — when the stamp is missing entirely — the
+    // RECEIVER being a registered class (the swift emitter's
+    // receiver-class fallback: Ruby's contract for a model finder is
+    // `-> instance`; a nil traps either way, matching Ruby's
+    // NoMethodError-on-nil at the member chain).
+    let is_model_stamp = match result_ty {
+        Some(Ty::Class { .. }) => true,
+        Some(Ty::Union { variants }) => {
+            let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+            matches!(non_nil.as_slice(), [Ty::Class { .. }])
+        }
+        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => {
+            let ExprNode::Const { path } = &*r.node else { return rendered };
+            let cls = type_name(
+                &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+            );
+            CLASS_HIERARCHY.with(|h| h.borrow().contains_key(&cls))
+        }
+        Some(_) => false,
+    };
+    if is_model_stamp {
+        return format!("{rendered}!!");
+    }
+    rendered
+}
+
 fn emit_raise(value: &Expr) -> String {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. } => {
@@ -1439,8 +1489,11 @@ fn emit_send(
         if (method == "key?" || method == "has_key?") && recv_is_hash(r) {
             return format!("{}.containsKey({})", emit_expr(r), args_s[0]);
         }
-        // `Hash#delete(k)` → `MutableMap.remove(k)`.
-        if method == "delete" {
+        // `Hash#delete(k)` → `MutableMap.remove(k)` — only on an actual
+        // Map receiver (same gate as `key?`): the controller-test
+        // `delete(path)` HTTP helper is a real method on the inherited
+        // RoundhouseTestCase and must stay a call.
+        if method == "delete" && recv_is_hash(r) {
             return format!("{}.remove({})", emit_expr(r), args_s[0]);
         }
         // `Hash#merge(other)` → a new map (`+` yields a read-only Map; the

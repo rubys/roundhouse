@@ -497,7 +497,12 @@ pub fn emit_test_class(
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
 
-    out.push_str(&format!("class {class_name} {{\n"));
+    // Every test class extends the hand-written RoundhouseTestCase
+    // (RhTestSupport.kt, emitted whenever the App carries tests): JUnit
+    // runs its @BeforeEach (schema reset + fixtures) before the
+    // subclass's, and the controller-test surface (get/post/
+    // assertResponse/assertSelect) resolves by inheritance.
+    out.push_str(&format!("class {class_name} : RoundhouseTestCase() {{\n"));
     for n in body_ivars.keys() {
         match inferred_ivar_types.get(n) {
             Some(ty) => out.push_str(&format!("    {}\n", render_member("", n, ty))),
@@ -525,10 +530,14 @@ pub fn emit_test_class(
         if m.name.as_str() == "initialize" {
             continue;
         }
-        // JUnit discovery: annotate the `test_*` methods. `setup`/helpers
-        // stay plain (called by the test body, not the platform).
+        // JUnit discovery: annotate the `test_*` methods, and `setup` as
+        // @BeforeEach (runs after the inherited RoundhouseTestCase
+        // @BeforeEach — JUnit orders superclass lifecycle methods first).
+        // Other helpers stay plain (called by the test body).
         let rendered = if m.name.as_str().starts_with("test_") {
             format!("@org.junit.jupiter.api.Test\n{}", emit_method(m, ""))
+        } else if m.name.as_str() == "setup" {
+            format!("@org.junit.jupiter.api.BeforeEach\n{}", emit_method(m, ""))
         } else {
             emit_method(m, "")
         };

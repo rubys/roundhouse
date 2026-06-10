@@ -88,3 +88,75 @@ fn real_blog_kotlin_compiles() {
     generate_project(fixture, &scratch);
     assert_kotlin_compiles("real-blog", &scratch);
 }
+
+/// Execution leg: `gradle test` over the emitted project runs the
+/// TRANSPILED real-blog suite (article/comment model tests + controller
+/// dispatch tests) under JUnit 5 against an in-memory SQLite database —
+/// compile-clean is necessary but not sufficient; this catches runtime
+/// contract drift (fixture loading, Router.match dispatch, the
+/// RoundhouseTestCase harness). Sibling of swift's
+/// `real_blog_swift_tests_pass` and the crystal/rust/go/ruby/python/
+/// elixir/typescript execution legs.
+#[test]
+#[ignore]
+fn real_blog_kotlin_tests_pass() {
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog-test");
+    generate_project(fixture, &scratch);
+
+    let java_home = std::env::var("KOTLIN_JAVA_HOME")
+        .or_else(|_| std::env::var("JAVA_HOME"))
+        .ok();
+    let mut cmd = Command::new("gradle");
+    cmd.arg("test").arg("--console=plain").arg("--no-daemon").current_dir(&scratch);
+    if let Some(jh) = java_home {
+        cmd.env("JAVA_HOME", jh);
+    }
+    let output = cmd.output().expect("run gradle test");
+    assert!(
+        output.status.success(),
+        "gradle test failed on emitted real-blog at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Defense against issue #4: `gradle test` exits 0 when the test
+    // source set discovers no JUnit classes. real-blog carries 21 tests
+    // across 4 suites; require the full floor so emit-routing can't
+    // silently drop a test class.
+    let results_dir = scratch.join("build/test-results/test");
+    let mut total = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&results_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("xml") {
+                continue;
+            }
+            if let Ok(xml) = std::fs::read_to_string(&path) {
+                total += parse_testsuite_count(&xml);
+            }
+        }
+    }
+    assert!(
+        total >= 21,
+        "expected >= 21 real-blog tests to run, got {total}\nresults dir: {}",
+        results_dir.display(),
+    );
+}
+
+/// Extract the `tests="N"` attribute from a JUnit `<testsuite …>` element.
+fn parse_testsuite_count(xml: &str) -> usize {
+    let Some(idx) = xml.find("<testsuite ") else {
+        return 0;
+    };
+    let tail = &xml[idx..];
+    let Some(attr_idx) = tail.find("tests=\"") else {
+        return 0;
+    };
+    let rest = &tail[attr_idx + "tests=\"".len()..];
+    let end = rest.find('"').unwrap_or(0);
+    rest[..end].parse::<usize>().unwrap_or(0)
+}
