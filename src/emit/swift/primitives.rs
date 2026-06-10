@@ -271,7 +271,7 @@ enum Server {
                     let path = request.uri.path
                     let query = parseUrlencoded(request.uri.query ?? "")
                     let r = try await NIOThreadPool.singleton.runIfActive {
-                        dispatch(method, path, query, form, routes, controllers, layout)
+                        dispatchScoped(method, path, query, form, routes, controllers, layout)
                     }
                     var headers = HTTPFields()
                     if let ct = r.contentType {
@@ -295,6 +295,29 @@ enum Server {
         )
         print("Roundhouse Swift server listening on http://127.0.0.1:\(port)")
         try await app.runService()
+    }
+
+    // Per-request memory scope. NIO pool threads have no run loop, so
+    // on Darwin Foundation's autoreleased bridge objects (NSString in
+    // replacingOccurrences, NSRegularExpression matches) never drain
+    // without an explicit pool — RSS grows linearly under load. Linux
+    // Foundation has no autorelease machinery; the plain call is right.
+    static func dispatchScoped(
+        _ rawMethod: String,
+        _ rawPath: String,
+        _ query: [String: String],
+        _ form: [String: String],
+        _ routes: [Route],
+        _ controllers: [String: () -> ActionControllerBase],
+        _ layout: (String, String?, String?) -> String
+    ) -> DispatchResult {
+        #if canImport(ObjectiveC)
+        return autoreleasepool {
+            dispatch(rawMethod, rawPath, query, form, routes, controllers, layout)
+        }
+        #else
+        return dispatch(rawMethod, rawPath, query, form, routes, controllers, layout)
+        #endif
     }
 
     // The whole synchronous request — runs on one pool thread.
@@ -432,6 +455,47 @@ enum Server {
 }
 "#;
 
+// Thread-confined mutable slot — the Swift analog of the Kotlin
+// OBJECT_TL_FIELDS ThreadLocal conversion (the fix that ended Kotlin's
+// cross-request state bleed). Module-level mutable `@ivar` state
+// (ViewHelpers' content_for slots) emits as a computed static property
+// backed by one of these: each NIOThreadPool thread sees its own value,
+// and since a request's whole dispatch runs on one pool thread
+// (Server.swift's runIfActive bridge), per-thread IS per-request.
+// ThreadSpecificVariable requires a class value, hence the Box.
+const RHTHREADLOCAL_SWIFT: &str = r#"import NIOPosix
+
+final class RhThreadLocal<T> {
+    private final class Box {
+        var value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    private let tsv = ThreadSpecificVariable<Box>()
+    private let makeDefault: () -> T
+
+    init(_ makeDefault: @escaping () -> T) {
+        self.makeDefault = makeDefault
+    }
+
+    var value: T {
+        get {
+            if let box = tsv.currentValue { return box.value }
+            let box = Box(makeDefault())
+            tsv.currentValue = box
+            return box.value
+        }
+        set {
+            if let box = tsv.currentValue {
+                box.value = newValue
+            } else {
+                tsv.currentValue = Box(newValue)
+            }
+        }
+    }
+}
+"#;
+
 /// The hand-written primitive files, emitted under `Sources/App/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
     vec![
@@ -458,6 +522,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Server.swift"),
             content: SERVER_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/RhThreadLocal.swift"),
+            content: RHTHREADLOCAL_SWIFT.to_string(),
         },
     ]
 }

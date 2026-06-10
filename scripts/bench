@@ -121,7 +121,7 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python|kotlin) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python|kotlin|swift) NORMALIZED+=("$t") ;;
         jr) NORMALIZED+=(jruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
@@ -130,8 +130,9 @@ for t in "${TARGETS[@]}"; do
         ex) NORMALIZED+=(elixir) ;;
         py) NORMALIZED+=(python) ;;
         kt) NORMALIZED+=(kotlin) ;;
+        sw) NORMALIZED+=(swift) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python kotlin" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python kotlin swift" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -179,6 +180,10 @@ PY_OUT="/tmp/rh-py-pass2"
 # BUILD_DIR). `gradle installDist` builds a self-contained launcher; Main.kt
 # reads BLOG_DB + PORT and serves via Javalin on the JVM.
 KT_OUT="/tmp/rh-kt-pass2"
+# Swift target — emit_preview writes here (matches scripts/compare's
+# BUILD_DIR). `swift build -c release` produces a single AOT binary;
+# main.swift reads BLOG_DB + PORT and serves via Hummingbird.
+SW_OUT="/tmp/rh-swift-pass2"
 # JDK for the kotlin build/run (non-interactive shells otherwise resolve an
 # older `java` via PATH). Honors $KOTLIN_JAVA_HOME, then an existing
 # $JAVA_HOME (e.g. mise's `mise where java`), then the macOS Homebrew path.
@@ -456,6 +461,20 @@ build_target() {
                 (cd "$KT_OUT" && JAVA_HOME="$KOTLIN_JAVA_HOME" PATH="$KOTLIN_JAVA_HOME/bin:$PATH" gradle installDist --console=plain -q) || return 1
             fi
             ;;
+        swift)
+            # emit_preview → $SW_OUT, then SPM release build → a single
+            # AOT binary (.build/release/App). No VM warmup concern.
+            TARGET_BUILD_DIR="$SW_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$SW_OUT/Sources/App/main.swift" ]]; then
+                step "regenerating swift target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target swift "$FIXTURE" >/dev/null 2>&1) || return 1
+            fi
+            if (( SKIP_EMIT == 0 )) || [[ ! -x "$SW_OUT/.build/release/App" ]]; then
+                step "building swift target (swift build -c release)"
+                (cd "$SW_OUT" && swift build -c release >/dev/null) || return 1
+            fi
+            ;;
         rust)
             TARGET_BUILD_DIR="$RS_OUT"
             TARGET_GEMFILE=""
@@ -591,6 +610,12 @@ stage_db() {
             ;;
         kotlin)
             local db="$KT_OUT/storage/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        swift)
+            local db="$SW_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -781,6 +806,19 @@ start_target() {
                 BLOG_DB="storage/development.sqlite3" \
                 PORT="$port" \
                 ./build/install/roundhouse-app/bin/roundhouse-app \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        swift)
+            # AOT binary (Hummingbird/SwiftNIO) — single process,
+            # NIOThreadPool concurrency, no worker concept (workers=1
+            # recorded like go/kotlin). No heap pin needed: native memory
+            # management, RSS is the honest number.
+            (cd "$SW_OUT" && \
+                BLOG_DB="storage/development.sqlite3" \
+                PORT="$port" \
+                ./.build/release/App \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true

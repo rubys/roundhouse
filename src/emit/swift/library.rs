@@ -110,12 +110,15 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     Ok(out)
 }
 
-/// Module-level `@ivar` state (e.g. ViewHelpers' `@slots = {}`) →
-/// `static var`s, typed from assign-site stamps or the container scan.
-/// Also installs the names as instance props so reads/assigns resolve.
-/// NOTE: shared mutable statics — per-request isolation (the
-/// ThreadSpecificVariable conversion, Kotlin's OBJECT_TL_FIELDS) lands
-/// with the server/concurrency phase.
+/// Module-level `@ivar` state (e.g. ViewHelpers' `@slots = {}`) —
+/// THREAD-CONFINED: a computed static property over an RhThreadLocal
+/// backing slot (the Kotlin OBJECT_TL_FIELDS lesson — shared module
+/// statics bleed state across requests; per-thread is per-request under
+/// the Server's runIfActive bridge). The computed get/set keeps every
+/// call site unchanged — reads, whole-reassigns, and even subscript
+/// mutations (`slots[k] = v` round-trips through the accessor pair).
+/// Types come from assign-site stamps or the container scan; the names
+/// install as instance props so reads/assigns resolve.
 fn emit_module_ivars(methods: &[MethodDef], exclude: &BTreeMap<String, Ty>) -> String {
     let mut ivars: BTreeMap<String, IvarInfo> = BTreeMap::new();
     let mut containers: std::collections::HashMap<String, String> =
@@ -133,19 +136,26 @@ fn emit_module_ivars(methods: &[MethodDef], exclude: &BTreeMap<String, Ty>) -> S
         if exclude.contains_key(n) {
             continue;
         }
-        let decl = match (&info.ty, containers.get(n)) {
+        let (ty_str, default) = match (&info.ty, containers.get(n)) {
             (Some(t), _) => match try_default_for(t) {
-                Some(d) => format!("    static var {n}: {} = {d}\n", swift_ty(t)),
-                // Set-once reference slot → implicitly-unwrapped.
-                None => format!("    static var {n}: {}!\n", swift_ty(t)),
+                Some(d) => (swift_ty(t), d),
+                // No scalar default (a reference slot) — optional,
+                // nil-defaulted, still thread-confined.
+                None => (format!("{}?", swift_ty(t)), "nil".to_string()),
             },
             (None, Some(ct)) => {
                 let lit = if ct.contains(':') { "[:]" } else { "[]" };
-                format!("    static var {n}: {ct} = {lit}\n")
+                (ct.clone(), lit.to_string())
             }
-            (None, None) => format!("    static var {n}: Any? = nil\n"),
+            (None, None) => ("Any?".to_string(), "nil".to_string()),
         };
-        out.push_str(&decl);
+        out.push_str(&format!(
+            "    private static let _{n} = RhThreadLocal<{ty_str}>({{ {default} }})\n\
+             \x20\x20\x20\x20static var {n}: {ty_str} {{\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20get {{ _{n}.value }}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20set {{ _{n}.value = newValue }}\n\
+             \x20\x20\x20\x20}}\n"
+        ));
     }
     for (n, ty) in exclude {
         props.insert(n.clone(), ty.clone());
