@@ -41,9 +41,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.extend(primitives::primitives());
 
     // Transpiled framework runtime — `runtime/ruby/*.rb` → Swift under
-    // `Sources/App/`. Grown one file at a time (Phase 3).
-    let runtime_units = crate::runtime_loader::swift_units(|_path, classes| classes)
-        .expect("swift runtime transpile failed (Ruby source error)");
+    // `Sources/App/`. Grown one file at a time (Phase 3). The transform
+    // closure pre-registers each entry's classes (parents, Error
+    // conformance, throwing methods, object accessors) before that entry
+    // renders, so call sites resolve regardless of order.
+    expr::reset_registries();
+    let runtime_units = crate::runtime_loader::swift_units(|_path, classes| {
+        library::register_classes(&classes);
+        classes
+    })
+    .expect("swift runtime transpile failed (Ruby source error)");
     for unit in runtime_units {
         files.push(EmittedFile { path: unit.out_path, content: unit.content });
     }

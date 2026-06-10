@@ -1143,6 +1143,28 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
+        rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "",
+        out_path: "Sources/App/Errors.swift",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "",
+        out_path: "Sources/App/ActiveRecordBase.swift",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 pub fn swift_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

@@ -51,6 +51,39 @@ thread_local! {
     /// Whether the method being emitted returns a value — decides
     /// `return nil` vs bare `return` for Ruby's `return nil`.
     static RETURNS_VALUE: RefCell<bool> = const { RefCell::new(false) };
+    /// Whether the class being emitted is an Error-conforming Ruby error
+    /// class — redirects `super(msg)` in its init to the synthesized
+    /// `message` property.
+    static IN_ERROR_CLASS: RefCell<bool> = const { RefCell::new(false) };
+    /// Whether the method being emitted is an `init` of a parented
+    /// class — `super(args)` becomes the designated `super.init(args)`.
+    static INIT_SUPER: RefCell<bool> = const { RefCell::new(false) };
+    /// "Type.prop" keys for module/object-level accessors whose reads
+    /// are property accesses, not calls (`ActiveRecord.adapter`).
+    static OBJECT_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// "Type.method" keys (camelCased) for methods marked `throws` by
+    /// the raise classification — call sites prefix `try`.
+    static THROWS_METHODS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Class → parent (Swift type names), for ancestor walks (inherited
+    /// statics like `Article.find` → `ActiveRecordBase.find`).
+    static CLASS_PARENTS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Swift type name → its CLASS-method names (camelCased) mapped to
+    /// their rendered return types — drives `override class func`
+    /// marking on subclass redeclarations (covariant CLASS returns
+    /// override legally; covariant CONTAINER returns can only shadow).
+    static CLASS_STATIC_METHODS: RefCell<HashMap<String, HashMap<String, String>>> =
+        RefCell::new(HashMap::new());
+    /// Swift type name → its stored-property names (accessors + body
+    /// ivars + collapsed pure readers) — subclasses skip re-declaring
+    /// inherited slots, and self-sends to ancestor props read without
+    /// parens.
+    static CLASS_PROPS: RefCell<HashMap<String, HashSet<String>>> = RefCell::new(HashMap::new());
+    /// The class currently being emitted (for ancestor-aware self-send
+    /// resolution).
+    static CURRENT_CLASS: RefCell<String> = RefCell::new(String::new());
+    /// Error-conforming class names — a `raise` of one becomes a real
+    /// `throw`; anything else stays `fatalError`.
+    static ERROR_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Empty-container locals' inferred declaration types, from how
     /// they're later populated (`map[k] = v`, `list << x`) — Kotlin's
     /// CONTAINER_TYPES scan.
@@ -61,6 +94,68 @@ thread_local! {
 pub(super) fn reset_registries() {
     INSTANCE_PROP_TYPES.with(|m| m.borrow_mut().clear());
     CLASS_INSTANCE_METHODS.with(|m| m.borrow_mut().clear());
+    OBJECT_PROPS.with(|m| m.borrow_mut().clear());
+    THROWS_METHODS.with(|m| m.borrow_mut().clear());
+    CLASS_PARENTS.with(|m| m.borrow_mut().clear());
+    ERROR_CLASSES.with(|m| m.borrow_mut().clear());
+}
+
+/// Register a module/object-level accessor property ("Type.prop") whose
+/// reads must NOT carry call parens (`ActiveRecord.adapter`).
+pub(super) fn register_object_prop(key: String) {
+    OBJECT_PROPS.with(|m| {
+        m.borrow_mut().insert(key);
+    });
+}
+
+/// Register a class's parent for ancestor walks.
+pub(super) fn register_class_parent(class: String, parent: String) {
+    CLASS_PARENTS.with(|m| {
+        m.borrow_mut().insert(class, parent);
+    });
+}
+
+/// Register an Error-conforming class (a `< StandardError` transpile).
+pub(super) fn register_error_class(name: String) {
+    ERROR_CLASSES.with(|m| {
+        m.borrow_mut().insert(name);
+    });
+}
+
+/// Register a throwing method ("Type.method", camelCased).
+pub(super) fn register_throws(key: String) {
+    THROWS_METHODS.with(|m| {
+        m.borrow_mut().insert(key);
+    });
+}
+
+/// Does `type.method` (or an ancestor's) throw?
+pub(super) fn throws_lookup(type_name: &str, method_camel: &str) -> bool {
+    let mut cur = type_name.to_string();
+    loop {
+        let key = format!("{cur}.{method_camel}");
+        if THROWS_METHODS.with(|m| m.borrow().contains(&key)) {
+            return true;
+        }
+        match CLASS_PARENTS.with(|m| m.borrow().get(&cur).cloned()) {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
+fn is_error_class_name(name: &str) -> bool {
+    ERROR_CLASSES.with(|m| m.borrow().contains(name))
+}
+
+/// Flag the class being emitted as an Error-conforming error class.
+pub(super) fn set_error_class(flag: bool) {
+    IN_ERROR_CLASS.with(|f| *f.borrow_mut() = flag);
+}
+
+/// Flag the method being emitted as the init of a parented class.
+pub(super) fn set_init_super(flag: bool) {
+    INIT_SUPER.with(|f| *f.borrow_mut() = flag);
 }
 
 /// Register a class's instance-method name set (camelCased).
@@ -68,6 +163,88 @@ pub(super) fn register_class_methods(class: String, methods: HashSet<String>) {
     CLASS_INSTANCE_METHODS.with(|m| {
         m.borrow_mut().insert(class, methods);
     });
+}
+
+/// Register a class's class-method names (camelCased) → rendered return
+/// types.
+pub(super) fn register_static_methods(class: String, methods: HashMap<String, String>) {
+    CLASS_STATIC_METHODS.with(|m| {
+        m.borrow_mut().insert(class, methods);
+    });
+}
+
+/// The nearest ancestor's return type for a class method, if any
+/// ancestor declares it.
+pub(super) fn ancestor_static_ret(class: &str, name: &str) -> Option<String> {
+    let mut cur = CLASS_PARENTS.with(|m| m.borrow().get(class).cloned());
+    while let Some(c) = cur {
+        if let Some(ret) =
+            CLASS_STATIC_METHODS.with(|m| m.borrow().get(&c).and_then(|s| s.get(name).cloned()))
+        {
+            return Some(ret);
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    None
+}
+
+/// Is `sub` the same class as — or a registered descendant of — `sup`?
+/// (Both are rendered Swift type names; trailing `?` strips, so
+/// optional-covariant overrides resolve too.)
+pub(super) fn is_same_or_descendant(sub: &str, sup: &str) -> bool {
+    let sub = sub.trim_end_matches('?');
+    let sup = sup.trim_end_matches('?');
+    let mut cur = Some(sub.to_string());
+    while let Some(c) = cur {
+        if c == sup {
+            return true;
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    false
+}
+
+/// Register a class's stored-property name set (camelCased).
+pub(super) fn register_class_props(class: String, props: HashSet<String>) {
+    CLASS_PROPS.with(|m| {
+        m.borrow_mut().insert(class, props);
+    });
+}
+
+/// Set the class currently being emitted.
+pub(super) fn set_current_class(name: &str) {
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = name.to_string());
+}
+
+/// Is `name` a stored property anywhere in the ANCESTOR chain of
+/// `class` (excluding the class itself)?
+pub(super) fn ancestor_has_prop(class: &str, name: &str) -> bool {
+    let mut cur = CLASS_PARENTS.with(|m| m.borrow().get(class).cloned());
+    while let Some(c) = cur {
+        if CLASS_PROPS.with(|m| m.borrow().get(&c).map_or(false, |s| s.contains(name))) {
+            return true;
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    false
+}
+
+/// Union of a member-name kind across the receiver's ANCESTORS (parent
+/// chain, excluding the class itself) — decides `override` marking.
+pub(super) fn ancestor_has(class: &str, name: &str, statics: bool) -> bool {
+    if statics {
+        return ancestor_static_ret(class, name).is_some();
+    }
+    let mut cur = CLASS_PARENTS.with(|m| m.borrow().get(class).cloned());
+    while let Some(c) = cur {
+        let hit =
+            CLASS_INSTANCE_METHODS.with(|m| m.borrow().get(&c).map_or(false, |s| s.contains(name)));
+        if hit {
+            return true;
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    false
 }
 
 fn is_known_instance_method(recv: &Expr, method: &str) -> bool {
@@ -429,13 +606,29 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Assign { target, value } => emit_assign(target, value),
         ExprNode::OpAssign { target, op, value } => emit_op_assign(target, *op, value),
         ExprNode::Return { value } => {
+            let returns_value = RETURNS_VALUE.with(|r| *r.borrow());
             // `return nil` is a bare `return` only in a Void method; a
             // value-returning (Optional) method needs the literal.
             if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
-                if RETURNS_VALUE.with(|r| *r.borrow()) {
+                if returns_value {
                     "return nil".to_string()
                 } else {
                     "return".to_string()
+                }
+            } else if !returns_value {
+                // Ruby's `return self`-style value in a Void method:
+                // Swift rejects non-void returns. Pure values drop;
+                // side-effecting expressions run first.
+                if matches!(
+                    &*value.node,
+                    ExprNode::SelfRef
+                        | ExprNode::Var { .. }
+                        | ExprNode::Ivar { .. }
+                        | ExprNode::Lit { .. }
+                ) {
+                    "return".to_string()
+                } else {
+                    format!("{}\nreturn", emit_expr(value))
                 }
             } else {
                 format!("return {}", emit_expr(value))
@@ -447,9 +640,26 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             format!("while {c} {{\n{}\n}}", indent(&emit_expr(body)))
         }
         ExprNode::Raise { value } => emit_raise(value),
-        // `super()` in `initialize` has no Swift method-body analog
-        // (designated-init delegation is a Phase 3 concern). Placeholder.
-        ExprNode::Super { .. } => "/* super() */".to_string(),
+        // `super(msg)` inside an error class's `initialize` assigns the
+        // synthesized message property (`Error` is a protocol — there is
+        // no super-initializer to delegate to). Elsewhere it stays a
+        // placeholder until real designated-init delegation is needed.
+        ExprNode::Super { args } => {
+            if IN_ERROR_CLASS.with(|f| *f.borrow()) {
+                match args.as_ref().and_then(|a| a.first()) {
+                    Some(msg) => format!("self.message = {}", emit_expr(msg)),
+                    None => "self.message = \"\"".to_string(),
+                }
+            } else if INIT_SUPER.with(|f| *f.borrow()) {
+                let rendered: Vec<String> = args
+                    .as_ref()
+                    .map(|a| a.iter().map(emit_expr).collect())
+                    .unwrap_or_default();
+                format!("super.init({})", rendered.join(", "))
+            } else {
+                "/* super() */".to_string()
+            }
+        }
         ExprNode::Cast { value, target_ty } => emit_cast(value, target_ty),
         ExprNode::Lambda { params, body, .. } => emit_lambda(params, body),
         // No throwing yet (Phase 3 `throws` pass), so the rescue-modifier
@@ -835,6 +1045,9 @@ fn try_param_guard(stmt: &Expr) -> Option<String> {
 }
 
 fn branch_is_terminal(e: &Expr) -> bool {
+    if is_raise_expr(e) {
+        return true;
+    }
     match &*e.node {
         ExprNode::Return { .. } | ExprNode::Raise { .. } | ExprNode::Break { .. }
         | ExprNode::Next { .. } => true,
@@ -865,9 +1078,13 @@ pub(super) fn wrap_return(e: &Expr) -> String {
         | ExprNode::Raise { .. }
         | ExprNode::While { .. }
         | ExprNode::Assign { .. }
+        | ExprNode::OpAssign { .. }
         | ExprNode::Super { .. }
         | ExprNode::Next { .. }
         | ExprNode::Break { .. } => emit_expr(e),
+        // A raise in Send spelling (throw/fatalError) is terminal — no
+        // `return` prefix (fatalError's Never satisfies the return path).
+        _ if is_raise_expr(e) => emit_expr(e),
         _ => format!("return {}", emit_expr(e)),
     }
 }
@@ -936,18 +1153,76 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
     }
 }
 
-/// Raise placeholder until the Phase 3 `throws`-propagation pass exists
-/// (plan delta 1): every raise renders as `fatalError` so the file
-/// compiles without a `throws` ripple; the pass later splits control-flow
-/// raises (`RecordNotFound` → real `throw`) from "never happens" ones
-/// (which stay `fatalError`).
+/// The plan's throws split (delta 1): a raise of an Error-conforming
+/// class is a real `throw` (control flow: RecordNotFound → 404,
+/// RecordInvalid); everything else — message-only raises,
+/// NotImplementedError — is a "never happens" `fatalError`, keeping the
+/// `throws` ripple confined to the genuinely-throwing surface.
 fn emit_raise(value: &Expr) -> String {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. } => {
             format!("fatalError({})", emit_expr(value))
         }
+        // `raise RecordNotFound` / `raise RecordNotFound.new(...)`.
+        ExprNode::Const { path } => {
+            let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            let cls = super::naming::type_name(&joined);
+            if is_error_class_name(&cls) {
+                format!("throw {cls}()")
+            } else {
+                format!("fatalError(\"{joined}\")")
+            }
+        }
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
+            if let ExprNode::Const { path } = &*r.node {
+                let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+                let cls = super::naming::type_name(&joined);
+                if is_error_class_name(&cls) {
+                    return format!("throw {}", emit_expr(value));
+                }
+            }
+            format!("fatalError(\"\\(String(describing: {}))\")", emit_expr(value))
+        }
         _ => format!("fatalError(\"\\(String(describing: {}))\")", emit_expr(value)),
     }
+}
+
+/// A raise in either IR spelling — terminal for return-wrapping.
+pub(super) fn is_raise_expr(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Raise { .. } => true,
+        ExprNode::Send { recv: None, method, args, .. } => {
+            method.as_str() == "raise" && !args.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// Does this body contain a raise that the classification turns into a
+/// real `throw`? (Drives the `throws` marking on method signatures.)
+pub(super) fn body_throws(e: &Expr) -> bool {
+    let direct = match &*e.node {
+        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "raise" => {
+            args.first().map_or(false, |a| {
+                matches!(&*a.node, ExprNode::Const { path }
+                    if is_error_class_name(&super::naming::type_name(
+                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"))))
+            })
+        }
+        ExprNode::Raise { value } => match &*value.node {
+            ExprNode::Const { path } => is_error_class_name(&super::naming::type_name(
+                &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+            )),
+            ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
+                matches!(&*r.node, ExprNode::Const { path }
+                    if is_error_class_name(&super::naming::type_name(
+                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"))))
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    direct || children(e).into_iter().any(body_throws)
 }
 
 /// The lowerer inserts `Cast` at untyped-row boundaries to mean "coerce
@@ -1011,10 +1286,51 @@ fn emit_send(
         }
     }
 
-    // Constructor: `X.new(...)` → `X(...)`.
+    // Bareword `raise Class, msg` / `raise msg` (the Send spelling; the
+    // Raise node is the other). The plan's throws split: an
+    // Error-conforming class throws; everything else is a "never
+    // happens" fatalError.
+    if method == "raise" && recv.is_none() && !args.is_empty() {
+        if let ExprNode::Const { path } = &*args[0].node {
+            let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            let cls = super::naming::type_name(&joined);
+            if is_error_class_name(&cls) {
+                let rest = args_s[1..].join(", ");
+                return format!("throw {cls}({rest})");
+            }
+            // NotImplementedError and friends.
+            let msg = args_s
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| format!("\"{joined}\""));
+            return format!("fatalError({msg})");
+        }
+        return format!("fatalError({})", args_s[0]);
+    }
+
+    // Constructor: `X.new(...)` → `X(...)`. Implicit-self `new(attrs)`
+    // in a class method → `Self(...)` (dynamic, so `Article.create`
+    // builds an Article; requires `required init`, which the init emit
+    // marks).
     if method == "new" {
         if let Some(r) = recv {
             return format!("{}({})", emit_expr(r), args_s.join(", "));
+        }
+        return format!("Self({})", args_s.join(", "));
+    }
+
+    // `self.class.X(...)` → `Self.X(...)` — Swift statics are NOT
+    // reachable by bare name from instance methods (unlike Kotlin
+    // companions), and `Self` keeps the dispatch dynamic so per-model
+    // overrides resolve.
+    if let Some(r) = recv {
+        if let ExprNode::Send { recv: Some(inner), method: m2, args: a2, .. } = &*r.node {
+            if m2.as_str() == "class"
+                && a2.is_empty()
+                && matches!(&*inner.node, ExprNode::SelfRef)
+            {
+                return format!("Self.{}({})", camel(method), args_s.join(", "));
+            }
         }
     }
 
@@ -1091,6 +1407,11 @@ fn emit_send(
                     *exclusive,
                 );
             }
+            // Ruby's nil-on-empty `records[-1]` is Swift's Optional
+            // `.last`.
+            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { value: -1 } }) {
+                return format!("{}.last", emit_expr(r));
+            }
             return format!("{}[{}]", emit_expr(r), args_s[0]);
         }
         // Hash key test (Swift dictionaries have no containsKey; the
@@ -1112,6 +1433,9 @@ fn emit_send(
         }
         if method == "include?" {
             return format!("{}.contains({})", emit_expr(r), args_s[0]);
+        }
+        if method == "join" {
+            return format!("{}.joined(separator: {})", emit_expr(r), args_s[0]);
         }
     }
     if let (Some(r), 2) = (recv, args.len()) {
@@ -1145,13 +1469,46 @@ fn emit_send(
             "strip" => {
                 return format!("{rs}.trimmingCharacters(in: .whitespacesAndNewlines)")
             }
+            // Identity no-ops on Swift value types; `to_h` only on an
+            // actual Hash (elsewhere it's a real method).
+            "to_a" | "dup" | "freeze" => return rs,
+            "to_h"
+                if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+                    || matches!(
+                        r.ty.as_ref(),
+                        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Hash"
+                    ) =>
+            {
+                return rs;
+            }
             _ => {}
         }
+        // Self-receiver: a zero-arg send is a CALL by default (the
+        // Kotlin keystone fix) — property read ONLY when the name is a
+        // known property of the class being emitted or an ancestor.
+        if matches!(&*r.node, ExprNode::SelfRef) {
+            let name = camel(method);
+            let is_prop = INSTANCE_PROP_TYPES.with(|m| m.borrow().contains_key(&name))
+                || CURRENT_CLASS.with(|c| ancestor_has_prop(&c.borrow(), &name));
+            if is_prop {
+                return format!("self.{name}");
+            }
+            return format!("self.{name}()");
+        }
         // A `Const` receiver (a class / namespace like `Db`) means a
-        // 0-arg *method* call, not a property read. A receiver whose
-        // class type registers this name as a real instance method keeps
-        // its parens too.
-        if matches!(&*r.node, ExprNode::Const { .. }) || is_known_instance_method(r, method) {
+        // 0-arg *method* call — unless it's a registered object-level
+        // accessor (`ActiveRecord.adapter`), which reads as a property.
+        // A receiver whose class type registers this name as a real
+        // instance method keeps its parens too.
+        if matches!(&*r.node, ExprNode::Const { .. }) {
+            let name = camel(method);
+            if OBJECT_PROPS.with(|m| m.borrow().contains(&format!("{rs}.{name}"))) {
+                return format!("{rs}.{name}");
+            }
+            let try_kw = if throws_lookup(&rs, &name) { "try " } else { "" };
+            return format!("{try_kw}{rs}.{name}()");
+        }
+        if is_known_instance_method(r, method) {
             return format!("{rs}.{}()", camel(method));
         }
         if !forces_parens(method) && !method.ends_with('?') && !method.ends_with('!') {
@@ -1174,10 +1531,28 @@ fn emit_send(
         return format!("{base}({}) {lam}", args_s.join(", "));
     }
 
-    // General call.
+    // General call — with `try` when the callee is registered throwing
+    // (Const-receiver statics resolve through the ancestor walk;
+    // typed-Var receivers through their class).
     let name = camel(method);
     match recv {
-        Some(r) => format!("{}.{name}({})", emit_expr(r), args_s.join(", ")),
+        Some(r) => {
+            let rs = emit_expr(r);
+            let recv_type = match &*r.node {
+                ExprNode::Const { .. } => Some(rs.clone()),
+                _ => match r.ty.as_ref() {
+                    Some(crate::ty::Ty::Class { id, .. }) => {
+                        Some(super::naming::type_name(id.0.as_str()))
+                    }
+                    _ => None,
+                },
+            };
+            let try_kw = recv_type
+                .map_or(false, |t| throws_lookup(&t, &name))
+                .then_some("try ")
+                .unwrap_or("");
+            format!("{try_kw}{rs}.{name}({})", args_s.join(", "))
+        }
         None => format!("{name}({})", args_s.join(", ")),
     }
 }

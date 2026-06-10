@@ -72,11 +72,11 @@ pub fn swift_ty(t: &Ty) -> String {
     }
 }
 
-/// Render a `Ty::Class`. Last-segment naming (the emit is a flat module,
-/// like Kotlin's flat package), with the well-known cross-target special
-/// cases: temporal classes stringify, `Regexp` → `NSRegularExpression`
-/// (placeholder until a consumer decides between it and native `Regex`),
-/// `Hash` → the dictionary sugar.
+/// Render a `Ty::Class`. Named via `naming::type_name` (last segment +
+/// the `*::Base` flat-module disambiguation), with the well-known
+/// cross-target special cases: temporal classes stringify, `Regexp` →
+/// `NSRegularExpression` (placeholder until a consumer decides between
+/// it and native `Regex`), `Hash` → the dictionary sugar.
 fn render_class(full: &str, args: &[Ty]) -> String {
     match full {
         "Date" | "Time" | "DateTime" | "ActiveSupport::TimeWithZone" => {
@@ -92,9 +92,9 @@ fn render_class(full: &str, args: &[Ty]) -> String {
         }
         _ => {}
     }
-    let base = full.rsplit("::").next().unwrap_or(full);
+    let base = super::naming::type_name(full);
     if args.is_empty() {
-        base.to_string()
+        base
     } else {
         let parts: Vec<String> = args.iter().map(swift_ty).collect();
         format!("{base}<{}>", parts.join(", "))
