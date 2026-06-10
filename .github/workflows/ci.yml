@@ -181,6 +181,32 @@ jobs:
       - name: cargo test --test kotlin_toolchain -- --ignored
         run: cargo test --test kotlin_toolchain -- --ignored --nocapture
 
+  # toolchain-swift: emit the real-blog Swift/SPM project and `swift build`
+  # it (full type-check + link against the real Hummingbird + swift-nio +
+  # CSQLite dependency graph — the analog of toolchain-kotlin's
+  # compileKotlin). setup-swift provides the toolchain; libsqlite3-dev is
+  # the CSQLite systemLibrary's header + link target (the plan's Linux
+  # packaging caveat). Tracked in #34.
+  toolchain-swift:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.1'
+      - name: Install libsqlite3-dev (CSQLite systemLibrary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+      - name: cargo test --test swift_toolchain -- --ignored
+        run: cargo test --test swift_toolchain -- --ignored --nocapture
+
   # toolchain-typescript: tsc parity + node:test on real-blog,
   # under both the default (`node-sync`, better-sqlite3) profile
   # AND the `node-async` libsql profile that exercises async
@@ -653,6 +679,37 @@ jobs:
           working-directory: ./fixtures/real-blog
       - name: scripts/compare kotlin
         run: scripts/compare kotlin
+
+  # compare-swift: DOM-diff the live Hummingbird server against Rails. Needs
+  # Ruby (Rails reference) + a Swift toolchain + libsqlite3-dev (target
+  # build/boot via scripts/compare's `swift build -c release` + the
+  # .build/release/App binary). Tracked in #34.
+  compare-swift:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.1'
+      - name: Install libsqlite3-dev (CSQLite systemLibrary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
+      # Rails boots — same ordering rationale as compare-kotlin/compare-jruby.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: scripts/compare swift
+        run: scripts/compare swift
 
   compare-typescript:
     needs: generate-fixture
