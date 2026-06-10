@@ -46,6 +46,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // conformance, throwing methods, object accessors) before that entry
     // renders, so call sites resolve regardless of order.
     expr::reset_registries();
+    // `processAction` is the dispatch boundary the server catches at —
+    // its Base declaration carries `throws` by contract so the throwing
+    // controller overrides are legal.
+    library::register_throws_contract("ActionControllerBase", "processAction");
     let runtime_units = crate::runtime_loader::swift_units(|_path, classes| {
         library::register_classes(&classes);
         classes
@@ -65,8 +69,19 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .map(|v| crate::lower::lower_view_to_library_class(v, app))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
-    let (model_lcs, model_registry) =
-        crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
+    // Permitted-params specs (resource → fields) collected from the
+    // controllers, so each model gains a typed `fromParams(<Model>Params)`
+    // factory the controllers call.
+    let params_specs_full =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
+        params_specs_full.iter().map(|(r, s)| (r.clone(), s.fields.clone())).collect();
+    let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
+        &app.models,
+        &app.schema,
+        view_extras,
+        &params_specs,
+    );
     library::register_classes(&model_lcs);
     for lc in &model_lcs {
         files.push(library::emit_class_file(lc));
@@ -104,17 +119,60 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         app,
         view_lower_extras.clone(),
     );
-    let mut all_view_lcs = view_lcs;
+    let mut all_view_lcs = view_lcs.clone();
     all_view_lcs.extend(jbuilder_lcs);
-    for lc in merge_by_module(all_view_lcs) {
+    let merged_views = merge_by_module(all_view_lcs);
+    library::register_classes(&merged_views);
+    for lc in &merged_views {
         let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
         files.push(EmittedFile {
             path: std::path::PathBuf::from(format!("Sources/App/app/views/{last}.swift")),
-            content: format!("import Foundation\n\n{}", library::emit_library_class(&lc)),
+            content: format!("import Foundation\n\n{}", library::emit_library_class(lc)),
         });
     }
 
-    // Phase 5+: controllers + Server/Main.
+    // Controllers → Sources/App/app/controllers/<Name>.swift. Lowered
+    // with the full registry (models + routes + importmap + views) so
+    // action bodies dispatch `Article.all`, `Articles.index(...)`, route
+    // helpers, etc. Synthesized `<Resource>Params` siblings
+    // (origin-tagged) route to app/models alongside the model classes.
+    let mut controller_extras = view_lower_extras;
+    controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
+    let assocs = crate::lower::model_associations::compute_association_graph(app);
+    let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
+        &app.controllers,
+        controller_extras,
+        Some(&app.schema),
+        &app.views,
+        &assocs,
+    );
+    // Synthesize `ApplicationController` when a controller extends it but
+    // the app doesn't define one.
+    let needs_app_controller = app
+        .controllers
+        .iter()
+        .any(|c| matches!(c.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationController"))
+        && !app.controllers.iter().any(|c| c.name.0.as_str() == "ApplicationController");
+    if needs_app_controller {
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(
+                "Sources/App/app/controllers/ApplicationController.swift",
+            ),
+            content: "class ApplicationController: ActionControllerBase {\n}\n".to_string(),
+        });
+        library::register_synthetic_class("ApplicationController", "ActionControllerBase");
+    }
+    library::register_classes(&controller_lcs);
+    for lc in &controller_lcs {
+        let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        let dir = if lc.origin.is_some() { "models" } else { "controllers" };
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(format!("Sources/App/app/{dir}/{last}.swift")),
+            content: format!("import Foundation\n\n{}", library::emit_library_class(lc)),
+        });
+    }
+
+    // Phase 6: Server.swift wiring + emitted Main.swift.
     files
 }
 

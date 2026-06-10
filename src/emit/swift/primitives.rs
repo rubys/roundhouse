@@ -139,6 +139,9 @@ enum Db {
     }
     static func escapeInt(_ n: Int) -> String { String(n) }
     static func escapeBool(_ b: Bool) -> String { b ? "1" : "0" }
+    static func escapeIntList(_ ids: [Int]) -> String {
+        ids.map(String.init).joined(separator: ", ")
+    }
 }
 "#;
 
@@ -202,14 +205,11 @@ const ADAPTER_INTERFACE_SWIFT: &str = r#"protocol AdapterInterface {
 }
 "#;
 
-// The recursive params union (String | Hash | Array) — verbatim from
-// `swift-reference/Sources/App/runtime/ParamValue.swift`.
-const PARAM_VALUE_SWIFT: &str = r#"enum ParamValue {
-    case str(String)
-    case dict([String: ParamValue])
-    case arr([ParamValue])
-}
-"#;
+// NOTE: no ParamValue primitive. The enum-union shape (locked in
+// swift-reference) doesn't survive the runtime's untyped `is_a?(Hash)`
+// narrowing — the Kotlin arc hit this exact failure and resolved it by
+// mapping ParamValue → the top type (see ty.rs); params are nested
+// `[String: Any?]` maps end-to-end.
 
 /// The hand-written primitive files, emitted under `Sources/App/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -233,10 +233,6 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/AdapterInterface.swift"),
             content: ADAPTER_INTERFACE_SWIFT.to_string(),
-        },
-        EmittedFile {
-            path: PathBuf::from("Sources/App/runtime/ParamValue.swift"),
-            content: PARAM_VALUE_SWIFT.to_string(),
         },
     ]
 }

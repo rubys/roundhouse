@@ -40,7 +40,10 @@ fn register_params_for(receiver: &str, methods: &[MethodDef]) {
         }
         super::expr::register_method_params(
             format!("{receiver}.{}", camel(m.name.as_str())),
-            m.params.iter().map(|p| camel(p.name.as_str())).collect(),
+            m.params
+                .iter()
+                .map(|p| (camel(p.name.as_str()), p.default.as_ref().map(emit_expr)))
+                .collect(),
         );
     }
 }
@@ -188,6 +191,19 @@ fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
     props
 }
 
+/// Register a synthesized class (no LC) — just its parent edge, so
+/// ancestor walks work (`ApplicationController: ActionControllerBase`).
+pub fn register_synthetic_class(name: &str, parent: &str) {
+    super::expr::register_class_parent(name.to_string(), parent.to_string());
+}
+
+/// Mark a method throwing by CONTRACT (its base declaration must carry
+/// `throws` because overrides will: `processAction` is the dispatch
+/// boundary the server catches at).
+pub fn register_throws_contract(class: &str, method_camel: &str) {
+    super::expr::register_throws(format!("{class}.{method_camel}"));
+}
+
 /// Pre-register a class set's emit-relevant facts so call sites resolve
 /// regardless of render order: instance-method names (property-vs-method),
 /// parents (ancestor walks), Error conformance (raise classification),
@@ -245,9 +261,24 @@ pub fn register_classes(lcs: &[LibraryClass]) {
                 super::expr::register_class_parent(cls.clone(), type_name(p.0.as_str()));
             }
         }
-        for m in &lc.methods {
-            if m.kind == AccessorKind::Method && super::expr::body_throws(&m.body) {
-                super::expr::register_throws(format!("{cls}.{}", camel(m.name.as_str())));
+        // Throws registration to a FIXPOINT: a method calling a sibling
+        // that throws (processAction → create) becomes throwing itself.
+        loop {
+            let mut changed = false;
+            for m in &lc.methods {
+                if m.kind != AccessorKind::Method {
+                    continue;
+                }
+                let key = format!("{cls}.{}", camel(m.name.as_str()));
+                if !super::expr::throws_lookup(&cls, &camel(m.name.as_str()))
+                    && super::expr::body_throws(&m.body, &cls)
+                {
+                    super::expr::register_throws(key);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
         if lc.is_module {
@@ -427,9 +458,16 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         // typing signal; assign-site stamps are the fallback.
         let best = pure_readers.get(n).cloned().or_else(|| info.ty.clone());
         match (&best, info.saw_nil) {
-            (Some(t), false) => {
-                out.push_str(&format!("    var {n}: {} = {}\n", swift_ty(t), default_for(t)));
-            }
+            (Some(t), false) => match try_default_for(t) {
+                Some(d) => {
+                    out.push_str(&format!("    var {n}: {} = {d}\n", swift_ty(t)));
+                }
+                // Set-per-request reference slot (controller @article) —
+                // implicitly unwrapped, Swift's lateinit.
+                None => {
+                    out.push_str(&format!("    var {n}: {}!\n", swift_ty(t)));
+                }
+            },
             (Some(t), true) => {
                 let mut st = swift_ty(t);
                 if !st.ends_with('?') {
@@ -742,9 +780,18 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
             indent4(&body)
         );
     }
-    // The throws split (plan delta 1): a method whose body throws an
-    // Error-conforming class carries `throws`.
-    let throws_kw = if super::expr::body_throws(&m.body) { " throws" } else { "" };
+    // The throws split (plan delta 1): a method whose body throws —
+    // directly, via a throwing callee, or by registered contract
+    // (ancestor walk covers throwing overrides of a contract decl) —
+    // carries `throws`.
+    let cls_name = ctx.map(|c| c.name.as_str()).unwrap_or("");
+    let throws_kw = if super::expr::body_throws(&m.body, cls_name)
+        || (!cls_name.is_empty() && super::expr::throws_lookup(cls_name, &name))
+    {
+        " throws"
+    } else {
+        ""
+    };
     let static_kw = if is_static {
         // In classes, statics emit `class func` so per-model overrides
         // (tableName, _adapter_*) dispatch dynamically via `Self`.

@@ -101,11 +101,13 @@ thread_local! {
     /// The current method's parameter types (camelCased name → Ty) —
     /// the optionality fallback when a Var read carries no stamped ty.
     static PARAM_TYPES: RefCell<HashMap<String, crate::ty::Ty>> = RefCell::new(HashMap::new());
-    /// "Receiver.method" → ORDERED camelCased param names. Decides
-    /// whether a call-site `kwargs: true` hash splats positionally into
-    /// the callee's parameter order (Swift funcs here are
-    /// underscore-labeled, so named args don't apply).
-    static METHOD_PARAMS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+    /// "Receiver.method" → ORDERED (camelCased name, rendered default)
+    /// pairs. Decides whether a call-site `kwargs: true` hash splats
+    /// positionally into the callee's parameter order (Swift funcs here
+    /// are underscore-labeled, so named args don't apply); a skipped
+    /// DEFAULTED middle param is filled with its default.
+    static METHOD_PARAMS: RefCell<HashMap<String, Vec<(String, Option<String>)>>> =
+        RefCell::new(HashMap::new());
     /// Error-conforming class names — a `raise` of one becomes a real
     /// `throw`; anything else stays `fatalError`.
     static ERROR_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -222,15 +224,28 @@ fn is_param(method: &str) -> bool {
     PARAM_NAMES.with(|p| p.borrow().contains(&camel(method)))
 }
 
-/// Register a callable's ordered parameter names ("Receiver.method").
-pub(super) fn register_method_params(key: String, params: Vec<String>) {
+/// Register a callable's ordered (param name, rendered default) pairs
+/// ("Receiver.method").
+pub(super) fn register_method_params(key: String, params: Vec<(String, Option<String>)>) {
     METHOD_PARAMS.with(|m| {
         m.borrow_mut().insert(key, params);
     });
 }
 
-fn method_params_for(receiver: &str, method: &str) -> Option<Vec<String>> {
-    METHOD_PARAMS.with(|m| m.borrow().get(&format!("{receiver}.{}", camel(method))).cloned())
+/// Look up a callable's params — walking the receiver's ancestor chain
+/// (self-sends to inherited methods: `self.redirectTo` finds
+/// ActionControllerBase's).
+fn method_params_for(receiver: &str, method: &str) -> Option<Vec<(String, Option<String>)>> {
+    let mut cur = Some(receiver.to_string());
+    while let Some(c) = cur {
+        let hit =
+            METHOD_PARAMS.with(|m| m.borrow().get(&format!("{c}.{}", camel(method))).cloned());
+        if hit.is_some() {
+            return hit;
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    None
 }
 
 /// Render a call's arguments. A trailing `kwargs: true` hash splats
@@ -252,26 +267,44 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                         _ => None,
                     })
                     .collect();
-                let recv_type = recv.and_then(|r| match &*r.node {
-                    ExprNode::Const { path } => Some(super::naming::type_name(
-                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
-                    )),
-                    _ => None,
-                });
+                let recv_type = match recv {
+                    Some(r) => match &*r.node {
+                        ExprNode::Const { path } => Some(super::naming::type_name(
+                            &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+                        )),
+                        // Self-send: the current class (ancestors walk in
+                        // the lookup).
+                        ExprNode::SelfRef => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
+                        _ => None,
+                    },
+                    None => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
+                };
                 if let (Some(keys), Some(rt)) = (keys, recv_type) {
                     if let Some(params) = method_params_for(&rt, method) {
                         let tail = &params[head.len().min(params.len())..];
                         let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
                         let mut consumed = 0;
-                        for p in tail {
+                        let mut pending_defaults: Vec<String> = Vec::new();
+                        let mut ok = true;
+                        for (p, default) in tail {
                             if let Some(idx) = keys.iter().position(|k| k == p) {
+                                // Fill any skipped defaulted params first.
+                                parts.append(&mut pending_defaults);
                                 parts.push(emit_expr(&entries[idx].1));
                                 consumed += 1;
+                            } else if let Some(d) = default {
+                                // Maybe-skipped middle param — only emitted
+                                // if a later kwarg lands.
+                                pending_defaults.push(d.clone());
                             } else {
+                                ok = false;
+                                break;
+                            }
+                            if consumed == keys.len() {
                                 break;
                             }
                         }
-                        if consumed == keys.len() {
+                        if ok && consumed == keys.len() {
                             return parts.join(", ");
                         }
                     }
@@ -417,7 +450,21 @@ fn coerce_for_prop(prop_raw: &str, value: &Expr, val: String) -> String {
             None => true,
             Some(t) => matches!(t, Ty::Untyped | Ty::Var { .. }),
         };
-    if !surface_untrusted {
+    // A class-typed prop assigned a call whose EMITTED return type is a
+    // base class (`Article.find` inherits Base's
+    // `-> ActiveRecordBase`) — the IR believes the model type (typed
+    // registry, which is why it inserted no Cast), but the Swift surface
+    // is the base.
+    let class_widened = if let Ty::Class { id, .. } = &ty {
+        let want = super::naming::type_name(id.0.as_str());
+        emitted_static_ret(value).map_or(false, |ret| {
+            let ret = ret.trim_end_matches('?');
+            !ret.is_empty() && ret != want
+        })
+    } else {
+        false
+    };
+    if !surface_untrusted && !class_widened {
         return val;
     }
     match ty {
@@ -425,6 +472,13 @@ fn coerce_for_prop(prop_raw: &str, value: &Expr, val: String) -> String {
         Ty::Float => format!("({val} as! Double)"),
         Ty::Str | Ty::Sym => format!("({val} as! String)"),
         Ty::Bool => format!("({val} as! Bool)"),
+        // A class-typed property assigned a base-typed expression
+        // (`self.article = Article.find(...)` — Base's `find` returns
+        // ActiveRecordBase): downcast to the declared model type.
+        Ty::Class { id, .. } => {
+            let cls = super::naming::type_name(id.0.as_str());
+            format!("({val} as! {cls})")
+        }
         _ => val,
     }
 }
@@ -451,6 +505,34 @@ fn recv_is_hash(r: &Expr) -> bool {
         return INSTANCE_PROP_TYPES.with(|m| m.borrow().get(&n).map_or(false, ty_is_hash));
     }
     false
+}
+
+/// The EMITTED return type of a static call (`X.m(...)`) — the
+/// registered (possibly inherited) signature string, when known.
+fn emitted_static_ret(e: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(r), method, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() == "new" {
+        return None;
+    }
+    let ExprNode::Const { path } = &*r.node else {
+        return None;
+    };
+    let cls = super::naming::type_name(
+        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+    );
+    ancestor_static_ret_incl_self(&cls, &camel(method.as_str()))
+}
+
+/// `ancestor_static_ret` including the class's own registration.
+fn ancestor_static_ret_incl_self(class: &str, name: &str) -> Option<String> {
+    if let Some(ret) =
+        CLASS_STATIC_METHODS.with(|m| m.borrow().get(class).and_then(|s| s.get(name).cloned()))
+    {
+        return Some(ret);
+    }
+    ancestor_static_ret(class, name)
 }
 
 /// A value whose Swift surface type is `Any?`-ish regardless of IR
@@ -957,6 +1039,17 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
                 if let (Some(t), Some(f)) =
                     (single_value_expr(then_branch), single_value_expr(else_branch))
                 {
+                    // `x.is_a?(T) ? x : default` — a ternary can't
+                    // narrow (Kotlin's smart-cast did); Swift's idiom is
+                    // `(x as? T) ?? default`.
+                    if let Some((n, st)) = isa_check_parts(cond) {
+                        let reads_same = prop_read_name(t).as_deref() == Some(n.as_str())
+                            || matches!(&*t.node, ExprNode::Cast { value, .. }
+                                if prop_read_name(value).as_deref() == Some(n.as_str()));
+                        if reads_same {
+                            return format!("(({n} as? {st}) ?? {})", emit_expr(f));
+                        }
+                    }
                     return format!(
                         "({} ? {} : {})",
                         emit_expr(cond),
@@ -1129,10 +1222,25 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Swift's `??` when the result
-        // isn't a Bool.
+        // isn't a Bool. A map read coalesced with a scalar literal uses
+        // `as?` so BOTH optional layers collapse (`params["id"] ?? "0"`
+        // over `[String: Any?]` is `Any??` → `Any?`, which interpolates
+        // as "Optional(…)"); `as? T ?? literal` yields plain T.
         BoolOpKind::Or => {
             if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Bool)) {
                 format!("{l} || {r}")
+            } else if is_map_read_shape(left) {
+                let cast = match &*right.node {
+                    ExprNode::Lit { value: Literal::Str { .. } } => Some("String"),
+                    ExprNode::Lit { value: Literal::Int { .. } } => Some("Int"),
+                    ExprNode::Lit { value: Literal::Float { .. } } => Some("Double"),
+                    ExprNode::Lit { value: Literal::Bool { .. } } => Some("Bool"),
+                    _ => None,
+                };
+                match cast {
+                    Some(t) => format!("({l} as? {t} ?? {r})"),
+                    None => format!("({l} ?? {r})"),
+                }
             } else {
                 format!("({l} ?? {r})")
             }
@@ -1341,17 +1449,16 @@ fn isa_swift_type(class_name: &str) -> Option<&'static str> {
     })
 }
 
-/// `x.is_a?(T)` as an if-condition over a Var → `let x = x as? T`.
-fn isa_narrow_cond(cond: &Expr) -> Option<String> {
+/// `x.is_a?(T)` parts — the (camelCased read, Swift type) pair, when
+/// the receiver is a simple read and T maps.
+fn isa_check_parts(cond: &Expr) -> Option<(String, &'static str)> {
     let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
         return None;
     };
     if method.as_str() != "is_a?" && method.as_str() != "kind_of?" {
         return None;
     }
-    let ExprNode::Var { name, .. } = &*r.node else {
-        return None;
-    };
+    let n = prop_read_name(r)?;
     let [arg] = args.as_slice() else {
         return None;
     };
@@ -1360,7 +1467,12 @@ fn isa_narrow_cond(cond: &Expr) -> Option<String> {
     };
     let cls = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
     let swift = isa_swift_type(&cls)?;
-    let n = camel(name.as_str());
+    Some((n, swift))
+}
+
+/// `x.is_a?(T)` as an if-condition → `let x = x as? T`.
+fn isa_narrow_cond(cond: &Expr) -> Option<String> {
+    let (n, swift) = isa_check_parts(cond)?;
     Some(format!("let {n} = {n} as? {swift}"))
 }
 
@@ -1624,6 +1736,18 @@ pub(super) fn wrap_return(e: &Expr) -> String {
         // A raise in Send spelling (throw/fatalError) is terminal — no
         // `return` prefix (fatalError's Never satisfies the return path).
         _ if is_raise_expr(e) => emit_expr(e),
+        // A return-position hash literal drops the `as [String: Any?]`
+        // pin so the declared return type drives inference
+        // (`toH() -> [String: String]`).
+        ExprNode::Hash { entries, .. } if !entries.is_empty() => {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            format!("return [{}]", pairs.join(", "))
+        }
+        ExprNode::Hash { .. } => "return [:]".to_string(),
+        ExprNode::Array { elements, .. } if elements.is_empty() => "return []".to_string(),
         _ => format!("return {}", emit_expr(e)),
     }
 }
@@ -1753,9 +1877,14 @@ pub(super) fn is_raise_expr(e: &Expr) -> bool {
     }
 }
 
-/// Does this body contain a raise that the classification turns into a
-/// real `throw`? (Drives the `throws` marking on method signatures.)
-pub(super) fn body_throws(e: &Expr) -> bool {
+/// Does this body throw — directly (a raise the classification turns
+/// into a real `throw`) or transitively (a call to a registered-throws
+/// method: `try Article.find` in a controller action, `self.create()`
+/// in processAction)? `cls` is the enclosing class for self-send
+/// resolution (empty for modules). Drives the `throws` marking; the
+/// per-class registration loop in `library::register_classes` runs this
+/// to a fixpoint so call-chains propagate.
+pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
     let direct = match &*e.node {
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "raise" => {
             args.first().map_or(false, |a| {
@@ -1775,9 +1904,23 @@ pub(super) fn body_throws(e: &Expr) -> bool {
             }
             _ => false,
         },
+        // A call to a registered-throws method.
+        ExprNode::Send { recv: Some(r), method, .. } => match &*r.node {
+            ExprNode::Const { path } => throws_lookup(
+                &super::naming::type_name(
+                    &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+                ),
+                &camel(method.as_str()),
+            ),
+            ExprNode::SelfRef => !cls.is_empty() && throws_lookup(cls, &camel(method.as_str())),
+            _ => false,
+        },
+        ExprNode::Send { recv: None, method, .. } => {
+            !cls.is_empty() && throws_lookup(cls, &camel(method.as_str()))
+        }
         _ => false,
     };
-    direct || children(e).into_iter().any(body_throws)
+    direct || children(e).into_iter().any(|c| body_throws(c, cls))
 }
 
 /// The lowerer inserts `Cast` at untyped-row boundaries to mean "coerce
@@ -1866,10 +2009,20 @@ fn emit_send(
     // Constructor: `X.new(...)` → `X(...)`. Implicit-self `new(attrs)`
     // in a class method → `Self(...)` (dynamic, so `Article.create`
     // builds an Article; requires `required init`, which the init emit
-    // marks).
+    // marks). EXCEPTION: a receiver with a registered static method
+    // named `new` (the new.html.erb view) is a method call —
+    // `Articles.new(...)` is legal Swift, no keyword clash.
     if method == "new" {
         if let Some(r) = recv {
-            return format!("{}({})", emit_expr(r), args_s.join(", "));
+            let rs = emit_expr(r);
+            if matches!(&*r.node, ExprNode::Const { .. }) {
+                let has_new_method = CLASS_STATIC_METHODS
+                    .with(|m| m.borrow().get(&rs).map_or(false, |s| s.contains_key("new")));
+                if has_new_method {
+                    return format!("{rs}.new({})", args_s.join(", "));
+                }
+            }
+            return format!("{rs}({})", args_s.join(", "));
         }
         return format!("Self({})", args_s.join(", "));
     }
@@ -2005,9 +2158,26 @@ fn emit_send(
         }
     }
     if let (Some(r), 2) = (recv, args.len()) {
-        // `fetch(k, default)` → nil-coalesced index.
+        // `fetch(k, default)` → nil-coalesced index; a scalar-literal
+        // default collapses both optional layers via `as?` (the index
+        // read is `Any??`, which would interpolate as "Optional(…)").
         if method == "fetch" {
-            return format!("({}[{}] ?? {})", emit_expr(r), args_s[0], args_s[1]);
+            let cast = match &*args[1].node {
+                ExprNode::Lit { value: Literal::Str { .. } } => Some("String"),
+                ExprNode::Lit { value: Literal::Int { .. } } => Some("Int"),
+                ExprNode::Lit { value: Literal::Float { .. } } => Some("Double"),
+                ExprNode::Lit { value: Literal::Bool { .. } } => Some("Bool"),
+                _ => None,
+            };
+            return match cast {
+                Some(t) => format!(
+                    "({}[{}] as? {t} ?? {})",
+                    emit_expr(r),
+                    args_s[0],
+                    args_s[1]
+                ),
+                None => format!("({}[{}] ?? {})", emit_expr(r), args_s[0], args_s[1]),
+            };
         }
         // `tr(from, to)` — the runtime's single-char uses map to plain
         // replacement.
@@ -2081,7 +2251,11 @@ fn emit_send(
                 }
                 return format!("self.{name}");
             }
-            return format!("self.{name}()");
+            let try_kw = CURRENT_CLASS
+                .with(|c| throws_lookup(&c.borrow(), &name))
+                .then_some("try ")
+                .unwrap_or("");
+            return format!("{try_kw}self.{name}()");
         }
         // A `Const` receiver (a class / namespace like `Db`) means a
         // 0-arg *method* call — unless it's a registered object-level
@@ -2161,6 +2335,7 @@ fn emit_send(
             let rs = emit_expr(r);
             let recv_type = match &*r.node {
                 ExprNode::Const { .. } => Some(rs.clone()),
+                ExprNode::SelfRef => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
                 _ => match r.ty.as_ref() {
                     Some(crate::ty::Ty::Class { id, .. }) => {
                         Some(super::naming::type_name(id.0.as_str()))
@@ -2174,6 +2349,12 @@ fn emit_send(
                 .unwrap_or("");
             format!("{try_kw}{rs}.{name}({})", emit_call_args(recv, method, args))
         }
-        None => format!("{name}({})", emit_call_args(recv, method, args)),
+        None => {
+            let try_kw = CURRENT_CLASS
+                .with(|c| throws_lookup(&c.borrow(), &name))
+                .then_some("try ")
+                .unwrap_or("");
+            format!("{try_kw}{name}({})", emit_call_args(recv, method, args))
+        }
     }
 }

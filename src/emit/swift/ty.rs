@@ -83,6 +83,12 @@ fn render_class(full: &str, args: &[Ty]) -> String {
             return "String".to_string();
         }
         "Regexp" => return "NSRegularExpression".to_string(),
+        // The params union renders as the top type — the Kotlin arc
+        // proved the sealed-union shape doesn't survive the runtime's
+        // untyped narrowing (`is_a?(Hash)` doesn't match a union wrapper
+        // and silently drops every param); the recursive params value is
+        // plain nested `[String: Any?]` maps end-to-end.
+        "Roundhouse::ParamValue" | "ParamValue" => return "Any?".to_string(),
         "Hash" => {
             return if args.len() == 2 {
                 format!("[{}: {}]", swift_ty(&args[0]), swift_ty(&args[1]))
