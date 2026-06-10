@@ -2129,13 +2129,11 @@ fn emit_send(
             {
                 return format!("RhString.gsubMap({rs}, {}, {})", args_s[0], args_s[1]);
             }
-            // Literal/string-typed pattern → the pure-Swift scanner
-            // (corelibs replacingOccurrences is the Linux render
-            // bottleneck — NSString bridging + an allocation per call).
-            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } })
-                || matches!(args[0].ty.as_ref(), Some(crate::ty::Ty::Str))
-            {
-                return format!("RhString.replace({rs}, {}, {})", args_s[0], args_s[1]);
+            if matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                return format!(
+                    "{rs}.replacingOccurrences(of: {}, with: {})",
+                    args_s[0], args_s[1]
+                );
             }
             return format!("RhString.gsub({rs}, {}, {})", args_s[0], args_s[1]);
         }
@@ -2230,9 +2228,14 @@ fn emit_send(
             };
         }
         // `tr(from, to)` — the runtime's single-char uses map to plain
-        // replacement (the pure-Swift scanner, not Foundation).
+        // replacement.
         if method == "tr" {
-            return format!("RhString.replace({}, {}, {})", emit_expr(r), args_s[0], args_s[1]);
+            return format!(
+                "{}.replacingOccurrences(of: {}, with: {})",
+                emit_expr(r),
+                args_s[0],
+                args_s[1]
+            );
         }
     }
     if let (Some(r), 2) = (recv, args.len()) {
