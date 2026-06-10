@@ -61,9 +61,12 @@ pub enum BuildTarget {
     Kotlin,
     Python,
     Rust,
-    /// Swift emit (backend-only). Transpile-only and intentionally
-    /// excluded from `ALL` (the `--site` archive matrix) while the target
-    /// is under construction — see `docs/swift-migration-plan.md`.
+    /// Swift emit (backend-only). In the `ALL` `--site` archive matrix
+    /// as of the compare/bench/CI gates closing (the emitted archive
+    /// builds via `swift build` and boots; Server.swift serves
+    /// `/assets/*`). Still incomplete (no frameworks/e2e gates, like
+    /// several published targets) — see `docs/swift-migration-plan.md`
+    /// and issue #34.
     Swift,
     Typescript,
     /// TypeScript emit under the `worker` deployment profile
@@ -85,6 +88,7 @@ impl BuildTarget {
         BuildTarget::Kotlin,
         BuildTarget::Python,
         BuildTarget::Rust,
+        BuildTarget::Swift,
         BuildTarget::Typescript,
         BuildTarget::TypescriptWorker,
     ];
@@ -398,6 +402,7 @@ fn ensure_static_assets(
             | BuildTarget::Kotlin
             | BuildTarget::Python
             | BuildTarget::Rust
+            | BuildTarget::Swift
             | BuildTarget::Typescript
             | BuildTarget::TypescriptWorker
     );

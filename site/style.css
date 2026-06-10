@@ -18,6 +18,7 @@
   --accent-kotlin: #ff79c6;
   --accent-python: #7aa2f7;
   --accent-rust: #ff9e64;
+  --accent-swift: #f0805e;
   --accent-typescript: #e0af68;
   --accent: var(--accent-ruby);
   --tree-hover: #292e42;
@@ -170,6 +171,7 @@ header h1 a {
 .tab[data-lang="kotlin"].active { color: var(--accent-kotlin); border-bottom-color: var(--accent-kotlin); }
 .tab[data-lang="python"].active { color: var(--accent-python); border-bottom-color: var(--accent-python); }
 .tab[data-lang="rust"].active { color: var(--accent-rust); border-bottom-color: var(--accent-rust); }
+.tab[data-lang="swift"].active { color: var(--accent-swift); border-bottom-color: var(--accent-swift); }
 .tab[data-lang="typescript"].active { color: var(--accent-typescript); border-bottom-color: var(--accent-typescript); }
 
 /* Main layout */
