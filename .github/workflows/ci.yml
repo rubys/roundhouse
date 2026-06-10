@@ -1233,6 +1233,36 @@ jobs:
       - name: scripts/e2e kotlin
         run: scripts/e2e --tgz browse/kotlin.tgz kotlin
 
+  # swift (5/5): boots the published swift.tgz via `swift build -c release`
+  # (main.swift reads BLOG_DB + PORT). All five specs — Server.swift serves
+  # /assets/* in-dispatch, and the Cable primitive (HummingbirdWebSocket,
+  # actioncable-v1-json) carries turbo_comment + action_cable. Needs a Swift
+  # toolchain + libsqlite3-dev (the CSQLite systemLibrary); Ruby-free.
+  e2e-swift:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.1'
+      - name: Install libsqlite3-dev (CSQLite systemLibrary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/e2e swift
+        run: scripts/e2e --tgz browse/swift.tgz swift
+
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at

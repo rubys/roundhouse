@@ -13,11 +13,14 @@
 //! kotlin gates.
 //!
 //! Requires a Swift toolchain (6+) and, on Linux, `libsqlite3-dev` — same
-//! prerequisites as `swift_toolchain.rs`.
+//! prerequisites as `swift_toolchain.rs` — PLUS XCTest, which Linux
+//! toolchains bundle but the macOS Command Line Tools do NOT. On macOS,
+//! point at a full Xcode per-invocation (no xcode-select needed):
 //!
-//! Marked `#[ignore]` while gaps close — run explicitly:
+//!     DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+//!         cargo test --test framework_tests_swift -- --ignored --nocapture
 //!
-//!     cargo test --test framework_tests_swift -- --ignored --nocapture
+//! Marked `#[ignore]` while gaps close — run explicitly as above.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -2405,6 +2405,16 @@ fn emit_send(
         let sw_method = if method == "each" { "forEach".to_string() } else { camel(method) };
         let lam = emit_expr(b);
         let base = match recv {
+            // Hash#each iterates SORTED by key: Ruby hashes are
+            // insertion-ordered but Swift Dictionary is not — and worse,
+            // not even stable across calls, which made render_attrs emit
+            // tracked-asset tags in varying attribute order and tripped
+            // Turbo's data-turbo-track reload. Sorted is the same
+            // determinism rule the rust emitter applies (the compare
+            // harness DOM-diffs attribute SETS, so order is free).
+            Some(r) if method == "each" && recv_is_hash(r) => {
+                format!("{}.sorted(by: {{ $0.key < $1.key }}).{sw_method}", emit_expr(r))
+            }
             Some(r) => format!("{}.{sw_method}", emit_expr(r)),
             None => sw_method,
         };

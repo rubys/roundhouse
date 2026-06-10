@@ -188,14 +188,171 @@ struct TimeInstant {
 }
 "#;
 
-// Action Cable broadcast sink — backend-only target has no cable
-// transport; the lowered after_*_commit callbacks call these as no-ops
-// (same as Kotlin's Broadcasts.kt).
+// Turbo Streams broadcast sink. The model after_*_commit callbacks pass
+// a {stream, target, html} bag; compose the <turbo-stream> wrapper and
+// fan it out to /cable subscribers via Cable. Mirrors Kotlin's
+// Broadcasts.kt (and go/rust/crystal's Broadcasts).
 const BROADCASTS_SWIFT: &str = r#"enum Broadcasts {
-    static func append(_ args: [String: Any?]) {}
-    static func prepend(_ args: [String: Any?]) {}
-    static func replace(_ args: [String: Any?]) {}
-    static func remove(_ args: [String: Any?]) {}
+    static func append(_ args: [String: Any?]) { record("append", args) }
+    static func prepend(_ args: [String: Any?]) { record("prepend", args) }
+    static func replace(_ args: [String: Any?]) { record("replace", args) }
+    static func remove(_ args: [String: Any?]) { record("remove", args) }
+
+    private static func record(_ action: String, _ opts: [String: Any?]) {
+        guard let stream = opts["stream"] as? String else { return }
+        let target = (opts["target"] as? String) ?? ""
+        let html = (opts["html"] as? String) ?? ""
+        Cable.dispatch(stream, Cable.turboStreamHtml(action, target, html))
+    }
+}
+"#;
+
+// Action Cable WebSocket + Turbo Streams broadcaster — the per-target
+// transport primitive (cf. Kotlin's Cable.kt, runtime/go/v2/cable.go,
+// runtime/crystal/cable.cr). Same wire format (actioncable-v1-json),
+// same per-channel subscriber map. The concurrency bridge is an
+// AsyncStream per connection: `dispatch` (called synchronously from the
+// Db pool threads' after-commit hooks) yields into the stream — the
+// continuation is thread-safe — and a per-connection writer task drains
+// it to the WebSocket. Heartbeat every 3s (ActionCable clients treat a
+// ~6s ping gap as a dead connection).
+const CABLE_SWIFT: &str = r#"import Foundation
+import HummingbirdWebSocket
+import NIOConcurrencyHelpers
+
+enum Cable {
+    struct Sub {
+        let connId: UUID
+        let identifier: String
+        let cont: AsyncStream<String>.Continuation
+    }
+
+    private static let lock = NIOLock()
+    // channel name -> live subscriptions. The identifier (the raw
+    // subscribe frame's `identifier` string) is echoed on every
+    // broadcast so Turbo routes the frame to the right
+    // <turbo-cable-stream-source>.
+    private static var subscribers: [String: [Sub]] = [:]
+
+    // The /cable connection handler: welcome -> (subscribe ->
+    // confirm_subscription)* with a writer task draining the broadcast
+    // stream and a ping task heartbeating.
+    static func handle(
+        _ inbound: WebSocketInboundStream,
+        _ outbound: WebSocketOutboundWriter
+    ) async {
+        let connId = UUID()
+        let (stream, cont) = AsyncStream.makeStream(of: String.self)
+        cont.yield(encode(["type": "welcome"]))
+        let writer = Task {
+            for await msg in stream {
+                do {
+                    try await outbound.write(.text(msg))
+                } catch {
+                    break
+                }
+            }
+        }
+        let pinger = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                cont.yield(encode([
+                    "type": "ping",
+                    "message": Int(Date().timeIntervalSince1970),
+                ]))
+            }
+        }
+        do {
+            for try await message in inbound.messages(maxSize: 1 << 20) {
+                if case .text(let text) = message {
+                    onMessage(connId, cont, text)
+                }
+            }
+        } catch {
+            // socket error — fall through to cleanup
+        }
+        pinger.cancel()
+        cont.finish()
+        lock.withLock {
+            for (channel, subs) in subscribers {
+                let kept = subs.filter { $0.connId != connId }
+                if kept.isEmpty {
+                    subscribers.removeValue(forKey: channel)
+                } else {
+                    subscribers[channel] = kept
+                }
+            }
+        }
+        _ = await writer.value
+    }
+
+    private static func onMessage(
+        _ connId: UUID,
+        _ cont: AsyncStream<String>.Continuation,
+        _ text: String
+    ) {
+        guard let data = text.data(using: .utf8),
+              let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              frame["command"] as? String == "subscribe",
+              let identifier = frame["identifier"] as? String,
+              let channel = decodeChannel(identifier)
+        else { return }
+        lock.withLock {
+            subscribers[channel, default: []].append(
+                Sub(connId: connId, identifier: identifier, cont: cont)
+            )
+        }
+        cont.yield(encode(["type": "confirm_subscription", "identifier": identifier]))
+    }
+
+    // Fan `html` out to every subscriber of `channel`, wrapped in the
+    // Action Cable message envelope Turbo expects. Called from
+    // Broadcasts on each model after-commit hook (a Db pool thread —
+    // the continuation yield is the thread-safe bridge).
+    static func dispatch(_ channel: String, _ html: String) {
+        let subs = lock.withLock { subscribers[channel] ?? [] }
+        for sub in subs {
+            sub.cont.yield(encode([
+                "type": "message",
+                "identifier": sub.identifier,
+                "message": html,
+            ]))
+        }
+    }
+
+    static func turboStreamHtml(_ action: String, _ target: String, _ content: String) -> String {
+        if content.isEmpty {
+            return "<turbo-stream action=\"\(action)\" target=\"\(target)\"></turbo-stream>"
+        }
+        return "<turbo-stream action=\"\(action)\" target=\"\(target)\"><template>\(content)</template></turbo-stream>"
+    }
+
+    // Recover the channel name from Turbo's signed_stream_name. The
+    // identifier is `{"channel":"Turbo::StreamsChannel",
+    // "signed_stream_name":"<b64>--<digest>"}`; the base64 prefix
+    // decodes to a JSON-encoded stream name (the same string a
+    // broadcast's `stream` carries).
+    private static func decodeChannel(_ identifier: String) -> String? {
+        guard let idData = identifier.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: idData) as? [String: Any],
+              let signed = obj["signed_stream_name"] as? String
+        else { return nil }
+        let b64 = signed.components(separatedBy: "--").first ?? signed
+        guard let decoded = Data(base64Encoded: b64),
+              let name = try? JSONSerialization.jsonObject(
+                  with: decoded,
+                  options: [.fragmentsAllowed]
+              ) as? String
+        else { return nil }
+        return name
+    }
+
+    private static func encode(_ obj: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return s
+    }
 }
 "#;
 
@@ -236,6 +393,7 @@ const ADAPTER_INTERFACE_SWIFT: &str = r#"protocol AdapterInterface {
 // ActionDispatch router is this module's `Router`.
 const SERVER_SWIFT: &str = r#"import Foundation
 import Hummingbird
+import HummingbirdWebSocket
 import NIOCore
 import NIOPosix
 
@@ -289,8 +447,20 @@ enum Server {
             }
         }
 
+        // The Action Cable /cable WebSocket — a separate ws router so
+        // the upgrade can echo the `actioncable-v1-json` subprotocol
+        // ActionCable clients require (cf. the Kotlin raw-Jetty-servlet
+        // workaround; Hummingbird's shouldUpgrade hook makes it direct).
+        let wsRouter = Hummingbird.Router(context: BasicWebSocketRequestContext.self)
+        wsRouter.ws("/cable") { _, _ in
+            return .upgrade([.secWebSocketProtocol: "actioncable-v1-json"])
+        } onUpgrade: { inbound, outbound, _ in
+            await Cable.handle(inbound, outbound)
+        }
+
         let app = Application(
             router: hb,
+            server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
             configuration: .init(address: .hostname("127.0.0.1", port: port))
         )
         print("Roundhouse Swift server listening on http://127.0.0.1:\(port)")
@@ -526,6 +696,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/RhThreadLocal.swift"),
             content: RHTHREADLOCAL_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/Cable.swift"),
+            content: CABLE_SWIFT.to_string(),
         },
     ]
 }
