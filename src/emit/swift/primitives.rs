@@ -14,6 +14,19 @@ use crate::emit::EmittedFile;
 const RHSTRING_SWIFT: &str = r#"import Foundation
 
 enum RhString {
+    // Ruby `to_s` semantics for untyped values: nil → "", optionals
+    // unwrap (recursively — `Any` can box nested optionals, which
+    // String(describing:)/interpolation would render as "Optional(…)").
+    static func s(_ x: Any?) -> String {
+        guard let x = x else { return "" }
+        let m = Mirror(reflecting: x)
+        if m.displayStyle == .optional {
+            guard let child = m.children.first else { return "" }
+            return s(child.value)
+        }
+        return "\(x)"
+    }
+
     // Ruby `str.gsub(regex, map)`: each match is replaced by its map
     // entry (identity when absent).
     static func gsubMap(_ s: String, _ pattern: NSRegularExpression, _ map: [String: String]) -> String {

@@ -1,6 +1,6 @@
 use std::path::Path;
 use roundhouse::analyze::Analyzer;
-use roundhouse::emit::{crystal, elixir, go, kotlin, python, rust, typescript};
+use roundhouse::emit::{crystal, elixir, go, kotlin, python, rust, swift, typescript};
 use roundhouse::ingest::ingest_app;
 use roundhouse::profile::DeploymentProfile;
 
@@ -45,6 +45,7 @@ fn main() {
         "elixir" | "ex" => (elixir::emit(&app), "/tmp/rh-ex-pass2"),
         "go" => (go::emit(&app), "/tmp/rh-go-pass2"),
         "kotlin" | "kt" => (kotlin::emit(&app), "/tmp/rh-kt-pass2"),
+        "swift" | "sw" => (swift::emit(&app), "/tmp/rh-swift-pass2"),
         other => panic!("unknown target: {other}"),
     };
 

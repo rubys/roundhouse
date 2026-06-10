@@ -93,6 +93,9 @@ thread_local! {
     /// nil-guard — reads force-unwrap (Kotlin's `!!` smart-cast
     /// cluster, Swift's `!`).
     static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Closure-nesting depth — `next` is a closure `return` inside an
+    /// iterator block, `continue` in a loop.
+    static IN_LAMBDA: RefCell<usize> = const { RefCell::new(0) };
     /// The current method's parameter names — the view lowerer renders a
     /// partial local as a bare Send in arg position but a Var as a
     /// receiver; a bare zero-arg send naming a param emits the
@@ -1121,6 +1124,20 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         }
         ExprNode::Cast { value, target_ty } => emit_cast(value, target_ty),
         ExprNode::Lambda { params, body, .. } => emit_lambda(params, body),
+        // `next` in an iterator block is a closure `return` (forEach's
+        // continue); in a `while` it's `continue`. `break` only arises
+        // in loops here.
+        ExprNode::Next { value } => {
+            if IN_LAMBDA.with(|d| *d.borrow() > 0) {
+                match value {
+                    Some(v) => format!("return {}", emit_expr(v)),
+                    None => "return".to_string(),
+                }
+            } else {
+                "continue".to_string()
+            }
+        }
+        ExprNode::Break { .. } => "break".to_string(),
         // No throwing yet (Phase 3 `throws` pass), so the rescue-modifier
         // fallback shape degrades to just the expression — visible TODO.
         ExprNode::RescueModifier { expr, fallback } => format!(
@@ -1207,7 +1224,26 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
         match part {
             InterpPart::Text { value } => out.push_str(&escape_str(value)),
             InterpPart::Expr { expr } => {
-                out.push_str(&format!("\\({})", emit_expr(expr)));
+                // Optional-ish values route through RhString.s — Swift
+                // interpolation of an Optional renders "Optional(…)",
+                // Ruby renders nil as "".
+                let plain = matches!(
+                    expr.ty.as_ref(),
+                    Some(crate::ty::Ty::Str)
+                        | Some(crate::ty::Ty::Sym)
+                        | Some(crate::ty::Ty::Int)
+                        | Some(crate::ty::Ty::Float)
+                        | Some(crate::ty::Ty::Bool)
+                        | Some(crate::ty::Ty::Class { .. })
+                    // A map-read SHAPE is always optional on the Swift
+                    // surface regardless of the IR's stamped scalar
+                    // (Record field reads like the importmap pins).
+                ) && !is_map_read_shape(expr);
+                if plain {
+                    out.push_str(&format!("\\({})", emit_expr(expr)));
+                } else {
+                    out.push_str(&format!("\\(RhString.s({}))", emit_expr(expr)));
+                }
             }
         }
     }
@@ -1335,11 +1371,15 @@ fn try_iflet_conjunction(cond: &Expr, then_branch: &Expr, else_branch: &Expr) ->
 
 /// Emit a branch with extra proven-non-nil props in scope.
 fn with_nonnull(props: &[String], branch: &Expr) -> String {
+    with_nonnull_scope(props, || emit_expr(branch))
+}
+
+fn with_nonnull_scope<F: FnOnce() -> String>(props: &[String], f: F) -> String {
     let added: Vec<String> = NONNULL_PROPS.with(|s| {
         let mut set = s.borrow_mut();
         props.iter().filter(|p| set.insert((*p).clone())).cloned().collect()
     });
-    let out = emit_expr(branch);
+    let out = f();
     NONNULL_PROPS.with(|s| {
         let mut set = s.borrow_mut();
         for p in &added {
@@ -1410,22 +1450,24 @@ fn prop_nil_checked(cond: &Expr) -> Option<String> {
                 matches!(t, crate::ty::Ty::Union { variants }
                     if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)))
             };
-            let optionalish = r.ty.as_ref().map_or(false, is_opt)
-                // A Var read (or bare-Send param read) with no stamped
-                // ty: the method signature's param type is the authority.
-                || match &*r.node {
-                    ExprNode::Var { name, .. } => {
-                        let n = camel(name.as_str());
-                        PARAM_TYPES.with(|p| p.borrow().get(&n).map_or(false, is_opt))
-                    }
-                    ExprNode::Send { recv: None, method, args, .. }
-                        if args.is_empty() && is_param(method.as_str()) =>
-                    {
-                        let n = camel(method.as_str());
-                        PARAM_TYPES.with(|p| p.borrow().get(&n).map_or(false, is_opt))
-                    }
-                    _ => false,
-                };
+            // The signature's param type takes PRECEDENCE over the
+            // stamped read ty — the analyzer flow-narrows reads inside
+            // guarded branches (IR-level smart cast), but Swift doesn't,
+            // so the declared optionality is what the emitted code sees.
+            let optionalish = match &*r.node {
+                ExprNode::Var { name, .. } => {
+                    let n = camel(name.as_str());
+                    PARAM_TYPES.with(|p| p.borrow().get(&n).map(|t| is_opt(t)))
+                }
+                ExprNode::Send { recv: None, method, args, .. }
+                    if args.is_empty() && is_param(method.as_str()) =>
+                {
+                    let n = camel(method.as_str());
+                    PARAM_TYPES.with(|p| p.borrow().get(&n).map(|t| is_opt(t)))
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| r.ty.as_ref().map_or(false, is_opt));
             if optionalish {
                 prop_read_name(r)
             } else {
@@ -1718,11 +1760,15 @@ pub(super) fn wrap_return(e: &Expr) -> String {
         ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs, true),
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, true),
         ExprNode::If { cond, then_branch, else_branch } if !is_empty_branch(else_branch) => {
+            // Same optional narrowing as emit_if — a return-position If
+            // doesn't route through it.
+            let then_nn = props_proven_nonnull(cond);
+            let else_nn: Vec<String> = prop_nil_checked(cond).into_iter().collect();
             let c = emit_expr(cond);
             format!(
                 "if {c} {{\n{}\n}} else {{\n{}\n}}",
-                indent(&wrap_return(then_branch)),
-                indent(&wrap_return(else_branch))
+                indent(&with_nonnull_scope(&then_nn, || wrap_return(then_branch))),
+                indent(&with_nonnull_scope(&else_nn, || wrap_return(else_branch)))
             )
         }
         ExprNode::Return { .. }
@@ -1943,7 +1989,9 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    IN_LAMBDA.with(|d| *d.borrow_mut() += 1);
     let body_s = emit_expr(body);
+    IN_LAMBDA.with(|d| *d.borrow_mut() -= 1);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
@@ -2210,7 +2258,19 @@ fn emit_send(
         let rs = emit_expr(r);
         match method {
             "nil?" => return format!("({rs} == nil)"),
-            "to_s" => return format!("\"\\({rs})\""),
+            // `to_s`: identity on a String; plain interpolation for
+            // provably-scalar receivers; the RhString.s unwrapper for
+            // anything optional-ish (interpolating `Any?` renders
+            // "Optional(…)", Ruby renders nil as "").
+            "to_s" => {
+                return match r.ty.as_ref() {
+                    Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym) => rs,
+                    Some(crate::ty::Ty::Int)
+                    | Some(crate::ty::Ty::Float)
+                    | Some(crate::ty::Ty::Bool) => format!("\"\\({rs})\""),
+                    _ => format!("RhString.s({rs})"),
+                };
+            }
             "to_i" => return format!("Int(\"\\({rs})\")!"),
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
@@ -2320,9 +2380,14 @@ fn emit_send(
     }
 
     // A bare zero-arg send naming a parameter of the current method is
-    // that parameter (the view lowerer's partial-local Send shape).
+    // that parameter (the view lowerer's partial-local Send shape) —
+    // force-unwrapped when the enclosing branch's nil-guard proved it.
     if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
-        return camel(method);
+        let n = camel(method);
+        if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
+            return format!("{n}!");
+        }
+        return n;
     }
 
     // General call — with `try` when the callee is registered throwing

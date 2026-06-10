@@ -114,8 +114,9 @@ case "$TARGET" in
     jruby|jr)      TARGET=jruby ;;
     spinel|sp)     TARGET=spinel ;;
     kotlin|kt)     TARGET=kotlin ;;
+    swift|sw)      TARGET=swift ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, jruby, kotlin, or spinel)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, jruby, kotlin, swift, or spinel)" >&2
         exit 2
         ;;
 esac
@@ -141,7 +142,7 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
     # runtime/typescript/server.ts:206-217, runtime/python/server.py:95-102,
     # and runtime/spinel/scaffold/main.rb:82-93 for the pattern).
     case "$TARGET" in
-        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin|python)
+        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin|swift|python)
             PATHS+=(/articles.json /articles/1.json)
             ;;
         elixir)
@@ -187,6 +188,10 @@ case "$TARGET" in
         ;;
     kotlin)
         BUILD_DIR="/tmp/rh-kt-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    swift)
+        BUILD_DIR="/tmp/rh-swift-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     elixir)
@@ -385,6 +390,11 @@ case "$TARGET" in
         step "building kotlin target (gradle installDist)"
         (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" PATH="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}/bin:$PATH" gradle installDist --console=plain -q)
         ;;
+    swift)
+        # SPM release build → a single binary at .build/release/App.
+        step "building swift target (swift build -c release)"
+        (cd "$BUILD_DIR" && swift build -c release 2>&1 | tail -2)
+        ;;
     elixir)
         step "building elixir target"
         (cd "$BUILD_DIR" && mix deps.get && MIX_ENV=prod mix compile)
@@ -472,6 +482,11 @@ if [[ -z "$TARGET_CMD" ]]; then
             # The installDist launcher reads BLOG_DB + PORT (Main.kt). JAVA_HOME
             # pins the JDK for the bundled `java` invocation.
             (cd "$BUILD_DIR" && JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}" BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./build/install/roundhouse-app/bin/roundhouse-app >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        swift)
+            # The release binary reads BLOG_DB + PORT (main.swift).
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./.build/release/App >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         elixir)
