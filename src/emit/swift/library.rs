@@ -36,20 +36,69 @@ use super::ty::swift_ty;
 /// from the methods' enclosing class. Consumed by
 /// `runtime_loader::swift_units` for `Mode::Module` entries.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
-    super::expr::set_instance_prop_types(std::collections::HashMap::new());
     super::expr::set_current_class("");
+    super::expr::set_in_module(true);
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
         .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
     let mut out = format!("enum {name} {{\n");
+    out.push_str(&emit_module_ivars(methods, &BTreeMap::new()));
     for m in methods {
         out.push_str(&indent_method(&emit_method(m, true)));
         out.push('\n');
     }
     out.push_str("}\n");
+    super::expr::set_in_module(false);
     Ok(out)
+}
+
+/// Module-level `@ivar` state (e.g. ViewHelpers' `@slots = {}`) →
+/// `static var`s, typed from assign-site stamps or the container scan.
+/// Also installs the names as instance props so reads/assigns resolve.
+/// NOTE: shared mutable statics — per-request isolation (the
+/// ThreadSpecificVariable conversion, Kotlin's OBJECT_TL_FIELDS) lands
+/// with the server/concurrency phase.
+fn emit_module_ivars(methods: &[MethodDef], exclude: &BTreeMap<String, Ty>) -> String {
+    let mut ivars: BTreeMap<String, IvarInfo> = BTreeMap::new();
+    let mut containers: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for m in methods {
+        collect_ivars(&m.body, &mut ivars);
+        containers.extend(super::expr::container_scan(&m.body));
+    }
+    let mut props: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+    let mut out = String::new();
+    for (n, info) in &ivars {
+        props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::Untyped));
+        // An accessor-backed ivar is declared by the accessor's
+        // `static var`, not here.
+        if exclude.contains_key(n) {
+            continue;
+        }
+        let decl = match (&info.ty, containers.get(n)) {
+            (Some(t), _) => match try_default_for(t) {
+                Some(d) => format!("    static var {n}: {} = {d}\n", swift_ty(t)),
+                // Set-once reference slot → implicitly-unwrapped.
+                None => format!("    static var {n}: {}!\n", swift_ty(t)),
+            },
+            (None, Some(ct)) => {
+                let lit = if ct.contains(':') { "[:]" } else { "[]" };
+                format!("    static var {n}: {ct} = {lit}\n")
+            }
+            (None, None) => format!("    static var {n}: Any? = nil\n"),
+        };
+        out.push_str(&decl);
+    }
+    for (n, ty) in exclude {
+        props.insert(n.clone(), ty.clone());
+    }
+    super::expr::set_instance_prop_types(props);
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// `Result`-shaped wrapper over `emit_library_class`, the signature the
@@ -174,11 +223,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // statics. A set-once reference accessor (the adapter slot) becomes
     // an implicitly-unwrapped `static var` — Swift's lateinit.
     if lc.is_module {
-        super::expr::set_instance_prop_types(std::collections::HashMap::new());
         super::expr::set_current_class(&class_name);
         super::expr::set_error_class(false);
+        super::expr::set_in_module(true);
         let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("enum {class_name} {{\n");
+        out.push_str(&emit_module_ivars(&lc.methods, &accessor_props));
         for (n, ty) in &accessor_props {
             match try_default_for(ty) {
                 Some(d) => {
@@ -199,8 +249,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
         out.push_str("}\n");
+        super::expr::set_in_module(false);
         return out;
     }
+    super::expr::set_in_module(false);
 
     // 1. Accessor-derived properties (name → type), and the set of method
     //    names to drop (the synthesized getters/setters).
@@ -598,7 +650,21 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
 
     begin_method(&m.body, returns_value);
     super::expr::set_init_super(is_init && ctx.map_or(false, |c| c.has_parent));
-    let body = emit_body(&m.body, returns_value, ret_ty.as_ref());
+    // Prologue: hoisted vars (locals first assigned in nested scopes) +
+    // `var x = x` shadows for params the body mutates (Swift params are
+    // immutable; Ruby's are not).
+    let mut prologue = String::new();
+    for (n, st, d) in super::expr::take_hoisted() {
+        prologue.push_str(&format!("var {n}: {st} = {d}\n"));
+    }
+    for p in &m.params {
+        let cn = camel(p.name.as_str());
+        if super::expr::is_reassigned(&cn) {
+            prologue.push_str(&format!("var {cn} = {cn}\n"));
+            super::expr::declare_local(&cn);
+        }
+    }
+    let body = format!("{prologue}{}", emit_body(&m.body, returns_value, ret_ty.as_ref()));
     super::expr::set_init_super(false);
 
     if is_init {

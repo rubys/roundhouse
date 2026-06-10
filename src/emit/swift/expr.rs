@@ -81,6 +81,18 @@ thread_local! {
     /// The class currently being emitted (for ancestor-aware self-send
     /// resolution).
     static CURRENT_CLASS: RefCell<String> = RefCell::new(String::new());
+    /// Whether a module enum is being emitted — its `@ivar` state lives
+    /// in `static var`s, and static funcs have no `self`, so ivar
+    /// assigns emit bare names.
+    static IN_MODULE: RefCell<bool> = const { RefCell::new(false) };
+    /// Locals to hoist as typed `var` declarations at the method top —
+    /// first assigned inside a nested scope but used/reassigned later
+    /// (Kotlin's scan_hoist).
+    static HOISTED: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+    /// Optional properties proven non-nil by the enclosing branch's
+    /// nil-guard — reads force-unwrap (Kotlin's `!!` smart-cast
+    /// cluster, Swift's `!`).
+    static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Error-conforming class names — a `raise` of one becomes a real
     /// `throw`; anything else stays `fatalError`.
     static ERROR_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -156,6 +168,30 @@ pub(super) fn set_error_class(flag: bool) {
 /// Flag the method being emitted as the init of a parented class.
 pub(super) fn set_init_super(flag: bool) {
     INIT_SUPER.with(|f| *f.borrow_mut() = flag);
+}
+
+/// Flag module-enum emission (bare ivar assigns, static-var state).
+pub(super) fn set_in_module(flag: bool) {
+    IN_MODULE.with(|f| *f.borrow_mut() = flag);
+}
+
+/// Is this (camelCased) local marked var-requiring by the pre-scan?
+/// Drives the `var x = x` shadow for mutated params.
+pub(super) fn is_reassigned(name: &str) -> bool {
+    REASSIGNED.with(|r| r.borrow().contains(name))
+}
+
+/// Mark a name as already declared (param shadows, hoisted vars).
+pub(super) fn declare_local(name: &str) {
+    DECLARED.with(|d| {
+        d.borrow_mut().insert(name.to_string());
+    });
+}
+
+/// The hoisted-var declarations for the method just begun:
+/// `(name, swift_ty, default)` triples.
+pub(super) fn take_hoisted() -> Vec<(String, String, String)> {
+    HOISTED.with(|h| std::mem::take(&mut *h.borrow_mut()))
 }
 
 /// Register a class's instance-method name set (camelCased).
@@ -305,6 +341,30 @@ fn coerce_for_prop(prop_raw: &str, value: &Expr, val: String) -> String {
     }
 }
 
+/// Is the receiver statically a Hash (directly or through a nullable
+/// Union / the declared prop type)?
+fn recv_is_hash(r: &Expr) -> bool {
+    fn ty_is_hash(t: &crate::ty::Ty) -> bool {
+        match t {
+            crate::ty::Ty::Hash { .. } => true,
+            crate::ty::Ty::Class { id, .. } => id.0.as_str() == "Hash",
+            crate::ty::Ty::Union { variants } => variants
+                .iter()
+                .any(|v| !matches!(v, crate::ty::Ty::Nil) && ty_is_hash(v)),
+            _ => false,
+        }
+    }
+    if r.ty.as_ref().map_or(false, ty_is_hash) {
+        return true;
+    }
+    // An ivar read takes the declared property type.
+    if let ExprNode::Ivar { name } = &*r.node {
+        let n = camel(name.as_str());
+        return INSTANCE_PROP_TYPES.with(|m| m.borrow().get(&n).map_or(false, ty_is_hash));
+    }
+    false
+}
+
 /// A value whose Swift surface type is `Any?`-ish regardless of IR
 /// stamping: a map index read / fetch, or a `??`-coalesce over one.
 fn is_map_read_shape(e: &Expr) -> bool {
@@ -330,6 +390,25 @@ pub(super) fn begin_method(body: &Expr, returns_value: bool) {
     let mut mutated: HashSet<String> = HashSet::new();
     count_assigns(body, &mut counts, &mut nil_types, &mut mutated);
     DECLARED.with(|d| d.borrow_mut().clear());
+
+    // Var-hoist (Kotlin's scan_hoist): a local FIRST assigned inside a
+    // nested scope but assigned more than once needs a typed `var`
+    // declaration at the method top — Swift scopes the nested decl to
+    // its branch.
+    let mut hoist_info: HashMap<String, (usize, usize, Option<crate::ty::Ty>)> = HashMap::new();
+    scan_hoist(body, 0, &mut hoist_info);
+    let mut hoisted: Vec<(String, String, String)> = Vec::new();
+    for (n, (first_depth, count, ty)) in hoist_info {
+        if first_depth > 0 && count > 1 {
+            let (st, d) = hoist_decl(ty.as_ref());
+            DECLARED.with(|dset| {
+                dset.borrow_mut().insert(n.clone());
+            });
+            hoisted.push((n, st, d));
+        }
+    }
+    hoisted.sort();
+    HOISTED.with(|h| *h.borrow_mut() = hoisted);
     REASSIGNED.with(|r| {
         let mut set = r.borrow_mut();
         set.clear();
@@ -372,7 +451,11 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
     };
     match &*e.node {
         ExprNode::Assign { target: LValue::Index { recv, index }, value } => {
-            if let ExprNode::Var { name, .. } = &*recv.node {
+            let target = match &*recv.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name),
+                _ => None,
+            };
+            if let Some(name) = target {
                 out.entry(camel(name.as_str())).or_insert(format!(
                     "[{}: {}]",
                     nn(index.ty.as_ref()),
@@ -383,7 +466,11 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if method.as_str() == "[]=" && args.len() == 2 =>
         {
-            if let ExprNode::Var { name, .. } = &*r.node {
+            let target = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name),
+                _ => None,
+            };
+            if let Some(name) = target {
                 out.entry(camel(name.as_str())).or_insert(format!(
                     "[{}: {}]",
                     nn(args[0].ty.as_ref()),
@@ -394,7 +481,11 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if matches!(method.as_str(), "<<" | "push" | "append") && args.len() == 1 =>
         {
-            if let ExprNode::Var { name, .. } = &*r.node {
+            let target = match &*r.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name),
+                _ => None,
+            };
+            if let Some(name) = target {
                 out.entry(camel(name.as_str()))
                     .or_insert(format!("[{}]", nn(args[0].ty.as_ref())));
             }
@@ -404,6 +495,87 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
     for child in children(e) {
         scan_container_types(child, out);
     }
+}
+
+/// One-off container scan over a body (module-ivar typing).
+pub(super) fn container_scan(e: &Expr) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    scan_container_types(e, &mut out);
+    out
+}
+
+/// Hoist-scan walk: branch bodies (If/While/Case/Lambda) are depth+1,
+/// Seq and conditions stay at the current depth.
+fn scan_hoist(
+    e: &Expr,
+    depth: usize,
+    info: &mut HashMap<String, (usize, usize, Option<crate::ty::Ty>)>,
+) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            let cn = camel(name.as_str());
+            let entry = info.entry(cn).or_insert((depth, 0, None));
+            entry.1 += 1;
+            if entry.2.is_none() {
+                if let Some(t) = value.ty.as_ref() {
+                    if !matches!(t, crate::ty::Ty::Nil) {
+                        entry.2 = Some(t.clone());
+                    }
+                }
+            }
+            scan_hoist(value, depth, info);
+        }
+        ExprNode::Seq { exprs } => {
+            for x in exprs {
+                scan_hoist(x, depth, info);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            scan_hoist(cond, depth, info);
+            scan_hoist(then_branch, depth + 1, info);
+            scan_hoist(else_branch, depth + 1, info);
+        }
+        ExprNode::While { cond, body, .. } => {
+            scan_hoist(cond, depth, info);
+            scan_hoist(body, depth + 1, info);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            scan_hoist(scrutinee, depth, info);
+            for a in arms {
+                scan_hoist(&a.body, depth + 1, info);
+            }
+        }
+        ExprNode::Lambda { body, .. } => scan_hoist(body, depth + 1, info),
+        _ => {
+            for c in children(e) {
+                scan_hoist(c, depth, info);
+            }
+        }
+    }
+}
+
+/// Declaration type + default for a hoisted local.
+fn hoist_decl(ty: Option<&crate::ty::Ty>) -> (String, String) {
+    use crate::ty::Ty;
+    let Some(t) = ty else {
+        return ("Any?".to_string(), "nil".to_string());
+    };
+    let d = match t {
+        Ty::Int => "0",
+        Ty::Float => "0.0",
+        Ty::Bool => "false",
+        Ty::Str | Ty::Sym => "\"\"",
+        Ty::Array { .. } => "[]",
+        Ty::Hash { .. } => "[:]",
+        _ => {
+            let mut st = swift_ty(t);
+            if !st.ends_with('?') {
+                st.push('?');
+            }
+            return (st, "nil".to_string());
+        }
+    };
+    (swift_ty(t), d.to_string())
 }
 
 /// Ruby methods that lower to mutating Swift members on value types.
@@ -583,9 +755,24 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn emit_node(n: &ExprNode, e: &Expr) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => camel(name.as_str()),
-        // Instance variable → property reference.
-        ExprNode::Ivar { name } => camel(name.as_str()),
+        ExprNode::Var { name, .. } => {
+            let n = camel(name.as_str());
+            if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
+                format!("{n}!")
+            } else {
+                n
+            }
+        }
+        // Instance variable → property reference; force-unwrapped when
+        // the enclosing branch's nil-guard proved it non-nil.
+        ExprNode::Ivar { name } => {
+            let n = camel(name.as_str());
+            if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
+                format!("{n}!")
+            } else {
+                n
+            }
+        }
         ExprNode::SelfRef => "self".to_string(),
         ExprNode::Const { path } => {
             let joined: Vec<String> = path.iter().map(|s| s.to_string()).collect();
@@ -782,6 +969,11 @@ fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
         Some(narrowed) => narrowed,
         None => emit_expr(cond),
     };
+    // Optional-property narrowing: `!x.nil?` proves x non-nil in the
+    // then-branch; `x.nil?` proves it in the else-branch. Reads inside
+    // the proven branch force-unwrap.
+    let then_nonnull = props_proven_nonnull(cond);
+    let else_nonnull = prop_nil_checked(cond).into_iter().collect::<Vec<_>>();
     let then_empty = is_empty_branch(then_branch);
     let else_empty = is_empty_branch(else_branch);
     // An empty then-branch with a real else (the lowered guard shape
@@ -789,15 +981,93 @@ fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     // statement. (Not reachable for the narrowing cond shape: a `nil?`
     // cond with a real else fuses to if-let upstream.)
     if then_empty && !else_empty {
-        let els = indent(&emit_expr(else_branch));
+        let els = indent(&with_nonnull(&else_nonnull, else_branch));
         return format!("if !({c}) {{\n{els}\n}}");
     }
-    let then = indent(&emit_expr(then_branch));
+    let then = indent(&with_nonnull(&then_nonnull, then_branch));
     if else_empty {
         format!("if {c} {{\n{then}\n}}")
     } else {
-        let els = indent(&emit_expr(else_branch));
+        let els = indent(&with_nonnull(&else_nonnull, else_branch));
         format!("if {c} {{\n{then}\n}} else {{\n{els}\n}}")
+    }
+}
+
+/// Emit a branch with extra proven-non-nil props in scope.
+fn with_nonnull(props: &[String], branch: &Expr) -> String {
+    let added: Vec<String> = NONNULL_PROPS.with(|s| {
+        let mut set = s.borrow_mut();
+        props.iter().filter(|p| set.insert((*p).clone())).cloned().collect()
+    });
+    let out = emit_expr(branch);
+    NONNULL_PROPS.with(|s| {
+        let mut set = s.borrow_mut();
+        for p in &added {
+            set.remove(p);
+        }
+    });
+    out
+}
+
+/// The binding a `nil?` receiver reads, when it IS a simple read — an
+/// ivar, a zero-arg self-send, or a local/param Var.
+fn prop_read_name(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Ivar { name } => Some(camel(name.as_str())),
+        ExprNode::Var { name, .. } => Some(camel(name.as_str())),
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if args.is_empty() && matches!(&*r.node, ExprNode::SelfRef) =>
+        {
+            Some(camel(method.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Props proven non-nil when `cond` is true: `!x.nil?` (both `!` IR
+/// spellings) and `&&`-conjunctions thereof.
+fn props_proven_nonnull(cond: &Expr) -> Vec<String> {
+    match &*cond.node {
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            let mut v = props_proven_nonnull(left);
+            v.extend(props_proven_nonnull(right));
+            v
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "!" && args.is_empty() =>
+        {
+            prop_nil_checked(r).into_iter().collect()
+        }
+        ExprNode::Send { recv: None, method, args, .. }
+            if method.as_str() == "!" && args.len() == 1 =>
+        {
+            prop_nil_checked(&args[0]).into_iter().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The prop a bare `x.nil?` cond checks (proven non-nil in the ELSE
+/// branch). Only Optional-typed reads participate — force-unwrapping a
+/// non-optional is a compile error, and a nil-check on one is just a
+/// tautology the analyzer left in.
+fn prop_nil_checked(cond: &Expr) -> Option<String> {
+    match &*cond.node {
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "nil?" && args.is_empty() =>
+        {
+            let optionalish = matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Union { variants })
+                    if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+            );
+            if optionalish {
+                prop_read_name(r)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1009,7 +1279,10 @@ fn emit_slice_range(
 /// A standalone `if x.nil? { <terminal> }` over an Optional-typed
 /// binding rewrites to `guard let x = x else { … }`, shadow-rebinding
 /// the name non-optional for the rest of the scope — Swift's spelling
-/// of the narrowing Kotlin gets from smart casts.
+/// of the narrowing Kotlin gets from smart casts. The compound form
+/// `if x.nil? || <more(x)> { <terminal> }` becomes
+/// `guard let x = x, !(<more>) else { … }` — `x` inside `<more>` reads
+/// the unwrapped binding.
 fn try_param_guard(stmt: &Expr) -> Option<String> {
     let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else {
         return None;
@@ -1017,7 +1290,12 @@ fn try_param_guard(stmt: &Expr) -> Option<String> {
     if !is_empty_branch(else_branch) || !branch_is_terminal(then_branch) {
         return None;
     }
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+    // Split `x.nil?` vs `x.nil? || rest`.
+    let (nil_check, rest) = match &*cond.node {
+        ExprNode::BoolOp { op: BoolOpKind::Or, left, right, .. } => (left, Some(right)),
+        _ => (cond, None),
+    };
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*nil_check.node else {
         return None;
     };
     if method.as_str() != "nil?" || !args.is_empty() {
@@ -1038,8 +1316,12 @@ fn try_param_guard(stmt: &Expr) -> Option<String> {
         return None;
     }
     let n = camel(name.as_str());
+    let extra = match rest {
+        Some(rhs) => format!(", !({})", emit_expr(rhs)),
+        None => String::new(),
+    };
     Some(format!(
-        "guard let {n} = {n} else {{\n{}\n}}",
+        "guard let {n} = {n}{extra} else {{\n{}\n}}",
         indent(&emit_expr(then_branch))
     ))
 }
@@ -1089,6 +1371,17 @@ pub(super) fn wrap_return(e: &Expr) -> String {
     }
 }
 
+/// An assignment's value: an empty container literal leans on the
+/// (already-typed) target — `[:]` / `[]` — instead of pinning
+/// `[String: Any?]()`.
+fn assign_value(value: &Expr) -> String {
+    match &*value.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => "[:]".to_string(),
+        ExprNode::Array { elements, .. } if elements.is_empty() => "[]".to_string(),
+        _ => emit_expr(value),
+    }
+}
+
 fn emit_assign(target: &LValue, value: &Expr) -> String {
     let val = emit_expr(value);
     match target {
@@ -1096,7 +1389,7 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             let n = camel(name.as_str());
             let already = DECLARED.with(|d| d.borrow().contains(&n));
             if already {
-                format!("{n} = {val}")
+                format!("{n} = {}", assign_value(value))
             } else {
                 let is_var = REASSIGNED.with(|r| r.borrow().contains(&n));
                 DECLARED.with(|d| {
@@ -1134,13 +1427,18 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
         }
         // `self.`-qualified so constructor params can shadow properties
-        // (`init(_ verb: String)` assigning the `verb` property).
+        // (`init(_ verb: String)` assigning the `verb` property) — but
+        // bare in module enums (static funcs have no `self`).
         LValue::Ivar { name } => {
-            let val = coerce_for_prop(name.as_str(), value, val);
-            format!("self.{} = {val}", camel(name.as_str()))
+            let val = coerce_for_prop(name.as_str(), value, assign_value(value));
+            if IN_MODULE.with(|f| *f.borrow()) {
+                format!("{} = {val}", camel(name.as_str()))
+            } else {
+                format!("self.{} = {val}", camel(name.as_str()))
+            }
         }
         LValue::Attr { recv, name } => {
-            let val = coerce_for_prop_assign(recv, name.as_str(), value, val);
+            let val = coerce_for_prop_assign(recv, name.as_str(), value, assign_value(value));
             format!("{}.{} = {val}", emit_expr(recv), camel(name.as_str()))
         }
         LValue::Index { recv, index } => {
@@ -1391,8 +1689,8 @@ fn emit_send(
         ) {
             return format!("{} {} {}", emit_expr(r), method, args_s[0]);
         }
-        // `<<` push → Array.append.
-        if method == "<<" {
+        // `<<` / `push` → Array.append.
+        if method == "<<" || method == "push" {
             return format!("{}.append({})", emit_expr(r), args_s[0]);
         }
         // Index read `recv[k]` — or a Range arg, the Ruby string-slice
@@ -1437,6 +1735,33 @@ fn emit_send(
         if method == "join" {
             return format!("{}.joined(separator: {})", emit_expr(r), args_s[0]);
         }
+        // Dictionary shims (Ruby Hash surface → Swift Dictionary).
+        if method == "delete" && recv_is_hash(r) {
+            return format!("{}.removeValue(forKey: {})", emit_expr(r), args_s[0]);
+        }
+        if method == "merge" {
+            return format!(
+                "{}.merging({}) {{ (_, new) in new }}",
+                emit_expr(r),
+                args_s[0]
+            );
+        }
+    }
+    if let (Some(r), 2) = (recv, args.len()) {
+        // `fetch(k, default)` → nil-coalesced index.
+        if method == "fetch" {
+            return format!("({}[{}] ?? {})", emit_expr(r), args_s[0], args_s[1]);
+        }
+        // `tr(from, to)` — the runtime's single-char uses map to plain
+        // replacement.
+        if method == "tr" {
+            return format!(
+                "{}.replacingOccurrences(of: {}, with: {})",
+                emit_expr(r),
+                args_s[0],
+                args_s[1]
+            );
+        }
     }
     if let (Some(r), 2) = (recv, args.len()) {
         if method == "[]=" {
@@ -1472,6 +1797,9 @@ fn emit_send(
             // Identity no-ops on Swift value types; `to_h` only on an
             // actual Hash (elsewhere it's a real method).
             "to_a" | "dup" | "freeze" => return rs,
+            "join" => return format!("{rs}.joined(separator: \"\")"),
+            "keys" if recv_is_hash(r) => return format!("Array({rs}.keys)"),
+            "values" if recv_is_hash(r) => return format!("Array({rs}.values)"),
             "to_h"
                 if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
                     || matches!(
@@ -1491,6 +1819,9 @@ fn emit_send(
             let is_prop = INSTANCE_PROP_TYPES.with(|m| m.borrow().contains_key(&name))
                 || CURRENT_CLASS.with(|c| ancestor_has_prop(&c.borrow(), &name));
             if is_prop {
+                if NONNULL_PROPS.with(|s| s.borrow().contains(&name)) {
+                    return format!("self.{name}!");
+                }
                 return format!("self.{name}");
             }
             return format!("self.{name}()");
@@ -1529,6 +1860,19 @@ fn emit_send(
             return format!("{base} {lam}");
         }
         return format!("{base}({}) {lam}", args_s.join(", "));
+    }
+
+    // Stdlib-bridging Const receivers (the Kotlin special cases).
+    if let Some(r) = recv {
+        if let ExprNode::Const { path } = &*r.node {
+            let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            if joined == "Base64" && method == "strict_encode64" && args.len() == 1 {
+                return format!("Data(({}).utf8).base64EncodedString()", args_s[0]);
+            }
+            if joined == "JSON" && method == "generate" && args.len() == 1 {
+                return format!("JsonBuilder.encodeValue({})", args_s[0]);
+            }
+        }
     }
 
     // General call — with `try` when the callee is registered throwing

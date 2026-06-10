@@ -202,6 +202,15 @@ const ADAPTER_INTERFACE_SWIFT: &str = r#"protocol AdapterInterface {
 }
 "#;
 
+// The recursive params union (String | Hash | Array) — verbatim from
+// `swift-reference/Sources/App/runtime/ParamValue.swift`.
+const PARAM_VALUE_SWIFT: &str = r#"enum ParamValue {
+    case str(String)
+    case dict([String: ParamValue])
+    case arr([ParamValue])
+}
+"#;
+
 /// The hand-written primitive files, emitted under `Sources/App/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
     vec![
@@ -224,6 +233,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/AdapterInterface.swift"),
             content: ADAPTER_INTERFACE_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/ParamValue.swift"),
+            content: PARAM_VALUE_SWIFT.to_string(),
         },
     ]
 }

@@ -103,12 +103,24 @@ fn render_class(full: &str, args: &[Ty]) -> String {
 
 /// Render a union. Special-cases `T | Nil` as the optional shorthand
 /// `T?` (function types get the parens Swift requires: `((A) -> B)?`).
-/// Heterogeneous (non-nullable) unions have no untagged Swift analog —
-/// a generated `enum` with associated values is the eventual shape (cf.
-/// `ParamValue` in `swift-reference/`); for now they degrade to `Any?`.
+/// Nested unions flatten first — `(String | Nil) | Nil` is `String?`,
+/// not `String??`. Heterogeneous (non-nullable) unions have no untagged
+/// Swift analog — a generated `enum` with associated values is the
+/// eventual shape (cf. `ParamValue` in `swift-reference/`); for now
+/// they degrade to `Any?`.
 fn render_union(variants: &[Ty]) -> String {
-    let has_nil = variants.iter().any(|t| matches!(t, Ty::Nil));
-    let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
+    fn flatten<'a>(variants: &'a [Ty], out: &mut Vec<&'a Ty>) {
+        for v in variants {
+            match v {
+                Ty::Union { variants } => flatten(variants, out),
+                _ => out.push(v),
+            }
+        }
+    }
+    let mut flat: Vec<&Ty> = Vec::new();
+    flatten(variants, &mut flat);
+    let has_nil = flat.iter().any(|t| matches!(t, Ty::Nil));
+    let non_nil: Vec<&Ty> = flat.into_iter().filter(|t| !matches!(t, Ty::Nil)).collect();
     match non_nil.as_slice() {
         [] => "Void".to_string(),
         [single] if has_nil => {
