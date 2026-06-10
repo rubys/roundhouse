@@ -27,9 +27,44 @@ enum RhString {
         return "\(x)"
     }
 
+    // Ruby `str.gsub(literal, replacement)` — pure Swift, NO Foundation
+    // bridging (corelibs-foundation's replacingOccurrences is the
+    // dominant render cost on Linux: NSString UTF-16 bridging + generic
+    // search + an allocation per call even when nothing matches).
+    // Fast path: no occurrence → the ORIGINAL string back, zero
+    // allocation — the common case for html_escape's five passes over
+    // ordinary text. Single-ASCII-byte needles (every escape pass, tr)
+    // pre-check via a raw UTF-8 byte scan; an ASCII byte can't
+    // false-match inside a multibyte sequence.
+    static func replace(_ s: String, _ from: String, _ to: String) -> String {
+        guard !from.isEmpty else { return s }
+        let fromUtf8 = Array(from.utf8)
+        if fromUtf8.count == 1 {
+            let needle = fromUtf8[0]
+            if !s.utf8.contains(needle) { return s }
+        }
+        guard let first = s.firstRange(of: from) else { return s }
+        var out = String(s[s.startIndex..<first.lowerBound])
+        out.reserveCapacity(s.utf8.count + to.utf8.count)
+        out += to
+        var cursor = first.upperBound
+        while let r = s[cursor...].firstRange(of: from) {
+            out += s[cursor..<r.lowerBound]
+            out += to
+            cursor = r.upperBound
+        }
+        out += s[cursor...]
+        return out
+    }
+
     // Ruby `str.gsub(regex, map)`: each match is replaced by its map
-    // entry (identity when absent).
+    // entry (identity when absent). Fast path: when NO map key occurs in
+    // the string, any regex match could only be identity-replaced, so
+    // the result is the original — skip the (corelibs-slow)
+    // NSRegularExpression machinery entirely. The JSON-escape path hits
+    // this for every ordinary string.
     static func gsubMap(_ s: String, _ pattern: NSRegularExpression, _ map: [String: String]) -> String {
+        if !map.keys.contains(where: { s.contains($0) }) { return s }
         let ns = s as NSString
         var result = ""
         var last = 0
@@ -148,7 +183,7 @@ enum Db {
     static func changes() -> Int { conn().changes }
 
     static func escapeString(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+        "'" + RhString.replace(s, "'", "''") + "'"
     }
     static func escapeInt(_ n: Int) -> String { String(n) }
     static func escapeBool(_ b: Bool) -> String { b ? "1" : "0" }
