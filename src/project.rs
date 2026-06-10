@@ -208,19 +208,21 @@ pub fn target_readme(target: BuildTarget) -> String {
         BuildTarget::Go => {
             // `go mod tidy` is mandatory: the emitted go.sum is an
             // empty placeholder, so nothing resolves without it.
+            // `-o server` is too: the module is named `app` and the
+            // tree has an `app/` source dir, so a bare `go build .`
+            // fails with "build output already exists" (caught by
+            // scripts/smoke the first time the README was executed).
             "## Prerequisites\n\
              - Go 1.24+\n\n\
              ## Build\n\
              ```sh\n\
              go mod tidy\n\
-             go build .\n\
+             go build -o server .\n\
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             ./app\n\
+             ./server\n\
              ```\n\n\
-             Or build the v2 binary explicitly: \
-             `go build -o server ./cmd/v2/ && ./server`\n\n\
              ## Test\n\
              ```sh\n\
              go test ./...\n\
@@ -341,11 +343,29 @@ pub fn target_readme(target: BuildTarget) -> String {
              (https://rubys.github.io/roundhouse/)."
         }
     };
+    // Archives that ship the Playwright suite (see `ships_e2e`)
+    // document its run here. CI's smoke job executes these blocks
+    // verbatim, so the section must stay runnable as written.
+    let e2e = if ships_e2e(target) {
+        "## End-to-end\n\
+         Browser smoke tests (Playwright). Needs Node.js 18+ and the \
+         `sqlite3` CLI; run after the Build steps above — the test \
+         config boots the server and seeds `db/seed.sql` itself:\n\
+         ```sh\n\
+         cd e2e\n\
+         npm install\n\
+         npx playwright install chromium\n\
+         npx playwright test\n\
+         ```\n\n"
+    } else {
+        ""
+    };
     format!(
         "# Roundhouse → {name}\n\n\
          {attribution}\n\n\
          {serves}\
          {body}\n\
+         {e2e}\
          ## Regenerate\n\
          ```sh\n\
          roundhouse --target {name} -o <output-dir> <input-app>\n\
@@ -396,9 +416,138 @@ pub fn target_files(
         files
     } else {
         let files = ensure_seed_sql(files)?;
-        ensure_static_assets(files, target)
+        let files = ensure_static_assets(files, target);
+        ensure_e2e(files, target)
     };
     Ok(ensure_readme(files, target))
+}
+
+/// Targets whose archives ship the Playwright e2e suite under `e2e/`
+/// (and the matching `## End-to-end` README section). This is the
+/// smoke-test pilot: the archive becomes the complete test artifact —
+/// `scripts/smoke` just runs the README's steps against the unpacked
+/// tgz, subsuming the per-target `toolchain-<t>`/`e2e-<t>` CI jobs.
+/// Grows one target at a time as the smoke matrix replaces them.
+fn ships_e2e(target: BuildTarget) -> bool {
+    matches!(target, BuildTarget::Go)
+}
+
+/// The Playwright specs, verbatim from the repo's `e2e/` harness — the
+/// single source for both the legacy `scripts/e2e` path and the
+/// in-archive suite. Compiled in via `include_str!` so build-site
+/// needs no disk layout beyond the crate itself.
+const E2E_SPECS: &[(&str, &str)] = &[
+    ("e2e/index.spec.js", include_str!("../e2e/index.spec.js")),
+    ("e2e/validation.spec.js", include_str!("../e2e/validation.spec.js")),
+    ("e2e/tailwind.spec.js", include_str!("../e2e/tailwind.spec.js")),
+    ("e2e/turbo_comment.spec.js", include_str!("../e2e/turbo_comment.spec.js")),
+    ("e2e/action_cable.spec.js", include_str!("../e2e/action_cable.spec.js")),
+];
+
+/// Inject the self-contained Playwright e2e suite into an archive:
+/// the specs (shared, target-agnostic) plus a generated
+/// `playwright.config.js` whose `webServer` block boots the target's
+/// own binary (built per the README) and a `global-setup.js` that
+/// seeds the target's DB from the archive's `db/seed.sql` (sqlite3
+/// CLI, idempotent — skips when articles already exist). The README's
+/// `## End-to-end` section documents the run: `cd e2e && npm install
+/// && npx playwright install chromium && npx playwright test`.
+fn ensure_e2e(
+    mut files: Vec<(String, String)>,
+    target: BuildTarget,
+) -> Vec<(String, String)> {
+    if !ships_e2e(target) {
+        return files;
+    }
+    // Per-target boot command (relative to the archive root, after the
+    // README's Build steps) and DB path (the server's unset-env default
+    // — global-setup seeds the same file the server opens).
+    let (boot, db_rel) = match target {
+        BuildTarget::Go => ("./server", "storage/development.sqlite3"),
+        _ => unreachable!("ships_e2e gates the match"),
+    };
+
+    for (path, content) in E2E_SPECS {
+        files.push((path.to_string(), content.to_string()));
+    }
+    // "type": "module" matters: global-setup.js is written as ESM, and
+    // without it Node loads the file as CommonJS ("exports is not
+    // defined in ES module scope").
+    files.push((
+        "e2e/package.json".to_string(),
+        "{\n  \"name\": \"app-e2e\",\n  \"private\": true,\n  \"type\": \"module\",\n  \
+         \"description\": \"Playwright end-to-end smoke tests for this archive — see ../README.md\",\n  \
+         \"scripts\": {\n    \"test\": \"playwright test\"\n  },\n  \
+         \"devDependencies\": {\n    \"@playwright/test\": \"^1.49.0\"\n  }\n}\n"
+            .to_string(),
+    ));
+    files.push((
+        "e2e/playwright.config.js".to_string(),
+        format!(
+            "import {{ defineConfig, devices }} from '@playwright/test'\n\
+             \n\
+             // Generated by Roundhouse. Self-contained: `webServer` boots the app\n\
+             // (built per ../README.md) and global-setup.js seeds ../db/seed.sql.\n\
+             // E2E_SKIP is a space/comma list of spec basenames to skip.\n\
+             const SKIP = (process.env.E2E_SKIP || '').split(/[\\s,]+/).filter(Boolean)\n\
+             \n\
+             export default defineConfig({{\n\
+             \x20\x20testDir: '.',\n\
+             \x20\x20testIgnore: SKIP.map(name => `**/${{name}}*.spec.js`),\n\
+             \x20\x20fullyParallel: true,\n\
+             \x20\x20forbidOnly: !!process.env.CI,\n\
+             \x20\x20retries: process.env.CI ? 2 : 0,\n\
+             \x20\x20reporter: process.env.CI ? [['github'], ['list']] : 'list',\n\
+             \x20\x20globalSetup: './global-setup.js',\n\
+             \x20\x20use: {{\n\
+             \x20\x20\x20\x20baseURL: 'http://localhost:3000',\n\
+             \x20\x20\x20\x20trace: 'on-first-retry',\n\
+             \x20\x20}},\n\
+             \x20\x20webServer: {{\n\
+             \x20\x20\x20\x20command: '{boot}',\n\
+             \x20\x20\x20\x20cwd: '..',\n\
+             \x20\x20\x20\x20url: 'http://localhost:3000/articles',\n\
+             \x20\x20\x20\x20reuseExistingServer: !process.env.CI,\n\
+             \x20\x20\x20\x20timeout: 30_000,\n\
+             \x20\x20}},\n\
+             \x20\x20projects: [{{ name: 'chromium', use: {{ ...devices['Desktop Chrome'] }} }}],\n\
+             }})\n"
+        ),
+    ));
+    files.push((
+        "e2e/global-setup.js".to_string(),
+        format!(
+            "// Generated by Roundhouse. Seeds the server's DB from ../db/seed.sql\n\
+             // (sqlite3 CLI). Idempotent: skips when articles already exist, so\n\
+             // `npx playwright test` re-runs don't double-seed. For a truly fresh\n\
+             // run, delete {db_rel} (or re-extract the archive).\n\
+             import {{ execFileSync }} from 'node:child_process'\n\
+             import {{ mkdirSync, readFileSync }} from 'node:fs'\n\
+             import path from 'node:path'\n\
+             import {{ fileURLToPath }} from 'node:url'\n\
+             \n\
+             const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')\n\
+             const db = path.join(root, '{db_rel}')\n\
+             const seed = path.join(root, 'db', 'seed.sql')\n\
+             \n\
+             export default function globalSetup() {{\n\
+             \x20\x20mkdirSync(path.dirname(db), {{ recursive: true }})\n\
+             \x20\x20let count = 0\n\
+             \x20\x20try {{\n\
+             \x20\x20\x20\x20count = Number(execFileSync('sqlite3', [db, 'SELECT COUNT(*) FROM articles'],\n\
+             \x20\x20\x20\x20\x20\x20{{ encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }}).trim())\n\
+             \x20\x20}} catch {{ /* missing file or table — seed below */ }}\n\
+             \x20\x20if (count === 0) {{\n\
+             \x20\x20\x20\x20execFileSync('sqlite3', [db], {{ input: readFileSync(seed, 'utf8') }})\n\
+             \x20\x20\x20\x20console.log(`global-setup: seeded ${{db}} from db/seed.sql`)\n\
+             \x20\x20}} else {{\n\
+             \x20\x20\x20\x20console.log(`global-setup: db already seeded (${{count}} articles)`)\n\
+             \x20\x20}}\n\
+             }}\n"
+        ),
+    ));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 /// Inject the quick-start README (`target_readme`) when the file set

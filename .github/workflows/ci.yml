@@ -1018,6 +1018,50 @@ jobs:
       - name: scripts/e2e go
         run: scripts/e2e --tgz browse/go.tgz go
 
+  # smoke-go: PILOT of the smoke-test consolidation. The go archive is
+  # the complete test artifact — it ships the transpiled app, its
+  # model/controller test suite, AND the Playwright e2e suite (e2e/,
+  # injected by project::ensure_e2e with a webServer config that boots
+  # the archive's own binary and seeds its own db/seed.sql). scripts/smoke
+  # extracts the tgz and executes the README's ```sh blocks verbatim —
+  # docs-as-contract: if the README is wrong, this job is red (it caught
+  # `go build .` colliding with the app/ dir on its first run).
+  #
+  # Subsumes toolchain-go's build+test legs (README § Build/Test = go
+  # mod tidy / go build / go test ./...) and e2e-go (README § End-to-end
+  # = playwright). Once this holds, toolchain-go + e2e-go can retire
+  # (toolchain-go's tiny-blog gate stays available as a dev-loop check:
+  # cargo test --test go_toolchain -- --ignored). Rolls out per target
+  # via project::ships_e2e.
+  #
+  # The repo-side playwright install pre-warms the browser cache +
+  # system deps so the README's own `npx playwright install chromium`
+  # (same ^1.49 range) is a cache hit.
+  smoke-go:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Pre-warm Playwright (chromium + system deps)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/smoke go
+        run: scripts/smoke --tgz browse/go.tgz go
+
   # ruby (5/5): the archive is self-contained — its own Gemfile + Makefile
   # build Puma/Rack + tailwind (npx @tailwindcss/cli) + turbo.min.js (the
   # turbo-rails gem). Ruby IS the runtime here, so setup-ruby is expected

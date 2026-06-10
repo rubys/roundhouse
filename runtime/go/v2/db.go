@@ -21,6 +21,7 @@ package v2
 import (
 	"database/sql"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -100,6 +101,14 @@ func OpenProductionDB(path, schemaSQL string) {
 	defer dbMu.Unlock()
 	if db != nil {
 		db.Close()
+	}
+	// The default path lives under storage/, which tar archives can't
+	// carry as an empty directory — create it (and any DATABASE_PATH
+	// parent) rather than panicking with sqlite's opaque CANTOPEN.
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			panic("create db dir: " + err.Error())
+		}
 	}
 	// WAL + a sized connection pool (#17). The two are joint: WAL lets
 	// readers proceed concurrently, but that concurrency has nowhere to

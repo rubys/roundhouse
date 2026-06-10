@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# scripts/smoke — run an archive's own README against the unpacked tgz.
+#
+# The consolidation thesis (see the smoke pilot in ci.yml): the published
+# `<target>.tgz` is the complete test artifact. It ships the transpiled
+# app, its model/controller test suite, the Playwright e2e suite (e2e/),
+# and a README whose fenced ```sh blocks are the exact build/test/e2e
+# steps. This script extracts the archive and executes those blocks in
+# order — no per-target knowledge lives here, unlike scripts/e2e's
+# build/seed/boot case tables. If the README is wrong, the smoke job is
+# red: the docs are the contract.
+#
+# Sections executed: every `## <name>` section's ```sh blocks EXCEPT
+#   ## Run         — boots a foreground server (for humans)
+#   ## Regenerate  — needs the roundhouse binary (for humans)
+#
+# Usage:  scripts/smoke [options] TARGET
+#
+# Options:
+#   --site-dir DIR   Use a prebuilt site dir; archive at DIR/browse/<target>.tgz.
+#                    Default: build the site into a temp dir via build-site.
+#   --tgz PATH       Use a specific archive tarball (overrides --site-dir).
+#   --keep           Don't delete the work dir on exit (debug).
+#
+# Environment: the target's toolchain plus whatever the README's steps
+# need (e.g. Node + `npx playwright install chromium` for ## End-to-end).
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+TARGET=""
+SITE_DIR=""
+TGZ=""
+KEEP=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --site-dir) SITE_DIR="$2"; shift 2 ;;
+        --tgz)      TGZ="$2";      shift 2 ;;
+        --keep)     KEEP=1;        shift ;;
+        -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)         echo "unknown flag: $1" >&2; exit 2 ;;
+        *)
+            if [[ -z "$TARGET" ]]; then TARGET="$1"
+            else echo "unexpected positional arg: $1" >&2; exit 2; fi
+            shift ;;
+    esac
+done
+
+[[ -z "$TARGET" ]] && { echo "usage: scripts/smoke [options] TARGET" >&2; exit 2; }
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[1;32mok\033[0m  %s\n' "$*"; }
+fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*"; }
+
+WORK="$(mktemp -d -t roundhouse-smoke.XXXXXX)"
+cleanup() {
+    local code=$?
+    if (( KEEP )); then
+        echo "--keep: work dir retained at $WORK"
+    else
+        rm -rf "$WORK"
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+# -------- 1. resolve + extract archive --------
+
+if [[ -z "$TGZ" ]]; then
+    if [[ -z "$SITE_DIR" ]]; then
+        step "building site (build-site) → $WORK/site"
+        (cd "$REPO_ROOT" && cargo run --release --quiet --bin build-site -- \
+            fixtures/real-blog "$WORK/site" >/dev/null)
+        SITE_DIR="$WORK/site"
+    fi
+    TGZ="$SITE_DIR/browse/$TARGET.tgz"
+fi
+[[ -f "$TGZ" ]] || { fail "archive not found: $TGZ"; exit 1; }
+
+step "extracting $(basename "$TGZ") → $WORK"
+tar xzf "$TGZ" -C "$WORK"
+APP_DIR="$WORK/$TARGET"
+[[ -d "$APP_DIR" ]] || APP_DIR="$WORK"
+[[ -f "$APP_DIR/README.md" ]] || { fail "README.md missing from archive"; exit 1; }
+ok "extracted ($APP_DIR)"
+
+# -------- 2. extract the README's runnable blocks --------
+
+# One file per ```sh block, named NN--<section>.sh, in document order.
+# awk tracks the current `## ` heading; blocks under Run / Regenerate
+# are skipped (foreground server / needs the transpiler).
+BLOCKS="$WORK/.smoke-blocks"
+mkdir -p "$BLOCKS"
+awk -v dir="$BLOCKS" '
+    /^## /    { section = substr($0, 4) }
+    /^```sh$/ {
+        if (section != "Run" && section != "Regenerate") {
+            slug = section
+            gsub(/[^A-Za-z0-9]+/, "-", slug)
+            n++
+            file = sprintf("%s/%02d--%s.sh", dir, n, slug)
+            collecting = 1
+        }
+        next
+    }
+    /^```$/   { collecting = 0; next }
+    collecting { print > file }
+' "$APP_DIR/README.md"
+
+shopt -s nullglob
+block_files=("$BLOCKS"/*.sh)
+(( ${#block_files[@]} )) || { fail 'no runnable sh blocks found in README.md'; exit 1; }
+
+# -------- 3. run them, in order, from the archive root --------
+
+for f in "${block_files[@]}"; do
+    name="$(basename "$f" .sh)"
+    section="${name#*--}"
+    step "README § ${section//-/ }"
+    sed 's/^/    $ /' "$f"
+    (cd "$APP_DIR" && bash -euo pipefail "$f") || {
+        fail "README § ${section//-/ } failed"
+        exit 1
+    }
+    ok "README § ${section//-/ }"
+done
+
+step "smoke: $TARGET archive passes its own README"
