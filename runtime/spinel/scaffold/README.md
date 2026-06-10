@@ -9,7 +9,10 @@ the same blog into a native binary via
 [Spinel](https://github.com/matz/spinel).
 
 This README ships in `runtime/spinel/scaffold/` and is copied verbatim
-into each emitted spinel project.
+into the emitted spinel, ruby, and jruby projects — all three share
+this scaffold. The spinel sections apply only to the spinel target;
+the CRuby sections cover the ruby target (and jruby, which swaps the
+`sqlite3` gem for the JDBC variant).
 
 This is a working specimen, not a framework. Read it to see what
 "Rails-shape Ruby without metaprogramming" actually looks like
@@ -120,6 +123,11 @@ Rack/Puma dependency):
 | `make test` / `make lint` | thin wrappers around the corresponding `rake` tasks |
 | `make run` | one-shot CGI smoke (`REQUEST_METHOD=GET PATH_INFO=/articles ruby main.rb`) |
 | `make clean` | `rm -rf build/ static/` |
+
+Spinel-target builds (`make build`, `make spinel-test`) depend on
+current upstream spinel health — see
+[Spinel compatibility](#spinel-compatibility) for the live blocker
+list before proceeding. The CRuby (`rake`) targets are unaffected.
 
 ## Architecture
 
@@ -399,6 +407,15 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   human running through the demo is the validation.
 
 ### Spinel compatibility
+
+> **Check upstream status before building the spinel target.**
+> Spinel and this fixture co-evolve, and at any given moment the
+> spinel build or runtime may be blocked by open upstream issues
+> filed from this project. The live list is
+> [open matz/spinel issues authored by rubys](https://github.com/matz/spinel/issues?q=is%3Aissue%20state%3Aopen%20author%3Arubys);
+> if it's non-empty, the status claims below may not hold on
+> current spinel master. The CRuby target does not depend on
+> spinel and is unaffected.
 
 - Linter-clean across all 34 production files.
 - Two known soft-blockers exist as small CRuby-isms:

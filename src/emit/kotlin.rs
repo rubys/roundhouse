@@ -285,7 +285,7 @@ fn emit_main(app: &App) -> EmittedFile {
          \npackage roundhouse\n\
          \nfun main() {{\n\
          \x20\x20\x20\x20val dbPath = System.getenv(\"BLOG_DB\") ?: System.getenv(\"DATABASE_PATH\") ?: \"storage/development.sqlite3\"\n\
-         \x20\x20\x20\x20val port = (System.getenv(\"PORT\") ?: \"9000\").toInt()\n\
+         \x20\x20\x20\x20val port = (System.getenv(\"PORT\") ?: \"3000\").toInt()\n\
          \x20\x20\x20\x20val routes = mutableListOf<Route>(\n{}\n    )\n\
          \x20\x20\x20\x20val controllers: Map<String, () -> ActionControllerBase> = mapOf(\n{}\n    )\n\
          \x20\x20\x20\x20Server.start(dbPath, port, routes, controllers, {})\n\

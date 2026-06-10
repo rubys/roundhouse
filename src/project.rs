@@ -145,11 +145,12 @@ impl BuildTarget {
     }
 }
 
-/// Quick-start README for a transpile target. Written into the
-/// output directory by the `--target LANG` mode of the `roundhouse`
-/// binary, unless the file set already contains a `README.md` (the
-/// spinel and ruby targets ship a comprehensive scaffold README that
-/// must not be overwritten).
+/// Quick-start README for a transpile target. Injected into every
+/// file set by `target_files` (so both `--target` output and the
+/// `--site` archives carry it), unless the set already contains a
+/// `README.md` — the spinel/ruby/jruby targets ship a comprehensive
+/// scaffold README, and the Blog fixture its own, that must not be
+/// overwritten.
 ///
 /// Content is intentionally short: prerequisites, build, run, test,
 /// and the regenerate command. Target-specific specifics (port
@@ -161,7 +162,8 @@ pub fn target_readme(target: BuildTarget) -> String {
         BuildTarget::Blog => {
             "Source fixture, walked verbatim. Not a transpile output — no \
              build commands apply. This archive exists so consumers can \
-             download the input that Roundhouse transpiles.\n"
+             download the input that Roundhouse transpiles. (The Regenerate \
+             command below re-walks the fixture into this archive.)\n"
         }
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby => {
             // Should not reach: these targets ship a scaffold README
@@ -204,16 +206,21 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n"
         }
         BuildTarget::Go => {
+            // `go mod tidy` is mandatory: the emitted go.sum is an
+            // empty placeholder, so nothing resolves without it.
             "## Prerequisites\n\
-             - Go 1.21+\n\n\
+             - Go 1.24+\n\n\
              ## Build\n\
              ```sh\n\
-             go build ./...\n\
+             go mod tidy\n\
+             go build .\n\
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             go run .\n\
+             ./app\n\
              ```\n\n\
+             Or build the v2 binary explicitly: \
+             `go build -o server ./cmd/v2/ && ./server`\n\n\
              ## Test\n\
              ```sh\n\
              go test ./...\n\
@@ -311,10 +318,33 @@ pub fn target_readme(target: BuildTarget) -> String {
              runs in a `SharedWorker` context.\n"
         }
     };
+    // Every server target serves the same blog with the same env
+    // conventions (PORT, default 3000; Action Cable at /cable), so
+    // the "what you get" sentence lives here, not per target. Blog
+    // (source fixture) and TypescriptWorker (no standalone server)
+    // are the two non-server archives.
+    let serves = match target {
+        BuildTarget::Blog | BuildTarget::TypescriptWorker => "",
+        _ => {
+            "Running it serves the blog on http://localhost:3000 \
+             (set `PORT` to override), with live Turbo Stream \
+             updates over the `/cable` WebSocket.\n\n"
+        }
+    };
+    let attribution = match target {
+        BuildTarget::Blog => {
+            "The Rails source app that [Roundhouse]\
+             (https://rubys.github.io/roundhouse/) transpiles."
+        }
+        _ => {
+            "Transpiled from a Rails source app by [Roundhouse]\
+             (https://rubys.github.io/roundhouse/)."
+        }
+    };
     format!(
         "# Roundhouse → {name}\n\n\
-         Transpiled from a Rails source app by [Roundhouse]\
-         (https://rubys.github.io/roundhouse/).\n\n\
+         {attribution}\n\n\
+         {serves}\
          {body}\n\
          ## Regenerate\n\
          ```sh\n\
@@ -362,12 +392,30 @@ pub fn target_files(
     // self-contained-seedable (`sqlite3 <db> < db/seed.sql`) with no Ruby
     // — see e2e harness (scripts/e2e). spinel/ruby/jruby already carry it
     // via the scaffold walk; inject-if-absent is a no-op there.
-    if target == BuildTarget::Blog {
-        Ok(files)
+    let files = if target == BuildTarget::Blog {
+        files
     } else {
         let files = ensure_seed_sql(files)?;
-        Ok(ensure_static_assets(files, target))
+        ensure_static_assets(files, target)
+    };
+    Ok(ensure_readme(files, target))
+}
+
+/// Inject the quick-start README (`target_readme`) when the file set
+/// doesn't already carry one. No-ops for the scaffold targets
+/// (spinel/ruby/jruby ship the comprehensive scaffold README) and for
+/// Blog when the fixture has its own README (the archive is the
+/// verbatim source). Lives here rather than in the CLI so the
+/// `--site` archives and `--target` output carry the same README.
+fn ensure_readme(
+    mut files: Vec<(String, String)>,
+    target: BuildTarget,
+) -> Vec<(String, String)> {
+    if !files.iter().any(|(p, _)| p == "README.md") {
+        files.push(("README.md".to_string(), target_readme(target)));
+        files.sort_by(|a, b| a.0.cmp(&b.0));
     }
+    files
 }
 
 /// Inject prebuilt static assets (the compiled `tailwind.css`, and later

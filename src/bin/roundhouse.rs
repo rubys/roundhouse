@@ -6,9 +6,9 @@
 //!
 //!   `roundhouse --target LANG [INPUT] [-o OUT]`
 //!       Single-target transpile. Default INPUT=`.`, default
-//!       OUT=`./out/<lang>/`. Writes the emitted file set to OUT
-//!       and (unless the emit already includes one) a quick-start
-//!       README at OUT/README.md.
+//!       OUT=`./out/<lang>/`. Writes the emitted file set to OUT;
+//!       the set includes a quick-start README (injected by
+//!       `project::target_files` unless the target ships its own).
 //!
 //!   `roundhouse --site [INPUT] [-o OUT]`
 //!       Build the full GitHub Pages site: per-target archives
@@ -216,7 +216,7 @@ fn run_transpile(
     // first one.
     let (files_result, mut diags) =
         roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
-    let mut files = files_result?;
+    let files = files_result?;
 
     // Policy: unsupported-construct errors fail the transpile cleanly by
     // default. With --allow-unsupported they downgrade to warnings and
@@ -238,11 +238,6 @@ fn run_transpile(
             "{errors} unsupported construct(s) — rerun with --allow-unsupported \
              to emit stubs and write the full inventory"
         ));
-    }
-
-    let has_readme = files.iter().any(|(p, _)| p == "README.md");
-    if !has_readme {
-        files.push(("README.md".to_string(), project::target_readme(target)));
     }
 
     project::write_to_dir(&files, out)?;

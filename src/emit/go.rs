@@ -467,12 +467,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // `go build` / `go vet` won't resolve dependencies.
     files.push(emit_go_mod());
     files.push(emit_go_sum());
-    // README + root main.go template shim. Pre-Phase-6 the root
-    // main.go ran the legacy `app` package; with legacy retired it
-    // forwards to `cmd/v2/`. Kept as a `package main` file so
-    // `go build .` from the project root still produces a binary.
+    // Root main.go template shim. Pre-Phase-6 the root main.go ran
+    // the legacy `app` package; with legacy retired it forwards to
+    // `cmd/v2/`. Kept as a `package main` file so `go build .` from
+    // the project root still produces a binary. (README.md comes from
+    // project::target_readme, shared across targets.)
     files.push(emit_root_main());
-    files.push(emit_readme());
     files
 }
 
@@ -528,27 +528,3 @@ fn emit_root_main() -> EmittedFile {
     }
 }
 
-fn emit_readme() -> EmittedFile {
-    EmittedFile {
-        path: std::path::PathBuf::from("README.md"),
-        content: "# Generated Go App\n\n\
-                  Built by Roundhouse from a Rails source app. Run:\n\n\
-                  ```\n\
-                  go mod tidy\n\
-                  go build .\n\
-                  ./app\n\
-                  ```\n\n\
-                  Or build the v2 binary explicitly:\n\n\
-                  ```\n\
-                  go build -o server ./cmd/v2/\n\
-                  ./server\n\
-                  ```\n\n\
-                  The server listens on `:3000` (override with `$PORT`). It serves\n\
-                  the Tailwind-styled pages and mounts an Action Cable WebSocket at\n\
-                  `/cable`: model after-commit hooks broadcast Turbo Stream fragments\n\
-                  to subscribed browsers, so creates/updates/destroys appear live\n\
-                  without a page refresh. Uses github.com/coder/websocket (resolved\n\
-                  by `go mod tidy`).\n"
-            .to_string(),
-    }
-}
