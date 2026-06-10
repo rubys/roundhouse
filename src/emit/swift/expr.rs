@@ -58,6 +58,19 @@ thread_local! {
     /// Whether the method being emitted is an `init` of a parented
     /// class — `super(args)` becomes the designated `super.init(args)`.
     static INIT_SUPER: RefCell<bool> = const { RefCell::new(false) };
+    /// Whether an XCTest class is being emitted — message-only raises
+    /// (the inlined minitest assertions: `raise "…" if cond`) become
+    /// `throw RhTestFailure(…)` so XCTest reports a per-test failure
+    /// instead of fatalError trapping the whole run.
+    static IN_TEST_CLASS: RefCell<bool> = const { RefCell::new(false) };
+    /// Class → its `required init`'s (rendered param decl, forwarding
+    /// args, types-only signature key). A subclass declaring its OWN
+    /// designated init loses init inheritance, but a `required` init
+    /// must be re-provided — the emitter appends a forwarding shim
+    /// using this registry (skipped when the type signatures match:
+    /// the subclass init IS the required one).
+    static CLASS_INITS: RefCell<HashMap<String, (String, String, String)>> =
+        RefCell::new(HashMap::new());
     /// "Type.prop" keys for module/object-level accessors whose reads
     /// are property accesses, not calls (`ActiveRecord.adapter`).
     static OBJECT_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -129,6 +142,7 @@ pub(super) fn reset_registries() {
     CLASS_PARENTS.with(|m| m.borrow_mut().clear());
     ERROR_CLASSES.with(|m| m.borrow_mut().clear());
     METHOD_PARAMS.with(|m| m.borrow_mut().clear());
+    CLASS_INITS.with(|m| m.borrow_mut().clear());
 }
 
 /// Register a module/object-level accessor property ("Type.prop") whose
@@ -187,6 +201,31 @@ pub(super) fn set_error_class(flag: bool) {
 /// Flag the method being emitted as the init of a parented class.
 pub(super) fn set_init_super(flag: bool) {
     INIT_SUPER.with(|f| *f.borrow_mut() = flag);
+}
+
+/// Flag XCTest-class emission (assertion raises throw, not trap).
+pub(super) fn set_in_test_class(flag: bool) {
+    IN_TEST_CLASS.with(|f| *f.borrow_mut() = flag);
+}
+
+/// Register a class's `required init` signature (rendered param decl +
+/// forwarding args + types-only key).
+pub(super) fn register_class_init(class: String, decl: String, fwd: String, sig: String) {
+    CLASS_INITS.with(|m| {
+        m.borrow_mut().insert(class, (decl, fwd, sig));
+    });
+}
+
+/// The nearest STRICT ancestor's registered init signature.
+pub(super) fn ancestor_init_sig(class: &str) -> Option<(String, String, String)> {
+    let mut cur = CLASS_PARENTS.with(|m| m.borrow().get(class).cloned());
+    while let Some(c) = cur {
+        if let Some(sig) = CLASS_INITS.with(|m| m.borrow().get(&c).cloned()) {
+            return Some(sig);
+        }
+        cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
+    }
+    None
 }
 
 /// Flag module-enum emission (bare ivar assigns, static-var state).
@@ -1886,7 +1925,11 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
 fn emit_raise(value: &Expr) -> String {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. } => {
-            format!("fatalError({})", emit_expr(value))
+            if IN_TEST_CLASS.with(|f| *f.borrow()) {
+                format!("throw RhTestFailure({})", emit_expr(value))
+            } else {
+                format!("fatalError({})", emit_expr(value))
+            }
         }
         // `raise RecordNotFound` / `raise RecordNotFound.new(...)`.
         ExprNode::Const { path } => {
@@ -2050,6 +2093,11 @@ fn emit_send(
                 .cloned()
                 .unwrap_or_else(|| format!("\"{joined}\""));
             return format!("fatalError({msg})");
+        }
+        // Message-only raise: a throwing test failure inside an XCTest
+        // class (the inlined minitest assertions), a trap elsewhere.
+        if IN_TEST_CLASS.with(|f| *f.borrow()) {
+            return format!("throw RhTestFailure({})", args_s[0]);
         }
         return format!("fatalError({})", args_s[0]);
     }

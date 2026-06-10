@@ -207,6 +207,34 @@ jobs:
       - name: cargo test --test swift_toolchain -- --ignored
         run: cargo test --test swift_toolchain -- --ignored --nocapture
 
+  framework-tests-swift:
+    needs: generate-fixture
+    # Per-target framework-test conformance gate for the Swift target:
+    # transpiles runtime/ruby/test/**/*_test.rb to XCTest classes and runs
+    # them under `swift test`. Complements toolchain-swift (which only
+    # compiles real-blog): this one actually *runs* assertions, catching
+    # Swift-runtime adapter drift compile-clean can't see. Sibling of
+    # framework-tests-kotlin. NOTE: needs a full toolchain with XCTest —
+    # Linux toolchains bundle it; macOS would need Xcode (not just CLT).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.1'
+      - name: Install libsqlite3-dev (CSQLite systemLibrary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+      # Scoped to the green subset (inflector + router + view_helpers —
+      # the same three kotlin runs). The remaining two canonical gates
+      # (errors / ac_base) are wired in the test file but fail on the
+      # SAME emit-gap families kotlin defers (class-reflection
+      # `< StandardError`; controller-body typing). Drop names as those
+      # gaps close. Tracked in #34.
+      - name: cargo test --test framework_tests_swift (green subset)
+        run: cargo test --test framework_tests_swift -- --ignored --nocapture inflector router view_helpers
+
   # toolchain-typescript: tsc parity + node:test on real-blog,
   # under both the default (`node-sync`, better-sqlite3) profile
   # AND the `node-async` libsql profile that exercises async

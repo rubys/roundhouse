@@ -34,7 +34,20 @@ let package = Package(
                 "CSQLite",
             ]
         ),
-    ]
+"#;
+
+// Appended when the app carries test modules: XCTest target depending
+// on the executable (supported since Swift 5.5 — the test bundle
+// @testable-imports App; SwiftPM handles the executable's main). Only
+// declared when Tests/AppTests/ exists — SPM errors on a declared
+// target with no source directory.
+const PACKAGE_SWIFT_TEST_TARGET: &str = r#"        .testTarget(
+            name: "AppTests",
+            dependencies: ["App"]
+        ),
+"#;
+
+const PACKAGE_SWIFT_CLOSE: &str = r#"    ]
 )
 "#;
 
@@ -47,13 +60,17 @@ const CSQLITE_SHIM_H: &str = "#include <sqlite3.h>\n";
 
 const GITIGNORE: &str = "/.build/\n/storage/\n";
 
-/// The SPM scaffold files. Phase 1 emits only these; Phase 2+ adds the
-/// `Sources/App/` sources (models, controllers, views, runtime).
-pub fn scaffold() -> Vec<EmittedFile> {
+/// The SPM scaffold files (`has_tests` appends the AppTests target).
+pub fn scaffold(has_tests: bool) -> Vec<EmittedFile> {
+    let mut package = PACKAGE_SWIFT.to_string();
+    if has_tests {
+        package.push_str(PACKAGE_SWIFT_TEST_TARGET);
+    }
+    package.push_str(PACKAGE_SWIFT_CLOSE);
     vec![
         EmittedFile {
             path: PathBuf::from("Package.swift"),
-            content: PACKAGE_SWIFT.to_string(),
+            content: package,
         },
         EmittedFile {
             path: PathBuf::from("Sources/CSQLite/module.modulemap"),

@@ -173,6 +173,110 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
     Ok(emit_library_class(lc))
 }
 
+/// XCTest class from a lowered TestModule: file constants + hoisted
+/// inner helper classes (`Article < ActiveRecord::Base` declared inline
+/// in the test file — the companion-hoist the ts/crystal/kotlin gates
+/// do) + `final class <X>Test: XCTestCase` with THROWING test methods —
+/// the inlined minitest assertions (`raise "…" if cond`) emit as
+/// `throw RhTestFailure(…)`, which XCTest reports as a per-test failure
+/// (vs fatalError trapping the whole run). minitest's `setup` maps to
+/// XCTest's throwing `setUpWithError` hook.
+pub fn emit_test_class(
+    lc: &LibraryClass,
+    inner_classes: &[LibraryClass],
+    constants: &[(crate::ident::Symbol, Expr)],
+) -> String {
+    let class_name = type_name(lc.name.0.as_str());
+    let mut out = String::from("import XCTest\n@testable import App\n\n");
+
+    // File-scope constants (hoisted above the class).
+    for (name, value) in constants {
+        out.push_str(&format!("let {} = {}\n", name.as_str(), emit_expr(value)));
+    }
+    if !constants.is_empty() {
+        out.push('\n');
+    }
+
+    // Inner helper classes — emitted with the normal class walker (it
+    // sets its own emit context; the test-class setup below overrides).
+    register_classes(inner_classes);
+    for inner in inner_classes {
+        out.push_str(&emit_library_class(inner));
+        out.push('\n');
+    }
+
+    // Every test-class method throws (assertions + the helpers tests
+    // call) — register BEFORE emitting so signatures carry `throws` and
+    // self-send call sites get `try`.
+    for m in &lc.methods {
+        if m.kind == AccessorKind::Method {
+            super::expr::register_throws(format!("{class_name}.{}", camel(m.name.as_str())));
+        }
+    }
+    register_params_for(&class_name, &lc.methods);
+
+    // Body ivars (`@article` assigned in setup) — typed from assign
+    // stamps; non-defaultable references go implicitly-unwrapped
+    // (assigned in setUp before any test body reads them).
+    let mut body_ivars: BTreeMap<String, IvarInfo> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+
+    let mut all_props: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+    out.push_str(&format!("final class {class_name}: XCTestCase {{\n"));
+    for (n, info) in &body_ivars {
+        all_props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::Untyped));
+        match (&info.ty, info.saw_nil) {
+            (Some(t), false) => match try_default_for(t) {
+                Some(d) => out.push_str(&format!("    var {n}: {} = {d}\n", swift_ty(t))),
+                None => out.push_str(&format!("    var {n}: {}!\n", swift_ty(t))),
+            },
+            (Some(t), true) => {
+                let mut st = swift_ty(t);
+                if !st.ends_with('?') {
+                    st.push('?');
+                }
+                out.push_str(&format!("    var {n}: {st} = nil\n"));
+            }
+            (None, _) => out.push_str(&format!("    var {n}: Any? = nil\n")),
+        }
+    }
+    if !body_ivars.is_empty() {
+        out.push('\n');
+    }
+
+    super::expr::set_instance_prop_types(all_props);
+    super::expr::set_current_class(&class_name);
+    super::expr::set_in_module(false);
+    super::expr::set_error_class(false);
+    super::expr::set_in_test_class(true);
+    let ctx = ClassCtx { name: class_name.clone(), has_parent: false };
+
+    for m in &lc.methods {
+        if m.receiver != MethodReceiver::Instance || m.kind != AccessorKind::Method {
+            continue;
+        }
+        if m.name.as_str() == "initialize" {
+            continue;
+        }
+        let rendered = if m.name.as_str() == "setup" {
+            emit_method_in(m, false, &ctx).replacen(
+                "func setup() throws",
+                "override func setUpWithError() throws",
+                1,
+            )
+        } else {
+            emit_method_in(m, false, &ctx)
+        };
+        out.push_str(&indent_method(&rendered));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    super::expr::set_in_test_class(false);
+    out
+}
+
 /// Class-level accessor pairs (`class << self; attr_accessor :x`) —
 /// name → type, taken from the reader's return (or writer's param).
 fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
@@ -263,6 +367,17 @@ pub fn register_classes(lcs: &[LibraryClass]) {
             statics.insert("name".to_string(), "String".to_string());
         }
         super::expr::register_static_methods(cls.clone(), statics);
+        // The class's `required init` signature, for subclass
+        // forwarding shims (a subclass with its OWN designated init
+        // must still re-provide the inherited required init).
+        if let Some(init) = lc
+            .methods
+            .iter()
+            .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize")
+        {
+            let (decl, fwd, sig) = render_params(init);
+            super::expr::register_class_init(cls.clone(), decl, fwd, sig);
+        }
         if let Some(p) = &lc.parent {
             let pn = p.0.as_str().rsplit("::").next().unwrap_or("");
             if matches!(pn, "StandardError" | "RuntimeError" | "Exception") {
@@ -536,6 +651,26 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // `#{name}` in NotImplementedError messages reads Ruby's
     // `Class#name` — synthesize it when referenced and not defined
     // (Ruby-qualified name, per class).
+    // A subclass that declared its OWN designated init lost init
+    // inheritance — but an ancestor's `required init` must still be
+    // provided. Append a forwarding shim when the signatures differ
+    // (identical-signature inits — the models' initialize(attrs) — ARE
+    // the required init already).
+    if let Some(own_init) = lc
+        .methods
+        .iter()
+        .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize")
+    {
+        if let Some((anc_decl, anc_fwd, anc_sig)) = super::expr::ancestor_init_sig(&class_name) {
+            let (_, _, own_sig) = render_params(own_init);
+            if own_sig != anc_sig {
+                out.push_str(&format!(
+                    "    required init({anc_decl}) {{\n        super.init({anc_fwd})\n    }}\n"
+                ));
+            }
+        }
+    }
+
     let defines_name = lc.methods.iter().any(|m| m.name.as_str() == "name");
     let references_name = lc.methods.iter().any(|m| references_class_name(&m.body));
     if references_name && !defines_name {
@@ -581,17 +716,25 @@ fn emit_subscript(
     needs_override: bool,
 ) -> String {
     let model = getter.or(setter).expect("subscript needs at least one of []/[]=");
-    let (param_name, param_ty) = match m_sig_params(model).and_then(|p| p.first()) {
+    let (param_name, mut param_ty) = match m_sig_params(model).and_then(|p| p.first()) {
         Some(p) => (camel(p.name.as_str()), swift_ty(&p.ty)),
         None => ("name".to_string(), "String".to_string()),
     };
-    let elem_ty = match getter.and_then(m_sig_ret) {
+    let mut elem_ty = match getter.and_then(m_sig_ret) {
         Some(t) if !matches!(t, Ty::Nil) => swift_ty(&t),
         _ => setter
             .and_then(m_sig_params)
             .and_then(|p| p.get(1).map(|p| swift_ty(&p.ty)))
             .unwrap_or_else(|| "Any?".to_string()),
     };
+    // An override must MATCH the AR Base indexer's signature exactly
+    // (`(String) -> Any?`) — an untyped test-scope `[]` would render
+    // `(Any?) -> Any?` and fail to override. The same key→String pin
+    // the Kotlin gate needed.
+    if needs_override {
+        param_ty = "String".to_string();
+        elem_ty = "Any?".to_string();
+    }
     let mut out = format!(
         "{}subscript({param_name}: {param_ty}) -> {elem_ty} {{\n",
         if needs_override { "override " } else { "" }
@@ -599,6 +742,10 @@ fn emit_subscript(
     if let Some(g) = getter {
         begin_method(&g.body, true);
         out.push_str(&format!("    get {{\n{}\n    }}\n", indent4(&indent4(&emit_body(&g.body, true, None)))));
+    } else if needs_override {
+        // An override can't drop an accessor the ancestor has —
+        // delegate to super (Ruby's inheritance semantics).
+        out.push_str(&format!("    get {{ super[{param_name}] }}\n"));
     }
     if let Some(s) = setter {
         begin_method(&s.body, false);
@@ -613,6 +760,8 @@ fn emit_subscript(
             "    set {{\n{alias}{}\n    }}\n",
             indent4(&indent4(&body))
         ));
+    } else if needs_override {
+        out.push_str(&format!("    set {{ super[{param_name}] = newValue }}\n"));
     }
     out.push_str("}\n");
     out
@@ -683,6 +832,38 @@ fn instance_prop_names(lc: &LibraryClass) -> std::collections::HashSet<String> {
     }
     props.extend(ivars.keys().cloned());
     props
+}
+
+/// A method's rendered (param decl, forwarding args, type-signature
+/// key) — the same formatting `emit_method_impl` uses, factored for
+/// the init-shim registry. The signature KEY is types-only: Swift
+/// overload identity ignores internal param names and defaults
+/// (`init(_ _attrs:)` and `init(_ attrs:)` are both `init(_:)`).
+fn render_params(m: &MethodDef) -> (String, String, String) {
+    let sig_params = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) => Some(params),
+        _ => None,
+    };
+    let mut types: Vec<String> = Vec::new();
+    let decl: Vec<String> = m
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let pn = camel(p.name.as_str());
+            let ty = sig_params
+                .and_then(|sp| sp.get(i))
+                .map(|sp| swift_ty(&sp.ty))
+                .unwrap_or_else(|| "Any?".to_string());
+            types.push(ty.clone());
+            match &p.default {
+                Some(d) => format!("_ {pn}: {ty} = {}", emit_expr(d)),
+                None => format!("_ {pn}: {ty}"),
+            }
+        })
+        .collect();
+    let fwd: Vec<String> = m.params.iter().map(|p| camel(p.name.as_str())).collect();
+    (decl.join(", "), fwd.join(", "), types.join(", "))
 }
 
 /// Module-context method emit (enums use `static`, no overrides).
