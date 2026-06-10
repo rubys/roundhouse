@@ -492,21 +492,10 @@ fn coerce_for_prop(prop_raw: &str, value: &Expr, val: String) -> String {
             None => true,
             Some(t) => matches!(t, Ty::Untyped | Ty::Var { .. }),
         };
-    // A class-typed prop assigned a call whose EMITTED return type is a
-    // base class (`Article.find` inherits Base's
-    // `-> ActiveRecordBase`) — the IR believes the model type (typed
-    // registry, which is why it inserted no Cast), but the Swift surface
-    // is the base.
-    let class_widened = if let Ty::Class { id, .. } = &ty {
-        let want = super::naming::type_name(id.0.as_str());
-        emitted_static_ret(value).map_or(false, |ret| {
-            let ret = ret.trim_end_matches('?');
-            !ret.is_empty() && ret != want
-        })
-    } else {
-        false
-    };
-    if !surface_untrusted && !class_widened {
+    // (Covariant static-call widening — `self.article = Article.find`
+    // — is handled at the CALL SITE by coerce_send_result, so the prop
+    // path only handles the untyped-surface cases.)
+    if !surface_untrusted {
         return val;
     }
     match ty {
@@ -547,6 +536,82 @@ fn recv_is_hash(r: &Expr) -> bool {
         return INSTANCE_PROP_TYPES.with(|m| m.borrow().get(&n).map_or(false, ty_is_hash));
     }
     false
+}
+
+/// Call-site covariance coercion: the IR stamps `Article.find(...)` /
+/// `Article.last()` with the MODEL type (typed registry — which is why
+/// the lowerer inserts no Cast), but the EMITTED signature is inherited
+/// from Base and returns ActiveRecordBase(?). When they disagree and
+/// the stamped type descends from the emitted one, downcast the whole
+/// call — covering return positions, member chains
+/// (`Article.last().title`), and argument slots uniformly.
+fn coerce_send_result(
+    rendered: String,
+    recv: Option<&Expr>,
+    method: &str,
+    result_ty: Option<&crate::ty::Ty>,
+) -> String {
+    use crate::ty::Ty;
+    // Only static Const-receiver calls have registered emitted returns.
+    let Some(r) = recv else { return rendered };
+    if !matches!(&*r.node, ExprNode::Const { .. }) || method == "new" {
+        return rendered;
+    }
+    let ExprNode::Const { path } = &*r.node else { return rendered };
+    let cls = super::naming::type_name(
+        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+    );
+    let Some(emitted) = ancestor_static_ret_incl_self(&cls, &camel(method)) else {
+        return rendered;
+    };
+    let emitted_base = emitted.trim_end_matches('?');
+    if emitted_base.is_empty() {
+        return rendered;
+    }
+    // Container case: the inherited signature returns `[Base]` (the
+    // widened-container override emit — `Article.all()` is declared
+    // `-> [ActiveRecordBase]`); recover the narrow element type from
+    // the stamp, falling back to the receiver class.
+    if let Some(ei) = emitted_base.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let want_inner = match result_ty {
+            Some(Ty::Array { elem }) => match &**elem {
+                Ty::Class { id, .. } => Some(super::naming::type_name(id.0.as_str())),
+                _ => None,
+            },
+            _ => Some(cls.clone()),
+        };
+        if let Some(wi) = want_inner {
+            if wi != ei && is_same_or_descendant(&wi, ei) {
+                return format!("({rendered} as! [{wi}])");
+            }
+        }
+        return rendered;
+    }
+    // The wanted type: the IR's stamped model type when present —
+    // falling back to the RECEIVER class itself when it descends from
+    // the emitted base (Ruby's `-> instance` contract: `Comment.create`
+    // yields a Comment even when the stamp is missing).
+    let want = match result_ty {
+        Some(Ty::Class { id, .. }) => super::naming::type_name(id.0.as_str()),
+        Some(Ty::Union { variants }) => {
+            let non_nil: Vec<&Ty> =
+                variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+            match non_nil.as_slice() {
+                [Ty::Class { id, .. }] => super::naming::type_name(id.0.as_str()),
+                _ => cls.clone(),
+            }
+        }
+        _ => cls.clone(),
+    };
+    if emitted_base == want {
+        return rendered;
+    }
+    // Coerce only the genuinely-covariant case (the wanted type
+    // descends from the emitted base type).
+    if is_same_or_descendant(&want, emitted_base) {
+        return format!("({rendered} as! {want})");
+    }
+    rendered
 }
 
 /// The EMITTED return type of a static call (`X.m(...)`) — the
@@ -1069,7 +1134,8 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(*op, left, right, e),
         ExprNode::Send { recv, method, args, block, .. } => {
-            emit_send(recv.as_ref(), method.as_str(), args, block.as_ref())
+            let rendered = emit_send(recv.as_ref(), method.as_str(), args, block.as_ref());
+            coerce_send_result(rendered, recv.as_ref(), method.as_str(), e.ty.as_ref())
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             // A value-typed If with simple branches is Ruby's ternary in

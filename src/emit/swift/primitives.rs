@@ -102,6 +102,18 @@ enum Db {
         dbPath = path
     }
 
+    // Test mode: fresh in-memory DB + schema, replacing this thread's
+    // connection. Called from RoundhouseTestCase.setUpWithError before
+    // every test (XCTest runs tests serially on one thread, so the
+    // thread-confined connection IS the test's connection).
+    static func setupTestDb(_ schema: String) {
+        dbPath = ":memory:"
+        tlConn.currentValue = nil
+        if !schema.isEmpty {
+            exec(schema)
+        }
+    }
+
     static func exec(_ sql: String) {
         let c = conn()
         guard sqlite3_exec(c.handle, sql, nil, nil, nil) == SQLITE_OK else {

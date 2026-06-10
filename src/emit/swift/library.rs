@@ -224,7 +224,9 @@ pub fn emit_test_class(
     }
 
     let mut all_props: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
-    out.push_str(&format!("final class {class_name}: XCTestCase {{\n"));
+    // RoundhouseTestCase (RhTestSupport.swift): XCTestCase + the per-test
+    // DB-reset/fixture-reload hook + the controller-test dispatch surface.
+    out.push_str(&format!("final class {class_name}: RoundhouseTestCase {{\n"));
     for (n, info) in &body_ivars {
         all_props.insert(n.clone(), info.ty.clone().unwrap_or(Ty::Untyped));
         match (&info.ty, info.saw_nil) {
@@ -261,11 +263,20 @@ pub fn emit_test_class(
             continue;
         }
         let rendered = if m.name.as_str() == "setup" {
-            emit_method_in(m, false, &ctx).replacen(
-                "func setup() throws",
-                "override func setUpWithError() throws",
-                1,
-            )
+            // minitest setup → XCTest's throwing hook, chaining to the
+            // base's DB-reset/fixture-reload FIRST (override replaces;
+            // explicit super keeps the reset).
+            emit_method_in(m, false, &ctx)
+                .replacen(
+                    "func setup() throws {",
+                    "override func setUpWithError() throws {\n    try super.setUpWithError()",
+                    1,
+                )
+                .replacen(
+                    "func setup() {",
+                    "override func setUpWithError() throws {\n    try super.setUpWithError()",
+                    1,
+                )
         } else {
             emit_method_in(m, false, &ctx)
         };
@@ -347,15 +358,23 @@ pub fn register_classes(lcs: &[LibraryClass]) {
         }
         super::expr::register_class_methods(cls.clone(), methods);
         super::expr::register_class_props(cls.clone(), instance_prop_names(lc));
+        // Parent edge FIRST — the statics registration below resolves
+        // effective (override-rewritten) return types via the ancestor
+        // walk.
+        if let Some(p) = &lc.parent {
+            let pn = p.0.as_str().rsplit("::").next().unwrap_or("");
+            if matches!(pn, "StandardError" | "RuntimeError" | "Exception") {
+                super::expr::register_error_class(cls.clone());
+            } else {
+                super::expr::register_class_parent(cls.clone(), type_name(p.0.as_str()));
+            }
+        }
         let mut statics: std::collections::HashMap<String, String> = lc
             .methods
             .iter()
             .filter(|m| m.receiver == MethodReceiver::Class && m.kind == AccessorKind::Method)
             .map(|m| {
-                let ret = match m_sig_ret(m) {
-                    Some(t) if !matches!(t, Ty::Nil) => swift_ty(&t),
-                    _ => String::new(),
-                };
+                let ret = effective_static_ret(&cls, m);
                 (camel(m.name.as_str()), ret)
             })
             .collect();
@@ -377,14 +396,6 @@ pub fn register_classes(lcs: &[LibraryClass]) {
         {
             let (decl, fwd, sig) = render_params(init);
             super::expr::register_class_init(cls.clone(), decl, fwd, sig);
-        }
-        if let Some(p) = &lc.parent {
-            let pn = p.0.as_str().rsplit("::").next().unwrap_or("");
-            if matches!(pn, "StandardError" | "RuntimeError" | "Exception") {
-                super::expr::register_error_class(cls.clone());
-            } else {
-                super::expr::register_class_parent(cls.clone(), type_name(p.0.as_str()));
-            }
         }
         // Throws registration to a FIXPOINT: a method calling a sibling
         // that throws (processAction → create) becomes throwing itself.
@@ -774,6 +785,37 @@ fn m_sig_params(m: &MethodDef) -> Option<&Vec<crate::ty::Param>> {
     }
 }
 
+/// The return type a static method is EMITTED with — normally its own,
+/// but a container-covariant narrowing ([Article] vs the ancestor's
+/// [ActiveRecordBase]) is widened back to the ancestor's. Swift treats a
+/// narrowed container return as an overload, not an override, so
+/// `self.method()` in an inherited body binds statically to the ancestor
+/// copy (the unassigned-adapter crash). Emitting with the ancestor's
+/// return makes it a true override — the body's narrow array upcasts
+/// implicitly, and call sites recover the narrow type via
+/// coerce_send_result.
+fn effective_static_ret(cls: &str, m: &MethodDef) -> String {
+    let own = match m_sig_ret(m) {
+        Some(t) if !matches!(t, Ty::Nil) => swift_ty(&t),
+        _ => String::new(),
+    };
+    widened_container_ret(cls, &camel(m.name.as_str()), &own).unwrap_or(own)
+}
+
+fn widened_container_ret(cls: &str, name: &str, own: &str) -> Option<String> {
+    let anc = super::expr::ancestor_static_ret(cls, name)?;
+    if anc == own {
+        return None;
+    }
+    let ai = anc.strip_prefix('[')?.strip_suffix(']')?;
+    let oi = own.strip_prefix('[')?.strip_suffix(']')?;
+    if super::expr::is_same_or_descendant(oi, ai) {
+        Some(anc.clone())
+    } else {
+        None
+    }
+}
+
 fn m_sig_ret(m: &MethodDef) -> Option<Ty> {
     match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
@@ -922,13 +964,22 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
     };
     let returns_value =
         !is_init && !force_unit && matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
-    let ret_clause = if force_unit || is_init {
+    let my_ret = match &ret_ty {
+        Some(t) if !matches!(t, Ty::Nil) => swift_ty(t),
+        _ => String::new(),
+    };
+    // Container-covariant returns are emitted with the ANCESTOR's type so
+    // the method is a true override (see effective_static_ret).
+    let widened = match ctx {
+        Some(c) if is_static && !my_ret.is_empty() => {
+            widened_container_ret(&c.name, &name, &my_ret)
+        }
+        _ => None,
+    };
+    let ret_clause = if force_unit || is_init || my_ret.is_empty() {
         String::new()
     } else {
-        match &ret_ty {
-            Some(t) if !matches!(t, Ty::Nil) => format!(" -> {}", swift_ty(t)),
-            _ => String::new(),
-        }
+        format!(" -> {}", widened.as_deref().unwrap_or(&my_ret))
     };
 
     begin_method(&m.body, returns_value);
@@ -991,15 +1042,10 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
         ""
     };
     let override_kw = match ctx {
+        Some(_) if is_static && widened.is_some() => "override ",
         Some(c) if is_static => {
-            // Covariant CLASS returns override legally; covariant
-            // CONTAINER returns can only shadow (an overload the typed
-            // assignment context resolves) — `override` there is a
-            // compile error.
-            let my_ret = match &ret_ty {
-                Some(t) if !matches!(t, Ty::Nil) => swift_ty(t),
-                _ => String::new(),
-            };
+            // Covariant CLASS returns override legally (the widened
+            // branch above handles covariant CONTAINER returns).
             match super::expr::ancestor_static_ret(&c.name, &name) {
                 Some(anc) if anc == my_ret || super::expr::is_same_or_descendant(&my_ret, &anc) => {
                     "override "

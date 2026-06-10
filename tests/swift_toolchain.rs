@@ -94,3 +94,61 @@ fn real_blog_swift_builds() {
     generate_project(fixture, &scratch);
     assert_swift_builds("real-blog", &scratch);
 }
+
+/// Execution leg: `swift test` over the emitted project runs the
+/// TRANSPILED real-blog suite (article/comment model tests + controller
+/// dispatch tests) under XCTest against an in-memory SQLite database —
+/// compile-clean is necessary but not sufficient; this catches runtime
+/// contract drift (fixture loading, Router.match dispatch, covariant
+/// `class func` dispatch through inherited Base bodies).
+///
+/// Same prerequisites as the build leg PLUS XCTest, which Linux
+/// toolchains bundle but the macOS Command Line Tools do NOT. On macOS,
+/// point at a full Xcode per-invocation (no xcode-select needed):
+///
+///     DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+///         cargo test --test swift_toolchain -- --ignored --nocapture
+#[test]
+#[ignore]
+fn real_blog_swift_tests_pass() {
+    let fixture = Path::new("fixtures/real-blog");
+    let scratch = scratch_dir("real-blog-test");
+    generate_project(fixture, &scratch);
+
+    let output = Command::new("swift")
+        .arg("test")
+        .current_dir(&scratch)
+        .output()
+        .expect("run swift test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "swift test failed on emitted real-blog at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        stdout,
+        stderr,
+    );
+
+    // Defense against issue #4: `swift test` exits 0 when zero XCTest
+    // methods are discovered. real-blog carries 21 tests across 4
+    // suites; require a healthy floor so emit-routing can't silently
+    // drop a whole test class.
+    let executed = parse_executed_count(&stdout).or_else(|| parse_executed_count(&stderr));
+    assert!(
+        executed.map_or(false, |n| n >= 21),
+        "expected >= 21 real-blog tests to run, got {executed:?}\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+}
+
+/// Extract N from the LAST XCTest "Executed N test(s)" summary line (the
+/// all-tests rollup).
+fn parse_executed_count(s: &str) -> Option<usize> {
+    let idx = s.rfind("Executed ")?;
+    let rest = &s[idx + "Executed ".len()..];
+    let end = rest.find(' ')?;
+    rest[..end].parse::<usize>().ok()
+}

@@ -181,12 +181,14 @@ jobs:
       - name: cargo test --test kotlin_toolchain -- --ignored
         run: cargo test --test kotlin_toolchain -- --ignored --nocapture
 
-  # toolchain-swift: emit the real-blog Swift/SPM project and `swift build`
+  # toolchain-swift: emit the real-blog Swift/SPM project, `swift build`
   # it (full type-check + link against the real Hummingbird + swift-nio +
   # CSQLite dependency graph — the analog of toolchain-kotlin's
-  # compileKotlin). setup-swift provides the toolchain; libsqlite3-dev is
-  # the CSQLite systemLibrary's header + link target (the plan's Linux
-  # packaging caveat). Tracked in #34.
+  # compileKotlin), and `swift test` it — the execution leg running the
+  # transpiled real-blog model + controller suite under XCTest (bundled
+  # in Linux toolchains). setup-swift provides the toolchain;
+  # libsqlite3-dev is the CSQLite systemLibrary's header + link target
+  # (the plan's Linux packaging caveat). Tracked in #34.
   toolchain-swift:
     needs: generate-fixture
     runs-on: ubuntu-latest
