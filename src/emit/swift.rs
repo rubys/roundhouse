@@ -65,14 +65,70 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .map(|v| crate::lower::lower_view_to_library_class(v, app))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
-    let (model_lcs, _registry) =
+    let (model_lcs, model_registry) =
         crate::lower::lower_models_with_registry(&app.models, &app.schema, view_extras);
     library::register_classes(&model_lcs);
     for lc in &model_lcs {
         files.push(library::emit_class_file(lc));
     }
 
-    // Phase 3+: transpiled framework runtime + hand-written primitives +
-    // controllers/views.
+    // Views → Sources/App/app/views/<Name>.swift. Each ERB template
+    // lowers to its own `Views::<Plural>` LibraryClass carrying one
+    // render method; re-lower here with the model registry (+ route
+    // helper / importmap extras) so view bodies dispatch model
+    // attributes and route helpers type. Swift enums can't be reopened
+    // (same as Kotlin objects), so templates sharing a module merge into
+    // one `enum Articles { ... }` — the name the broadcast callbacks and
+    // controllers call (`Articles.article(self)`).
+    let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+        model_registry.into_iter().collect();
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
+    if let Some(f) = library::emit_function_module(&route_helper_funcs) {
+        files.push(f);
+    }
+    // Importmap pins/entry → `enum Importmap` (the layout's
+    // `javascript_importmap_tags` lowers to `Importmap.pins()`/`.entry()`).
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&importmap_funcs));
+    if let Some(f) = library::emit_function_module(&importmap_funcs) {
+        files.push(f);
+    }
+    let view_lcs =
+        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras.clone());
+    // Jbuilder (json-format) views lower to `<name>_json` methods on the
+    // same `Views::<Plural>` module; merge them into the html view enums
+    // so a controller's JSON branch resolves `Articles.indexJson(...)`.
+    let jbuilder_lcs = crate::lower::lower_jbuilder_to_library_classes(
+        &app.views,
+        app,
+        view_lower_extras.clone(),
+    );
+    let mut all_view_lcs = view_lcs;
+    all_view_lcs.extend(jbuilder_lcs);
+    for lc in merge_by_module(all_view_lcs) {
+        let last = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from(format!("Sources/App/app/views/{last}.swift")),
+            content: format!("import Foundation\n\n{}", library::emit_library_class(&lc)),
+        });
+    }
+
+    // Phase 5+: controllers + Server/Main.
     files
+}
+
+/// Swift enums can't be reopened — templates sharing a `Views::<Plural>`
+/// module collapse into one LibraryClass (concat methods, first-seen
+/// order).
+fn merge_by_module(lcs: Vec<crate::dialect::LibraryClass>) -> Vec<crate::dialect::LibraryClass> {
+    let mut merged: Vec<crate::dialect::LibraryClass> = Vec::new();
+    for lc in lcs {
+        if let Some(existing) = merged.iter_mut().find(|m| m.name == lc.name) {
+            existing.methods.extend(lc.methods);
+        } else {
+            merged.push(lc);
+        }
+    }
+    merged
 }

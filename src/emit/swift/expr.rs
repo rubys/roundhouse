@@ -93,6 +93,19 @@ thread_local! {
     /// nil-guard — reads force-unwrap (Kotlin's `!!` smart-cast
     /// cluster, Swift's `!`).
     static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// The current method's parameter names — the view lowerer renders a
+    /// partial local as a bare Send in arg position but a Var as a
+    /// receiver; a bare zero-arg send naming a param emits the
+    /// identifier, not a call.
+    static PARAM_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// The current method's parameter types (camelCased name → Ty) —
+    /// the optionality fallback when a Var read carries no stamped ty.
+    static PARAM_TYPES: RefCell<HashMap<String, crate::ty::Ty>> = RefCell::new(HashMap::new());
+    /// "Receiver.method" → ORDERED camelCased param names. Decides
+    /// whether a call-site `kwargs: true` hash splats positionally into
+    /// the callee's parameter order (Swift funcs here are
+    /// underscore-labeled, so named args don't apply).
+    static METHOD_PARAMS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
     /// Error-conforming class names — a `raise` of one becomes a real
     /// `throw`; anything else stays `fatalError`.
     static ERROR_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -110,6 +123,7 @@ pub(super) fn reset_registries() {
     THROWS_METHODS.with(|m| m.borrow_mut().clear());
     CLASS_PARENTS.with(|m| m.borrow_mut().clear());
     ERROR_CLASSES.with(|m| m.borrow_mut().clear());
+    METHOD_PARAMS.with(|m| m.borrow_mut().clear());
 }
 
 /// Register a module/object-level accessor property ("Type.prop") whose
@@ -192,6 +206,80 @@ pub(super) fn declare_local(name: &str) {
 /// `(name, swift_ty, default)` triples.
 pub(super) fn take_hoisted() -> Vec<(String, String, String)> {
     HOISTED.with(|h| std::mem::take(&mut *h.borrow_mut()))
+}
+
+/// Install the current method's parameter names + types (see
+/// `PARAM_NAMES` / `PARAM_TYPES`).
+pub(super) fn set_param_names(params: Vec<(String, Option<crate::ty::Ty>)>) {
+    PARAM_NAMES.with(|p| *p.borrow_mut() = params.iter().map(|(n, _)| n.clone()).collect());
+    PARAM_TYPES.with(|p| {
+        *p.borrow_mut() =
+            params.into_iter().filter_map(|(n, t)| t.map(|t| (n, t))).collect()
+    });
+}
+
+fn is_param(method: &str) -> bool {
+    PARAM_NAMES.with(|p| p.borrow().contains(&camel(method)))
+}
+
+/// Register a callable's ordered parameter names ("Receiver.method").
+pub(super) fn register_method_params(key: String, params: Vec<String>) {
+    METHOD_PARAMS.with(|m| {
+        m.borrow_mut().insert(key, params);
+    });
+}
+
+fn method_params_for(receiver: &str, method: &str) -> Option<Vec<String>> {
+    METHOD_PARAMS.with(|m| m.borrow().get(&format!("{receiver}.{}", camel(method))).cloned())
+}
+
+/// Render a call's arguments. A trailing `kwargs: true` hash splats
+/// POSITIONALLY into the callee's registered parameter order
+/// (`truncate(body, length: 100)` → `truncate(body, 100)`); every kwarg
+/// must land on a tail parameter or the hash stays a map literal — so a
+/// genuine sym-keyed map arg (an unregistered primitive like
+/// `Broadcasts.append`) is never miscaptured.
+fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
+    if let Some((last, head)) = args.split_last() {
+        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+            if !entries.is_empty() {
+                let keys: Option<Vec<String>> = entries
+                    .iter()
+                    .map(|(k, _)| match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            Some(camel(value.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let recv_type = recv.and_then(|r| match &*r.node {
+                    ExprNode::Const { path } => Some(super::naming::type_name(
+                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+                    )),
+                    _ => None,
+                });
+                if let (Some(keys), Some(rt)) = (keys, recv_type) {
+                    if let Some(params) = method_params_for(&rt, method) {
+                        let tail = &params[head.len().min(params.len())..];
+                        let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
+                        let mut consumed = 0;
+                        for p in tail {
+                            if let Some(idx) = keys.iter().position(|k| k == p) {
+                                parts.push(emit_expr(&entries[idx].1));
+                                consumed += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if consumed == keys.len() {
+                            return parts.join(", ");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
 }
 
 /// Register a class's instance-method name set (camelCased).
@@ -716,7 +804,49 @@ fn children(e: &Expr) -> Vec<&Expr> {
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = try_string_builder(e) {
+        return s;
+    }
     emit_node(&e.node, e)
+}
+
+/// The view lowerer's StringBuilder IrHints. Swift's spelling is plain
+/// string accumulation — `var io = ""` / `io += chunk` / `io` (String
+/// append is amortized O(1)); mirrors `kotlin::expr::try_string_builder`.
+/// Non-hinted sites fall through to the normal walkers.
+fn try_string_builder(e: &Expr) -> Option<String> {
+    match e.hint? {
+        crate::expr::IrHint::StringBuilderInit => {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
+                let n = camel(name.as_str());
+                DECLARED.with(|d| {
+                    d.borrow_mut().insert(n.clone());
+                });
+                return Some(format!("var {n} = \"\""));
+            }
+            None
+        }
+        crate::expr::IrHint::StringBuilderAppend => {
+            if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+                if method.as_str() == "<<" && args.len() == 1 {
+                    if let ExprNode::Var { name, .. } = &*r.node {
+                        return Some(format!(
+                            "{} += {}",
+                            camel(name.as_str()),
+                            emit_expr(&args[0])
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        crate::expr::IrHint::StringBuilderResult => {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                return Some(camel(name.as_str()));
+            }
+            None
+        }
+    }
 }
 
 /// Render a top-level runtime constant's value. Non-empty hash/array
@@ -750,6 +880,38 @@ fn indent(s: &str) -> String {
 fn is_empty_branch(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// The branch's single value-expression, when it is one (possibly
+/// wrapped in a one-element Seq) — the shape a ternary can carry.
+fn single_value_expr(e: &Expr) -> Option<&Expr> {
+    match &*e.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => single_value_expr(&exprs[0]),
+        ExprNode::Seq { .. }
+        | ExprNode::If { .. }
+        | ExprNode::While { .. }
+        | ExprNode::Case { .. }
+        | ExprNode::Assign { .. }
+        | ExprNode::OpAssign { .. }
+        | ExprNode::Return { .. }
+        | ExprNode::Raise { .. }
+        | ExprNode::Super { .. }
+        | ExprNode::Next { .. }
+        | ExprNode::Break { .. } => None,
+        // Assignment in Send spelling (`x[k] = v`, `recv.foo = v`) is a
+        // statement, not a ternary-carriable value — and so is an
+        // iteration (`each` returns its receiver in Ruby, typing the If
+        // as a value, but the Swift forEach is Void).
+        ExprNode::Send { method, block, .. }
+            if block.is_some()
+                || method.as_str() == "[]="
+                || (method.as_str().ends_with('=')
+                    && !matches!(method.as_str(), "==" | "!=" | "<=" | ">=")) =>
+        {
+            None
+        }
+        _ => Some(e),
+    }
 }
 
 fn emit_node(n: &ExprNode, e: &Expr) -> String {
@@ -786,6 +948,23 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             emit_send(recv.as_ref(), method.as_str(), args, block.as_ref())
         }
         ExprNode::If { cond, then_branch, else_branch } => {
+            // A value-typed If with simple branches is Ruby's ternary in
+            // value position (arg slots, interpolations) — Swift's `if`
+            // is a statement there (unlike Kotlin), so emit `c ? a : b`.
+            if matches!(e.ty.as_ref(), Some(t) if !matches!(t, crate::ty::Ty::Nil))
+                && !is_empty_branch(else_branch)
+            {
+                if let (Some(t), Some(f)) =
+                    (single_value_expr(then_branch), single_value_expr(else_branch))
+                {
+                    return format!(
+                        "({} ? {} : {})",
+                        emit_expr(cond),
+                        emit_expr(t),
+                        emit_expr(f)
+                    );
+                }
+            }
             emit_if(cond, then_branch, else_branch)
         }
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, false),
@@ -962,6 +1141,13 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
 }
 
 fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
+    // `if !x.nil? && rest(x)` — the REST of the condition itself needs
+    // the binding, so it rewrites to Swift's conjunctive optional
+    // binding: `if let x = x, rest { … }` (the rebound `x` is non-opt
+    // in both the rest-condition and the then-branch).
+    if let Some(s) = try_iflet_conjunction(cond, then_branch, else_branch) {
+        return s;
+    }
     // `if x.is_a?(T)` narrows via shadow-rebinding: `if let x = x as? T`.
     // Swift's `is` does NOT smart-cast (unlike Kotlin), so the branch
     // body's uses of `x` at type T only compile with the rebind.
@@ -993,6 +1179,52 @@ fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     }
 }
 
+/// `if !x.nil? && rest { then }` → `if let x = x, rest { then }`.
+/// Fires only when the leading conjunct is a negated nil-check over an
+/// Optional-typed simple read; `rest` and the then-branch emit with the
+/// rebound (non-optional) name — NO force-unwrap inside.
+fn try_iflet_conjunction(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> Option<String> {
+    // Unwrap a `!` (either IR spelling) to its operand.
+    fn negated(e: &Expr) -> Option<&Expr> {
+        match &*e.node {
+            ExprNode::Send { recv: Some(r), method, args, .. }
+                if method.as_str() == "!" && args.is_empty() =>
+            {
+                Some(r)
+            }
+            ExprNode::Send { recv: None, method, args, .. }
+                if method.as_str() == "!" && args.len() == 1 =>
+            {
+                Some(&args[0])
+            }
+            _ => None,
+        }
+    }
+    // Two source spellings of "present":
+    //   !x.nil? && rest            → if let x = x, rest
+    //   !(x.nil? || more)          → if let x = x, !(more)
+    let (n, rest) = match &*cond.node {
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            let inner = negated(left)?;
+            (prop_nil_checked(inner)?, emit_expr(right))
+        }
+        _ => {
+            let inner = negated(cond)?;
+            let ExprNode::BoolOp { op: BoolOpKind::Or, left, right, .. } = &*inner.node else {
+                return None;
+            };
+            (prop_nil_checked(left)?, format!("!({})", emit_expr(right)))
+        }
+    };
+    let then = indent(&emit_expr(then_branch));
+    if is_empty_branch(else_branch) {
+        Some(format!("if let {n} = {n}, {rest} {{\n{then}\n}}"))
+    } else {
+        let els = indent(&emit_expr(else_branch));
+        Some(format!("if let {n} = {n}, {rest} {{\n{then}\n}} else {{\n{els}\n}}"))
+    }
+}
+
 /// Emit a branch with extra proven-non-nil props in scope.
 fn with_nonnull(props: &[String], branch: &Expr) -> String {
     let added: Vec<String> = NONNULL_PROPS.with(|s| {
@@ -1010,13 +1242,19 @@ fn with_nonnull(props: &[String], branch: &Expr) -> String {
 }
 
 /// The binding a `nil?` receiver reads, when it IS a simple read — an
-/// ivar, a zero-arg self-send, or a local/param Var.
+/// ivar, a zero-arg self-send, a local/param Var, or the view lowerer's
+/// bare-Send param spelling.
 fn prop_read_name(e: &Expr) -> Option<String> {
     match &*e.node {
         ExprNode::Ivar { name } => Some(camel(name.as_str())),
         ExprNode::Var { name, .. } => Some(camel(name.as_str())),
         ExprNode::Send { recv: Some(r), method, args, .. }
             if args.is_empty() && matches!(&*r.node, ExprNode::SelfRef) =>
+        {
+            Some(camel(method.as_str()))
+        }
+        ExprNode::Send { recv: None, method, args, .. }
+            if args.is_empty() && is_param(method.as_str()) =>
         {
             Some(camel(method.as_str()))
         }
@@ -1053,14 +1291,33 @@ fn props_proven_nonnull(cond: &Expr) -> Vec<String> {
 /// tautology the analyzer left in.
 fn prop_nil_checked(cond: &Expr) -> Option<String> {
     match &*cond.node {
+        // Both nil-check spellings: `x.nil?` and `x == nil`.
         ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "nil?" && args.is_empty() =>
+            if (method.as_str() == "nil?" && args.is_empty())
+                || (method.as_str() == "=="
+                    && args.len() == 1
+                    && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Nil })) =>
         {
-            let optionalish = matches!(
-                r.ty.as_ref(),
-                Some(crate::ty::Ty::Union { variants })
-                    if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-            );
+            let is_opt = |t: &crate::ty::Ty| {
+                matches!(t, crate::ty::Ty::Union { variants }
+                    if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)))
+            };
+            let optionalish = r.ty.as_ref().map_or(false, is_opt)
+                // A Var read (or bare-Send param read) with no stamped
+                // ty: the method signature's param type is the authority.
+                || match &*r.node {
+                    ExprNode::Var { name, .. } => {
+                        let n = camel(name.as_str());
+                        PARAM_TYPES.with(|p| p.borrow().get(&n).map_or(false, is_opt))
+                    }
+                    ExprNode::Send { recv: None, method, args, .. }
+                        if args.is_empty() && is_param(method.as_str()) =>
+                    {
+                        let n = camel(method.as_str());
+                        PARAM_TYPES.with(|p| p.borrow().get(&n).map_or(false, is_opt))
+                    }
+                    _ => false,
+                };
             if optionalish {
                 prop_read_name(r)
             } else {
@@ -1842,6 +2099,19 @@ fn emit_send(
         if is_known_instance_method(r, method) {
             return format!("{rs}.{}()", camel(method));
         }
+        // A typed receiver reading a property the class (or an ancestor)
+        // declares — including collapsed predicate readers
+        // (`article.persisted?` → Base's `persisted` var).
+        if let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() {
+            let cls = super::naming::type_name(id.0.as_str());
+            let name = camel(method);
+            let has_prop = CLASS_PROPS
+                .with(|m| m.borrow().get(&cls).map_or(false, |s| s.contains(&name)))
+                || ancestor_has_prop(&cls, &name);
+            if has_prop {
+                return format!("{rs}.{name}");
+            }
+        }
         if !forces_parens(method) && !method.ends_with('?') && !method.ends_with('!') {
             // Attribute read on an instance.
             return format!("{rs}.{}", camel(method));
@@ -1875,9 +2145,16 @@ fn emit_send(
         }
     }
 
+    // A bare zero-arg send naming a parameter of the current method is
+    // that parameter (the view lowerer's partial-local Send shape).
+    if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
+        return camel(method);
+    }
+
     // General call — with `try` when the callee is registered throwing
     // (Const-receiver statics resolve through the ancestor walk;
-    // typed-Var receivers through their class).
+    // typed-Var receivers through their class), and the kwargs-splat
+    // decision on the rendered arguments.
     let name = camel(method);
     match recv {
         Some(r) => {
@@ -1895,8 +2172,8 @@ fn emit_send(
                 .map_or(false, |t| throws_lookup(&t, &name))
                 .then_some("try ")
                 .unwrap_or("");
-            format!("{try_kw}{rs}.{name}({})", args_s.join(", "))
+            format!("{try_kw}{rs}.{name}({})", emit_call_args(recv, method, args))
         }
-        None => format!("{name}({})", args_s.join(", ")),
+        None => format!("{name}({})", emit_call_args(recv, method, args)),
     }
 }

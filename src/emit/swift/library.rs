@@ -30,6 +30,58 @@ use super::expr::{begin_method, emit_expr, wrap_return};
 use super::naming::{camel, type_name};
 use super::ty::swift_ty;
 
+/// Register every method's ORDERED camelCased param names under
+/// "Receiver.method" — the call-site kwargs-splat decision (see
+/// `expr::METHOD_PARAMS`).
+fn register_params_for(receiver: &str, methods: &[MethodDef]) {
+    for m in methods {
+        if m.kind != AccessorKind::Method {
+            continue;
+        }
+        super::expr::register_method_params(
+            format!("{receiver}.{}", camel(m.name.as_str())),
+            m.params.iter().map(|p| camel(p.name.as_str())).collect(),
+        );
+    }
+}
+
+/// Standalone lowered functions (route helpers, importmap) → one
+/// namespace enum, named for the module path's last segment. The
+/// generalization Kotlin calls emit_function_module.
+pub fn emit_function_module(
+    funcs: &[crate::dialect::LibraryFunction],
+) -> Option<crate::emit::EmittedFile> {
+    let first = funcs.first()?;
+    let name = first
+        .module_path
+        .last()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    let enclosing =
+        first.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            block_param: None,
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from(enclosing.clone())),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
+        })
+        .collect();
+    let content = emit_module(&methods).ok()?;
+    Some(crate::emit::EmittedFile {
+        path: PathBuf::from(format!("Sources/App/{name}.swift")),
+        content: format!("import Foundation\n\n{content}"),
+    })
+}
+
 /// Render a Ruby module (bare functions, no instances) as a Swift
 /// caseless `enum` namespace of static funcs — the idiomatic spelling;
 /// Swift has no `object` keyword (plan delta 2). The enum name comes
@@ -43,6 +95,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .and_then(|m| m.enclosing_class.as_ref())
         .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
+    register_params_for(&name, methods);
     let mut out = format!("enum {name} {{\n");
     out.push_str(&emit_module_ivars(methods, &BTreeMap::new()));
     for m in methods {
@@ -222,6 +275,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // with `class << self; attr_accessor :adapter`) → a caseless enum of
     // statics. A set-once reference accessor (the adapter slot) becomes
     // an implicitly-unwrapped `static var` — Swift's lateinit.
+    register_params_for(&class_name, &lc.methods);
     if lc.is_module {
         super::expr::set_current_class(&class_name);
         super::expr::set_error_class(false);
@@ -649,6 +703,16 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
     };
 
     begin_method(&m.body, returns_value);
+    super::expr::set_param_names(
+        m.params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let ty = sig_params.and_then(|sp| sp.get(i)).map(|sp| sp.ty.clone());
+                (camel(p.name.as_str()), ty)
+            })
+            .collect(),
+    );
     super::expr::set_init_super(is_init && ctx.map_or(false, |c| c.has_parent));
     // Prologue: hoisted vars (locals first assigned in nested scopes) +
     // `var x = x` shadows for params the body mutates (Swift params are
