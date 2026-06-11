@@ -33,6 +33,7 @@ use super::{IngestError, IngestResult};
 /// top-level helper class lands alongside the test file without
 /// per-target plumbing changes.
 pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestModule>> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
     let mut top_classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();

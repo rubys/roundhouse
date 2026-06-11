@@ -419,7 +419,7 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
             let pnames: Vec<String> = params.iter().map(|s| s.to_string()).collect();
             emit_for_each(r, &pnames, body).unwrap_or_else(|| {
-                crate::emit::diagnostics::report_unsupported("python", "each-block", "")
+                crate::emit::diagnostics::report_unsupported(e.span, "python", "each-block", "")
             })
         }
         // `case scrutinee; when X then …; else …; end` → an `if/elif/else`
@@ -561,7 +561,7 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[crate::expr::Arm], is_last: bool, vo
     let mut else_body: Option<&Expr> = None;
     for arm in arms {
         if arm.guard.is_some() {
-            return crate::emit::diagnostics::report_unsupported("python", "Case", "");
+            return crate::emit::diagnostics::report_unsupported(scrutinee.span, "python", "Case", "");
         }
         match &arm.pattern {
             Pattern::Wildcard => else_body = Some(&arm.body),
@@ -573,7 +573,7 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[crate::expr::Arm], is_last: bool, vo
                     stmt_block(&arm.body, is_last, void)
                 ));
             }
-            _ => return crate::emit::diagnostics::report_unsupported("python", "Case", ""),
+            _ => return crate::emit::diagnostics::report_unsupported(scrutinee.span, "python", "Case", ""),
         }
     }
     if let Some(eb) = else_body {
@@ -670,7 +670,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
             match params.as_slice() {
                 [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
-                _ => crate::emit::diagnostics::report_unsupported("python", "map-block", ""),
+                _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
             }
         }
         ExprNode::Send { recv, method, args, parenthesized, .. } => {
@@ -772,7 +772,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let args_s: Vec<String> = args.iter().map(emit_expr).collect();
             format!("_block({})", args_s.join(", "))
         }
-        other => crate::emit::diagnostics::report_unsupported("python", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "python", other.kind_str(), ""),
     }
 }
 

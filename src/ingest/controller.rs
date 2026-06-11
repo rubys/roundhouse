@@ -20,6 +20,7 @@ use super::util::{
 use super::{IngestError, IngestResult};
 
 pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Controller>> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {

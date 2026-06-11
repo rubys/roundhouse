@@ -230,7 +230,7 @@ fn run_transpile(
         }
     }
     for d in &diags {
-        eprintln!("roundhouse: {d}");
+        eprintln!("roundhouse: {}", d.render(&app.sources));
     }
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     if errors > 0 {

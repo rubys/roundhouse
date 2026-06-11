@@ -45,6 +45,7 @@ pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App
 /// The actual whole-app walker. Generic over [`Vfs`] so it can read
 /// from disk or from an in-memory map without code duplication.
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
+    super::sources::reset();
     let mut app = App::new();
 
     let schema_path = dir.join("db/schema.rb");
@@ -284,6 +285,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             }
         }
     }
+
+    app.sources = super::sources::drain();
 
     Ok(app)
 }

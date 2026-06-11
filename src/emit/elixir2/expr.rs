@@ -769,7 +769,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::Cast { value, .. } => emit_expr(value),
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
-        other => crate::emit::diagnostics::report_unsupported("elixir2", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "elixir2", other.kind_str(), ""),
     }
 }
 
@@ -813,7 +813,14 @@ fn emit_pattern(p: &crate::expr::Pattern) -> String {
         Pattern::Expr { expr } => emit_expr(expr),
         // Array/Record destructure patterns aren't produced by the
         // column indexer; surface a diagnostic if one ever reaches here.
-        other => crate::emit::diagnostics::report_unsupported("elixir2", "case pattern", &format!("{other:?}")),
+        // Patterns don't carry spans — synthetic keeps the report
+        // message-only.
+        other => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "elixir2",
+            "case pattern",
+            &format!("{other:?}"),
+        ),
     }
 }
 
@@ -1606,6 +1613,7 @@ fn unpack_kwargs_with(params: Option<&[crate::dialect::Param]>, args: &[Expr]) -
 fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Expr) -> String {
     let ExprNode::Lambda { params, body, .. } = &*block.node else {
         return crate::emit::diagnostics::report_unsupported(
+            block.span,
             "elixir2",
             "block",
             &format!("non-lambda block on `{method}`"),
@@ -1626,6 +1634,7 @@ fn emit_block_call(recv: Option<&Expr>, method: &str, args: &[Expr], block: &Exp
     let accs = block_accumulators(body, params);
     if accs.len() > 1 {
         return crate::emit::diagnostics::report_unsupported(
+            block.span,
             "elixir2",
             "block",
             "block reassigns multiple outer locals (tuple reduce)",

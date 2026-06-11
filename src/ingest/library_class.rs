@@ -26,6 +26,7 @@ pub fn ingest_library_class(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Option<LibraryClass>> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
@@ -52,6 +53,7 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();

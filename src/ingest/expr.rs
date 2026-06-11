@@ -33,7 +33,15 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
 }
 
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
-    let span = Span::synthetic(); // Real spans land when miette is wired in.
+    // Byte offsets into the text registered for `file` (the exact text
+    // prism is parsing). FileId(0) when the entry point didn't
+    // register — spans then render message-only downstream.
+    let loc = node.location();
+    let span = Span {
+        file: super::sources::file_id(file),
+        start: loc.start_offset() as u32,
+        end: loc.end_offset() as u32,
+    };
     let expr_node = match node {
         n if n.as_constant_read_node().is_some() => {
             let c = n.as_constant_read_node().unwrap();
@@ -1415,6 +1423,7 @@ fn ingest_index_argument(
 /// `db/seeds.rb` ingest; generalized so future multi-statement sources
 /// can share it.
 pub(super) fn ingest_ruby_program(source: &str, file: &str) -> IngestResult<Expr> {
+    super::sources::register(file, source);
     let result = parse(source.as_bytes());
     let root = result.node();
     let program = root.as_program_node().ok_or_else(|| IngestError::Parse {

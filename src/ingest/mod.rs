@@ -24,6 +24,7 @@ pub mod library_class;
 pub mod model;
 pub mod routes;
 pub mod schema;
+pub mod sources;
 pub mod survey;
 pub mod test;
 pub mod util;

@@ -72,7 +72,9 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
             // diagnostic, so every per-target emitter drops a raise stub
             // at the site via the `Expr.diagnostic` short-circuit.
             let detail = "find_by(<col>) projection not yet wired";
+            // The arel IR doesn't carry spans — synthetic until it does.
             crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
                 None,
                 "ColumnSpec::Named",
                 detail,

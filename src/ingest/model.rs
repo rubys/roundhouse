@@ -28,6 +28,7 @@ pub fn ingest_model(
     file: &str,
     schema: &Schema,
 ) -> IngestResult<Option<Model>> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {

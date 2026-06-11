@@ -85,7 +85,7 @@ fn main() -> ExitCode {
 
     let mut had_output = false;
     for d in &diags {
-        eprintln!("{d}");
+        eprintln!("{}", d.render(&app.sources));
         had_output = true;
     }
 

@@ -19,7 +19,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::ident::Symbol;
-use crate::span::Span;
+use crate::span::{SourceFile, Span};
 use crate::ty::Ty;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,14 +71,19 @@ impl Diagnostic {
     }
 
     /// Construct an `Unsupported` diagnostic for a tool-coverage gap.
-    /// The span is synthetic (real spans are a separate, stubbed gap);
-    /// severity is the kind default (`Error`); the message is the
+    /// `span` is the reporting site's `Expr.span` — pass
+    /// `Span::synthetic()` when no Expr is in hand. Emit-time reports
+    /// run on lowered IR, so the span is only as good as the lowering
+    /// passes' span preservation: synthesized nodes that weren't
+    /// stamped with their source-enclosing span render message-only.
+    /// Severity is the kind default (`Error`); the message is the
     /// canonical [`Self::unsupported_text`] plus any `detail`.
     ///
     /// `target` is `None` for target-agnostic gaps (e.g. a shared
     /// lowerer). `construct` and `detail` accept anything `Into<…>` so
     /// call sites can pass `&str`/`String`/`Symbol` without ceremony.
     pub fn unsupported(
+        span: Span,
         target: Option<Symbol>,
         construct: impl Into<Symbol>,
         detail: impl Into<String>,
@@ -92,10 +97,29 @@ impl Diagnostic {
         }
         let kind = DiagnosticKind::Unsupported { target, construct, detail };
         Diagnostic {
-            span: Span::synthetic(),
+            span,
             severity: Self::default_severity(&kind),
             kind,
             message,
+        }
+    }
+
+    /// Render with source attribution when the span resolves against
+    /// `sources` (the `App::sources` table captured at ingest):
+    /// `path:line:col: error[code]: message`. Synthetic spans and
+    /// `FileId`s outside the table fall back to the plain message-only
+    /// `Display` form, so callers can use this unconditionally.
+    pub fn render(&self, sources: &[SourceFile]) -> String {
+        let resolved = (self.span.file.0 as usize)
+            .checked_sub(1)
+            .and_then(|i| sources.get(i))
+            .filter(|_| !self.span.is_synthetic());
+        match resolved {
+            Some(sf) => {
+                let (line, col) = sf.line_col(self.span.start);
+                format!("{}:{line}:{col}: {self}", sf.path)
+            }
+            None => self.to_string(),
         }
     }
 
@@ -216,6 +240,7 @@ mod tests {
     #[test]
     fn unsupported_constructor_targeted_with_detail() {
         let d = Diagnostic::unsupported(
+            Span::synthetic(),
             Some(Symbol::from("go")),
             "While",
             "loop body has non-tail statement",
@@ -230,7 +255,7 @@ mod tests {
 
     #[test]
     fn unsupported_constructor_target_agnostic_no_detail() {
-        let d = Diagnostic::unsupported(None, "ColumnSpec::Named", "");
+        let d = Diagnostic::unsupported(Span::synthetic(), None, "ColumnSpec::Named", "");
         assert_eq!(
             d.to_string(),
             "error[unsupported]: ColumnSpec::Named not supported (all targets)"

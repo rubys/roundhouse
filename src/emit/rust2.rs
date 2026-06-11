@@ -41,7 +41,9 @@ pub(crate) use ctx::EmitCtx;
 /// garbage. `subject` names what failed (`model \`Article\``); `err` is
 /// the inner emit error.
 fn emit_failure_stub(subject: &str, err: &str) -> String {
+    // Whole-class failure — no single Expr to blame, so no span.
     crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
         Some(crate::ident::Symbol::from("rust2")),
         subject,
         err,

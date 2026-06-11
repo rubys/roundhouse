@@ -16,6 +16,7 @@ use super::util::{
 use super::{IngestError, IngestResult};
 
 pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = parse(source);
     let root = result.node();
 

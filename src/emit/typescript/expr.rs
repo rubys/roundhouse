@@ -1428,7 +1428,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let desugared = desugar_op_assign(target, *op, value, e.span);
             emit_expr(&desugared)
         }
-        other => crate::emit::diagnostics::report_unsupported("typescript", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "typescript", other.kind_str(), ""),
     }
 }
 

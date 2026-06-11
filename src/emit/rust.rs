@@ -112,7 +112,7 @@ fn rt_emit_expr(e: &Expr) -> String {
         ExprNode::StringInterp { parts } => rt_emit_string_interp(parts),
         ExprNode::Seq { exprs } if exprs.len() == 1 => rt_emit_expr(&exprs[0]),
         ExprNode::Cast { value, .. } => rt_emit_expr(value),
-        other => crate::emit::diagnostics::report_unsupported("rust", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "rust", other.kind_str(), ""),
     }
 }
 
@@ -317,7 +317,13 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return format!("{} {method} {}", rt_emit_expr(r), rt_emit_expr(arg));
         }
     }
-    crate::emit::diagnostics::report_unsupported("rust", "Send", format!("method `{method}`"))
+    // No Expr in scope here — approximate the site with the receiver's
+    // (or first arg's) span; synthetic when neither carries one.
+    let span = recv
+        .map(|r| r.span)
+        .or_else(|| args.first().map(|a| a.span))
+        .unwrap_or_default();
+    crate::emit::diagnostics::report_unsupported(span, "rust", "Send", format!("method `{method}`"))
 }
 
 fn is_rust_binop(method: &str) -> bool {

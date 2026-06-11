@@ -48,7 +48,7 @@ pub enum IrHint {
 /// `ty` is populated by the analyzer; ingest leaves it `None`. Inline for
 /// simplicity; migrate to a salsa-indexed side table when incrementality
 /// becomes load-bearing.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Expr {
     pub span: Span,
     pub node: Box<ExprNode>,
@@ -96,6 +96,22 @@ pub struct Expr {
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
+}
+
+/// Structural equality ignores `span`: it's provenance metadata, not
+/// semantics. The round-trip tests compare IR re-ingested from emitted
+/// Ruby against the original ingest, and those two parses legitimately
+/// sit at different byte offsets (and in different files).
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+            && self.ty == other.ty
+            && self.effects == other.effects
+            && self.leading_blank_line == other.leading_blank_line
+            && self.diagnostic == other.diagnostic
+            && self.hint == other.hint
+            && self.decisions == other.decisions
+    }
 }
 
 impl Expr {

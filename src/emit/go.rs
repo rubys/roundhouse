@@ -119,6 +119,7 @@ fn rt_emit_body(body: &Expr) -> String {
                     // statement (panic(...) is a valid Go statement) so the
                     // rest of the body still emits.
                     let stub = crate::emit::diagnostics::report_unsupported(
+                        e.span,
                         "go",
                         "non-tail-statement",
                         format!("{} in method body", e.node.kind_str()),
@@ -154,12 +155,13 @@ fn rt_emit_expr(e: &Expr) -> String {
             // in mid-expression, which would need an IIFE — report the
             // gap and degrade to a panic stub at that one site.
             crate::emit::diagnostics::report_unsupported(
+                e.span,
                 "go",
                 "If",
                 "ternary in embedded expression position (needs IIFE lowering)",
             )
         }
-        other => crate::emit::diagnostics::report_unsupported("go", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "go", other.kind_str(), ""),
     }
 }
 
@@ -370,7 +372,13 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             );
         }
     }
-    crate::emit::diagnostics::report_unsupported("go", "Send", format!("method `{method}`"))
+    // No Expr in scope here — approximate the site with the receiver's
+    // (or first arg's) span; synthetic when neither carries one.
+    let span = recv
+        .map(|r| r.span)
+        .or_else(|| args.first().map(|a| a.span))
+        .unwrap_or_default();
+    crate::emit::diagnostics::report_unsupported(span, "go", "Send", format!("method `{method}`"))
 }
 
 fn is_go_binop(method: &str) -> bool {

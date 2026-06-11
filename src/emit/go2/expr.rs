@@ -495,9 +495,11 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         // Go equivalent here, so it stays unsupported and surfaces loudly.
         ExprNode::Next { value } => match value {
             None => "continue".to_string(),
-            Some(_) => crate::emit::diagnostics::report_unsupported("go2", "Next", "value-carrying"),
+            Some(_) => {
+                crate::emit::diagnostics::report_unsupported(e.span, "go2", "Next", "value-carrying")
+            }
         },
-        other => crate::emit::diagnostics::report_unsupported("go2", other.kind_str(), ""),
+        other => crate::emit::diagnostics::report_unsupported(e.span, "go2", other.kind_str(), ""),
     }
 }
 
@@ -2467,7 +2469,7 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 format!("self.{pascal} = {v}")
             }
         }
-        _ => crate::emit::diagnostics::report_unsupported("go2", "Assign-target", ""),
+        _ => crate::emit::diagnostics::report_unsupported(value.span, "go2", "Assign-target", ""),
     }
 }
 

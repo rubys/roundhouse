@@ -59,6 +59,14 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// Source files read during ingest, indexed by `Span.file`
+    /// (`FileId(n)` → `sources[n - 1]`; `FileId(0)` is the synthetic
+    /// sentinel). Carries the parsed text so diagnostics can resolve
+    /// byte-offset spans to file:line:col without re-reading disk —
+    /// which the wasm ingest path couldn't do anyway. Empty for Apps
+    /// built by hand in tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<crate::span::SourceFile>,
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
@@ -98,6 +106,7 @@ impl App {
             importmap: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
+            sources: Vec::new(),
         }
     }
 }

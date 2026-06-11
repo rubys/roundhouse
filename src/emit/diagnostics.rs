@@ -63,8 +63,12 @@ pub fn push(d: Diagnostic) {
 /// degrade stub string to emit at the site. `target` is the concrete
 /// backend name (`"go"`, `"rust"`, …) — it both labels the diagnostic
 /// and selects the stub syntax. `detail` is collected on the diagnostic
-/// for the inventory but kept out of the terse runtime stub.
+/// for the inventory but kept out of the terse runtime stub. `span` is
+/// the offending `Expr.span`, carried so the collected report can name
+/// file:line:col (only as precise as the lowering passes' span
+/// preservation — synthesized nodes render message-only).
 pub fn report_unsupported(
+    span: crate::span::Span,
     target: &str,
     construct: impl Into<Symbol>,
     detail: impl Into<String>,
@@ -72,6 +76,7 @@ pub fn report_unsupported(
     let target_sym = Symbol::from(target);
     let construct = construct.into();
     push(Diagnostic::unsupported(
+        span,
         Some(target_sym.clone()),
         construct.clone(),
         detail,
@@ -140,7 +145,9 @@ mod tests {
 
     #[test]
     fn scope_collects_pushed_diagnostics() {
-        let (stub, diags) = scope(|| report_unsupported("go", "While", "non-tail body"));
+        let (stub, diags) = scope(|| {
+            report_unsupported(crate::span::Span::synthetic(), "go", "While", "non-tail body")
+        });
         assert_eq!(stub, r#"panic("roundhouse: While not supported (go)")"#);
         assert_eq!(diags.len(), 1);
         match &diags[0].kind {
@@ -156,7 +163,7 @@ mod tests {
     #[test]
     fn push_outside_scope_is_a_noop() {
         // Must not panic, and must not retain anything for the next scope.
-        push(Diagnostic::unsupported(None, "Stray", ""));
+        push(Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Stray", ""));
         let (_, diags) = scope(|| ());
         assert!(diags.is_empty());
     }
@@ -164,9 +171,10 @@ mod tests {
     #[test]
     fn nested_scopes_isolate() {
         let (outer_inner_diags, outer_diags) = scope(|| {
-            push(Diagnostic::unsupported(Some(Symbol::from("rust")), "Outer", ""));
+            let syn = crate::span::Span::synthetic();
+            push(Diagnostic::unsupported(syn, Some(Symbol::from("rust")), "Outer", ""));
             let (_, inner) = scope(|| {
-                push(Diagnostic::unsupported(Some(Symbol::from("rust")), "Inner", ""));
+                push(Diagnostic::unsupported(syn, Some(Symbol::from("rust")), "Inner", ""));
             });
             inner
         });
