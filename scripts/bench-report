@@ -17,6 +17,16 @@ out   = ARGV[1] || File.join(File.dirname(File.expand_path(input)), 'index.html'
 
 cells = JSON.parse(File.read(input))
 
+# env.json is written by scripts/bench alongside summary.json. Optional:
+# reports for runs that predate it (or hand-assembled summaries) still
+# render, just without the provenance line and environment appendix.
+run_path = File.dirname(File.expand_path(input))
+env = begin
+  JSON.parse(File.read(File.join(run_path, 'env.json')))
+rescue Errno::ENOENT, JSON::ParserError
+  nil
+end
+
 # ── ordering / metadata ──────────────────────────────────────────────
 
 TARGET_ORDER = %w[rust crystal go kotlin swift spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
@@ -64,6 +74,22 @@ runs      = cells.first['runs']
 
 def fmt_int(n)  ; n.to_i.to_s.reverse.scan(/\d{1,3}/).join(',').reverse ; end
 def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
+
+# ── env.json helpers ─────────────────────────────────────────────────
+
+def lscpu_field(env, name)
+  rows = env && env.dig('cpu', 'lscpu', 'lscpu')
+  rows && rows.find { |r| r['field'] == "#{name}:" }&.dig('data')
+end
+
+def kv_table(rows)
+  out = +"<table>\n<tbody>\n"
+  rows.each do |k, v|
+    next if v.nil? || v.to_s.empty?
+    out << "<tr><th>#{k}</th><td>#{v}</td></tr>\n"
+  end
+  out << "</tbody></table>\n"
+end
 
 # ── SVG primitives ───────────────────────────────────────────────────
 
@@ -250,11 +276,50 @@ html = +"<!doctype html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n"
 html << "<title>Roundhouse bench — #{run_dir}</title>\n<style>#{styles}</style>\n</head>\n<body>\n"
 
 html << "<h1>Roundhouse benchmark results</h1>\n"
-html << %(<div class="meta">Run <code>#{run_dir}</code> · #{total} cells × #{runs} runs · #{endpoints.size} endpoints × #{targets.size} targets</div>\n)
+provenance = ''
+if env
+  sha = env.dig('git', 'sha').to_s[0, 12]
+  provenance << " · captured #{env['captured_at']}" if env['captured_at']
+  provenance << %( · <code>#{sha}</code>) unless sha.empty?
+end
+html << %(<div class="meta">Run <code>#{run_dir}</code>#{provenance} · #{total} cells × #{runs} runs · #{endpoints.size} endpoints × #{targets.size} targets</div>\n)
+
+# Sibling artifacts published alongside this page (relative links, so
+# they work both served and opened from the run directory directly).
+artifacts = %w[env.json per-run.json summary.json summary.md]
+  .select { |f| File.exist?(File.join(run_path, f)) }
+unless artifacts.empty?
+  html << %(<div class="meta">Artifacts: #{artifacts.map { |f| %(<a href="#{f}"><code>#{f}</code></a>) }.join(' · ')}</div>\n)
+end
+
+# Keep the methodology prose generic — machine and harness specifics come
+# from env.json (with a bland fallback when it's absent); exact toolchain
+# versions live in the environment appendix at the bottom of the page.
+if env
+  clock   = env['clock'] || {}
+  ghz     = clock['max_khz'] ? fmt_dec(clock['max_khz'].to_i / 1_000_000.0, 1) + ' GHz' : nil
+  boost   = clock['boost'] == '0' ? '<strong>boost disabled</strong>' : 'boost enabled'
+  machine = [
+    lscpu_field(env, 'Model name'),
+    "#{lscpu_field(env, 'Core(s) per socket')}c/#{lscpu_field(env, 'CPU(s)')}t",
+    ghz, boost,
+    clock['governor'] ? "governor=#{clock['governor']}" : nil,
+  ].compact.join(', ')
+  machine << ", #{(env['memory_mb'].to_f / 1024).round} GB RAM" if env['memory_mb']
+  machine << ", #{env.dig('os', 'pretty_name')}" if env.dig('os', 'pretty_name')
+  h       = env['harness'] || {}
+  harness = "workers=#{Array(h['workers']).join('/')}, c=#{h['concurrency']}, " \
+            "#{h['runs']}×#{h['duration_sec']}s runs per cell after #{h['warmup_sec']}s warmup"
+  appendix_ref = ' Full hardware, toolchain versions, and the exact invocation are in the <a href="#environment">environment appendix</a> below.'
+else
+  machine = 'Bare-metal Linux host, frequency boost disabled, governor=performance'
+  harness = "workers=1, c=64, #{runs} runs per cell"
+  appendix_ref = ''
+end
 
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> Hetzner AX41-NVMe (Ryzen 5 3600, 6c/12t, 3.6 GHz base, <strong>boost disabled</strong>, governor=performance), 64 GB ECC DDR4, NVMe SSD, Ubuntu 24.04. Toolchains via <a href="https://mise.jdx.dev">mise</a> — Ruby 4.0.2+YJIT, Rust 1.94, Go 1.24, Node 25, Crystal 1.20, Elixir 1.18/OTP 28, Python 3.14, Swift 6 (SPM release build), Kotlin/JVM (Gradle 9.5, OpenJDK 21), JRuby 10/OpenJDK 21. Harness: <code>scripts/bench</code> defaults — workers=1, c=64, 3×20s runs per cell. Quiet machine throughout (Kamal services moved off bench port). The JVM cells (<code>jruby</code>, <code>kotlin</code>) run under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): their RSS is a deliberate budget, not the JVM's default share of host RAM, so they stay comparable to the other cells' working sets.
+    <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median run is reported. Quiet machine throughout. The JVM cells (<code>jruby</code>, <code>kotlin</code>) run under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): their RSS is a deliberate budget, not the JVM's default share of host RAM, so they stay comparable to the other cells' working sets.#{appendix_ref}
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
     #{(targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today. It collapses to the shared 8.1 fixture once AR-JDBC ships Rails 8.1 support.</p>) : '')}
   </div>
@@ -470,6 +535,67 @@ cells.sort_by { |c| [TARGET_ORDER.index(c['target']) || 99, ENDPOINT_ORDER.index
   html << "</tr>\n"
 end
 html << "</tbody></table>\n</details>\n"
+
+# ── Section: environment appendix ────────────────────────────────────
+
+if env
+  html << %(<details id="environment">\n<summary>Environment#{env['captured_at'] ? " (captured #{env['captured_at']})" : ''}</summary>\n)
+
+  clock = env['clock'] || {}
+  html << "<h3>Host</h3>\n"
+  html << kv_table([
+    ['hostname', env.dig('host', 'hostname')],
+    ['OS',       env.dig('os', 'pretty_name')],
+    ['kernel',   env.dig('host', 'uname')],
+    ['board',    [env.dig('cpu', 'board_vendor'), env.dig('cpu', 'board_name')].compact.reject(&:empty?).join(' ')],
+    ['CPU',      lscpu_field(env, 'Model name')],
+    ['topology', lscpu_field(env, 'CPU(s)') && "#{lscpu_field(env, 'Core(s) per socket')} cores / #{lscpu_field(env, 'CPU(s)')} threads"],
+    ['clock',    clock['governor'] && "governor=#{clock['governor']}, boost #{clock['boost'] == '0' ? 'disabled' : 'enabled'}, #{(clock['max_khz'].to_i / 1000)} MHz max"],
+    ['memory',   env['memory_mb'] && "#{fmt_int(env['memory_mb'])} MB"],
+  ])
+
+  toolchains = env['toolchains'] || {}
+  unless toolchains.empty?
+    html << "<h3>Toolchains</h3>\n"
+    html << kv_table(toolchains.sort.map { |name, ver| [name, "<code>#{ver}</code>"] })
+  end
+
+  h = env['harness'] || {}
+  requested  = Array(h['targets'])
+  unmeasured = requested - targets
+  html << "<h3>Harness</h3>\n"
+  html << kv_table([
+    ['command',     h['command'] && "<code>#{h['command']}</code>"],
+    ['workers',     Array(h['workers']).join(', ')],
+    ['concurrency', h['concurrency']],
+    ['runs',        h['runs'] && "#{h['runs']} × #{h['duration_sec']}s after #{h['warmup_sec']}s warmup"],
+    ['wrk threads', h['wrk_threads']],
+    ['endpoints',   Array(h['endpoints']).map { |e| "<code>#{e}</code>" }.join(' ')],
+    ['targets',     requested.join(', ')],
+    ['not measured', unmeasured.empty? ? nil : "#{unmeasured.join(', ')} (requested but produced no cells)"],
+  ])
+
+  g = env['git'] || {}
+  unless g.empty?
+    html << "<h3>Source</h3>\n"
+    html << kv_table([
+      ['commit',  g['sha'] && "<code>#{g['sha']}</code>#{g['dirty'] ? ' (dirty)' : ''}"],
+      ['branch',  g['branch']],
+      ['subject', g['subject']],
+    ])
+  end
+
+  c = env['conditions'] || {}
+  unless c.empty?
+    html << "<h3>Conditions at start</h3>\n"
+    html << kv_table([
+      ['load average', Array(c['loadavg_1_5_15']).join(' / ')],
+      ['uptime',       c['uptime']],
+    ])
+  end
+
+  html << "</details>\n"
+end
 
 html << %(<hr><p class="meta">Generated #{Time.now.utc.iso8601} from <code>#{File.basename(input)}</code>.</p>\n)
 html << "</body>\n</html>\n"
