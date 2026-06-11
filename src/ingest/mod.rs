@@ -40,7 +40,7 @@ pub use library_class::{
 };
 pub use model::ingest_model;
 pub use routes::ingest_routes;
-pub use schema::ingest_schema;
+pub use schema::{ingest_migration, ingest_schema};
 pub use test::ingest_test_file;
 pub use view::ingest_view;
 
