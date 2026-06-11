@@ -237,9 +237,41 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     Ok(out)
 }
 
+/// Module singletons whose state is *per-request render state*, not
+/// process-wide configuration. Their ivar slots emit as `thread_local!`
+/// `RefCell<Option<T>>` instead of a global `Mutex<Option<T>>`.
+///
+/// Why: `ViewHelpers`' content_for/yield slot store is reset and
+/// repopulated on every request. Behind a process-global mutex, every
+/// concurrent render serializes on one lock — profiled at c=64 as
+/// ~46% of thread-time blocked in mutex wait on the no-DB
+/// `/articles/new` endpoint (roundhouse#32); switching to
+/// thread-locals measured +24% throughput. Thread-locals are correct
+/// here because a request's render runs synchronously inside one
+/// handler poll (controller action → views → layout, no `.await`
+/// between `set_yield` and `get_yield`), so the state never needs to
+/// cross threads. This mirrors Rails' own per-thread scoping of view
+/// rendering state (and the hand-written `runtime/rust/view_helpers.rs`,
+/// which used `thread_local!` before the framework runtime moved to
+/// transpiled Ruby).
+///
+/// Config-like singletons (`ActiveRecord`'s ADAPTER: set once at boot
+/// from the main thread, read from every worker) must stay global, so
+/// global-Mutex remains the default and this list is opt-in. The
+/// durable fix — threading an `ActionView::Slots` value object
+/// per-request — is tracked in runtime/ruby/action_view/view_helpers.rb's
+/// header comment; this list is the call surface's interim shape.
+const REQUEST_SCOPED_SINGLETONS: &[&str] = &["ViewHelpers"];
+
+fn is_request_scoped_singleton(name: &str) -> bool {
+    REQUEST_SCOPED_SINGLETONS.contains(&name)
+}
+
 /// Emit a Ruby `module X; class << self; attr_accessor :slot; end;
 /// end` class as a Rust unit struct + per-slot `Mutex<Option<T>>`
-/// statics. The transpiled `attr_accessor` getter/setter pair routes
+/// statics (or `thread_local!` `RefCell<Option<T>>` for
+/// request-scoped singletons — see `REQUEST_SCOPED_SINGLETONS`).
+/// The transpiled `attr_accessor` getter/setter pair routes
 /// through the static slot (see `expr.rs::in_module_singleton`).
 ///
 /// Produces:
@@ -260,21 +292,38 @@ fn emit_module_singleton(
     ivars: &[(String, Ty)],
     class: &LibraryClass,
 ) -> Result<String, String> {
+    let thread_local = is_request_scoped_singleton(name);
     let mut out = String::new();
     // Unit struct — no per-instance fields. Callers reach the slot
     // methods via `ActiveRecord::adapter()` / `ActiveRecord::set_adapter(v)`.
     writeln!(out, "pub struct {name};\n").unwrap();
-    // One Mutex<Option<T>> static per ivar. Naming follows the
-    // SCREAMING_SNAKE Rust static convention; trim_start_matches('_')
-    // handles leading-underscore ivars.
-    for (fname, ty) in ivars {
-        let slot = super::expr::module_singleton_slot_name(fname);
-        writeln!(
-            out,
-            "static {slot}: std::sync::Mutex<Option<{}>> = std::sync::Mutex::new(None);",
-            rust_ty(ty),
-        )
-        .unwrap();
+    // One slot static per ivar. Naming follows the SCREAMING_SNAKE
+    // Rust static convention; trim_start_matches('_') handles
+    // leading-underscore ivars. Request-scoped singletons get
+    // `thread_local!` `RefCell<Option<T>>` slots; everything else a
+    // process-global `Mutex<Option<T>>`.
+    if thread_local && !ivars.is_empty() {
+        writeln!(out, "thread_local! {{").unwrap();
+        for (fname, ty) in ivars {
+            let slot = super::expr::module_singleton_slot_name(fname);
+            writeln!(
+                out,
+                "    static {slot}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }};",
+                rust_ty(ty),
+            )
+            .unwrap();
+        }
+        writeln!(out, "}}").unwrap();
+    } else {
+        for (fname, ty) in ivars {
+            let slot = super::expr::module_singleton_slot_name(fname);
+            writeln!(
+                out,
+                "static {slot}: std::sync::Mutex<Option<{}>> = std::sync::Mutex::new(None);",
+                rust_ty(ty),
+            )
+            .unwrap();
+        }
     }
     if !ivars.is_empty() {
         out.push('\n');
@@ -283,7 +332,7 @@ fn emit_module_singleton(
     let ivar_type_map: std::collections::HashMap<String, Ty> =
         ivars.iter().cloned().collect();
     let class_method_param_tys = collect_class_method_param_tys(&class.methods);
-    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_module_singleton(true, || {
+    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_module_singleton(true, thread_local, || {
         super::expr::with_ivar_types(ivar_type_map, || {
             let mut first = true;
             for m in &class.methods {

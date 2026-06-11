@@ -15,7 +15,8 @@ use super::super::util::{
 use super::super::literal::emit_is_a;
 use super::super::{
     emit_expr, in_module_singleton, ivar_field_ty,
-    module_singleton_slot_name, recv_var_back_propagated_hash_kv,
+    module_singleton_slot_name, module_singleton_thread_local,
+    recv_var_back_propagated_hash_kv,
 };
 use super::dispatch::dispatch_method_by_recv_ty;
 
@@ -193,6 +194,11 @@ pub(super) fn try_recv_typed_method(
                     let slot = module_singleton_slot_name(name.as_str());
                     let k = emit_expr(&args[0]);
                     let v = emit_expr(&args[1]);
+                    if module_singleton_thread_local() {
+                        return Some(format!(
+                            "{{ {slot}.with(|__s| __s.borrow_mut().get_or_insert_with(std::collections::HashMap::new).insert(({k}).to_string(), ({v}).to_string())); }}"
+                        ));
+                    }
                     return Some(format!(
                         "{{ {slot}.lock().unwrap().get_or_insert_with(std::collections::HashMap::new).insert(({k}).to_string(), ({v}).to_string()); }}"
                     ));

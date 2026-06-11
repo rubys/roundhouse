@@ -164,20 +164,31 @@ pub(super) fn current_return_is_unit() -> bool {
 /// Run `f` with the module-singleton emit mode active. Used by
 /// `library.rs` when the class shape signals a Ruby
 /// `class << self; ... end` (every method is a class method).
-pub(super) fn with_module_singleton<F, R>(active: bool, f: F) -> R
+/// `thread_local` selects the request-scoped slot shape (per-ivar
+/// `thread_local!` `RefCell<Option<T>>`) over the default global
+/// `Mutex<Option<T>>` — see `library.rs::REQUEST_SCOPED_SINGLETONS`.
+pub(super) fn with_module_singleton<F, R>(active: bool, thread_local: bool, f: F) -> R
 where
     F: FnOnce() -> R,
 {
     let ctx = current_emit_ctx().expect("with_module_singleton called outside with_emit_ctx");
     let prev = ctx.in_module_singleton.replace(active);
+    let prev_tl = ctx.module_singleton_thread_local.replace(thread_local);
     let r = f();
     ctx.in_module_singleton.set(prev);
+    ctx.module_singleton_thread_local.set(prev_tl);
     r
 }
 
 pub(super) fn in_module_singleton() -> bool {
     current_emit_ctx()
         .map(|ctx| ctx.in_module_singleton.get())
+        .unwrap_or(false)
+}
+
+pub(super) fn module_singleton_thread_local() -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.module_singleton_thread_local.get())
         .unwrap_or(false)
 }
 
@@ -771,6 +782,15 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // Callers expect a non-Option return type per RBS;
                 // `Option<T>` ivars stay None-able via the inner T.
                 let slot = module_singleton_slot_name(name.as_str());
+                if module_singleton_thread_local() {
+                    // Request-scoped slot: borrow the thread-local
+                    // RefCell instead of locking a process-wide mutex
+                    // (which profiled as the dominant render-path
+                    // serializer at c=64 — roundhouse#32).
+                    return format!(
+                        "{slot}.with(|__s| __s.borrow().clone()).unwrap_or_default()"
+                    );
+                }
                 return format!(
                     "{slot}.lock().unwrap().clone().unwrap_or_default()"
                 );

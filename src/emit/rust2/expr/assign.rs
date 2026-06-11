@@ -9,7 +9,8 @@ use super::util::{coerce_to_value, is_builtin_container_class, is_option_ty};
 use super::{
     current_return_ty, declare_var, emit_expr, in_constructor, in_module_singleton,
     is_declared_var, is_mut_var, ivar_field_ty,
-    local_var_ty, mark_local_var_ty, module_singleton_slot_name, param_ty,
+    local_var_ty, mark_local_var_ty, module_singleton_slot_name,
+    module_singleton_thread_local, param_ty,
     record_back_propagated_hash,
 };
 
@@ -70,6 +71,11 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // static Mutex slot. Always Some-wraps so the slot
                 // stays `Option<T>` regardless of T's nullability.
                 let slot = module_singleton_slot_name(name.as_str());
+                if module_singleton_thread_local() {
+                    return format!(
+                        "{slot}.with(|__s| *__s.borrow_mut() = Some({rhs_coerced}))"
+                    );
+                }
                 return format!("*{slot}.lock().unwrap() = Some({rhs_coerced})");
             }
             if in_constructor() {
@@ -89,6 +95,11 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             // through the static slot.
             if in_module_singleton() && matches!(&*recv.node, ExprNode::SelfRef) {
                 let slot = module_singleton_slot_name(name.as_str());
+                if module_singleton_thread_local() {
+                    return format!(
+                        "{slot}.with(|__s| *__s.borrow_mut() = Some({rhs}))"
+                    );
+                }
                 return format!("*{slot}.lock().unwrap() = Some({rhs})");
             }
             format!("{}.{name} = {rhs}", emit_expr(recv))

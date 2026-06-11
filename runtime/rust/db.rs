@@ -137,6 +137,17 @@ pub fn open_production_db(path: &str, schema_sql: &str) {
 /// reaching for `std::env::set_var` (which is `unsafe` under
 /// Rust edition 2024).
 pub fn open_production_pool(path: &str, schema_sql: &str, pool_size: usize) {
+    // Turn off SQLite's global memory-status accounting before the library
+    // initializes. With it on (the bundled-build default), every internal
+    // malloc/free takes the process-wide `mem0` mutex, which serializes all
+    // pool connections under load — profiled at ~65% of thread-time blocked
+    // on that lock at c=64 (roundhouse#32). sqlite3_config is only effective
+    // pre-initialization; if something already opened a connection it returns
+    // SQLITE_MISUSE and accounting simply stays on (correct, just slower), so
+    // the result is deliberately ignored.
+    unsafe {
+        rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0i32);
+    }
     if path != ":memory:" {
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {

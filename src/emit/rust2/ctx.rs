@@ -177,6 +177,13 @@ pub struct EmitCtx {
     /// `with_module_singleton`.
     pub in_module_singleton: Cell<bool>,
 
+    /// True while emitting a module singleton whose state is
+    /// *request-scoped* (see `library.rs::REQUEST_SCOPED_SINGLETONS`):
+    /// per-ivar slots are `thread_local!` `RefCell<Option<T>>` statics
+    /// instead of global `Mutex<Option<T>>`. Only meaningful while
+    /// `in_module_singleton` is set. Set by `with_module_singleton`.
+    pub module_singleton_thread_local: Cell<bool>,
+
     /// True while emitting an expression that's the *immediate* recv
     /// of a method-call Send. At a recv position Rust's auto-ref
     /// (`(&v).method(...)` / `(&mut v).method(...)`) handles
