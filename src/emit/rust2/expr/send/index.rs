@@ -377,12 +377,24 @@ pub(super) fn try_recv_typed_method(
             && args.len() == 2
             && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Hash { .. }))
         {
-            let recv_s = emit_expr(r);
             let key_s = emit_expr(&args[0]);
             let default_is_nil = matches!(
                 &*args[1].node,
                 ExprNode::Lit { value: Literal::Nil }
             );
+            // Thread-local module-singleton slot (ViewHelpers @slots)
+            // — borrow in place instead of cloning the map snapshot
+            // out of the slot first.
+            if let Some(get_s) = super::super::module_singleton_hash_get(r, &key_s) {
+                if default_is_nil {
+                    return Some(get_s);
+                }
+                return Some(format!(
+                    "{get_s}.unwrap_or({})",
+                    emit_expr(&args[1])
+                ));
+            }
+            let recv_s = emit_expr(r);
             if default_is_nil {
                 return Some(format!("{recv_s}.get({key_s}).cloned()"));
             }

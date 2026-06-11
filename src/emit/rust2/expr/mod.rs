@@ -192,6 +192,26 @@ pub(super) fn module_singleton_thread_local() -> bool {
         .unwrap_or(false)
 }
 
+/// Keyed read on a thread-local module-singleton Hash ivar
+/// (`@slots[k]` / `@slots.fetch(k, ...)` inside a request-scoped
+/// singleton like ViewHelpers). The generic Ivar-read emit clones the
+/// whole map out of the slot before indexing — for the slot store
+/// that means copying the entire rendered page body on every
+/// `get_yield` (roundhouse#32). This form borrows in place and clones
+/// only the looked-up value. Returns the rendered
+/// `Option<V>`-producing expression, or `None` when the shape doesn't
+/// match (caller falls through to the generic emit).
+pub(super) fn module_singleton_hash_get(recv: &Expr, key_s: &str) -> Option<String> {
+    if !in_module_singleton() || !module_singleton_thread_local() {
+        return None;
+    }
+    let ExprNode::Ivar { name } = &*recv.node else { return None };
+    let slot = module_singleton_slot_name(name.as_str());
+    Some(format!(
+        "{slot}.with(|__s| __s.borrow().as_ref().and_then(|__m| __m.get({key_s}).cloned()))"
+    ))
+}
+
 /// Slot identifier for an ivar in module-singleton emit. `@adapter`
 /// → `ADAPTER`. Mirrors the SCREAMING_SNAKE Rust convention for
 /// statics; the `_` stripping handles Ruby's leading-underscore

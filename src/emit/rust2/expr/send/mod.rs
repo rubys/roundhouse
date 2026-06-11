@@ -68,6 +68,7 @@ pub(super) fn emit_send(
     if let Some(s) = try_string_append(recv, method, args) { return s; }
     if let Some(s) = try_recv_typed_method(recv, method, args) { return s; }
     if let Some(s) = try_view_helpers_dom_id(recv, method, args) { return s; }
+    if let Some(s) = try_view_helpers_const_escape(recv, method, args) { return s; }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
     // suffixes. The user-defined HWIA methods `key?`/`has_key?`/etc.
@@ -331,6 +332,88 @@ pub(super) fn emit_send(
 /// Returns `None` for any non-matching shape — opaque-typed recv,
 /// non-Const recv, recv-class without a Class Ty, etc. — so the
 /// regular dispatch loop runs.
+/// Resolve `ViewHelpers::html_escape(...)` at transpile time when the
+/// argument is compile-time constant: a string literal, an integer
+/// literal's `.to_s`, or an if/else whose branches are both string
+/// literals. The runtime call scans + allocates a fresh `String` per
+/// invocation (regex machinery included), paid on every render for
+/// values that never change (roundhouse#32). The fold applies the
+/// exact same character map as the runtime
+/// (`runtime/ruby/action_view/view_helpers.rb` HTML_ESCAPES), so
+/// emitted bytes are identical — the work just moves to emit time.
+///
+/// Returns `None` for dynamic args (model fields, helper results) —
+/// those keep the runtime escape.
+fn try_view_helpers_const_escape(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+) -> Option<String> {
+    if method != "html_escape" || args.len() != 1 {
+        return None;
+    }
+    let r = recv?;
+    let ExprNode::Const { path } = &*r.node else { return None };
+    if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
+        return None;
+    }
+    fold_const_escape(&args[0])
+}
+
+/// Matches Ruby's CGI.escapeHTML map (HTML_ESCAPES in
+/// `runtime/ruby/action_view/view_helpers.rb`): `'` becomes the
+/// numeric `&#39;`, not the named `&apos;`.
+fn html_escape_const(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn fold_const_escape(arg: &Expr) -> Option<String> {
+    // Peek through Cast wrappers (same pattern as the dom_id peephole).
+    let inner = if let ExprNode::Cast { value, .. } = &*arg.node {
+        value
+    } else {
+        arg
+    };
+    match &*inner.node {
+        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+            // `{:?}` renders a valid Rust string literal with quotes
+            // and escapes.
+            Some(format!("{:?}", html_escape_const(value)))
+        }
+        // `4.to_s` — digits never need escaping; fold to the rendered
+        // literal.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "to_s" && args.is_empty() =>
+        {
+            match &*r.node {
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
+                    Some(format!("{:?}", value.to_string()))
+                }
+                _ => None,
+            }
+        }
+        // `if cond { "a" } else { "b" }` with literal branches — escape
+        // each branch at emit time, keep the cond dynamic.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let t = fold_const_escape(then_branch)?;
+            let f = fold_const_escape(else_branch)?;
+            Some(format!("if {} {{ {t} }} else {{ {f} }}", emit_expr(cond)))
+        }
+        _ => None,
+    }
+}
+
 fn try_view_helpers_dom_id(
     recv: Option<&Expr>,
     method: &str,

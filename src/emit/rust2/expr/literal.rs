@@ -271,7 +271,23 @@ pub(super) fn emit_is_a(recv: &Expr, class_arg: &Expr) -> String {
 /// `{`/`}` as `{{`/`}}`; each interp `Expr` becomes a `{}` placeholder
 /// + arg.
 pub(super) fn emit_string_interp(parts: &[InterpPart]) -> String {
-    let mut fmt = String::from("format!(\"");
+    let (fmt, args) = string_interp_fmt_and_args(parts);
+    let mut out = format!("format!(\"{fmt}\"");
+    if !args.is_empty() {
+        out.push_str(", ");
+        out.push_str(&args.join(", "));
+    }
+    out.push(')');
+    out
+}
+
+/// Same lowering split into (format-string body, rendered args) so
+/// `ops.rs::try_string_append` can splice the pieces into
+/// `write!(io, "...", args)` — formatting directly into the
+/// accumulator instead of allocating an intermediate `String` via
+/// `format!` and copying it in with `push_str` (roundhouse#32).
+pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<String>) {
+    let mut fmt = String::new();
     let mut args: Vec<String> = Vec::new();
     for p in parts {
         match p {
@@ -329,13 +345,7 @@ pub(super) fn emit_string_interp(parts: &[InterpPart]) -> String {
             }
         }
     }
-    fmt.push_str("\"");
-    if !args.is_empty() {
-        fmt.push_str(", ");
-        fmt.push_str(&args.join(", "));
-    }
-    fmt.push(')');
-    fmt
+    (fmt, args)
 }
 
 /// Returns `true` when `expr` is an index/send into a recv whose

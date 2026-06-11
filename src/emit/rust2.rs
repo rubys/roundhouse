@@ -138,6 +138,8 @@ const RT_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/rust/test_suppo
 /// bare references the lowerer leaves unqualified.
 const VIEW_IMPORTS: &str = "\
 #[allow(unused_imports)]
+use std::fmt::Write as _;
+#[allow(unused_imports)]
 use crate::view_helpers::{self, ViewHelpers};
 #[allow(unused_imports)]
 use crate::route_helpers::{self, RouteHelpers};
@@ -340,6 +342,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .collect();
     for unit in runtime_units {
         let mut content = unit.content;
+        // The `io << "...#{x}..."` append lowers to `write!(io, ...)`
+        // (see ops.rs::try_string_append), whose trait method needs
+        // `std::fmt::Write` in scope. View files carry the import via
+        // VIEW_IMPORTS; transpiled runtime units get it on demand.
+        if content.contains("write!(") {
+            content = format!("#[allow(unused_imports)]\nuse std::fmt::Write as _;\n{content}");
+        }
         // Bare-fn compat shim for hand-written `runtime/rust/server.rs`,
         // which calls `view_helpers::set_yield(...)` / `get_yield()` /
         // `reset_render_state()` against a free-function surface. The

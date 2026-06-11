@@ -232,6 +232,29 @@ pub(super) fn try_string_append(
         return None;
     }
     let arg = &args[0];
+    // Interpolated-string append: format directly into the
+    // accumulator with `write!` instead of building an intermediate
+    // `String` via `format!` and copying it in with `push_str`. The
+    // HTML render path appends one interpolated mega-fragment per
+    // template chunk, so the intermediate alloc+copy+free was paid on
+    // essentially every line of every view (roundhouse#32). `write!`
+    // into a `String` is infallible (`fmt::Write for String` never
+    // errors); `.ok()` discards the `Result` without panic plumbing.
+    // The `std::fmt::Write as _` trait import rides the VIEW_IMPORTS
+    // prelude (and is prepended to any transpiled runtime unit whose
+    // body uses `write!`). The `{ ...; }` block keeps the expression
+    // `()`-shaped like the `push_str` it replaces — append sites sit
+    // in else-less `if` bodies, where an `Option<()>` value is E0317.
+    if let ExprNode::StringInterp { parts } = &*arg.node {
+        let (fmt, fmt_args) = super::super::literal::string_interp_fmt_and_args(parts);
+        let recv_s = super::super::emit_send_recv(r);
+        let args_s = if fmt_args.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", fmt_args.join(", "))
+        };
+        return Some(format!("{{ write!({recv_s}, \"{fmt}\"{args_s}).ok(); }}"));
+    }
     let arg_rendered = match arg.ty.as_ref() {
         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => match &*arg.node {
             ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => emit_expr(arg),

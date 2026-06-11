@@ -291,7 +291,6 @@ pub(super) fn emit_bool_op(
                         Some(crate::ty::Ty::Hash { .. })
                     )
                 {
-                    let recv_s = emit_expr(r);
                     let key_s = emit_expr(&args[0]);
                     // Hash<_, Untyped> recv → `.get(k).cloned()`
                     // returns `Option<Value>`. Primitive default
@@ -315,6 +314,13 @@ pub(super) fn emit_bool_op(
                             _ => emit_expr(right),
                         }
                     };
+                    // Thread-local module-singleton slot (ViewHelpers
+                    // @slots) — borrow in place instead of cloning the
+                    // map snapshot out of the slot first.
+                    if let Some(get_s) = super::module_singleton_hash_get(r, &key_s) {
+                        return format!("{get_s}.unwrap_or({default_s})");
+                    }
+                    let recv_s = emit_expr(r);
                     return format!(
                         "{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"
                     );
