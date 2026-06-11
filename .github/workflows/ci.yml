@@ -119,22 +119,17 @@ jobs:
   # -------------------------------------------------------------------
   # One job per target language. Each generates a project from the
   # fixtures in-process and runs the target's real toolchain over it.
+  #
+  # SHRUNK by the smoke consolidation (see the smoke-<target> matrix):
+  # the smoke jobs run each archive's full build + model/controller
+  # test + Playwright legs from the published tgz, so toolchain jobs
+  # whose only coverage was real-blog build/test (go, rust, kotlin,
+  # swift) are retired — their harnesses remain as dev-loop tools
+  # (cargo test --test <t>_toolchain -- --ignored). The survivors stay
+  # for coverage smoke can't reach: tiny-blog gates (crystal, elixir,
+  # python — the absent-feature shape real-blog can't test) and
+  # typescript's dual-profile tsc + node:test (async coloring).
   # -------------------------------------------------------------------
-  toolchain-rust:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: cargo test --test rust_toolchain -- --ignored
-        run: cargo test --test rust_toolchain -- --ignored --nocapture
-
   toolchain-crystal:
     needs: generate-fixture
     runs-on: ubuntu-latest
@@ -154,70 +149,13 @@ jobs:
       - name: cargo test --test crystal_toolchain -- --ignored
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
-  # toolchain-kotlin: emit the real-blog Kotlin/Gradle project,
-  # `gradle compileKotlin` it (full type-check against the real Javalin +
-  # sqlite-jdbc classpath — the analog of crystal's --no-codegen), and
-  # `gradle test` it — the execution leg running the transpiled real-blog
-  # model + controller suite under JUnit 5. setup-java provides the JDK
-  # (the test reads JAVA_HOME); setup-gradle provides a `gradle` on PATH
-  # (the emitted project ships no wrapper).
-  toolchain-kotlin:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.5.1'
-      - name: cargo test --test kotlin_toolchain -- --ignored
-        run: cargo test --test kotlin_toolchain -- --ignored --nocapture
-
-  # toolchain-swift: emit the real-blog Swift/SPM project, `swift build`
-  # it (full type-check + link against the real Hummingbird + swift-nio +
-  # CSQLite dependency graph — the analog of toolchain-kotlin's
-  # compileKotlin), and `swift test` it — the execution leg running the
-  # transpiled real-blog model + controller suite under XCTest (bundled
-  # in Linux toolchains). setup-swift provides the toolchain;
-  # libsqlite3-dev is the CSQLite systemLibrary's header + link target
-  # (the plan's Linux packaging caveat). Tracked in #34.
-  toolchain-swift:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.1'
-      - name: Install libsqlite3-dev (CSQLite systemLibrary)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
-      - name: cargo test --test swift_toolchain -- --ignored
-        run: cargo test --test swift_toolchain -- --ignored --nocapture
-
   framework-tests-swift:
     needs: generate-fixture
     # Per-target framework-test conformance gate for the Swift target:
     # transpiles runtime/ruby/test/**/*_test.rb to XCTest classes and runs
-    # them under `swift test`. Complements toolchain-swift (which only
-    # compiles real-blog): this one actually *runs* assertions, catching
-    # Swift-runtime adapter drift compile-clean can't see. Sibling of
+    # them under `swift test`. Complements smoke-swift (the archive's
+    # real-blog suite): this one runs the framework runtime's own
+    # assertions, catching adapter drift the app tests miss. Sibling of
     # framework-tests-kotlin. NOTE: needs a full toolchain with XCTest —
     # Linux toolchains bundle it; macOS would need Xcode (not just CLT).
     runs-on: ubuntu-latest
@@ -319,11 +257,10 @@ jobs:
     # runs the emitted JUnit-5 spec under `gradle test`. Independent of the
     # real-blog fixture (each test builds a minimal in-process App with a
     # single TestModule), so this parallelizes freely against
-    # generate-fixture / toolchain-* jobs. Complements toolchain-kotlin
-    # (which only compiles real-blog): this one actually *runs* assertions,
-    # catching Kotlin-runtime adapter drift compile-clean can't see. Same
-    # JDK + Gradle setup as toolchain-kotlin. Sibling of
-    # framework-tests-typescript / framework-tests-crystal.
+    # generate-fixture / toolchain-* jobs. Complements smoke-kotlin (the
+    # archive's real-blog suite): this one runs the framework runtime's
+    # own assertions, catching adapter drift the app tests miss. Sibling
+    # of framework-tests-typescript / framework-tests-crystal.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -428,26 +365,6 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: cargo test --test framework_tests_spinel -- --ignored
         run: cargo test --test framework_tests_spinel -- --ignored --nocapture
-
-  toolchain-go:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.24'
-          cache: false
-      - name: cargo test --test go_toolchain -- --ignored
-        run: cargo test --test go_toolchain -- --ignored --nocapture
 
   toolchain-elixir:
     needs: generate-fixture
@@ -972,71 +889,32 @@ jobs:
         run: scripts/compare spinel
 
   # -------------------------------------------------------------------
-  # e2e-<target>: Playwright browser smoke tests against a target server
-  # booted from its ARCHIVE — the dynamic-behavior layer the static DOM
-  # diff (compare-*) can't reach: Turbo Streams, Action Cable broadcasts,
-  # computed Tailwind styles, validation re-renders. See e2e/README.md.
+  # smoke-<target>: the archive runs its own README. Each published
+  # <target>.tgz is the complete test artifact — the transpiled app,
+  # its model/controller test suite, and the Playwright e2e suite
+  # (e2e/, injected by project::ensure_e2e with a webServer config
+  # that boots the archive's own binary and seeds its own db/seed.sql).
+  # scripts/smoke extracts the tgz and executes the README's ```sh
+  # blocks verbatim — docs-as-contract: if the README is wrong, the
+  # job is red. (The go pilot caught `go build .` colliding with the
+  # app/ source dir, a missing-storage/ boot panic, and four more
+  # never-executed README instructions across targets.)
   #
-  # The `browse-archives` artifact from build-site carries the exact
-  # published rubys.github.io/roundhouse/browse/<target>.tgz; scripts/e2e
-  # extracts it, seeds a fresh DB from the archive's OWN db/seed.sql
-  # (sqlite3, no Rails), then builds + boots the target and runs the
-  # specs. No Rust toolchain in any e2e job — build-site already built
-  # the archive.
+  # Each smoke job subsumes the target's old toolchain-<t> build+test
+  # legs (README § Build/Test) and e2e-<t> (README § End-to-end). The
+  # toolchain harnesses remain as dev-loop tools:
+  # cargo test --test <t>_toolchain -- --ignored.
   #
-  # Matrix grows one target at a time. E2E_SKIP gates the specs a target
-  # can't yet satisfy so the job is green-able while the gap is recorded —
-  # the purpose of this matrix is to surface and burn those gaps down.
+  # Per-job content = toolchain setup only; no per-target build/seed/
+  # boot knowledge lives here (that's the point — it's all in the
+  # archive). The repo-side playwright install pre-warms the browser
+  # cache + system deps so the README's own `npx playwright install
+  # chromium` (same ^1.49 range) is a cache hit.
+  #
+  # ruby/jruby stay on scripts/e2e below: their scaffold README is a
+  # comprehensive document, not a block-runnable quick-start.
   # -------------------------------------------------------------------
 
-  # go (3/5): index + validation + tailwind. Note the ABSENCE of any
-  # setup-ruby step — that's the point: go.tgz runs without Ruby. The server
-  # now serves static/assets/ (server.go) and scripts/e2e builds the Tailwind
-  # CSS. Remaining gaps: Turbo Stream comment insert, Action Cable broadcast.
-  e2e-go:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.24'
-          cache: false
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Install Playwright (chromium)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/e2e go
-        run: scripts/e2e --tgz browse/go.tgz go
-
-  # smoke-go: PILOT of the smoke-test consolidation. The go archive is
-  # the complete test artifact — it ships the transpiled app, its
-  # model/controller test suite, AND the Playwright e2e suite (e2e/,
-  # injected by project::ensure_e2e with a webServer config that boots
-  # the archive's own binary and seeds its own db/seed.sql). scripts/smoke
-  # extracts the tgz and executes the README's ```sh blocks verbatim —
-  # docs-as-contract: if the README is wrong, this job is red (it caught
-  # `go build .` colliding with the app/ dir on its first run).
-  #
-  # Subsumes toolchain-go's build+test legs (README § Build/Test = go
-  # mod tidy / go build / go test ./...) and e2e-go (README § End-to-end
-  # = playwright). Once this holds, toolchain-go + e2e-go can retire
-  # (toolchain-go's tiny-blog gate stays available as a dev-loop check:
-  # cargo test --test go_toolchain -- --ignored). Rolls out per target
-  # via project::ships_e2e.
-  #
-  # The repo-side playwright install pre-warms the browser cache +
-  # system deps so the README's own `npx playwright install chromium`
-  # (same ^1.49 range) is a cache hit.
   smoke-go:
     needs: build-site
     runs-on: ubuntu-latest
@@ -1097,7 +975,7 @@ jobs:
 
   # typescript (5/5): tsx server via npm (src/server.ts has the /cable ws +
   # CableServer). No setup-ruby — runs without Ruby.
-  e2e-typescript:
+  smoke-typescript:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1109,16 +987,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e typescript
-        run: scripts/e2e --tgz browse/typescript.tgz typescript
+      - name: scripts/smoke typescript
+        run: scripts/smoke --tgz browse/typescript.tgz typescript
 
-  # rust (3/5): cargo build --release on the standalone archive (axum).
-  e2e-rust:
+  smoke-rust:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1131,16 +1008,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e rust
-        run: scripts/e2e --tgz browse/rust.tgz rust
+      - name: scripts/smoke rust
+        run: scripts/smoke --tgz browse/rust.tgz rust
 
-  # python (3/5): aiohttp via uv. Serves static/assets/ (add_static).
-  e2e-python:
+  smoke-python:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1158,16 +1034,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e python
-        run: scripts/e2e --tgz browse/python.tgz python
+      - name: scripts/smoke python
+        run: scripts/smoke --tgz browse/python.tgz python
 
-  # crystal (3/5): crystal build --release of the archive.
-  e2e-crystal:
+  smoke-crystal:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1183,18 +1058,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e crystal
-        run: scripts/e2e --tgz browse/crystal.tgz crystal
+      - name: scripts/smoke crystal
+        run: scripts/smoke --tgz browse/crystal.tgz crystal
 
-  # elixir (5/5): mix/Plug.Cowboy v2 overlay (Main.run). Plug.Static serves
-  # static/assets/; /cable upgrades to a WebSock handler (via websock_adapter)
-  # backed by an Elixir Registry, with Broadcasts fanning out turbo-streams.
-  e2e-elixir:
+  smoke-elixir:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1211,13 +1083,13 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e elixir
-        run: scripts/e2e --tgz browse/elixir.tgz elixir
+      - name: scripts/smoke elixir
+        run: scripts/smoke --tgz browse/elixir.tgz elixir
 
   # jruby (2/5): byte-identical emit to ruby on the JVM. Assets NOT built
   # (the Makefile turbo.min.js step collides MRI vs JRuby bundler — same as
@@ -1249,12 +1121,7 @@ jobs:
       - name: scripts/e2e jruby
         run: scripts/e2e --tgz browse/jruby.tgz jruby
 
-  # kotlin (3/5): boots the published kotlin.tgz via `gradle installDist` +
-  # the bundled launcher (Main.kt reads BLOG_DB + PORT). index + validation +
-  # tailwind pass; the Javalin server serves /assets/* in-dispatch (Server.kt).
-  # turbo/cable specs gated like the other backend-only targets. Needs a JDK +
-  # Gradle (the archive ships no wrapper); Ruby-free, so no setup-ruby.
-  e2e-kotlin:
+  smoke-kotlin:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1273,20 +1140,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e kotlin
-        run: scripts/e2e --tgz browse/kotlin.tgz kotlin
+      - name: scripts/smoke kotlin
+        run: scripts/smoke --tgz browse/kotlin.tgz kotlin
 
-  # swift (5/5): boots the published swift.tgz via `swift build -c release`
-  # (main.swift reads BLOG_DB + PORT). All five specs — Server.swift serves
-  # /assets/* in-dispatch, and the Cable primitive (HummingbirdWebSocket,
-  # actioncable-v1-json) carries turbo_comment + action_cable. Needs a Swift
-  # toolchain + libsqlite3-dev (the CSQLite systemLibrary); Ruby-free.
-  e2e-swift:
+  smoke-swift:
     needs: build-site
     runs-on: ubuntu-latest
     steps:
@@ -1303,13 +1165,13 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: Install Playwright (chromium)
+      - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/e2e swift
-        run: scripts/e2e --tgz browse/swift.tgz swift
+      - name: scripts/smoke swift
+        run: scripts/smoke --tgz browse/swift.tgz swift
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +

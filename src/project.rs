@@ -175,13 +175,14 @@ pub fn target_readme(target: BuildTarget) -> String {
             "## Prerequisites\n\
              - Crystal 1.10+\n\
              - SQLite (system library)\n\n\
-             ## Install dependencies\n\
+             ## Build\n\
              ```sh\n\
              shards install\n\
+             crystal build src/main.cr -o server\n\
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             crystal run main.cr\n\
+             ./server\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -198,7 +199,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             mix run --no-halt\n\
+             mix run --no-halt -e \"Main.run\"\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -231,10 +232,14 @@ pub fn target_readme(target: BuildTarget) -> String {
         BuildTarget::Kotlin => {
             "## Prerequisites\n\
              - JDK 17+\n\
-             - Gradle 8+ (or the bundled wrapper)\n\n\
+             - Gradle 8+\n\n\
+             ## Build\n\
+             ```sh\n\
+             gradle installDist\n\
+             ```\n\n\
              ## Run\n\
              ```sh\n\
-             gradle run\n\
+             ./build/install/roundhouse-app/bin/roundhouse-app\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -245,6 +250,10 @@ pub fn target_readme(target: BuildTarget) -> String {
             "## Prerequisites\n\
              - Swift 6+ (swift.org toolchain or Xcode CLT)\n\
              - Linux: `libsqlite3-dev`\n\n\
+             ## Build\n\
+             ```sh\n\
+             swift build\n\
+             ```\n\n\
              ## Run\n\
              ```sh\n\
              swift run\n\
@@ -255,16 +264,18 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n"
         }
         BuildTarget::Python => {
+            // --extra test pulls pytest (an optional dependency group
+            // in pyproject.toml) so the Test step below resolves.
             "## Prerequisites\n\
              - Python 3.11+\n\
-             - `uv` (or pip)\n\n\
+             - `uv`\n\n\
              ## Install dependencies\n\
              ```sh\n\
-             uv sync     # or: pip install -r requirements.txt\n\
+             uv sync --extra test\n\
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             uv run python main.py\n\
+             uv run python -m app\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -281,7 +292,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             cargo run --release --bin app\n\
+             ./target/release/app\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -423,13 +434,27 @@ pub fn target_files(
 }
 
 /// Targets whose archives ship the Playwright e2e suite under `e2e/`
-/// (and the matching `## End-to-end` README section). This is the
-/// smoke-test pilot: the archive becomes the complete test artifact —
-/// `scripts/smoke` just runs the README's steps against the unpacked
-/// tgz, subsuming the per-target `toolchain-<t>`/`e2e-<t>` CI jobs.
-/// Grows one target at a time as the smoke matrix replaces them.
+/// (and the matching `## End-to-end` README section). The archive is
+/// the complete test artifact — `scripts/smoke` just runs the README's
+/// steps against the unpacked tgz, subsuming the per-target
+/// `toolchain-<t>`/`e2e-<t>` CI jobs.
+///
+/// Excluded: the scaffold targets (spinel/ruby/jruby) — their
+/// comprehensive scaffold README isn't block-runnable (its quick-start
+/// blocks clone the repo), so they keep the scripts/e2e path —
+/// TypescriptWorker (no standalone server) and Blog (source fixture).
 fn ships_e2e(target: BuildTarget) -> bool {
-    matches!(target, BuildTarget::Go)
+    matches!(
+        target,
+        BuildTarget::Go
+            | BuildTarget::Typescript
+            | BuildTarget::Rust
+            | BuildTarget::Python
+            | BuildTarget::Crystal
+            | BuildTarget::Elixir
+            | BuildTarget::Kotlin
+            | BuildTarget::Swift
+    )
 }
 
 /// The Playwright specs, verbatim from the repo's `e2e/` harness — the
@@ -446,12 +471,16 @@ const E2E_SPECS: &[(&str, &str)] = &[
 
 /// Inject the self-contained Playwright e2e suite into an archive:
 /// the specs (shared, target-agnostic) plus a generated
-/// `playwright.config.js` whose `webServer` block boots the target's
-/// own binary (built per the README) and a `global-setup.js` that
-/// seeds the target's DB from the archive's `db/seed.sql` (sqlite3
-/// CLI, idempotent — skips when articles already exist). The README's
-/// `## End-to-end` section documents the run: `cd e2e && npm install
-/// && npx playwright install chromium && npx playwright test`.
+/// `playwright.config.js` whose `webServer` block seeds the target's
+/// DB from the archive's `db/seed.sql` (`e2e/seed.js`, sqlite3 CLI,
+/// idempotent) and then boots the target's own binary (built per the
+/// README). Seeding rides the webServer command — NOT globalSetup —
+/// because Playwright starts the webServer before globalSetup runs,
+/// and servers that self-seed demo data on an empty DB (typescript)
+/// or need the DB's parent dir created (elixir) must see the seeded
+/// state at boot. The README's `## End-to-end` section documents the
+/// run: `cd e2e && npm install && npx playwright install chromium &&
+/// npx playwright test`.
 fn ensure_e2e(
     mut files: Vec<(String, String)>,
     target: BuildTarget,
@@ -461,9 +490,28 @@ fn ensure_e2e(
     }
     // Per-target boot command (relative to the archive root, after the
     // README's Build steps) and DB path (the server's unset-env default
-    // — global-setup seeds the same file the server opens).
+    // — global-setup seeds the same file the server opens). The boot
+    // command must NOT rebuild: scripts/smoke runs the README's Build
+    // section first, and Playwright's webServer timeout (120s) is for
+    // boot, not compilation.
     let (boot, db_rel) = match target {
         BuildTarget::Go => ("./server", "storage/development.sqlite3"),
+        BuildTarget::Typescript => ("npm start", "db/development.sqlite3"),
+        BuildTarget::Rust => ("./target/release/app", "storage/development.sqlite3"),
+        BuildTarget::Python => ("uv run python -m app", "storage/development.sqlite3"),
+        BuildTarget::Crystal => ("./server", "db/development.sqlite3"),
+        // mix.exs declares no `mod:` (the app doesn't auto-start), so
+        // the entry point must be explicit — bare `mix run --no-halt`
+        // starts the BEAM and nothing else.
+        BuildTarget::Elixir => (
+            "mix run --no-halt -e \"Main.run\"",
+            "storage/development.sqlite3",
+        ),
+        BuildTarget::Kotlin => (
+            "./build/install/roundhouse-app/bin/roundhouse-app",
+            "storage/development.sqlite3",
+        ),
+        BuildTarget::Swift => ("./.build/debug/App", "storage/development.sqlite3"),
         _ => unreachable!("ships_e2e gates the match"),
     };
 
@@ -498,29 +546,34 @@ fn ensure_e2e(
              \x20\x20forbidOnly: !!process.env.CI,\n\
              \x20\x20retries: process.env.CI ? 2 : 0,\n\
              \x20\x20reporter: process.env.CI ? [['github'], ['list']] : 'list',\n\
-             \x20\x20globalSetup: './global-setup.js',\n\
              \x20\x20use: {{\n\
              \x20\x20\x20\x20baseURL: 'http://localhost:3000',\n\
              \x20\x20\x20\x20trace: 'on-first-retry',\n\
              \x20\x20}},\n\
+             \x20\x20// seed.js runs INSIDE the webServer command (not globalSetup —\n\
+             \x20\x20// Playwright boots the webServer first) so the server opens an\n\
+             \x20\x20// already-seeded DB.\n\
              \x20\x20webServer: {{\n\
-             \x20\x20\x20\x20command: '{boot}',\n\
+             \x20\x20\x20\x20command: 'node e2e/seed.js && {boot}',\n\
              \x20\x20\x20\x20cwd: '..',\n\
              \x20\x20\x20\x20url: 'http://localhost:3000/articles',\n\
              \x20\x20\x20\x20reuseExistingServer: !process.env.CI,\n\
-             \x20\x20\x20\x20timeout: 30_000,\n\
+             \x20\x20\x20\x20timeout: 120_000,\n\
              \x20\x20}},\n\
              \x20\x20projects: [{{ name: 'chromium', use: {{ ...devices['Desktop Chrome'] }} }}],\n\
              }})\n"
         ),
     ));
     files.push((
-        "e2e/global-setup.js".to_string(),
+        "e2e/seed.js".to_string(),
         format!(
             "// Generated by Roundhouse. Seeds the server's DB from ../db/seed.sql\n\
-             // (sqlite3 CLI). Idempotent: skips when articles already exist, so\n\
-             // `npx playwright test` re-runs don't double-seed. For a truly fresh\n\
-             // run, delete {db_rel} (or re-extract the archive).\n\
+             // (sqlite3 CLI). Runs as the first half of playwright.config.js's\n\
+             // webServer command, so the server boots against an already-seeded\n\
+             // DB (some targets self-seed demo data on an empty one, with\n\
+             // different row timestamps than the canonical seed). Idempotent:\n\
+             // skips when articles already exist, so re-runs don't double-seed.\n\
+             // For a truly fresh run, delete {db_rel} (or re-extract the archive).\n\
              import {{ execFileSync }} from 'node:child_process'\n\
              import {{ mkdirSync, readFileSync }} from 'node:fs'\n\
              import path from 'node:path'\n\
@@ -530,19 +583,17 @@ fn ensure_e2e(
              const db = path.join(root, '{db_rel}')\n\
              const seed = path.join(root, 'db', 'seed.sql')\n\
              \n\
-             export default function globalSetup() {{\n\
-             \x20\x20mkdirSync(path.dirname(db), {{ recursive: true }})\n\
-             \x20\x20let count = 0\n\
-             \x20\x20try {{\n\
-             \x20\x20\x20\x20count = Number(execFileSync('sqlite3', [db, 'SELECT COUNT(*) FROM articles'],\n\
-             \x20\x20\x20\x20\x20\x20{{ encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }}).trim())\n\
-             \x20\x20}} catch {{ /* missing file or table — seed below */ }}\n\
-             \x20\x20if (count === 0) {{\n\
-             \x20\x20\x20\x20execFileSync('sqlite3', [db], {{ input: readFileSync(seed, 'utf8') }})\n\
-             \x20\x20\x20\x20console.log(`global-setup: seeded ${{db}} from db/seed.sql`)\n\
-             \x20\x20}} else {{\n\
-             \x20\x20\x20\x20console.log(`global-setup: db already seeded (${{count}} articles)`)\n\
-             \x20\x20}}\n\
+             mkdirSync(path.dirname(db), {{ recursive: true }})\n\
+             let count = 0\n\
+             try {{\n\
+             \x20\x20count = Number(execFileSync('sqlite3', [db, 'SELECT COUNT(*) FROM articles'],\n\
+             \x20\x20\x20\x20{{ encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }}).trim())\n\
+             }} catch {{ /* missing file or table — seed below */ }}\n\
+             if (count === 0) {{\n\
+             \x20\x20execFileSync('sqlite3', [db], {{ input: readFileSync(seed, 'utf8') }})\n\
+             \x20\x20console.log(`seed.js: seeded ${{db}} from db/seed.sql`)\n\
+             }} else {{\n\
+             \x20\x20console.log(`seed.js: db already seeded (${{count}} articles)`)\n\
              }}\n"
         ),
     ));
