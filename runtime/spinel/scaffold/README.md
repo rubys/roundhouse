@@ -9,10 +9,12 @@ the same blog into a native binary via
 [Spinel](https://github.com/matz/spinel).
 
 This README ships in `runtime/spinel/scaffold/` and is copied verbatim
-into the emitted spinel, ruby, and jruby projects — all three share
-this scaffold. The spinel sections apply only to the spinel target;
-the CRuby sections cover the ruby target (and jruby, which swaps the
-`sqlite3` gem for the JDBC variant).
+into the emitted projects that share this scaffold: as `README.md` in
+the spinel archive, and as `SPECIMEN.md` in the ruby and jruby
+archives (whose top-level `README.md` is a generated machine-runnable
+quick-start — the CI smoke contract). The spinel sections apply only
+to the spinel target; the CRuby sections cover the ruby target (and
+jruby, which swaps the `sqlite3` gem for the JDBC variant).
 
 This is a working specimen, not a framework. Read it to see what
 "Rails-shape Ruby without metaprogramming" actually looks like

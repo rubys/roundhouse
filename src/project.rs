@@ -148,14 +148,15 @@ impl BuildTarget {
 /// Quick-start README for a transpile target. Injected into every
 /// file set by `target_files` (so both `--target` output and the
 /// `--site` archives carry it), unless the set already contains a
-/// `README.md` — the spinel/ruby/jruby targets ship a comprehensive
-/// scaffold README, and the Blog fixture its own, that must not be
-/// overwritten.
+/// `README.md` — the spinel target ships the comprehensive scaffold
+/// README, and the Blog fixture its own, that must not be overwritten.
+/// (ruby/jruby rename theirs to `SPECIMEN.md` — see
+/// `scaffold_readme_to_specimen` — so they take this quick-start.)
 ///
 /// Content is intentionally short: prerequisites, build, run, test,
-/// and the regenerate command. Target-specific specifics (port
-/// numbers, exact file paths) are best-effort — the README is a
-/// pointer, not a contract.
+/// and the regenerate command. For `ships_e2e` targets the `## <name>`
+/// sections are a CI contract — `scripts/smoke` executes their ```sh
+/// blocks verbatim against the published archive.
 pub fn target_readme(target: BuildTarget) -> String {
     let name = target.as_str();
     let body = match target {
@@ -165,11 +166,77 @@ pub fn target_readme(target: BuildTarget) -> String {
              download the input that Roundhouse transpiles. (The Regenerate \
              command below re-walks the fixture into this archive.)\n"
         }
-        BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby => {
-            // Should not reach: these targets ship a scaffold README
-            // and `--target` mode skips generation when one is present.
+        BuildTarget::Spinel => {
+            // Should not reach: the spinel archive keeps the scaffold
+            // README and `ensure_readme` skips when one is present.
             "See the scaffold-provided README.md for build/run/test \
              instructions.\n"
+        }
+        // ruby/jruby Test sections run the same five driver files as
+        // `tests/ruby_toolchain.rs` — NOT `rake test`: the archive's
+        // emitted `test/test_helper.rb` is deliberately Minitest-free
+        // (TestBase, for spinel AOT), while the scaffold's runtime
+        // tests subclass Minitest::Test, so one rake_test_loader
+        // process can't host both populations.
+        BuildTarget::Ruby => {
+            "This tree is the Rails-shape-without-metaprogramming \
+             specimen — see `SPECIMEN.md` for the full architecture \
+             document (layout, runtime, ruleset, limitations).\n\n\
+             ## Prerequisites\n\
+             - Ruby 3.4+ (with bundler)\n\
+             - Node.js + npm — Tailwind/Turbo asset build\n\
+             - SQLite (system library)\n\n\
+             ## Install dependencies\n\
+             ```sh\n\
+             bundle install\n\
+             ```\n\n\
+             ## Build\n\
+             ```sh\n\
+             make assets\n\
+             ```\n\n\
+             ## Run\n\
+             ```sh\n\
+             BLOG_DB=tmp/blog.sqlite3 bundle exec puma -C config/puma.rb\n\
+             ```\n\n\
+             ## Test\n\
+             ```sh\n\
+             bundle exec ruby -Itest -I. test/models/article_test.rb\n\
+             bundle exec ruby -Itest -I. test/models/comment_test.rb\n\
+             bundle exec ruby -Itest -I. test/controllers/articles_controller_test.rb\n\
+             bundle exec ruby -Itest -I. test/controllers/comments_controller_test.rb\n\
+             bundle exec ruby -Itest -I. test/query_count_test.rb\n\
+             ```\n"
+        }
+        BuildTarget::Jruby => {
+            // `jruby -S bundle exec jruby …` (not `… exec ruby …`):
+            // bundle exec resolves plain `ruby` via PATH/shebang, which
+            // lands on MRI when both interpreters are installed.
+            // Static assets ship prebuilt (ensure_static_assets): the
+            // Makefile's turbo.min.js copy shells `bundle exec ruby`,
+            // colliding the MRI and JRuby bundlers — so no Build step.
+            "This tree is the Rails-shape-without-metaprogramming \
+             specimen running on the JVM — see `SPECIMEN.md` for the \
+             full architecture document. Static assets ship prebuilt \
+             in `static/assets/` (the Makefile's `make assets` step is \
+             MRI-only).\n\n\
+             ## Prerequisites\n\
+             - JRuby 10+ (JDK 21+)\n\n\
+             ## Install dependencies\n\
+             ```sh\n\
+             jruby -S bundle install\n\
+             ```\n\n\
+             ## Run\n\
+             ```sh\n\
+             BLOG_DB=tmp/blog.sqlite3 WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb\n\
+             ```\n\n\
+             ## Test\n\
+             ```sh\n\
+             jruby -S bundle exec jruby -Itest -I. test/models/article_test.rb\n\
+             jruby -S bundle exec jruby -Itest -I. test/models/comment_test.rb\n\
+             jruby -S bundle exec jruby -Itest -I. test/controllers/articles_controller_test.rb\n\
+             jruby -S bundle exec jruby -Itest -I. test/controllers/comments_controller_test.rb\n\
+             jruby -S bundle exec jruby -Itest -I. test/query_count_test.rb\n\
+             ```\n"
         }
         BuildTarget::Crystal => {
             "## Prerequisites\n\
@@ -439,10 +506,12 @@ pub fn target_files(
 /// steps against the unpacked tgz, subsuming the per-target
 /// `toolchain-<t>`/`e2e-<t>` CI jobs.
 ///
-/// Excluded: the scaffold targets (spinel/ruby/jruby) — their
-/// comprehensive scaffold README isn't block-runnable (its quick-start
-/// blocks clone the repo), so they keep the scripts/e2e path —
-/// TypescriptWorker (no standalone server) and Blog (source fixture).
+/// Excluded: Spinel (keeps the scaffold README as its top-level doc —
+/// the specimen document and matz's extraction surface; not in the
+/// smoke matrix), TypescriptWorker (no standalone server), and Blog
+/// (source fixture). ruby/jruby participate: their scaffold README
+/// ships as SPECIMEN.md and a generated quick-start takes README.md
+/// (see `scaffold_readme_to_specimen`).
 fn ships_e2e(target: BuildTarget) -> bool {
     matches!(
         target,
@@ -454,6 +523,8 @@ fn ships_e2e(target: BuildTarget) -> bool {
             | BuildTarget::Elixir
             | BuildTarget::Kotlin
             | BuildTarget::Swift
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
     )
 }
 
@@ -512,6 +583,17 @@ fn ensure_e2e(
             "storage/development.sqlite3",
         ),
         BuildTarget::Swift => ("./.build/debug/App", "storage/development.sqlite3"),
+        // BLOG_DB must be explicit: bare puma (without the rake dev
+        // task's env defaulting) falls back to :memory: and the seed
+        // file is never opened.
+        BuildTarget::Ruby => (
+            "BLOG_DB=tmp/blog.sqlite3 bundle exec puma -C config/puma.rb",
+            "tmp/blog.sqlite3",
+        ),
+        BuildTarget::Jruby => (
+            "BLOG_DB=tmp/blog.sqlite3 WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb",
+            "tmp/blog.sqlite3",
+        ),
         _ => unreachable!("ships_e2e gates the match"),
     };
 
@@ -602,11 +684,12 @@ fn ensure_e2e(
 }
 
 /// Inject the quick-start README (`target_readme`) when the file set
-/// doesn't already carry one. No-ops for the scaffold targets
-/// (spinel/ruby/jruby ship the comprehensive scaffold README) and for
-/// Blog when the fixture has its own README (the archive is the
-/// verbatim source). Lives here rather than in the CLI so the
-/// `--site` archives and `--target` output carry the same README.
+/// doesn't already carry one. No-ops for spinel (ships the
+/// comprehensive scaffold README) and for Blog when the fixture has
+/// its own README (the archive is the verbatim source); ruby/jruby
+/// rename the scaffold README to `SPECIMEN.md` first, so they get the
+/// quick-start. Lives here rather than in the CLI so the `--site`
+/// archives and `--target` output carry the same README.
 fn ensure_readme(
     mut files: Vec<(String, String)>,
     target: BuildTarget,
@@ -779,7 +862,23 @@ fn ruby_runtime_files(
     // already folded in by `spinel_files` (both targets need them — the
     // spinel binary now serves `/assets/*` too). Nothing CRuby-specific
     // to add here beyond the overlay above.
-    Ok(dedupe_last_wins(files))
+    let mut files = dedupe_last_wins(files);
+    scaffold_readme_to_specimen(&mut files);
+    Ok(files)
+}
+
+/// The ruby/jruby archives ship the scaffold's comprehensive README as
+/// `SPECIMEN.md`, freeing `README.md` for the generated machine-runnable
+/// quick-start (`target_readme` via `ensure_readme`) that the smoke
+/// contract executes. The spinel archive is untouched — its scaffold
+/// README stays top-level (it's the specimen document for that target
+/// and matz's primary extraction surface).
+fn scaffold_readme_to_specimen(files: &mut [(String, String)]) {
+    for (path, _) in files.iter_mut() {
+        if path == "README.md" {
+            *path = "SPECIMEN.md".to_string();
+        }
+    }
 }
 
 /// "jruby" archive: byte-identical to the "ruby" tree except the SQLite
@@ -844,7 +943,9 @@ fn jruby_runtime_files(
         &mut files,
     )?;
 
-    Ok(dedupe_last_wins(files))
+    let mut files = dedupe_last_wins(files);
+    scaffold_readme_to_specimen(&mut files);
+    Ok(files)
 }
 
 /// Spinel-target files: lowered emit (app/, config/, test/) plus

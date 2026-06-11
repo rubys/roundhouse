@@ -7,11 +7,11 @@
 # is self-contained: extract → seed (Ruby-free, via db/seed.sql) → build →
 # boot → run e2e/*.spec.js.
 #
-# NOTE: the emit targets (go/typescript/rust/python/crystal/elixir/
-# kotlin/swift) have moved to `scripts/smoke`, which runs the archive's
-# own README + in-archive e2e/ suite with no per-target tables. This
-# harness remains the CI path for ruby/jruby (their scaffold README
-# isn't block-runnable) and a dev convenience for the rest.
+# NOTE: CI has moved entirely to `scripts/smoke`, which runs each
+# archive's own README + in-archive e2e/ suite with no per-target
+# tables (ruby/jruby included — their scaffold doc ships as
+# SPECIMEN.md). This harness remains as a dev convenience only; its
+# per-target case tables are no longer kept in sync by CI.
 #
 # Usage:  scripts/e2e [options] TARGET
 #
